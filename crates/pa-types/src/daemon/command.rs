@@ -569,6 +569,10 @@ pub enum DaemonCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         active_session_id: String,
+        /// Also hold until every RLM child run of the session settled
+        /// (the `wait_for_headless_completion` barrier of the same name).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wait_for_rlm_quiescence: Option<bool>,
         #[serde(flatten)]
         rest: JsonMap,
     },
@@ -1140,6 +1144,21 @@ pub enum DaemonCommand {
         #[serde(flatten)]
         rest: JsonMap,
     },
+    /// Rust-native client command (operator directive 2026-09-29): the
+    /// interactive client's report that it just drew the Anthropic
+    /// subscription ban-risk warning — the worker persists the session's
+    /// once-per-lifecycle marker row so a reattach, a resume, or a worker
+    /// replacement of the same session skips the warning (the TS gate is
+    /// per interactive-mode instance, so the TS protocol has no
+    /// counterpart; an older daemon rejects the frame and the client
+    /// degrades to its per-instance gate).
+    MarkAnthropicWarningShown {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        active_session_id: String,
+        #[serde(flatten)]
+        rest: JsonMap,
+    },
     AckResult {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
@@ -1255,5 +1274,10 @@ mod tests {
         rt::<DaemonCommand>(
             r#"{"type":"worker_register","activeSessionId":"abc123def456","sessionId":"s-uuid","socketPath":"/tmp/w.sock","workerInstanceId":"inst-1","token":"tok","pid":4242}"#,
         );
+    }
+
+    #[test]
+    fn mark_anthropic_warning_shown_roundtrip() {
+        rt::<DaemonCommand>(r#"{"type":"mark_anthropic_warning_shown","activeSessionId":"s1"}"#);
     }
 }

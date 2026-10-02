@@ -63,6 +63,21 @@ use serde_json::{json, Value};
 const KITTY_FLAGS_PUSH: &[u8] = b"\x1b[>7u";
 /// The kitty flags pop (TS `ProcessTerminal.stop` / `drainInput`).
 const KITTY_FLAGS_POP: &[u8] = b"\x1b[<u";
+/// The alternate-screen leave: the boundary a mode-counting relay
+/// discards keyboard-protocol writes across (writes before it, made
+/// while the pane's alt screen is up, never land on the relay's
+/// stack).
+const ALT_SCREEN_LEAVE: &[u8] = b"\x1b[?1049l";
+/// The exit-tail stale-level drain (pa-tui `enhanced_keys`'s
+/// `STALE_LEVEL_DRAIN`): the bare pops the exit writes AFTER the last
+/// alt-screen leave. A mode-counting relay (herdr's pane emulator
+/// re-encodes pane input from its own count of the push/pop pairs in
+/// the pane output and never resets the count on foreground-program
+/// exit) discards the pair's writes made inside the alt screen, so
+/// only the post-leave drain lands — and the leftover level it clears
+/// would otherwise turn every later Ctrl+C/Ctrl+D in the pane's shell
+/// into a dead kitty CSI-u keypress.
+const EXIT_POP_DRAIN: usize = 3;
 /// The probe's capability query.
 const KITTY_QUERY: &[u8] = b"\x1b[?u";
 /// The harness's answer: flags `1|2|4`, then primary device attributes.
@@ -506,6 +521,30 @@ fn run_route(route: Route, known_terminal: bool) {
     assert_eq!(
         depth, 0,
         "{}: the terminal's kitty-mode stack is {depth} deep after the exit — the shell receives CSI-u keys",
+        route.name(),
+    );
+    // (1b) The exit-tail stale-level drain: the pops written after the
+    // LAST alt-screen leave must cover the drain depth. A
+    // mode-counting relay (herdr's pane emulator re-encodes pane input
+    // from its own count of the push/pop pairs in the pane output and
+    // never resets the count on foreground-program exit) discards the
+    // pair's writes that land while the pane's alt screen is up — so
+    // the teardown's own pop, written inside the alt screen, never
+    // lands on the relay, and only post-leave pops (clamped no-ops at
+    // spec depth zero) repair the leftover level that would otherwise
+    // turn every later Ctrl+C/Ctrl+D in the pane's shell into a dead
+    // kitty CSI-u keypress.
+    let last_leave = find_subsequence_last(&stream, ALT_SCREEN_LEAVE)
+        .unwrap_or_else(|| panic!("{}: the alt-screen leave never landed", route.name()));
+    let mut pops_after_leave = 0usize;
+    let mut at = last_leave;
+    while let Some(hit) = find_subsequence_from(&stream, at, KITTY_FLAGS_POP) {
+        pops_after_leave += 1;
+        at = hit + 1;
+    }
+    assert!(
+        pops_after_leave >= EXIT_POP_DRAIN,
+        "{}: the exit wrote {pops_after_leave} pops after the last alt-screen leave — the stale-level drain never ran past the leave",
         route.name(),
     );
     // The exit code (the panic route dies on the unwind; everything

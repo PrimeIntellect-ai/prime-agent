@@ -516,16 +516,15 @@ impl Supervisor {
         crate::update_prepare::prepared_dir(&self.options.agent_dir, &socket_hash, update_id)
     }
 
-    /// Update-prepare watchdog (spec §5): the deadline and the marker
-    /// self-expiry are re-checked on a timer, so a coordinator that dies
-    /// mid-prepare can never wedge the supervisor - every state has a
-    /// watchdog exit (invariant I1).
+    /// Update-prepare watchdog (spec §5): aborts a transaction whose
+    /// deadline or marker self-expiry passes even when no command arrives
+    /// to re-check, so a coordinator that dies mid-prepare can never wedge
+    /// the supervisor (invariant I1). Parks with no timer while no update
+    /// is in flight.
     pub(super) async fn update_prepare_watchdog(self: Arc<Self>) {
         loop {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            if let Some(abort) = self.update_prepare.abort_if_expired(util::now_ms()) {
-                self.finish_update_abort(&abort);
-            }
+            let abort = self.update_prepare.wait_for_expiry().await;
+            self.finish_update_abort(&abort);
         }
     }
 }

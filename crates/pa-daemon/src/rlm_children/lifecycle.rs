@@ -252,10 +252,10 @@ impl SupervisorChildSessionsInner {
                     for record in children.iter() {
                         let record = record.lock().await;
                         if record.active_session_id == active_session_id {
-                            durable = record
-                                .session_id
-                                .clone()
-                                .or_else(|| Some(record.rlm_child_id.clone()));
+                            durable = Some(crate::rlm_children::durable_child_selector(
+                                record.session_id.as_deref(),
+                                &record.rlm_child_id,
+                            ));
                             break;
                         }
                     }
@@ -295,8 +295,10 @@ impl SupervisorChildSessionsInner {
         Ok(())
     }
 
-    /// Whether the child worker still has work in flight (streaming or
-    /// queued). `Err` means the child cannot be reached right now.
+    /// Whether the child worker still has work in flight (streaming,
+    /// queued, or its own children still running - so a child stays
+    /// running while any descendant does). `Err` means the child cannot be
+    /// reached right now.
     pub(super) async fn child_busy(&self, active_session_id: &str) -> Result<bool> {
         let command = DaemonCommand::GetState {
             id: None,
@@ -304,10 +306,9 @@ impl SupervisorChildSessionsInner {
             rest: Map::default(),
         };
         let state = self.command(&command, STATE_TIMEOUT_MS).await?;
-        Ok(state
-            .get("isStreaming")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
+        let flag = |name: &str| state.get(name).and_then(Value::as_bool).unwrap_or(false);
+        Ok(flag("isStreaming")
+            || flag("hasRunningSubagents")
             || state
                 .get("sessionActions")
                 .and_then(|actions| actions.get("queuedCount"))
@@ -331,7 +332,8 @@ impl SupervisorChildSessionsInner {
             .map(compact_rlm_text))
     }
 
-    /// Best-effort bounded wait for one child to go idle. The wait is a
+    /// Best-effort bounded wait for one child and its descendants to go
+    /// idle. The wait is a
     /// snapshot helper, not a gate: its timeout is not an error, and the
     /// caller re-reads the child's state afterwards (TS collect: "a
     /// timeout returns current snapshots, never an error").
@@ -339,9 +341,12 @@ impl SupervisorChildSessionsInner {
         if budget.is_zero() {
             return;
         }
+        // The child's own descendants keep it busy (`child_busy`), so the
+        // wait holds until they settle too.
         let command = DaemonCommand::WaitForIdle {
             id: None,
             active_session_id: active_session_id.to_string(),
+            wait_for_rlm_quiescence: Some(true),
             rest: Map::default(),
         };
         let _ = self

@@ -91,10 +91,14 @@ impl SessionNavigation {
         let _ =
             tokio::task::spawn_blocking(move || crate::session_store::read_session_info(&primed))
                 .await;
-        {
+        let previous = {
             let mut core = self.core.lock().unwrap();
-            core.store = Some(file);
-        }
+            core.store.replace(file)
+        };
+        // The old store's lease release flushes the window and info
+        // sidecars (megabytes for a large session): off the core lock
+        // and the runtime.
+        let _ = tokio::task::spawn_blocking(move || drop(previous)).await;
         self.engine.set_session_file(new_path.clone());
         // TS re-restores the moved-to session's saved model at its runtime
         // recreation (`createRuntime` -> `createAgentSession`): the
@@ -413,9 +417,28 @@ impl Worker {
                 // summary row ships now (the title's cost folds it in
                 // `update_subagent_summary` on arrival).
                 self.push_roster_delta();
+                // The pane reporter re-reports for the successor session
+                // (the TS replacement arm: the old instance went silent at
+                // the teardown, the successor force-publishes with its own
+                // session reference immediately — same pane, new session).
+                let (active, session_ref) = {
+                    let core = self.core.lock().unwrap();
+                    (core.busy, Worker::herdr_session_ref(&core))
+                };
+                self.herdr
+                    .lock()
+                    .unwrap()
+                    .session_started(active, session_ref);
                 response_success(None, command, Some(json!({ "cancelled": false })))
             }
-            Err(error) => response_failure(None, command, &error, None),
+            Err(error) => {
+                // A failed replacement tore the old session down without
+                // installing the successor: the reporter goes silent (the
+                // TS `session_shutdown` non-quit arm — never release, the
+                // pane is not the worker's to free here).
+                *self.herdr.lock().unwrap() = crate::herdr::HerdrReporter::default();
+                response_failure(None, command, &error, None)
+            }
         }
     }
 

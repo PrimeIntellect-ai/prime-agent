@@ -76,6 +76,8 @@ struct Step {
     run: Option<String>,
     #[serde(default)]
     with: Option<With>,
+    #[serde(default)]
+    env: Option<BTreeMap<String, String>>,
 }
 
 #[derive(serde::Deserialize)]
@@ -301,8 +303,17 @@ fn the_rolling_nightly_refresh_is_a_serialized_job() {
         .expect("the nightly-refresh job exists");
     assert_eq!(
         refresh.r#if.as_deref(),
-        Some("contains(github.ref_name, '-')"),
-        "only -beta* tags refresh the rolling nightly release"
+        Some(
+            "${{ !cancelled() && needs.promote.result == 'success' \
+&& contains(github.ref_name, '-') }}",
+        ),
+        "the refresh gate is the explicit result form (the promote precedent): \
+         an `if` without a status function is auto-prefixed with success(), and \
+         the default needs gate skips every job downstream of a skipped job in \
+         the dependency chain - on a -beta* tag the two stable-route build jobs \
+         are skipped, and as promote's needs they are the refresh's transitive \
+         needs, so the bare form skipped the refresh on every green beta \
+         promote while the payload uploaded inside the same promote"
     );
     // The refresh is the workflow's only shared mutable state, so it alone
     // serializes (a queued refresh superseded by a newer tag is harmless:
@@ -317,7 +328,27 @@ fn the_rolling_nightly_refresh_is_a_serialized_job() {
         "the refresh serializes in its own group"
     );
     assert!(refresh.needs.is_some(), "the refresh needs the promote job");
-    let run = step(refresh, "Refresh the rolling nightly release")
+    // The refresh step's gh calls are repo-relative (gh release view /
+    // download / upload / create) and this job never checks out: gh resolves
+    // the repo from the git remote or GH_REPO - never from GITHUB_REPOSITORY
+    // - so the GH_REPO row is load-bearing. Probe-pinned: with the gate
+    // fixed but GH_REPO absent, the job's first gh call fails with
+    // "failed to run git: not a git repository".
+    let refresh_step = step(refresh, "Refresh the rolling nightly release");
+    let refresh_env = refresh_step
+        .env
+        .as_ref()
+        .expect("the refresh step declares env");
+    assert_eq!(
+        refresh_env.get("GH_REPO").map(String::as_str),
+        Some("${{ github.repository }}"),
+        "the refresh step pins the repo for gh (no checkout, no git remote)"
+    );
+    assert!(
+        refresh_env.contains_key("GH_TOKEN"),
+        "the refresh step carries the workflow token"
+    );
+    let run = refresh_step
         .run
         .as_deref()
         .expect("the refresh step runs a script");
@@ -457,6 +488,49 @@ fn the_producer_refuses_rows_the_reader_rejects() {
     assert!(
         !out.join("latest.json").exists(),
         "no channel manifest is published from rejected rows"
+    );
+}
+
+#[test]
+fn the_producer_refuses_a_manifest_missing_a_platform_row() {
+    let (_, workflow) = load_workflow();
+    let emit_run = channel_step_run(&workflow);
+    let fixture = tempfile::tempdir().expect("fixture dir");
+    // A merged manifest missing the Windows row (the shape a skipped
+    // build leg would produce): the completeness gate must refuse — the
+    // channel's platform list must match the built set, and a shrunken
+    // manifest would strand that platform's installs.
+    let out = stage_merged_manifest(fixture.path(), "1.2.3", false);
+    let merged: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(out.join("manifest.json")).expect("read the merged manifest"),
+    )
+    .expect("parse the merged manifest");
+    let rows: Vec<serde_json::Value> = merged["binaries"]
+        .as_array()
+        .expect("the binaries list")
+        .iter()
+        .filter(|row| row["platform"].as_str() != Some("win32-x64"))
+        .cloned()
+        .collect();
+    std::fs::write(
+        out.join("manifest.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "version": merged["version"],
+            "binaries": rows,
+        }))
+        .expect("serialize"),
+    )
+    .expect("rewrite the merged manifest without the Windows row");
+
+    let result = run_step(emit_run, fixture.path(), "v1.2.3");
+    assert!(
+        !result.status.success(),
+        "the emission must fail when a known platform's row is missing"
+    );
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        stderr.contains("missing artifact rows") && stderr.contains("win32-x64"),
+        "the failure names the missing platform: {stderr}"
     );
 }
 
@@ -615,17 +689,31 @@ fn assembled_archives_carry_the_platform_alias_the_reader_demands() {
     let archive_bytes = std::fs::read(&archive).expect("read the archive");
     assert_eq!(row["sha256"], sha256_hex(&archive_bytes));
 
-    // The full chain: the promote emission over the assembled row, then
-    // the reader over the emitted manifest.
+    // The full chain: the promote emission over the assembled row (staged
+    // into a complete five-platform merged manifest — the completeness
+    // gate refuses a manifest missing a known platform's row), then the
+    // reader over the emitted manifest.
     let out = stage_merged_manifest(fixture.path(), "1.2.3", false);
     std::fs::copy(&archive, out.join("prime-agent-1.2.3-linux-x64.tar.gz"))
-        .expect("stage the real archive");
-    let merged = serde_json::json!({"version": "v1.2.3", "binaries": [row]});
+        .expect("stage the real archive over its fixture");
+    let merged_path = out.join("manifest.json");
+    let mut merged: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&merged_path).expect("read the staged merged manifest"),
+    )
+    .expect("parse the staged merged manifest");
+    merged["binaries"]
+        .as_array_mut()
+        .expect("the staged manifest's binaries")
+        .retain(|candidate| candidate["platform"] != "linux-x64");
+    merged["binaries"]
+        .as_array_mut()
+        .expect("the staged manifest's binaries")
+        .push(row.clone());
     std::fs::write(
-        out.join("manifest.json"),
+        &merged_path,
         serde_json::to_string_pretty(&merged).expect("serialize"),
     )
-    .expect("write the merged manifest");
+    .expect("write the merged manifest with the assembled row");
     let result = run_step(emit_run, fixture.path(), "v1.2.3");
     assert!(
         result.status.success(),
@@ -636,9 +724,14 @@ fn assembled_archives_carry_the_platform_alias_the_reader_demands() {
     assert_eq!(json["version"], "v1.2.3");
     let release = parse_channel_manifest(&bytes).expect("the reader accepts the manifest");
     assert_eq!(release.version, "1.2.3");
-    assert_eq!(release.artifacts.len(), 1);
-    let artifact: &ReleaseArtifact = &release.artifacts[0];
-    assert_eq!(artifact.platform, "linux-x64");
+    // The reader keeps every known platform's row; the assembled linux-x64
+    // row is one of the five.
+    assert_eq!(release.artifacts.len(), 5);
+    let artifact: &ReleaseArtifact = release
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.platform == "linux-x64")
+        .expect("the assembled row survived the emission");
     assert_eq!(artifact.file, "prime-agent-1.2.3-linux-x64.tar.gz");
     assert_eq!(artifact.sha256, sha256_hex(&archive_bytes));
 }

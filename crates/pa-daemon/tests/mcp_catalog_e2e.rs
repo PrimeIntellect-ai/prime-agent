@@ -171,10 +171,9 @@ impl Client {
             .set_read_timeout(Some(Duration::from_millis(100)))
             .expect("set timeout");
         loop {
-            line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => {}
+                Ok(_) if line.trim().is_empty() => line.clear(),
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse response line"),
                 Err(error) => {
                     assert!(
@@ -346,6 +345,21 @@ fn catalog_surfaces_and_paste_installs_through_the_daemon() {
     assert_eq!(
         github["pasteToken"], true,
         "github is pasteable (alias pair)"
+    );
+    // The api-key credential section serves the stored-key rows the view
+    // manages alongside the connections: the web-search entry, honestly
+    // unconfigured in the fresh agent dir.
+    let credentials = roster["data"]["credentials"]
+        .as_array()
+        .unwrap_or_else(|| panic!("credentials array: {roster}"));
+    let serper = credentials
+        .iter()
+        .find(|credential| credential["id"] == "serper")
+        .expect("the web-search credential row");
+    assert_eq!(serper["label"], "Serper (web search)");
+    assert_eq!(
+        serper["configured"], false,
+        "a fresh agent dir holds no serper key"
     );
 
     // The paste flow installs end-to-end: the credential is stored bound to

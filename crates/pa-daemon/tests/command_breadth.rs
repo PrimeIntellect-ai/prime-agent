@@ -522,6 +522,10 @@ const WIRE_FIXTURES: &[(&str, &str)] = &[
         "get_mcp_connections",
         r#"{"type": "get_mcp_connections", "activeSessionId": "sess"}"#,
     ),
+    (
+        "mark_anthropic_warning_shown",
+        r#"{"type": "mark_anthropic_warning_shown", "activeSessionId": "sess"}"#,
+    ),
 ];
 
 /// The accept list is the TS list, in TS order, followed by the Rust-native
@@ -550,6 +554,7 @@ fn known_command_types_match_the_ts_list() {
                     | "list_kernel_bash"
                     | "tail_kernel_bash"
                     | "kill_kernel_bash"
+                    | "mark_anthropic_warning_shown"
             ),
             "unexpected non-TS command type: {extra}"
         );

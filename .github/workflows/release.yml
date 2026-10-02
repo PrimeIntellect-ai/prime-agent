@@ -1,7 +1,7 @@
 # Release pipeline for Prime Agent (Rust).
 #
 # THE TWO BUILD ROUTES (one promote gate):
-#   - a plain vX.Y.Z tag (stable) BUILDS its own 4-target matrix: the stable
+#   - a plain vX.Y.Z tag (stable) BUILDS its own 5-target matrix: the stable
 #     cadence is rare, and its cut must not depend on a continuous run the
 #     staleness gate may have skipped (a superseded push builds nothing) or
 #     artifact retention may have evicted;
@@ -19,6 +19,8 @@
 #     green gates on that commit). Both routes upload the same
 #     artifacts-<target> set into this run, so the promote gate consumes
 #     one shape from either route.
+#   - the Windows target (build-windows) BUILDS on both routes: continuous
+#     builds no Windows target, so a beta has no win32 artifact to consume.
 #
 
 name: release
@@ -57,9 +59,10 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0 action pin; toolchain pinned below
-        with:
-          toolchain: "1.98.1"
+      # The pinned SHA is the toolchain pin: this action version has no
+      # `toolchain` input, and its parse step hard-codes 1.98.1. Change the
+      # compiler by changing the SHA; a `toolchain:` input is ignored.
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e
       - name: Validate tag matches workspace version
         run: |
           set -euo pipefail
@@ -107,14 +110,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Windows cannot ride this matrix: the job-level `container:` pins the
+        # linux builds to the reviewed ubuntu:22.04 image (the digest-pinned
+        # glibc baseline), and a Windows runner cannot host that container.
+        # The MSVC target builds in its own `build-windows` job below (the
+        # build-darwin pattern).
         include:
           - target: x86_64-unknown-linux-gnu
             runs-on: ubuntu-24.04
           - target: aarch64-unknown-linux-gnu
             runs-on: ubuntu-24.04-arm
-          # Windows ships when the platform trait impls land:
-          # - target: x86_64-pc-windows-msvc
-          #   runs-on: windows-2022
     env:
       # AppleDouble resource forks must not leak into the archive; the
       # assembler additionally enforces plain-file payloads.
@@ -132,9 +137,11 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0 action pin; toolchain pinned below
+      # The pinned SHA is the toolchain pin: this action version has no
+      # `toolchain` input, and its parse step hard-codes 1.98.1. Change the
+      # compiler by changing the SHA; a `toolchain:` input is ignored.
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e
         with:
-          toolchain: "1.98.1"
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
@@ -145,8 +152,11 @@ jobs:
           # the new key builds cold; the marker moves only with reviewed
           # baseline changes (same protocol as the image digest below).
           key: ${{ matrix.target }}-glibc235
+      # Only the shipped binary links here: the job packages `prime-agent`
+      # alone, so pa-daemon's [[bin]] would be a second thin-LTO link with
+      # no consumer (~26% of the build step, measured).
       - name: Build (release, locked)
-        run: cargo build --release --locked --target ${{ matrix.target }} -j 4
+        run: cargo build --release --locked --target ${{ matrix.target }} -j 4 -p pa-cli --bin prime-agent
       - name: Split the shipped binary + split-debug decoder (Option C posture)
         # Linux only: the build emits line tables and does not strip at
         # link; this step produces the SHIPPED binary (objcopy
@@ -234,8 +244,17 @@ jobs:
         include:
           - target: aarch64-apple-darwin
             runs-on: macos-14
+          # The x86_64 leg cross-compiles on the Apple-silicon pool: rustc
+          # and the Xcode linker build either darwin arch from an M-series
+          # host, and the M-pool links this binary ~2.2x faster than the
+          # macos-15-intel pool with far tighter variance (484 s vs 1046 s
+          # same-commit link tail, 2026-09-30). The livecheck below runs
+          # the assembled x64 artifact under Rosetta 2 — the macos-15
+          # arm64 image installs it, and install-rust.sh ships the x64
+          # build to an Apple-Silicon Mac's Rosetta shell, so the gate
+          # still boots the binary on its delivery runtime.
           - target: x86_64-apple-darwin
-            runs-on: macos-15-intel  # macos-13 is retired; this is the Intel runner now
+            runs-on: macos-15
     env:
       # AppleDouble resource forks must not leak into the archive; the
       # assembler additionally enforces plain-file payloads.
@@ -244,15 +263,24 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0 action pin; toolchain pinned below
+      # The pinned SHA is the toolchain pin: this action version has no
+      # `toolchain` input, and its parse step hard-codes 1.98.1. Change the
+      # compiler by changing the SHA; a `toolchain:` input is ignored.
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e
         with:
-          toolchain: "1.98.1"
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: ${{ matrix.target }}
+      # Only the shipped binary links here: the job packages `prime-agent`
+      # alone, so pa-daemon's [[bin]] would be a second thin-LTO link with
+      # no consumer (~26% of the build step, measured).
       - name: Build (release, locked)
-        run: cargo build --release --locked --target ${{ matrix.target }} -j 4
+        run: cargo build --release --locked --target ${{ matrix.target }} -j 4 -p pa-cli --bin prime-agent
+      # The aarch64 leg livechecks natively; the x86_64 leg,
+      # cross-compiled on the Apple-silicon pool, livechecks under
+      # Rosetta 2 — the runtime install-rust.sh gives the x64 payload on
+      # an Apple-Silicon Mac.
       - name: "Livecheck gate: --version prints the tag version"
         run: |
           set -euo pipefail
@@ -272,6 +300,89 @@ jobs:
             --version "${RELEASE_VERSION#v}" \
             --target "${{ matrix.target }}" \
             --binary "target/${{ matrix.target }}/release/prime-agent" \
+            --catalog-assets "target/${{ matrix.target }}/catalog-assets" \
+            --out-dir "target/${{ matrix.target }}/dist"
+          cat "target/${{ matrix.target }}/dist/manifest.json"
+      - name: Upload artifacts
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: artifacts-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/dist/prime-agent-*
+            target/${{ matrix.target }}/dist/SHA256SUMS
+            target/${{ matrix.target }}/dist/manifest.json
+          if-no-files-found: error
+
+  # The Windows build: its own job (the build-darwin pattern), because the
+  # GNU builds pin their glibc baseline inside the digest-reviewed ubuntu:22.04
+  # container - a runner-level image a windows runner cannot host. The runner
+  # label is pinned to windows-2022 (never the mutable windows-latest) for the
+  # same reviewed-baseline reason as the container digest: a label that
+  # drifts under promote would drift the release baseline; it moves only
+  # through reviewed changes.
+  #
+  # BOTH ROUTES build it: the continuous workflow builds no Windows target,
+  # so a -beta* tag has no continuous win32 artifact to consume - this job
+  # builds the tag commit itself on either route and uploads the same
+  # artifacts-<target> shape into this run.
+  build-windows:
+    needs: tag-check
+    name: build-${{ matrix.target }}
+    runs-on: ${{ matrix.runs-on }}
+    permissions:
+      contents: read
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      # The pinned SHA is the toolchain pin: this action version has no
+      # `toolchain` input, and its parse step hard-codes 1.98.1. Change the
+      # compiler by changing the SHA; a `toolchain:` input is ignored.
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: ${{ matrix.target }}
+      # The Windows runner images ship `python` (python3 is not a stable alias
+      # there); the release scripts run under whichever spelling exists.
+      - name: Resolve the Python interpreter
+        shell: bash
+        run: echo "PY=$(command -v python3 || command -v python)" >> "$GITHUB_ENV"
+      # Only the shipped binary links here (the build-gnu/build-darwin rule).
+      - name: Build (release, locked)
+        run: cargo build --release --locked --target ${{ matrix.target }} -j 4 -p pa-cli --bin prime-agent
+      - name: "Livecheck gate: --version prints the tag version"
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Cargo's MSVC linker emits prime-agent.exe; the payload name the
+          # assembler stages and the installer extracts.
+          bin="target/${{ matrix.target }}/release/prime-agent.exe"
+          out="$("${bin}" --version)"
+          [[ "${out}" == "${RELEASE_VERSION#v}" ]]             || { echo "binary reports '${out}', expected '${RELEASE_VERSION#v}'"; exit 1; }
+      - name: Generate bundled catalog assets (fixture, offline-safe)
+        shell: bash
+        run: |
+          set -euo pipefail
+          "${PY}" scripts/release/bundle_catalog.py generate --fixture \
+            --out "target/${{ matrix.target }}/catalog-assets"
+      - name: Assemble tarball + checksums + manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          "${PY}" scripts/release/assemble_artifacts.py \
+            --repo-root . \
+            --version "${RELEASE_VERSION#v}" \
+            --target "${{ matrix.target }}" \
+            --binary "target/${{ matrix.target }}/release/prime-agent.exe" \
             --catalog-assets "target/${{ matrix.target }}/catalog-assets" \
             --out-dir "target/${{ matrix.target }}/dist"
           cat "target/${{ matrix.target }}/dist/manifest.json"
@@ -407,17 +518,23 @@ jobs:
     # promote on BOTH routes - each route deliberately skips the other two
     # legs. The expression admits exactly the two healthy routes and nothing
     # else: (stable) both build jobs succeeded, or (beta) the consume route
+    # succeeded - and on both, build-windows (it runs on either route)
     # succeeded; a failed leg, a cancelled run, or a failed tag-check leaves
     # promote skipped, matching the pre-consume failure semantics. The
     # artifact completeness assertion inside the gate is the belt behind the
     # routing: an incomplete set fails the promotion loudly either way.
-    if: ${{ !cancelled() && (
+    if: ${{ !cancelled() && needs.build-windows.result == 'success' && (
           (needs.build-gnu.result == 'success' && needs.build-darwin.result == 'success')
           || needs.reuse-continuous.result == 'success') }}
-    needs: [build-gnu, build-darwin, reuse-continuous]
+    needs: [build-gnu, build-darwin, build-windows, reuse-continuous]
     name: promotion gate -> release attach
     runs-on: ubuntu-latest
-    environment: release
+    # The channel gates differ: the stable channel publishes from the protected
+    # `release` environment (the required-reviewer approval is the ship gate);
+    # the nightly/beta channel publishes from `release-beta` (no required
+    # reviewers - every green merge rolls the beta automatically, the rolling
+    # channel by design; the stable cut stays the human-approved act).
+    environment: ${{ contains(github.ref_name, '-beta') && 'release-beta' || 'release' }}
     permissions:
       contents: write
       id-token: write
@@ -484,6 +601,31 @@ jobs:
           if failures:
               sys.exit("hash continuity failed:\n" + "\n".join(failures))
           print(f"hash continuity verified for all archives")
+          PY
+      # Prime Agent 0.9.8 (the TypeScript release) updates itself with its
+      # bundled installer, which installs any archive that carries install.sh,
+      # theme/prime.json, export-html/template.html and photon_rs_bg.wasm.
+      # The Rust archive lacks all four, and that is the only thing stopping a
+      # TS client from installing a Rust release into the TS layout (which
+      # breaks it). TS needs all four, so refusing a root-level install.sh
+      # keeps every Rust archive uninstallable by the TS updater.
+      - name: Refuse archives the TypeScript updater would install
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import pathlib, sys, tarfile
+          incoming = pathlib.Path("incoming")
+          failures = []
+          for entry_dir in sorted(p for p in incoming.iterdir() if p.is_dir()):
+              for archive in sorted(entry_dir.glob("prime-agent-*.tar.gz")):
+                  with tarfile.open(archive) as tar:
+                      names = {pathlib.PurePosixPath(m.name).parts for m in tar.getmembers()}
+                  if ("install.sh",) in names:
+                      failures.append(f"{archive.name}: contains a root-level install.sh")
+          if failures:
+              sys.exit("a TypeScript Prime Agent updater could install these archives:\n"
+                       + "\n".join(failures))
+          print("no archive carries the TypeScript installer layout")
           PY
       - name: Verify Linux decoder integrity against installed tar ELF
         run: |
@@ -616,6 +758,21 @@ jobs:
               rows.append(
                   {"platform": platform, "file": file_name, "sha256": sha}
               )
+          # COMPLETENESS: the channel's platform list must match the built set.
+          # The reader serves every known platform; a manifest that silently
+          # dropped one (a skipped matrix leg, a build-job regression) would
+          # strand that platform's installs on the old channel version, so a
+          # missing row fails the release here instead of publishing a
+          # shrunken channel. `promote` needs every build job, so the merged
+          # manifest carries every known platform by construction; this gate
+          # turns that invariant into an enforced contract.
+          missing = known - seen
+          if missing:
+              sys.exit(
+                  f"the release is missing artifact rows for {sorted(missing)}: "
+                  "the channel manifest must carry a row for every known "
+                  "platform (one build job per platform)"
+              )
           document = {"version": f"v{version}"}
           v1_rows = [row for row in rows if row["platform"] in v1_platforms]
           if v1_rows:
@@ -632,24 +789,27 @@ jobs:
       #
       # THE SECURITY MODEL, in one block for every future reader:
       #   - SEPARATION: the build jobs (build-gnu/build-darwin) produce and
-      #     attest the artifacts and hold NO R2 credentials; this promote job
-      #     — the protected 'release' environment, gated by the operator's
-      #     approval click — is the ONLY job that ever holds the R2 secrets.
-      #     The build is not the release: the approval gate IS the release
-      #     decision, and every s3 cp below runs only after it.
+      #     attest the artifacts and never reference the R2 secrets; this
+      #     promote job is the only job that does. The R2 secrets are
+      #     repo-level (neither environment holds any), so the environment
+      #     is not a credential boundary. Stable tags run in the 'release'
+      #     environment, whose required-reviewer approval is a process gate:
+      #     a stable s3 cp runs only after a human approves. Beta tags run in
+      #     'release-beta' (no reviewers) and publish automatically once the
+      #     builds pass.
       #   - CHECKSUM FIRST: sha256sum --check SHA256SUMS passes before any
       #     upload — a corrupt or mismatched artifact never reaches the
       #     bucket.
       #   - HEADER FORM (TS parity): the version-prefixed artifacts
       #     (releases/v<version>/) are immutable (1y) with their content
       #     types; the root pointers (latest.json, stable, beta, beta.json,
-      #     install.sh, install-beta.sh) are no-cache — the user path is
-      #     always fresh.
+      #     install.sh, install-beta.sh, install.ps1, install-beta.ps1) are
+      #     no-cache — the user path is always fresh.
       #   - NO PATS, NO LEAKS: the GitHub side uses the workflow's own
-      #     identity (github.token); the R2 keys are environment secrets
-      #     scoped to this job; nothing is echoed.
+      #     identity (github.token); the R2 keys are repo-level secrets
+      #     read only by this job; nothing is echoed.
       #   - BETA SUPERSEDE: only the LATEST green commit gets a beta cut;
-      #     a newer rust push landing while this beta built means a newer
+      #     a newer main push landing while this beta built means a newer
       #     cut is coming — this publish keeps its versioned artifacts but
       #     skips the beta channel pointers (beta.json/beta/install-beta.sh),
       #     so the channel only ever advances forward.
@@ -688,12 +848,14 @@ jobs:
             --content-type text/plain \
             --cache-control 'public, max-age=31536000, immutable'
 
-          # The rendered installer pair: the repo file's defaults ARE the
+          # The rendered installer pairs: the repo files' defaults ARE the
           # official domain, so the publish render only stamps the build's
-          # R2 base + channel default into the served copies. Both renders
+          # R2 base + channel default into the served copies. All renders
           # publish on every cut (TS parity: a changed installer ships with
           # whichever channel publishes, so the served scripts never go
-          # stale between releases).
+          # stale between releases) — the sh pair (install.sh /
+          # install-beta.sh) and the Windows PowerShell pair (install.ps1 /
+          # install-beta.ps1).
           render_installer() {
             channel="$1"
             sed -e "s|^DOWNLOAD_BASE_URL_DEFAULT=.*|DOWNLOAD_BASE_URL_DEFAULT=\"${INSTALL_BASE_URL}\"|" \
@@ -701,6 +863,20 @@ jobs:
                 "verification-source/install-rust.sh" > "/tmp/install-${channel}.sh"
             grep -q "^DOWNLOAD_BASE_URL_DEFAULT=\"${INSTALL_BASE_URL}\"" "/tmp/install-${channel}.sh"
             grep -q "^RELEASE_CHANNEL_DEFAULT=${channel}$" "/tmp/install-${channel}.sh"
+          }
+
+          # The Windows-native render of the same installer (install.ps1):
+          # the same base + channel stamps, the same publish-every-cut rule.
+          # The Windows-idiomatic entry is
+          #   irm <base>/install.ps1 | iex
+          # while Git-Bash users run the install-rust.sh form above.
+          render_installer_ps1() {
+            channel="$1"
+            sed -e "s|^\$DownloadBaseUrlDefault = '.*'|\$DownloadBaseUrlDefault = '${INSTALL_BASE_URL}'|" \
+                -e "s|^\$ReleaseChannelDefault = '.*'|\$ReleaseChannelDefault = '${channel}'|" \
+                "verification-source/install.ps1" > "/tmp/install-${channel}.ps1"
+            grep -qF "\$DownloadBaseUrlDefault = '${INSTALL_BASE_URL}'" "/tmp/install-${channel}.ps1"
+            grep -qF "\$ReleaseChannelDefault = '${channel}'" "/tmp/install-${channel}.ps1"
           }
 
           # THE ANNOTATED-TAG PEEL: the nightly cuts create ANNOTATED tags,
@@ -799,7 +975,7 @@ jobs:
           if [[ "$RELEASE_VERSION" == *-beta* ]]; then
             # THE BETA CHANNEL: the rolling per-push cut. The supersede
             # rule — only the newest proven commit advances the channel: a
-            # newer rust push landing while this beta built means a newer
+            # newer main push landing while this beta built means a newer
             # cut is already coming; this one keeps its versioned
             # artifacts (immutable, still served to pinned installs) but
             # leaves the channel pointers alone.
@@ -813,14 +989,19 @@ jobs:
               else
                 render_installer beta
                 publish_pointer_pair beta.json beta release-out/beta.json beta
-                aws s3 cp /tmp/install-beta.sh "s3://${R2_BUCKET}/prime-agent/install-beta.sh" \
+                aws s3 cp /tmp/install-beta.sh "s3://${R2_BUCKET}/install-beta.sh" \
                   --endpoint-url "$R2_ENDPOINT_URL" \
                   --content-type text/x-shellscript \
                   --cache-control no-cache
-                # The stable installer (install.sh) moves ONLY on a stable
-                # release — a beta cut never touches the stable channel's
-                # surface (the TS version serves installs until the first
-                # Rust stable release replaces it).
+                render_installer_ps1 beta
+                aws s3 cp /tmp/install-beta.ps1 "s3://${R2_BUCKET}/install-beta.ps1" \
+                  --endpoint-url "$R2_ENDPOINT_URL" \
+                  --content-type text/plain \
+                  --cache-control no-cache
+                # The stable installers (install.sh / install.ps1) move ONLY
+                # on a stable release — a beta cut never touches the stable
+                # channel's surface (the TS version serves installs until the
+                # first Rust stable release replaces it).
                 echo "beta channel advanced to ${RELEASE_VERSION} at ${INSTALL_BASE_URL}"
               fi
             fi
@@ -834,14 +1015,24 @@ jobs:
             else
               render_installer stable
               publish_pointer_pair latest.json stable release-out/latest.json stable
-              aws s3 cp /tmp/install-stable.sh "s3://${R2_BUCKET}/prime-agent/install.sh" \
+              aws s3 cp /tmp/install-stable.sh "s3://${R2_BUCKET}/install.sh" \
                 --endpoint-url "$R2_ENDPOINT_URL" \
                 --content-type text/x-shellscript \
                 --cache-control no-cache
+              render_installer_ps1 stable
+              aws s3 cp /tmp/install-stable.ps1 "s3://${R2_BUCKET}/install.ps1" \
+                --endpoint-url "$R2_ENDPOINT_URL" \
+                --content-type text/plain \
+                --cache-control no-cache
               render_installer beta
-              aws s3 cp /tmp/install-beta.sh "s3://${R2_BUCKET}/prime-agent/install-beta.sh" \
+              aws s3 cp /tmp/install-beta.sh "s3://${R2_BUCKET}/install-beta.sh" \
                 --endpoint-url "$R2_ENDPOINT_URL" \
                 --content-type text/x-shellscript \
+                --cache-control no-cache
+              render_installer_ps1 beta
+              aws s3 cp /tmp/install-beta.ps1 "s3://${R2_BUCKET}/install-beta.ps1" \
+                --endpoint-url "$R2_ENDPOINT_URL" \
+                --content-type text/plain \
                 --cache-control no-cache
               echo "stable channel advanced to ${RELEASE_VERSION} at ${INSTALL_BASE_URL}"
             fi
@@ -904,7 +1095,21 @@ jobs:
   # refuses to clobber a newer rolling beta.json (re-runs of older tags).
   nightly-refresh:
     needs: promote
-    if: contains(github.ref_name, '-')
+    # THE GATE IS EXPLICIT (the promote precedent: an `if` without a status
+    # function is auto-prefixed with success(), and GitHub's default needs
+    # gate skips every job downstream of a skipped job in the dependency
+    # chain). On a -beta* tag the two stable-route build jobs skip themselves
+    # by their own gates; they are promote's needs and therefore this job's
+    # TRANSITIVE needs, so the bare `if: contains(github.ref_name, '-')` that
+    # lived here skipped the refresh on every
+    # green beta promote since the flow went live - the rolling `nightly`
+    # release never materialized (releases/tags/nightly 404s) while the
+    # per-tag prereleases and the R2 beta.json published and the payload
+    # uploaded inside the same green promote. The explicit form admits
+    # exactly the one healthy state: a green promote - the only producer of
+    # the nightly-refresh-payload artifact - on a -beta* tag. A failed,
+    # skipped, or cancelled promote leaves the refresh skipped.
+    if: ${{ !cancelled() && needs.promote.result == 'success' && contains(github.ref_name, '-') }}
     name: rolling nightly release refresh (the nightly channel's discoverable base)
     concurrency:
       group: rolling-nightly-refresh
@@ -921,6 +1126,13 @@ jobs:
       - name: Refresh the rolling nightly release
         env:
           GH_TOKEN: ${{ github.token }}
+          # gh resolves the repo from the git remote - absent: this job never
+          # checks out - or GH_REPO, and never from GITHUB_REPOSITORY, so
+          # without this row every `gh release ...` call below dies with
+          # "failed to run git: not a git repository" (probe-pinned: the gate
+          # fix alone let the job run and its first gh call failed exactly
+          # so).
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           # The rolling update channel distributes tarballs only. Per-tag

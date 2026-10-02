@@ -677,14 +677,25 @@ impl Supervisor {
             // the daemon's lifetime. `canonical` was resolved while the
             // file still existed - the same key the table stores.
             self.session_bindings.forget_file(&canonical);
-            if let Some(entry) = roster_entry {
-                let agent_id = entry.agent_id;
-                self.roster
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .delete(&agent_id);
-                self.push_roster_update(Vec::new(), vec![agent_id]);
-            }
+            // The tombstone above changed the ledger, whether or not the
+            // deleted session had a roster row (a subagent of a stopped
+            // parent has none - its only row was the saved listing's):
+            // every successful delete refreshes the bucket, and only the
+            // row removal stays conditional. The refreshed rows and the
+            // removal ship in one push.
+            let changed = self.refresh_deleted_descendant_usage().await;
+            let removed_ids = match roster_entry {
+                Some(entry) => {
+                    let agent_id = entry.agent_id;
+                    self.roster
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .delete(&agent_id);
+                    vec![agent_id]
+                }
+                None => Vec::new(),
+            };
+            self.push_roster_update(changed, removed_ids);
         }
         (
             vec![response_line(&response_success(

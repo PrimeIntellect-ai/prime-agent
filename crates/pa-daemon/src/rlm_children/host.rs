@@ -152,6 +152,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 };
                 let record = Arc::new(Mutex::new(record));
                 this.children.lock().await.push(Arc::clone(&record));
+                this.refresh_running().await;
                 anyhow::Ok((record, created, model))
             }
             .await;

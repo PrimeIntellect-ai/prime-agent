@@ -198,28 +198,28 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
     ),
     CommandSpec::new(
         &["update"],
-        "update [--check]",
+        "update [--check] [--nightly|--stable]",
         "Update to the latest Rust build (uninstalls the TypeScript version)",
     )
     .options(&[
-        "--check  Print the latest available build vs the running version, without installing",
-        "--force     Reinstall even if the current version is the latest on the channel (the managed-install flow)",
+        "--check  Print the update channel's latest release vs the running version, without installing",
+        "--force     Reinstall the latest build of the channel",
         "--rollback  Restore the previous compiled release (the managed-install flow)",
-        "--nightly   Switch updates to the nightly channel (the managed-install flow)",
-        "--stable    Return updates to the stable channel (the managed-install flow)",
+        "--nightly   Switch updates to the nightly channel (the latest main build)",
+        "--stable    Return updates to the stable channel",
         "--archive <path>  Install a local release payload (the managed-install flow)",
         "--source <url>     The https:// origin recorded as the release's install source (required with --archive)",
     ])
     .description(
         "Move from the TypeScript version to the Rust port in one step: `prime-agent update` \
-         fetches the installer from the official domain endpoint \
-         (https://app.primeintellect.ai/prime-agent/install.sh — never a GitHub raw or workflow \
-         URL) and runs it, which uninstalls the TypeScript version and installs the latest Rust \
-         build; your sessions and configuration (~/.prime/agent) are never touched. Restart \
-         prime-agent after the update to run the new build. This command exists only in the \
-         Rust binary — the TypeScript version does not have it; the move happens when you run \
-         the installer's curl|sh URL (the README's Install section) or `prime-agent update` \
-         (after the Rust install exists).",
+         fetches the update channel's installer (stable: \
+         https://app.primeintellect.ai/prime-agent/install.sh; nightly: install-beta.sh from the \
+         release download base — never a GitHub raw or workflow URL) and runs it, which \
+         uninstalls the TypeScript version and installs the latest Rust build; your sessions and \
+         configuration (~/.prime/agent) are never touched. Restart prime-agent after the update \
+         to run the new build. This command exists only in the Rust binary — the TypeScript \
+         version does not have it; the move happens when you run the installer's curl|sh URL (the \
+         README's Install section) or `prime-agent update` (after the Rust install exists).",
     ),
     CommandSpec::new(&["model"], "model list [search]", "Inspect available models"),
     CommandSpec::new(&["model", "list"], "model list [search]", "List available models"),
@@ -324,14 +324,8 @@ const TOP_LEVEL_OPTION_GROUPS: &[OptionGroup] = &[
         ],
     },
     OptionGroup {
-        heading: "Tool and resource options",
+        heading: "Resource options",
         options: &[
-            ("-t, --tools <list>", "Allowlist comma-separated tool names"),
-            ("-nt, --no-tools", "Disable all tools by default"),
-            (
-                "-nbt, --no-builtin-tools",
-                "Disable built-in tools by default",
-            ),
             ("--skill <path>", "Load a skill (repeatable)"),
             ("-ns, --no-skills", "Disable skill discovery"),
             (

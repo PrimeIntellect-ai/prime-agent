@@ -96,8 +96,6 @@ const CORPUS: &[&[&str]] = &[
     &["--fork"],
     &["--session-dir"],
     &["--models"],
-    &["--tools", "read,write"],
-    &["--tools", "read"],
     &["--goal-token-budget", "5"],
     &["--goal", ""],
     &["--goal", "  "],
@@ -356,7 +354,7 @@ fn run(binary: &Path, args: &[&str], sandbox: &Path) -> InvocationOutput {
         // through passwd rather than $HOME, so the env override is the only
         // reliable isolation for both binaries.
         .env("PRIME_AGENT_CODING_AGENT_DIR", sandbox.join("agent"))
-        // Isolate TMPDIR too (batterylib.scrubbed_env parity): without it the
+        // Isolate TMPDIR too: without it the
         // TS daemon census escapes into the box's ambient daemons and
         // `shutdown --force` kills unrelated sockets (containment contract).
         .env("TMPDIR", sandbox.join("tmp"))

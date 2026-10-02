@@ -31,6 +31,19 @@ impl SessionUi {
     ) -> Result<SessionUi> {
         let active_session_id = match &options.session {
             SessionSelection::New => create_session(&client, options, None).await?,
+            SessionSelection::NewChild { rlm_depth, .. } => {
+                let id = create_session(&client, options, None).await?;
+                // `tui agents new scoped`, fire-and-forget (the
+                // `subagents_view_opened` pattern): the open never waits on
+                // the telemetry flush.
+                if let Some(telemetry) = options.telemetry.clone() {
+                    let depth = *rlm_depth;
+                    tokio::spawn(async move {
+                        telemetry.scoped_agent_created(depth).await;
+                    });
+                }
+                id
+            }
             SessionSelection::Attach(id) => id.clone(),
             SessionSelection::Resume(_) => {
                 create_session(&client, options, Some(&options.session)).await?
@@ -78,6 +91,7 @@ impl SessionUi {
             speed_stats: None,
             client_settings: options.client_settings.clone(),
             anthropic_subscription_warning_shown: false,
+            anthropic_warning_mark_pending: std::sync::Arc::default(),
             active_side_question_id: None,
             side_question_counter: 0,
             share: None,
@@ -341,6 +355,16 @@ impl SessionUi {
         {
             self.client.drop_direct();
         }
+        // The primary interactive connection sends its Herdr pane identity
+        // with attach so an env-less session (e.g. cron-created) can adopt
+        // it (adopt-if-absent, never rebind — the daemon owns that rule);
+        // a client outside a Herdr pane sends nothing (the wire keeps its
+        // tip shape).
+        let client_env = {
+            let env =
+                pa_types::daemon::herdr_env::collect_client_env(|key| std::env::var(key).ok());
+            (!env.is_empty()).then_some(env)
+        };
         let attach_command = |session_id: &str| DaemonCommand::Attach {
             id: None,
             active_session_id: session_id.to_string(),
@@ -358,7 +382,7 @@ impl SessionUi {
             resume_cursor: None,
             telemetry_disabled: self.telemetry_disabled.filter(|disabled| *disabled),
             recovery_config: None,
-            env: None,
+            env: client_env.clone(),
             launch_env: None,
             rest: Map::default(),
         };

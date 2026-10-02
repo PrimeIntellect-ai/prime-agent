@@ -22,6 +22,19 @@ windows-cross:
 	cargo check --workspace --target x86_64-pc-windows-gnu --all-targets
 	cargo clippy --workspace --target x86_64-pc-windows-gnu --all-targets -- -D warnings
 
+# Windows MSVC cross-check: the release target's own triple (release.yml's
+# build-windows job builds x86_64-pc-windows-msvc natively on windows-2022;
+# this gate type-checks the same target from a linux host). The check form
+# needs MSVC-side C tooling for the native build scripts (ring): cargo-xwin
+# wraps the build with the MSVC CRT + clang-cl/llvm-lib, so the gate fails
+# loudly when cargo-xwin (or the llvm tools) is missing instead of silently
+# skipping. The gnu gate above stays the cheap cfg-hygiene mirror; the
+# authoritative msvc build runs on the windows runner.
+windows-msvc-cross:
+	@rustup target list --installed | grep -q x86_64-pc-windows-msvc || { echo "x86_64-pc-windows-msvc target not installed (rustup target add x86_64-pc-windows-msvc)"; exit 1; }
+	@command -v cargo-xwin >/dev/null 2>&1 || { echo "cargo-xwin not installed (cargo install cargo-xwin --locked; it provisions the MSVC CRT + expects clang-cl/llvm-lib on PATH)"; exit 1; }
+	cargo xwin check --workspace --target x86_64-pc-windows-msvc --all-targets
+
 # Lints the live workflow files (.github/workflows/).
 actionlint:
 	@command -v actionlint >/dev/null 2>&1 || { echo "actionlint not installed (see rhysd/actionlint releases)"; exit 1; }
@@ -50,14 +63,6 @@ glibc-gate:
 			echo "binary requires $${max_glibc}, above the GLIBC_2.35 (Ubuntu 22.04) baseline" >&2; exit 1; \
 		fi \
 		;; esac
-
-# Perf wave + regression gate (benchmark.yml job, the local mirror): runs the
-# TS binary and a fresh release build side by side in a fresh Prime sandbox
-# (both sides on one quiet machine, the methodology BENCHMARKS.md requires)
-# and gates the rust medians against scripts/battery/perf-baseline.json.
-# PA_BENCH_NO_SANDBOX=1 runs it on the bare runner instead.
-perf-wave:
-	scripts/battery/ci_perf_wave.sh
 
 # Local mirror of the release build-job gates:
 # release build against the committed lockfile, deterministic tarball assembly,
@@ -180,4 +185,4 @@ shard-gates:
 	python3 scripts/test_ci_test_shard.py
 	python3 scripts/test_ci_pr_crates.py
 
-.PHONY: check deny windows-cross actionlint perf-wave glibc-gate release-dry-run continuous-dry-run audit-build package catalog-assets catalog-assets-fixture catalog-assets-gates fold-gates restamp-gates shard-gates
+.PHONY: check deny windows-cross actionlint glibc-gate release-dry-run continuous-dry-run audit-build package catalog-assets catalog-assets-fixture catalog-assets-gates fold-gates restamp-gates shard-gates

@@ -119,11 +119,23 @@ impl Supervisor {
             config,
             telemetry_disabled,
             runtime_metadata,
+            env,
             ..
         } = create
         else {
             return Err(anyhow!("launch_worker requires a create command"));
         };
+        // The allowlisted client env (the pane identity, e.g. Herdr's
+        // `HERDR_*`) re-filtered here (the socket peer is untrusted) and
+        // carried on the durable create command: the worker resolves its
+        // session's pane identity from the create payload — never from
+        // this supervisor process's boot environment (the TS daemon
+        // boot-context bug class, not reproduced) — and a respawned
+        // worker re-receives the same identity.
+        let client_env = env
+            .as_ref()
+            .map(crate::herdr::filter_client_env)
+            .filter(|env| !env.is_empty());
         // The shutdown gate: a create dispatched while the supervisor is
         // stopping must never launch a worker the stop pass would miss (a
         // late create racing a shutdown would otherwise orphan its worker
@@ -251,6 +263,12 @@ impl Supervisor {
             if let Some(value) = config_object.and_then(|config| config.get(key)) {
                 durable_rest.insert(key.to_string(), value.clone());
             }
+        }
+        // The session's pane identity (the allowlisted client env) rides
+        // the durable create command so the worker's `create` payload
+        // carries it and a respawn replays it.
+        if let Some(client_env) = client_env {
+            durable_rest.insert("env".to_string(), serde_json::to_value(client_env)?);
         }
         // A child's RLM identity rides the durable create command too, so a
         // respawned or adopted child stays identifiable for ledger appends.
@@ -622,13 +640,12 @@ impl Supervisor {
     /// idle state and crossed the threshold asks for its own graceful
     /// stop over the supervisor link — TS `canEvictWorker` reaches roots
     /// and children alike. The supervisor verifies the worker token,
-    /// refuses a client-owned or noSession descriptor (TS
-    /// `hasOwnerClient`: the owner's disconnect cleanup owns that stop;
-    /// an in-memory session has no file to wake from), and re-reads the
-    /// setting — the supervisor's own fresh-snapshot fence: a setting
+    /// refuses a client-owned descriptor (TS `hasOwnerClient`), and re-reads
+    /// the setting — the supervisor's own fresh-snapshot fence: a setting
     /// flipped to `"off"` (or past the threshold) between the worker's
-    /// ask and the stop cancels the passivation. The stop itself is the
-    /// existing graceful path (`stop_worker`: durable tombstone, routed
+    /// ask and the stop cancels the passivation. The stop runs under the
+    /// eviction fence (TS `withEvictionFence`) and is the existing
+    /// graceful path (`stop_worker`: durable tombstone, routed
     /// shutdown, process-retirement wait, registry removal, roster
     /// passivation), so the passivated worker's row stays visible and
     /// its next prompt (or an attach by durable id) wakes a fresh worker
@@ -648,21 +665,15 @@ impl Supervisor {
                 None,
             );
         };
-        // Rust clients create noSession roots unowned (`lifecycle: None`);
-        // TS makes them client-owned, so its `hasOwnerClient` refuses them.
-        // An in-memory session has no file to wake from.
-        {
-            let descriptor = resident.descriptor.lock().await;
-            if descriptor.owner_client_id.is_some()
-                || descriptor.create_command.no_session == Some(true)
-            {
-                return response_failure(
-                    Some(command_id),
-                    type_name,
-                    "Idle passivation is refused for a client-owned or in-memory (noSession) worker",
-                    None,
-                );
-            }
+        // The owner gate (TS `canEvictWorker`'s `hasOwnerClient` arm): a
+        // client-owned worker never passivates itself.
+        if resident.descriptor.lock().await.owner_client_id.is_some() {
+            return response_failure(
+                Some(command_id),
+                type_name,
+                "Idle passivation is refused for a client-owned worker",
+                None,
+            );
         }
         // The supervisor-side settings re-read (the fence): the same
         // `idleEvictionMinutes` surface the worker read.
@@ -683,7 +694,19 @@ impl Supervisor {
                 return response_success(Some(command_id), type_name, None);
             }
         }
-        match self.stop_worker(&resident).await {
+        // TS `withEvictionFence`: holding every in-flight route permit
+        // proves no routed request is still running on this worker (a
+        // drained `cron_add` or prompt would fail TS's fresh
+        // `canEvictWorker`), and refuses new client routes until the
+        // stop has retired the worker. A request in flight defers the
+        // passivation; the worker's next park re-asks.
+        let Ok(fence) = Arc::clone(&resident.inflight).try_acquire_many_owned(
+            u32::try_from(crate::backpressure::WORKER_INFLIGHT_CAPACITY)
+                .expect("in-flight capacity fits u32"),
+        ) else {
+            return response_success(Some(command_id), type_name, None);
+        };
+        match self.stop_worker_releasing(&resident, Some(fence)).await {
             Ok(()) => {
                 self.log_line(&format!(
                     "session worker {} passivated idle (idleEvictionMinutes={threshold})",
@@ -704,6 +727,16 @@ impl Supervisor {
         self: &Arc<Self>,
         resident: &Arc<ResidentWorker>,
     ) -> anyhow::Result<()> {
+        self.stop_worker_releasing(resident, None).await
+    }
+
+    /// The graceful stop; `fence` (the idle passivation's) is released
+    /// past the retire. Every other stop caller passes `None`.
+    async fn stop_worker_releasing(
+        self: &Arc<Self>,
+        resident: &Arc<ResidentWorker>,
+        fence: Option<tokio::sync::OwnedSemaphorePermit>,
+    ) -> anyhow::Result<()> {
         // The stop's durable intent persists BEFORE the worker is told (TS
         // `stopWorkerUntracked(removeDescriptor)` ->
         // `persistWorkerStopTombstone`): a supervisor that dies mid-stop, or
@@ -720,6 +753,12 @@ impl Supervisor {
         // The stop is intentional: routes waiting out a replacement must
         // fail fast instead of parking on this worker.
         resident.note_retired();
+        // The fence releases past the retire (a tombstone-persist failure
+        // fails the stop before it, and the worker stays fully
+        // routable) and before the shutdown route, which needs a permit
+        // of its own. A client route that acquires a freed permit next
+        // sees the retire (the post-admission check in routing.rs).
+        drop(fence);
         match self
             .route_command_typed(
                 resident,

@@ -201,9 +201,6 @@ fn collect_candidates(
         let Some(header) = crate::session_store::read_session_header(&path) else {
             continue;
         };
-        if header.id.is_empty() {
-            continue;
-        }
         candidates.push(SweepCandidate {
             protected: protected.contains(&canonical_session_path(&path)),
             session_id: header.id,

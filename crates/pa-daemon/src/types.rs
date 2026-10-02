@@ -85,6 +85,11 @@ pub struct SessionSummary {
     /// activity label's `running tools` state.
     #[serde(default)]
     pub is_running_tools: bool,
+    /// An RLM child of this session (or one of its descendants) is still
+    /// running; the session counts as working even after its own turn
+    /// ended.
+    #[serde(default)]
+    pub has_running_subagents: bool,
     pub attached_clients: u32,
     pub message_count: u32,
     pub session_actions: SessionActionSnapshot,
@@ -142,6 +147,14 @@ pub struct SessionSummary {
     pub runtime_kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unfinished_action_count: Option<u32>,
+    /// Whether this session has already drawn the Anthropic subscription
+    /// ban-risk warning (Rust-native, operator directive 2026-09-29): the
+    /// once-per-session-lifecycle gate the interactive client reads from
+    /// `get_state` before warning — a reattach or a resume of the same
+    /// session skips, a genuinely new session warns once. Absent when the
+    /// session is still initializing (older workers never emit it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anthropic_warning_shown: Option<bool>,
 }
 
 /// Port of `SessionActionSnapshot` (core/session-action-store.ts).

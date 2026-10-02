@@ -263,6 +263,14 @@ impl pa_tui::client_auth::ClientAuthCommands for ScriptedClientAuth {
         Box::pin(async move { Ok("Connected.".to_string()) })
     }
 
+    fn api_key(
+        &self,
+        _credential: &str,
+        _panel: AuthPanelHandle,
+    ) -> Pin<Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send>> {
+        Box::pin(async move { Ok("Saved API key.".to_string()) })
+    }
+
     fn logout(
         &self,
         server: &str,

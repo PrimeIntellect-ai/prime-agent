@@ -89,7 +89,7 @@ impl Worker {
                 response_success(None, "abort_compaction", None)
             }
             "set_auto_compaction" => self.handle_set_auto_compaction(payload),
-            "wait_for_idle" => self.handle_wait_for_idle().await,
+            "wait_for_idle" => self.handle_wait_for_idle(payload).await,
             "wait_for_headless_completion" => {
                 self.handle_wait_for_headless_completion(payload).await
             }
@@ -121,6 +121,7 @@ impl Worker {
             "shutdown" => self.handle_shutdown().await,
             "rename" => self.handle_rename("rename", payload),
             "set_session_name" => self.handle_rename("set_session_name", payload),
+            "mark_anthropic_warning_shown" => self.handle_mark_anthropic_warning_shown(),
             "rename_saved_session" => self.handle_rename_saved_session(payload),
             "delete_saved_session" => self.handle_delete_saved_session(payload).await,
             "replace_acp_mcp_servers" => self.handle_replace_acp_mcp_servers(payload),
@@ -744,7 +745,40 @@ impl Worker {
             .as_mut()
             .and_then(|store| store.lease.take());
         drop(lease);
+        // The session runtime ended (TS `prime-agent stop <agent>`): the
+        // pane reporter releases its pane as the last write on the wire —
+        // no report may reclaim it afterwards. The slot is taken out
+        // first (swapped to the disabled no-op) so a later attach can
+        // adopt the pane again; the taken handle's release is the
+        // release of the session this kill stopped.
+        let reporter = std::mem::take(&mut *self.herdr.lock().unwrap());
+        reporter.release().await;
         response_success(None, "kill", None)
+    }
+
+    /// `mark_anthropic_warning_shown` (Rust-native, operator directive
+    /// 2026-09-29): the interactive client reports that it just drew the
+    /// Anthropic subscription ban-risk warning; the worker persists the
+    /// once-per-session-lifecycle marker row (the gate a reattach, a resume,
+    /// or a worker replacement reads). Idempotent — a session already marked
+    /// (or an in-memory session with no file) answers success without a
+    /// second row.
+    fn handle_mark_anthropic_warning_shown(&self) -> DaemonResponse {
+        const NAME: &str = "mark_anthropic_warning_shown";
+        if let Err(response) = self.require_created(NAME) {
+            return response;
+        }
+        let mut core = self.core.lock().unwrap();
+        let Some(store) = core.store.as_mut() else {
+            return response_failure(None, NAME, "Session is still initializing", None);
+        };
+        if store.anthropic_warning_shown() {
+            return response_success(None, NAME, None);
+        }
+        match store.mark_anthropic_warning_shown() {
+            Ok(()) => response_success(None, NAME, None),
+            Err(error) => response_failure(None, NAME, &error.to_string(), None),
+        }
     }
 
     pub(crate) fn handle_rename(&self, command: &str, payload: &Value) -> DaemonResponse {

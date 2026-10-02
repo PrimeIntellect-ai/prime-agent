@@ -201,10 +201,9 @@ impl Client {
             .set_read_timeout(Some(Duration::from_millis(100)))
             .expect("set timeout");
         loop {
-            line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => {}
+                Ok(_) if line.trim().is_empty() => line.clear(),
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse line"),
                 Err(error) => {
                     assert!(Instant::now() < deadline, "timed out reading: {error}");
