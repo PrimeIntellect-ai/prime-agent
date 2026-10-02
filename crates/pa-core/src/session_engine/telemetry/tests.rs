@@ -1413,3 +1413,66 @@ async fn a_run_active_when_telemetry_turns_off_is_severed_not_merged() {
         "the off-period tool end never counts"
     );
 }
+
+/// A run whose stream crosses the opt-out never completes: the first
+/// off-period event that belongs to it severs it, so the pre-off run
+/// cannot record, complete, or merge after a re-enable. Regression for
+/// the crossing-stream finding: the off-period `MessageUpdate` (not the
+/// boundary events) is what cuts the run.
+#[tokio::test]
+async fn a_run_crossing_an_off_period_stream_never_completes() {
+    let on = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let switch: Arc<dyn Fn() -> bool + Send + Sync> = {
+        let on = Arc::clone(&on);
+        Arc::new(move || on.load(std::sync::atomic::Ordering::Relaxed))
+    };
+    let fixture = fixture_with_switch(switch);
+    let assistant = assistant_message();
+
+    // The run starts while on and records a turn.
+    fixture.clock.set(1_000);
+    emit(&fixture, AgentEvent::AgentStart);
+    fixture.clock.set(1_050);
+    emit(&fixture, AgentEvent::TurnStart);
+    fixture.clock.set(1_100);
+    emit(&fixture, message_end_event(assistant.clone()));
+
+    // Telemetry goes off mid-run: the next stream delta belongs to the
+    // off period and severs the run.
+    on.store(false, std::sync::atomic::Ordering::Relaxed);
+    fixture.clock.set(1_200);
+    emit(&fixture, text_delta_event(&assistant));
+
+    // Back on before the run's end: the post-on events find no run -
+    // the pre-off run never completes, and its window never reports.
+    on.store(true, std::sync::atomic::Ordering::Relaxed);
+    fixture.clock.set(1_250);
+    emit(&fixture, AgentEvent::TurnStart);
+    fixture.clock.set(1_300);
+    emit(&fixture, message_end_event(assistant.clone()));
+    fixture.clock.set(1_350);
+    emit(
+        &fixture,
+        AgentEvent::AgentEnd {
+            messages: Vec::new(),
+        },
+    );
+
+    fixture.clock.set(1_400);
+    let telemetry = SessionTelemetry::detached(
+        fixture.client.clone(),
+        fixture.state.clone(),
+        "interactive".to_string(),
+    );
+    telemetry.end().await.unwrap();
+
+    let runs = event_properties(&fixture.mock, "agent run completed").await;
+    assert!(
+        runs.is_empty(),
+        "a run that crossed the opt-out never reports"
+    );
+    let ended = &event_properties(&fixture.mock, "agent session ended").await[0];
+    assert_eq!(ended["run_count"], serde_json::json!(0));
+    assert_eq!(ended["model_call_count"], serde_json::json!(0));
+    assert_eq!(ended["input_tokens"], serde_json::json!(0));
+}

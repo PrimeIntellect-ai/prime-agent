@@ -152,6 +152,16 @@ fn recording_on(state: &TelemetryState) -> bool {
         .is_none_or(|telemetry_enabled| telemetry_enabled())
 }
 
+/// While telemetry is off, the active run (if any) is severed: dropped
+/// without emitting, together with its in-flight tables. Every off-period
+/// event that belongs to a run cuts it, so a run that spans an opt-out
+/// can never complete after a re-enable — neither its facts nor the off
+/// window's timing ride a later event.
+fn sever_off_period_run(state: &mut TelemetryState) {
+    state.active_run = None;
+    state.tool_starts.clear();
+}
+
 #[derive(Default)]
 struct SessionTotals {
     run_count: u64,
@@ -491,6 +501,7 @@ impl SessionTelemetry {
     pub fn note_compaction(&self, duration_ms: Option<u64>) {
         let mut state = self.state.lock().expect("telemetry state poisoned");
         if !recording_on(&state) {
+            sever_off_period_run(&mut state);
             return;
         }
         if let Some(run) = state.active_run.as_mut() {
@@ -513,19 +524,15 @@ impl SessionTelemetry {
     /// Panics if the telemetry state mutex is poisoned.
     pub fn note_auto_retry_event(&self, event: &AutoRetryEvent) {
         let mut state = self.state.lock().expect("telemetry state poisoned");
-        let recording = recording_on(&state);
+        if !recording_on(&state) {
+            // While off nothing counts, and the run severs: an off-period
+            // retry never continues an on-period run across the opt-out.
+            sever_off_period_run(&mut state);
+            return;
+        }
         let Some(run) = state.active_run.as_mut() else {
             return;
         };
-        if !recording {
-            // While off nothing counts, and the retry linkage severs:
-            // a pending retry never continues an on-period run across
-            // an off period (only the `End` bookkeeping applies).
-            if matches!(event, AutoRetryEvent::End { .. }) {
-                run.retry_pending = false;
-            }
-            return;
-        }
         match event {
             AutoRetryEvent::Start {
                 delay_ms, reason, ..
@@ -688,13 +695,7 @@ fn handle_event(
     match event {
         AgentEvent::AgentStart => {
             if !recording_on(&state) {
-                // While off no run lives: drop the pending one without
-                // emitting (nothing it recorded past the off point
-                // counts) and keep the in-flight tables clean, so a
-                // later enable never merges the next run into an
-                // off-period one.
-                state.active_run = None;
-                state.tool_starts.clear();
+                sever_off_period_run(&mut state);
                 return;
             }
             // A retried attempt continues its turn's run (TS keeps one run
@@ -756,6 +757,7 @@ fn handle_event(
         }
         AgentEvent::MessageStart { message } => {
             if !recording_on(&state) {
+                sever_off_period_run(&mut state);
                 return;
             }
             if message.role() == "user" {
@@ -767,6 +769,7 @@ fn handle_event(
         }
         AgentEvent::TurnStart => {
             if !recording_on(&state) {
+                sever_off_period_run(&mut state);
                 return;
             }
             if let Some(run) = state.active_run.as_mut() {
@@ -781,7 +784,8 @@ fn handle_event(
             assistant_message_event,
             ..
         } => {
-            if state.active_run.is_some() && !recording_on(&state) {
+            if !recording_on(&state) {
+                sever_off_period_run(&mut state);
                 return;
             }
             if state.active_run.is_some() {
@@ -840,6 +844,7 @@ fn handle_event(
         }
         AgentEvent::MessageEnd { message } => {
             if !recording_on(&state) {
+                sever_off_period_run(&mut state);
                 return;
             }
             if let pa_agent::types::AgentMessage::Standard(pa_agent::types::Message::Assistant(
@@ -884,6 +889,7 @@ fn handle_event(
         }
         AgentEvent::ToolExecutionStart { tool_call_id, .. } => {
             if !recording_on(&state) {
+                sever_off_period_run(&mut state);
                 return;
             }
             state.tool_starts.insert(tool_call_id, now);
@@ -897,8 +903,9 @@ fn handle_event(
             let started_at = state.tool_starts.remove(&tool_call_id);
             if !recording_on(&state) {
                 // The in-flight entry pops either way (a start recorded
-                // while on never leaks into a later on-period end), but
-                // nothing counts.
+                // while on never leaks into a later on-period end), and
+                // the run severs: nothing counts.
+                sever_off_period_run(&mut state);
                 return;
             }
             let duration_ms = started_at.map_or(0, |start| now.saturating_sub(start));
@@ -918,12 +925,7 @@ fn handle_event(
         }
         AgentEvent::AgentEnd { .. } => {
             if !recording_on(&state) {
-                // The off period severs the run: discard it silently.
-                // Its completed event never fires, so a later enable
-                // cannot send its facts, and the next on-period run
-                // starts clean instead of absorbing this one.
-                state.active_run = None;
-                state.tool_starts.clear();
+                sever_off_period_run(&mut state);
                 return;
             }
             if let Some(run) = state.active_run.as_mut() {
