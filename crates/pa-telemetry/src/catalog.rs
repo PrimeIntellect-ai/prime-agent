@@ -8,7 +8,10 @@
 //! `agent installation stage`, each a catalog entry with typed property
 //! rules, plus enrichment on the legacy session events. The v1 adoption
 //! events stay catalogued (schema rules: additive changes do not bump the
-//! schema version; the new-event vocabulary does).
+//! schema version; the new-event vocabulary does). Schema version 3 adds
+//! the kernel telemetry bridge's skill-event vocabulary
+//! (`computer_use_session_started`, `computer_use_action`) under that
+//! same rule.
 //!
 //! [`sanitize`] is the platform adjust layer: before a batch reaches any
 //! sink, every catalogued event's properties are normalized against its
@@ -22,10 +25,12 @@ use serde_json::Value;
 
 use crate::properties::Properties;
 
-/// The current schema version stamped on every event. Bumped to 2 when the
-/// #2117 tracking vocabulary landed; additive property changes do not bump
-/// it.
-pub const SCHEMA_VERSION: u64 = 2;
+/// The current schema version stamped on every event. Bumped to 2 when
+/// the #2117 tracking vocabulary landed and to 3 when the kernel
+/// telemetry bridge's skill-event vocabulary (`computer_use_*`) landed —
+/// new-event vocabulary bumps the version (the #2117 precedent);
+/// additive property changes alone do not.
+pub const SCHEMA_VERSION: u64 = 3;
 
 /// The property-rule revision of the error-message policy (the reviewed
 /// fixed-string set). #2117 `error_message_policy_revision`.
@@ -64,8 +69,9 @@ pub enum PropKind {
     Uuid,
     /// A version string (capped at 64 bytes).
     Version,
-    /// A free string capped at `max` bytes.
-    BoundedString { max: usize },
+    /// A free string capped at `max` bytes; null stays null when
+    /// `nullable`.
+    BoundedString { max: usize, nullable: bool },
     /// The documented nested primitive-map exception (`phase_timings`).
     PrimitiveMap,
 }
@@ -141,8 +147,9 @@ impl PropKind {
                 Value::String(text) => Some(Value::String(cap_string(&text, 64))),
                 _ => None,
             },
-            PropKind::BoundedString { max } => match value {
+            PropKind::BoundedString { max, nullable } => match value {
                 Value::String(text) => Some(Value::String(cap_string(&text, *max))),
+                Value::Null if *nullable => Some(Value::Null),
                 _ => None,
             },
             PropKind::PrimitiveMap => match value {
@@ -795,7 +802,10 @@ const fn nullable_boolean() -> PropKind {
 }
 
 const fn error_message() -> PropKind {
-    PropKind::BoundedString { max: 4096 }
+    PropKind::BoundedString {
+        max: 4096,
+        nullable: false,
+    }
 }
 
 const fn cost() -> PropKind {
@@ -806,13 +816,17 @@ const fn cost() -> PropKind {
 }
 
 const fn free_string(max: usize) -> PropKind {
-    PropKind::BoundedString { max }
+    PropKind::BoundedString {
+        max,
+        nullable: false,
+    }
 }
 
 // ---------------------------------------------------------------------------
-// The catalog (schema v2): the #2117 events plus the v1 adoption events.
-// Every event the product emits has exactly one row here; the seams are the
-// complete emission set (privacy contract).
+// The catalog (schema v3): the #2117 events, the v1 adoption events, and
+// the kernel `telemetry.emit` bridge's skill events. Every event the
+// product emits has exactly one row here; the seams are the complete
+// emission set (privacy contract).
 // ---------------------------------------------------------------------------
 
 /// `agent started` (v1, enriched in v2): session creation, depth-0 only.
@@ -1361,6 +1375,78 @@ const SESSION_ARCHIVED: EventRule = EventRule {
     ],
 };
 
+/// `computer_use_session_started` (v3): the computer-use skill's first
+/// observation per kernel process, emitted through the
+/// `telemetry.emit` kernel bridge. Platform only — never app names,
+/// window titles, or screen content (the typed property rules enforce
+/// it).
+const COMPUTER_USE_SESSION_STARTED: EventRule = EventRule {
+    name: "computer_use_session_started",
+    since: 3,
+    properties: &[(
+        "platform",
+        required(enum_rule(&["mac", "linux", "unknown"], "unknown")),
+    )],
+};
+
+/// `computer_use_action` (v3): one computer-use skill action per call,
+/// emitted through the `telemetry.emit` kernel bridge. Category,
+/// outcome, frozen error code, and duration only — never element text,
+/// app payload, or screen content. `error_code` is the frozen
+/// `ComputerUseError` code vocabulary (null when the outcome is `ok`);
+/// an out-of-vocabulary code falls back to `unknown`, so no free string
+/// rides the event.
+const COMPUTER_USE_ACTION: EventRule = EventRule {
+    name: "computer_use_action",
+    since: 3,
+    properties: &[
+        (
+            "action",
+            required(enum_rule(
+                &[
+                    "click",
+                    "drag",
+                    "scroll",
+                    "press_key",
+                    "type_text",
+                    "set_value",
+                    "select_text",
+                    "secondary",
+                    "paste",
+                    "get_state",
+                    "get_app",
+                    "activate",
+                    "unknown",
+                ],
+                "unknown",
+            )),
+        ),
+        ("outcome", required(enum_rule(&["ok", "error"], "error"))),
+        (
+            "error_code",
+            optional(nullable_enum_rule(
+                &[
+                    "APP_NOT_ALLOWED",
+                    "PERMISSIONS_NOT_GRANTED",
+                    "PERMISSIONS_PENDING",
+                    "SCREEN_LOCKED",
+                    "USER_STOPPED",
+                    "ELEMENT_STALE",
+                    "AMBIGUOUS_APP",
+                    "APP_NOT_RUNNING",
+                    "APP_LAUNCH_FAILED",
+                    "ACTION_UNSUPPORTED",
+                    "INJECTION_FAILED",
+                    "TRANSPORT_ERROR",
+                    "INVALID_ARGUMENT",
+                ],
+                "unknown",
+            )),
+        ),
+        ("duration_ms", required(duration())),
+    ],
+};
+
 /// The `tui *` adoption events (v1).
 const TUI_EVENTS: &[EventRule] = &[
     EventRule {
@@ -1702,6 +1788,8 @@ pub fn catalog() -> Vec<&'static EventRule> {
         &TOOL_EXECUTED,
         &KERNEL_BOOTSTRAP,
         &SESSION_ARCHIVED,
+        &COMPUTER_USE_SESSION_STARTED,
+        &COMPUTER_USE_ACTION,
     ];
     all.extend(TUI_EVENTS.iter());
     all.extend(UPDATE_EVENTS.iter());
@@ -1807,10 +1895,12 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn schema_version_bumped_for_the_2117_vocabulary() {
-        // The #2117 event vocabulary landed at schema version 2; the v1
-        // adoption events stay catalogued at their entry version.
-        assert_eq!(SCHEMA_VERSION, 2);
+    fn schema_version_bumps_per_new_event_vocabulary() {
+        // New-event vocabulary bumps the schema version: the #2117
+        // vocabulary landed at v2, the kernel telemetry bridge's skill
+        // events at v3. The v1 adoption events stay catalogued at their
+        // entry version.
+        assert_eq!(SCHEMA_VERSION, 3);
         let catalog = catalog();
         for name in [
             "agent run started",
@@ -1828,6 +1918,13 @@ mod tests {
                 .find(|rule| rule.name == name)
                 .unwrap_or_else(|| panic!("{name} must be catalogued"));
             assert_eq!(rule.since, 2, "{name} entered the catalog at v2");
+        }
+        for name in ["computer_use_session_started", "computer_use_action"] {
+            let rule = catalog
+                .iter()
+                .find(|rule| rule.name == name)
+                .unwrap_or_else(|| panic!("{name} must be catalogued"));
+            assert_eq!(rule.since, 3, "{name} entered the catalog at v3");
         }
         for name in [
             "agent started",
@@ -1979,6 +2076,67 @@ mod tests {
         assert_eq!(cap_string("abcdef", 3), "abc");
         let capped = cap_string("private tool text", 7);
         assert_eq!(capped, "private");
+    }
+
+    #[test]
+    fn sanitize_normalizes_computer_use_session_started() {
+        let mut properties = Properties::new();
+        properties.set("platform", json!("windows")); // out of vocabulary
+        properties.set("app_name", json!("private app")); // not a catalogued property
+        let adjusted = sanitize("computer_use_session_started", &mut properties);
+        assert_eq!(properties.get("platform"), Some(&json!("unknown")));
+        assert!(properties.get("app_name").is_none(), "unknown key dropped");
+        assert_eq!(adjusted, 2, "one fallback + one dropped key");
+    }
+
+    #[test]
+    fn sanitize_normalizes_computer_use_action() {
+        // The ok shape: a null error code stays null (nullable rule).
+        let mut properties = Properties::new();
+        properties.set("action", json!("click"));
+        properties.set("outcome", json!("ok"));
+        properties.set("error_code", Value::Null); // null when outcome=ok
+        properties.set("duration_ms", json!(45u64));
+        assert_eq!(sanitize("computer_use_action", &mut properties), 0);
+        assert_eq!(properties.get("error_code"), Some(&Value::Null));
+        // The error shape: a frozen code passes unchanged.
+        let mut properties = Properties::new();
+        properties.set("action", json!("type_text"));
+        properties.set("outcome", json!("error"));
+        properties.set("error_code", json!("ELEMENT_STALE"));
+        properties.set("duration_ms", json!(7u64));
+        assert_eq!(sanitize("computer_use_action", &mut properties), 0);
+        assert_eq!(properties.get("error_code"), Some(&json!("ELEMENT_STALE")));
+        // Out-of-vocabulary action, outcome, and error code fall back;
+        // duration clamps to the shared duration cap. No free string
+        // rides the event: every property is a fixed vocabulary or a
+        // clamped number.
+        // The activate action round-trips (App.activate telemetry).
+        let mut properties = Properties::new();
+        properties.set("action", json!("activate"));
+        properties.set("outcome", json!("ok"));
+        properties.set("error_code", Value::Null);
+        properties.set("duration_ms", json!(12u64));
+        assert_eq!(sanitize("computer_use_action", &mut properties), 0);
+        assert_eq!(properties.get("action"), Some(&json!("activate")));
+        // Out-of-vocabulary action, outcome, and error code fall back;
+        // duration clamps to the shared duration cap. No free string
+        // rides the event: every property is a fixed vocabulary or a
+        // clamped number.
+        let mut properties = Properties::new();
+        properties.set("action", json!("launch_app"));
+        properties.set("outcome", json!("cancelled"));
+        properties.set("error_code", json!("EXFIL_ATTEMPT"));
+        properties.set("duration_ms", json!(u64::MAX));
+        let adjusted = sanitize("computer_use_action", &mut properties);
+        assert_eq!(properties.get("action"), Some(&json!("unknown")));
+        assert_eq!(properties.get("outcome"), Some(&json!("error")));
+        assert_eq!(properties.get("error_code"), Some(&json!("unknown")));
+        assert_eq!(
+            properties.get("duration_ms"),
+            Some(&json!(31_536_000_000u64))
+        );
+        assert_eq!(adjusted, 4, "three fallbacks + one clamp");
     }
 
     #[test]

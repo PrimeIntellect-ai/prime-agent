@@ -21,10 +21,16 @@ impl Properties {
     }
 
     /// Insert a property. Non-primitive values are rejected (warn + skip) so
-    /// no structured payload can ever reach a sink.
+    /// no structured payload can ever reach a sink. The warning carries the
+    /// key and the value's kind only — a structured value can hold prompt,
+    /// tool, or screen content, so the raw value never rides a log line.
     pub fn set(&mut self, key: &str, value: Value) {
         if !is_primitive(&value) {
-            tracing::warn!(key, value = %value, "rejected non-primitive telemetry property");
+            tracing::warn!(
+                key,
+                kind = value_kind(&value),
+                "rejected non-primitive telemetry property"
+            );
             return;
         }
         self.0.insert(key.to_string(), value);
@@ -85,6 +91,17 @@ impl From<Properties> for Map<String, Value> {
     }
 }
 
+/// The kind label of a rejected non-primitive value. The label is the
+/// only value-derived fact rejection logging may carry — never the value
+/// itself (privacy contract).
+pub(crate) fn value_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => "primitive",
+    }
+}
+
 /// True for JSON primitives only.
 pub(crate) fn is_primitive(value: &Value) -> bool {
     matches!(
@@ -120,6 +137,23 @@ mod tests {
         }
         assert_eq!(p.get("bad"), None);
         assert!(p.is_empty());
+    }
+
+    #[test]
+    fn rejection_labels_carry_no_value() {
+        // A structured value holding private content: the rejection label
+        // describes the shape only, so the raw value can never reach a
+        // log line (the kind is a fixed literal, not value-derived text).
+        let mut secret = Map::new();
+        secret.insert(
+            "ax".to_string(),
+            Value::String("private screen text".to_string()),
+        );
+        for value in [Value::Object(secret), Value::Array(vec![Value::from(1)])] {
+            let label = value_kind(&value);
+            assert!(matches!(label, "object" | "array"));
+            assert!(!label.contains("private"), "no raw value in {label}");
+        }
     }
 
     #[test]

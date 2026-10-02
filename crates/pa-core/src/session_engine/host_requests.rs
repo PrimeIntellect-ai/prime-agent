@@ -1,7 +1,9 @@
 //! Kernel host-request handlers for the bundled goal and rlm-heartbeat
-//! skills: the `snake_case` bridge the Python REPL skills call. Port of
-//! handleGoalHostRequest / handleRlmHeartbeatHostRequest in agent-session.ts
-//! plus rlmHeartbeatHostResponse.
+//! skills and the generic `telemetry.emit` skill bridge: the `snake_case`
+//! bridge the Python REPL skills call. Port of handleGoalHostRequest /
+//! handleRlmHeartbeatHostRequest in agent-session.ts plus
+//! rlmHeartbeatHostResponse; `telemetry.emit` is Rust-native (no TS
+//! counterpart).
 
 use std::future::Future;
 use std::pin::Pin;
@@ -14,6 +16,7 @@ use crate::cron::store::{
 use crate::cron::{AgentCronJob, DeliveryMode, JobStatus};
 use crate::goals::{goal_host_response, GoalHostResponse, GoalState, GoalStatus};
 use crate::session::manager::SessionManager;
+use pa_telemetry::{base_properties, lookup, TelemetryClient};
 
 use super::goal_driver::GoalDriver;
 
@@ -336,6 +339,78 @@ pub fn handle_rlm_heartbeat_host_request(
     }
 }
 
+// ---------------------------------------------------------------------------
+// telemetry.emit
+// ---------------------------------------------------------------------------
+
+/// The only event names the `telemetry.emit` bridge may carry. A
+/// catalogued name alone is not authorization: catalogued events with
+/// free-text properties (e.g. `agent error`'s 4096-byte
+/// `error_message`) would turn the bridge into an exfiltration channel
+/// for any kernel-resident code, so the bridge serves the skill-side
+/// adoption vocabulary only and everything else stays host-internal.
+const KERNEL_BRIDGE_EVENTS: &[&str] = &["computer_use_session_started", "computer_use_action"];
+
+/// Handle a `telemetry.emit` host request from a Python-backed skill: the
+/// best-effort bridge onto the session's telemetry client, restricted to
+/// [`KERNEL_BRIDGE_EVENTS`]. A request tracks only when the name is
+/// bridge-allowlisted and catalogued, every property key is one of that
+/// event's catalogued properties (a caller-supplied base-property key or
+/// an unknown key refuses the whole request — the caller must not
+/// override the host's platform facts), every value is a JSON primitive,
+/// and every required property is present; anything else answers
+/// `{"emitted": false}` without tracking anything. The catalog's typed
+/// rules still normalize what survives (enum fallbacks, number caps) —
+/// and neither bridge event carries a free string, so no content-bearing
+/// value can ride. Telemetry never breaks the caller: a refused request
+/// is a value, never an error.
+pub fn handle_telemetry_emit_host_request(
+    payload: &Value,
+    client: &TelemetryClient,
+    execution_mode: &str,
+) -> Value {
+    let Some(name) = payload.get("name").and_then(Value::as_str) else {
+        return json!({ "emitted": false });
+    };
+    if !KERNEL_BRIDGE_EVENTS.contains(&name) {
+        return json!({ "emitted": false });
+    }
+    let Some(rule) = lookup(name) else {
+        return json!({ "emitted": false });
+    };
+    let properties = match payload.get("properties") {
+        // An absent (or null) properties object validates as an empty
+        // one; any other non-object value is malformed.
+        None | Some(Value::Null) => None,
+        Some(Value::Object(map)) => Some(map),
+        Some(_) => return json!({ "emitted": false }),
+    };
+    let empty = serde_json::Map::new();
+    let properties = properties.unwrap_or(&empty);
+    for (key, value) in properties {
+        if !rule.properties.iter().any(|(known, _)| known == key) {
+            return json!({ "emitted": false });
+        }
+        if !matches!(
+            value,
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_)
+        ) {
+            return json!({ "emitted": false });
+        }
+    }
+    for (key, property_rule) in rule.properties {
+        if property_rule.required && !properties.contains_key(*key) {
+            return json!({ "emitted": false });
+        }
+    }
+    let mut tracked = base_properties(execution_mode);
+    for (key, value) in properties {
+        tracked.set(key, value.clone());
+    }
+    client.track(name, tracked);
+    json!({ "emitted": true })
+}
+
 /// The session identity fields heartbeat creation needs.
 pub struct SessionBinding {
     pub session_id: String,
@@ -355,6 +430,7 @@ mod tests {
     use super::*;
     use crate::cron::store::AgentCronJobStore;
     use crate::session::manager::SessionManager;
+    use pa_telemetry::{MockSink, TelemetryClientConfig, TelemetrySink};
 
     fn persisted_session() -> SessionManager {
         let dir = tempfile::TempDir::new().unwrap();
@@ -553,5 +629,225 @@ mod tests {
         assert!(error
             .to_string()
             .contains("unknown RLM heartbeat request type"));
+    }
+
+    fn telemetry_client(mock: &std::sync::Arc<MockSink>) -> TelemetryClient {
+        let mut config = TelemetryClientConfig::new("install-1");
+        // Flush per event so assertions see every tracked event without
+        // an explicit flush round-trip.
+        config.batch_size = 1;
+        config.flush_interval = std::time::Duration::from_mins(10);
+        config.sinks = vec![mock.clone() as std::sync::Arc<dyn TelemetrySink>];
+        TelemetryClient::spawn(config).expect("spawn client")
+    }
+
+    /// A catalogued event rides the client with its properties and the
+    /// platform base under them.
+    #[tokio::test]
+    async fn telemetry_emit_tracks_catalogued_events() {
+        let mock = std::sync::Arc::new(MockSink::new());
+        let client = telemetry_client(&mock);
+        let response = handle_telemetry_emit_host_request(
+            &json!({
+                "type": "telemetry.emit",
+                "name": "computer_use_action",
+                "properties": {
+                    "action": "click",
+                    "outcome": "error",
+                    "error_code": "APP_NOT_ALLOWED",
+                    "duration_ms": 120
+                }
+            }),
+            &client,
+            "interactive",
+        );
+        assert_eq!(response, json!({ "emitted": true }));
+        client.flush().await.unwrap();
+        let events = mock.events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].name, "computer_use_action");
+        assert_eq!(events[0].properties.get("action"), Some(&json!("click")));
+        assert_eq!(events[0].properties.get("outcome"), Some(&json!("error")));
+        assert_eq!(
+            events[0].properties.get("error_code"),
+            Some(&json!("APP_NOT_ALLOWED"))
+        );
+        assert_eq!(
+            events[0].properties.get("duration_ms"),
+            Some(&json!(120u64))
+        );
+        assert_eq!(
+            events[0].properties.get("execution_mode"),
+            Some(&json!("interactive"))
+        );
+    }
+
+    /// An uncatalogued name drops silently: no event, `emitted: false`.
+    #[tokio::test]
+    async fn telemetry_emit_drops_uncatalogued_names() {
+        let mock = std::sync::Arc::new(MockSink::new());
+        let client = telemetry_client(&mock);
+        for name in ["not an event", "computer use action", ""] {
+            let response = handle_telemetry_emit_host_request(
+                &json!({ "name": name, "properties": { "action": "click" } }),
+                &client,
+                "interactive",
+            );
+            assert_eq!(response, json!({ "emitted": false }), "name {name}");
+        }
+        client.flush().await.unwrap();
+        assert!(mock.events().is_empty());
+    }
+
+    /// A catalogued name outside the bridge's event vocabulary refuses the
+    /// request — `agent error` (a 4096-byte free-string `error_message`)
+    /// must not become an exfiltration channel for kernel-resident code.
+    #[tokio::test]
+    async fn telemetry_emit_refuses_events_outside_the_bridge_allowlist() {
+        let mock = std::sync::Arc::new(MockSink::new());
+        let client = telemetry_client(&mock);
+        for name in ["agent error", "tool executed"] {
+            let response = handle_telemetry_emit_host_request(
+                &json!({
+                    "name": name,
+                    "properties": {
+                        "error_message": "private screen text streamed to the sink"
+                    }
+                }),
+                &client,
+                "interactive",
+            );
+            assert_eq!(response, json!({ "emitted": false }), "name {name}");
+        }
+        client.flush().await.unwrap();
+        assert!(mock.events().is_empty(), "nothing tracked");
+    }
+
+    /// Caller-supplied keys outside the event's catalogued property set
+    /// refuse the whole request: base-property keys (the host's platform
+    /// facts are not caller-overridable) and unknown keys never reach a
+    /// sink.
+    #[tokio::test]
+    async fn telemetry_emit_refuses_base_property_and_unknown_keys() {
+        let mock = std::sync::Arc::new(MockSink::new());
+        let client = telemetry_client(&mock);
+        for key in ["execution_mode", "os_release", "screen_text"] {
+            let mut properties = json!({
+                "action": "click",
+                "outcome": "ok",
+                "duration_ms": 5
+            });
+            properties[key] = json!("spoofed value");
+            let response = handle_telemetry_emit_host_request(
+                &json!({ "name": "computer_use_action", "properties": properties }),
+                &client,
+                "interactive",
+            );
+            assert_eq!(response, json!({ "emitted": false }), "key {key}");
+        }
+        client.flush().await.unwrap();
+        assert!(mock.events().is_empty(), "nothing tracked");
+    }
+
+    /// A structured property value or a missing required property refuses
+    /// the whole request — nothing partial ever tracks.
+    #[tokio::test]
+    async fn telemetry_emit_refuses_structured_values_and_missing_required() {
+        let mock = std::sync::Arc::new(MockSink::new());
+        let client = telemetry_client(&mock);
+        let structured = json!({
+            "name": "computer_use_action",
+            "properties": {
+                "action": { "ax": "private screen text" },
+                "outcome": "ok",
+                "duration_ms": 5
+            }
+        });
+        let response = handle_telemetry_emit_host_request(&structured, &client, "interactive");
+        assert_eq!(response, json!({ "emitted": false }));
+        let missing_required = json!({
+            "name": "computer_use_action",
+            "properties": { "action": "click", "outcome": "ok" }
+        });
+        let response =
+            handle_telemetry_emit_host_request(&missing_required, &client, "interactive");
+        assert_eq!(response, json!({ "emitted": false }));
+        client.flush().await.unwrap();
+        assert!(mock.events().is_empty(), "nothing tracked");
+    }
+
+    /// The real Python payload shapes ride the bridge: the ok shape keeps
+    /// a null error code, and an out-of-vocabulary error code falls back
+    /// to the fixed `unknown` literal at the catalog's typed boundary —
+    /// a free string never rides the event.
+    #[tokio::test]
+    async fn telemetry_emit_falls_back_on_out_of_vocabulary_error_codes() {
+        let mock = std::sync::Arc::new(MockSink::new());
+        let client = telemetry_client(&mock);
+        let ok_shape = json!({
+            "name": "computer_use_action",
+            "properties": {
+                "action": "click",
+                "outcome": "ok",
+                "error_code": null,
+                "duration_ms": 12
+            }
+        });
+        let response = handle_telemetry_emit_host_request(&ok_shape, &client, "interactive");
+        assert_eq!(response, json!({ "emitted": true }));
+        let error_shape = json!({
+            "name": "computer_use_action",
+            "properties": {
+                "action": "type_text",
+                "outcome": "error",
+                "error_code": "EXFIL_ATTEMPT",
+                "duration_ms": 12
+            }
+        });
+        let response = handle_telemetry_emit_host_request(&error_shape, &client, "interactive");
+        assert_eq!(response, json!({ "emitted": true }));
+        client.flush().await.unwrap();
+        let events = mock.events();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].properties.get("outcome"), Some(&json!("ok")));
+        assert_eq!(events[0].properties.get("error_code"), Some(&json!(null)));
+        assert_eq!(events[1].properties.get("outcome"), Some(&json!("error")));
+        assert_eq!(
+            events[1].properties.get("error_code"),
+            Some(&json!("unknown")),
+            "out-of-vocabulary code fell back to the fixed literal"
+        );
+    }
+
+    /// The bridge never errors: malformed payloads answer `emitted: false` —
+    /// including an absent (or null) properties object, which validates as
+    /// empty and therefore misses every required property.
+    #[tokio::test]
+    async fn telemetry_emit_never_errors_on_malformed_payloads() {
+        let mock = std::sync::Arc::new(MockSink::new());
+        let client = telemetry_client(&mock);
+        let malformed = [
+            json!({}),                                                      // no name
+            json!({ "name": 7 }),                                           // name not a string
+            json!({ "name": "computer_use_action", "properties": "nope" }), // not an object
+            json!(["not", "an", "object"]),                                 // payload not an object
+        ];
+        for payload in &malformed {
+            let response = handle_telemetry_emit_host_request(payload, &client, "interactive");
+            assert_eq!(response, json!({ "emitted": false }));
+        }
+        // An absent or null properties object validates as an empty one,
+        // and an empty property set is missing every required property:
+        // the request refuses, still without erroring.
+        for properties in [None, Some(Value::Null)] {
+            let mut payload = json!({ "name": "computer_use_session_started" });
+            if let Some(properties) = properties {
+                payload["properties"] = properties;
+            }
+            let response = handle_telemetry_emit_host_request(&payload, &client, "interactive");
+            assert_eq!(response, json!({ "emitted": false }));
+        }
+        client.flush().await.unwrap();
+        assert!(mock.events().is_empty(), "nothing tracked");
     }
 }

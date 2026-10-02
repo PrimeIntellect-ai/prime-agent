@@ -32,8 +32,11 @@ use pa_telemetry::{
 };
 use serde_json::Value;
 
+use crate::kernel::shared::{host_handler, HostRequestHandlers};
+
 use super::auto_retry::AutoRetryEvent;
 use super::error_classify::classify_error_message;
+use super::host_requests::handle_telemetry_emit_host_request;
 
 // The one-shot daemon/worker event trackers (the `daemon event` and
 // `model refused` one-shot surfaces the supervisor notes/adoption/sessions
@@ -80,6 +83,37 @@ pub struct TelemetryWiring {
     /// Injectable clock (millis since epoch); defaults to system time.
     /// Tests pass a controlled clock to assert duration math.
     pub now: Option<Arc<dyn Fn() -> u64 + Send + Sync>>,
+}
+
+impl TelemetryWiring {
+    /// Register the kernel `telemetry.emit` host request onto the handler
+    /// map: the generic, best-effort bridge Python-backed skills call to
+    /// emit catalogued events through this wiring's client. Skills on
+    /// telemetry-opt-out hosts never see it registered — their
+    /// `host_request` fails and the skill-side bridge no-ops. The handler
+    /// never errors: malformed payloads and uncatalogued names answer
+    /// `{"emitted": false}`.
+    pub fn register_kernel_bridge(&self, handlers: &mut HostRequestHandlers) {
+        let client = self.client.clone();
+        let execution_mode = self
+            .execution_mode
+            .clone()
+            .unwrap_or_else(|| EXECUTION_MODE_UNKNOWN.to_string());
+        handlers.register(
+            "telemetry.emit",
+            host_handler(move |payload| {
+                let client = client.clone();
+                let execution_mode = execution_mode.clone();
+                Box::pin(async move {
+                    Ok(handle_telemetry_emit_host_request(
+                        &payload.data,
+                        &client,
+                        &execution_mode,
+                    ))
+                })
+            }),
+        );
+    }
 }
 
 /// Installed session telemetry: the event subscription plus the in-memory

@@ -157,9 +157,21 @@ fn cached_prefix_is_stable_across_sessions() {
 // ---------------------------------------------------------------------
 
 /// Host-request types that are host-internal plumbing, not model-facing
-/// programmatic tools (the prompt must not document them).
-const INTERNAL_HOST_REQUESTS: &[&str] =
-    &["model.info", "mcp.config", "mcp.refresh", "mcp.begin_login"];
+/// programmatic tools (the prompt must not document them). The mcp
+/// sidecar's and turn-boundary runtime's requests are never model-called;
+/// `telemetry.emit` IS reachable from model-authored kernel code
+/// (`host_request` is importable), so its classification is "restricted
+/// to a fixed skill event vocabulary with typed properties" — the
+/// handler's allowlist admits only the two computer-use events and
+/// refuses everything else — which keeps it out of the prompt's
+/// documented programmatic surface.
+const INTERNAL_HOST_REQUESTS: &[&str] = &[
+    "model.info",
+    "mcp.config",
+    "mcp.refresh",
+    "mcp.begin_login",
+    "telemetry.emit",
+];
 
 /// Map one registered host-request type to the prompt token that documents
 /// it. `None` when the request is host-internal.
