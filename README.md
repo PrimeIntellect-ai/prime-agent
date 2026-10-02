@@ -40,7 +40,7 @@ Prime Agent is an open-source coding and research agent for general and long-run
 
 ## Install
 
-Install the latest build with the one-command installer (every push to the `rust` branch publishes a fresh rolling beta; the stable channel ships on release):
+Install the latest stable version with the one-command installer:
 
 ```bash
 curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
@@ -49,12 +49,8 @@ curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
 On Windows, install from PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/PrimeIntellect-ai/prime-agent/main/install.ps1 | iex
+irm https://app.primeintellect.ai/prime-agent/install.ps1 | iex
 ```
-
-Windows builds ship on the beta channel for now; when the stable channel has no Windows build, the installer falls back to beta and says so. The sh one-liner also works under Git Bash on Windows. Both installers publish the same layout (the launcher under `$HOME\.local\bin`, the payload under `$HOME\.local\share\prime-agent`) and read the same release channel: darwin (arm64/x64), linux (arm64/x64), and windows (x86_64, `win32-x64`).
-
-Everything the installers download — the version pointers, the platform tarballs, the checksums — comes from the release channel's own domain; only the Windows one-liner's copy of install.ps1 comes from GitHub.
 
 ## Why Prime Agent
 
