@@ -203,17 +203,9 @@ fn install_ps1_carries_the_windows_contract() {
     // flipped predicate or swapped branches fails the contract, not just a
     // missing URL string.
     assert!(
-        text.contains("if ($baseTrimmed -eq $DownloadBaseUrlDefault.TrimEnd('/')) {"),
-        "the official-base predicate must be trimmed equality on the default"
-    );
-    assert!(
         text.contains(
-            "$releaseBase = \"https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v$version\""
+            "if ($baseTrimmed -eq $DownloadBaseUrlDefault.TrimEnd('/')) {\n    $releaseBase = \"https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v$version\"\n} else {\n    $releaseBase = \"$baseTrimmed/releases/v$version\"\n}"
         ),
-        "the official branch must send the archives to the GitHub release"
-    );
-    assert!(
-        text.contains("$releaseBase = \"$baseTrimmed/releases/v$version\""),
-        "the mirror branch must serve the bucket layout from the trimmed base"
+        "the official-base branch must carry the GitHub release URL and the mirror branch the bucket layout, as one contiguous block"
     );
 }
