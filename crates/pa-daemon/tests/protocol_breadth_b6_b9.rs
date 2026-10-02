@@ -678,7 +678,6 @@ fn wave_b9_prompt_admission_wire_shapes() {
         &json!({ "type": "cancel_prompt_admission", "activeSessionId": session_id, "admissionId": "never-registered" }),
     );
     let response = client.read_response("c-0");
-    assert_eq!(response["success"], true, "{response}");
     assert_eq!(response["data"], json!({ "status": "unknown" }));
 
     // An empty admission id answers the TS parse error.
@@ -710,10 +709,11 @@ fn wave_b9_prompt_admission_wire_shapes() {
     // not race the registration).
     std::thread::sleep(Duration::from_millis(100));
 
-    // The cancel answers `cancelled` and the queued prompt never runs.
+    // The queued prompt committed at admission: cancelOwned withdraws
+    // that item without aborting the unrelated slow turn.
     client.send_command(
         "c-1",
-        &json!({ "type": "cancel_prompt_admission", "activeSessionId": session_id, "admissionId": "adm-1" }),
+        &json!({ "type": "cancel_prompt_admission", "activeSessionId": session_id, "admissionId": "adm-1", "cancelOwned": true }),
     );
     // The cancelled wait's failure response may land before the cancel's
     // own response (both frames traverse the same worker pipe, and the
@@ -721,7 +721,7 @@ fn wave_b9_prompt_admission_wire_shapes() {
     // it), so the read buffers instead of dropping it.
     let (response, mut lines) = client.read_response_and_lines("c-1");
     assert_eq!(response["success"], true, "{response}");
-    assert_eq!(response["data"], json!({ "status": "cancelled" }));
+    assert_eq!(response["data"], json!({ "status": "owned" }));
     // The cancelled prompt_and_wait fails its wait (the dropped queue item
     // never completes).
     let response = match lines
@@ -743,6 +743,21 @@ fn wave_b9_prompt_admission_wire_shapes() {
     let response = client.read_response("q-1");
     assert_eq!(response["data"]["steering"], json!([]), "{response}");
     assert_eq!(response["data"]["followUp"], json!([]), "{response}");
+
+    // A non-wait prompt's public admission ends when its success response
+    // lands, even if its queued turn has not run yet (TS prompt lifetime).
+    client.send_command(
+        "p-3",
+        &json!({ "type": "prompt", "activeSessionId": session_id, "message": "non-wait", "admissionId": "adm-3" }),
+    );
+    let response = client.read_response("p-3");
+    assert_eq!(response["success"], true, "{response}");
+    client.send_command(
+        "c-3",
+        &json!({ "type": "cancel_prompt_admission", "activeSessionId": session_id, "admissionId": "adm-3", "cancelOwned": true }),
+    );
+    let response = client.read_response("c-3");
+    assert_eq!(response["data"], json!({ "status": "unknown" }));
 
     // A cancel for a fresh id answers `unknown` (nothing registered).
     client.send_command(

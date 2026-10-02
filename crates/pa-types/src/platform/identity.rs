@@ -24,6 +24,7 @@ pub fn socket_identity(path: &Path) -> Option<SocketIdentity> {
 }
 
 #[cfg(not(unix))]
+#[must_use]
 pub fn socket_identity(_path: &Path) -> Option<SocketIdentity> {
     None
 }

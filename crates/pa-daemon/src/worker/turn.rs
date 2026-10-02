@@ -14,8 +14,8 @@ pub(super) struct TurnRunner {
     pub(crate) core: Arc<Mutex<SessionCore>>,
     /// The input-pause table (the admission gate holds queued input).
     pub(super) input_pauses: crate::session_input_pause::InputPauseTable,
-    /// The prompt-admission registry: a queued admitted prompt commits
-    /// when its turn starts and clears when the turn settles.
+    /// The prompt-admission registry: an admitted prompt clears when its
+    /// turn settles.
     pub(super) prompt_admissions: crate::prompt_admission::WorkerAdmissions,
     pub(super) work_notify: Arc<Notify>,
     pub(super) idle_notify: Arc<Notify>,
@@ -91,6 +91,10 @@ impl TurnRunner {
                     None
                 } else if core.steering.front().is_some() {
                     let items = gather_delivery_batch(&mut core, Lane::Steering);
+                    core.running_admission_ids = items
+                        .iter()
+                        .filter_map(|item| item.admission_id.clone())
+                        .collect();
                     core.busy = true;
                     core.abort_requested = false;
                     core.retry_abort_requested = false;
@@ -100,6 +104,10 @@ impl TurnRunner {
                     Some(items)
                 } else if core.follow_up.front().is_some() {
                     let items = gather_delivery_batch(&mut core, Lane::FollowUp);
+                    core.running_admission_ids = items
+                        .iter()
+                        .filter_map(|item| item.admission_id.clone())
+                        .collect();
                     core.busy = true;
                     core.abort_requested = false;
                     core.retry_abort_requested = false;
@@ -353,14 +361,19 @@ impl TurnRunner {
         // The post-await revalidation (the fresh bots' race findings):
         // the engine gate's await opened a window - a bash admitted, a
         // prompt parked in a lane, a replay prefix restored, a manual
-        // compaction started, or a CLIENT ATTACHED during it must all
-        // cancel the stop (the shutdown would cancel the compaction and
-        // disconnect the new client); the bash that started in the
-        // window keeps the worker resident exactly like the pre-gate
-        // check.
+        // compaction started, a CLIENT ATTACHED, or the worker's own
+        // graceful SHUTDOWN starting during it must all cancel the stop
+        // (the shutdown would cancel the compaction and disconnect the
+        // new client; a stop ask under a running shutdown races the
+        // worker's own exit). The shutdown arm is stricter than TS:
+        // daemon-mode.ts `passivateSession` checks `shuttingDown` only
+        // BEFORE its fresh-snapshot await, not after it. The bash that
+        // started in the window keeps the worker resident exactly like
+        // the pre-gate check.
         {
             let core = self.core.lock().unwrap();
             if core.compacting
+                || core.shutdown_requested
                 || core.queued_input_suspended
                 || !core.attached_client_ids.is_empty()
                 || !core.steering.is_empty()
@@ -413,11 +426,6 @@ impl TurnRunner {
         let Some((first, batched)) = items.split_first() else {
             return;
         };
-        // An admitted prompt's turn started: its prompt admission commits
-        // (TS `commitAdmission`) — one per batched item, in delivery order.
-        for admission_id in items.iter().filter_map(|item| item.admission_id.as_ref()) {
-            self.prompt_admissions.commit(admission_id);
-        }
         self.emit_turn_event(json!({ "type": "agent_start" }));
         self.emit_turn_event(json!({ "type": "turn_start" }));
         // The pane reporter's run boundary (TS `agent_start`): working.
@@ -1228,6 +1236,7 @@ impl TurnRunner {
             let mut core = self.core.lock().unwrap();
             core.busy = false;
             core.active_action = None;
+            core.running_admission_ids.clear();
         }
         self.push_roster_delta();
         // The fallback `agent_end` for runs that ended without a model

@@ -48,10 +48,11 @@
 #      DRIVING this very install (the internal supervisor-socket
 #      variable a daemon exports to its workers) is never probed at all
 #      — the suite that killed the fleet daemon twice ran exactly that
-#      shape — unless --force or PRIME_AGENT_STOP_LIVE_DAEMON=1 overrides
-#      for a deliberate in-daemon update; an operator shell never carries the
-#      internal variable, so the field contract is unchanged. Every
-#      daemon so identified is shut down REGARDLESS of busy-ness (the
+#      shape — unless PRIME_AGENT_STOP_LIVE_DAEMON=1 overrides for a
+#      deliberate in-daemon update (--force does not); an operator shell
+#      never carries the internal variable, so the field contract is
+#      unchanged.
+#      Every daemon so identified is shut down REGARDLESS of busy-ness (the
 #      field ruling: an install that leaves the old daemon up is the
 #      takeover bug), by an ESCALATING ladder that sends no signal to any
 #      pid without --force: the graceful `shutdown` request (force:false), a 5s
@@ -179,9 +180,9 @@ network once.
 
 Options:
   --update    the documented alias the update entry points exec (identical run)
-  --force     stop every running Prime Agent daemon (TypeScript and Rust, busy
-              ones and the one this install runs under): the shutdown request
-              first, then SIGTERM/SIGKILL after a bounded wait
+  --force     if a Prime Agent daemon (TypeScript or Rust) is still up after the
+              shutdown requests and the drain wait, send it SIGTERM, then SIGKILL.
+              Never applies to the daemon this install runs under.
               (from a pipe: curl -fsSL <url>/install.sh | sh -s -- --force)
   --verbose   the detail also goes to stdout, not just fd 3 (no animation)
 Output:
@@ -594,7 +595,7 @@ ts_takeover_undo=""
 migrated_note=""
 # The renderer always restores the cursor and line wrap when it stops; the
 # trap stops it on every exit path (an INT/TERM exits through it too).
-trap 'ui_stop' EXIT
+trap 'ui_stop; rm -rf "$dl"' EXIT
 ui_interrupted() {
   if [ -n "$ui_step" ]; then step_fail "$ui_step" "interrupted"; fi
 }
@@ -1152,7 +1153,7 @@ step_ok "Verified"
 # one did not settle, and a second confirm poll. Without --force NOTHING
 # IS EVER KILLED from here: no signal is sent to any pid at any step —
 # even the forced request is the daemon's own shutdown request over its
-# socket. With --force, a daemon still up after the (shorter) drain wait
+# socket. With --force, a daemon still up after the full drain wait
 # gets SIGTERM, then SIGKILL, sent to the supervisor pid its hello names,
 # and only after that pid's command line proves it is a Prime Agent
 # daemon (a stale or fake responder never gets another process killed). An
@@ -1208,12 +1209,11 @@ esac
 # is identified by the internal supervisor-socket variable it exports to
 # its workers (TS parity), with the worker-role marker + the public
 # socket as the belt. A stop candidate equal to it is NEVER probed at
-# all — not even the hello — unless --force or
-# PRIME_AGENT_STOP_LIVE_DAEMON=1 explicitly overrides for a deliberate
-# in-daemon update. An operator
-# shell never carries the internal variables (a profile-exported
-# PRIME_AGENT_DAEMON_SOCKET alone does not trigger the refusal), so the
-# field contract is unchanged.
+# all — not even the hello — unless PRIME_AGENT_STOP_LIVE_DAEMON=1
+# explicitly overrides for a deliberate in-daemon update (never
+# --force). An operator shell never carries the internal variables (a
+# profile-exported PRIME_AGENT_DAEMON_SOCKET alone does not trigger the
+# refusal), so the field contract is unchanged.
 live_daemon_socket="${PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_SOCKET:-}"
 if [ -z "$live_daemon_socket" ] && [ "${PRIME_AGENT_INTERNAL_DAEMON_WORKER:-}" = "1" ]; then
   live_daemon_socket="${PRIME_AGENT_DAEMON_SOCKET:-}"
@@ -1318,9 +1318,6 @@ STOP_DRAIN_MINIMUM_S = 5.0
 STOP_DRAIN_PER_SESSION_S = 2.0
 STOP_DRAIN_UNKNOWN_S = 30.0
 STOP_DRAIN_CAP_S = 120.0
-# --force: the forced request's drain wait is capped short, then the
-# supervisor pid gets SIGTERM and, if it is still up, SIGKILL.
-FORCE_DRAIN_CAP_S = 15.0
 FORCE_TERM_WAIT_S = 5.0
 FORCE_KILL_WAIT_S = 3.0
 
@@ -1538,7 +1535,7 @@ def drain_confirm_timeout_s():
         drain = STOP_DRAIN_UNKNOWN_S
     else:
         drain = min(STOP_DRAIN_MINIMUM_S + STOP_DRAIN_PER_SESSION_S * count, STOP_DRAIN_CAP_S)
-    return min(drain, FORCE_DRAIN_CAP_S) if force else drain
+    return drain
 
 owner_label = "Rust" if owner == "rust" else "TypeScript"
 sessions_label = "unknown sessions" if count is None else "%d session%s" % (count, "" if count == 1 else "s")
@@ -1569,6 +1566,14 @@ if stopped_within(drain_confirm_timeout_s()):
 # and TS shapes are both `<...prime-agent...> --mode daemon`, the npm
 # build runs `node <...prime-agent...> --mode daemon`): a stale or fake
 # responder advertising some other pid never gets that process killed.
+# Only the supervisor is signalled. Both products start each worker in
+# its own process group, and a signal that lands mid-shutdown is a forced
+# exit in both, so workers the drain has not stopped yet are left behind.
+# The next Rust daemon on the pinned socket finishes, adopts, or retires
+# a Rust daemon's leftovers, which is why the signal waits out the full
+# drain window. A TS daemon still up here never acted on the forced
+# request (one already shutting down exits at once on it); its leftover
+# workers fall to their own supervisor-lost exit.
 def command_line(pid):
     try:
         with open("/proc/%d/cmdline" % pid, "rb") as handle:
@@ -1594,6 +1599,7 @@ def is_prime_agent_daemon(args):
 
 # The --force outcomes, each with its own report text:
 #   killed       a signal brought the daemon down;
+#   gone         the daemon went down on its own before any signal;
 #   unverified   no signal was sent: the daemon could not be re-identified
 #                on a fresh connection;
 #   undelivered  no signal was sent: os.kill refused (e.g. permission);
@@ -1605,7 +1611,7 @@ def kill_supervisor():
         sock = connect()
     except OSError:
         if not listening_flag():
-            return "killed"
+            return "gone"
         progress("could not reconnect to identify the daemon; not signalled")
         return "unverified"
     current = wait_hello(sock)
@@ -1628,7 +1634,7 @@ def kill_supervisor():
             os.kill(pid, sig)
         except OSError as error:
             if stopped_within(1.0):
-                return "killed"
+                return "killed" if signalled else "gone"
             if signalled:
                 break
             progress("could not signal pid %d (%s); not signalled" % (pid, error.strerror or error))
@@ -1641,7 +1647,9 @@ def kill_supervisor():
 
 if force:
     kill_result = kill_supervisor()
-    if kill_result == "killed":
+    if kill_result == "gone":
+        print("%s:stopped-forced:%s" % (owner, count_label))
+    elif kill_result == "killed":
         print("%s:stopped-killed:%s" % (owner, count_label))
     else:
         print("%s:kill-%s:%s" % (owner, kill_result, count_label))
@@ -1665,10 +1673,13 @@ stop_daemon_candidate() {
   last_stop_recorded="no"
   last_stop_was_rust="no"
   # THE SELF-SOCKET REFUSAL: the candidate that is the daemon DRIVING this
-  # very install is never probed — not even the hello — unless --force or
-  # the explicit override is set (a deliberate in-daemon update). The refusal
-  # is loud and lands in the summary: a skipped live daemon is a fact the
-  # operator must see, never a silent skip.
+  # very install is never probed — not even the hello — unless
+  # PRIME_AGENT_STOP_LIVE_DAEMON=1 is set (a deliberate in-daemon update).
+  # --force never lifts it: only processes inside a daemon session ever
+  # reach this branch, so a --force hint would steer agents into stopping
+  # their own daemon. The refusal is loud and lands in the summary: a
+  # skipped live daemon is a fact the operator must see, never a silent
+  # skip.
   # The equivalence goes BEYOND the raw string: a socket reached through
   # a symlinked spelling is still the driving daemon (macOS /tmp ->
   # /private/tmp is the canonical field case), so the same-file test
@@ -1676,11 +1687,11 @@ stop_daemon_candidate() {
   if [ -n "$live_daemon_socket" ] \
      && { [ "$socket_path" = "$live_daemon_socket" ] \
           || [ "$socket_path" -ef "$live_daemon_socket" ]; } \
-     && [ "${PRIME_AGENT_STOP_LIVE_DAEMON:-}" != "1" ] \
-     && [ "$FORCE" != 1 ]; then
-    note "! Left the daemon this install runs under running (${socket_path});"
-    note "  re-run with --force (or PRIME_AGENT_STOP_LIVE_DAEMON=1) to stop it too."
-    ts_stop_summary="${ts_stop_summary}daemon: skipped the live daemon socket ${socket_path} (this install runs under it; re-run with --force to stop it)
+     && [ "${PRIME_AGENT_STOP_LIVE_DAEMON:-}" != "1" ]; then
+    note "! Left the daemon this install runs under running (${socket_path}):"
+    note "  stopping it would also end this install and every session it runs."
+    note "  Set PRIME_AGENT_STOP_LIVE_DAEMON=1 to stop it on purpose."
+    ts_stop_summary="${ts_stop_summary}daemon: skipped the live daemon socket ${socket_path} (this install runs under it; PRIME_AGENT_STOP_LIVE_DAEMON=1 stops it)
 "
     ts_stop_refused="yes"
     return 0
@@ -2010,6 +2021,7 @@ on_exit() {
   if [ "$WINDOWS" = "yes" ]; then
     rm -rf "${PREFIX}/share/.prime-agent-install.lock.d"
   fi
+  rm -rf "$dl"
 }
 trap on_exit EXIT
 
@@ -2560,5 +2572,3 @@ case ":$PATH:" in
     fi
     ;;
 esac
-
-rm -rf "$dl"
