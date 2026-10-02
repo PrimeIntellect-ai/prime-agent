@@ -692,16 +692,10 @@ fn spawn_kitty_probe() {
     }
 }
 
-<<<<<<< HEAD
-/// Windows has no kitty keyboard protocol probe: the capability settles
-/// as probed-but-unsupported (the same settle the no-answer probe path
-/// takes) and the query window closes.
-=======
 /// Windows has no kitty keyboard protocol probe (the vendored crossterm
 /// ships the raw-read support check unix-only): the capability settles as
 /// probed-but-unsupported — the same settle the no-answer probe path takes —
 /// and the query window closes.
->>>>>>> pi/main
 #[cfg(not(unix))]
 fn spawn_kitty_probe() {
     KITTY_PROBED.store(true, Ordering::SeqCst);
