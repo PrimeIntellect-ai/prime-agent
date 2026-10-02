@@ -182,6 +182,13 @@ impl ClientSettings for CliClientSettings {
         set_chat_detail
     );
     setting!(
+        factory_enabled,
+        set_factory_enabled,
+        get_factory_enabled,
+        set_factory_enabled,
+        bool
+    );
+    setting!(
         warnings_anthropic_extra_usage,
         set_warnings_anthropic_extra_usage,
         get_warnings_anthropic_extra_usage,

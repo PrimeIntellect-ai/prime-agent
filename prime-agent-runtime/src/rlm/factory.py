@@ -1348,15 +1348,7 @@ class FactoryExecutor:
             "nodes": nodes,
             "events": [dict(event) for event in run.events[-EVENT_WINDOW:]],
             "elapsed_ms": int((self._now_fn() - run.started_at) * 1000),
-            "usage": {
-                "spawns": run.spawn_count,
-                "settled": run.settle_count,
-                "tool_uses": run.tool_use_total,
-                "max_parallel": run.max_parallel,
-                "max_children": run.max_children,
-                "running": self._running_instance_count(run),
-                "transitions_fired": run.transitions_fired,
-            },
+            "usage": self._usage_report(run),
         }
 
     async def stop(self, run_id: str) -> dict[str, Any]:
@@ -1491,6 +1483,7 @@ class FactoryExecutor:
             "settled": run.settle_count,
             "tool_uses": run.tool_use_total,
             "max_parallel": run.max_parallel,
+            "max_children": run.max_children,
             "running": self._running_instance_count(run),
             "transitions_fired": run.transitions_fired,
         }

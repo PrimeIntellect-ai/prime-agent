@@ -11,6 +11,7 @@ fn the_dock_segments_cover_each_groups_own_cells() {
         heartbeats: 3,
         heartbeats_paused: 1,
         bash_running: 1,
+        factory_group: true,
         ..ActivityDock::default()
     };
     let (frame, segments) = render_activity_dock_segments(&dock, &theme, 120);
@@ -136,6 +137,7 @@ fn activity_dock_frames_one_row_with_running_paused_and_goal_counts() {
         heartbeats: 3,
         heartbeats_paused: 1,
         bash_running: 1,
+        factory_group: true,
         goal_label: Some("Pursuing goal (0s)".to_string()),
         ..ActivityDock::default()
     };
@@ -173,6 +175,7 @@ fn activity_dock_frames_one_row_with_running_paused_and_goal_counts() {
     // the warning color — every live goal state keeps a surface.
     let dock = ActivityDock {
         goal_label: Some("Goal paused (0s)".to_string()),
+        factory_group: true,
         ..ActivityDock::default()
     };
     let frame = render_activity_dock(&dock, &theme, 100);
@@ -196,6 +199,7 @@ fn activity_dock_frames_one_row_with_running_paused_and_goal_counts() {
     // go neutral at zero.
     let dock = ActivityDock {
         heartbeats: 1,
+        factory_group: true,
         ..ActivityDock::default()
     };
     let frame = render_activity_dock(&dock, &theme, 100);
@@ -208,8 +212,14 @@ fn activity_dock_frames_one_row_with_running_paused_and_goal_counts() {
         " ◆ 0 subagents  ·  ◷ 1 heartbeat  ·  ▸ 0 shells  ·  ⚙ 0 factory"
     );
     // The all-zero dock renders its own empty state — the zero
-    // readout — and the zero segments stay neutral, never green.
-    let frame = render_activity_dock(&ActivityDock::default(), &theme, 100);
+    // readout — and the zero segments stay neutral, never green. The
+    // factory lane is advertised here (the unadvertised lane's row is
+    // the pin of its own).
+    let advertised = ActivityDock {
+        factory_group: true,
+        ..ActivityDock::default()
+    };
+    let frame = render_activity_dock(&advertised, &theme, 100);
     let text = frame[1]
         .iter()
         .map(|span| span.content.as_str())
@@ -278,6 +288,7 @@ fn prompt_bar_subagent_segment_is_the_running_count_only() {
     let dock = ActivityDock {
         subagents_running_direct: 2,
         subagents_running_nested: 0,
+        factory_group: true,
         ..ActivityDock::default()
     };
     let frame = render_activity_dock(&dock, &theme, 80);
@@ -295,6 +306,7 @@ fn prompt_bar_subagent_segment_is_the_running_count_only() {
     let dock = ActivityDock {
         subagents_running_direct: 2,
         subagents_running_nested: 7,
+        factory_group: true,
         ..ActivityDock::default()
     };
     let frame = render_activity_dock(&dock, &theme, 80);
@@ -316,6 +328,7 @@ fn prompt_bar_subagent_segment_is_the_running_count_only() {
     let dock = ActivityDock {
         subagents_running_direct: 0,
         subagents_running_nested: 1,
+        factory_group: true,
         ..ActivityDock::default()
     };
     let frame = render_activity_dock(&dock, &theme, 80);
@@ -345,6 +358,7 @@ fn activity_dock_selection_is_the_hover_colored_band() {
         heartbeats_paused: 1,
         bash_running: 1,
         factory_runs: 1,
+        factory_group: true,
         goal_label: Some("Pursuing goal (0s)".to_string()),
         selected: ActivityGroup::Heartbeats,
         focused: true,
@@ -408,9 +422,13 @@ fn activity_dock_selection_is_the_hover_colored_band() {
 /// in both directions and N groups take exactly N presses to cycle.
 #[test]
 fn dock_arrows_visit_every_group_even_when_empty() {
-    // The all-zero dock: the heartbeats, shells, and factory groups
-    // are empty and stay in the cycle.
-    let dock = ActivityDock::default();
+    // The all-zero dock with the factory lane advertised: the
+    // heartbeats, shells, and factory groups are empty and stay in
+    // the cycle.
+    let dock = ActivityDock {
+        factory_group: true,
+        ..ActivityDock::default()
+    };
     assert_eq!(
         dock.groups(),
         vec![
@@ -485,6 +503,7 @@ fn dock_arrows_visit_the_same_groups_with_items() {
         heartbeats: 2,
         heartbeats_paused: 1,
         bash_running: 1,
+        factory_group: true,
         goal_label: Some("Pursuing goal (0s)".to_string()),
         ..ActivityDock::default()
     };
@@ -532,10 +551,14 @@ fn dock_arrows_visit_the_same_groups_with_items() {
 fn dock_goal_group_unmounts_with_its_row() {
     let with_goal = ActivityDock {
         goal_label: Some("Goal paused (0s)".to_string()),
+        factory_group: true,
         ..ActivityDock::default()
     };
     assert!(with_goal.groups().contains(&ActivityGroup::Goal));
-    let ended = ActivityDock::default();
+    let ended = ActivityDock {
+        factory_group: true,
+        ..ActivityDock::default()
+    };
     assert!(
         !ended.groups().contains(&ActivityGroup::Goal),
         "the goal group leaves the cycle when its row unmounts"
@@ -552,6 +575,47 @@ fn dock_goal_group_unmounts_with_its_row() {
     );
 }
 
+/// The factory group is the lane's opt-in surface: an unadvertised
+/// `factory_activity` lane mounts no factory group anywhere — no row
+/// segment, no traversal, no click region (the factory's default-off
+/// gate; the dock's factory group renders exactly while the daemon
+/// advertises the lane).
+#[test]
+fn an_unadvertised_factory_lane_mounts_no_factory_group() {
+    let theme = Theme::builtin("prime", ColorMode::TrueColor);
+    // The default dock is the unadvertised lane (the opt-in default).
+    let dock = ActivityDock::default();
+    assert!(
+        !dock.groups().contains(&ActivityGroup::Factory),
+        "the unadvertised lane stays out of the traversal cycle"
+    );
+    let (frame, segments) = render_activity_dock_segments(&dock, &theme, 120);
+    let text = frame[1]
+        .iter()
+        .map(|span| span.content.as_str())
+        .collect::<String>();
+    assert_eq!(
+        text, " ◆ 0 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells",
+        "no factory segment renders: {text}"
+    );
+    assert!(
+        segments.iter().all(|segment| segment.group != ActivityGroup::Factory),
+        "no factory click region records"
+    );
+    // The arrows wrap the remaining groups exactly: a stale Factory
+    // selection steps to the row's real ends, never a hidden group.
+    assert_eq!(
+        dock.step(ActivityGroup::Bash, ActivityDirection::Next),
+        ActivityGroup::Subagents,
+        "the cycle wraps past the shells group"
+    );
+    assert_eq!(
+        dock.step(ActivityGroup::Subagents, ActivityDirection::Prev),
+        ActivityGroup::Bash,
+        "the reverse cycle wraps past the subagents group"
+    );
+}
+
 /// Entering an empty group still renders it: the focused selection's
 /// band — the ONE shared selection style — rides the group's
 /// zero-count segment on the row — the dock-level empty state is
@@ -563,6 +627,7 @@ fn dock_renders_the_focused_empty_group() {
     let dock = ActivityDock {
         selected: ActivityGroup::Heartbeats,
         focused: true,
+        factory_group: true,
         ..ActivityDock::default()
     };
     let frame = render_activity_dock(&dock, &theme, 100);

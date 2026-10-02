@@ -302,6 +302,12 @@ impl pa_tui::client_settings::ClientSettings for StubSettings {
         *self.chat_detail.lock().expect("chat detail lock") = Some(detail.to_string());
         Ok(())
     }
+    fn factory_enabled(&self) -> bool {
+        false
+    }
+    fn set_factory_enabled(&self, _enabled: bool) -> Result<()> {
+        Ok(())
+    }
     fn warnings_anthropic_extra_usage(&self) -> bool {
         true
     }

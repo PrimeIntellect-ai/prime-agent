@@ -310,7 +310,10 @@ impl Worker {
             // supervisor owns the boot restore pass).
             update_resume: None,
             client_id: crate::util::new_display_id(),
-            server_capabilities: worker_server_capabilities(),
+            // The factory lane advertises only while its opt-in gate
+            // reads enabled (`factory.enabled`, default off) — the same
+            // fresh-per-connection read the supervisor's hello does.
+            server_capabilities: worker_server_capabilities(&self.config.agent_dir),
             rest: Map::default(),
         };
         let hello_bytes = serde_json::to_vec(&hello)?;

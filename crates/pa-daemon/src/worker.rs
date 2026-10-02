@@ -92,8 +92,8 @@ use crate::peer::{
 };
 use crate::protocol::{
     create_daemon_event_meta, create_daemon_replay_info, current_protocol_info,
-    default_client_capabilities, default_server_capabilities, normalize_client_capabilities,
-    response_failure, response_success, DaemonOutbound, DaemonResponse, DaemonResumeCursor,
+    default_client_capabilities, normalize_client_capabilities, response_failure,
+    response_success, DaemonOutbound, DaemonResponse, DaemonResumeCursor,
     DaemonSessionClosedReason, DAEMON_APP_VERSION, DAEMON_SCHEMA_ID, DAEMON_SCHEMA_REVISION,
 };
 use crate::registration::RegistrationHandle;

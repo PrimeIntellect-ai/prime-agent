@@ -153,6 +153,10 @@ impl SessionUi {
             heartbeats_paused: paused_heartbeat_count(&self.heartbeat_catalog),
             bash_running,
             factory_runs,
+            // The group renders exactly while the daemon advertises the
+            // lane: the factory's opt-in gate (a daemon without the
+            // factory lane never mounts the group).
+            factory_group: self.factory_activity_supported(),
             goal_label,
             selected: self.activity_group,
             focused: self.subagents_focused,

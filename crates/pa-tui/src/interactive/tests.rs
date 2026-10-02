@@ -315,7 +315,9 @@ fn the_headless_settle_names_every_stuck_member() {
 /// The pre-attach placeholder (painted for a NEW chat before the attach
 /// lands) carries the zero dock the fresh session mounts: the landed
 /// frame keeps the placeholder's geometry, so the splash never reflows
-/// two rows when the session attaches.
+/// two rows when the session attaches. The factory group stays off the
+/// placeholder (the opt-in gate: the group mounts only after the
+/// daemon's hello advertises the `factory_activity` lane).
 #[test]
 fn the_startup_placeholder_carries_the_dock_a_fresh_session_mounts() {
     let mut view = AgentView::new(crate::theme::Theme::builtin(
@@ -332,7 +334,7 @@ fn the_startup_placeholder_carries_the_dock_a_fresh_session_mounts() {
         rows[rows.len() - 2..],
         [
             "\u{2500}".repeat(100),
-            " \u{25c6} 0 subagents  \u{b7}  \u{25f7} 0 heartbeats  \u{b7}  \u{25b8} 0 shells  \u{b7}  \u{2699} 0 factory"
+            " \u{25c6} 0 subagents  \u{b7}  \u{25f7} 0 heartbeats  \u{b7}  \u{25b8} 0 shells"
                 .to_string(),
         ],
         "the placeholder's last two rows are the dock's rule and zero row"

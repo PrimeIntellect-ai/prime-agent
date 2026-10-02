@@ -354,6 +354,30 @@ impl SettingsManager {
         self.save_global_scope()
     }
 
+    /// `factory.enabled` (the agent factory's opt-in gate): unset reads
+    /// as disabled — the factory stays off until the user runs
+    /// `/factory on`.
+    #[must_use]
+    pub fn get_factory_enabled(&self) -> bool {
+        self.settings()
+            .factory
+            .as_ref()
+            .and_then(|factory| factory.enabled)
+            .unwrap_or(false)
+    }
+
+    /// `factory.enabled` setter: persists the opt-in gate to the global
+    /// scope (the same shared settings key the daemon's lane advertisement
+    /// and the kernel's factory gate read).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings scope cannot be saved.
+    pub fn set_factory_enabled(&mut self, enabled: bool) -> Result<()> {
+        self.global_mut().factory.get_or_insert_with(Default::default).enabled = Some(enabled);
+        self.save_global_scope()
+    }
+
     /// `enabledModels` (TS `getEnabledModels`/`setEnabledModels`): the
     /// persisted model-scope patterns (`None` is no filter).
     #[must_use]

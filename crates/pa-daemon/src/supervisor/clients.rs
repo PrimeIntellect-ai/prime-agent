@@ -2,7 +2,7 @@
 //! and the parsed-command execution surface.
 use super::{
     broadcast, command_type_name, current_protocol_info, daemon_closing_shutdown_event,
-    default_server_capabilities, input_admission_id, json, parse_supervisor_command_line,
+    input_admission_id, json, parse_supervisor_command_line,
     response_failure, response_line, response_success, salvage_command_type, salvage_id,
     subscribers, update_gate_refuses, util, Arc, AsyncBufReadExt, AsyncWriteExt, BufReader,
     ClientRouting, DaemonCommand, DaemonOutbound, DaemonRuntimeIdentity, EnvelopeParseError, Map,
@@ -99,7 +99,13 @@ impl Supervisor {
             supervisor_socket_path: Some(self.options.socket_path.to_string_lossy().to_string()),
             update_resume: Some(self.restore.hello_resume()),
             client_id: client_id.clone(),
-            server_capabilities: default_server_capabilities(),
+            // The factory lane advertises only while its opt-in gate
+            // reads enabled (`factory.enabled`, default off): the
+            // settings read is fresh per connection, so a `/factory on`
+            // toggle surfaces on the next client start.
+            server_capabilities: crate::factory_activity::advertised_server_capabilities(
+                &self.options.agent_dir,
+            ),
             rest: Map::default(),
         };
         write_line(&mut writer, &serde_json::to_value(&hello)?).await?;

@@ -420,6 +420,58 @@ impl SessionUi {
                     view,
                 );
             }
+            // `/factory [on|off|status]`: the factory's opt-in gate (the
+            // operator's directive: the factory is disabled until the
+            // user turns it on). The toggle persists `factory.enabled` —
+            // the shared settings key the daemon's `factory_activity`
+            // advertisement and the kernel's factory gate read — so the
+            // factory surfaces on the next client start (the running
+            // connection keeps the advertisement its hello was built
+            // with).
+            "factory" => {
+                self.track_command_used("factory");
+                let arg = resolved.args.trim().to_lowercase();
+                let Some(settings) = &self.client_settings else {
+                    self.note("/factory is not available in this client yet", view);
+                    return Ok(());
+                };
+                match arg.as_str() {
+                    "on" => {
+                        if let Err(error) = settings.set_factory_enabled(true) {
+                            self.error_row(&format!("{error:#}"), view);
+                            return Ok(());
+                        }
+                        self.note(
+                            "The factory is enabled. Restart the client to surface the factory group (the factory page and the agent-side factory API follow the same gate).",
+                            view,
+                        );
+                    }
+                    "off" => {
+                        if let Err(error) = settings.set_factory_enabled(false) {
+                            self.error_row(&format!("{error:#}"), view);
+                            return Ok(());
+                        }
+                        self.note(
+                            "The factory is disabled. The factory group and page disappear on the next client start.",
+                            view,
+                        );
+                    }
+                    "" | "status" => {
+                        if settings.factory_enabled() {
+                            self.note(
+                                "The factory is enabled. Run /factory off to disable it.",
+                                view,
+                            );
+                        } else {
+                            self.note(
+                                "The factory is disabled (off by default). Run /factory on to enable it (takes effect on the next client start).",
+                                view,
+                            );
+                        }
+                    }
+                    _ => self.error_row("Usage: /factory [on|off|status]", view),
+                }
+            }
             // `/update` (the TS->Rust migration path): the confirm, then
             // the download+install runs OUT-OF-BAND (a background task —
             // the TUI stays mounted, the daemon keeps running, and the

@@ -158,6 +158,18 @@ pub trait ClientSettings: Send + Sync {
     /// Returns `Err` when the tier name is not a known service tier or
     /// opening or persisting the settings store fails.
     fn set_default_service_tier(&self, tier: &str) -> Result<()>;
+    /// `factory.enabled` (the agent factory's opt-in gate; unset reads
+    /// as disabled).
+    fn factory_enabled(&self) -> bool;
+    /// Persists `factory.enabled` to the global scope — the same shared
+    /// settings key the daemon's `factory_activity` lane advertisement
+    /// and the kernel's factory gate read.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when opening or persisting the settings store
+    /// fails.
+    fn set_factory_enabled(&self, enabled: bool) -> Result<()>;
     /// `chatDetail` (`overview`/`details`/`all`; TS #2709 default
     /// `details`): the conversation-detail level the chat starts at.
     /// `chatDetail` (`overview`/`details`/`all`; the default reads as
