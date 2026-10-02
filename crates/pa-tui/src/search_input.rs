@@ -254,11 +254,18 @@ impl SearchInput {
     /// stored in the query and re-emitted to the terminal on the next
     /// render of the field.
     pub(crate) fn paste(&mut self, text: &str) {
-        self.last_action = LastAction::None;
-        self.push_undo();
         let mut clean = text.replace(['\r', '\n'], "");
         clean = clean.replace('\t', "    ");
         clean = clean.chars().filter(|c| !c.is_control()).collect();
+        // A payload that filters to nothing (control-only bytes, empty
+        // bracketed paste) changes nothing: no undo step is pushed, so
+        // the next undo still undoes the typing (the editor's
+        // `handle_paste` rule).
+        if clean.is_empty() {
+            return;
+        }
+        self.last_action = LastAction::None;
+        self.push_undo();
         self.insert_at_cursor(&clean);
     }
 
@@ -487,6 +494,18 @@ mod tests {
         // can never re-emit a terminal control sequence.
         assert_eq!(input.value(), "a]8;;https://evil.exampleb");
         assert!(!input.value().chars().any(char::is_control));
+    }
+
+    /// A control-only paste filters to nothing and changes nothing: no
+    /// empty undo step is pushed (the editor's `handle_paste` rule), so
+    /// the next undo still undoes the typing.
+    #[test]
+    fn a_control_only_paste_leaves_the_undo_stack_alone() {
+        let mut input = typed("ab");
+        input.paste("\u{1b}\u{7}");
+        assert_eq!(input.value(), "ab");
+        input.handle_key("ctrl+-", &kb());
+        assert_eq!(input.value(), "", "undo removes the typing, not a no-op");
     }
 
     #[test]
