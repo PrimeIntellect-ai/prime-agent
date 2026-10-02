@@ -1980,6 +1980,71 @@ class ChildNameTest(unittest.TestCase):
         self.assertTrue(_child_name("r", "collect", 0, 2).endswith("-a2"))
 
 
+class FactoryHelpTest(unittest.TestCase):
+    """rlm.factory.help(): the embedded authoring reference (PR #3199).
+
+    The full agent-facing reference — authoring rules, guards/joins/cycles,
+    foreach, budgets, stall detectors, and the API with worked examples —
+    is a module-level constant in rlm/factory.py; ``help()`` returns it
+    with no filesystem resolution, so packaged kernels (where the repo
+    layout is not adjacent) see the same guide.
+    """
+
+    def test_factory_help_returns_the_full_reference(self) -> None:
+        doc = rlm_module.rlm.factory.help()
+        self.assertIsInstance(doc, str)
+        # help() returns the embedded constant, never a filesystem read.
+        self.assertEqual(doc, factory_module.FACTORY_HELP)
+
+        # The shipped section structure: store, author, dag sugar, run, safety.
+        for heading in (
+            "# Factory",
+            "## Store the spec",
+            "## Authoring reference",
+            "## Dag form",
+            "## Run, watch, steer",
+            "## Safety",
+        ):
+            self.assertIn(heading, doc)
+
+        # Prose sections wrap at ~76 columns; flatten before matching phrases.
+        flat = " ".join(doc.split())
+        # Guards: the op set evaluated over the from-state's latest settle.
+        self.assertIn("`eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `exists`, `contains`", flat)
+        self.assertIn("over the from-state's latest settle", flat)
+        # foreach: one child per item of the named json input, clamped at max.
+        self.assertIn('**foreach**: `{"over": "<input>", "max": 1..256}`', flat)
+        self.assertIn("expands one entry into one child per item of the named `json` input", flat)
+        # max_parallel is the run's global budget, not a per-node limit.
+        self.assertIn(
+            "`run.max_parallel` (1..64, default 8) is the run's global budget of "
+            "simultaneously running instances",
+            flat,
+        )
+        self.assertIn("not a per-node limit", flat)
+        # Stall detectors: dead configurations fail loudly, never wedge.
+        self.assertIn("Dead configurations fail loudly, never wedge", flat)
+        self.assertIn("nothing in flight and nothing pending", flat)
+        # The stop/resume contract.
+        self.assertIn("`stop(run_id)` cancels every running child of the run (idempotent)", flat)
+        self.assertIn("`resume(run_id)` continues a paused run and raises on a non-paused one", flat)
+
+        # The run/status/stop/resume/graph/watch snippet, as the agent types it.
+        self.assertIn('result = await rlm.factory.run("pr-manager")', doc)
+        self.assertIn('status = await rlm.factory.status(result["run_id"])', doc)
+        self.assertIn('snapshot = await rlm.factory.watch(result["run_id"], 30)', doc)
+        self.assertIn("runs = await rlm.factory.graph()", doc)
+        self.assertIn('live = await rlm.factory.graph(result["run_id"])', doc)
+        self.assertIn('spec = await rlm.factory.graph("pr-manager")', doc)
+
+        # The worked examples bound their emitted payloads — captured answers
+        # are capped previews (~160-200 chars), so an unbounded json payload
+        # would truncate at the cap and fail to bind.
+        self.assertIn('findings": ["at most three one-line findings"]', doc)
+        self.assertIn("capped at the eight most relevant", doc)
+        self.assertIn("an unbounded payload truncates at the cap and fails to bind", flat)
+
+
 # ---------------------------------------------------------------------------
 # Executor test infrastructure
 # ---------------------------------------------------------------------------

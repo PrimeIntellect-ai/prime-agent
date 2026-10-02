@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .bash import BashHandle, BashResult, bash
-from .factory import resume_factory, run_factory, status_factory, stop_factory
+from .factory import FACTORY_HELP, resume_factory, run_factory, status_factory, stop_factory
 from .harness import HarnessEntry, HarnessScope, HarnessState, RefinementEvent, get_harness_state
 
 _NOT_CALLABLE_MESSAGE = "'rlm' is not callable; spawn a child with: handle = await rlm.spawn('sub-task', name='worker')"
@@ -537,6 +537,10 @@ class _RLMFactoryNamespace:
     continues the run (nonblocking control loop). Runs live in kernel
     memory only; children stay supervisor-owned. Every call is async, so
     always await it: ``await rlm.factory.run('<id>')``.
+
+    ``help()`` returns the full embedded authoring reference and API guide
+    (states, ports, guards, joins, foreach, budgets, and the API with
+    worked examples): ``rlm.factory.help()``.
     """
 
     async def run(self, spec_id: str, *, name: str | None = None) -> dict[str, Any]:
@@ -550,6 +554,10 @@ class _RLMFactoryNamespace:
 
     async def resume(self, run_id: str) -> dict[str, Any]:
         return await resume_factory(run_id)
+
+    def help(self) -> str:
+        """Return the embedded factory authoring reference and API guide."""
+        return FACTORY_HELP
 
 
 class _RLMNamespace:
