@@ -136,6 +136,12 @@ impl Worker {
             .as_mut()
             .and_then(|store| store.lease.take());
         drop(lease);
+        // The worker's quit (TS `session_shutdown` reason `quit`): the
+        // pane reporter releases its pane as the last write on the wire
+        // — awaited here so the release lands before this reply unlocks
+        // the process exit, and no late report reclaims the pane.
+        let reporter = self.herdr.lock().unwrap().clone();
+        reporter.release().await;
         response_success(None, "shutdown", None)
     }
 
