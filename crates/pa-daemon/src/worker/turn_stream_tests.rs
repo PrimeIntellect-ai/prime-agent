@@ -14,6 +14,9 @@ mod abort_idle_race;
 mod broadcast;
 mod burst;
 mod feed;
+// The interleave harness's recording probe speaks the supervisor link over
+// a unix domain socket, so the family only exists on unix.
+#[cfg(unix)]
 mod interleave;
 mod park;
 mod queue;

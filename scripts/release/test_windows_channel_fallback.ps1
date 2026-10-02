@@ -58,11 +58,19 @@ Set-Content -LiteralPath (Join-Path $channel 'beta') -Value $betaVersion -NoNewl
 $betaRow = '{"platform": "' + $platform + '", "file": "' + $artifactFile + '", "sha256": "' + $artifactSha + '"}'
 Set-Content -LiteralPath (Join-Path $channel 'beta.json') -Value ('{"version": "v' + $betaVersion + '", "binaries": [' + $betaRow + '], "binaries_v2": [' + $betaRow + ']}')
 
+# An isolated loopback port for the channel server (bind port 0, read the
+# assignment back, release): the test never races a listener it does not own.
+$portListener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+$portListener.Start()
+$port = $portListener.LocalEndpoint.Port
+$portListener.Stop()
+$baseUrl = "http://127.0.0.1:$port"
+
 # One install run under a given channel knob, with the transcript captured.
 function Invoke-Installer {
     param([string]$ChannelKnob, [string]$Prefix)
     Remove-Item -Path 'Env:PRIME_AGENT_DOWNLOAD_BASE_URL', 'Env:PRIME_AGENT_RELEASE_CHANNEL', 'Env:PRIME_AGENT_RUST_PREFIX', 'Env:PRIME_AGENT_ALLOW_HTTP', 'Env:PRIME_AGENT_VERSION' -ErrorAction SilentlyContinue
-    $env:PRIME_AGENT_DOWNLOAD_BASE_URL = 'http://localhost:8124'
+    $env:PRIME_AGENT_DOWNLOAD_BASE_URL = $baseUrl
     $env:PRIME_AGENT_ALLOW_HTTP = '1'
     $env:PRIME_AGENT_RUST_PREFIX = $Prefix
     if ($ChannelKnob) { $env:PRIME_AGENT_RELEASE_CHANNEL = $ChannelKnob }
@@ -70,9 +78,23 @@ function Invoke-Installer {
     return [pscustomobject]@{ Lines = $lines; Exit = $LASTEXITCODE }
 }
 
-$server = Start-Process -FilePath $py -ArgumentList '-m','http.server','8124','--directory',$channel -PassThru -WindowStyle Hidden
+$server = Start-Process -FilePath $py -ArgumentList '-m','http.server',"$port",'--directory',$channel -PassThru -WindowStyle Hidden
 try {
-    Start-Sleep -Seconds 2
+    # Readiness is the server answering a request for this test's own
+    # channel (beta.json), not a fixed sleep: bounded deadline, and a dead
+    # child fails fast instead of hanging the installer.
+    $deadline = (Get-Date).AddSeconds(30)
+    $ready = $false
+    while (-not $ready) {
+        if ($server.HasExited) { throw "the local channel server exited early (port $port)" }
+        if ((Get-Date) -gt $deadline) { throw "the local channel server did not answer on $baseUrl within 30s" }
+        try {
+            $probe = Invoke-WebRequest -Uri "$baseUrl/beta.json" -TimeoutSec 2
+            if ($probe.StatusCode -eq 200) { $ready = $true }
+        } catch {
+            Start-Sleep -Milliseconds 100
+        }
+    }
 
     # Case 1: the default channel falls back to beta and installs.
     $prefixA = Join-Path $scratch 'prefix-a'
