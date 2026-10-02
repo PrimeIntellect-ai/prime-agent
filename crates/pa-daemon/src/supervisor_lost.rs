@@ -126,9 +126,13 @@ async fn exit_orphaned(worker: &Worker, absent_since: tokio::time::Instant) {
         agent_engine.dispose_kernel().await;
     }
     let _ = worker.record_recovery(false, "shutdown");
+    // The bind-time identity (captured in `serve`) is the unlink's
+    // expected identity, so a REPLACED file at the path - a successor
+    // worker's live socket, the deterministic-path relaunch - survives
+    // this exit.
     crate::socket::cleanup_socket_path(
         &worker.config.socket_path,
-        crate::socket::socket_identity(&worker.config.socket_path),
+        worker.bound_socket_identity.lock().unwrap().clone(),
     );
     std::process::exit(0);
 }
