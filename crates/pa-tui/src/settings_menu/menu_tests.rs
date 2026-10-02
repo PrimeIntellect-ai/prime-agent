@@ -393,6 +393,62 @@ fn arrows_no_op_on_submenu_rows() {
     assert!(text.iter().any(|row| row.contains("Thinking Level")));
 }
 
+/// A caret-only key in the search field keeps the filtered selection
+/// (the config selector's re-filter rule: the filter re-runs only when
+/// the query changed), so the row Space would activate stays the one
+/// under the cursor.
+#[test]
+fn a_caret_move_keeps_the_filtered_selection() {
+    let mut menu = menu();
+    // "mo" leaves two rows (steering-mode, follow-up-mode).
+    for key in ["m", "o"] {
+        menu.handle_key(key, &kb());
+    }
+    assert!(menu.tabs[menu.tab].filtered.len() >= 2);
+    menu.handle_key("down", &kb());
+    let selected = menu.tabs[menu.tab].selected;
+    assert!(selected > 0);
+    // A caret move edits nothing: the selection stays on the row.
+    menu.handle_key("ctrl+left", &kb());
+    assert_eq!(
+        menu.tabs[menu.tab].selected, selected,
+        "a caret-only key keeps the selection"
+    );
+}
+
+/// A paste on the empty-menu state (no tabs) is a no-op, like the
+/// navigation keys: nothing panics, nothing types.
+#[test]
+fn a_paste_on_an_empty_menu_edits_nothing() {
+    let mut menu = SettingsMenu::new(Vec::new());
+    menu.paste("anything");
+    assert!(menu.tabs.is_empty());
+}
+
+/// A paste while a submenu owns the frame edits nothing: the parent
+/// list's search stays untouched behind it.
+#[test]
+fn a_paste_while_a_submenu_is_open_edits_nothing() {
+    let mut menu = menu();
+    menu.handle_key("2", &kb());
+    menu.handle_key("enter", &kb());
+    assert!(menu.sub.is_some());
+    menu.paste("thinking");
+    assert_eq!(menu.tabs[menu.tab].search.value(), "");
+}
+
+/// A paste lands in the search field (TS routes the raw paste to the
+/// `Input`): TS's sanitize strips the spaces (Space stays the row
+/// activation), the filter re-runs on the changed query.
+#[test]
+fn a_paste_types_into_the_search_query_without_spaces() {
+    let mut menu = menu();
+    menu.paste("auto comp");
+    assert_eq!(menu.tabs[menu.tab].search.value(), "autocomp");
+    assert_eq!(menu.tabs[menu.tab].filtered.len(), 1);
+    assert_eq!(menu.rows[menu.tabs[menu.tab].filtered[0]].id, "autocompact");
+}
+
 #[test]
 fn digits_type_into_an_active_query() {
     let mut menu = menu();
@@ -545,4 +601,86 @@ fn opening_into_a_setting_keeps_the_top_bar_and_the_padding() {
     assert!(text
         .iter()
         .any(|row| row.starts_with("  Enter select · Esc back")));
+}
+
+/// The search field takes the WHOLE key id (TS `Input.handleInput`, the
+/// `SettingsList.handleInput` final arm): Backspace deletes the query.
+/// After garbage filters the list to the no-match row, backspacing it
+/// away returns the settings rows.
+#[test]
+fn backspace_edits_the_search_query() {
+    let mut menu = menu();
+    for key in ["z", "q", "x"] {
+        menu.handle_key(key, &kb());
+    }
+    let filtered = render_text(&menu);
+    assert!(
+        filtered
+            .iter()
+            .any(|row| row.contains("No matching settings")),
+        "the garbage query filters the list to the no-match row"
+    );
+    assert!(
+        !filtered.iter().any(|row| row.contains("Auto-compact")),
+        "no settings row matches the garbage query"
+    );
+    for _ in 0..3 {
+        menu.handle_key("backspace", &kb());
+    }
+    let text = render_text(&menu);
+    assert!(
+        text.iter().any(|row| row.contains("Auto-compact")),
+        "the settings rows return once the query is backspaced away"
+    );
+    assert!(
+        !text.iter().any(|row| row.contains("No matching settings")),
+        "the no-match row clears with the query"
+    );
+}
+
+/// Backspace at the empty-query boundary stays inside the menu (TS
+/// `Input.handleBackspace` clamps at the cursor): the action is None
+/// and the rows keep rendering — the menu neither closes nor strands on
+/// its no-match row. Like every key that reaches the search field, the
+/// press runs the filter pass, which re-lands the tab's selection on its
+/// first row (TS `applyFilter`'s reset, kept for parity).
+#[test]
+fn backspace_on_an_empty_query_keeps_the_menu_open() {
+    let mut menu = menu();
+    assert_eq!(
+        menu.handle_key("backspace", &kb()),
+        SettingsMenuAction::None,
+        "backspace with an empty query is a no-op action"
+    );
+    let text = render_text(&menu);
+    assert!(
+        text.iter().any(|row| row.contains("Auto-compact")),
+        "the rows keep rendering: {text:?}"
+    );
+    assert!(
+        !text.iter().any(|row| row.contains("No matching settings")),
+        "the empty query keeps every row matched"
+    );
+}
+
+/// Space keeps its row-activation meaning after the search field takes
+/// whole key ids (TS sanitizes a bare space out of the query): the key
+/// cycles the selected row's value and types nothing into the field.
+#[test]
+fn space_activates_instead_of_typing_into_the_query() {
+    let mut menu = menu();
+    let field_before = render_text(&menu)[1].clone();
+    assert_eq!(
+        menu.handle_key("space", &kb()),
+        SettingsMenuAction::Change {
+            id: "autocompact",
+            value: "false".to_string()
+        },
+        "Space cycles the selected row (the operator's key vocabulary)"
+    );
+    let field_after = render_text(&menu)[1].clone();
+    assert_eq!(
+        field_before, field_after,
+        "the sanitized Space never types into the search field"
+    );
 }

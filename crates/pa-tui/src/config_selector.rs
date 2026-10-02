@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use crate::keybindings::{format_key_text, KeybindingsManager};
 use crate::keys::key_event_to_id;
+use crate::search_input::SearchInput;
 use crate::theme::{Theme, ThemeColor};
 use crate::{Line, Span};
 
@@ -84,7 +85,7 @@ pub struct ConfigSelector {
     kind: SelectorKind,
     rows: Vec<SelectorRow>,
     filtered: Vec<usize>,
-    query: String,
+    search: SearchInput,
     selected: usize,
 }
 
@@ -105,7 +106,7 @@ impl ConfigSelector {
             kind,
             rows,
             filtered,
-            query: String::new(),
+            search: SearchInput::new(),
             selected: 0,
         };
         selector.select_first_item();
@@ -121,14 +122,21 @@ impl ConfigSelector {
     /// The current filter query.
     #[must_use]
     pub fn query(&self) -> &str {
-        &self.query
+        self.search.value()
     }
 
     /// Replace the filter query in one step (the `/model <search>` prefill;
     /// typing the same characters one key at a time cannot express a
-    /// space, which the key loop treats as toggle).
+    /// space, which the key loop treats as toggle). The caret lands at
+    /// the prefill's end, so the next keystroke extends it.
     pub fn set_query(&mut self, query: &str) {
-        self.query = query.to_string();
+        self.search.prefill(query);
+        self.apply_filter();
+    }
+
+    /// A bracketed paste into the filter (TS the search `Input`'s paste).
+    pub fn paste(&mut self, text: &str) {
+        self.search.paste(text);
         self.apply_filter();
     }
 
@@ -216,17 +224,12 @@ impl ConfigSelector {
         if key == "space" || kb.matches(key, "tui.select.confirm") {
             return self.toggle_selected();
         }
-        if key == "backspace" {
-            self.query.pop();
+        // TS `ConfigSelectorComponent.handleInput`'s final arm: every
+        // other key id goes whole to the search `Input`.
+        let previous = self.search.value().to_string();
+        self.search.handle_key(key, kb);
+        if self.search.value() != previous {
             self.apply_filter();
-            return None;
-        }
-        // Every other key with a printable identity edits the filter.
-        if let [character] = key.chars().collect::<Vec<char>>()[..] {
-            if !character.is_control() {
-                self.query.push(character);
-                self.apply_filter();
-            }
         }
         None
     }
@@ -308,12 +311,12 @@ impl ConfigSelector {
     /// Rebuild the filtered view: items matching the query, plus the group
     /// and subgroup rows that contain them (TS `filterItems`).
     fn apply_filter(&mut self) {
-        if self.query.trim().is_empty() {
+        if self.search.value().trim().is_empty() {
             self.filtered = (0..self.rows.len()).collect();
             self.select_first_item();
             return;
         }
-        let query = self.query.to_lowercase();
+        let query = self.search.value().to_lowercase();
         let item_matches = |row: &SelectorRow| match row {
             SelectorRow::Item {
                 label,
@@ -456,8 +459,8 @@ impl ConfigSelector {
         lines.extend(crate::menu_panel::search_field_lines(
             theme,
             width,
-            &self.query,
-            self.query.chars().count(),
+            self.search.value(),
+            self.search.cursor(),
             true,
             self.search_placeholder(),
         ));
@@ -615,7 +618,7 @@ fn run_selector_surface(
             let action = match crossterm::event::read()? {
                 Event::Key(key) => handle_key_event(&mut selector, key, &kb),
                 Event::Paste(text) => {
-                    selector_query_insert(&mut selector, &text);
+                    selector.paste(&text);
                     None
                 }
                 _ => None,
@@ -653,13 +656,6 @@ fn handle_key_event(
     // instead of leaving a hard-coded ctrl+c exit ahead of the table.
     let id = key_event_to_id(&key)?;
     selector.handle_key(&id, kb)
-}
-
-fn selector_query_insert(selector: &mut ConfigSelector, text: &str) {
-    for c in text.chars() {
-        let id = c.to_string();
-        selector.handle_key(&id, &KeybindingsManager::new());
-    }
 }
 
 #[cfg(test)]
@@ -710,6 +706,59 @@ mod tests {
             })
         );
         assert_eq!(selector.checked("kernel"), Some(false));
+    }
+
+    /// TS `ConfigSelectorComponent.handleInput`'s final arm hands every
+    /// non-intercepted key to the search `Input`, so the word and line
+    /// kills (ctrl+w, ctrl+u) edit the filter.
+    #[test]
+    fn word_and_line_edits_reach_the_filter() {
+        let mut selector = ConfigSelector::new(rows());
+        for key in ["k", "e", "r", "n", "e", "l"] {
+            selector.handle_key(key, &kb());
+        }
+        assert_eq!(selector.query(), "kernel");
+        selector.handle_key("ctrl+w", &kb());
+        assert_eq!(selector.query(), "", "ctrl+w deletes the typed word");
+        for key in ["b", "r", "o", "w", "s", "e", "r"] {
+            selector.handle_key(key, &kb());
+        }
+        assert_eq!(selector.query(), "browser");
+        selector.handle_key("ctrl+u", &kb());
+        assert_eq!(selector.query(), "", "ctrl+u clears the line");
+    }
+
+    /// The filter's full grammar: home+delete edits the head, undo takes
+    /// an edit back (TS the search `Input`'s bindings on the whole key
+    /// ids).
+    #[test]
+    fn cursor_and_undo_bindings_reach_the_filter() {
+        let mut selector = ConfigSelector::new(rows());
+        for key in ["a", "b", "c"] {
+            selector.handle_key(key, &kb());
+        }
+        assert_eq!(selector.query(), "abc");
+        selector.handle_key("home", &kb());
+        selector.handle_key("delete", &kb());
+        assert_eq!(selector.query(), "bc", "home+delete removes the head");
+        selector.handle_key("ctrl+-", &kb());
+        assert_eq!(selector.query(), "abc", "undo takes the delete back");
+    }
+
+    /// The no-match edge state recovers through the same grammar: a
+    /// garbage query that empties the list backspaces away, and the rows
+    /// return.
+    #[test]
+    fn the_no_match_state_recovers_through_backspace() {
+        let mut selector = ConfigSelector::new(rows());
+        for key in ["z", "z"] {
+            selector.handle_key(key, &kb());
+        }
+        assert!(selector.filtered.is_empty(), "garbage matches no row");
+        selector.handle_key("backspace", &kb());
+        selector.handle_key("backspace", &kb());
+        assert_eq!(selector.query(), "");
+        assert_eq!(selector.filtered.len(), rows().len(), "every row returns");
     }
 
     /// The frame renders through the shared menu grammar: the title, the
@@ -813,6 +862,26 @@ mod keybind_tests {
             selector.handle_key("ctrl+c", &kb),
             Some(SelectorAction::Close),
             "the cancel default still owns ctrl+c"
+        );
+    }
+
+    /// A rebound `tui.editor.deleteCharBackward` moves with the table
+    /// (TS the search `Input`'s binding): the remapped key edits the
+    /// filter and the freed key no longer deletes.
+    #[test]
+    fn a_remapped_backspace_binding_edits_the_filter() {
+        let mut selector = selector();
+        let kb = manager(&[("tui.editor.deleteCharBackward", &["ctrl+h"])]);
+        for key in ["a", "b"] {
+            selector.handle_key(key, &kb);
+        }
+        selector.handle_key("ctrl+h", &kb);
+        assert_eq!(selector.query(), "a", "the remapped binding deletes");
+        selector.handle_key("backspace", &kb);
+        assert_eq!(
+            selector.query(),
+            "a",
+            "the freed backspace matches no binding and never edits"
         );
     }
 

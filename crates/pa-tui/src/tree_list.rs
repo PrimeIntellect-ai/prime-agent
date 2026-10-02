@@ -884,19 +884,28 @@ impl TreeList {
             }
         } else if kb.matches(id, "app.tree.toggleLabelTimestamp") {
             self.show_label_timestamps = !self.show_label_timestamps;
-        } else {
-            // Printable characters build the search query (TS: control
-            // characters never append).
-            let has_control = id
-                .chars()
-                .any(|c| c.is_control() || matches!(u32::from(c), 0x7f..=0x9f));
-            if !has_control && !id.is_empty() && !id.contains('+') {
-                self.search_query.push_str(id);
-                self.folded.clear();
-                self.apply_filter();
-            }
+        } else if let Some(text) = crate::editor::decode_printable(id) {
+            // Printable characters build the search query. TS's final arm
+            // reads raw key data, where only printables join; the port gets
+            // parsed ids, so the editor's printable decode gates the append.
+            self.search_query.push_str(&text);
+            self.folded.clear();
+            self.apply_filter();
         }
         action
+    }
+
+    /// One bracketed paste into the search query: TS's raw-data arm
+    /// drops the control bytes (its `hasControlChars` gate), the
+    /// printable text joins the query, and the folds re-run.
+    pub fn paste(&mut self, text: &str) {
+        let clean: String = text.chars().filter(|c| !c.is_control()).collect();
+        if clean.is_empty() {
+            return;
+        }
+        self.search_query.push_str(&clean);
+        self.folded.clear();
+        self.apply_filter();
     }
 
     /// Update one node's label after a save (TS `updateNodeLabel`).
