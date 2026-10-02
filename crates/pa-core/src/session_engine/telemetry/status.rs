@@ -108,43 +108,35 @@ pub fn telemetry_status_text(settings: &SettingsManager, agent_dir: &Path) -> St
 ///
 /// # Errors
 ///
-/// Returns an error when the global settings file cannot be written.
+/// Returns an error when the global settings file cannot be written, or
+/// when the telemetry-state lock stays contended past its retry window:
+/// the command fails before anything changes (an opt-out whose epoch
+/// cannot move must not report success).
 pub fn set_telemetry_enabled_text(
     settings: &mut SettingsManager,
     agent_dir: &Path,
     enabled: bool,
 ) -> anyhow::Result<String> {
+    // The telemetry-state directory lock spans the whole command: the
+    // settings change and the off-epoch bump land together or neither,
+    // cross-process (a `/telemetry` in one process, the recording in the
+    // worker's). Contention past the retry window fails the command
+    // cleanly — the user retries — instead of leaving a saved opt-out
+    // whose zero-event window the worker could not see. The lock nests
+    // over the settings storage's own lock; nothing takes them in the
+    // reverse order.
+    // The lock lives beside the state file; the settings write would
+    // create the directory, but the lock comes first.
+    std::fs::create_dir_all(agent_dir)?;
+    let state_path = agent_dir.join("telemetry.json");
+    let _state_lock = acquire_telemetry_state_lock(&state_path)?;
     settings.set_telemetry_enabled(enabled)?;
     if !enabled {
         // The persisted off-epoch bumps on every successful disable: the
         // recording seams (this process or another — the worker's) sever
         // facts that span the opt-out even when no telemetry event fires
-        // inside the off window. The bump is a read-modify-write, so the
-        // command funnel serializes it cross-process with the same
-        // directory-lock protocol the settings storage uses; on lock
-        // contention past the retry window it degrades to skipping the
-        // bump (the live per-event opt-out check still guards the off
-        // period itself).
-        let state_path = agent_dir.join("telemetry.json");
-        let mut acquired = None;
-        for _ in 0..10 {
-            match crate::platform::lock_dir::LockDir::acquire(
-                &state_path,
-                std::time::Duration::from_secs(10),
-            ) {
-                Ok(guard) => {
-                    acquired = Some(guard);
-                    break;
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                }
-                Err(_) => break,
-            }
-        }
-        if acquired.is_some() {
-            pa_telemetry::bump_off_epoch(agent_dir);
-        }
+        // inside the off window.
+        pa_telemetry::bump_off_epoch(agent_dir);
     }
     let switch = telemetry_switch(&settings.reopen());
     let requested = if enabled { "on" } else { "off" };
@@ -167,6 +159,35 @@ pub fn set_telemetry_enabled_text(
     Ok(format!(
         "{headline}\n{}",
         telemetry_status_text(settings, agent_dir)
+    ))
+}
+
+/// Acquire the telemetry-state directory lock (the settings storage's
+/// protocol: 10s staleness, `WouldBlock` retried 10 x 20ms).
+///
+/// # Errors
+///
+/// Returns the lock error when the lock stays contended past the retry
+/// window or cannot be created: the caller must fail the command (an
+/// opt-out whose epoch cannot move must not report success).
+fn acquire_telemetry_state_lock(
+    state_path: &Path,
+) -> anyhow::Result<crate::platform::lock_dir::LockDir> {
+    const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(10);
+    let mut last_error = None;
+    for _ in 1..=10 {
+        match crate::platform::lock_dir::LockDir::acquire(state_path, STALE_AFTER) {
+            Ok(guard) => return Ok(guard),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                last_error = Some(error);
+            }
+            Err(error) => return Err(error.into()),
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    Err(anyhow::anyhow!(
+        "Failed to acquire the telemetry state lock: {}",
+        last_error.map_or_else(|| "busy".to_string(), |e| e.to_string())
     ))
 }
 

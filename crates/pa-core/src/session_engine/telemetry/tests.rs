@@ -1708,3 +1708,48 @@ fn concurrent_disables_bump_the_epoch_once_each_and_keep_the_state_private() {
         );
     }
 }
+
+/// A contended telemetry-state lock fails the disable cleanly: the
+/// settings stay unchanged and the epoch stays put, so an opt-out never
+/// reports success without its zero-event window being visible to the
+/// worker. Once the contention clears the command works and bumps.
+#[test]
+fn a_contended_state_lock_fails_the_disable_cleanly() {
+    let _env = CleanTelemetryEnv::default();
+    let dir = tempfile::tempdir().unwrap();
+    let agent_dir = dir.path().join("agent");
+    let mut settings = crate::settings::SettingsManager::create(dir.path(), &agent_dir);
+    super::set_telemetry_enabled_text(&mut settings, &agent_dir, true).unwrap();
+    let id = pa_telemetry::install_id(&agent_dir).unwrap();
+
+    // Another process holds the telemetry-state lock.
+    let held = crate::platform::lock_dir::LockDir::acquire(
+        &agent_dir.join("telemetry.json"),
+        std::time::Duration::from_secs(10),
+    )
+    .unwrap();
+
+    let mut disabling = crate::settings::SettingsManager::create(dir.path(), &agent_dir);
+    let outcome = super::set_telemetry_enabled_text(&mut disabling, &agent_dir, false);
+    assert!(
+        outcome.is_err(),
+        "the disable fails instead of skipping its epoch bump"
+    );
+    // Nothing changed: the settings still say on, the epoch never moved.
+    assert!(
+        crate::settings::SettingsManager::create(dir.path(), &agent_dir).get_telemetry_enabled()
+    );
+    assert_eq!(pa_telemetry::read_off_epoch(&agent_dir), 0);
+
+    drop(held);
+
+    // With the lock free, the same command lands: settings off, one bump.
+    let mut retry = crate::settings::SettingsManager::create(dir.path(), &agent_dir);
+    super::set_telemetry_enabled_text(&mut retry, &agent_dir, false).unwrap();
+    assert_eq!(pa_telemetry::read_off_epoch(&agent_dir), 1);
+    assert_eq!(
+        pa_telemetry::existing_install_id(&agent_dir),
+        Some(id),
+        "the installation id survives the bumps"
+    );
+}
