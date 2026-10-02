@@ -356,7 +356,7 @@ fn no_output_placeholder() {
 #[test]
 fn bash_dominated_cell_renders_as_bash() {
     let code =
-        "r = await sh(\"\"\"\ncd crates/pa-tui\ncargo test -p pa-tui\n\"\")\nprint(r.output)";
+        "r = await sh(\"\"\"\ncd crates/pa-tui\ncargo test -p pa-tui\n\"\"\")\nprint(r.output)";
     let card = cell_card(
         code,
         json!({
@@ -390,7 +390,7 @@ fn bash_dominated_cell_renders_as_bash() {
 
 #[test]
 fn bash_minority_cell_stays_python() {
-    let code = "def sh(cmd):\n    return await bash(cmd)\nr = await sh(\"ls\")\nprint(r.pid)";
+    let code = "async def sh(cmd):\n    return await bash(cmd)\nr = await sh(\"ls\")\nprint(r.pid)";
     let card = cell_card(
         code,
         json!({

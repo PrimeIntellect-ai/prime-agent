@@ -303,10 +303,7 @@ pub(crate) struct BashCellStats {
 /// The bash stats of a settled ipython card that renders as bash.
 pub(crate) fn bash_dominated_stats(card: &ToolCallCard) -> Option<BashCellStats> {
     let code = cell_code(card).trim_end();
-    let details = card.result.as_ref().map_or_else(
-        || IpythonDetails::parse(&Value::Null),
-        |result| IpythonDetails::parse(&result.details),
-    );
+    let details = IpythonDetails::parse(&card.result.as_ref()?.details);
     let bash = dominant_bash(&details, code)?;
     Some(BashCellStats {
         bash_lines: bash.lines,
