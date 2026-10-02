@@ -416,6 +416,27 @@ fn a_caret_move_keeps_the_filtered_selection() {
     );
 }
 
+/// A paste on the empty-menu state (no tabs) is a no-op, like the
+/// navigation keys: nothing panics, nothing types.
+#[test]
+fn a_paste_on_an_empty_menu_edits_nothing() {
+    let mut menu = SettingsMenu::new(Vec::new());
+    menu.paste("anything");
+    assert!(menu.tabs.is_empty());
+}
+
+/// A paste while a submenu owns the frame edits nothing: the parent
+/// list's search stays untouched behind it.
+#[test]
+fn a_paste_while_a_submenu_is_open_edits_nothing() {
+    let mut menu = menu();
+    menu.handle_key("2", &kb());
+    menu.handle_key("enter", &kb());
+    assert!(menu.sub.is_some());
+    menu.paste("thinking");
+    assert_eq!(menu.tabs[menu.tab].search.value(), "");
+}
+
 /// A paste lands in the search field (TS routes the raw paste to the
 /// `Input`): TS's sanitize strips the spaces (Space stays the row
 /// activation), the filter re-runs on the changed query.

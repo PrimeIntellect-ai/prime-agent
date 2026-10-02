@@ -509,6 +509,16 @@ impl SettingsMenu {
     /// (Space stays the row activation), and the filter re-runs when the
     /// query changed.
     pub fn paste(&mut self, text: &str) {
+        // The submenu owns the frame while open (its key dispatch takes
+        // every key first): a paste never edits the hidden parent list.
+        if self.sub.is_some() {
+            return;
+        }
+        // An empty row set carries no tabs (the menu renders its empty
+        // state): nothing to paste into.
+        if self.tabs.is_empty() {
+            return;
+        }
         let sanitized = text.replace(' ', "");
         let tab = self.active_mut();
         let previous = tab.search.value().to_string();
