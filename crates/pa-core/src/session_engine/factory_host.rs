@@ -178,6 +178,15 @@ impl FactoryHost {
                 // states' declared models from the preflight. A scoped
                 // reference (`local:`/`global:`) resolves its own
                 // store's entry, exactly like the kernel's harness get.
+                //
+                // The match order is the kernel's own resolution, tier
+                // by tier: the id, then the title, within a tier before
+                // the next tier (its harness `get` answers the id before
+                // the title scan, and the local store is the
+                // unprefixed tier). A global id must not shadow a local
+                // title — the old id-first sweep matched the global id
+                // while the kernel spawned the local titled subagent,
+                // validating (and allowlisting) the wrong model.
                 let Some(reference) = subagent.as_str() else {
                     continue;
                 };
@@ -186,13 +195,18 @@ impl FactoryHost {
                     Scope::Any => true,
                     other => other == scope,
                 };
-                subagents
-                    .iter()
-                    .find(|(scope, candidate)| allows(*scope) && candidate.id == reference)
-                    .or_else(|| {
+                let tier_entry =
+                    |tier: Scope, key: fn(&crate::refinement::HarnessEntry) -> &str| {
                         subagents.iter().find(|(scope, candidate)| {
-                            allows(*scope) && candidate.title == reference
+                            *scope == tier && allows(*scope) && key(candidate) == reference
                         })
+                    };
+                [Scope::Local, Scope::Global]
+                    .into_iter()
+                    .filter(|tier| allows(*tier))
+                    .find_map(|tier| {
+                        tier_entry(tier, |candidate| &candidate.id)
+                            .or_else(|| tier_entry(tier, |candidate| &candidate.title))
                     })
                     .and_then(|(_, entry)| entry.metadata.get("model"))
                     .and_then(Value::as_str)

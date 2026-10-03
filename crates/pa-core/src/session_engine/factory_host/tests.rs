@@ -277,6 +277,92 @@ fn a_null_machine_falls_through_to_the_dag_spec() {
     );
 }
 
+/// One subagent entry with an explicit title and model (the shared
+/// helper hard-codes both to the id).
+fn titled_subagent(id: &str, title: &str, model: &str) -> HarnessEntry {
+    let mut metadata = Map::new();
+    metadata.insert("model".to_string(), json!(model));
+    HarnessEntry {
+        id: id.to_string(),
+        kind: RefinementKind::Subagent,
+        title: title.to_string(),
+        content: "Do the work.".to_string(),
+        path: String::new(),
+        scope: None,
+        reference: Map::new(),
+        arguments: Map::new(),
+        metadata,
+        source: "test".to_string(),
+        created_at: "2026-01-01T00:00:00Z".to_string(),
+        updated_at: "2026-01-01T00:00:00Z".to_string(),
+        version: 1,
+    }
+}
+
+/// The kernel's own resolution order, tier by tier — the id, then the
+/// title, within a tier before the next tier — so a local TITLED
+/// subagent wins over a global ID of the same name: the old id-first
+/// sweep matched the global id while the kernel's harness `get` +
+/// title scan spawns the local titled subagent, so the preflight
+/// validated (and allowlisted) the wrong model.
+#[test]
+fn a_local_title_wins_over_a_global_id_of_the_same_name() {
+    let dir = tempfile::tempdir().unwrap();
+    write_catalog(dir.path());
+    write_harness_state(
+        dir.path(),
+        // Global: the id "researcher", a model the allowlist would
+        // happily allow while the kernel spawns another.
+        &[
+            titled_subagent("researcher", "g-titled", "testprov/other-model"),
+            machine_entry(
+                "spec",
+                &json!({
+                    "states": [{ "id": "a", "entry": true, "subagent": "researcher" }]
+                }),
+            ),
+        ],
+        // Local: the TITLE "researcher" under a different id, the model
+        // the kernel's tier order actually spawns.
+        &[titled_subagent(
+            "titled-researcher",
+            "researcher",
+            "testprov/declared-model",
+        )],
+    );
+    let bridge = host(dir.path(), None, None, true);
+    assert_eq!(
+        bridge.spec_model_selectors("spec").unwrap(),
+        vec!["testprov/declared-model".to_string()],
+        "the local titled subagent's model is the one the preflight reads"
+    );
+    // End to end, the allowlist pins the model the kernel actually
+    // spawns (the local-title model): a gate that allows only the
+    // global-id model must REFUSE the run — the exact bypass the old
+    // id-first sweep produced, letting a blocked model spawn — and a
+    // gate that allows the local-title model passes it.
+    let allows_only_global_id = host(
+        dir.path(),
+        None,
+        Some(vec!["testprov/other-model".to_string()]),
+        true,
+    );
+    assert!(
+        allows_only_global_id.preflight_run("spec").is_err(),
+        "the allowlist gate must judge the model the run actually spawns"
+    );
+    let allows_actual = host(
+        dir.path(),
+        None,
+        Some(vec!["testprov/declared-model".to_string()]),
+        true,
+    );
+    assert!(
+        allows_actual.preflight_run("spec").is_ok(),
+        "the allowed actual model passes the gate"
+    );
+}
+
 /// The local overlay shadows the global spec by id (the merge's `local:`
 /// rule keeps the shadowed global reachable under its own id).
 #[test]
