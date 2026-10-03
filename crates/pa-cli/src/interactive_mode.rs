@@ -90,7 +90,7 @@ pub fn run_interactive_mode(options: &RunOptions) -> Result<i32> {
             } else {
                 "cold"
             };
-        let startup_telemetry = (!options.config.telemetry_disabled).then(|| {
+        let mut startup_telemetry = (!options.config.telemetry_disabled).then(|| {
             let agent_dir = options.config.agent_dir.clone();
             let settings =
                 pa_core::settings::SettingsManager::create(&options.config.cwd, &agent_dir);
@@ -137,9 +137,9 @@ pub fn run_interactive_mode(options: &RunOptions) -> Result<i32> {
         }
         // `startup` (schema v1): process entry to a ready interactive
         // session environment (daemon listening). Emitted through a
-        // one-shot client that flushes immediately; the session's own
-        // telemetry rides the daemon worker.
-        if let Some(client) = startup_telemetry.as_ref() {
+        // one-shot client; the session's own telemetry rides the daemon
+        // worker.
+        if let Some(client) = startup_telemetry.take() {
             let daemon_ready_ms = startup_started.elapsed().as_millis() as u64;
             let mut properties = pa_telemetry::base_properties("interactive");
             properties.set("duration_ms", serde_json::Value::from(daemon_ready_ms));
@@ -154,8 +154,8 @@ pub fn run_interactive_mode(options: &RunOptions) -> Result<i32> {
                 startup_kind: Some(startup_kind),
                 timing_scope: Some("system_work"),
             }
-            .track(client);
-            let _ = client.shutdown().await;
+            .track(&client);
+            flush_startup_telemetry(client);
         }
         // `prime-agent agents` and bare `--resume` open the agents view
         // (TS `agentsViewRequested`); the view then opens sessions, and a
@@ -206,6 +206,23 @@ pub fn run_interactive_mode(options: &RunOptions) -> Result<i32> {
     // contract.
     std::thread::sleep(Duration::from_millis(300));
     Ok(0)
+}
+
+/// The one-shot startup client's final flush, handed to the runtime:
+/// fire-and-forget from the paint path's perspective — the tracked
+/// `startup` events' delivery belongs to the background worker (the
+/// sink's bounded request timeout; a re-sent batch keeps its event ids,
+/// so the backend dedupes), never to the first frame. Awaiting this
+/// flush inline was the #3288 regression: the drain held the first paint
+/// behind the analytics POST's network round-trip to the platform
+/// endpoint, invisible to the offline test env (no analytics sink in
+/// debug builds). `the_startup_flush_never_blocks_the_first_frame`
+/// guards the hand-off with a hanging sink: a regression back to an
+/// inline await fails that test instead of delaying the paint.
+pub(super) fn flush_startup_telemetry(client: pa_telemetry::TelemetryClient) {
+    tokio::spawn(async move {
+        let _ = client.shutdown().await;
+    });
 }
 
 /// TS `shutdown` prints the dim resume hint (`formatResumeHint`) to stdout

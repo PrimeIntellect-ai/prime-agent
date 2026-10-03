@@ -904,3 +904,129 @@ fn a_fork_launch_never_opens_the_agents_view() {
         "a --continue with a saved candidate still opens the view"
     );
 }
+
+/// A sink whose `send_batch` hangs until the test releases it: the
+/// stand-in for the analytics POST's network round-trip (the same
+/// delivery contract the production sink carries, minus its own
+/// timeout — the point is that delivery takes longer than the paint).
+#[derive(Default)]
+struct GatedSink {
+    /// The batch attempt reached the sink (delivery started).
+    entered: std::sync::atomic::AtomicBool,
+    /// The delivered batches' event names (delivery finished).
+    delivered: std::sync::Mutex<Vec<String>>,
+    /// The release flag the hanging send waits on.
+    released: std::sync::atomic::AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+impl GatedSink {
+    fn release(&self) {
+        self.released
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+
+    fn delivered_names(&self) -> Vec<String> {
+        self.delivered.lock().expect("gate lock").clone()
+    }
+}
+
+impl pa_telemetry::TelemetrySink for GatedSink {
+    fn send_batch<'a>(
+        &'a self,
+        _install_id: &'a str,
+        events: Vec<pa_telemetry::TelemetryEvent>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = pa_telemetry::SinkOutcome> + Send + 'a>>
+    {
+        Box::pin(async move {
+            self.entered
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            while !self.released.load(std::sync::atomic::Ordering::SeqCst) {
+                self.notify.notified().await;
+            }
+            let mut delivered = self.delivered.lock().expect("gate lock");
+            for event in &events {
+                delivered.push(event.name.clone());
+            }
+            pa_telemetry::SinkOutcome::Sent
+        })
+    }
+}
+
+/// The interactive startup flush is fire-and-forget from the paint
+/// path's perspective: the first frame must never await the tracked
+/// `startup` events' delivery (the #3288 regression — the inline
+/// `shutdown().await` held the first paint behind the analytics POST's
+/// ~150ms network round-trip; the bench never saw it because the
+/// offline test env installs no analytics sink). The gated sink
+/// stands in for the POST: the flush hand-off must complete while
+/// delivery still hangs, and the released drain must still deliver the
+/// tracked events.
+#[test]
+fn the_startup_flush_never_blocks_the_first_frame() {
+    tokio::runtime::Runtime::new()
+        .expect("runtime")
+        .block_on(startup_flush_never_blocks_the_first_frame());
+}
+
+async fn startup_flush_never_blocks_the_first_frame() {
+    let sink = std::sync::Arc::new(GatedSink::default());
+    let mut config = pa_telemetry::TelemetryClientConfig::new("install-1");
+    config.batch_size = 20;
+    config.flush_interval = std::time::Duration::from_mins(10);
+    config.sinks = vec![sink.clone() as std::sync::Arc<dyn pa_telemetry::TelemetrySink>];
+    let client = pa_telemetry::TelemetryClient::spawn(config).expect("startup client");
+
+    // The composition root's startup tracks: the event and the ui_ready
+    // stage on the one-shot client.
+    let mut properties = pa_telemetry::base_properties("interactive");
+    properties.set("duration_ms", serde_json::Value::from(1));
+    client.track("startup", properties);
+    pa_telemetry::AgentStartupStage {
+        stage: "ui_ready",
+        outcome: "completed",
+        duration_ms: Some(1),
+        startup_kind: Some("cold"),
+        timing_scope: Some("system_work"),
+    }
+    .track(&client);
+
+    // The paint path's hand-off: while the sink still hangs, it must
+    // already be done — the first frame paints with delivery pending.
+    // The hand-off runs as its own task so a regression back to a
+    // blocking flush reds the timeout instead of wedging the suite.
+    let hand_off = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        tokio::spawn(async move { flush_startup_telemetry(client) }),
+    )
+    .await;
+    assert!(
+        hand_off.is_ok(),
+        "the flush hand-off completed while the sink still hung (the paint path never waits out delivery)"
+    );
+    assert!(
+        sink.delivered_names().is_empty(),
+        "delivery was still pending when the paint path proceeded"
+    );
+
+    // The released drain still delivers the tracked startup events.
+    sink.release();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while sink.delivered_names().is_empty() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the released drain delivered the tracked startup events"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    let names = sink.delivered_names();
+    assert!(
+        names.contains(&"startup".to_string()),
+        "the startup event delivered: {names:?}"
+    );
+    assert!(
+        names.contains(&"agent startup stage".to_string()),
+        "the ui_ready stage delivered: {names:?}"
+    );
+}
