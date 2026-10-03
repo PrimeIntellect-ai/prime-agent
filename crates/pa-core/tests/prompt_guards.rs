@@ -515,7 +515,9 @@ fn core_layer_documents_the_real_tool_surface() {
 /// The packaged skill set at TS tip `f62dae4d0`
 /// (`packages/coding-agent/skills/`): 12 skills — the generic `mcp` doc
 /// skill in, the per-service linear/notion pair out (TS removed theirs
-/// when the generic MCP surface landed).
+/// when the generic MCP surface landed). `system-router` is the one
+/// addition since: the System 1 / System 2 harness router (TS PR #2484)
+/// ported as a bundled kernel skill.
 const TS_PACKAGED_SKILL_SET: &[&str] = &[
     "agent-message",
     "agent-observe",
@@ -528,6 +530,7 @@ const TS_PACKAGED_SKILL_SET: &[&str] = &[
     "refine",
     "rlm-heartbeat",
     "skill-creator",
+    "system-router",
     "websearch",
 ];
 

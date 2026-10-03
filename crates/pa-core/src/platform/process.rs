@@ -234,6 +234,99 @@ pub fn kill_process_group_or_pid(_pid: i32) -> bool {
     false
 }
 
+/// Relay a signal to the process group led by `pid` (the leader's own pid is
+/// its pgid): the reference ladder's stop for teardown paths whose direct
+/// child may already be reaped - a launcher (`sh -c`, a container client)
+/// can exit first and leave descendants alive in its group, so the group is
+/// signalled whether or not the leader is still around (TS
+/// `signalProcessGroupIfHeld`). Group-only, no bare-pid fallback: by the
+/// time teardown reaches here the leader is reaped, and a signal to its
+/// recycled pid would hit an innocent process - the group signal carries the
+/// reference's inherent, bounded pid-reuse TOCTOU and nothing wider.
+#[cfg(unix)]
+#[must_use]
+pub fn signal_process_group(pid: i32, signal: Signal) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    let sig = match signal {
+        Signal::Term => libc::SIGTERM,
+        Signal::Kill => libc::SIGKILL,
+    };
+    unsafe { libc::kill(-pid, sig) == 0 }
+}
+
+/// Windows (and bare-metal) have no signalable process groups: the TS
+/// reference's `processGroupExists` is false on win32, so its leader-exit
+/// relays are no-ops there; tree teardown goes through
+/// [`kill_process_group_or_pid`] instead.
+#[cfg(not(unix))]
+#[must_use]
+pub fn signal_process_group(_pid: i32, _signal: Signal) -> bool {
+    false
+}
+
+/// Cheap `kill(-pid, 0)` group-membership probe: true while any process
+/// still holds the pgid led by `pid`, so teardown can tell a drained
+/// group from one that ignored its stop (TS `processGroupExists`; EPERM
+/// counts as existing - the group is there, just not signalable).
+/// Windows (and bare-metal) have no signalable groups, so no group ever
+/// exists to probe there and callers take their enforcement arm.
+#[cfg(unix)]
+#[must_use]
+pub fn process_group_exists(pid: i32) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    // SAFETY: signal 0 performs the permission and existence checks
+    // without sending anything.
+    if unsafe { libc::kill(-pid, 0) } == 0 {
+        return true;
+    }
+    // EPERM: the group has a member this process may not signal.
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(not(unix))]
+#[must_use]
+pub fn process_group_exists(_pid: i32) -> bool {
+    false
+}
+
+/// Kill every member of the process group led by `pid`: the enforced stop
+/// for teardown after the leader has exited and been reaped (the close
+/// ladder's leader-exit arms). No bare-pid fallback - the reaped leader no
+/// longer anchors its pid, so a fallback could signal an innocent recycled
+/// pid; the group signal keeps the reference's inherent, bounded
+/// group-reuse TOCTOU and nothing wider (the group's live members hold the
+/// pgid at signal time). The caller must still own the leader's `Child`:
+/// on Windows the handle keeps the reaped leader's pid reserved against
+/// reuse and resolvable for the tree walk, exactly while a live member
+/// anchors the pgid on POSIX.
+#[cfg(unix)]
+#[must_use]
+pub fn kill_process_group(pid: i32) -> bool {
+    signal_process_group(pid, Signal::Kill)
+}
+
+/// The same enforced stop on Windows: no signalable groups, so the
+/// hardened `taskkill /F /T` tree kill reaches the dead leader's
+/// descendants through the parent-child snapshot instead (the TS
+/// reference's own win32 answer for a stop that must reach a tree). The
+/// walk is link-based: a descendant keeps naming the exited leader as its
+/// parent, so the tree stays walkable after the reaped leader itself is
+/// gone from the snapshot - provided the caller still owns the leader's
+/// `Child` handle, which keeps the pid reserved (a Windows pid recycles
+/// only after its last handle closes), so the walk can neither miss the
+/// tree nor reach an unrelated recycled one. Best-effort by contract:
+/// false only means the stop is unproven, the answer callers treat
+/// conservatively.
+#[cfg(not(unix))]
+#[must_use]
+pub fn kill_process_group(pid: i32) -> bool {
+    kill_process_group_or_pid(pid)
+}
+
 /// Cheap `kill(pid, 0)` existence probe; counts zombies as existing.
 #[cfg(unix)]
 #[must_use]
@@ -330,6 +423,7 @@ pub fn pidfd_signal(fd: i32, signal: Signal) -> bool {
         any(target_arch = "x86_64", target_arch = "aarch64")
     ))
 ))]
+#[must_use]
 pub fn pidfd_signal(_fd: i32, _signal: Signal) -> bool {
     false
 }
@@ -586,6 +680,10 @@ mod windows_tests {
         assert!(!kill_pid(-1, Signal::Kill));
         assert!(!kill_pid(0, Signal::Term));
         assert!(!kill_process_group_or_pid(-1));
+        assert!(!kill_process_group(-1));
+        assert!(!kill_process_group(0));
+        assert!(!process_group_exists(-1));
+        assert!(!process_group_exists(0));
     }
 }
 
@@ -609,6 +707,35 @@ mod exit_wait_tests {
         assert!(
             wait_for_exit(pid).await.is_ok(),
             "a reaped pid resolves at once"
+        );
+    }
+}
+
+/// The group probe the teardown ladders drain on (TS `processGroupExists`)
+/// and the enforced group-only kill they escalate to.
+#[cfg(all(test, unix))]
+mod process_group_tests {
+    use super::*;
+
+    #[test]
+    fn process_group_exists_while_a_member_runs_and_not_after_it_drains() {
+        let mut command = std::process::Command::new("sleep");
+        command.arg("600");
+        set_new_process_group(&mut command);
+        let mut child = command.spawn().expect("spawn sleep");
+        let pid = child.id() as i32;
+        assert!(process_group_exists(pid), "the group holds its live leader");
+        child.kill().expect("kill sleep");
+        child.wait().expect("reap sleep");
+        // The leader was the group's only member: reaped, nothing holds
+        // the pgid and the enforced kill proves no delivery.
+        assert!(
+            !process_group_exists(pid),
+            "a drained group names no members"
+        );
+        assert!(
+            !kill_process_group(pid),
+            "the enforced kill on a drained group is a proven no-op"
         );
     }
 }

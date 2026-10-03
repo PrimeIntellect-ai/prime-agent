@@ -1,0 +1,1 @@
+- Added a System 1 / System 2 harness router: the bundled `system-router` skill runs an action-only sub-model (one single-choice decision per step, thinking disabled, confidence-gated per action risk) against a declared JSON-lines environment adapter, and returns the full trace for the session model to review and steer.
