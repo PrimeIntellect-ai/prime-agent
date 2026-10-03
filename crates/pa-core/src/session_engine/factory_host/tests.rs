@@ -323,12 +323,22 @@ fn a_local_title_wins_over_a_global_id_of_the_same_name() {
             ),
         ],
         // Local: the TITLE "researcher" under a different id, the model
-        // the kernel's tier order actually spawns.
-        &[titled_subagent(
-            "titled-researcher",
-            "researcher",
-            "testprov/declared-model",
-        )],
+        // the kernel's tier order actually spawns — and the SAME spec
+        // entry the run names, because the kernel's unprefixed spec
+        // lookup reads one store (its harness `get` has no
+        // local-then-global fall-through): a spec stored only globally
+        // is an UNKNOWN SPEC to the kernel, so the run the end-to-end
+        // allowlist pins judge would reject before any spawn — the
+        // bypass scenario must run a spec the kernel actually accepts.
+        &[
+            titled_subagent("titled-researcher", "researcher", "testprov/declared-model"),
+            machine_entry(
+                "spec",
+                &json!({
+                    "states": [{ "id": "a", "entry": true, "subagent": "researcher" }]
+                }),
+            ),
+        ],
     );
     let bridge = host(dir.path(), None, None, true);
     assert_eq!(

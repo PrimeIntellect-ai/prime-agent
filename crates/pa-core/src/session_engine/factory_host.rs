@@ -90,9 +90,12 @@ impl FactoryHost {
     /// kernel's `run()` remains the authority and reports unknown specs).
     /// Ids carry the harness's scope prefixes (`local:`/`global:`) verbatim
     /// — the kernel's harness `get` routes them to one store, so the
-    /// preflight resolves the exact entry the run will execute; an
-    /// unprefixed id resolves local state first, then global (the same
-    /// tier order the harness's unprefixed `get` uses).
+    /// preflight resolves the exact entry the run will execute. An
+    /// unprefixed id resolves local state first, then global — broader
+    /// than the kernel's own unprefixed lookup, which reads one store
+    /// (a spec stored only globally is an unknown spec to the kernel),
+    /// so a global fall-through judges a run the kernel would refuse;
+    /// harmless, and the kernel's `run()` remains the authority.
     fn spec_model_selectors(&self, spec_id: &str) -> Option<Vec<String>> {
         let (spec_scope, spec_id) = split_harness_scope(spec_id);
         let global = self.global_harness_state();

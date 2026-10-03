@@ -101,7 +101,19 @@ def _is_positive_int(value: Any) -> bool:
     return _is_int(value) and value > 0
 
 
-def _value_is_finite(value: Any, _seen: "frozenset[int] | None" = None) -> bool:
+MAX_GUARD_VALUE_DEPTH = 256
+"""Nesting bound on one guard comparison value (``when.value``). Every
+seam the value rides recurses per level — the traversal itself, the
+snapshot's ``deepcopy``, the wire conversion, the reply frames' JSON
+encoder — so a value deeper than this bound cannot ride any of them and
+would exhaust the interpreter's stack on the way to finding out. A
+container nested beyond the bound rejects as part of the same
+finite-JSON-data rule, with the validation answer instead of the crash."""
+
+
+def _value_is_finite(
+    value: Any, _seen: "frozenset[int] | None" = None, _depth: int = 0
+) -> bool:
     """True when a guard comparison value is JSON clean: every nested
     float finite, every object key a string, every leaf a JSON scalar,
     and no cycle.
@@ -124,8 +136,16 @@ def _value_is_finite(value: Any, _seen: "frozenset[int] | None" = None) -> bool:
     stops at the cycle instead of exhausting the interpreter's stack
     chasing it. ``_seen`` threads the per-branch ancestry (a
     shared-but-acyclic reference appearing twice stays valid: each
-    branch checks it independently).
+    branch checks it independently). Depth bounds the nesting the same
+    way: a container nested beyond ``MAX_GUARD_VALUE_DEPTH`` levels
+    cannot ride any of the value's downstream seams (the snapshot's
+    deep copy, the wire conversion, the reply frames' encoder are each
+    recursive per level), so it rejects here with the validation answer
+    instead of exhausting the interpreter's stack further down the
+    write path.
     """
+    if _depth > MAX_GUARD_VALUE_DEPTH:
+        return False
     seen = _seen or frozenset()
     if isinstance(value, (list, dict)):
         if id(value) in seen:
@@ -136,10 +156,10 @@ def _value_is_finite(value: Any, _seen: "frozenset[int] | None" = None) -> bool:
     if isinstance(value, (bool, int, str)) or value is None:
         return True
     if isinstance(value, list):
-        return all(_value_is_finite(item, seen) for item in value)
+        return all(_value_is_finite(item, seen, _depth + 1) for item in value)
     if isinstance(value, dict):
         return all(
-            isinstance(key, str) and _value_is_finite(item, seen)
+            isinstance(key, str) and _value_is_finite(item, seen, _depth + 1)
             for key, item in value.items()
         )
     return False
@@ -457,7 +477,8 @@ def _validate_guard(
         errors.append(
             f"transitions[{index}] when.value must be finite JSON data "
             "(JSON carries no NaN or Infinity, and only JSON shapes "
-            "serialize: lists, objects, strings, numbers, booleans, null)"
+            "serialize: lists, objects, strings, numbers, booleans, null, "
+            f"and no container nests deeper than {MAX_GUARD_VALUE_DEPTH} levels)"
         )
 
 

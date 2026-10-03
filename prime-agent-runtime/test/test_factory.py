@@ -1707,7 +1707,7 @@ class ValidateFactoryMachineTest(unittest.TestCase):
                 validate_factory_machine(
                     machine_with({"output": "verdict", "op": "eq", "value": bad})
                 ),
-                ["transitions[0] when.value must be finite JSON data (JSON carries no NaN or Infinity, and only JSON shapes serialize: lists, objects, strings, numbers, booleans, null)"],
+                ["transitions[0] when.value must be finite JSON data (JSON carries no NaN or Infinity, and only JSON shapes serialize: lists, objects, strings, numbers, booleans, null, and no container nests deeper than 256 levels)"],
                 repr(bad),
             )
         nested = machine_with(
@@ -1715,7 +1715,7 @@ class ValidateFactoryMachineTest(unittest.TestCase):
         )
         self.assertEqual(
             validate_factory_machine(nested),
-            ["transitions[0] when.value must be finite JSON data (JSON carries no NaN or Infinity, and only JSON shapes serialize: lists, objects, strings, numbers, booleans, null)"],
+            ["transitions[0] when.value must be finite JSON data (JSON carries no NaN or Infinity, and only JSON shapes serialize: lists, objects, strings, numbers, booleans, null, and no container nests deeper than 256 levels)"],
         )
 
     def test_guard_value_object_keys_must_be_strings(self) -> None:
@@ -1751,7 +1751,7 @@ class ValidateFactoryMachineTest(unittest.TestCase):
         ):
             self.assertEqual(
                 validate_factory_machine(machine_with(["ok", bad])),
-                ["transitions[0] when.value must be finite JSON data (JSON carries no NaN or Infinity, and only JSON shapes serialize: lists, objects, strings, numbers, booleans, null)"],
+                ["transitions[0] when.value must be finite JSON data (JSON carries no NaN or Infinity, and only JSON shapes serialize: lists, objects, strings, numbers, booleans, null, and no container nests deeper than 256 levels)"],
                 repr(bad),
             )
         # String keys with finite values stay valid.
@@ -1781,18 +1781,54 @@ class ValidateFactoryMachineTest(unittest.TestCase):
         cycle.append(cycle)
         self.assertEqual(
             validate_factory_machine(machine_with(cycle)),
-            ["transitions[0] when.value must be finite JSON data (JSON carries no NaN or Infinity, and only JSON shapes serialize: lists, objects, strings, numbers, booleans, null)"],
+            ["transitions[0] when.value must be finite JSON data (JSON carries no NaN or Infinity, and only JSON shapes serialize: lists, objects, strings, numbers, booleans, null, and no container nests deeper than 256 levels)"],
         )
         nested: dict[str, Any] = {"flag": True}
         nested["self"] = nested
         self.assertEqual(
             validate_factory_machine(machine_with([nested])),
-            ["transitions[0] when.value must be finite JSON data (JSON carries no NaN or Infinity, and only JSON shapes serialize: lists, objects, strings, numbers, booleans, null)"],
+            ["transitions[0] when.value must be finite JSON data (JSON carries no NaN or Infinity, and only JSON shapes serialize: lists, objects, strings, numbers, booleans, null, and no container nests deeper than 256 levels)"],
         )
         # A shared-but-acyclic reference is NOT a cycle: the same object
         # appearing twice (a diamond) stays a valid comparison value.
         shared = {"flag": True}
         self.assertEqual(validate_factory_machine(machine_with([shared, shared])), [])
+
+    def test_guard_value_depth_rejects_without_exhausting_the_stack(self) -> None:
+        # Deep-but-ACYCLIC nesting is the cycle rule's other half: the
+        # traversal descends one level per recursion, so a value nested
+        # past the interpreter's stack would raise RecursionError on the
+        # write path instead of answering the validation error. Every
+        # downstream seam recurses per level the same way (the snapshot's
+        # deep copy, the wire conversion, the reply frames' encoder), so
+        # the nesting rejects at the bound with the same message — and a
+        # value under the bound (realistic guard values nest a handful of
+        # levels) stays valid.
+        def machine_with(value: Any) -> dict[str, Any]:
+            return {
+                "states": [
+                    state("a", entry=True, outputs=[{"name": "verdict", "type": "json"}]),
+                    state("b"),
+                ],
+                "transitions": [
+                    {"from": "a", "to": "b", "when": {"output": "verdict", "op": "contains", "value": value}}
+                ],
+            }
+
+        deep: list[Any] = []
+        node = deep
+        for _ in range(factory_module.MAX_GUARD_VALUE_DEPTH + 50):
+            child: list[Any] = []
+            node.append(child)
+            node = child
+        self.assertEqual(
+            validate_factory_machine(machine_with(deep)),
+            ["transitions[0] when.value must be finite JSON data (JSON carries no NaN or Infinity, and only JSON shapes serialize: lists, objects, strings, numbers, booleans, null, and no container nests deeper than 256 levels)"],
+        )
+        within: list[Any] = ["verdict"]
+        for _ in range(10):
+            within = [within]
+        self.assertEqual(validate_factory_machine(machine_with(within)), [])
 
     def test_guard_rules(self) -> None:
         def machine_with(when: Any) -> dict[str, Any]:
