@@ -711,6 +711,13 @@ impl pa_tui::interactive::OnboardingSink for FreshHomeOnboardingSink {
         pa_core::settings::SettingsManager::create(&self.cwd, &self.agent_dir)
             .set_onboarding_shown(true)
     }
+
+    fn onboarding_incomplete(
+        &self,
+        _outcome: &'static str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(std::future::ready(()))
+    }
 }
 
 /// The product sink whose completion write always fails (the failed
@@ -737,6 +744,13 @@ impl pa_tui::interactive::OnboardingSink for FailingMarkOnboardingSink {
 
     fn mark_onboarding_complete(&self) -> anyhow::Result<()> {
         Err(anyhow::anyhow!("settings disk full"))
+    }
+
+    fn onboarding_incomplete(
+        &self,
+        _outcome: &'static str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(std::future::ready(()))
     }
 }
 
@@ -4325,8 +4339,9 @@ async fn tui_ctrl_s_stashes_and_restores_the_prompt_draft() {
 /// with nothing stashed reports "No prompt to stash", and the key with a
 /// draft while a stash is already held reports "Prompt stash already has
 /// a draft" — the fresh draft STAYS in the editor (the manual stash never
-/// clobbers a held one), submits on Enter, and the held draft is still
-/// what the next key press restores.
+/// clobbers a held one), submits on Enter, and the admitted send
+/// restores the held draft into the emptied editor (TS
+/// `promptStashToRestore`).
 #[tokio::test]
 async fn tui_ctrl_s_stash_keeps_a_held_draft_and_reports_the_empty_editor() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -4413,13 +4428,13 @@ async fn tui_ctrl_s_stash_keeps_a_held_draft_and_reports_the_empty_editor() {
             },
             // The fresh draft stayed live: Enter submits it.
             key(KeyCode::Enter, KeyModifiers::NONE),
-            pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
-            // The stash still holds the FIRST draft: the key restores it.
-            key(KeyCode::Char('s'), KeyModifiers::CONTROL),
+            // The admitted submit returns the held FIRST draft to the emptied
+            // editor (TS `promptStashToRestore`, interactive-mode.ts:5752-5759).
             pa_tui::interactive::HeadlessStep::WaitRender {
                 needle: "Restored stashed prompt".to_string(),
                 timeout_ms: 5_000,
             },
+            pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
         ],
         width: 100,
         height: 30,
@@ -4440,7 +4455,7 @@ async fn tui_ctrl_s_stash_keeps_a_held_draft_and_reports_the_empty_editor() {
         "the fresh draft stayed in the editor at the guard:\n{}",
         frames[guard_index]
     );
-    // The stash still held the first draft: the final key restored it.
+    // The admitted send restored the held first draft into the editor.
     let restore_index = frames
         .iter()
         .position(|frame| frame.contains("Restored stashed prompt"))
@@ -4449,7 +4464,7 @@ async fn tui_ctrl_s_stash_keeps_a_held_draft_and_reports_the_empty_editor() {
         frames[restore_index..]
             .iter()
             .any(|frame| frame.contains("f24 guard draft")),
-        "the held draft (not the fresh one) restored last"
+        "the admitted send restored the held draft into the editor"
     );
 
     // Daemon-side: the fresh draft submitted (it never left the editor).

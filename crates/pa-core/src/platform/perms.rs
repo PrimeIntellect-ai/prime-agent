@@ -82,6 +82,7 @@ pub fn file_mode(path: &Path) -> Option<u32> {
 }
 
 #[cfg(not(unix))]
+#[must_use]
 pub fn file_mode(_path: &Path) -> Option<u32> {
     None
 }
@@ -95,6 +96,7 @@ pub fn is_executable(path: &Path) -> bool {
 }
 
 #[cfg(not(unix))]
+#[must_use]
 pub fn is_executable(path: &Path) -> bool {
     path.is_file()
 }
@@ -112,6 +114,7 @@ pub fn is_readable_writable(path: &Path) -> bool {
 }
 
 #[cfg(not(unix))]
+#[must_use]
 pub fn is_readable_writable(path: &Path) -> bool {
     // Windows: a create-open probe is the equivalent permission test.
     OpenOptions::new().read(true).write(true).open(path).is_ok()

@@ -170,7 +170,7 @@ impl SessionUi {
         self.dirty = true;
     }
 
-    /// Report the first scroll action of the run (`tui scroll used`),
+    /// Report the first scroll action of the run (`tui_scroll_count`),
     /// fire-and-forget so the keypress never waits on the telemetry flush.
     pub(super) fn track_scroll(&mut self, action: &'static str, resumed_following: bool) {
         if self.scroll_adoption_emitted {
@@ -244,7 +244,7 @@ impl SessionUi {
         }
     }
 
-    /// Report a builtin client-command submission (`agent command used`),
+    /// Report a builtin command submission (`agent command used`),
     /// fire-and-forget like the scroll event: the command's handling never
     /// waits on the telemetry flush.
     pub(super) fn track_command_used(&mut self, command: &'static str) {
@@ -1053,12 +1053,32 @@ impl SessionUi {
                 if !partial {
                     card.ended_at = Some(std::time::Instant::now());
                     self.pending_tools.remove(tool_call_id);
+                    self.track_ipython_bash_rendered(card);
                 }
                 view.mark_entry_stale(index);
                 return true;
             }
         }
         false
+    }
+
+    /// `tui ipython bash rendered`: the settled ipython card that renders
+    /// as bash reports its bash share, primitives only.
+    fn track_ipython_bash_rendered(&self, card: &crate::tool_card::ToolCallCard) {
+        if card.name != "ipython" {
+            return;
+        }
+        let Some(stats) = crate::tool_card::ipython::bash_dominated_stats(card) else {
+            return;
+        };
+        let Some(telemetry) = self.telemetry.clone() else {
+            return;
+        };
+        tokio::spawn(async move {
+            telemetry
+                .ipython_bash_rendered(stats.bash_lines, stats.cell_lines, stats.count)
+                .await;
+        });
     }
 
     /// Update the loader activity label (agent-activity tracker subset).

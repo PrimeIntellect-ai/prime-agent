@@ -3,11 +3,11 @@
 use super::routing::fail_unsent_request;
 use super::{
     anyhow, connect_transport, create_command_payload, json, mpsc, persist_worker,
-    probe_worker_socket, util, worker_connect_deadline, write_frame, Arc, Child, ClientRouting,
-    Command, Context, DaemonWorkerLifecycle, Duration, Ordering, PathBuf, PrivateFrameReader,
-    ResidentWorker, Result, RouteAdmission, Supervisor, TypedCreateRejection, Value, WorkerReply,
-    WorkerRequest, DEFAULT_PRIVATE_FRAME_LIMITS, LONG_ROUTE_TIMEOUT_MS, ROUTE_TIMEOUT_MS,
-    WORKER_AUTH_FLOOR_MS,
+    persist_worker_at, probe_worker_socket, util, write_frame, Arc, Child, ClientRouting, Command,
+    Context, DaemonWorkerLifecycle, Duration, Ordering, PathBuf, PrivateFrameReader,
+    ResidentWorker, Result, RouteAdmission, Supervisor, TempSync, TypedCreateRejection, Value,
+    WorkerReply, WorkerRequest, DEFAULT_PRIVATE_FRAME_LIMITS, LONG_ROUTE_TIMEOUT_MS,
+    ROUTE_TIMEOUT_MS, WORKER_AUTH_FLOOR_MS,
 };
 use crate::lease::is_process_alive;
 use crate::registry::WorkerRelay;
@@ -240,8 +240,14 @@ impl Supervisor {
         // nothing).
         self.declare_compaction_terminal(resident, || resident.compaction.observe_worker_gone())
             .await;
-        let deadline = worker_connect_deadline();
-        let child = self.spawn_worker_process(resident, deadline).await?;
+        let deadline = self.connect_deadline();
+        // The relaunch REPLACES an established, already-durable
+        // descriptor: its spawn record keeps the synced persist (the
+        // fresh create is the only launch class that rides the unsynced
+        // TS `persistWorker` shape).
+        let child = self
+            .spawn_worker_process(resident, deadline, TempSync::Synced)
+            .await?;
         if let Err(error) = self.connect_worker(resident, deadline).await {
             // Never leave a spawned-but-unwired worker process behind.
             let mut child = child;
@@ -415,6 +421,7 @@ impl Supervisor {
         self: &Arc<Self>,
         resident: &Arc<ResidentWorker>,
         connect_deadline: tokio::time::Instant,
+        spawn_record_sync: TempSync,
     ) -> Result<Child> {
         // One env definition for spawn and for the update roster's
         // `launch_env` row (spec §8: "env snapshot to respawn the worker
@@ -480,7 +487,20 @@ impl Supervisor {
             descriptor.pid = u64::from(child_pid);
             descriptor.process_start_id = crate::protocol::process_start_id(child_pid);
             descriptor.lifecycle = DaemonWorkerLifecycle::Starting;
-            let _ = persist_worker(&resident.descriptor_path, &descriptor);
+            // The spawn record's durability is per launch class
+            // (`spawn_record_sync`): a fresh create rides the TS
+            // `persistWorker` shape — the atomic rename without the
+            // pre-rename fsync (TS's `writeFileAtomicSync` fsync is
+            // opt-in and the descriptor family never requests it) — and
+            // the create-completion persist (`launch_worker`'s
+            // post-create write) re-establishes the durable write as the
+            // metadata-survival barrier. A relaunch REPLACES an
+            // established, already-durable descriptor: it keeps the
+            // synced persist, because a torn unsynced replacement would
+            // lose the descriptor's whole payload — the recovery journal
+            // pointer and the durable create command the next boot's
+            // revival replays.
+            let _ = persist_worker_at(&resident.descriptor_path, &descriptor, spawn_record_sync);
         }
 
         // Probe the worker socket until it accepts connections. A worker that

@@ -1,3 +1,9 @@
+<!--
+Pull requests are accepted from maintainers and vouched contributors only.
+If a maintainer has not invited this work, start with a GitHub Discussion:
+https://github.com/PrimeIntellect-ai/prime-agent/discussions
+-->
+
 ## Ownership compliance
 
 <!-- Crate scope/non-goals/public API + dependency direction per AGENTS.md -->

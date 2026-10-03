@@ -1,8 +1,6 @@
-//! The worker-handshake boundary oracles (the launch-storm wedge class,
-//! 2026-09-28): the handshake owns its channel privately until the auth
-//! answer installs it for routing — the TS `pendingClient`/`worker.client`
-//! boundary. Split from `tests.rs` at the file-size advisory (the worker
-//! test mass precedent: one family per module).
+//! The worker-handshake boundary oracles: the handshake owns its channel
+//! privately until the auth answer installs it for routing — the TS
+//! `pendingClient`/`worker.client` boundary (one family per module).
 
 use super::*;
 
@@ -160,14 +158,11 @@ async fn handshake_channel_stays_private_until_auth_answers() {
     );
 }
 
-/// The launch-storm wedge oracle (2026-09-28): a registration that lands
-/// mid-handshake must not kill the launch. Pre-fix, the registration
-/// path's roster refresh routed `get_state` onto the same unauthenticated
-/// connection the launch's `worker_auth` was handshakeing on; the worker
-/// answered the refresh as the failed unauthenticated FIRST command and
-/// closed the connection, stranding the handshake for the whole connect
-/// budget — a fully-healthy worker failing its launch "did not come up in
-/// time" (a warm ~12.5% rate on the four-launch e2e storm). Served-path:
+/// A registration that lands mid-handshake must not kill the launch:
+/// the registration's roster refresh routes onto its own authenticated
+/// channel once the handshake installs it, while the handshake's
+/// `worker_auth` keeps the unauthenticated connection to itself until
+/// the answer arrives. Served-path:
 /// the wire carries EXACTLY the auth frame (no route rides the private
 /// channel), the registration itself succeeds, and the launch completes.
 #[tokio::test]
@@ -223,8 +218,7 @@ async fn a_mid_handshake_registration_cannot_kill_the_handshake() {
         .expect("request id")
         .to_string();
 
-    // The registration lands while the handshake is still in flight — the
-    // exact interleave that wedged the launch pre-fix.
+    // The registration lands while the handshake is still in flight.
     let command = DaemonCommand::WorkerRegister {
         id: None,
         active_session_id: "w-wedge".to_string(),
@@ -269,11 +263,11 @@ async fn a_mid_handshake_registration_cannot_kill_the_handshake() {
     );
 }
 
-/// The install guard's TOCTOU pin (the Macroscope HIGH finding on the
-/// first PR head): a stale connect that passed its epoch check before a
-/// newer connection installed must never overwrite the newer channel —
-/// the recheck happens under the channel lock, so the stale install is
-/// dropped and the newer channel stays routable.
+/// The install guard's TOCTOU pin: a stale connect that passed its
+/// epoch check before a newer connection installed must never
+/// overwrite the newer channel — the recheck happens under the channel
+/// lock, so the stale install is dropped and the newer channel stays
+/// routable.
 #[tokio::test]
 async fn a_stale_epoch_never_overwrites_the_installed_channel() {
     let dir = std::env::temp_dir().join(format!("pa-install-{}", uuid::Uuid::new_v4()));

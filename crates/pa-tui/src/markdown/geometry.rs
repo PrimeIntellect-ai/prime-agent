@@ -1,7 +1,7 @@
 //! Geometry uses the same wrapping traversal as painted Markdown rows.
 use super::{
-    block_cache_key, heading_spans, parse_blocks, render_inline, wrapped_span_count, Block,
-    BlockKind, MarkdownBlockCache, MarkdownStyle,
+    block_cache_key, code_rows, heading_spans, parse_blocks, render_inline, wrapped_span_count,
+    Block, BlockKind, MarkdownBlockCache, MarkdownStyle,
 };
 use crate::{Line, Span};
 use ratatui::style::Style;
@@ -66,11 +66,12 @@ pub(super) fn blank_after(next: Option<&Block>, exclude_lists: bool) -> bool {
     }
 }
 
-/// Count rows without painting output buffers or syntax highlighting.
-/// A non-empty `cache` replays the block's painted rows: the count==paint
-/// invariant holds by construction (the cached rows ARE what the render
-/// emits for the same key). The cache is only read — a cold cache costs
-/// what [`markdown_row_count`] costs.
+/// Count rows without collecting the painted rows; fenced code measures
+/// the same (highlighted) rows the paint wraps. A non-empty `cache`
+/// replays the block's painted rows: the count==paint invariant holds by
+/// construction (the cached rows ARE what the render emits for the same
+/// key). The cache is only read — a cold cache costs what
+/// [`markdown_row_count`] costs.
 pub(crate) fn markdown_row_count_tagged(
     text: &str,
     width: usize,
@@ -105,8 +106,12 @@ pub(crate) fn markdown_row_count_tagged(
                     + usize::from(blank_after(next, false))
             }
             BlockKind::Hr => 1,
-            BlockKind::Code { .. } => {
-                block.lines.len().max(1) + usize::from(blank_after(next, false))
+            BlockKind::Code { lang } => {
+                code_rows(block, lang.as_deref(), style)
+                    .iter()
+                    .map(|row| wrapped_span_count(row, width))
+                    .sum::<usize>()
+                    + usize::from(blank_after(next, false))
             }
             BlockKind::Paragraph => {
                 block

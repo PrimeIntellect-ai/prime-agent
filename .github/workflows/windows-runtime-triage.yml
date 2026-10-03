@@ -100,6 +100,55 @@ jobs:
         run: |
           pwsh -NoProfile -File scripts/release/test_windows_install.ps1 2>&1 | Tee-Object -FilePath win-install-e2e.log
           exit $LASTEXITCODE
+      # The Windows channel-fallback regression (the local-channel unit test
+      # for the stable->beta fallback the plain one-liner rides): a stable
+      # channel without a win32-x64 row falls back to beta with the notice,
+      # and an explicitly requested channel refuses with the beta route.
+      - name: windows channel-fallback unit (install.ps1 stable->beta)
+        id: channel_fallback
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File scripts/release/test_windows_channel_fallback.ps1 2>&1 | Tee-Object -FilePath win-channel-fallback.log
+          exit $LASTEXITCODE
+      # THE RAW ONE-LINER on the real channel, end to end: install.ps1
+      # itself from raw.githubusercontent (the ref under test - on main it
+      # is the README's shipped command), then the pointer, the manifest,
+      # the win32-x64 tarball, and its sums from the real bucket, the real
+      # default prefix ($HOME\.local), the real stable->beta Windows
+      # fallback, and the launcher answering --version. The transcript
+      # (win-raw-one-liner.log) is the evidence: the install transcript,
+      # the --version output, and the exit codes.
+      - name: the raw one-liner on the real channel (irm | iex)
+        id: raw_one_liner
+        continue-on-error: true
+        shell: pwsh
+        env:
+          RAW_REF: ${{ inputs.ref || github.ref }}
+        run: |
+          Get-ChildItem Env: | Where-Object { $_.Name -like 'PRIME_AGENT_*' } |
+            ForEach-Object { Remove-Item -Path ("Env:" + $_.Name) -ErrorAction SilentlyContinue }
+          Start-Transcript -Path win-raw-one-liner.log
+          $installExit = 0
+          try {
+            irm "https://raw.githubusercontent.com/PrimeIntellect-ai/prime-agent/$env:RAW_REF/install.ps1" | iex
+          } catch {
+            $installExit = 1
+            Write-Output "RAW_ONE_LINER: the one-liner threw: $($_.Exception.Message)"
+          }
+          $launcherExit = 0
+          try {
+            & (Join-Path $HOME '.local\bin\prime-agent.cmd') --version
+            $launcherExit = $LASTEXITCODE
+            Write-Output "RAW_ONE_LINER: launcher --version exit $launcherExit"
+            if ($launcherExit -ne 0) { $installExit = 1 }
+          } catch {
+            $installExit = 1
+            Write-Output "RAW_ONE_LINER: the launcher did not answer --version: $($_.Exception.Message)"
+          }
+          Write-Output "RAW_ONE_LINER: install exit $installExit"
+          Stop-Transcript
+          exit $installExit
       - name: pa-cli battery (unit + the e2e set)
         id: pa_cli
         continue-on-error: true
@@ -112,10 +161,10 @@ jobs:
       - name: Summary + the overall verdict
         shell: pwsh
         run: |
-          $summary = "WIN_BATTERY pa-types=${{ steps.pa_types.outcome }} pa-core=${{ steps.pa_core.outcome }} pa-daemon=${{ steps.pa_daemon.outcome }} pa-tui=${{ steps.pa_tui.outcome }} pa-cli=${{ steps.pa_cli.outcome }} install-e2e=${{ steps.install_e2e.outcome }}"
+          $summary = "WIN_BATTERY pa-types=${{ steps.pa_types.outcome }} pa-core=${{ steps.pa_core.outcome }} pa-daemon=${{ steps.pa_daemon.outcome }} pa-tui=${{ steps.pa_tui.outcome }} pa-cli=${{ steps.pa_cli.outcome }} install-e2e=${{ steps.install_e2e.outcome }} channel-fallback=${{ steps.channel_fallback.outcome }} raw-one-liner=${{ steps.raw_one_liner.outcome }}"
           Add-Content -Path win_battery_summary.log -Value $summary
           Write-Output $summary
-          if (@("${{ steps.pa_types.outcome }}", "${{ steps.pa_core.outcome }}", "${{ steps.pa_daemon.outcome }}", "${{ steps.pa_tui.outcome }}", "${{ steps.pa_cli.outcome }}", "${{ steps.install_e2e.outcome }}") -contains 'failure') { exit 1 }
+          if (@("${{ steps.pa_types.outcome }}", "${{ steps.pa_core.outcome }}", "${{ steps.pa_daemon.outcome }}", "${{ steps.pa_tui.outcome }}", "${{ steps.pa_cli.outcome }}", "${{ steps.install_e2e.outcome }}", "${{ steps.channel_fallback.outcome }}", "${{ steps.raw_one_liner.outcome }}") -contains 'failure') { exit 1 }
       - name: Upload the per-crate logs
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -128,5 +177,7 @@ jobs:
             pa-tui_win.log
             pa-cli_win.log
             win-install-e2e.log
+            win-channel-fallback.log
+            win-raw-one-liner.log
             win_battery_summary.log
           if-no-files-found: warn

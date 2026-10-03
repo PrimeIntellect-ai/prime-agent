@@ -522,6 +522,58 @@ async fn sequential_refines_push_exactly_their_own_rows() {
     );
 }
 
+/// A plan whose one edit creates a factory entry (a stored state-machine
+/// workflow spec): valid shape, so only the opt-in gate decides it.
+const FACTORY_PLAN: &str = r#"{"summary":"sweep","edits":[{"action":"create","kind":"factory","id":"sweep","title":"Factory","content":"Sweep review.","arguments":{"machine":{"states":[{"id":"collect","entry":true,"subagent":"worker"}],"transitions":[]}}}]}"#;
+
+#[tokio::test]
+async fn refine_factory_edits_follow_the_agent_dir_opt_in_setting() {
+    // The host /refine flow reads `factory.enabled` live from the session's
+    // agent dir on every run — the same settings.json the kernel-side
+    // factory gate reads — so a refinement cannot author factories the
+    // user has not opted into. Without a wired agent dir (or with the
+    // setting off), the factory create refuses with the one exact
+    // disabled message; opted in, the same proposal applies.
+    let (mut session, tmp) = refine_test_session().await;
+    let global_dir = tmp.path().join("harness");
+    let refused = session
+        .refine_with_refiner(
+            &refine::RefineOptions::default(),
+            refine::RefinementSource::User,
+            &session_ai_model(),
+            refine_plan_call(FACTORY_PLAN),
+            global_dir.clone(),
+        )
+        .await
+        .unwrap();
+    assert!(!refused.applied_edits[0].applied);
+    assert_eq!(
+        refused.applied_edits[0].error.as_deref(),
+        Some(crate::refinement::FACTORY_DISABLED_MESSAGE)
+    );
+    // The user opts in: the next run of the same proposal applies.
+    let agent_dir = tmp.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("settings.json"),
+        r#"{"factory": {"enabled": true}}"#,
+    )
+    .unwrap();
+    session.set_agent_dir(agent_dir);
+    let applied = session
+        .refine_with_refiner(
+            &refine::RefineOptions::default(),
+            refine::RefinementSource::User,
+            &session_ai_model(),
+            refine_plan_call(FACTORY_PLAN),
+            global_dir,
+        )
+        .await
+        .unwrap();
+    assert!(applied.applied_edits[0].applied);
+    assert!(applied.applied_edits[0].error.is_none());
+}
+
 #[tokio::test]
 async fn refine_keeps_the_retry_drop_instead_of_resurrecting_the_error_row() {
     let (session, tmp) = refine_test_session().await;

@@ -118,7 +118,7 @@ impl AgentSession {
         self.skills = skills;
     }
 
-    /// Bind the telemetry handle the `skill used` adoption event reports
+    /// Bind the telemetry handle the `skill_use_count` counter counts
     /// through (the engine wiring owns the telemetry lifetime and
     /// installs it once the session telemetry is assembled).
     pub fn set_skill_telemetry(&mut self, telemetry: std::sync::Arc<telemetry::SessionTelemetry>) {
@@ -133,6 +133,15 @@ impl AgentSession {
     pub fn set_auto_refine(&mut self, allowed: bool, gates: refine::AutoRefineGates) {
         self.auto_refine_allowed = allowed;
         self.auto_refine = gates;
+    }
+
+    /// Bind the session's agent dir (the settings root). The refine flow
+    /// reads the `factory.enabled` opt-in from the agent dir's
+    /// settings.json on every run — the same live read the kernel-side
+    /// factory gate performs — so a session without a wired agent dir
+    /// keeps the fail-closed disabled default.
+    pub fn set_agent_dir(&mut self, agent_dir: std::path::PathBuf) {
+        self.agent_dir = Some(agent_dir);
     }
 
     /// Bind the kernel-state probe behind the post-compaction

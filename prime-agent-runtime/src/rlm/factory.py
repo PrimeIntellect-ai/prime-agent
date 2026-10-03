@@ -1636,7 +1636,7 @@ class FactoryExecutor:
         self,
         spec_id: str,
         canonical: dict[str, Any],
-        resolved: dict[str, tuple[str, str | None, str | None]],
+        resolved: dict[str, tuple[str, str | None, str | None, str | None]],
         *,
         name: str | None,
     ) -> FactoryRun:
@@ -2559,15 +2559,13 @@ class FactoryExecutor:
     # -- control loop --------------------------------------------------------
 
     def _start_loop(self, run: FactoryRun) -> None:
+        # Called only from run()/resume(), both awaited inside a running
+        # asyncio loop, so get_running_loop() always finds it.
         import asyncio
 
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            run.state = "failed"
-            self._event(run, "executor_error", error="no running asyncio loop; the factory control loop needs one")
-            return
-        run.task = loop.create_task(self._control_loop(run, run.loop_generation))
+        run.task = asyncio.get_running_loop().create_task(
+            self._control_loop(run, run.loop_generation)
+        )
 
     async def _control_loop(self, run: FactoryRun, generation: int) -> None:
         import asyncio
@@ -2767,16 +2765,6 @@ FACTORY_DISABLED_MESSAGE = "the factory is disabled; run /factory on to enable i
 _SETTINGS_FILE_NAME = "settings.json"
 
 
-def _agent_dir() -> Path:
-    """Resolve the Prime Agent config dir the same way the rest of the runtime does."""
-    raw = (
-        os.environ.get("PRIME_AGENT_CODING_AGENT_DIR")
-        or os.environ.get("PI_CODING_AGENT_DIR")
-        or str(Path.home() / ".prime" / "agent")
-    )
-    return Path(raw).expanduser().resolve()
-
-
 def factory_enabled() -> bool:
     """Read the ``factory.enabled`` opt-in setting (default off).
 
@@ -2790,6 +2778,10 @@ def factory_enabled() -> bool:
     means disabled -- the opt-in default is fail-closed, so an unreadable
     settings file refuses the factory instead of silently enabling it.
     """
+    # One home for the agent-dir resolution (harness.py owns it); imported
+    # lazily because harness imports this module at its own top.
+    from .harness import _agent_dir
+
     path = _agent_dir() / _SETTINGS_FILE_NAME
     try:
         with open(path, encoding="utf-8") as handle:
@@ -3783,10 +3775,13 @@ detail, and the event ledger until then.
 - `run` re-validates the spec and resolves every subagent reference first,
   reporting all failures in one `ValueError` and starting nothing on any
   failure; `name=` labels the run in status and the TUI.
-- Pause and failure notices (escalate, budget, max_transitions,
-  max_children, failed, finished) arrive as quiet notices in the
-  conversation once per kind per run, the pause notices with the resume
-  call spelled out — a paused run does not need polling to be noticed.
+- Pause and failure milestones (escalate, budget, max_transitions,
+  max_children, failed, finished) are recorded in the run's event
+  ledger, every repeat included, the pause milestones with the resume
+  call spelled out — read `status()`'s trailing events to see them.
+  Quiet conversation notices for the milestones (one per kind per run)
+  arrive with the stacked live-view PR, which adds the host side that
+  renders them.
 - `stop(run_id)` cancels every running child of the run (idempotent);
   `resume(run_id)` continues a paused run and raises on a non-paused one.
 - The activity lane the daemon and TUI speak arrives with the stacked

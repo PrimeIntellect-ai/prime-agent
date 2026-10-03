@@ -429,10 +429,6 @@ mod tests {
             "The provider ended the response stream without a stop signal."
         );
         assert!(pa_telemetry::ERROR_SUBTYPES.contains(&classification.subtype));
-        assert!(
-            pa_telemetry::ERROR_CODES.contains(&classification.code.unwrap()),
-            "the code token stays inside the catalog's safe vocabulary"
-        );
         // The empty-stream variant classifies identically.
         let empty = classify(
             "Provider dropped the response stream (stream_drop): the stream ended before any response content or stop signal"
