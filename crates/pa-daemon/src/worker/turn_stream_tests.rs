@@ -14,6 +14,11 @@ mod abort_idle_race;
 mod broadcast;
 mod burst;
 mod feed;
+// The interleave harness's probe (and every race test riding it) binds a
+// unix socket: tokio gates `UnixListener` behind `all(unix)`, so the
+// module is unix-only for the windows cross-check (the same contract as
+// feed's `#[cfg(unix)]` tests).
+#[cfg(unix)]
 mod interleave;
 mod park;
 mod queue;
