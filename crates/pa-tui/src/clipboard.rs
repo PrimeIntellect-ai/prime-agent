@@ -1,9 +1,7 @@
-//! Terminal clipboard writes (TS `utils/clipboard.ts` `copyToClipboard`):
-//! the platform clipboard tools first (they hold selection ownership), then
-//! the OSC 52 escape for remote sessions or when no tool copied. The OSC 52
-//! payload cap and the final error text are TS-verbatim; the TS native
-//! `clipboard-rs` addon (skipped on Linux by TS itself) has no Rust
-//! counterpart, so the tool chain plus OSC 52 is the full port.
+//! Terminal clipboard writes: the platform clipboard tools first (they hold selection
+//! ownership), then the OSC 52 escape for remote sessions or when no tool copied. The
+//! OSC 52 payload cap and the final error text are TS-verbatim; the TS native addon has
+//! no Rust counterpart, so the tool chain plus OSC 52 is the full port.
 
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -31,13 +29,13 @@ impl OscSink {
     }
 }
 
-/// TS `isRemoteSession`: any SSH or mosh transport means the local tools
-/// would target the wrong machine, so OSC 52 carries the copy home.
+/// Any SSH or mosh transport means the local tools would target the
+/// wrong machine, so OSC 52 carries the copy home.
 fn is_remote_session(env: &Env) -> bool {
     env.has("SSH_CONNECTION") || env.has("SSH_CLIENT") || env.has("MOSH_CONNECTION")
 }
 
-/// TS `isWaylandSession`.
+/// Whether this is a Wayland session.
 fn is_wayland_session(env: &Env) -> bool {
     env.has("WAYLAND_DISPLAY") || env.value("XDG_SESSION_TYPE").as_deref() == Some("wayland")
 }
@@ -86,16 +84,14 @@ impl Env {
     }
 }
 
-/// TS `execSyncHidden`'s helper deadline: a tool that wedges — `wl-copy`
-/// waiting on a compositor that never focuses — dies at the deadline
-/// instead of hanging the input loop that copied.
+/// A helper deadline: a tool that wedges — `wl-copy` waiting on a compositor that never
+/// focuses — dies at the deadline instead of hanging the input loop that copied.
 const HELPER_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(5_000);
 /// The bounded wait's poll cadence.
 const PIPE_POLL: Duration = Duration::from_millis(20);
 
-/// Run `program` with `text` on its stdin (TS `execSyncHidden`'s
-/// deadline): a helper that does not finish inside the cap is killed
-/// and reported as a failed copy.
+/// Run `program` with `text` on its stdin: a helper that does not finish
+/// inside the cap is killed and reported as a failed copy.
 fn pipe_to(program: &str, args: &[&str], text: &str) -> bool {
     let Ok(mut child) = Command::new(program)
         .args(args)
@@ -106,13 +102,9 @@ fn pipe_to(program: &str, args: &[&str], text: &str) -> bool {
     else {
         return false;
     };
-    // The whole payload reaches the helper (TS `execSyncHidden` writes
-    // the entire input under its 5s cap, with no size prefilter: `/copy`
-    // and the selection copy carry arbitrary chat text, not just URLs
-    // and keys). The write rides its own thread so a helper that never
-    // reads a payload larger than the pipe buffer cannot hang the input
-    // loop: the deadline below kills the child, the closed pipe fails
-    // the blocked write, and the detached writer ends on its own.
+    // The whole payload reaches the helper (no size prefilter). The write rides its
+    // own thread so a helper that never reads a payload larger than the pipe buffer
+    // cannot hang the input loop.
     let write_result = {
         let stdin = child.stdin.take();
         let payload = text.as_bytes().to_vec();
@@ -128,10 +120,9 @@ fn pipe_to(program: &str, args: &[&str], text: &str) -> bool {
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                // The helper read the payload before exiting; a helper
-                // that closed its stdin without reading fails the write
-                // promptly, and a wedged reader loses the rest of the
-                // deadline instead of hanging the caller.
+                // A helper that closed its stdin without reading fails the write
+                // promptly; a wedged reader loses the rest of the deadline instead of
+                // hanging the caller.
                 let wrote = write_result
                     .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
                     .unwrap_or(false);
@@ -148,7 +139,7 @@ fn pipe_to(program: &str, args: &[&str], text: &str) -> bool {
     }
 }
 
-/// The Linux tool chain (TS order): Termux, then Wayland (`wl-copy` when it
+/// The Linux tool chain: Termux, then Wayland (`wl-copy` when it
 /// exists), then the X11 pair (`xclip` with `xsel` fallback).
 fn copy_on_linux(text: &str, env: &Env) -> bool {
     if env.has("TERMUX_VERSION") && pipe_to("termux-clipboard-set", &[], text) {
@@ -157,12 +148,10 @@ fn copy_on_linux(text: &str, env: &Env) -> bool {
     let has_wayland = env.has("WAYLAND_DISPLAY");
     let has_x11 = env.has("DISPLAY");
     if is_wayland_session(env) && has_wayland {
-        // TS verifies the tool exists before relying on the async spawn.
         let wl_copy_exists = Command::new("which")
             .arg("wl-copy")
-            // No inherited fds: a probe must never hold the terminal the
-            // TUI owns (the fd-set audit's rule — no child holds
-            // /dev/tty).
+            // No inherited fds: a probe must never hold the terminal the TUI owns
+            // (the fd-set audit's rule — no child holds /dev/tty).
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -182,16 +171,15 @@ fn copy_on_linux(text: &str, env: &Env) -> bool {
     false
 }
 
-/// TS `copyToX11Clipboard`: `xclip -selection clipboard`, falling back to
-/// `xsel --clipboard --input`.
+/// `xclip -selection clipboard`, falling back to `xsel --clipboard
+/// --input`.
 fn copy_to_x11(text: &str) -> bool {
     pipe_to("xclip", &["-selection", "clipboard"], text)
         || pipe_to("xsel", &["--clipboard", "--input"], text)
 }
 
-/// Copy `text` to the user's clipboard (TS `copyToClipboard`): platform
-/// tools, then OSC 52 for remote sessions or when no tool copied. Errors
-/// resolve with the TS wording.
+/// Copy `text` to the user's clipboard: platform tools, then OSC 52 for remote sessions
+/// or when no tool copied. Errors resolve with the TS wording.
 pub(crate) fn copy_to_clipboard(text: &str, sink: &mut OscSink) -> Result<(), String> {
     copy_with_env(text, sink, &Env::process())
 }

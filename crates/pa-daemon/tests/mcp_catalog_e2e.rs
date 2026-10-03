@@ -1,28 +1,16 @@
-//! MCP catalog e2e: the `/mcp` view's daemon surface serves the RESOLVED
-//! service catalog (the discovery rows the interactive view renders), the
-//! paste flow installs a token service end-to-end through the real daemon,
-//! and the disconnect removes it. The disk-cache path feeds the catalog (the
-//! fetch lane writes its `mcp-service-catalog.v2.json` snapshot envelope; the
-//! daemon reads the validated cache), and the pinned-definition hint gates on
-//! that snapshot being in hand, with the linear/notion compiled fallback
-//! covered by the pa-core verifiers.
-// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
-// the full rationale).
-// Stack-resident futures by design on the daemon's hot paths; boxing the
-// call sites for a lint tick is a perf regression with zero correctness gain.
+//! MCP catalog e2e: the daemon surface serves the RESOLVED catalog, the
+//! paste flow installs a token service end-to-end, and the disconnect removes
+//! it. The disk-cache path feeds the catalog (the fetch lane's snapshot
+//! envelope; the compiled fallback is covered by the pa-core verifiers).
 #![allow(clippy::large_futures)]
-// 64-bit-only targets; the narrowing casts sit at OS boundaries
-// (pid/fd/time/size) where the values are bounded by the kernel - the
-// dead-guard expect()s would add panic paths where silent wrap was
-// deliberate.
+// 64-bit-only targets; the narrowing casts sit at bounded OS boundaries.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// The fn-length threshold is a style gate, not correctness; the structure
-// campaign owns the god-fn splits as a follow-up.
+// Fn length is a style gate, not correctness.
 #![allow(clippy::too_many_lines)]
 // API-shape opinions, not defects; the surfaces are deliberate.
 #![allow(
@@ -54,9 +42,8 @@ impl Drop for Daemon {
     }
 }
 
-/// The kernel Python with prime-agent-runtime installed; skipped (with a
-/// note) on machines without a live install (the same gate as the
-/// product-path e2e).
+/// The kernel Python with prime-agent-runtime installed; skipped (with a note) without a live
+/// install.
 fn kernel_python() -> Option<PathBuf> {
     if let Some(explicit) = std::env::var_os("PA_E2E_KERNEL_PYTHON") {
         let explicit = PathBuf::from(explicit);
@@ -81,8 +68,8 @@ fn kernel_python() -> Option<PathBuf> {
     None
 }
 
-/// The daemon e2e tests each supervise a daemon + a session worker;
-/// serializing them keeps the harness out of parallel-spawn resource races.
+/// The tests each supervise a daemon + a session worker; serializing them keeps the harness out of
+/// parallel-spawn races.
 static DAEMON_E2E: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[allow(clippy::zombie_processes)]
@@ -96,14 +83,12 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path, kernel_python: &Path) -> Da
         .arg(agent_dir)
         .env("PRIME_AGENT_KERNEL_PYTHON", kernel_python)
         .env("PRIME_AGENT_CODING_AGENT_DIR", agent_dir)
-        // The fetch lane is live in the supervisor now (startup + hourly
-        // refreshes of this very cache file): PI_OFFLINE keeps those off
-        // the network so a live fetch can never race the cache state this
-        // test arranges on disk (the same posture as the model-catalog
-        // e2e; the daemon serves the arranged cache directly).
+        // The fetch lane is live in the supervisor (hourly refreshes of this very cache
+        // file): PI_OFFLINE keeps those off the network so a live fetch can never race
+        // the cache state arranged on disk.
         .env("PI_OFFLINE", "1")
-        // The tests own catalog availability through the agent dir alone;
-        // a stray package dir's bundled snapshot must never leak in.
+        // The tests own catalog availability through the agent dir alone; a stray
+        // package dir's bundled snapshot must never leak in.
         .env_remove("PI_PACKAGE_DIR")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -196,9 +181,8 @@ impl Client {
         }
     }
 
-    /// Graceful supervisor stop: the supervisor routes `shutdown` to its
-    /// resident worker (no orphaned workers race the next daemon in the
-    /// suite), then exits. The `Drop` SIGKILL stays as the safety net.
+    /// Graceful supervisor stop: routes `shutdown` to the worker, then exits (Drop SIGKILL is
+    /// the safety net).
     fn shutdown_daemon(&mut self) {
         self.send_command("shutdown", &json!({ "type": "shutdown" }));
         let _ = self.read_response("shutdown");
@@ -214,9 +198,8 @@ const PINNED_FROM_RECORD_HINT: &str =
 /// same fixture the pa-core parity tests parse).
 const REAL_CATALOG: &str = include_str!("../../pa-core/tests/fixtures/mcp/plugins-catalog.v2.json");
 
-/// One extra pasteable service whose endpoint cannot resolve (the reserved
-/// `invalid` TLD): the install's verification fails closed with the network
-/// category instead of touching any real endpoint.
+/// One pasteable service whose endpoint cannot resolve (`invalid` TLD): the install's
+/// verification fails closed with the network category.
 fn seeded_catalog_document() -> Value {
     let mut catalog: Value = serde_json::from_str(REAL_CATALOG).expect("fixture catalog parses");
     catalog["entries"]
@@ -243,10 +226,9 @@ fn seeded_catalog_document() -> Value {
     catalog
 }
 
-/// The fetch lane's disk form: the catalog document wrapped in the snapshot
-/// envelope `{url, scope, fetchedAt, payload}` the cache reader validates
-/// (a bare catalog document at the cache path never serves — proven by the
-/// pa-core remote-source tests).
+/// The fetch lane's disk form: the catalog wrapped in the snapshot envelope
+/// `{url, scope, fetchedAt, payload}` the cache reader validates (a bare catalog
+/// document at the cache path never serves).
 fn snapshot_envelope(payload: &Value) -> String {
     serde_json::to_string(&json!({
         "url": pa_models::fetch::MCP_SERVICE_CATALOG_URL,
@@ -268,9 +250,8 @@ fn catalog_surfaces_and_paste_installs_through_the_daemon() {
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
     let sessions_dir = dir.path().join("sessions");
     std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
-    // The validated disk cache: the fetch lane's snapshot envelope, read by
-    // the daemon's catalog resolution (fail-closed parsing is covered in
-    // pa-core).
+    // The validated disk cache: the fetch lane's snapshot envelope, read by the
+    // daemon's catalog resolution.
     std::fs::write(
         agent_dir.join("mcp-service-catalog.v2.json"),
         snapshot_envelope(&seeded_catalog_document()),
@@ -301,8 +282,6 @@ fn catalog_surfaces_and_paste_installs_through_the_daemon() {
         .expect("active session id")
         .to_string();
 
-    // The resolved catalog surfaces: 69 service cards (the real 68 plus the
-    // paste fixture), linear/notion reserved, the fixture row pasteable.
     client.send_command(
         "m1",
         &json!({ "type": "get_mcp_connections", "activeSessionId": session_id }),
@@ -362,9 +341,8 @@ fn catalog_surfaces_and_paste_installs_through_the_daemon() {
         "a fresh agent dir holds no serper key"
     );
 
-    // The paste flow installs end-to-end: the credential is stored bound to
-    // the service endpoint and a record is persisted; verification against
-    // the unreachable endpoint fails closed with the network category.
+    // The paste flow installs end-to-end: the credential is stored bound to the endpoint;
+    // verification against the unreachable endpoint fails closed with the network category.
     client.send_command(
         "p1",
         &json!({
@@ -393,8 +371,6 @@ fn catalog_surfaces_and_paste_installs_through_the_daemon() {
             .is_some_and(|error| error != "credential-changed"),
         "a fixed network category, not a guard discard: {installed}"
     );
-    // The credential: typed, bound to the endpoint (read from the auth file
-    // the daemon and the kernel share).
     let auth: Value = serde_json::from_str(
         &std::fs::read_to_string(agent_dir.join("auth.json")).expect("auth.json"),
     )
@@ -405,7 +381,6 @@ fn catalog_surfaces_and_paste_installs_through_the_daemon() {
         auth["mcp:paste-fixture"]["endpoint"],
         "https://paste-fixture.invalid/mcp"
     );
-    // The connection record: the durable endpoint pin.
     let records: Value = serde_json::from_str(
         &std::fs::read_to_string(agent_dir.join("mcp-connections.json"))
             .expect("mcp-connections.json"),
@@ -415,8 +390,6 @@ fn catalog_surfaces_and_paste_installs_through_the_daemon() {
     assert_eq!(record["serviceId"], "paste-fixture");
     assert_eq!(record["endpoint"], "https://paste-fixture.invalid/mcp");
 
-    // The roster reflects the install: the service row now carries the
-    // account (pending verification), and the connections roster lists it.
     client.send_command(
         "m2",
         &json!({ "type": "get_mcp_connections", "activeSessionId": session_id }),
@@ -491,14 +464,8 @@ fn catalog_surfaces_and_paste_installs_through_the_daemon() {
     client.shutdown_daemon();
 }
 
-/// The pinned-definition hint gating through the real daemon (Kevin's
-/// dogfood report, TS parity): a connection record whose service left the
-/// catalog shows the catalog-source hint ONLY when a validated snapshot is
-/// in hand to prove that. With the cache gone and no packaged bundle (a
-/// dev install, a cold box before the first fetch) the pinned row stays
-/// manageable and is never one-click connectable, but no
-/// source-unavailable claim: TS always has its catalog, so it never claims
-/// absence it cannot prove.
+/// The pinned-definition hint gating (Kevin's dogfood report, TS parity): a record whose
+/// service left the catalog shows the hint ONLY when a validated snapshot proves it.
 #[test]
 fn pinned_hint_needs_a_snapshot_to_claim_the_source_unavailable() {
     let Some(kernel_python) = kernel_python() else {
@@ -508,8 +475,7 @@ fn pinned_hint_needs_a_snapshot_to_claim_the_source_unavailable() {
     let dir = tempfile::tempdir().expect("tempdir");
     let agent_dir = dir.path().join("agent");
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
-    // A fetched catalog that does NOT define the service, plus the durable
-    // record the pin is built from.
+    // A fetched catalog that does NOT define the service, plus the durable record.
     let cache = json!({
         "version": 2,
         "counts": {},
@@ -546,8 +512,7 @@ fn pinned_hint_needs_a_snapshot_to_claim_the_source_unavailable() {
         .expect("write records");
     let cache_path = agent_dir.join("mcp-service-catalog.v2.json");
 
-    // Cache present: the snapshot proves the service is gone — the hint
-    // shows, byte-exact.
+    // Cache present: the snapshot proves the service is gone — the hint shows.
     {
         let socket = dir.path().join("cache-present.sock");
         let _daemon = spawn_supervisor(&socket, &agent_dir, &kernel_python);
@@ -570,8 +535,7 @@ fn pinned_hint_needs_a_snapshot_to_claim_the_source_unavailable() {
         client.shutdown_daemon();
     }
 
-    // Cache absent (and no packaged bundle): the row stays, the claim does
-    // not — the ordinary account hint is all the card says.
+    // Cache absent (and no packaged bundle): the row stays, the claim does not.
     std::fs::remove_file(&cache_path).expect("remove the cache");
     let socket = dir.path().join("cache-absent.sock");
     let _daemon = spawn_supervisor(&socket, &agent_dir, &kernel_python);

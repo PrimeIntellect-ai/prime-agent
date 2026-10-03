@@ -1,28 +1,16 @@
-//! End-to-end verifier for the durable `compaction_outcome` row (TS
-//! `_endCompactionUnsuccessfully` -> `_persistCompactionOutcome`): a forced
-//! FAILED auto-compaction at the daemon worker must append the durable
-//! `custom_message` row to the session file, broadcast it as a
-//! `message_start`/`message_end` pair before the settled `compaction_end`
-//! event, and keep it out of the provider request (the model never sees
-//! the disclosure, so the KV-cacheable prefix is unaffected — the TS
-//! contract, pinned by `agent-session-compaction.test.ts`).
-// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
-// the full rationale).
-// Stack-resident futures by design on the daemon's hot paths; boxing the
-// call sites for a lint tick is a perf regression with zero correctness gain.
+//! Durable `compaction_outcome` row e2e (TS `_endCompactionUnsuccessfully`
+//! -> `_persistCompactionOutcome`): a forced FAILED auto-compaction appends
+//! the durable custom row, broadcasts it before the settled `compaction_end`,
+//! and keeps it out of the provider request (the KV-cacheable prefix).
 #![allow(clippy::large_futures)]
-// 64-bit-only targets; the narrowing casts sit at OS boundaries
-// (pid/fd/time/size) where the values are bounded by the kernel - the
-// dead-guard expect()s would add panic paths where silent wrap was
-// deliberate.
+// 64-bit-only targets; the narrowing casts sit at bounded OS boundaries.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// The fn-length threshold is a style gate, not correctness; the structure
-// campaign owns the god-fn splits as a follow-up.
+// Fn length is a style gate, not correctness.
 #![allow(clippy::too_many_lines)]
 // API-shape opinions, not defects; the surfaces are deliberate.
 #![allow(
@@ -44,8 +32,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-/// The compaction summarizer request marker (the fixed summarization
-/// system prompt rides the request's first message).
+/// The compaction summarizer request marker (the fixed summarization prompt).
 const SUMMARIZER_MARKER: &str = "context summarization assistant";
 
 struct Supervisor {
@@ -61,13 +48,9 @@ impl Drop for Supervisor {
     }
 }
 
-/// An OpenAI-compatible SSE mock with a switchable failure mode for the
-/// compaction summarizer request: while `fail_summarizer` is set, any
-/// request carrying the summarization prompt gets a 500 (the forced
-/// failed compaction); every other request is answered with the fixed
-/// reply. The per-request usage list makes the second turn's usage cross
-/// the compaction threshold (the f14-auto battery shape: 126010 tokens
-/// against a 500-token headroom).
+/// An OpenAI-compatible SSE mock with a switchable failure mode: while `fail_summarizer`
+/// is set, any request carrying the summarization prompt gets a 500; every other request
+/// the fixed reply. The usage list makes the second turn cross (f14-auto shape).
 struct CompactionMock {
     requests: Arc<Mutex<Vec<Value>>>,
     fail_summarizer: Arc<AtomicBool>,
@@ -131,7 +114,6 @@ fn small_usage() -> Value {
     })
 }
 
-/// The crossing turn's reported usage (the f14-auto battery shape).
 fn crossing_usage() -> Value {
     json!({
         "prompt_tokens": 126_000, "completion_tokens": 10, "total_tokens": 126_010,
@@ -202,9 +184,8 @@ fn serve(
             .as_bytes(),
         );
     }
-    // Turn 2 (the crossing turn) reports the over-threshold usage; every
-    // other request (including the recovery compaction's summarizer)
-    // reports the small usage so the session does not re-cross.
+    // Turn 2 reports the over-threshold usage; every other request reports the small
+    // usage so the session does not re-cross.
     let usage = if index == 1 {
         crossing_usage()
     } else {
@@ -327,8 +308,8 @@ impl Client {
         }
     }
 
-    /// Park broadcast events still in flight after a response (the turn's
-    /// trailing frames can land right after the prompt completes).
+    /// Park broadcast events still in flight after a response (trailing frames can land right after
+    /// the prompt completes).
     fn drain_events(&mut self, quiet_ms: u64) {
         let deadline = Instant::now() + Duration::from_millis(quiet_ms);
         self.reader
@@ -356,8 +337,6 @@ impl Client {
         }
     }
 
-    /// Read lines until the response for `id` arrives, parking broadcast
-    /// events on the way.
     fn read_response(&mut self, id: &str) -> Value {
         let deadline = Instant::now() + Duration::from_mins(1);
         loop {
@@ -373,9 +352,6 @@ impl Client {
     }
 }
 
-/// A forced-failed auto-compaction at the worker: the durable outcome row,
-/// its broadcast pair before the settled end event, and the model-context
-/// exclusion on the next turn.
 #[test]
 fn forced_failed_auto_compaction_records_the_durable_outcome_row() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -406,11 +382,8 @@ fn forced_failed_auto_compaction_records_the_durable_outcome_row() {
         .to_string(),
     )
     .expect("write models.json");
-    // The f14-auto battery settings shape: a tiny reserve (the 4_096
-    // estimate-error floor governs the headroom), so the combined
-    // input+output ceiling sits at 119_808 on the 128k window — the
-    // 126_010 crossing fires. A tiny keep-recent budget keeps the seeded
-    // turns summarizable.
+    // The f14-auto shape: a tiny reserve (the 4_096 estimate-error floor governs the headroom)
+    // puts the combined ceiling at 119_808 on the 128k window — the 126_010 crossing fires.
     std::fs::write(
         agent_dir.join("settings.json"),
         json!({ "compaction": {"enabled": true, "reserveTokens": 500, "keepRecentTokens": 10} })
@@ -449,7 +422,6 @@ fn forced_failed_auto_compaction_records_the_durable_outcome_row() {
     let attached = client.read_response("a1");
     assert_eq!(attached["success"], true, "attach failed: {attached}");
 
-    // Seed turn (small usage): the compaction threshold stays silent.
     client.send_command(
         "p1",
         &json!({"type": "prompt_and_wait", "activeSessionId": session_id, "message": "seed turn"}),
@@ -457,9 +429,8 @@ fn forced_failed_auto_compaction_records_the_durable_outcome_row() {
     let seeded = client.read_response("p1");
     assert_eq!(seeded["success"], true, "seed prompt failed: {seeded}");
 
-    // The crossing turn reports 126010 tokens (over the 500-token
-    // headroom): the post-turn threshold check fires a compaction, and the
-    // mock fails its summarizer request.
+    // The crossing turn reports 126010 tokens (over the 500-token headroom): the
+    // threshold check fires a compaction, and the mock fails its summarizer request.
     mock.fail_summarizer.store(true, Ordering::SeqCst);
     client.send_command(
         "p2",
@@ -481,9 +452,8 @@ fn forced_failed_auto_compaction_records_the_durable_outcome_row() {
     );
     client.drain_events(500);
 
-    // The broadcast: the durable row's message pair, then the settled
-    // compaction_end carrying the same failure message (TS
-    // `_endCompactionUnsuccessfully` order).
+    // The broadcast: the durable row's message pair, then the settled end carrying
+    // the same failure message (TS `_endCompactionUnsuccessfully` order).
     let row_start = client
         .events
         .iter()
@@ -533,17 +503,14 @@ fn forced_failed_auto_compaction_records_the_durable_outcome_row() {
     );
     let end_event = client.events[compaction_end_index].clone();
     assert_eq!(end_event["errorMessage"], json!(failure_message));
-    // TS `_endCompactionUnsuccessfully` passes no `errorSeverity` for
-    // automatic failures (the options carry customInstructions only), so
-    // the wire carries no key at all.
+    // TS `_endCompactionUnsuccessfully` passes no `errorSeverity` for automatic
+    // failures, so the wire carries no key at all.
     assert_eq!(end_event["errorSeverity"], json!(null));
     assert_eq!(end_event["aborted"], false);
     assert_eq!(end_event["willRetry"], false);
 
-    // The durable session file carries the row (the TS
-    // appendCustomMessageEntryWithRollback shape: customType/content/
-    // display/details on a custom_message entry).
-    // The session file carries a session UUID, not the worker's active id.
+    // The session file carries the row (TS `appendCustomMessageEntryWithRollback` shape)
+    // and a session UUID, not the worker's active id.
     let session_file = std::fs::read_dir(&session_dir)
         .expect("list session dir")
         .flatten()
@@ -571,10 +538,8 @@ fn forced_failed_auto_compaction_records_the_durable_outcome_row() {
         json!({"reason": "threshold", "outcome": "failed"})
     );
 
-    // The next turn: recovery compaction succeeds (the mock serves the
-    // summarizer again), the turn runs on the rebuilt context, and the
-    // provider request NEVER contains the disclosure — the model-context
-    // exclusion that keeps the KV-cacheable prefix unaffected.
+    // The next turn: recovery compaction succeeds and the provider request NEVER contains
+    // the disclosure — the exclusion that keeps the KV-cacheable prefix unaffected.
     mock.fail_summarizer.store(false, Ordering::SeqCst);
     let before_next = mock.request_count();
     client.send_command(

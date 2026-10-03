@@ -1,13 +1,8 @@
 //! `prime-agent incident`: reconstructs what the daemon did during a time
-//! window from its diagnostic logs (the CLI half of TS `src/cli/incident.ts`;
-//! the shared classifier lives in `pa_types::incident`, imported by both
-//! this command and the agents-view notice).
-//!
-//! The primary source is the shared structured log
-//! (`~/.prime/agent/logs/agent.jsonl`, plus its `.old` rotation); when
-//! that file is missing, empty, or unreadable, the newest per-daemon log
-//! (`~/.prime/agent/logs/<socket>.<hash>.log`, plain-text lines) is used
-//! as a fallback.
+//! window from its diagnostic logs (the shared classifier lives in
+//! `pa_types::incident`). The primary source is the shared structured log
+//! (`~/.prime/agent/logs/agent.jsonl` plus its `.old` rotation); when it is
+//! missing, empty, or unreadable, the newest per-daemon log is the fallback.
 
 pub(crate) mod report;
 pub(crate) mod time;
@@ -19,10 +14,9 @@ use pa_types::incident::{
 };
 use std::path::{Path, PathBuf};
 
-/// TS `DEFAULT_WINDOW_MS`: the default `--since` is 24 hours ago.
+/// The default `--since` is 24 hours ago.
 const DEFAULT_WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
 
-/// The parsed `incident` arguments (TS `IncidentCommandOptions`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct IncidentCommandOptions {
     pub(crate) since: Option<String>,
@@ -30,8 +24,7 @@ pub(crate) struct IncidentCommandOptions {
     pub(crate) session: Option<String>,
 }
 
-/// A usage error carrying the operator-facing message (TS
-/// `IncidentUsageError`).
+/// A usage error carrying the operator-facing message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct IncidentUsageError(pub(crate) String);
 
@@ -43,20 +36,17 @@ impl std::fmt::Display for IncidentUsageError {
 
 impl std::error::Error for IncidentUsageError {}
 
-/// The resolved `--since`/`--until` window (TS `IncidentWindow`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct IncidentWindow {
     pub(crate) since_ms: i64,
     pub(crate) until_ms: i64,
 }
 
-/// Parse `incident [--since <time>] [--until <time>] [--session <id>]`
-/// arguments (TS `parseIncidentOptions`).
+/// Parse `incident [--since <time>] [--until <time>] [--session <id>]` arguments.
 ///
 /// # Errors
 ///
-/// Returns [`IncidentUsageError`] for an unknown option, a missing or
-/// empty option value, or a value that is only whitespace.
+/// Returns [`IncidentUsageError`] for an unknown option or a missing/empty value.
 pub(crate) fn parse_incident_options(
     args: &[String],
 ) -> Result<IncidentCommandOptions, IncidentUsageError> {
@@ -104,8 +94,7 @@ pub(crate) fn parse_incident_options(
     Ok(options)
 }
 
-/// Resolve `--since`/`--until` (default: last 24h until now) (TS
-/// `resolveIncidentWindow`).
+/// Resolve `--since`/`--until` (default: last 24h until now) (TS `resolveIncidentWindow`).
 ///
 /// # Errors
 ///
@@ -130,7 +119,6 @@ pub(crate) fn resolve_incident_window(
     Ok(IncidentWindow { since_ms, until_ms })
 }
 
-/// The logs the incident command reads (TS `IncidentLogSource`).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct IncidentLogSource {
     pub(crate) entries: Vec<IncidentLogEntry>,
@@ -139,7 +127,6 @@ pub(crate) struct IncidentLogSource {
     pub(crate) source: String,
 }
 
-/// One log file to scan, with its line format.
 enum IncidentLogFileKind {
     /// `agent.jsonl` (and its `.old` rotation): one JSON object per line.
     Jsonl,
@@ -147,16 +134,12 @@ enum IncidentLogFileKind {
     Daemon,
 }
 
-/// The agent log directory (`getLogsDir`).
 fn incident_logs_dir() -> PathBuf {
     get_agent_dir().join("logs")
 }
 
-/// Read the daemon logs: agent.jsonl (plus its `.old` rotation) when it
-/// yields entries, otherwise the newest per-daemon log file in the logs
-/// directory (TS `readIncidentLogEntries`). The fallback covers a
-/// missing, empty, or unreadable agent.jsonl and picks only the newest
-/// per-daemon log; rotated per-daemon generations are not included.
+/// Read the daemon logs: agent.jsonl (plus its `.old` rotation) when it yields
+/// entries, otherwise the newest per-daemon log (rotated generations excluded).
 pub(crate) fn read_incident_log_entries() -> IncidentLogSource {
     let logs_dir = incident_logs_dir();
     let agent_log_path = logs_dir.join("agent.jsonl");
@@ -171,8 +154,7 @@ pub(crate) fn read_incident_log_entries() -> IncidentLogSource {
         return structured;
     }
     // agent.jsonl is missing, empty, or unreadable: fall back to the
-    // newest per-daemon log. Window filtering happens later; gate on
-    // parse yield only.
+    // newest per-daemon log. Window filtering happens later.
     let Some(fallback_path) = newest_daemon_log_path(&logs_dir) else {
         return structured;
     };
@@ -185,18 +167,14 @@ pub(crate) fn read_incident_log_entries() -> IncidentLogSource {
 }
 
 /// Scan every non-empty line of the files; unreadable files are skipped
-/// whole (TS `scanIncidentLogFiles`).
+/// whole.
 fn scan_incident_log_files(files: &[(PathBuf, IncidentLogFileKind)]) -> IncidentLogSource {
     let mut entries: Vec<IncidentLogEntry> = Vec::new();
     let mut scanned_count = 0;
     let mut skipped_count = 0;
     for (path, kind) in files {
-        // A torn multi-byte write at the live log's tail must not cost
-        // the whole scan (TS readFile + toString keeps it as replacement
-        // characters — the agents-view reader's own lossy rule): decode
-        // lossily, keep every structured line around the tear, and let
-        // the torn line itself fail the parse like any non-line. Only a
-        // read error (missing, unreadable) skips the file whole.
+        // A torn multi-byte write at the live log's tail must not cost the whole scan:
+        // decode lossily and let the torn line itself fail the parse.
         let Ok(bytes) = std::fs::read(path) else {
             continue;
         };
@@ -228,10 +206,8 @@ fn scan_incident_log_files(files: &[(PathBuf, IncidentLogFileKind)]) -> Incident
     }
 }
 
-/// The newest per-daemon log file in the logs directory (TS
-/// `newestDaemonLogPath`), skipping non-file entries: a directory whose
-/// name matches the log pattern would otherwise be picked as the
-/// fallback and hide older valid daemon logs.
+/// The newest per-daemon log file in the logs directory, skipping non-file
+/// entries (a matching directory would hide older valid logs).
 fn newest_daemon_log_path(logs_dir: &Path) -> Option<PathBuf> {
     let names = std::fs::read_dir(logs_dir).ok()?;
     let mut candidates: Vec<(PathBuf, i128)> = Vec::new();
@@ -245,8 +221,7 @@ fn newest_daemon_log_path(logs_dir: &Path) -> Option<PathBuf> {
         }
         let path = logs_dir.join(&file_name);
         let Ok(stat) = std::fs::metadata(&path) else {
-            // Lost a race with log rotation or permissions; skip the
-            // candidate.
+            // Lost a race with log rotation or permissions; skip it.
             continue;
         };
         if !stat.is_file() {
@@ -261,9 +236,8 @@ fn newest_daemon_log_path(logs_dir: &Path) -> Option<PathBuf> {
     candidates.first().map(|(path, _)| path.clone())
 }
 
-/// `<socket basename>.<hash8>.log` (TS `DAEMON_LOG_FILE_PATTERN`): the
-/// socket basename itself may lack `.sock` for custom sockets and Windows
-/// named pipes, so the hash suffix carries the match.
+/// `<socket basename>.<hash8>.log`: the socket basename itself may lack `.sock`
+/// for custom sockets and Windows named pipes.
 fn is_daemon_log_file_name(name: &str) -> bool {
     let Some(stem) = name.strip_suffix(".log") else {
         return false;
@@ -276,8 +250,7 @@ fn is_daemon_log_file_name(name: &str) -> bool {
     hash.iter().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) && bytes[bytes.len() - 9] == b'.'
 }
 
-/// The file's mtime in milliseconds (TS `stat.mtimeMs`); pre-epoch mtimes
-/// sort as negative.
+/// The file's mtime in milliseconds; pre-epoch mtimes sort as negative.
 fn mtime_ms(stat: &std::fs::Metadata) -> Option<i128> {
     let modified = stat.modified().ok()?;
     Some(match modified.duration_since(std::time::UNIX_EPOCH) {
@@ -286,13 +259,12 @@ fn mtime_ms(stat: &std::fs::Metadata) -> Option<i128> {
     })
 }
 
-/// The report text for the resolved window, or `None` when no daemon logs
-/// exist under the agent dir at all (TS `runIncident`'s early return).
+/// The report text for the resolved window, or `None` when no daemon logs exist.
 ///
 /// # Errors
 ///
-/// Returns [`IncidentUsageError`] when the caller passed no
-/// pre-resolved window and the options do not resolve to one.
+/// Returns [`IncidentUsageError`] when no window was passed and the options
+/// do not resolve to one.
 pub(crate) fn incident_report_text(
     options: &IncidentCommandOptions,
     window: Option<IncidentWindow>,
@@ -321,14 +293,13 @@ pub(crate) fn incident_report_text(
 }
 
 /// Entry point for `prime-agent incident`; prints the timeline (or the
-/// missing-logs message) to stdout (TS `runIncident`). Callers that
-/// validate the window pass it back so relative `HH:MM` bounds resolve
-/// exactly once instead of again against a later clock reading.
+/// missing-logs message) to stdout. A passed-back window resolves relative
+/// `HH:MM` bounds exactly once.
 ///
 /// # Errors
 ///
-/// Returns [`IncidentUsageError`] when the window must be resolved here
-/// and does not resolve; the message is the operator-facing usage error.
+/// Returns [`IncidentUsageError`] when the window must be resolved here and
+/// does not resolve; the message is the operator-facing usage error.
 pub(crate) fn run_incident(
     options: &IncidentCommandOptions,
     window: Option<IncidentWindow>,

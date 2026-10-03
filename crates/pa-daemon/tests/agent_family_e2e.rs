@@ -1,35 +1,17 @@
 //! Agent-message family e2e: parent-to-child sends deliver, by every
 //! identifier form (name, RLM child id, persisted session id), and the
 //! child replies back to its parent.
-//!
-//! One real supervisor, one real parent worker session (the reply target),
-//! and one real RLM child spawned through a `SupervisorChildSessions`
-//! registry bound to the parent (the same registry `rlm.list_subagents`
-//! and the worker's own controller read). The parent-side sends go through
-//! the real kernel host handler (`agent_message.send` with
-//! `receiver_role/receiver_name`), resolving through the controller's
-//! family view and delivering over the supervisor route; the child is a
-//! real worker with a scripted engine whose kernel answers each delivered
-//! prompt with a real `agent_message.send` addressed to its parent.
-//!
 //! Linux-only e2e (`AF_UNIX` sockets), like the other pa-daemon verifiers.
-// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
-// the full rationale).
-// Stack-resident futures by design on the daemon's hot paths; boxing the
-// call sites for a lint tick is a perf regression with zero correctness gain.
+// Stack-resident futures by design on the daemon's hot paths.
 #![allow(clippy::large_futures)]
-// 64-bit-only targets; the narrowing casts sit at OS boundaries
-// (pid/fd/time/size) where the values are bounded by the kernel - the
-// dead-guard expect()s would add panic paths where silent wrap was
-// deliberate.
+// 64-bit-only targets; the narrowing casts sit at bounded OS boundaries.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// The fn-length threshold is a style gate, not correctness; the structure
-// campaign owns the god-fn splits as a follow-up.
+// Fn length is a style gate, not correctness.
 #![allow(clippy::too_many_lines)]
 // API-shape opinions, not defects; the surfaces are deliberate.
 #![allow(
@@ -70,13 +52,10 @@ impl Drop for Daemon {
     }
 }
 
-// The timeout panic path cannot wait on the child; the test process exits
-// immediately afterwards, reaping it.
+// The timeout panic path cannot wait on the child; the test process exits and reaps it.
 #[allow(clippy::zombie_processes)]
-/// The parent worker's real authentication token from its worker descriptor
-/// (`daemon-workers/<instance>/<active-session-id>.json`): the family
-/// roster (`list_agent_peers`) is worker-token gated, so the family view
-/// needs the live token the supervisor issued the parent.
+/// The parent worker's real auth token from its worker descriptor: the family
+/// roster is worker-token gated, so the family view needs the live token.
 fn parent_worker_token(agent_dir: &Path, active_session_id: &str) -> String {
     let instances = std::fs::read_dir(agent_dir.join("daemon-workers")).expect("daemon-workers");
     for instance in instances.flatten() {
@@ -111,10 +90,9 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path, kernel_python: &Path) -> Da
         .env("PRIME_AGENT_KERNEL_PYTHON", kernel_python)
         .stdout(Stdio::null())
         .stderr(Stdio::from(log_err))
-        // A supervisor killed at teardown must not leak its session workers
-        // into later test binaries: the worker's supervisor-lost exit (TS
-        // `exitIfSupervisorOrphanedForTooLong`) runs on this short window
-        // instead of the 5-minute default.
+        // A supervisor killed at teardown must not leak its session workers: the worker's
+        // supervisor-lost exit (TS `exitIfSupervisorOrphanedForTooLong`) runs on this short
+        // window, not the 5-minute default.
         .env(
             pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
             "15000",
@@ -138,7 +116,6 @@ fn wait_socket_ready(socket: &Path) {
     }
 }
 
-/// JSONL supervisor client (command envelopes, id-matched responses).
 struct Client {
     reader: BufReader<UnixStream>,
     writer: UnixStream,
@@ -225,9 +202,8 @@ impl Client {
     }
 }
 
-/// The kernel Python with the runtime installed; the child's kernel cell
-/// (the parent-directed reply) needs it. Skipped (with a note) on
-/// machines without a live install.
+/// The kernel Python with the runtime installed; the child's reply cell needs it. Skipped (with a
+/// note) without a live install.
 fn kernel_python() -> Option<PathBuf> {
     if let Some(explicit) = std::env::var_os("PA_E2E_KERNEL_PYTHON") {
         let explicit = PathBuf::from(explicit);
@@ -252,9 +228,7 @@ fn kernel_python() -> Option<PathBuf> {
     None
 }
 
-/// The child's reply turn: a kernel `agent_message.send` addressed to the
-/// parent (no receiver name: the parent is the only Parent member), with
-/// the receipt recorded on disk for the test to read.
+/// The child's reply turn; no receiver name: the parent is the only Parent member.
 fn child_cell(receipts_dir: &Path) -> String {
     let receipt_path = receipts_dir.join("child-reply.json").display().to_string();
     let error_path = receipts_dir.join("child-reply.error").display().to_string();
@@ -263,8 +237,7 @@ fn child_cell(receipts_dir: &Path) -> String {
     )
 }
 
-/// The child's scripted responses: text for the spawn prompt, then a
-/// parent-directed reply turn for each delivered agent message.
+/// Text for the spawn prompt, then one parent-directed reply turn per delivered agent message.
 fn child_responses(receipts_dir: &Path) -> Value {
     let cell = child_cell(receipts_dir);
     let reply = json!([
@@ -284,7 +257,6 @@ fn child_responses(receipts_dir: &Path) -> Value {
     ])
 }
 
-/// One faux-engine script written to disk.
 fn write_faux_script(dir: &Path, name: &str, responses: &Value) -> PathBuf {
     let path = dir.join(format!("{name}.json"));
     std::fs::write(
@@ -295,8 +267,6 @@ fn write_faux_script(dir: &Path, name: &str, responses: &Value) -> PathBuf {
     path
 }
 
-/// The receipts-dir listing for a timeout message (what the workers
-/// actually recorded so far).
 fn receipt_listing(dir: &Path) -> String {
     let mut names: Vec<String> = std::fs::read_dir(dir)
         .map(|entries| {
@@ -310,9 +280,8 @@ fn receipt_listing(dir: &Path) -> String {
     names.join(", ")
 }
 
-/// The supervisor-under-test's stderr tail for a timeout message: the
-/// daemon log sits beside the receipts dir (both e2e layouts root it at
-/// `<tempdir>/daemon.sock`), and worker or spawn failures surface there.
+/// The daemon log sits beside the receipts dir (both e2e layouts root
+/// it at `<tempdir>/daemon.sock`); worker or spawn failures surface there.
 fn daemon_log_tail(receipts_dir: &Path) -> String {
     let root = receipts_dir.parent().unwrap_or(receipts_dir);
     std::fs::read_to_string(root.join("daemon.sock").with_extension("daemon.log"))
@@ -326,15 +295,8 @@ fn daemon_log_tail(receipts_dir: &Path) -> String {
         .collect()
 }
 
-/// A recorded JSON file, waiting for the turn that writes it. The
-/// recording cell writes the receipt non-atomically (`open(w).write`),
-/// so the file can exist while its content is still empty or partial:
-/// readiness is a successful parse, not file existence — a read that
-/// does not parse yet polls on like a missing one until the deadline.
-/// The deadline panic carries what the next diagnosis needs: the
-/// receipts recorded so far, the cell's error record when one exists (a
-/// failed kernel cell writes its traceback there), and the daemon log
-/// tail.
+/// The receipt is written non-atomically (`open(w).write`), so readiness is a successful
+/// parse, not file existence; the deadline panic carries the receipts and the log tail.
 fn read_recorded(dir: &Path, name: &str) -> Value {
     let path = dir.join(name);
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -358,7 +320,6 @@ kernel error record: {}; daemon log tail: {}",
     }
 }
 
-/// One `agent_message.send` host request through the real handler map.
 async fn send_agent_message(
     handlers: &HostRequestHandlers,
     receiver_name: &str,
@@ -375,10 +336,6 @@ async fn send_agent_message(
     .await
 }
 
-/// Verifier: the parent session's family view includes its spawned RLM
-/// child; a child-directed `agent_message.send` resolves by name, by RLM
-/// child id, and by persisted session id, delivers into the real child
-/// worker, and the child's own parent-directed reply delivers back.
 #[tokio::test]
 async fn parent_child_agent_message_round_trip_end_to_end() {
     let Some(kernel_python) = kernel_python() else {
@@ -392,8 +349,7 @@ async fn parent_child_agent_message_round_trip_end_to_end() {
     let receipts_dir = dir.path().join("receipts");
     std::fs::create_dir_all(&receipts_dir).expect("receipts dir");
 
-    // The parent session: a real worker (the child's reply target) whose
-    // script only needs to absorb the reply turns.
+    // The parent is a real worker (the child's reply target); its script only absorbs turns.
     let parent_script = write_faux_script(
         dir.path(),
         "parent",
@@ -438,10 +394,8 @@ async fn parent_child_agent_message_round_trip_end_to_end() {
         .expect("parent session file")
         .to_string();
 
-    // The parent's children registry (the same construction the worker
-    // engine performs), bound to the real parent identity: the child
-    // spawns through the supervisor and lands in the registry the
-    // controller's family view reads.
+    // The same construction the worker engine performs, bound to the real parent identity: the
+    // child lands in the registry the family view reads.
     let link = Arc::new(SupervisorLink::new(socket.clone()));
     let children = SupervisorChildSessions::new(
         Arc::clone(&link),
@@ -475,24 +429,15 @@ async fn parent_child_agent_message_round_trip_end_to_end() {
     assert_eq!(handle.name, "kid");
     let child_id = handle.rlm_child_id.clone();
 
-    // The detached task prompt waits for the parent's turn boundary (the
-    // spawn admission ordering); this harness owns its own children
-    // registry, separate from the parent worker's engine, so the boundary
-    // the real parent's turn would bump has to be simulated here. Without
-    // it the spawn prompt never fires and the delivered messages consume
-    // the child's scripted spawn response.
+    // This harness owns its own children registry, so the turn boundary the real
+    // parent's turn would bump is simulated here; without it the spawn prompt never fires.
     children.notify_turn_done();
-    // Wait for the spawn prompt's turn to settle before delivering: the
-    // child must run its spawn turn ("kid spawned") before the reply
-    // script begins, or the first delivered message would consume the
-    // spawn response and lose its own reply cell. Bounded: a child that
-    // never settles fails loudly instead of hanging the suite.
+    // Wait for the spawn turn to settle before delivering: the first delivered message
+    // would otherwise consume the spawn response and lose its reply cell.
     let settle_deadline = Instant::now() + Duration::from_secs(60);
     let spawn_row = loop {
         let roster = children.list_subagents().await.expect("child roster");
         let row = roster.first().expect("one child row");
-        // The spawn turn settled once the child went idle with an answer
-        // (or an error); a still-running child keeps polling.
         if row.status == "completed" || row.status == "error" {
             break row.clone();
         }
@@ -505,7 +450,6 @@ async fn parent_child_agent_message_round_trip_end_to_end() {
     };
     assert_eq!(spawn_row.status, "completed", "spawn turn: {spawn_row:?}");
 
-    // The roster row gives the child's live and persisted session ids.
     let roster = children.list_subagents().await.expect("child roster");
     let child_row = roster.first().expect("one child row");
     let child_active_session_id = child_row
@@ -515,8 +459,6 @@ async fn parent_child_agent_message_round_trip_end_to_end() {
     let child_session_id = child_row.session_id.clone().expect("child session id");
     assert_eq!(child_row.session_name, "kid");
 
-    // The parent-side controller: the same wiring the worker's engine
-    // performs (family + delivery over the supervisor link).
     let own_summary = json!({
         "activeSessionId": parent_active_session_id,
         "sessionId": parent_session_id,
@@ -524,13 +466,8 @@ async fn parent_child_agent_message_round_trip_end_to_end() {
         "runtimeKind": "top-level",
     });
     let children = Arc::new(children);
-    // Both the sends and the family view ride the parent's real worker
-    // token from its worker descriptor (the same wiring the worker's
-    // engine performs): the supervisor roster (`list_agent_peers`) is
-    // worker-token gated, and the supervisor-routed delivery requires
-    // worker_auth - a deliberately token-less controller can never pass
-    // it, so the token-less refusal premise belongs to the peer-transport
-    // suite, not here.
+    // Both the sends and the family view ride the parent's real worker token: the roster
+    // is worker-token gated and supervisor-routed delivery requires worker_auth.
     let controller = Arc::new(LinkAgentMessageController::new(
         Arc::clone(&link),
         parent_active_session_id.clone(),
@@ -548,8 +485,6 @@ async fn parent_child_agent_message_round_trip_end_to_end() {
     let mut handlers = HostRequestHandlers::default();
     register_agent_message_host_handlers(Arc::clone(&controller) as Arc<_>, &mut handlers);
 
-    // The family view lists the child (by every identifier form) and no
-    // phantom sibling for it.
     let family = family_controller.family().await.expect("family");
     let child_members: Vec<_> = family
         .iter()
@@ -565,17 +500,13 @@ async fn parent_child_agent_message_round_trip_end_to_end() {
         "{child_member:?}"
     );
 
-    // Send by name, by RLM child id, and by persisted session id: every
-    // form resolves through the family view and delivers into the real
-    // child worker with the TS receipt shape.
     let mut expected_cards = 0;
     for selector in ["kid", &child_id, &child_session_id] {
         let receipt = send_agent_message(&handlers, selector)
             .await
             .unwrap_or_else(|error| panic!("child send by {selector} failed: {error:#}"));
-        // `delivered` when the child is idle, `queued` behind its current
-        // turn (the TS steer lane): both mean the message reached the
-        // child worker; the rendering count below proves it ran.
+        // `delivered` when the child is idle, `queued` behind its current turn:
+        // both mean the message reached the child worker.
         let status = receipt["deliveryStatus"].as_str().expect("status");
         assert!(
             status == "delivered" || status == "queued",
@@ -587,10 +518,8 @@ async fn parent_child_agent_message_round_trip_end_to_end() {
         );
         assert_eq!(receipt["receiverRole"], "child", "{receipt}");
         assert!(receipt["id"].as_str().unwrap().starts_with("agentmsg_"));
-        // Send sequentially - the next selector only fires after this
-        // prompt's reply card renders. The batched-steering default (one
-        // turn at the tool boundary) would otherwise merge rapid queued
-        // prompts into a single turn and its single reply.
+        // Send sequentially: the batched-steering default (one turn at the tool
+        // boundary) would merge rapid queued prompts into a single turn and reply.
         expected_cards += 1;
         let card_deadline = Instant::now() + Duration::from_secs(20);
         loop {
@@ -612,10 +541,7 @@ async fn parent_child_agent_message_round_trip_end_to_end() {
         }
     }
 
-    // The child rendered every delivered prompt once and answered each
-    // with a real parent-directed kernel send. Each delivery's card
-    // carries the body twice (the row content plus details.message), so
-    // three deliveries render the body six times.
+    // Each delivery's card carries the body twice, so three deliveries render it six times.
     client.wait_idle("w-child", &child_active_session_id);
     let child_messages = client.messages("gm-child", &child_active_session_id);
     assert_eq!(
@@ -638,11 +564,8 @@ async fn parent_child_agent_message_round_trip_end_to_end() {
     );
     assert_eq!(child_receipt["receiverRole"], "parent", "{child_receipt}");
 
-    // The parent rendered every reply prompt from the child's name.
     client.wait_idle("w-parent", &parent_active_session_id);
     let parent_messages = client.messages("gm-parent", &parent_active_session_id);
-    // The reply prompt carries the child relationship label (the TS
-    // `child:<name>` sender prefix for subagent-origin messages).
     assert_eq!(
         parent_messages
             .matches("[agent-message from child:kid]")
@@ -650,8 +573,6 @@ async fn parent_child_agent_message_round_trip_end_to_end() {
         3,
         "the parent rendered every child reply: {parent_messages}"
     );
-    // Each reply's card carries the body twice (row content plus
-    // details.message), so three replies render the body six times.
     assert_eq!(
         parent_messages.matches("kid reply").count(),
         6,
@@ -659,8 +580,6 @@ async fn parent_child_agent_message_round_trip_end_to_end() {
     );
 }
 
-/// One recorded-JSON helper cell body: run one `host_request` and record
-/// its result (or the failure text) under a name.
 fn record_cell(request: &str, name: &str, receipts_dir: &Path) -> String {
     let receipt_path = receipts_dir
         .join(format!("{name}.json"))
@@ -675,7 +594,6 @@ fn record_cell(request: &str, name: &str, receipts_dir: &Path) -> String {
     )
 }
 
-/// A faux turn running one kernel cell.
 fn cell_turn(code: &str) -> Value {
     json!([
         { "content": [
@@ -685,16 +603,6 @@ fn cell_turn(code: &str) -> Value {
     ])
 }
 
-/// Verifier (the misroute regression, all through the real workers' own
-/// kernels): the family roster derives from durable parent edges, never
-/// from names or runtime kinds. A second root's child is NOT addressable
-/// from the first family by role or name (the sibling send for its name
-/// fails closed), a broadcast reaches only the nuclear family, the
-/// child's parent-reply targets its true parent with the `child:` label,
-/// another family's subagent never renders as a child of the recipient,
-/// and the observe roster labels only true edges: kid-a's own spawned
-/// grandchild nests under kid-a (never top-level in the root's roster),
-/// and the other family's rows never enter either roster.
 #[tokio::test]
 async fn family_edges_never_cross_families_end_to_end() {
     let Some(kernel_python) = kernel_python() else {
@@ -708,8 +616,7 @@ async fn family_edges_never_cross_families_end_to_end() {
     let receipts_dir = dir.path().join("receipts");
     std::fs::create_dir_all(&receipts_dir).expect("receipts dir");
 
-    // Parent-a's one kernel turn records its own observe roster and its
-    // broadcast receipts (its real worker token authorizes the roster).
+    // Parent-a's one kernel turn records its roster and broadcast receipts.
     let parent_a_cell = format!(
         "{}\n{}",
         record_cell(r#""agent_observe.list""#, "parent-observe", &receipts_dir),
@@ -731,16 +638,11 @@ async fn family_edges_never_cross_families_end_to_end() {
             { "text": "parent-a turn done" },
         ]),
     );
-    // Parent-b only absorbs turns (a sibling root on the receiving side).
     let sibling_root_script = write_faux_script(
         dir.path(),
         "parent-b",
         &json!([{ "text": "parent-b turn done" }]),
     );
-    // Kid-a's kernel turns: the cross-family sibling probe (must fail),
-    // the parent reply (must reach the true parent), its own broadcast
-    // (must reach only its parent), and its own observe roster (the
-    // grandchild nests under it, never under the root).
     let kid_cells = [
         record_cell(
             r#""agent_message.send", {"message": "hello sibling", "receiver_role": "sibling", "receiver_name": "kid-b"}"#,
@@ -759,17 +661,13 @@ async fn family_edges_never_cross_families_end_to_end() {
         ),
         record_cell(r#""agent_observe.list""#, "kid-observe", &receipts_dir),
     ];
-    // One scripted turn per cell: the tool-call entry, then the text
-    // entry that closes it (a nested array is not a valid script).
+    // One scripted turn per cell: the tool-call entry, then the text entry that closes it (a nested
+    // array is not a valid script).
     let mut kid_responses = vec![
         json!({ "text": "kid spawned" }),
-        // The parent's broadcast (target=all) delivers into this
-        // session's steering queue during the spawn turn; the loop's
-        // steering poll drains it as the spawn turn's follow-up. The
-        // filler text absorbs that delivered message's turn so the
-        // scripted cells align with the driven to-kid-N turns (without
-        // it every cell runs one turn early and the observe cell reads
-        // the roster before the grandchild spawns).
+        // The parent's broadcast (target=all) drains into this session's steering queue
+        // during the spawn turn; the filler text absorbs that message's turn so the
+        // scripted cells align with the driven turns.
         json!({ "text": "kid absorbed the broadcast" }),
     ];
     for cell in &kid_cells {
@@ -822,9 +720,7 @@ async fn family_edges_never_cross_families_end_to_end() {
     let (parent_a_active, parent_a_session, _parent_a_file) = &roots[0];
     let (sibling_root_active, _parent_b_session, _parent_b_file) = &roots[1];
 
-    // Each root spawns its own child; the second family's child name is
-    // one the first family might address (the historical misroute landed
-    // on exactly such name-keyed sends).
+    // Each root spawns its own child; the second family's kid name is one the first might address.
     let link = Arc::new(SupervisorLink::new(socket.clone()));
     let mut kids = Vec::new();
     for (index, (active, session, file)) in roots.iter().enumerate() {
@@ -860,9 +756,7 @@ async fn family_edges_never_cross_families_end_to_end() {
             .expect("spawn the child");
         assert_eq!(handle.name, kid_name);
         children.notify_turn_done();
-        // The spawn turn settles once the child goes idle with an answer
-        // (bounded: a kid that never settles fails loudly with its last
-        // roster row and the daemon log instead of hanging the suite).
+        // The spawn turn settles once the child goes idle with an answer (bounded).
         let settle_deadline = Instant::now() + Duration::from_secs(60);
         loop {
             let roster = children.list_subagents().await.expect("child roster");
@@ -881,13 +775,9 @@ async fn family_edges_never_cross_families_end_to_end() {
         let roster = children.list_subagents().await.expect("child roster");
         let row = roster.first().expect("one child row");
         assert_eq!(row.session_name, kid_name);
-        // The spawn row can settle in the admission-to-turn-pop window (the
-        // watcher's stability re-check), before the child's first turn
-        // writes its session file; the durable artifact is the proof, so
-        // wait for it (bounded) before reading.
+        // The spawn row can settle before the first turn's session file lands; wait for it.
         let kid_session_id = row.session_id.clone().expect("child persisted id");
-        // The per-child artifact dir IS the rlm child id (it already
-        // carries the "sub-" prefix); do not prefix it again.
+        // The per-child artifact dir IS the rlm child id; do not prefix it again.
         let artifact_dir = agent_dir
             .join("session-artifacts")
             .join(session)
@@ -902,8 +792,7 @@ async fn family_edges_never_cross_families_end_to_end() {
             );
             std::thread::sleep(Duration::from_millis(50));
         }
-        // The kid's own session file (the grandchild's durable parent
-        // edge): the spawn's per-child artifact dir holds exactly one.
+        // The kid's own session file (the grandchild's durable parent edge): exactly one.
         let kid_files: Vec<std::fs::DirEntry> = std::fs::read_dir(
             agent_dir
                 .join("session-artifacts")
@@ -924,20 +813,10 @@ async fn family_edges_never_cross_families_end_to_end() {
     let (kid_a_active, kid_a_session, kid_a_file) = &kids[0];
     let second_kid_active = &kids[1].0;
 
-    // Parent-a's first turn runs the cell that sends the broadcast, and
-    // the kid's script accounts for that broadcast draining into its
-    // steering queue as the spawn turn's follow-up (the filler turn).
-    // That first turn is driven explicitly: this harness owns the
-    // children registry in the TEST process (the parent is a scripted
-    // worker), so the registry's own settle notice mints its reserved-kind
-    // nonce here while the parent worker's queue admission consumes it
-    // there — the notice is (correctly) refused, and waiting for it
-    // leaves the receipts dir empty forever (the empty-dir red). The
-    // drive is the same agentOrigin delivery shape as every other drive
-    // below, and the receipt gate stays: once the broadcast receipt
-    // exists, the broadcast is already ahead of every drive in the FIFO
-    // steering lane, and each scripted cell lands on its driven turn no
-    // matter when the drain fires.
+    // This harness owns the children registry in the TEST process, so the settle notice is
+    // minted here while the parent worker's queue admission refuses it; waiting on it
+    // leaves the receipts dir empty. Once the broadcast receipt exists it is ahead of
+    // every later drive in the FIFO steering lane, so each scripted cell lands on its turn.
     client.send_command(
         "to-parent-a-cells",
         &json!({
@@ -956,8 +835,6 @@ async fn family_edges_never_cross_families_end_to_end() {
     client.wait_idle("w-parent-a-cells", parent_a_active);
     let _parent_broadcast = read_recorded(&receipts_dir, "parent-broadcast.json");
 
-    // Drive kid-a's kernel turns: the cross-family sibling probe, the
-    // parent reply, and its own broadcast.
     let drive_kid_turn = |client: &mut Client, id: &str, message: &str| {
         client.send_command(
             id,
@@ -981,11 +858,7 @@ async fn family_edges_never_cross_families_end_to_end() {
         drive_kid_turn(&mut client, id, message);
     }
 
-    // The grandchild: a second-family worker spawned through a registry
-    // bound to KID-A's durable identity (depth 1 -> the grandchild runs
-    // at depth 2, its parent edge keyed by kid-a's persisted id and
-    // session file). It joins the supervisor roster as a live resident,
-    // exactly like a grandchild kid-a itself would have spawned.
+    // The grandchild: a worker spawned through a registry bound to KID-A's durable identity.
     let kid_children = SupervisorChildSessions::new(
         Arc::clone(&link),
         agent_dir.clone(),
@@ -1033,13 +906,8 @@ async fn family_edges_never_cross_families_end_to_end() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     };
 
-    // Kid-a's own observe roster: the grandchild nests under its true
-    // parent.
     drive_kid_turn(&mut client, "to-kid-4", "drive the kid observe");
-    // The cross-family sibling probe fails closed: the kernel raises the
-    // host error, and the recorded traceback carries the TS error text
-    // (the send resolves no sibling — the other family's session is not
-    // addressable by name from this family).
+    // The cross-family sibling probe fails closed: not addressable by name.
     let Ok(crossed) = std::fs::read_to_string(receipts_dir.join("kid-sibling-cross.error")) else {
         let transcript = client.messages("gm-kid-debug", kid_a_active);
         eprintln!("KEEP-DIR {}", dir.path().display());
@@ -1060,7 +928,6 @@ async fn family_edges_never_cross_families_end_to_end() {
     if let Ok(error) = std::fs::read_to_string(receipts_dir.join("kid-parent-reply.error")) {
         panic!("kid kernel cell failed: {error}");
     }
-    // The parent reply reaches the TRUE parent by its durable edge.
     let parent_reply = read_recorded(&receipts_dir, "kid-parent-reply.json");
     assert_eq!(
         parent_reply["target"]["activeSessionId"], *parent_a_active,
@@ -1070,10 +937,8 @@ async fn family_edges_never_cross_families_end_to_end() {
     if let Ok(error) = std::fs::read_to_string(receipts_dir.join("kid-broadcast.error")) {
         panic!("kid kernel cell failed: {error}");
     }
-    // The TS broadcast ("all") reaches the family roster, which for a
-    // subagent includes its own children; the grandkid's presence
-    // depends on the broadcast-versus-spawn interleaving, so pin the
-    // isolation, not the exact set.
+    // The broadcast reaches the family roster; the grandkid's presence depends on
+    // broadcast-versus-spawn interleaving, so pin the isolation, not the exact set.
     let kid_broadcast = read_recorded(&receipts_dir, "kid-broadcast.json");
     let kid_targets: Vec<&str> = kid_broadcast["receipts"]
         .as_array()
@@ -1103,9 +968,6 @@ async fn family_edges_never_cross_families_end_to_end() {
     if let Ok(error) = std::fs::read_to_string(receipts_dir.join("kid-observe.error")) {
         panic!("kid kernel cell failed: {error}");
     }
-    // The grandchild nests under its TRUE parent: kid-a's observe roster
-    // is its nuclear family — itself, its parent, its own child — and
-    // the other family never appears.
     let kid_roster = read_recorded(&receipts_dir, "kid-observe.json");
     let kid_roster = kid_roster
         .get("agents")
@@ -1146,14 +1008,9 @@ async fn family_edges_never_cross_families_end_to_end() {
         "the other family never enters kid-a's roster: {kid_roster:?}"
     );
 
-    // The parent's kernel cells ran on the gate drive above; read their
-    // receipts.
     if let Ok(error) = std::fs::read_to_string(receipts_dir.join("parent-observe.error")) {
         panic!("parent kernel cell failed: {error}");
     }
-    // The parent's observe roster: itself (isCurrent), the sibling root,
-    // its own child — labeled by durable edges, never another family's
-    // subagent.
     let roster = read_recorded(&receipts_dir, "parent-observe.json");
     let roster = roster
         .get("agents")
@@ -1187,9 +1044,6 @@ async fn family_edges_never_cross_families_end_to_end() {
         }),
         "another family's subagent is never in the observe roster: {roster:?}"
     );
-    // The grandchild never renders top-level in the root's view: it is
-    // outside parent-a's nuclear family, nested under kid-a in kid-a's
-    // own roster (the mislabeled-grandchild regression).
     assert!(
         !roster
             .iter()
@@ -1199,8 +1053,6 @@ async fn family_edges_never_cross_families_end_to_end() {
     if let Ok(error) = std::fs::read_to_string(receipts_dir.join("parent-broadcast.error")) {
         panic!("parent kernel cell failed: {error}");
     }
-    // The parent's broadcast reaches its sibling root and its own child —
-    // never the other family's child.
     let parent_broadcast = read_recorded(&receipts_dir, "parent-broadcast.json");
     let mut parent_targets: Vec<&str> = parent_broadcast["receipts"]
         .as_array()
@@ -1221,10 +1073,6 @@ async fn family_edges_never_cross_families_end_to_end() {
         "the parent's broadcast stays inside its nuclear family: {parent_broadcast}"
     );
 
-    // The rendered transcript labels: the child's reply rendered with the
-    // `child:` prefix on its true parent; another family's subagent
-    // (kid-b, delivered here as a probe) renders WITHOUT the label —
-    // the mislabeled-ack regression.
     client.wait_idle("w-child-transcript", kid_a_active);
     let parent_messages = client.messages("gm-parent-transcript", parent_a_active);
     assert!(

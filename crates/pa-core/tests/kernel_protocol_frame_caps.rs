@@ -1,6 +1,4 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28) - this target's own
-// crate root: the same bounded-boundary disposition as src/lib.rs
-// (large_futures/too_many_lines/the cast family; details there).
+// Pedantic-gate dispositions as src/lib.rs (large_futures/too_many_lines/casts).
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -11,13 +9,9 @@
 )]
 
 //! Verifier integration test: an oversized protocol line poisons the child
-//! and lands in protocol repair instead of buffering until OOM (TS #2423
-//! `MAX_PROTOCOL_LINE_CHARS` + the `oversized protocol line` repair test).
-//!
-//! A fake runtime (a small executable script, not the real one) answers the
-//! ready handshake, streams 33 Mi of unterminated output for one request, and
-//! answers every other request normally — so the repair's replacement child
-//! serves the follow-up cell.
+//! and lands in protocol repair instead of buffering until OOM. A fake
+//! runtime streams 33 Mi of unterminated output for one request and answers
+//! every other request normally, so the repair's child serves the follow-up.
 
 #![cfg(unix)]
 
@@ -98,9 +92,8 @@ async fn oversized_unterminated_protocol_line_poisons_and_repairs() {
         "unexpected error: {error:#}"
     );
 
-    // The poisoned child is replaced by the protocol repair; the follow-up
-    // cell (the replacement also speaks the fake protocol) serves normally
-    // with a plain ok done frame.
+    // The poisoned child is replaced by the protocol repair; the follow-up cell (the replacement
+    // also speaks the fake protocol) serves normally with a plain ok done frame.
     let follow = manager.execute("42", ExecuteOptions::default()).await;
     let follow = follow.expect("follow-up execute must not fail");
     assert_eq!(follow.status, ExecuteStatus::Ok);

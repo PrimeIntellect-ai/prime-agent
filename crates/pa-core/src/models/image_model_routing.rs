@@ -1,14 +1,7 @@
-//! Routing for image-attaching turns on session models without image input
-//! (TS `image-model-routing.ts` + the two `auth-guidance.ts` messages).
-//!
+//! Routing for image-attaching turns on session models without image input.
 //! The decision is pure: the embedding supplies the session model, its
-//! per-request fields, the configured `settings.imageModel` reference, the
-//! available catalog, and the auth probe; the resolver either returns the
-//! image-capable model that serves the turn (with the session thinking
-//! level and service tier clamped to what it supports) or an actionable
-//! error naming the setting. The turn-dispatch owner (the daemon engine)
-//! invokes it once per dispatched batch and applies the result as the
-//! per-run model override.
+//! per-request fields, `settings.imageModel`, the catalog, and the auth
+//! probe; the resolver returns the image-capable model or an actionable error.
 
 use pa_types::ai::{clamp_thinking_level, supports_fast_mode, ServiceTier};
 
@@ -20,7 +13,6 @@ use pa_types::ai::{Model, ModelInput, ModelThinkingLevel};
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedImageModel {
     pub model: Model,
-    /// Session thinking level clamped to the routed model's vocabulary.
     pub thinking_level: ModelThinkingLevel,
     /// Session service tier clamped for the routed model (a `priority`
     /// request on a model without fast mode serves `default`).
@@ -33,8 +25,7 @@ fn takes_image_input(model: &Model) -> bool {
 }
 
 /// TS `formatImageModelRequiredMessage`: the session model cannot serve the
-/// attached images and no image model is configured. Name the model, the
-/// setting, and the alternatives so the user can act immediately.
+/// attached images and no image model is configured.
 fn format_image_model_required_message(session_model_id: &str) -> String {
     format!(
         "This turn attaches images, but the selected model ({session_model_id}) does not accept image input.\n\nPick one:\n- Switch the session model to an image-capable one with /model, or\n- Set imageModel in settings.json to an image-capable model (\"provider/model-id\" or a bare id), e.g. \"anthropic/claude-sonnet-4-5\"\n\nThen resend the message. Without it the request would silently drop the images."
@@ -55,9 +46,7 @@ pub struct ImageModelRoutingInputs<'a> {
     /// Model selected for the session; the routed turns carry images it
     /// cannot see.
     pub session_model: &'a Model,
-    /// Session thinking level; clamped to what the routed model supports.
     pub thinking_level: ModelThinkingLevel,
-    /// Session service tier; clamped to what the routed model supports.
     pub service_tier: Option<ServiceTier>,
     /// `settings.imageModel` reference ("provider/model-id" or a bare id).
     pub image_model_reference: Option<&'a str>,
@@ -74,14 +63,10 @@ pub struct ImageModelRoutingInputs<'a> {
 /// Resolve the model that serves turns attaching images: the configured
 /// image model when the session model has no image input, `None` when the
 /// session model serves them natively (or images are blocked globally).
-/// Returns the actionable refusal when the turn cannot be served honestly:
-/// a text-only session model would otherwise downgrade the images to an
-/// "(image omitted)" placeholder (TS `resolveImageModelOverride`).
 ///
 /// # Errors
 ///
-/// Returns the actionable refusal message when the turn cannot be served
-/// honestly (a text-only session model with no usable image model).
+/// The actionable refusal when the turn cannot be served honestly.
 pub fn resolve_image_model_override(
     inputs: &ImageModelRoutingInputs<'_>,
 ) -> Result<Option<ResolvedImageModel>, String> {

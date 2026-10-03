@@ -163,11 +163,8 @@ impl Worker {
             "reload" => self.handle_reload(),
             "cancel_rlm_child" => self.handle_cancel_rlm_child(payload).await,
             "delete_rlm_subagent" => self.handle_delete_rlm_subagent(payload).await,
-            // The engine call blocks on the engine runtime (the durable
-            // `rlm_max_depth_state` write takes the engine session lock),
-            // so it runs on a blocking thread like every other engine
-            // call — a direct call would block_on from inside this async
-            // task and die.
+            // The engine call blocks on the engine runtime, so it
+            // runs on a blocking thread like every other engine call.
             "set_rlm_max_depth" => self.handle_set_rlm_max_depth(payload).await,
             "acquire_session_input_pause" => self.handle_acquire_session_input_pause(payload),
             "release_session_input_pause" => self.handle_release_session_input_pause(payload),
@@ -209,12 +206,9 @@ impl Worker {
                 None,
             ));
         }
-        // The shutdown admission gate (the round-8 bots' finding): a
-        // command dispatched while the graceful stop is closing must not
-        // start new work the exit would orphan - an execute_bash racing
-        // the shutdown's user-bash abort would otherwise clear the
-        // abort request and spawn a child the worker's exit leaves
-        // running.
+        // The shutdown admission gate: a command dispatched while the graceful stop
+        // is closing must not start new work the exit would orphan (an execute_bash
+        // racing the shutdown would spawn a child the exit leaves running).
         if core.shutdown_requested {
             return Err(response_failure(
                 None,
@@ -226,13 +220,8 @@ impl Worker {
         Ok(())
     }
 
-    /// `navigate_tree` with the reload's announcement (TS
-    /// `_reloadGoalStateFromBranch` -> `_emitGoalUpdate`): a tree move
-    /// that reloaded the goal state announces the change at the moment it
-    /// happened — before the navigation's response reaches the client —
-    /// so attached surfaces never show the pre-navigation goal. The
-    /// engine owns the on-change dedupe, so an unchanged reload (or a
-    /// no-op leaf move, which never rebuilds) stays silent.
+    /// `navigate_tree` with the reload's announcement: announced before the
+    /// response reaches the client, so surfaces never show the pre-navigation goal.
     async fn handle_navigate_tree(&self, payload: &Value) -> DaemonResponse {
         let response = self.tree_navigation.navigate_tree(payload).await;
         if response.success {
@@ -246,9 +235,8 @@ impl Worker {
         response
     }
 
-    /// `replace_acp_mcp_servers` (TS daemon-mode.ts case): the session's
-    /// owner-fenced ACP MCP store. The ACP transport resolves and validates
-    /// the servers before sending them; the worker only fences ownership,
+    /// The session's owner-fenced ACP MCP store: the ACP transport resolves and
+    /// validates the servers before sending them; the worker fences ownership,
     /// guards the busy turn, and rolls back a failed replacement.
     fn handle_replace_acp_mcp_servers(&self, payload: &Value) -> DaemonResponse {
         let owner_id = payload
@@ -278,22 +266,20 @@ impl Worker {
                 None,
             );
         }
-        // The real agent engine owns the session's MCP store (one store
-        // for admission and prompt gating); scripted harness engines fall
-        // back to the worker-level store.
+        // The real agent engine owns the session's MCP store (one store for admission
+        // and prompt gating); scripted harness engines fall back to the worker-level store.
         let manager = self
             .engine
             .acp_mcp_manager()
             .unwrap_or_else(|| std::sync::Arc::clone(&self.acp_mcp));
         let manager = manager.lock().unwrap();
         match manager.replace_acp_servers(&servers, owner_id) {
-            // An unchanged list (same owner, identical servers) is a no-op
-            // success, like the TS manager's unchanged short-circuit.
+            // An unchanged list (same owner, identical servers) is a
+            // no-op success.
             Ok(_) => response_success(None, "replace_acp_mcp_servers", None),
             Err(error) => {
-                // Roll back any partially applied configuration with the
-                // owner-scoped clear, exactly like the TS rollback, before
-                // surfacing the failure.
+                // Roll back any partially applied configuration with
+                // the owner-scoped clear before surfacing the failure.
                 if manager.can_release_acp_servers(owner_id) {
                     let _ = manager.replace_acp_servers(&[], owner_id);
                 }
@@ -302,17 +288,9 @@ impl Worker {
         }
     }
 
-    /// Arm the one-shot forced steering batch (TS `abortAndSendQueued`'s
-    /// `_forcedAllSteeringActionIds = new Set(queuedSteering.map(...))`):
-    /// the visible plain-user steering items — queue-visible rows whose
-    /// delivery record is a user message, not an accepted agent message or
-    /// an injected custom row — deliver as ONE batched turn at the next
-    /// boundary, even under queue mode "one-at-a-time". Returns whether
-    /// anything armed; an empty lane (or an all-injected one) arms
-    /// nothing and the caller decides from the surviving queue whether
-    /// the abort keeps the pump flowing.
-    // Called by the `abort_and_send_queued` funnel (the wire command's
-    // body, #2599's handler once rebased).
+    /// Arm the one-shot forced steering batch: the visible plain-user steering
+    /// items deliver as ONE batched turn at the next boundary, even under queue
+    /// mode "one-at-a-time". Returns whether anything armed.
     pub(crate) fn arm_forced_all_steering(&self) -> bool {
         let mut core = self.core.lock().unwrap();
         let armable = |item: &QueuedItem| {
@@ -330,56 +308,27 @@ impl Worker {
         true
     }
 
-    /// `abort_and_send_queued` (TS `abortAndSendQueued`, schema 29): abort
-    /// the active run and keep the queue flowing behind the settled turn
-    /// — the armed plain-user steering rows co-deliver as the next
-    /// batched turn, then the follow-up lane drains when the session
-    /// goes idle, one turn per completed turn. `steeringMode` is never
-    /// changed, and the follow-up lane never merges into the batch.
+    /// `abort_and_send_queued` (schema 29): abort the active run, keep the queue
+    /// flowing — the armed steering rows co-deliver, then the follow-up drains.
     ///
-    /// Abort-only — the queue parks behind the suspension, like the bare
-    /// `abort` — when no queue-visible work survives or the scheduler
-    /// must stay parked (a held admission pause or a pending shutdown —
-    /// TS `canResume`).
-    ///
-    /// SANCTIONED DIVERGENCE (operator ruling 2026-09-25): TS parks the
-    /// queue whenever the steering lane has nothing armable
-    /// (`queuedSteering.length === 0`), so a follow-up-only queue sits
-    /// parked until an outside resume site fires; here the abort
-    /// resumes whenever queue-visible work survived, and a follow-up
-    /// parked behind an aborted turn starts promptly once the turn
-    /// settles. The bare `abort` command keeps the TS park.
-    ///
-    /// The `abort_and_send_queued` wire command (schema 29) and the
-    /// Ctrl+C trigger dispatch through this funnel
-    /// (`handle_abort_and_send_queued` below — the abort-parity lane's
-    /// command surface, #2599). Returns whether the queue was resumed
-    /// to drain behind the abort (the abort-only arm answers `false`).
+    /// SANCTIONED DIVERGENCE (operator ruling 2026-09-25): TS parks the queue
+    /// whenever nothing is armable; here the abort resumes. Returns whether
+    /// the queue was resumed.
     pub(crate) fn abort_and_send_queued(&self) -> bool {
-        // TS `canResume`: no disposal in flight, no admission pause held —
-        // and the arm only fires in the send arm (`queuedSteering.length
-        // === 0 || !canResume` runs the plain `requestAbort()` without
-        // touching the armed set).
+        // TS `canResume`: no admission pause held — the arm only
+        // fires in the send arm.
         let can_resume =
             !self.input_pauses.paused() && !self.core.lock().unwrap().shutdown_requested;
         if !can_resume {
             self.request_abort();
             return false;
         }
-        // TS `queuedSteering` + the arm: the visible plain-user steering
-        // rows carry the forced-batch flag; an empty (or all-injected)
-        // lane arms nothing.
         self.arm_forced_all_steering();
-        // TS runs `requestAbort()` in both arms (the suspension parks the
-        // queue). The cancel sweep keeps only the queue-visible rows, so
-        // the emptiness read below measures exactly the work the abort
-        // leaves behind.
+        // The cancel sweep keeps only the queue-visible rows, so the emptiness
+        // read below measures exactly the work the abort leaves behind.
         self.request_abort();
-        // The resume gate: the abort keeps the queue flowing whenever
-        // queue-visible work survived — the armed steering batch or a
-        // follow-up-only lane alike. The resumed pump — not this funnel —
-        // owns the delivery at the settled turn's boundary: steers first
-        // (one batched turn), then the follow-up lane.
+        // The resumed pump — not this funnel — owns the delivery at
+        // the settled turn's boundary.
         let queued_work = {
             let core = self.core.lock().unwrap();
             !core.steering.is_empty() || !core.follow_up.is_empty()
@@ -391,29 +340,21 @@ impl Worker {
         true
     }
 
-    /// TS `requestAbort()`: the abort funnel behind both abort commands
-    /// (`abort` and `abort_and_send_queued`) - suspend queued-input
-    /// admission, cancel the queue-invisible turn actions, abort the
-    /// in-flight compaction, and cancel the running turn.
+    /// The abort funnel behind both abort commands: suspend queued-input
+    /// admission, cancel the queue-invisible turn actions, abort the in-flight
+    /// compaction, and cancel the running turn.
     fn request_abort(&self) {
         {
             let mut core = self.core.lock().unwrap();
             core.abort_requested = true;
-            // TS `requestAbort()` suspends queued-input admission: the
-            // queue parks and a plain prompt is rejected until a resume
-            // site fires.
+            // The queue parks and a plain prompt is rejected until a
+            // resume site fires.
             core.queued_input_suspended = true;
         }
-        // TS `requestAbort()`'s `_cancelSessionActions`: queue-INVISIBLE
-        // turn actions cancel with "Prompt aborted before delivery." - a
-        // direct prompt admitted on an idle session never became a queue
-        // row, so the abort must resolve its waiting response instead of
-        // parking it behind the suspension forever (the ACP cancel wedge:
-        // the prompt item sat in the lane with no resume site, the
-        // `prompt_and_wait` response hung). The queue-visible lanes
-        // (steer/follow-up, agent-message deliveries, prompt-behind-work,
-        // heartbeat fires) survive parked - the suspension defers the
-        // pump, it never drops the queue (the abort-ownership probe).
+        // Queue-INVISIBLE turn actions cancel: a direct prompt admitted on an idle
+        // session never became a queue row, so the abort must resolve its waiting
+        // response, not park it behind the suspension forever. Queue-visible lanes
+        // survive parked — the suspension defers the pump, it never drops the queue.
         {
             let mut core = self.core.lock().unwrap();
             let cancel = |lane: &mut VecDeque<QueuedItem>| {
@@ -438,20 +379,11 @@ impl Worker {
             cancel(&mut core.steering);
             cancel(&mut core.follow_up);
         }
-        // A withdrawn minted goal continuation never reaches a turn (TS
-        // `_cancelSessionActions` drops the queued continuation; the goal
-        // keeps its consumed slot and resumes at the next boundary). Its
-        // pending guard already released at ITS admission (the worker
-        // sink), so the withdraw clears nothing: a mirror clear here could
-        // drop an unrelated in-flight mint's armed guard (a second
-        // continuation for the same boundary) or — after a core rebuild —
-        // a replacement session's guard. A withdrawn item holds no guard
-        // to release.
-        // TS `requestAbort()` also aborts the compaction in flight (manual
-        // and automatic): the interrupt key cancels a compacting session.
+        // A withdrawn continuation's pending guard already released at ITS admission,
+        // so the withdraw clears nothing (a mirror clear could drop an unrelated guard).
         self.compaction.abort();
-        // `requestAbort()` closes with `this.agent.abort()`: the in-flight
-        // turn's fetch cancels now, not at its next streamed event.
+        // The in-flight turn's fetch cancels now, not at its next
+        // streamed event.
         self.engine.abort_in_flight_turn();
     }
 
@@ -460,18 +392,9 @@ impl Worker {
         response_success(None, "abort", None)
     }
 
-    /// `abort_and_send_queued` (TS `abortAndSendQueued`, schema 29): abort
-    /// the active run and keep the queue flowing at the boundary — the
-    /// armed steering rows deliver as ONE co-delivered turn, then the
-    /// follow-up lane drains one turn per completed turn; abort-only
-    /// when no queue-visible work survives or the scheduler must stay
-    /// parked (the abort-only arm leaves the suspension set, so an
-    /// emptied queue stays parked like the bare `abort`).
     fn handle_abort_and_send_queued(&self) -> DaemonResponse {
-        // The funnel above owns the arm, the abort, and the conditional
-        // resume; the response acknowledges the abort itself, never the
-        // deliveries the resumed pump runs asynchronously at the settled
-        // turn's boundary.
+        // The response acknowledges the abort itself, never the
+        // async deliveries the resumed pump runs at the settle.
         self.abort_and_send_queued();
         response_success(None, "abort_and_send_queued", None)
     }
@@ -548,9 +471,8 @@ impl Worker {
             return response;
         }
         let core = self.core.lock().unwrap();
-        // TS `get_queue` serves `getSteeringMessagePreviews` /
-        // `getFollowUpMessagePreviews`: the labeled preview when the
-        // delivery carries one, else the message text.
+        // The labeled preview when the delivery carries one, else the
+        // message text.
         response_success(
             None,
             "get_queue",
@@ -580,10 +502,8 @@ impl Worker {
         let follow_up: Vec<String> = drain_lane(&mut core.follow_up);
         let snapshot = Self::snapshot_locked(&core);
         drop(core);
-        // The cleared lanes are idle again: the verdict refresh rides the
-        // same checkpoint as the snapshot (a stale busy=true from the
-        // cleared items' admission must not revive an empty session; a
-        // clear mid-turn keeps the verdict busy through the turn).
+        // The verdict refresh rides the same checkpoint as the snapshot: a stale
+        // busy=true from the cleared items' admission must not revive an empty session.
         self.checkpoint_queue(QueueCheckpoint::Settle {
             operation: "queue_cleared",
         });
@@ -632,10 +552,8 @@ impl Worker {
 
     async fn handle_kill(&self, payload: &Value) -> DaemonResponse {
         let reason = KillCloseReason::from_payload(payload);
-        // The session is closing: the continuation mint sites and their
-        // settle-hook retries bail from here on (TS `_disposed ||
-        // _disposing` in the goal/autonomous resume sites). A stopped
-        // session never continues.
+        // The session is closing: the continuation mint sites and
+        // their settle-hook retries bail from here on.
         if let Some(agent_engine) = &self.agent_engine {
             agent_engine.mark_session_closed();
         }
@@ -644,24 +562,17 @@ impl Worker {
         self.side_questions
             .abort_all_and_settle(SIDE_QUESTION_SETTLE_TIMEOUT)
             .await;
-        // TS `closeSessionOnce`'s first act: `killed` cancels the session's
-        // scheduled jobs (`cancelScheduledJobsForSession` — the queued
-        // heartbeat follow-ups' purge included); `replaced` keeps the plain
-        // cron jobs but cancels the subagent's RLM heartbeats
-        // (`cancelSubagentRlmHeartbeats`); `shutdown` keeps them all (the
-        // jobs survive the close for the later scheduled wake). The store
-        // cancel is durable, so the stopped session's own heartbeats can
-        // never revive it (the zombie fix).
+        // `killed` cancels the session's scheduled jobs; `replaced` keeps the plain
+        // cron jobs but cancels the subagent's RLM heartbeats; `shutdown` keeps them
+        // all. The store cancel is durable, so the stopped session's own heartbeats
+        // can never revive it.
         match reason {
             KillCloseReason::Killed => self.cancel_session_scheduled_jobs().await,
             KillCloseReason::Replaced => self.cancel_session_rlm_heartbeats().await,
             KillCloseReason::Shutdown => {}
         }
-        // TS `closeSessionOnce(reason)` cascades the close to the
-        // session's resident children with the SAME reason before the
-        // session's own archive and dispose; a close failure is swallowed
-        // here exactly like the daemon-mode kill handler's
-        // `.catch(() => undefined)`.
+        // The close cascades to the resident children with the SAME reason before
+        // the session's own archive and dispose; a close failure is swallowed.
         let child_reason = match reason {
             KillCloseReason::Killed => crate::rlm_children::ChildCloseReason::Killed,
             KillCloseReason::Shutdown => crate::rlm_children::ChildCloseReason::Shutdown,
@@ -670,25 +581,14 @@ impl Worker {
         if let Err(error) = self.close_rlm_children(child_reason).await {
             eprintln!("pa-daemon: RLM child close at kill failed: {error:#}");
         }
-        // The persist (TS `archiveSession` -> `appendSessionState`, before
-        // `session.abort()`): synchronous in TS, so the `archived` entry
-        // lands while the turn still holds its provider wait. The turn can
-        // only append its aborted row once the abort flag below opens the
-        // gate, so the file order (archived, then the aborted row) stays
-        // the TS one. `shutdown` keeps the resume entry (TS
-        // `closeKeepsResumeEntry`), so its file stays live on disk. The
-        // core lock never blocks on the in-flight turn: the turn runner
-        // holds it only for the instants it persists an event, never
-        // across the provider wait. The guard rides a block, not an
-        // explicit drop: a `drop(core)` does not end the guard's slot in
-        // an async generator, so the later awaits would make the future
-        // non-Send.
+        // The `archived` entry lands before the turn's aborted row (the abort flag
+        // below gates the aborted row), so the file order stays the TS one.
+        // The guard rides a block, not an explicit drop: a `drop(core)` does not
+        // end the guard's slot in an async generator (the awaits need Send).
         {
             let mut core = self.core.lock().unwrap();
-            // `shutdown` keeps the resume entry (TS
-            // `closeKeepsResumeEntry`), so its file stays live on disk;
-            // the killed and replaced closes archive (the base's
-            // `persist_entry` write).
+            // `shutdown` keeps the resume entry, so its file stays
+            // live on disk; the killed and replaced closes archive.
             if reason != KillCloseReason::Shutdown {
                 if let Some(store) = core.store.as_mut() {
                     if let Err(error) = store.persist_entry(
@@ -701,18 +601,10 @@ impl Worker {
             }
             core.created = false;
         }
-        // The abort funnel fires BEFORE every close step that can wait on
-        // the session mutex the running turn holds across its provider
-        // wait. TS `session.abort()` starts with `requestAbort()` ->
-        // `agent.abort()`, which cancels the in-flight fetch immediately,
-        // so the later awaits in the close (the settle, the telemetry
-        // archive, the kernel dispose) settle on an already-cancelled
-        // turn instead of waiting out the stream. TS dispose cancels the
-        // queued session actions and clears the agent queues
-        // (`requestAbort` parks the input pump, `dispose` rejects every
-        // queued action): nothing may feed another turn after the close
-        // below (and the turn runner clears the abort flag when it pops
-        // an item, so the cancel must land first).
+        // The abort funnel fires BEFORE every close step that can wait on the
+        // session mutex the running turn holds across its provider wait: the later
+        // awaits settle on an already-cancelled turn. The cancel sweep must land
+        // before the close clears the lanes.
         {
             let mut core = self.core.lock().unwrap();
             core.abort_requested = true;
@@ -723,25 +615,15 @@ impl Worker {
         self.compaction.abort();
         self.tree_navigation.abort();
         self.engine.abort_in_flight_turn();
-        // The awaited `session.abort()` settles the cancelled in-flight
-        // turn and compaction: the aborted turn's row broadcasts and
-        // persists here (the #247 gate's aborted-row exception), and only
-        // then does the runtime dispose run — the kernel teardown must
-        // not race a live run.
+        // The awaited settle lets the aborted turn's row broadcast and persist (the
+        // #247 gate's aborted-row exception); only then does the runtime dispose run
+        // (the kernel teardown must not race a live run).
         self.await_session_work_settled().await;
-        // `session archived` (schema v1) + the session-ended finalization:
-        // kill disposes the session like the TS dispose callback, which
-        // TS runs AFTER the awaited `session.abort()` — so the ended-run
-        // accounting includes the aborted turn, and the settle above has
-        // released the turn's hold on the session mutex: this never waits
-        // out a pending provider response.
+        // The session-ended finalization runs AFTER the awaited settle: the
+        // ended-run accounting includes the aborted turn, never a pending response.
         self.engine.archive_session_telemetry().await;
-        // The runtime dispose of the TS close path
-        // (`closeSessionOnce` -> `runtime.dispose()` ->
-        // `session.disposeAsync` -> `IpythonKernelProvisioner.dispose`,
-        // default snapshot policy): the session's kernel dies with the
-        // session. The worker keeps the engine object, so the engine-drop
-        // teardown from #235 cannot run yet — dispose it explicitly.
+        // The session's kernel dies with the session: the worker keeps the engine
+        // object, so the #235 engine-drop teardown cannot run yet — dispose explicitly.
         if let Some(agent_engine) = &self.agent_engine {
             agent_engine.dispose_kernel().await;
         }
@@ -808,9 +690,8 @@ impl Worker {
         }
         let summary = self.summary_locked(&core);
         drop(core);
-        // TS `session.setSessionName` emits `session_info_changed` so every
-        // attached client re-reads the name (the interactive mode patches
-        // its connection state from the event).
+        // `session_info_changed` makes every attached client re-read
+        // the name.
         self.emit_worker_event(serde_json::json!({
             "type": "session_info_changed",
             "name": name,

@@ -2,23 +2,17 @@
 //! and 1,000 spawned children (each with a persisted session file in the
 //! artifacts tree, none resident) must surface the full 1,001-row roster
 //! from `list --all`, performance-bounded (TS: 1,001 rows in 0.78s).
-// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
-// the full rationale).
-// Stack-resident futures by design on the daemon's hot paths; boxing the
-// call sites for a lint tick is a perf regression with zero correctness gain.
+// Stack-resident futures by design on the daemon's hot paths.
 #![allow(clippy::large_futures)]
-// 64-bit-only targets; the narrowing casts sit at OS boundaries
-// (pid/fd/time/size) where the values are bounded by the kernel - the
-// dead-guard expect()s would add panic paths where silent wrap was
-// deliberate.
+// Narrowing casts sit at OS boundaries (pid/fd/time/size) where the kernel
+// bounds the values.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// The fn-length threshold is a style gate, not correctness; the structure
-// campaign owns the god-fn splits as a follow-up.
+// Style gate only, not correctness.
 #![allow(clippy::too_many_lines)]
 // API-shape opinions, not defects; the surfaces are deliberate.
 #![allow(
@@ -66,9 +60,8 @@ fn spawn_daemon(socket: &Path, agent_dir: &Path) -> Daemon {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         // A supervisor killed at teardown must not leak its session workers
-        // into later test binaries: the worker's supervisor-lost exit (TS
-        // `exitIfSupervisorOrphanedForTooLong`) runs on this short window
-        // instead of the 5-minute default.
+        // into later test binaries: the worker's supervisor-lost exit runs
+        // on this short window instead of the 5-minute default.
         .env(
             pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
             "15000",
@@ -144,9 +137,8 @@ impl Client {
         self.writer.flush().expect("flush");
     }
 
-    /// Read one supervisor line before the deadline: the roster pushes a
-    /// kill produces interleave with its response, so the reader must be
-    /// bounded instead of blocking.
+    /// The roster pushes a kill produces interleave with its response, so
+    /// the reader must be bounded instead of blocking.
     fn read_line_bounded(&mut self, timeout: Duration) -> Value {
         let deadline = Instant::now() + timeout;
         self.reader
@@ -168,9 +160,6 @@ impl Client {
     }
 }
 
-/// One persisted child session file: a header plus two messages, laid out
-/// the way a spawned child persists (per-child dir under the parent's
-/// session-artifacts tree).
 fn write_child_session(path: &Path, id: &str, name: &str, prompt: &str) {
     std::fs::create_dir_all(path.parent().expect("child dir")).expect("child dir");
     let content = format!(
@@ -182,9 +171,6 @@ fn write_child_session(path: &Path, id: &str, name: &str, prompt: &str) {
     std::fs::write(path, content).expect("write child session");
 }
 
-/// Build one synthetic family: a root session in the sessions dir plus
-/// `children` ledger spawn records pointing at persisted (non-resident)
-/// child files, and write the ledger file at its canonical path.
 fn write_synthetic_family(agent_dir: &Path, children: usize) -> (PathBuf, usize) {
     let sessions_dir = agent_dir.join("sessions");
     std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
@@ -268,7 +254,6 @@ fn list_all_returns_the_full_synthetic_thousand_child_roster() {
         "list --all over {CHILDREN} ledger children answered in {elapsed:?}"
     );
 
-    // The root row and one child row carry the passive-roster identity.
     let root_row = sessions
         .iter()
         .find(|row| row["sessionId"].as_str() == Some("root-session-1"))
@@ -296,12 +281,9 @@ fn list_all_returns_the_full_synthetic_thousand_child_roster() {
     );
 }
 
-/// TS `seedRosterLedger` parity at the subscribe surface: a child spawned
-/// under a real resident parent seeds into the live roster, so a subscriber
-/// that subscribes after the spawn sees the full family in the snapshot;
-/// after the child worker shuts down (a plain stop, no tombstone), the
-/// child survives as a seeded passive row - both in the push the existing
-/// subscriber receives and in a fresh subscriber's snapshot.
+/// TS `seedRosterLedger` parity at the subscribe surface: after a plain
+/// stop (no tombstone) the child survives as a seeded passive row, in the
+/// existing subscriber's push and in a fresh subscriber's snapshot.
 #[tokio::test]
 async fn subscribe_after_spawn_then_shutdown_seeds_the_passive_child() {
     use pa_core::session_engine::rlm_host::{RlmSpawnRequest, RlmSubagentHost};
@@ -315,8 +297,8 @@ async fn subscribe_after_spawn_then_shutdown_seeds_the_passive_child() {
     let (mut client, hello) = Client::connect(&socket);
     assert_eq!(hello["type"], "daemon_hello");
 
-    // The parent is a real resident session: its session file is the seed
-    // root the child's ledger edge must descend from.
+    // The parent's session file is the seed root the child's ledger edge
+    // must descend from.
     let script = dir.path().join("script.json");
     std::fs::write(
         &script,
@@ -348,7 +330,6 @@ async fn subscribe_after_spawn_then_shutdown_seeds_the_passive_child() {
         .expect("parent session id")
         .to_string();
 
-    // Spawn the child under the parent's real session file.
     let children = SupervisorChildSessions::new(
         std::sync::Arc::new(pa_daemon::supervisor_link::SupervisorLink::new(
             socket.clone(),
@@ -382,7 +363,6 @@ async fn subscribe_after_spawn_then_shutdown_seeds_the_passive_child() {
         .expect("spawn child");
     let child_agent_id = format!("{parent_file}#{}", handle.rlm_child_id);
 
-    // Both rows settle as residents in the supervisor roster.
     let deadline = Instant::now() + Duration::from_secs(15);
     let child_active_id = loop {
         assert!(Instant::now() < deadline, "list never showed the child");
@@ -399,7 +379,6 @@ async fn subscribe_after_spawn_then_shutdown_seeds_the_passive_child() {
         std::thread::sleep(Duration::from_millis(50));
     };
 
-    // Subscribe after the spawn: the snapshot carries the resident family.
     let subscribed = client.send_command("r1", &json!({ "type": "roster_subscribe" }));
     assert_eq!(
         subscribed["success"], true,
@@ -417,17 +396,11 @@ async fn subscribe_after_spawn_then_shutdown_seeds_the_passive_child() {
     assert_eq!(child_entry["summary"]["runtimeKind"], "subagent");
     assert_eq!(child_entry["summary"]["parentSessionPath"], parent_file);
 
-    // Shutdown the child worker: a plain kill, no ledger tombstone. The
-    // stop passivates the anchored child (TS
-    // `flipWorkerRosterEntriesInactive`): the row settles as an inactive
-    // entry preserving its durable display fields, and no removal push
-    // ever carries it (the remove+reseed this replaced deleted and
-    // re-created the row). The kill's pushes and its response interleave
-    // in either order on the wire, so the lines are read raw and DRAINED
-    // until both the k1 response and the passivated-row push have
-    // arrived: breaking on the first passive roster row would assert a
-    // kill failure whenever that push lands before the response (an
-    // ordering race, not a product bug).
+    // The stop passivates the anchored child: the row settles inactive with
+    // its durable fields, and no removal push ever carries it. The kill's
+    // pushes and response interleave in either order, so drain both: breaking
+    // on the first passive row would assert a kill failure whenever the push
+    // lands before the response (an ordering race).
     client.send(&json!({
         "type": "command",
         "id": "k1",
@@ -475,15 +448,11 @@ async fn subscribe_after_spawn_then_shutdown_seeds_the_passive_child() {
     assert_eq!(seeded_summary["rlmChildId"], handle.rlm_child_id);
     assert_eq!(seeded_summary["sessionName"], "worker-a");
     assert_eq!(seeded_summary["parentSessionPath"], parent_file);
-    // The passivated row preserves the durable summary the resident row
-    // carried (only the live-runtime fields strip).
     assert_eq!(
         seeded_summary["messageCount"],
         child_entry["summary"]["messageCount"]
     );
 
-    // A fresh subscriber sees the full family immediately: the seeded
-    // child plus the still-resident parent.
     let (mut client_b, _hello_b) = Client::connect(&socket);
     let resubscribed = client_b.send_command("r2", &json!({ "type": "roster_subscribe" }));
     assert_eq!(

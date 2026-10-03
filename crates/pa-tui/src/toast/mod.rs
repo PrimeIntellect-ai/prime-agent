@@ -1,14 +1,9 @@
-//! Ephemeral action toasts: the top-right auto-dismiss overlay for
-//! short-lived action confirmations (clipboard copies and their kin).
+//! Ephemeral action toasts: the top-right auto-dismiss overlay for short-lived
+//! action confirmations (clipboard copies and their kin).
 //!
-//! SANCTIONED DIVERGENCE from TS (documented per the #289 precedent): the
-//! TS product has no in-TUI toast surface — confirmations render as
-//! durable chat status rows (`showStatus`), and its "toast" surfaces are
-//! OS-level notifications (the Windows Terminal / termux notifier). The
-//! Rust product keeps the chat row for anything the
-//! transcript should remember and surfaces action acks the user only
-//! needs for a moment as an overlay instead: the confirmation never
-//! pollutes the transcript and the transcript never scrolls to show it.
+//! SANCTIONED DIVERGENCE from TS (#289 precedent): TS has no in-TUI toast surface;
+//! Rust keeps the chat row for what the transcript should remember, and momentary
+//! acks render as an overlay instead.
 
 use std::time::{Duration, Instant};
 
@@ -40,9 +35,7 @@ impl Toast {
         }
     }
 
-    /// The overlay label: the second and later repeats of the same action
-    /// inside the window read as the count bump ("Copied … (x3)"), so a
-    /// coalesced repeat still visibly acknowledges every copy.
+    /// The overlay label: repeats read as the count bump ("Copied … (x3)").
     fn label(&self) -> String {
         if self.repeats > 1 {
             format!(
@@ -56,8 +49,8 @@ impl Toast {
     }
 }
 
-/// The expiry `TOAST_TTL` out from `now` (an overflow near the monotonic
-/// clock's end lands at `now`, which reads as expired).
+/// The expiry `TOAST_TTL` out from `now` (overflow lands at `now`, which
+/// reads as expired).
 fn expiry(now: Instant) -> Instant {
     now.checked_add(TOAST_TTL).unwrap_or(now)
 }
@@ -69,17 +62,13 @@ pub struct Toasts {
 }
 
 impl Toasts {
-    /// Show a toast. A repeat of an action whose toast is still on screen
-    /// COALESCES into that toast: its TTL resets and its repeat count
-    /// climbs, so three consecutive copies read as one "Copied … (x3)"
-    /// toast — never three identical rows stacked. The coalesced toast
-    /// moves to the bottom of the stack (it is the newest action). A
-    /// distinct action keeps its own toast; the stack caps at the limit
-    /// with the oldest dropping first.
+    /// Show a toast. A repeat whose toast is still on screen COALESCES into
+    /// it (TTL reset, count climb); the coalesced toast moves to the bottom,
+    /// and the stack caps with the oldest dropping first.
     pub fn push(&mut self, text: impl Into<String>) {
         let text = text.into();
-        // Only a still-visible toast coalesces: one whose TTL already
-        // passed starts fresh (the earlier confirmation is gone).
+        // Only a still-visible toast coalesces; an expired one starts
+        // fresh.
         let now = Instant::now();
         if let Some(index) = self
             .entries
@@ -106,9 +95,7 @@ impl Toasts {
     }
 
     /// The earliest entry's expiry, active or not: the run loop arms its
-    /// TTL wakeup on this so an idle surface still repaints the overlay
-    /// away (a stale past deadline self-drains — the prune at that
-    /// iteration empties it).
+    /// TTL wakeup on this so an idle surface still repaints away.
     #[must_use]
     pub fn next_expiry(&self) -> Option<Instant> {
         self.entries.iter().map(|toast| toast.expires_at).min()
@@ -123,9 +110,9 @@ impl Toasts {
             .collect()
     }
 
-    /// Fast-forward every toast's expiry by `age` (test hook: expiry
-    /// without a wall-clock wait; an expiry already too close to the
-    /// monotonic clock's start lands at `now`, which reads as expired).
+    /// Fast-forward every toast's expiry by `age` (test hook; an expiry
+    /// too close to the monotonic clock's start lands at `now`, which
+    /// reads as expired).
     #[cfg(test)]
     pub(crate) fn age_by(&mut self, age: Duration) {
         let now = Instant::now();
@@ -136,13 +123,9 @@ impl Toasts {
 }
 
 /// Composite the toasts over the frame's top transcript rows: each toast
-/// is a compact right-aligned pill over the row's right edge — the
-/// follow-hint composite's grammar, not a wholesale row replacement —
-/// so the covered row keeps its own content outside the pill's columns
-/// (and its leading OSC 133 zone markers: shell integration's
-/// turn-boundary jumps keep working while the toast is visible). Rows at
-/// or past `end` (the transcript window's last row + 1) stay untouched —
-/// a short window never lets the overlay run into the dock.
+/// is a right-aligned pill — not a wholesale row replacement — so the
+/// covered row keeps its content (and its leading OSC 133 zone markers)
+/// outside the pill's columns. Rows at or past `end` stay untouched.
 pub fn overlay_toasts(
     frame: &mut [Line],
     start: usize,
@@ -162,10 +145,7 @@ pub fn overlay_toasts(
         let Some(row) = frame.get_mut(start + offset) else {
             break;
         };
-        // The pill covers only its own columns at the row's right edge;
-        // the covered row's content survives on both sides (its leading
-        // zone markers intact). A pill wider than the frame truncates to
-        // the frame edge — the overlay never wraps a row past the width.
+        // A pill wider than the frame truncates to the frame edge.
         let pill = format!(" {text} ");
         let pill_width = crate::width::str_width(&pill).min(width);
         let col = width.saturating_sub(pill_width);
@@ -175,13 +155,11 @@ pub fn overlay_toasts(
         out.extend(prefix);
         // The pill never rides an open link region, whether the covered
         // content opened one or a wrapped link carried one in from the
-        // row above (the writer's regions resume at the next row's
-        // column 0): the close lands before the pill's cells, and an
+        // row above: the close lands before the pill's cells, and an
         // unmatched close is a terminal no-op.
         out.push(Span::raw(crate::hyperlinks::OSC8_CLOSE.to_string()));
         // The pill sits at its right-edge column even when the covered
-        // content runs short or a wide cluster clips at the boundary: the
-        // composited prefix pads up to the column first.
+        // content runs short: the prefix pads up to the column first.
         let prefix_width = crate::width::line_width(&out);
         if prefix_width < col {
             out.push(Span::raw(" ".repeat(col - prefix_width)));
@@ -197,10 +175,8 @@ pub fn overlay_toasts(
 }
 
 /// Slice `line`'s visible columns `[start, start + length)`, keeping the
-/// zero-width escapes whose column falls inside the range — the TS
-/// `sliceByColumn` form drops them, which strips an OSC 8 hyperlink from
-/// covered content for the toast's lifetime. Wide clusters clip at the
-/// boundary like the strict TS form.
+/// zero-width escapes inside the range — TS `sliceByColumn` drops them,
+/// which would strip a covered OSC 8 hyperlink.
 fn slice_columns_keeping_escapes(line: &Line, start: usize, length: usize) -> Line {
     use unicode_segmentation::UnicodeSegmentation;
     let mut out: Line = Vec::new();

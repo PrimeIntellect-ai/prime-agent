@@ -1,7 +1,6 @@
-//! Tool-call batch execution (TS `executeToolCalls`): sequential and parallel
-//! dispatch, per-tool preparation outcomes, batch termination, and tool-result
-//! message emission. Section of the port of
-//! `packages/agent/src/agent-loop.ts`.
+//! Tool-call batch execution: sequential and parallel dispatch, per-tool
+//! preparation outcomes, batch termination, and tool-result message
+//! emission.
 
 use std::sync::Arc;
 
@@ -18,10 +17,6 @@ use super::tool_call::{
 };
 use super::{AgentEventSink, AgentLoopConfig};
 
-// ---------------------------------------------------------------------------
-// Tool execution
-// ---------------------------------------------------------------------------
-
 pub(crate) struct ExecutedToolCallBatch {
     pub(crate) messages: Vec<ToolResultMessage>,
     pub(crate) terminate: bool,
@@ -33,7 +28,6 @@ pub(crate) struct FinalizedToolCallOutcome {
     pub(crate) is_error: bool,
 }
 
-/// Port of `executeToolCalls`.
 pub(crate) async fn execute_tool_calls(
     current_context: &AgentContext,
     assistant_message: &AssistantMessage,
@@ -77,7 +71,6 @@ pub(crate) async fn execute_tool_calls(
     }
 }
 
-/// Port of `executeToolCallsSequential`.
 async fn execute_tool_calls_sequential(
     current_context: &AgentContext,
     assistant_message: &AssistantMessage,
@@ -146,8 +139,6 @@ async fn execute_tool_calls_sequential(
     })
 }
 
-/// Port of `executeToolCallsParallel`.
-///
 /// `tool_execution_end` is emitted in completion order (from inside the
 /// concurrent tasks), while tool-result message events are emitted afterwards
 /// in assistant source order, matching the TS reference.
@@ -267,7 +258,6 @@ pub(crate) struct PreparedToolCall {
     pub(crate) args: serde_json::Value,
 }
 
-/// Port of `shouldTerminateToolBatch`.
 fn should_terminate_tool_batch(finalized_calls: &[FinalizedToolCallOutcome]) -> bool {
     !finalized_calls.is_empty()
         && finalized_calls

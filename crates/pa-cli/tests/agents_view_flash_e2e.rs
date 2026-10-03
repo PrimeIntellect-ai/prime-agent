@@ -1,13 +1,6 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
-// by design on hot paths (boxing 130 fns is allocation-churn with zero
-// correctness gain); the fn-length threshold is a style gate, not
-// correctness (the harness fns are intentionally linear); 64-bit targets -
-// the narrowing sits at OS/protocol boundaries where the values are
-// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
-// guarded parses), and checked conversions would add panic paths where
-// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
-// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
-// dossier for the conductor).
+// large_futures: stack futures on hot paths by design. too_many_lines:
+// style gate only. Casts: 64-bit targets; narrowing sits at bounded
+// OS/protocol boundaries.
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -17,15 +10,10 @@
     clippy::cast_precision_loss
 )]
 
-//! End-to-end verifier for the agents-view flash: a store seeded with
-//! hundreds of dead subagent sessions under one parent whose worker
-//! registers and then departs (the operator's fleet box: a departed
-//! root's registration-seeded rows stayed in the roster forever, and the
-//! agents view rendered them as top-level rows until the saved catalog
-//! re-parented them minutes later). The stop must settle the unowned
-//! rows out of the roster, so the first agents-view render is the live
-//! roster alone — while the saved catalog keeps every dead row resumable
-//! under the parent's collapsed tree.
+//! End-to-end verifier for the agents-view flash (the operator's fleet box:
+//! a departed root's registration-seeded rows stayed top-level until the
+//! catalog re-parented them minutes later): the first render must show the
+//! live roster alone; the catalog keeps every dead row resumable.
 #![cfg(unix)]
 
 use std::fmt::Write as _;
@@ -111,13 +99,10 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
     ] {
         command.env_remove(var);
     }
-    // The daemon's default sessions dir must stay the agent dir under the
-    // tempdir: an ambient `PRIME_AGENT_SESSION_DIR` (every agent-session
-    // shell on the fleet box exports one) would otherwise become the
-    // daemon's default session dir, so `rlm_spawn_ledger_for(None)`
-    // resolves the family ledger against the foreign dir and the seeded
-    // family never registers (the same env hygiene the sibling e2e
-    // spawns pin: ambient overrides must not leak in).
+    // The daemon's default sessions dir must stay the tempdir's agent dir: an
+    // ambient `PRIME_AGENT_SESSION_DIR` (fleet shells export one) would make
+    // the family ledger resolve against the foreign dir, never registering the
+    // seeded family.
     command.env_remove("PRIME_AGENT_SESSION_DIR");
     command.env_remove("PRIME_AGENT_CODING_AGENT_SESSION_DIR");
     command.env(
@@ -261,8 +246,7 @@ impl Client {
         }
     }
 
-    /// Drain buffered and live `roster_update` pushes until the socket
-    /// stays quiet for the window.
+    /// Drain buffered and live `roster_update` pushes until the socket stays quiet for the window.
     fn drain_roster_pushes(&mut self, quiet: Duration) {
         self.roster_updates.clear();
         let mut last_line = Instant::now();
@@ -277,9 +261,8 @@ impl Client {
     }
 }
 
-/// The rows of one roster snapshot whose summary carries the dead
-/// family's marker (a `rlmChildId` under the parent, or the parent's own
-/// session file).
+/// The rows of one roster snapshot whose summary carries the dead family's
+/// marker (a `rlmChildId` under the parent, or the parent's own session file).
 fn family_rows(roster: &[Value], parent_file: &Path, child_prefix: &str) -> usize {
     roster
         .iter()
@@ -300,9 +283,7 @@ fn roster_of(response: &Value) -> Vec<Value> {
         .unwrap_or_default()
 }
 
-/// The first frame of one headless view run (the mount draw happens
-/// before the saved-catalog fetch even spawns, so this is the frame the
-/// live roster alone produced).
+/// The first frame of one headless view run (the mount draw precedes the saved-catalog fetch).
 fn first_frame(frames: &[String]) -> String {
     frames
         .first()
@@ -310,7 +291,6 @@ fn first_frame(frames: &[String]) -> String {
         .unwrap_or_else(|| panic!("no frame rendered"))
 }
 
-/// The last frame containing `marker`.
 fn frame_of(frames: &[String], marker: &str) -> String {
     frames
         .iter()
@@ -356,8 +336,8 @@ async fn the_first_agents_view_render_is_clean_behind_hundreds_of_dead_subagents
     let sessions_dir = agent_dir.join("sessions");
     std::fs::create_dir_all(&sessions_dir).expect("session dir");
 
-    // The mock provider registers without any prompt ever running (the
-    // create and the stop are turn-free paths).
+    // The mock provider registers without any prompt ever running (the create and the stop are
+    // turn-free paths).
     std::fs::write(
         agent_dir.join("models.json"),
         json!({
@@ -383,10 +363,8 @@ async fn the_first_agents_view_render_is_clean_behind_hundreds_of_dead_subagents
     )
     .expect("write models.json");
 
-    // The dead family: one parent in the sessions dir and hundreds of
-    // subagent transcripts under session-artifacts (the RLM layout the
-    // scan never visits; the ledger walk carries them), with the spawn
-    // edges written before the parent ever registers.
+    // The dead family: one parent in the sessions dir and hundreds of subagent
+    // transcripts under session-artifacts (the RLM layout the scan never visits).
     let parent_file = write_fixture(
         &sessions_dir,
         "flash-parent",
@@ -422,8 +400,7 @@ async fn the_first_agents_view_render_is_clean_behind_hundreds_of_dead_subagents
     let supervisor = spawn_supervisor(dir.path());
     let mut client = Client::connect(&supervisor.socket);
 
-    // Before the family's worker ever registers, the roster snapshot is
-    // clean of the dead family (nothing anchors it).
+    // Before the worker registers, the roster is clean of the dead family.
     client.send_command("r0", &json!({ "type": "roster_subscribe" }));
     let before = client.request("r0");
     assert_eq!(before["success"], true, "roster_subscribe: {before}");
@@ -433,10 +410,8 @@ async fn the_first_agents_view_render_is_clean_behind_hundreds_of_dead_subagents
         "an unregistered family never reaches the roster: {before}"
     );
 
-    // The parent's worker registers (the create resumes the fixture
-    // file): the registration seed walks the live ledger family and the
-    // roster serves the hundreds of seeded rows - TS parity while the
-    // root is resident.
+    // The parent's worker registers (the create resumes the fixture file): the
+    // registration seed walks the live ledger family — TS parity while resident.
     client.send_command(
         "c1",
         &json!({
@@ -467,13 +442,10 @@ async fn the_first_agents_view_render_is_clean_behind_hundreds_of_dead_subagents
         "a resident root's own row plus its seeded family serves to subscribers: {resident}"
     );
 
-    // The worker departs (the operator's stale-worker stop): the family
-    // loses its only resident root, so its SEEDED rows settle out of the
-    // roster with the stop, while the parent's own TOP-LEVEL row
-    // PASSIVATES and stays (TS `flipWorkerRosterEntriesInactive` keeps
-    // every stopped non-ephemeral row visible - the dead family's
-    // children return to the saved catalog alone, the root session's row
-    // never vanishes).
+    // The worker departs (the operator's stale-worker stop): the SEEDED rows
+    // settle out of the roster with the stop, while the parent's own TOP-LEVEL
+    // row PASSIVATES and stays (TS `flipWorkerRosterEntriesInactive` keeps every
+    // stopped non-ephemeral row visible).
     client.send_command(
         "k1",
         &json!({ "type": "kill", "activeSessionId": active_id }),
@@ -509,8 +481,7 @@ async fn the_first_agents_view_render_is_clean_behind_hundreds_of_dead_subagents
         "the stopped parent's row passivated: {passivated_parent}"
     );
 
-    // The saved catalog keeps every dead row resumable (the passive
-    // ledger walk): the parent plus its hundreds of children.
+    // The saved catalog keeps every dead row resumable (the passive ledger walk).
     client.send_command(
         "s1",
         &json!({ "type": "list_saved_sessions", "cwd": dir.path().to_string_lossy() }),
@@ -528,12 +499,10 @@ async fn the_first_agents_view_render_is_clean_behind_hundreds_of_dead_subagents
         .unwrap_or_default();
     assert_eq!(children, DEAD_CHILDREN, "the dead rows stay resumable");
 
-    // The agents view: the first frame renders the live roster the
-    // moment the surface mounts (the saved-catalog fetch has not even
-    // spawned yet), so it never dumps the dead family's rows as
-    // top-level entries - the flash the operator saw. The settled frame
-    // carries the dead family through the parent's collapsed tree, and
-    // the drill-in reaches the dead children.
+    // The first frame renders the live roster the moment the surface mounts
+    // (the saved-catalog fetch has not spawned yet) — never the dead family
+    // as top-level entries. The settled frame carries the family through
+    // the parent's collapsed tree.
     let plan = AgentsHeadlessPlan {
         steps: vec![
             AgentsStep::WaitSettle { timeout_ms: 2_000 },
@@ -569,14 +538,8 @@ async fn the_first_agents_view_render_is_clean_behind_hundreds_of_dead_subagents
     );
 }
 
-/// A stopped session's row STAYS visible in the view (TS
-/// `flipWorkerRosterEntriesInactive` keeps every stopped non-ephemeral
-/// row passivated; the Rust stop used to delete the top-level row, so
-/// the session vanished until a later catalog scan re-listed it - the
-/// operator's rows-disappear report). The stop's push passivates the
-/// row in place, the roster snapshot serves it, and the view's first
-/// frame shows it in the Inactive section - no catalog wait, no
-/// vanishing.
+/// A stopped session's row STAYS visible (TS `flipWorkerRosterEntriesInactive`; the Rust
+/// stop used to delete it — the operator's rows-disappear report).
 #[tokio::test]
 async fn a_stopped_session_stays_visible_in_the_view() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -621,9 +584,8 @@ async fn a_stopped_session_stays_visible_in_the_view() {
     let supervisor = spawn_supervisor(dir.path());
     let mut client = Client::connect(&supervisor.socket);
 
-    // The session runs (its worker registers), then stops: the stop's
-    // roster push must PASSIVATE the row (a `changed` push), never
-    // remove it.
+    // The session runs (its worker registers), then stops: the stop's roster
+    // push must PASSIVATE the row (a `changed` push), never remove it.
     client.send_command(
         "c1",
         &json!({
@@ -677,8 +639,8 @@ async fn a_stopped_session_stays_visible_in_the_view() {
         "lifecycle stays live (TS passivation): {entry}"
     );
 
-    // The view's FIRST frame shows the stopped session in the Inactive
-    // section - from the roster alone, before the catalog even loads.
+    // The view's FIRST frame shows the stopped session in the Inactive section — from the roster
+    // alone, before the catalog loads.
     let plan = AgentsHeadlessPlan {
         steps: vec![AgentsStep::WaitSettle { timeout_ms: 2_000 }],
         width: 120,

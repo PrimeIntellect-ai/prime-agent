@@ -1,29 +1,19 @@
-//! Product-wide constants and environment handling, ported from
-//! `packages/coding-agent/src/config.ts`.
+//! Product-wide constants and environment handling.
 
 use std::path::{Path, PathBuf};
 
-/// The user-facing application name (`piConfig.name` in package.json).
 pub const APP_NAME: &str = "prime-agent";
 
-/// The agent state directory name (`piConfig.configDir` in package.json).
 pub const CONFIG_DIR_NAME: &str = ".prime/agent";
 
-/// `PRIME_AGENT_CODING_AGENT_DIR`: overrides the agent state directory.
 pub const ENV_AGENT_DIR: &str = "PRIME_AGENT_CODING_AGENT_DIR";
 
-/// `PRIME_AGENT_SESSION_DIR`: overrides the session directory.
 pub const ENV_SESSION_DIR: &str = "PRIME_AGENT_SESSION_DIR";
 
-/// `PRIME_AGENT_DAEMON_SOCKET`: overrides the daemon socket path when no
-/// explicit `--daemon-socket` flag is given. The `prime-agent` launcher
-/// (written by install-rust.sh) pins it, so the Rust product's daemon
-/// runs beside - never on, never replacing - the TypeScript product's
-/// daemon: the two
-/// products share the session store (`~/.prime/agent`) but not the
-/// daemon, and a Rust CLI that found the TS daemon on the default socket
-/// would treat the schema-id mismatch as a stale daemon and shut it down
-/// when idle.
+/// `PRIME_AGENT_DAEMON_SOCKET`: overrides the daemon socket path when no explicit
+/// `--daemon-socket` flag is given. The launcher pins it so the Rust daemon runs
+/// beside — never replacing — the TS daemon (a Rust CLI that found the TS daemon
+/// on the default socket would treat the schema-id mismatch as staleness).
 pub const ENV_DAEMON_SOCKET: &str = "PRIME_AGENT_DAEMON_SOCKET";
 
 /// The daemon socket path: an explicit `--daemon-socket` flag wins, then
@@ -40,11 +30,9 @@ pub fn resolve_daemon_socket_path(daemon_socket: Option<&str>) -> PathBuf {
         .unwrap_or_else(pa_daemon::socket::default_daemon_socket_path)
 }
 
-/// [`expand_tilde_path`] over a raw environment value: a tilde-prefixed
-/// value expands against the home dir; anything else passes through as
-/// the original bytes — a `to_string_lossy` here would silently rewrite a
-/// non-UTF-8 socket path (U+FFFD) and point the CLI at a socket nobody
-/// is serving.
+/// [`expand_tilde_path`] over a raw environment value: anything but a
+/// tilde-prefixed value passes through as the original bytes — a lossy read
+/// here would rewrite a non-UTF-8 socket path.
 pub fn expand_tilde_path_os(value: &std::ffi::OsStr) -> PathBuf {
     if value.to_str().is_some_and(|path| path.starts_with('~')) {
         return expand_tilde_path(&value.to_string_lossy());
@@ -52,17 +40,14 @@ pub fn expand_tilde_path_os(value: &std::ffi::OsStr) -> PathBuf {
     PathBuf::from(value)
 }
 
-/// `PRIME_AGENT_CODING_AGENT_SESSION_DIR`: legacy session-dir override.
 pub const ENV_LEGACY_SESSION_DIR: &str = "PRIME_AGENT_CODING_AGENT_SESSION_DIR";
 
 /// The version compiled into this build, used when no packaged manifest
-/// overrides it (dev checkouts, cargo target dirs).
+/// overrides it.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// The product version: the packaged `package.json` manifest next to the
-/// executable wins (TS `VERSION` reads `getPackageJsonPath()` at runtime, so
-/// a repackaged release reports the pinned manifest version), falling back
-/// to the compiled-in version.
+/// executable wins, falling back to the compiled-in version.
 pub fn version() -> &'static str {
     static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     VERSION.get_or_init(|| match packaged_manifest_version() {
@@ -72,7 +57,7 @@ pub fn version() -> &'static str {
 }
 
 /// The packaged package-dir (`PI_PACKAGE_DIR` wins, else the directory of
-/// the executable — the TS `getPackageDir` bun-binary layout).
+/// the executable).
 fn package_dir() -> PathBuf {
     if let Ok(env_dir) = std::env::var("PI_PACKAGE_DIR") {
         if !env_dir.is_empty() {
@@ -92,14 +77,12 @@ fn packaged_manifest_version() -> Option<String> {
     (!version.is_empty()).then(|| version.to_string())
 }
 
-/// `PRIME_AGENT_OFFLINE`: truthy values enable offline mode.
 pub const ENV_OFFLINE: &str = "PI_OFFLINE";
 
-/// `PRIME_AGENT_STARTUP_BENCHMARK`: truthy values enable startup benchmarking.
 pub const ENV_STARTUP_BENCHMARK: &str = "PI_STARTUP_BENCHMARK";
 
-/// Expand a leading `~`, `~/`, or (Windows) `~\` segment against the home
-/// directory (TS `expandTildePath`, including the win32 backslash arm).
+/// Expand a leading `~`, `~/`, or (Windows) `~\` segment against the
+/// home directory.
 pub fn expand_tilde_path(path: &str) -> PathBuf {
     let Some(home) = pa_types::platform::home_dir() else {
         return PathBuf::from(path);
@@ -117,7 +100,6 @@ pub fn expand_tilde_path(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
-/// The agent state directory, honoring `PRIME_AGENT_CODING_AGENT_DIR`.
 pub fn get_agent_dir() -> PathBuf {
     match std::env::var(ENV_AGENT_DIR) {
         Ok(dir) if !dir.is_empty() => expand_tilde_path(&dir),
@@ -127,7 +109,6 @@ pub fn get_agent_dir() -> PathBuf {
     }
 }
 
-/// The session directory override from the environment, if any.
 pub fn get_session_dir_env_override() -> Option<PathBuf> {
     std::env::var(ENV_SESSION_DIR)
         .ok()
@@ -136,8 +117,8 @@ pub fn get_session_dir_env_override() -> Option<PathBuf> {
         .map(|value| expand_tilde_path(&value))
 }
 
-/// Truthy environment flag check, matching `isTruthyEnvFlag` in main.ts:
-/// only `1`, `true`, and `yes` (case-insensitive) count.
+/// Truthy environment flag check: only `1`, `true`, and `yes`
+/// (case-insensitive) count.
 pub fn is_truthy_env_flag(value: Option<&str>) -> bool {
     match value {
         None => false,
@@ -161,11 +142,7 @@ pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
 mod tests {
     use super::*;
 
-    /// Precedence: an explicit `--daemon-socket` flag wins over the
-    /// `PRIME_AGENT_DAEMON_SOCKET` environment, which wins over the
-    /// per-user default. The env is what the `prime-agent` launcher
-    /// pins, so the flag/env/default order is the co-existence contract:
-    /// an explicit flag still overrides what any launcher installed.
+    /// The flag/env/default order is the co-existence contract (the launcher pins the env).
     #[test]
     fn daemon_socket_resolution_prefers_flag_then_env_then_default() {
         let default = pa_daemon::socket::default_daemon_socket_path();
@@ -195,10 +172,7 @@ mod tests {
         assert_eq!(expand_tilde_path("~foo"), PathBuf::from("~foo"));
     }
 
-    /// The TS `expandTildePath` win32 arm this crate already carries: a
-    /// `~\`-prefixed value expands against the home dir (the pa-types
-    /// twin gained the same arm, so the CLI and the daemon agree on the
-    /// state dir).
+    /// The TS `expandTildePath` win32 arm (the pa-types twin carries it too).
     #[test]
     #[cfg(windows)]
     fn expands_the_win32_backslash_tilde() {

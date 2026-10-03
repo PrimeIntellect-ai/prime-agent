@@ -1,7 +1,7 @@
-//! Real-provider stream adapter: pa-ai completion streaming bridged into the
-//! pa-agent loop's `StreamFn`/`ModelStream`, crossing the crate boundary by
-//! wire-shape (JSON) round-trip. Shared by pa-cli (print/json modes) and
-//! pa-daemon (session workers).
+//! Real-provider stream adapter: pa-ai completion streaming bridged into
+//! the pa-agent loop's `StreamFn`/`ModelStream`, crossing the crate
+//! boundary by wire-shape (JSON) round-trip; shared by pa-cli and
+//! pa-daemon.
 
 use std::sync::Arc;
 
@@ -9,8 +9,8 @@ use pa_agent::stream::{LlmContext, ModelStream, StreamFn, StreamRequestOptions};
 use pa_agent::types::{Model as AgentModel, ThinkingLevel};
 use pa_types::ai::Model;
 
-/// Wire-shape conversion at the pa-agent/pa-ai boundary: both sides serialize
-/// to the same camelCase wire shapes.
+/// Wire-shape conversion at the pa-agent/pa-ai boundary: both sides
+/// serialize to the same camelCase wire shapes.
 pub fn json_round_trip<T, U>(value: &T) -> Option<U>
 where
     T: serde::Serialize,
@@ -50,10 +50,8 @@ pub fn model_thinking_level(level: ThinkingLevel) -> pa_types::ai::ModelThinking
     }
 }
 
-/// Adapt the loop-level payload hook to the pa-ai hook shape: the two
-/// crates' `Model` values cross by the shared wire shape. A model that
-/// fails the round-trip (a wire-shape mismatch bug) keeps the payload
-/// unchanged — hooks are advisory and must never fail the request.
+/// Adapt the loop-level payload hook to the pa-ai hook shape. A failed
+/// round-trip keeps the payload unchanged — hooks never fail the request.
 fn agent_payload_hook_to_ai(hook: pa_agent::stream::OnPayloadHook) -> pa_ai::types::OnPayloadHook {
     std::sync::Arc::new(move |payload: serde_json::Value, model: &Model| {
         match json_round_trip::<_, pa_agent::types::Model>(model) {
@@ -63,9 +61,8 @@ fn agent_payload_hook_to_ai(hook: pa_agent::stream::OnPayloadHook) -> pa_ai::typ
     })
 }
 
-/// Adapt the loop-level response hook to the pa-ai hook shape. The
-/// `{status, headers}` response converts field-by-field; a model that
-/// fails the round-trip drops the hook call (advisory, never fatal).
+/// Adapt the loop-level response hook to the pa-ai hook shape; a failed
+/// round-trip drops the hook call (advisory, never fatal).
 fn agent_response_hook_to_ai(
     hook: pa_agent::stream::OnResponseHook,
 ) -> pa_ai::types::OnResponseHook {
@@ -82,25 +79,20 @@ fn agent_response_hook_to_ai(
     )
 }
 
-/// The mutable provider target a live session's stream reads per call:
-/// daemon `set_model` swaps it without rebuilding the session, and the
-/// provider-failover switch swaps it for the switched-to provider.
+/// The mutable provider target a live session's stream reads per call
+/// (daemon `set_model` and the failover switch swap it).
 #[derive(Debug, Clone)]
 pub struct ProviderTarget {
     pub api_key: Option<String>,
     pub model: Model,
     pub service_tier: Option<pa_types::ai::ServiceTier>,
-    /// The provider-request headers the resolved auth composed (model,
-    /// auth-storage, provider-config, and per-model headers): a live
-    /// `set_model` carries them through to the stream the same way the
-    /// build-time resolution does.
+    /// The auth-resolved provider-request headers: a live `set_model` carries
+    /// them through to the stream like the build-time resolution does.
     pub headers: Option<std::collections::BTreeMap<String, String>>,
 }
 
-/// A real pa-ai provider stream adapter for the agent loop, reading its
-/// target from a shared slot the host can swap live (`set_model`, provider
-/// failover). The slot is `None` only before the host sets the build-time
-/// target; the adapter never runs before that.
+/// A real pa-ai stream adapter reading its target from a shared slot the host can swap live
+/// (`set_model`, failover); `None` only before the host sets the build-time target.
 ///
 /// # Panics
 ///
@@ -126,12 +118,9 @@ pub fn switchable_stream_fn(target: Arc<std::sync::RwLock<Option<ProviderTarget>
     )
 }
 
-/// Stream one completion against `model` with `api_key` and the
-/// auth-resolved request `headers`.
-/// Stream one completion against `model` (the per-request tail the
-/// switchable seams and the CLI's route-authoritative variant share).
-/// `pub`: the CLI headless's route-authoritative stream reads the armed
-/// image target ahead of the shared slot and streams with the same tail.
+/// Stream one completion against `model` with `api_key` and the auth-resolved
+/// request `headers`: the per-request tail the switchable seams and the CLI's
+/// route-authoritative variant share.
 ///
 /// # Errors
 ///
@@ -156,12 +145,8 @@ pub fn stream_once(
         messages,
         tools: Some(tools),
     };
-    // The turn's abort signal reaches the transport (TS passes the run's
-    // AbortController signal into the stream options, so the fetch itself
-    // cancels): the in-flight request races this token, and the loop's
-    // abort paths fire it through [`ModelStream::close`] (TS
-    // `closeIterator`) or the stream's drop, long before the response
-    // would settle on its own.
+    // The turn's abort signal reaches the transport: the in-flight request races this
+    // token; the loop's abort paths fire it through [`ModelStream::close`] or the drop.
     let cancel = tokio_util::sync::CancellationToken::new();
     let stream_options = pa_ai::types::SimpleStreamOptions {
         base: pa_ai::types::StreamOptions {
@@ -173,10 +158,8 @@ pub fn stream_once(
             service_tier,
             cache_retention: None,
             session_id: options.session_id.clone(),
-            // The loop-level request hooks (TS `onPayload`/`onResponse`
-            // riding `SimpleStreamOptions` into the provider client) cross
-            // the crate boundary here: the payload hook may replace the
-            // wire payload, the response hook observes the headers.
+            // The loop-level request hooks cross the crate boundary here: the payload
+            // hook may replace the wire payload, the response hook observes headers.
             on_payload: options.on_payload.map(agent_payload_hook_to_ai),
             on_response: options.on_response.map(agent_response_hook_to_ai),
             // StreamOptions carries a plain map; the target's ordered
@@ -190,8 +173,7 @@ pub fn stream_once(
     };
     let stream = pa_ai::stream_simple(model, &ai_context, Some(stream_options))
         .map_err(|error| anyhow::anyhow!("{error:?}"))?;
-    // Pump pa-ai events into a pa-agent event stream (the loop's
-    // ModelStream): each provider event is forwarded verbatim.
+    // Pump pa-ai events into the loop's event stream, verbatim.
     let (handle, consumer) = pa_agent::stream::event_stream();
     let forwarder = tokio::spawn(async move {
         let mut stream = stream;
@@ -212,8 +194,8 @@ pub fn stream_once(
     Ok(consumer_pump(forwarder, consumer, cancel))
 }
 
-/// A stream adapter pinned to one target: the headless runtimes (print and
-/// json modes) resolve their model once, so the slot never changes.
+/// A stream adapter pinned to one target (headless runtimes resolve
+/// their model once, so the slot never changes).
 #[must_use]
 pub fn real_stream_fn(api_key: Option<String>, model: Model) -> StreamFn {
     switchable_stream_fn(Arc::new(std::sync::RwLock::new(Some(ProviderTarget {
@@ -345,9 +327,7 @@ fn consumer_pump(
 }
 
 /// A `ModelStream` whose lifetime keeps the pa-ai pump task alive and owns
-/// the fetch's cancellation token (the transport half of the turn-abort:
-/// the token cancels the in-flight request exactly where TS's fetch
-/// `AbortSignal` fires).
+/// the fetch's cancellation token (the transport half of the turn-abort).
 struct PumpedStream {
     _forwarder: tokio::task::JoinHandle<()>,
     stream: pa_agent::stream::AssistantMessageEventStream,
@@ -356,8 +336,7 @@ struct PumpedStream {
 
 impl Drop for PumpedStream {
     fn drop(&mut self) {
-        // A dropped consumer stops reading events, so the in-flight fetch
-        // behind the pump cancels instead of running to completion
+        // The in-flight fetch cancels instead of running to completion
         // detached (TS: the fetch dies with its iterator).
         self.cancel.cancel();
     }
@@ -376,9 +355,8 @@ impl ModelStream for PumpedStream {
         self.stream.result()
     }
 
-    /// Close/cancel the underlying stream (TS `iterator.return()` passed as
-    /// `closeIterator` to the abort race): the in-flight fetch cancels
-    /// immediately. Idempotent — the token's cancelled state is sticky.
+    /// Close/cancel: the in-flight fetch cancels immediately. Idempotent
+    /// — the token's cancelled state is sticky.
     fn close(&mut self) {
         self.cancel.cancel();
     }
@@ -386,12 +364,10 @@ impl ModelStream for PumpedStream {
 
 #[cfg(test)]
 mod tests {
-    //! Regression guard for the pa-agent -> pa-ai message boundary: the wire
-    //! round-trip must keep user messages. `UserPart` must stay `type`-tagged
-    //! like the TS wire format; an untagged variant serializes parts without
-    //! `"type"`, the pa-ai shape rejects them, and `real_stream_fn` silently
-    //! dropped every prompt admitted via `AgentPromptInput::Text` (content
-    //! parts), leaving the provider with a system prompt only.
+    //! Regression guard for the pa-agent -> pa-ai message boundary: `UserPart`
+    //! must stay `type`-tagged like the TS wire format; an untagged variant
+    //! silently dropped every `AgentPromptInput::Text` prompt, leaving the
+    //! provider with a system prompt only.
 
     use super::*;
 
@@ -475,12 +451,8 @@ mod tests {
         );
     }
 
-    /// Regression guard for the pa-ai -> pa-agent boundary: provider
-    /// signatures (`thinkingSignature`, `thoughtSignature`, `textSignature`)
-    /// must survive the wire-shape round-trip. pa-agent has no catch-all
-    /// field, so a key-casing mismatch silently dropped them — an
-    /// unsigned thinking block degraded to plain text in the next
-    /// provider request (see the anthropic convert), and a Rust-written
+    /// Regression guard: provider signatures must survive the round-trip. pa-agent has no
+    /// catch-all field, so a key-casing mismatch silently dropped them — a Rust-written
     /// session lost the signature TS-written ones carry.
     #[test]
     fn provider_signatures_round_trip_both_directions() {
@@ -522,11 +494,8 @@ mod tests {
         assert_eq!(agent_tool_call.thought_signature.as_deref(), Some("sig-2"));
     }
 
-    /// The turn-abort cancels the in-flight fetch at the seam: a delayed
-    /// faux response holds the request mid-wait; `ModelStream::close`
-    /// (the loop's `closeIterator` abort callback, fired the moment the
-    /// run's signal aborts) cancels the fetch NOW, so the stream settles
-    /// on the aborted message instead of waiting out the provider hold.
+    /// A delayed faux response holds the request mid-wait; `ModelStream::close` cancels the fetch
+    /// NOW, so the stream settles on the aborted message instead of waiting out the hold.
     #[tokio::test]
     async fn closing_the_stream_cancels_a_held_fetch_immediately() {
         let registration =
@@ -556,8 +525,7 @@ mod tests {
         )
         .await
         .expect("stream start");
-        // The hold keeps the response pending; abort the turn (the agent
-        // loop's close-on-abort path) mid-wait.
+        // Abort the turn mid-wait.
         stream.close();
         let settled = tokio::time::timeout(std::time::Duration::from_secs(5), stream.result())
             .await
@@ -568,8 +536,8 @@ mod tests {
             settled.error_message.as_deref(),
             Some("Request was aborted")
         );
-        // The aborted turn records no usage (TS EMPTY_USAGE on a mid-wait
-        // abort: no partial message ever streamed).
+        // No usage on a mid-wait abort (TS `EMPTY_USAGE`: no partial
+        // message ever streamed).
         let usage = settled.usage;
         assert_eq!(usage.total_tokens, 0);
         assert_eq!(usage.input, 0);

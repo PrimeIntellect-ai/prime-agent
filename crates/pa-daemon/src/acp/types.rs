@@ -1,13 +1,7 @@
 //! ACP wire types: the method surface, `session/update` payload shapes,
-//! and prompt-block parsing.
-//!
-//! The served surface is exactly what the TS product serves: `initialize`,
-//! `session/new`, `session/prompt`, `session/close` (requests),
-//! `session/cancel` (notification), `session/set_config_option` (the
-//! model/effort pickers, TS #2455), and the outgoing `session/update`
-//! notification. ACP-spec methods the TS product does not serve
-//! (`session/load`, `session/read`, `session/clone`, cwd adoption) are not
-//! invented here.
+//! and prompt-block parsing. The served surface is exactly what the TS
+//! product serves; ACP-spec methods it does not serve (`session/load`,
+//! `session/read`, `session/clone`, cwd adoption) are not invented here.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -87,7 +81,7 @@ pub enum AcpToolKind {
 }
 
 impl AcpToolKind {
-    /// The TS kind map: the model-facing tool is the Python REPL; bash is the
+    /// The kind map: the model-facing tool is the Python REPL; bash is the
     /// secondary escape hatch.
     pub fn of_tool(tool_name: &str) -> AcpToolKind {
         match tool_name {
@@ -181,8 +175,8 @@ pub enum AcpSessionUpdate {
         #[serde(rename = "_meta")]
         meta: Value,
     },
-    /// The session's configuration options changed (TS #2455): the full
-    /// set with current values, connection-scoped like the TS publish.
+    /// The session's configuration options changed (TS #2455): the
+    /// full set with current values, connection-scoped.
     #[serde(rename = "config_option_update")]
     ConfigOptionUpdate {
         #[serde(rename = "configOptions")]
@@ -243,9 +237,8 @@ pub enum PromptBlockError {
 /// Split ACP prompt blocks into the text and images the agent accepts.
 ///
 /// Image, embedded-resource, and resource-link blocks are advertised in
-/// `initialize`, so they must actually reach the model: dropping them
-/// silently would let a client believe a pasted screenshot was accepted.
-/// Embedded text resources become context the model can read.
+/// `initialize`, so they must actually reach the model: dropping them would
+/// let a client believe a pasted screenshot was accepted.
 pub fn parse_prompt_blocks(
     prompt: &[Value],
 ) -> Result<(String, Vec<ImageBlock>), PromptBlockError> {

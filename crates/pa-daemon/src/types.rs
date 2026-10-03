@@ -1,9 +1,7 @@
-//! Shared wire DTOs for the daemon protocol (session summaries, connection
-//! state, queue snapshots, agent messages).
-//!
-//! Message payloads are carried as raw JSON (`serde_json::Value`) so the daemon
-//! stays forward-compatible with the agent-loop lane's message evolution while
-//! text helpers cover everything the session store and UI need.
+//! Shared wire DTOs for the daemon protocol (session summaries,
+//! connection state, queue snapshots, agent messages). Message payloads
+//! are carried as raw JSON (`serde_json::Value`) so the daemon stays
+//! forward-compatible with the agent-loop lane's message evolution.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -46,8 +44,7 @@ pub fn message_timestamp_ms(message: &Value) -> Option<u64> {
     message.get("timestamp").and_then(Value::as_u64)
 }
 
-/// Lightweight daemon session shape used by list, create, rename, attach, and
-/// state responses (port of `SessionSummary` in daemon-session-list.ts).
+/// The lightweight session shape for list/create/rename/attach/state responses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionSummary {
@@ -74,15 +71,13 @@ pub struct SessionSummary {
     pub is_streaming: bool,
     pub is_compacting: bool,
     /// True while the session is parked waiting out a provider-reported
-    /// usage reset (TS `session.isQuotaParked`); the parked banner names
-    /// the wake time.
+    /// usage reset (TS `session.isQuotaParked`); the parked banner names the wake time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_quota_parked: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_bash_running: Option<bool>,
-    /// A streaming turn with tool calls in flight (TS `isRunningTools`:
-    /// `isStreaming && pendingToolCalls.size > 0`); drives the agents-view
-    /// activity label's `running tools` state.
+    /// A streaming turn with tool calls in flight (TS `isRunningTools`: `isStreaming &&
+    /// pendingToolCalls.size > 0`); drives the agents-view activity label's `running tools` state.
     #[serde(default)]
     pub is_running_tools: bool,
     /// An RLM child of this session (or one of its descendants) is still
@@ -119,28 +114,19 @@ pub struct SessionSummary {
     pub worker_state: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_pid: Option<u32>,
-    /// The worker's roster-delta sequence counter at snapshot time (every
-    /// roster delta this worker stamped before the snapshot carries a
-    /// sequence at or below it): the supervisor's authoritative pulls
-    /// (registration, create, refresh) gate against it in the same
-    /// roster-lock section that writes the summary, so a delta still in
-    /// flight when the pull answered is dropped instead of overwriting
-    /// the pull's fresher state.
+    /// The worker's roster-delta sequence counter at snapshot time: the pull gate keys it in the
+    /// same lock section, so a delta still in flight when the pull answered drops.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub roster_delta_sequence: Option<u64>,
     /// The worker process instance that took this summary (stamped with
-    /// [`SessionSummary::roster_delta_sequence`], so the pair names the
-    /// generation the counter orders): the supervisor's pull gate keys
-    /// its stale-delta watermark by the generation that answered the
-    /// pull, never by whichever process registered last — a delayed
-    /// pull from a replaced process is stale by construction.
+    /// [`SessionSummary::roster_delta_sequence`]): the pull gate keys its
+    /// watermark by the answering generation, never the last registered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_instance_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<Value>,
-    /// TS `modelFallbackMessage`: why a revived session's saved model fell
-    /// back (the restore missed after the catalog-readiness window). A
-    /// model fallback is never silent — the summary publishes it.
+    /// TS `modelFallbackMessage`: why a revived session's saved model
+    /// fell back (the restore missed the catalog-readiness window).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_fallback_message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -157,42 +143,29 @@ pub struct SessionSummary {
     pub anthropic_warning_shown: Option<bool>,
 }
 
-/// Port of `SessionActionSnapshot` (core/session-action-store.ts).
+/// The session action snapshot (TS `SessionActionSnapshot`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionActionSnapshot {
     pub queued_count: u32,
     pub steering: Vec<String>,
     pub follow_ups: Vec<String>,
-    /// Rust-native typed provenance the TS snapshot has no counterpart
-    /// for: which parked lane items are RLM child status notices, by
-    /// index (the condensed queue strip folds exactly these rows). The
-    /// lane strings stay the TS preview projection verbatim.
+    /// Rust-native typed provenance the TS snapshot has no counterpart for: which parked lane items
+    /// are RLM child status notices, by index (the lane strings stay the TS preview verbatim).
     #[serde(default, skip_serializing_if = "QueueLaneIndices::is_empty")]
     pub rlm_child_status: QueueLaneIndices,
-    /// Rust-native typed provenance the TS snapshot has no counterpart
-    /// for: which parked lane items are engine-minted internal prompts
-    /// (the injected, queue-invisible continuations TS's projection
-    /// filters out entirely — goal continuations and threshold
-    /// compaction continuations), by index. The condensed queue strip
-    /// folds exactly these rows into its counts too (operator directive
-    /// 2026-09-28: internal prompts never render as individual rows),
-    /// and the browser renders them read-only.
+    /// Rust-native typed provenance: which parked lane items are
+    /// engine-minted internal prompts (TS's projection filters them
+    /// out), by index (operator directive 2026-09-28: internal prompts
+    /// never render as individual rows).
     #[serde(default, skip_serializing_if = "QueueLaneIndices::is_empty")]
     pub injected_prompts: QueueLaneIndices,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active: Option<SessionActionActive>,
 }
 
-/// The lane-indices rider shape the queue projection's typed-provenance
-/// marks share: parked lane items, by index, of one internal class. The
-/// riders are [`SessionActionSnapshot::rlm_child_status`] (the
-/// `rlm_child_terminal_notice` / `rlm_child_failure` injected rows — the
-/// worker derives the indices from each parked item's injected custom
-/// row) and [`SessionActionSnapshot::injected_prompts`] (the
-/// engine-minted continuations). The classification rides the wire typed
-/// either way — a user-typed message that merely looks like an internal
-/// preview never carries either mark.
+/// The lane-indices rider shape the typed-provenance marks share: parked lane items, by index, of
+/// one internal class — a user-typed lookalike never carries either mark.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueueLaneIndices {

@@ -5,15 +5,9 @@ use super::{
     KernelState, MemoSlot, Signal, HOST_REQUEST_SHUTDOWN_TIMEOUT_MS, KERNEL_SHUTDOWN_TIMEOUT_MS,
 };
 
-// ---------------------------------------------------------------------------
-// Teardown
-// ---------------------------------------------------------------------------
-
 impl Inner {
-    /// Resolves `true` when this call performed the cleanup (false: a
-    /// concurrent teardown won; a joiner's options are ignored — the first
-    /// caller's policy wins). The memoization joins concurrent callers onto
-    /// one in-flight shutdown.
+    /// Resolves `true` when this call performed the cleanup (false: a concurrent teardown won; a
+    /// joiner's options are ignored).
     pub(crate) async fn shutdown_for_cleanup(
         self: &Arc<Self>,
         opts: KernelShutdownOptions,

@@ -1,13 +1,6 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
-// by design on hot paths (boxing 130 fns is allocation-churn with zero
-// correctness gain); the fn-length threshold is a style gate, not
-// correctness (the harness fns are intentionally linear); 64-bit targets -
-// the narrowing sits at OS/protocol boundaries where the values are
-// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
-// guarded parses), and checked conversions would add panic paths where
-// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
-// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
-// dossier for the conductor).
+// large_futures: stack-resident futures on hot paths by design.
+// too_many_lines: style gate, not correctness. Casts: 64-bit targets;
+// narrowing sits at bounded OS/protocol boundaries.
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -139,12 +132,8 @@ fn step_position(steps: &[Step], name: &str) -> usize {
 }
 
 /// The python3 interpreter when it is at least `min_version`, or None
-/// otherwise (the behavior gates skip with a logged reason; the step
-/// scripts are python heredocs). The merge step unpacks with
-/// `tar.extractall(..., filter="data")`, a python 3.12 API - the
-/// ubuntu-24.04 promote runner provides 3.12, bookworm ships 3.11 - so
-/// the full-script gates need (3, 12) and the normalize-only zero-artifact
-/// gate accepts any python 3.
+/// otherwise (the behavior gates skip with a logged reason). The merge step
+/// unpacks with `tar.extractall(..., filter="data")`, a python 3.12 API.
 fn python3_binary(min_version: (u8, u8)) -> Option<PathBuf> {
     let output = Command::new("python3").arg("--version").output();
     let Ok(status) = output else {
@@ -239,9 +228,8 @@ fn write_fixture_tarball(out_path: &Path, payload_name: &str, extra_members: &[&
         .expect("finish the gzip stream");
 }
 
-/// One build-job artifact in `dir`: the tarball, its checksum line, and the
-/// per-target manifest (`assemble_artifacts.py`'s schema). Returns the manifest
-/// row the merged manifest must carry back.
+/// One build-job artifact in `dir` (the `assemble_artifacts.py` schema):
+/// the tarball, checksum line, and per-target manifest. Returns the row the merge must carry back.
 fn write_artifact(dir: &Path, target: &str) -> serde_json::Value {
     write_artifact_with(dir, target, &[])
 }
@@ -528,9 +516,8 @@ fn an_archive_with_a_root_install_sh_fails_the_ts_updater_gate() {
     );
 }
 
-/// A one-target release (the TS test's beta-only/stable-only case): the
-/// single artifact lands flat in `incoming/`, and the gates must still
-/// verify its hashes and attach a complete manifest for it.
+/// A one-target release: the single artifact lands flat in `incoming/` and
+/// the gates must still verify its hashes and attach a manifest.
 #[test]
 fn single_artifact_release_finds_the_downloaded_manifest() {
     let Some(_python3) = python3_binary((3, 12)) else {
@@ -624,8 +611,7 @@ fn five_target_release_finds_all_downloaded_manifests() {
     }
 }
 
-/// A release whose artifacts never arrived must fail loudly at the normalize
-/// gate - never pass hash continuity having verified zero archives.
+/// A release whose artifacts never arrived must fail loudly at the normalize gate.
 #[test]
 fn zero_artifacts_fail_loudly_instead_of_verifying_nothing() {
     let Some(_python3) = python3_binary((3, 0)) else {

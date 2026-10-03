@@ -1,6 +1,4 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28) - this target's own
-// crate root: the same bounded-boundary disposition as src/lib.rs
-// (large_futures/too_many_lines/the cast family; details there).
+// Pedantic-gate dispositions as src/lib.rs (large_futures/too_many_lines/casts).
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -10,28 +8,9 @@
     clippy::cast_precision_loss
 )]
 
-//! Verifier integration tests for the kernel snapshot lifecycle (TS
-//! `state-snapshot.ts` + `IpythonKernelProvisioner`'s `snapshotDir` /
-//! `onRestore` seams, agent-session.ts's `hasSnapshot` prewarm arm):
-//!
-//! - a persisted session that runs cells and ends (the dispose kernel
-//!   teardown) leaves a `kernel-state.dill` snapshot in its artifact dir;
-//! - a resumed session PREWARMS from the snapshot alone (the config flag
-//!   stays off — only `hasSnapshot` fires the boot), so the boot lands
-//!   before the first prompt and reports `cold: false` through the
-//!   `kernel bootstrap` telemetry;
-//! - the first `ipython` call in the resumed session sees the old
-//!   variables WITHOUT re-running the setup cell — the namespace revived;
-//! - the `ipython_state_restored` notice (TS `_onIpythonStateRestored`,
-//!   `deliverAs: "nextTurn"`) rides the next admitted turn and lands
-//!   durably, naming what came back;
-//! - a fresh session without a snapshot and without the config prewarm
-//!   stays lazy (no boot, no event).
-//!
-//! The kernel Python is ambient product state (the auto-bootstrapped
-//! kernel venv); like `kernel_lifecycle.rs`, these tests skip (with a
-//! note) on machines without a live install so the suite stays hermetic
-//! elsewhere. `PA_CORE_KERNEL_PYTHON` points at an explicit interpreter.
+//! Verifier integration tests for the kernel snapshot lifecycle: a persisted session leaves a
+//! `kernel-state.dill` snapshot, and a resumed session prewarms from the snapshot alone so its
+//! first `ipython` call sees the old variables. The kernel Python is ambient; skipped if absent.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -50,8 +29,7 @@ use pa_core::settings::SettingsManager;
 use pa_types::session::FileEntry;
 
 /// The faux provider registry is process-global and the tests drive it:
-/// the std lock serializes them (they are the only contenders, so holding
-/// it across awaits is safe).
+/// the std lock serializes them (the only contenders).
 static FAUX_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// The kernel Python with prime-agent-runtime installed (see
@@ -195,8 +173,7 @@ async fn run_turn(engine: &pa_core::session_engine::engine::SessionEngine, text:
     engine.session.agent().wait_for_idle().await;
 }
 
-/// The session test fixtures: isolated agent dir, sessions dir, cwd, and
-/// the telemetry client.
+/// The session test fixtures: isolated agent dir, sessions dir, cwd, and the telemetry client.
 struct Fixture {
     dir: tempfile::TempDir,
     agent_dir: PathBuf,
@@ -250,11 +227,8 @@ impl Fixture {
     }
 }
 
-/// The full lifecycle: a session defines kernel state and ends (dispose
-/// flushes the final snapshot), a resumed session prewarms from the
-/// snapshot with the config flag OFF, and its FIRST ipython call sees the
-/// old namespace without re-running the setup — with the restore notice
-/// riding the turn.
+/// The full lifecycle: a session defines kernel state and ends, a resumed session prewarms with the
+/// config flag OFF, and its FIRST ipython call sees the old namespace.
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn session_end_then_resume_prewarms_and_revives_the_namespace() {
@@ -266,7 +240,6 @@ async fn session_end_then_resume_prewarms_and_revives_the_namespace() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let fixture = fixture();
 
-    // ---- Session one: define state through a real ipython cell, then end.
     let faux_one = faux_session(vec![
         ipython_tool_call_step(
             "call-setup",
@@ -289,7 +262,6 @@ async fn session_end_then_resume_prewarms_and_revives_the_namespace() {
         results.iter().any(|text| text.contains("setup done")),
         "the setup cell must have run: {results:?}"
     );
-    // The session end (the daemon's dispose seam): the final snapshot flush.
     engine.dispose_kernel().await;
 
     // The snapshot landed in the session's artifact dir (TS
@@ -306,8 +278,7 @@ async fn session_end_then_resume_prewarms_and_revives_the_namespace() {
     );
     drop(engine);
 
-    // ---- Session two: RESUME the same session file with the prewarm
-    // config flag off. Only `hasSnapshot` (the TS arm) may fire the boot.
+    // Session two: RESUME with the prewarm config flag off; only `hasSnapshot` may fire the boot.
     let faux_two = faux_session(vec![
         ipython_tool_call_step("call-read", "print(marker)"),
         text_step("read back"),
@@ -346,9 +317,8 @@ async fn session_end_then_resume_prewarms_and_revives_the_namespace() {
         "the resumed namespace must revive: {results:?}"
     );
 
-    // The restore notice rode the turn and landed durably, naming what
-    // came back (TS `_onIpythonStateRestored`, display row with the
-    // `restored` details flag).
+    // The restore notice rode the turn and landed durably, naming what came back (TS
+    // `_onIpythonStateRestored`, display row with the `restored` details flag).
     let entries = resumed.session.entries().await;
     let notice = entries
         .iter()
@@ -400,8 +370,7 @@ async fn fresh_session_without_snapshot_stays_lazy_without_the_flag() {
         .await
         .expect("create the lazy session");
 
-    // Long enough for a wrongly-fired prewarm to boot and report; the
-    // lazy session reports nothing.
+    // Long enough for a wrongly-fired prewarm to boot and report; the lazy session reports nothing.
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
         assert!(

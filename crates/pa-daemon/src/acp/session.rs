@@ -1,8 +1,7 @@
 //! The single-session ACP state machine: admission, prompt lifecycle,
-//! cancel, and close over the in-process session engine.
-//!
-//! One ACP connection drives one session. A second `session/new` is refused
-//! rather than silently sharing conversation state, cwd, and queues.
+//! cancel, and close over the in-process session engine. One ACP
+//! connection drives one session; a second `session/new` is refused
+//! rather than silently sharing conversation state.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -40,21 +39,18 @@ pub struct AcpSession {
     /// The last goal state published as `_meta.goal`, to detect changes.
     /// Shared with the event subscription so mid-turn changes publish too.
     last_published_goal: Arc<Mutex<pa_core::goals::GoalState>>,
-    /// The automatic compaction arm state (the overflow recovery machine
-    /// and the in-flight compaction abort slot), TS session-lifetime
-    /// state. Shared with the arm implementation
-    /// (`compaction_arms.rs`).
+    /// The automatic compaction arm state, shared with the arm
+    /// implementation (`compaction_arms.rs`).
     pub(super) arms: Arc<CompactionArms>,
-    /// Whether the latest turn's usage crossed the goal's token budget
-    /// (the usage listener arms it on `BudgetReached`, the settle loop's
-    /// goal boundary consumes it): TS `_shouldStopAfterTurn`'s budget arm.
+    /// Whether the latest turn's usage crossed the goal's token budget:
+    /// the usage listener arms it, the settle loop's goal boundary
+    /// consumes it.
     goal_budget_crossed: Arc<AtomicBool>,
 }
 
 impl AcpSession {
-    /// Admit a session: subscribe the engine event feed (with the
-    /// autonomous accounting and goal usage hooks) before anything can
-    /// publish, so no update is lost between admission and the response.
+    /// Subscribe the engine event feed before anything can publish, so
+    /// no update is lost between admission and the response.
     pub async fn new(
         id: String,
         engine: Arc<pa_core::session_engine::engine::SessionEngine>,
@@ -65,9 +61,6 @@ impl AcpSession {
         let mapping = Arc::new(Mutex::new(MappingState::default()));
         let last_published_goal =
             Arc::new(Mutex::new(engine.goal_driver.lock().await.state().clone()));
-        // The compaction arm state is shared with the event subscription:
-        // a user row that starts an agent run resets the overflow
-        // recovery machine at its `message_start` (TS `startsAgentRun`).
         let arms = Arc::new(CompactionArms::new());
         let goal_budget_crossed = Arc::new(AtomicBool::new(false));
         let subscription = subscribe_engine_events(
@@ -96,7 +89,6 @@ impl AcpSession {
         }
     }
 
-    /// Release the engine event subscription; no further updates flow.
     pub async fn unsubscribe(&self) {
         let subscription = self.subscription.lock().await.take();
         if let Some(subscription) = subscription {
@@ -118,9 +110,6 @@ impl AcpSession {
         self.cancel_requested.store(true, Ordering::SeqCst);
     }
 
-    /// Consume the goal-budget crossing the latest turn's usage armed
-    /// (the settle loop's budget-steer read; TS `_shouldStopAfterTurn`'s
-    /// budget arm).
     pub fn take_goal_budget_crossed(&self) -> bool {
         self.goal_budget_crossed.swap(false, Ordering::SeqCst)
     }
@@ -133,8 +122,6 @@ impl AcpSession {
         &self.agent
     }
 
-    /// Consult the autonomous driver for one settled turn (gate evaluation
-    /// runs inside the driver).
     pub async fn autonomous_follow_up(
         &self,
         message: &pa_types::ai::AssistantMessage,
@@ -143,8 +130,6 @@ impl AcpSession {
         self.autonomous_driver.after_turn(&mut state, message).await
     }
 
-    /// The current autonomous status snapshot (the completion envelope
-    /// publishes it while a run is enabled).
     pub async fn autonomous_status(&self) -> pa_core::autonomous::AgentAutonomousStatus {
         let state = self.autonomous.lock().await;
         pa_core::autonomous::autonomous_status(&state)
@@ -174,7 +159,6 @@ impl AcpSession {
         .await;
     }
 
-    /// Publish one adapter event at the active turn (namespaced metas).
     pub async fn publish_engine_event(&self, event: &AcpEngineEvent) {
         let turn_id = self.producer.active_prompt_turn().await;
         let mut mapping = MappingState::default();
@@ -189,9 +173,8 @@ impl AcpSession {
 
 /// Map the engine loop events onto ACP updates for the session lifetime.
 ///
-/// Message-end hooks mirror the TS session's `message_end` listeners:
-/// per-message autonomous usage accounting, and goal usage recording with a
-/// `_meta.goal` update whenever the goal state changes mid-turn.
+/// Message-end hooks run per-message autonomous usage accounting and goal
+/// usage recording with a `_meta.goal` update on mid-turn changes.
 #[allow(clippy::too_many_arguments)]
 async fn subscribe_engine_events(
     engine: &Arc<pa_core::session_engine::engine::SessionEngine>,
@@ -218,10 +201,9 @@ async fn subscribe_engine_events(
             let arms = arms.clone();
             let goal_budget_crossed = goal_budget_crossed.clone();
             Box::pin(async move {
-                // A user row that starts an agent run resets the overflow
-                // recovery machine (TS `startsAgentRun` at
-                // `message_start`): the stale attempt state from the
-                // previous run never suppresses a fresh overflow.
+                // A user row that starts an agent run resets the overflow recovery
+                // machine: stale attempt state from the previous run never suppresses a
+                // fresh overflow.
                 if let AgentEvent::MessageStart {
                     message: AgentMessage::Standard(Message::User(_)),
                 } = &event
@@ -256,13 +238,10 @@ async fn subscribe_engine_events(
                             let mut state = autonomous.lock().await;
                             autonomous_driver.account_message(&mut state, &wire);
                         }
-                        // Goal usage recording mirrors the TS guard
-                        // (`_accountGoalUsageForAssistantMessage`): only
-                        // turns that were neither errors nor aborted spend
-                        // the goal's budget, and only while the goal is
-                        // active; a budget crossing moves the goal to
-                        // `budget_limited` (the state change publishes
-                        // below) and arms the settle loop's wrap-up steer.
+                        // Goal usage recording: only non-error,
+                        // non-aborted turns spend the budget; a crossing
+                        // moves the goal to `budget_limited` and arms the
+                        // wrap-up steer.
                         if !matches!(
                             wire.stop_reason,
                             pa_types::ai::StopReason::Error | pa_types::ai::StopReason::Aborted
@@ -273,9 +252,8 @@ async fn subscribe_engine_events(
                             // double-counting guard: the loop does not
                             // assign message ids in-process.
                             let message_id = format!("a-{}", wire.timestamp);
-                            // TS `_shouldStopAfterTurn`'s catch: goal
-                            // accounting must not interrupt the loop; a
-                            // failed persist only warns.
+                            // Goal accounting must not interrupt the loop; a failed persist only
+                            // warns.
                             match driver
                                 .record_assistant_usage(&mut persistence, &message_id, &wire.usage)
                             {
@@ -381,8 +359,8 @@ fn project_event(event: &AgentEvent) -> Vec<AcpEngineEvent> {
 
 /// The transcript as it stood before a turn started, recorded so the turn's
 /// own messages can be told apart from everything older. Compaction can fire
-/// during a turn and rebuild the message list, so membership is tracked by
-/// a content key the rebuild preserves, not by index.
+/// during a turn, so membership is tracked by a content key the rebuild
+/// preserves, not by index.
 #[derive(Debug, Default)]
 pub struct TurnBoundary {
     keys: Vec<String>,
@@ -397,10 +375,9 @@ impl TurnBoundary {
     }
 
     /// Membership check for the wire shape of an assistant message (the
-    /// turn loop classifies the latest assistant against the pre-turn
-    /// transcript; the key composition is the one `message_key` builds —
-    /// compaction drops messages, it does not rewrite them, so the keys
-    /// survive the compaction rebuild).
+    /// key composition is the one `message_key` builds — compaction drops
+    /// messages, it does not rewrite them, so the keys survive the
+    /// rebuild).
     pub fn contains_wire(&self, assistant: &pa_types::ai::AssistantMessage) -> bool {
         let stop_reason = serde_json::to_value(assistant.stop_reason).unwrap_or(Value::Null);
         let key = json!([
@@ -414,8 +391,8 @@ impl TurnBoundary {
     }
 }
 
-/// Key for a kept message: (role, timestamp, stopReason, errorMessage) as the
-/// wire tuple. Compaction drops messages; it does not rewrite them.
+/// Key for a kept message: (role, timestamp, stopReason, errorMessage)
+/// as the wire tuple.
 fn message_key(message: &AgentMessage) -> Option<String> {
     let AgentMessage::Standard(Message::Assistant(assistant)) = message else {
         return None;
@@ -432,8 +409,6 @@ fn message_key(message: &AgentMessage) -> Option<String> {
     )
 }
 
-/// The newest assistant message of the transcript, when one exists (the
-/// autonomous driver consults it for the settled turn).
 pub async fn latest_assistant_message(agent: &Agent) -> Option<pa_types::ai::AssistantMessage> {
     let state = agent.state().await;
     state.messages.iter().rev().find_map(|message| {
@@ -446,11 +421,9 @@ pub async fn latest_assistant_message(agent: &Agent) -> Option<pa_types::ai::Ass
     })
 }
 
-/// The frame pair that brackets every settled turn: the completion event and
-/// the terminal quiescence envelope. In-process sessions have no RLM
-/// children, so quiescence is trivially reached at settlement; the
-/// autonomous accounting rides the completion update while a run is
-/// enabled.
+/// The frame pair that brackets every settled turn: the completion event
+/// and the terminal quiescence envelope. In-process sessions have no RLM
+/// children, so quiescence is trivially reached at settlement.
 pub async fn publish_completion_envelope(
     session: &AcpSession,
     turn_id: u64,
@@ -537,7 +510,6 @@ pub fn prompt_block_error(id: &Value, error: &PromptBlockError) -> Value {
     )
 }
 
-/// The prompt content admitted into a turn.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AdmittedPrompt {
     pub text: String,

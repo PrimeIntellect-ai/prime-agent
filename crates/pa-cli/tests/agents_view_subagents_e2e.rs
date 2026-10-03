@@ -1,13 +1,6 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
-// by design on hot paths (boxing 130 fns is allocation-churn with zero
-// correctness gain); the fn-length threshold is a style gate, not
-// correctness (the harness fns are intentionally linear); 64-bit targets -
-// the narrowing sits at OS/protocol boundaries where the values are
-// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
-// guarded parses), and checked conversions would add panic paths where
-// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
-// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
-// dossier for the conductor).
+// large_futures: stack futures on hot paths by design. too_many_lines:
+// style gate only. Casts: 64-bit targets; narrowing sits at bounded
+// OS/protocol boundaries.
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -18,13 +11,9 @@
 )]
 
 //! End-to-end verifier for the subagent panel surface of the agents view:
-//! a fixture roster (saved sessions on disk, one child under a parent and a
-//! grandchild under the child) behind a real supervisor, with the headless
-//! agents-view plan expanding the parent's list (the per-child detail rows),
-//! drilling into the child's transcript (whose frames pin the `depth N`
-//! tray label), and returning to the view with the carried selection —
-//! where the now-live resumed child renders per TS parity (a top-level
-//! runtime row keeping its persisted depth) and Enter re-opens it.
+//! the headless plan expands the parent, drills into the child's transcript
+//! (pinning the `depth N` tray label), and returns — where the now-live
+//! resumed child stays a child row (TS parity: the persisted depth).
 #![cfg(unix)]
 
 use std::fmt::Write as _;
@@ -125,9 +114,8 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
     panic!("supervisor socket never appeared");
 }
 
-/// One saved-session fixture: a session header whose `parentSession` and
-/// `rlmDepth` give the catalog the subagent linkage, a display name, and a
-/// user/assistant exchange.
+/// One saved-session fixture: a session header whose `parentSession`/`rlmDepth`
+/// give the catalog the subagent linkage, a display name, and an exchange.
 fn write_fixture(
     dir: &Path,
     id: &str,
@@ -162,8 +150,7 @@ fn write_fixture(
     path
 }
 
-/// The first frame showing `marker` (the state before the plan's later
-/// keystrokes mutate it).
+/// The first frame showing `marker` (the state before the plan's later keystrokes mutate it).
 fn first_frame_of(frames: &[String], marker: &str) -> String {
     frames
         .iter()
@@ -177,7 +164,6 @@ fn first_frame_of(frames: &[String], marker: &str) -> String {
         .clone()
 }
 
-/// The last frame showing `marker`.
 fn frame_of(frames: &[String], marker: &str) -> String {
     frames
         .iter()
@@ -228,8 +214,7 @@ async fn panel_expand_drill_in_and_back_re_expands_the_tree() {
     let supervisor = spawn_supervisor(dir.path());
 
     // The fixture roster: a parent orchestrator, one child under it, and a
-    // grandchild under the child (the catalog carries the linkage through
-    // the session headers' parentSession/rlmDepth).
+    // grandchild under the child (the linkage rides parentSession/rlmDepth).
     let parent_path = write_fixture(
         &session_dir,
         "orchestrator",
@@ -255,8 +240,7 @@ async fn panel_expand_drill_in_and_back_re_expands_the_tree() {
         &[("dig deeper", "nested work complete")],
     );
 
-    // View run 1: the collapsed parent carries its `N subagents` summary
-    // row; alt+right expands it; the child row opens its transcript.
+    // View run 1: expand the parent, drill into the child.
     let plan = AgentsHeadlessPlan {
         steps: vec![
             AgentsStep::WaitSettle { timeout_ms: 2_000 },
@@ -276,10 +260,8 @@ async fn panel_expand_drill_in_and_back_re_expands_the_tree() {
             .expect("agents view run")
             .outcome;
 
-    // Collapsed: the parent row and its `2 inactive subagents` line —
-    // the label aggregates the whole not-running descendant tree (the
-    // child and the grandchild under it), with both reachable only
-    // through the line.
+    // Collapsed: the parent row and its `2 inactive subagents` line — the label
+    // aggregates the whole not-running descendant tree.
     let collapsed = first_frame_of(&view.frames, "orchestrator chat");
     assert!(
         collapsed.contains("\u{25b8} 2 subagents (0 running)"),
@@ -290,9 +272,8 @@ async fn panel_expand_drill_in_and_back_re_expands_the_tree() {
         "the child stays hidden until the parent expands:\n{collapsed}"
     );
 
-    // Expanded: the parent's summary row flips its marker, the child
-    // detail row renders nested, and the child's own collapsed summary
-    // row keeps the grandchild hidden until the child expands too.
+    // Expanded: the child detail row renders nested, and the child's own
+    // collapsed summary keeps the grandchild hidden until the child expands.
     let expanded = first_frame_of(&view.frames, "worker alpha");
     assert!(
         expanded.contains("\u{25be} 2 subagents (0 running)"),
@@ -303,8 +284,8 @@ async fn panel_expand_drill_in_and_back_re_expands_the_tree() {
         "the grandchild stays hidden until the child expands:\n{expanded}"
     );
 
-    // The drill-in opened the child's session file, carrying the ancestor
-    // chain for the return re-expansion and the child's depth for its tray.
+    // The drill-in opened the child's session file, carrying the ancestor chain for the return and
+    // the child's depth for its tray.
     assert_eq!(
         view.selection,
         Some(SessionSelection::Resume(child_path.clone())),
@@ -321,9 +302,8 @@ async fn panel_expand_drill_in_and_back_re_expands_the_tree() {
         "the child has the grandchild under it"
     );
 
-    // The drilled-in child's transcript: its rows render, and the tray
-    // carries the subagent session's `depth N` label (TS
-    // `getTrayLocationLabel`).
+    // The drilled-in child's transcript: the tray carries the subagent session's `depth N` label
+    // (TS `getTrayLocationLabel`).
     let child_options = pa_tui::interactive::InteractiveOptions {
         models: None,
         socket_path: supervisor.socket.clone(),
@@ -385,18 +365,12 @@ async fn panel_expand_drill_in_and_back_re_expands_the_tree() {
         "the agents-back key returned to the view"
     );
 
-    // View run 2 (the flow's carried state): the drilled-in child is now
-    // a live session that STAYS a child row: the live `top-level` runtime
-    // carries the opened file's spawn-time parent binding one level below
-    // the parent, so the view renders it behind the parent's summary (in
-    // the parent's aggregate — a top-level flip would leave the grandchild
-    // alone behind it), revealed by the expansion with its persisted
-    // `rlmDepth` and its own saved descendants (the grandchild) behind its
-    // own collapsed summary row.
-    // Expand the parent from its own selected row (the child sits hidden
-    // behind the collapsed summary, so the carried selection falls back to
-    // the parent and re-syncs to it), then walk to the child — its summary
-    // row, then the child — and open it.
+    // View run 2 (the flow's carried state): the drilled-in child is now a live
+    // session that STAYS a child row — the live runtime carries the opened
+    // file's spawn-time parent binding, so the view renders it behind the
+    // parent's summary with its persisted `rlmDepth` and saved descendants.
+    // Expand the parent from its own row (the child sits hidden behind the
+    // collapsed summary, so the carried selection falls back to the parent).
     let plan = AgentsHeadlessPlan {
         steps: vec![
             AgentsStep::WaitSettle { timeout_ms: 2_000 },
@@ -421,10 +395,8 @@ async fn panel_expand_drill_in_and_back_re_expands_the_tree() {
             .await
             .expect("agents view re-run")
             .outcome;
-    // The settled frame is the one the saved-catalog scan landed in (the
-    // first frame now renders from the live roster alone — TS
-    // `applySessionList` before `armSavedSearchFetch` applies — so the
-    // mount frame predates the saved rows and their summary markers).
+    // The settled frame is the one the saved-catalog scan landed in (the first
+    // frame renders from the live roster alone — TS `applySessionList`).
     let returned = first_frame_of(&back.frames, "orchestrator chat");
     assert!(
         returned.contains("\u{25b8} 2 subagents (0 running)"),
@@ -451,9 +423,8 @@ async fn panel_expand_drill_in_and_back_re_expands_the_tree() {
         expanded.contains("orchestrator chat"),
         "the parent stays reachable as its own saved-catalog row:\n{expanded}"
     );
-    // The carried selection restored onto the resumed child's live row:
-    // Enter re-opened that session (its live active id), and the open
-    // carried the row's persisted depth for the tray label.
+    // The carried selection restored onto the resumed child's live row: Enter
+    // re-opened that session, carrying the row's persisted depth for the tray.
     assert_eq!(
         back.selection,
         Some(SessionSelection::Attach(
@@ -471,20 +442,16 @@ async fn panel_expand_drill_in_and_back_re_expands_the_tree() {
     drop(supervisor);
 }
 
-/// User-keybinding verifier for the standalone agents view (the #184
-/// follow-up): a `keybindings.json` fixture rebinding the view's open
-/// action (`app.agents.open` right -> ctrl+g) drives the whole surface —
-/// the hint row renders the OVERRIDE key, the override key opens the
-/// selection, and the default key no longer does.
+/// A `keybindings.json` fixture rebinding the open action (`app.agents.open` right
+/// -> ctrl+g) — the hint renders the OVERRIDE key; it opens, the default key does not.
 #[tokio::test]
 async fn agents_view_fires_user_keybindings_from_settings() {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
     let session_dir = agent_dir.join("sessions");
     std::fs::create_dir_all(&session_dir).expect("session dir");
-    // The settings fixture: one agents-view binding overridden exactly
-    // like a user's `~/.prime/agent/keybindings.json` would, loaded
-    // through the exact `KeybindingsManager::create` path the CLI uses.
+    // The settings fixture: one agents-view binding overridden like a user's
+    // `~/.prime/agent/keybindings.json`, loaded through the CLI's manager path.
     std::fs::write(
         agent_dir.join("keybindings.json"),
         r#"{ "app.agents.open": "ctrl+g" }"#,
@@ -500,8 +467,8 @@ async fn agents_view_fires_user_keybindings_from_settings() {
         &[("hello", "ok")],
     );
 
-    // Run 1: the override opens the selection; the hint row renders it
-    // (TS `renderHints` keyText slots).
+    // Run 1: the override opens the selection; the hint row renders it (TS `renderHints` keyText
+    // slots).
     let plan = AgentsHeadlessPlan {
         steps: vec![
             AgentsStep::WaitSettle { timeout_ms: 2_000 },
@@ -532,8 +499,7 @@ async fn agents_view_fires_user_keybindings_from_settings() {
         "the default open hint is gone after the override:\n{hints}"
     );
 
-    // Run 2: the default key is inert — a plan pressing it ends without
-    // an open.
+    // Run 2: the default key is inert — a plan pressing it ends without an open.
     let plan = AgentsHeadlessPlan {
         steps: vec![
             AgentsStep::WaitSettle { timeout_ms: 2_000 },

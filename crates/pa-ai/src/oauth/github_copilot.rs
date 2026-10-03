@@ -1,18 +1,6 @@
-//! The GitHub Copilot OAuth flow — the port of
-//! `packages/ai/src/utils/oauth/github-copilot.ts` (+
-//! `copilot-client-version.ts`): the optional GitHub Enterprise
-//! domain prompt, the device-code flow against the GitHub login
-//! endpoints (with the client impersonation headers and the
-//! `slow_down` backoff), the Copilot internal token exchange, the
-//! model-policy enabling after login, and the token refresh. The
-//! credentials the flow returns carry the TS shape (`access`, the
-//! GitHub `refresh` token, `expires`, the `enterpriseUrl`) and
-//! persist under the provider id `github-copilot`.
-//!
-//! Cancellation follows the fleet's cooperative pattern (#2770): the
-//! driving surface marks a shared flag when it exits; the poll loop
-//! checks it between its wait steps, so an exited surface never
-//! receives a completed login.
+//! The GitHub Copilot OAuth flow: the enterprise-domain prompt, the
+//! device-code flow (impersonation headers, `slow_down` backoff), the
+//! Copilot token exchange, the model-policy enabling, and the refresh.
 
 use std::time::Duration;
 
@@ -21,62 +9,47 @@ use url::Url;
 use super::provider_http::{ProviderHttp, ProviderHttpMethod, ProviderHttpRequest};
 use super::types::{OAuthLoginUi, OAuthPrompt};
 
-/// The OAuth app the TS flow ships (TS stores the id base64-encoded;
-/// the decoded value is the wire value).
+/// TS stores the id base64-encoded; the decoded value is the wire value.
 pub const COPILOT_CLIENT_ID: &str = "Iv1.b507a08c87ecfe98";
-/// TS `COPILOT_CLIENT_USER_AGENT` (the client identity the flow and
-/// the generated catalog both send — keep both in sync by editing the
-/// catalog generator too).
+/// The client identity the flow and the generated catalog both send
+/// — keep both in sync by editing the catalog generator too.
 pub const COPILOT_CLIENT_USER_AGENT: &str = "GitHubCopilotChat/0.48.1";
-/// TS `COPILOT_CLIENT_HEADERS`.
 pub const COPILOT_CLIENT_HEADERS: [(&str, &str); 4] = [
     ("User-Agent", COPILOT_CLIENT_USER_AGENT),
     ("Editor-Version", "vscode/1.136.1"),
     ("Editor-Plugin-Version", "copilot-chat/0.48.1"),
     ("Copilot-Integration-Id", "vscode-chat"),
 ];
-/// TS `INITIAL_POLL_INTERVAL_MULTIPLIER`.
 const INITIAL_POLL_INTERVAL_MULTIPLIER: f64 = 1.2;
-/// TS `SLOW_DOWN_POLL_INTERVAL_MULTIPLIER`.
 const SLOW_DOWN_POLL_INTERVAL_MULTIPLIER: f64 = 1.4;
-/// One request's bound (the port's request-timeout norm; TS `fetch`
-/// carries no explicit timeout here).
+/// The port's request bound; TS `fetch` carries no explicit timeout
+/// here.
 pub const DEFAULT_TOKEN_TIMEOUT_MS: u64 = 30_000;
-/// The refresh grant's request bound: the refresh runs under the auth
-/// store's file lock, which a peer declares stale after 10 seconds — the
-/// request must fit inside that window so a slow endpoint fails the
-/// refresh (kept for a retry) instead of holding the lock past its
-/// staleness.
+/// The refresh runs under the auth store's file lock, which a peer declares stale after 10 seconds;
+/// the request must fit inside that window.
 pub const REFRESH_TIMEOUT_MS: u64 = 8_000;
-/// The credential's expiry skew (TS `5 * 60 * 1000`).
 const EXPIRY_SKEW_MS: i64 = 5 * 60 * 1000;
-/// The device flow's requested scope (TS `scope: "read:user"`).
 const DEVICE_SCOPE: &str = "read:user";
 /// The cancel error the driving surface maps to the silent cancelled
 /// outcome.
 pub const LOGIN_CANCELLED: &str = "Login cancelled";
-/// The poll's cancel-check step (#2770 — the flag is checked between
-/// the wait steps).
 const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
-/// The credentials the flow returns and persists (TS
-/// `OAuthCredentials` plus the Copilot provider's `enterpriseUrl`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CopilotCredentials {
     /// The Copilot internal token (the API's bearer).
     pub access: String,
     /// The GitHub OAuth access token (the refresh source).
     pub refresh: String,
-    /// Wall-clock epoch milliseconds (TS `expires_at * 1000 - 5
-    /// minutes`).
+    /// Wall-clock epoch milliseconds.
     pub expires: i64,
-    /// The GitHub Enterprise domain the login ran against (`None` for
-    /// github.com; TS `enterpriseUrl`).
+    /// The GitHub Enterprise domain the login ran against (`None`
+    /// for github.com).
     pub enterprise_url: Option<String>,
 }
 
-/// TS `normalizeDomain`: a URL or bare domain reduced to its hostname
-/// (`None` on an empty input or an unparseable one).
+/// A URL or bare domain reduced to its hostname (`None` on an empty
+/// or unparseable input).
 pub fn normalize_domain(input: &str) -> Option<String> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -92,7 +65,6 @@ pub fn normalize_domain(input: &str) -> Option<String> {
         .map(|url| url.host_str().unwrap_or_default().to_string())
 }
 
-/// The provider's endpoint set for one domain (TS `getUrls`).
 fn urls_for(domain: &str) -> DeviceUrls {
     DeviceUrls {
         device_code_url: format!("https://{domain}/login/device/code"),
@@ -109,10 +81,9 @@ struct DeviceUrls {
     copilot_token_url: String,
 }
 
-/// TS `getBaseUrlFromToken`: the API base URL the Copilot token
-/// carries (`proxy-ep` rewritten onto `api.`), if any.
+/// The API base URL the Copilot token carries (`proxy-ep` rewritten
+/// onto `api.`), if any.
 pub fn get_base_url_from_token(token: &str) -> Option<String> {
-    // TS matches `/proxy-ep=([^;]+)/` on the token string.
     let start = token.find("proxy-ep=")?;
     let rest = &token[start + "proxy-ep=".len()..];
     let proxy_host = rest.split(';').next().unwrap_or_default();
@@ -125,8 +96,8 @@ pub fn get_base_url_from_token(token: &str) -> Option<String> {
     Some(format!("https://{api_host}"))
 }
 
-/// TS `getGitHubCopilotBaseUrl`: the token's carried endpoint wins,
-/// then the enterprise domain, then the individual default.
+/// The token's carried endpoint wins, then the enterprise domain,
+/// then the individual default.
 pub fn get_github_copilot_base_url(token: Option<&str>, enterprise_domain: Option<&str>) -> String {
     if let Some(url) = token.and_then(get_base_url_from_token) {
         return url;
@@ -137,22 +108,16 @@ pub fn get_github_copilot_base_url(token: Option<&str>, enterprise_domain: Optio
     "https://api.individual.githubcopilot.com".to_string()
 }
 
-/// Run the login (TS `loginGitHubCopilot`): the optional enterprise
-/// domain prompt, the device flow, the Copilot token exchange, and
-/// the model-policy enabling.
-///
+/// The enterprise-domain prompt, the device flow, the token exchange, and the model-policy
+/// enabling.
 /// # Errors
 ///
-/// Returns an error when the surface cancelled the login
-/// ([`LOGIN_CANCELLED`]), the enterprise input is not a domain, the
-/// device flow fails or times out, or the Copilot token exchange
-/// fails.
+/// Returns an error when the login is cancelled ([`LOGIN_CANCELLED`]), the
+/// enterprise input is not a domain, the device flow fails, or the exchange fails.
 pub async fn login_github_copilot(
     http: &dyn ProviderHttp,
     ui: &dyn OAuthLoginUi,
 ) -> Result<CopilotCredentials, String> {
-    // An exited surface never starts: no prompt, no browser launch (the
-    // #2770 flag is the seam).
     if ui.is_cancelled() {
         return Err(LOGIN_CANCELLED.to_string());
     }
@@ -190,9 +155,7 @@ pub async fn login_github_copilot(
     Ok(credentials)
 }
 
-/// Refresh an expired credential (TS `refreshGitHubCopilotToken`):
-/// the stored GitHub token exchanges for a fresh Copilot internal
-/// token.
+/// Refresh: the stored GitHub token exchanges for a fresh Copilot internal token.
 ///
 /// # Errors
 ///
@@ -214,8 +177,6 @@ pub async fn refresh_github_copilot_token(
     for (name, value) in COPILOT_CLIENT_HEADERS {
         headers.push((name.to_string(), value.to_string()));
     }
-    // The refresh runs under the auth store's lock: the request fits
-    // inside the lock's staleness window (REFRESH_TIMEOUT_MS).
     let response = http
         .request(
             ProviderHttpRequest {
@@ -260,9 +221,8 @@ pub async fn refresh_github_copilot_token(
     })
 }
 
-/// TS `enableAllGitHubCopilotModels`: enable every catalog model's
-/// policy after login so the subscription models are usable
-/// (failures are ignored — the account may already carry some).
+/// Enable every catalog model's policy after login so the subscription models are usable; failures
+/// are ignored (the account may already carry some).
 async fn enable_all_github_copilot_models(
     http: &dyn ProviderHttp,
     token: &str,
@@ -287,14 +247,12 @@ async fn enable_all_github_copilot_models(
             body: Some(r#"{"state":"enabled"}"#.to_string()),
             follow_redirects: true,
         };
-        // TS swallows both the failed status and the thrown request.
         if let Ok(response) = http.request(request, DEFAULT_TOKEN_TIMEOUT_MS).await {
             let _ = response.ok();
         }
     }
 }
 
-/// One device-code response (TS `DeviceCodeResponse`).
 // Field names mirror the TS `DeviceCodeResponse` wire payload; renaming is a contract change.
 #[allow(clippy::struct_field_names)]
 struct DeviceCode {
@@ -305,8 +263,6 @@ struct DeviceCode {
     expires_in: u64,
 }
 
-/// TS `startDeviceFlow`: the device authorization request with the
-/// client's user agent.
 async fn start_device_flow(http: &dyn ProviderHttp, domain: &str) -> Result<DeviceCode, String> {
     let urls = urls_for(domain);
     let body = url::form_urlencoded::Serializer::new(String::new())
@@ -387,11 +343,7 @@ async fn start_device_flow(http: &dyn ProviderHttp, domain: &str) -> Result<Devi
     })
 }
 
-/// TS `pollForGitHubAccessToken`: the device-code grant poll with the
-/// TS backoff (the 1.2x initial multiplier, the 1.4x `slow_down`
-/// multiplier, and the `slow_down` interval bump) and the cooperative
-/// cancel between the wait steps.
-// Long by design (a 1:1 port of the TS poll loop); refactoring is out of scope for the zero-behavior pedantic sweep.
+// Long by design: mirrors the provider's stream shape.
 #[allow(clippy::too_many_lines)]
 async fn poll_for_github_access_token(
     http: &dyn ProviderHttp,
@@ -449,7 +401,6 @@ async fn poll_for_github_access_token(
             )
             .await?;
         if !response.ok() {
-            // TS `fetchJson` throws the `status statusText: text` form.
             return Err(format!(
                 "{} {}: {}",
                 response.status,
@@ -507,8 +458,7 @@ async fn poll_for_github_access_token(
     Err("Device flow timed out".to_string())
 }
 
-/// One abortable wait (TS `abortableSleep`): the cooperative cancel
-/// ends it mid-wait instead of the abort signal.
+/// The cooperative cancel flag ends the wait mid-sleep.
 async fn cancel_aware_sleep(ui: &dyn OAuthLoginUi, total: Duration) -> Result<(), String> {
     let deadline = std::time::Instant::now() + total;
     loop {
@@ -523,7 +473,6 @@ async fn cancel_aware_sleep(ui: &dyn OAuthLoginUi, total: Duration) -> Result<()
     }
 }
 
-/// TS `response.statusText` (a reason phrase per status).
 fn status_text(status: u16) -> &'static str {
     match status {
         400 => "Bad Request",
@@ -550,9 +499,8 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
-    /// A scripted transport: queued responses per url (popped in
-    /// order), a static map, and a catch-all default for the model
-    /// policy POSTs; every request is recorded.
+    /// Queued responses per url (popped in order), a static map, and a
+    /// catch-all default for the model-policy POSTs.
     struct ScriptedHttp {
         queued: Mutex<HashMap<String, VecDeque<ProviderHttpResponse>>>,
         fixed: HashMap<String, ProviderHttpResponse>,
@@ -628,7 +576,6 @@ mod tests {
         }
     }
 
-    /// One scripted UI answer.
     enum ScriptedAnswer {
         Once(Option<String>),
     }
@@ -652,8 +599,6 @@ mod tests {
         }
     }
 
-    /// The scripted login surface: the enterprise prompt, the auth
-    /// block, the progress lines, and the cancel flag.
     struct ScriptedUi {
         prompt: ScriptedAnswer,
         auth_url: Mutex<Option<String>>,
@@ -723,8 +668,8 @@ mod tests {
         }
     }
 
-    /// The github.com happy flow's scripted endpoints (a fast poll:
-    /// interval 0, pending once, then the token).
+    /// The github.com happy flow (a fast poll: interval 0, pending
+    /// once, then the token).
     fn github_http() -> ScriptedHttp {
         ScriptedHttp::new()
             .queue(
@@ -759,7 +704,6 @@ mod tests {
         assert_eq!(credentials.access, "copilot-token");
         assert_eq!(credentials.refresh, "gh-token");
         assert_eq!(credentials.enterprise_url, None);
-        // The device-code request: the client id and the scope.
         let device = &http.bodies_for("https://github.com/login/device/code")[0];
         assert!(device
             .body
@@ -771,12 +715,10 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("scope=read%3Auser"));
-        // The poll request: the device-code grant.
         let poll = &http.bodies_for("https://github.com/login/oauth/access_token")[1];
         let body = poll.body.as_deref().unwrap();
         assert!(body.contains("device_code=dev-1"));
         assert!(body.contains("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code"));
-        // The Copilot token exchange: the impersonation headers ride.
         let internal = &http.bodies_for("https://api.github.com/copilot_internal/v2/token")[0];
         assert_eq!(internal.method, ProviderHttpMethod::Get);
         let header = |name: &str| {
@@ -790,14 +732,11 @@ mod tests {
         assert_eq!(header("Authorization"), "Bearer gh-token");
         assert_eq!(header("Editor-Version"), "vscode/1.136.1");
         assert_eq!(header("Copilot-Integration-Id"), "vscode-chat");
-        // The auth block carries the TS user-code line.
         let (url, instructions) = ui.captured_auth();
         assert_eq!(url, "https://github.com/login/device");
         assert_eq!(instructions.as_deref(), Some("Enter code: ABCD-1234"));
         // TS: expires = expires_at * 1000 - 5 minutes.
         assert_eq!(credentials.expires, 4_000_000_000_000 - EXPIRY_SKEW_MS);
-        // The model-policy pass runs for every catalog model with the
-        // policy body.
         let policies = http.bodies_for("https://api.individual.githubcopilot.com/models/");
         let models = crate::models_generated::get_models("github-copilot");
         assert_eq!(
@@ -848,7 +787,6 @@ mod tests {
             Some("company.ghe.com")
         );
         assert_eq!(credentials.access, "copilot-e");
-        // The policy pass routes onto the enterprise base URL.
         assert!(!http
             .bodies_for("https://copilot-api.company.ghe.com/models/")
             .is_empty());
@@ -881,8 +819,7 @@ mod tests {
                     r#"{"device_code":"dev-1","user_code":"CODE-1","verification_uri":"https://github.com/login/device","interval":0,"expires_in":900}"#,
                 )],
             )
-            // The poll never answers a token; the cancel flips after the
-            // auth block lands.
+            // The poll never answers a token.
             .catch_all(ScriptedHttp::entry(
                 200,
                 r#"{"error":"authorization_pending"}"#,
@@ -896,8 +833,8 @@ mod tests {
                 async move { login_github_copilot(flow_http.as_ref(), flow_ui.as_ref()).await },
             )
         };
-        // Readiness-wait for the URL (bounded: a missing URL fails the
-        // test instead of hanging the cancel flip).
+        // Readiness-wait for the URL (bounded: a missing URL fails
+        // the test).
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while ui.auth_url.lock().unwrap().is_none() {
             assert!(
@@ -1009,7 +946,6 @@ mod tests {
             Some("company.ghe.com")
         );
         assert_eq!(normalize_domain("not a domain"), None);
-        // The token's proxy endpoint rewrites onto api.
         assert_eq!(
             get_base_url_from_token("tid=1;exp=2;proxy-ep=proxy.individual.githubcopilot.com;x=3")
                 .as_deref(),

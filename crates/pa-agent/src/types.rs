@@ -1,5 +1,4 @@
-//! Domain types for the agent loop, mirroring the TS reference
-//! (`packages/agent/src/types.ts` and its AI message types).
+//! Domain types for the agent loop.
 //!
 //! Serde field names use camelCase so serialized messages match the TS wire
 //! format exactly (important for the proxy protocol and session JSONL parity).
@@ -10,7 +9,7 @@ use std::sync::Arc;
 use crate::abort::AbortSignal;
 use crate::BoxFut;
 
-/// Thinking/reasoning level for models that support it (see `types.ts`).
+/// Thinking/reasoning level for models that support it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ThinkingLevel {
@@ -24,8 +23,8 @@ pub enum ThinkingLevel {
     Max,
 }
 
-/// TS `ServiceTier` (pi-ai): the requested provider service tier. The
-/// wire names match the shared AI package's (serde lowercase).
+/// The requested provider service tier; the wire names match the shared
+/// AI package's (serde lowercase).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ServiceTier {
@@ -39,14 +38,13 @@ pub enum ServiceTier {
 /// How tool calls from one assistant message are executed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ToolExecutionMode {
-    /// Prepare, execute, and finalize each call before the next starts.
     Sequential,
     /// Preflight sequentially, execute allowed calls concurrently.
     #[default]
     Parallel,
 }
 
-/// Why an assistant response stopped, mirroring the TS `StopReason`.
+/// Why an assistant response stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StopReason {
     #[serde(rename = "stop")]
@@ -61,7 +59,6 @@ pub enum StopReason {
     Aborted,
 }
 
-/// Text content block.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TextContent {
     pub text: String,
@@ -74,7 +71,6 @@ pub struct TextContent {
     pub text_signature: Option<String>,
 }
 
-/// Thinking/reasoning content block.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ThinkingContent {
     pub thinking: String,
@@ -100,7 +96,6 @@ pub struct ImageContent {
     pub mime_type: String,
 }
 
-/// A content block emitted by an assistant message.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum AssistantContent {
@@ -109,7 +104,6 @@ pub enum AssistantContent {
     ToolCall(ToolCall),
 }
 
-/// A tool-call content block (TS `AgentToolCall`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,
@@ -176,7 +170,6 @@ impl Usage {
     }
 }
 
-/// One entry in an assistant message's redacted diagnostics list.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AssistantMessageDiagnostic {
     #[serde(rename = "type")]
@@ -189,7 +182,6 @@ pub struct AssistantMessageDiagnostic {
     pub details: Option<serde_json::Value>,
 }
 
-/// Mirrors the TS `createAssistantMessageDiagnostic`.
 pub fn assistant_message_diagnostic(
     kind: impl Into<String>,
     error: &anyhow::Error,
@@ -304,7 +296,6 @@ pub struct ToolResultMessage {
     pub timestamp: i64,
 }
 
-/// Content blocks allowed in a tool result (text or image).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ToolResultContent {
@@ -321,7 +312,6 @@ impl ToolResultContent {
     }
 }
 
-/// A standard LLM-bound message (user / assistant / toolResult).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "camelCase")]
 pub enum Message {
@@ -330,9 +320,8 @@ pub enum Message {
     ToolResult(ToolResultMessage),
 }
 
-/// An app-specific custom agent message (TS `CustomAgentMessages` declaration
-/// merging). Hosts use arbitrary roles here and filter/convert them in
-/// `convert_to_llm`.
+/// An app-specific custom agent message: hosts use arbitrary roles here
+/// and filter/convert them in `convert_to_llm`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CustomAgentMessage {
     pub role: String,
@@ -341,10 +330,7 @@ pub struct CustomAgentMessage {
 }
 
 /// Agent-level message: standard messages plus custom app messages.
-///
-/// Mirrors TS `AgentMessage = Message | CustomAgentMessages[keyof ...]`.
-// `Standard` mirrors the TS union member shape; boxing it would ripple
-// through every consumer of the wire type for no practical benefit.
+// Boxing `Standard` would ripple through every consumer of the wire type.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -411,7 +397,7 @@ impl From<UserMessage> for AgentMessage {
     }
 }
 
-/// Minimal model descriptor the loop needs (TS `Model<any>`).
+/// Minimal model descriptor the loop needs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Model {
     pub id: String,
@@ -423,7 +409,6 @@ pub struct Model {
     pub base_url: String,
     #[serde(default)]
     pub reasoning: bool,
-    /// Cost multipliers, mirroring `Model.cost`.
     #[serde(default)]
     pub cost: UsageCost,
     #[serde(rename = "contextWindow", default)]
@@ -469,7 +454,6 @@ impl AgentToolResult {
         }
     }
 
-    /// Error tool result shape used throughout the TS loop.
     pub fn error(s: impl Into<String>) -> Self {
         AgentToolResult {
             content: vec![ToolResultContent::text(s)],
@@ -484,17 +468,13 @@ pub type AgentToolUpdateCallback = Arc<dyn Fn(AgentToolResult) + Send + Sync>;
 
 /// Tool definition used by the agent runtime.
 ///
-/// The TS reference validates arguments against a `TypeBox` schema. Here the
-/// schema is a plain JSON Schema `Value` and validation runs through
-/// [`crate::validation`], which implements the subset of JSON Schema the
-/// product's tool schemas use (type checks, required properties, nested
-/// objects/arrays, enums, and primitive coercion).
+/// The schema is a plain JSON Schema `Value` (TS validates against a `TypeBox`
+/// schema); validation runs through [`crate::validation`], the subset of
+/// JSON Schema the product's tool schemas use.
 pub trait AgentTool: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
-    /// JSON Schema describing the tool parameters.
     fn parameters(&self) -> &serde_json::Value;
-    /// Human-readable label for UI display.
     fn label(&self) -> &str {
         self.name()
     }
@@ -504,7 +484,7 @@ pub trait AgentTool: Send + Sync {
         None
     }
     /// Execute the tool call. Return `Err` on failure instead of encoding
-    /// errors in `content`, exactly like a `throw` in the TS reference.
+    /// errors in `content`, like a `throw` in the TS reference.
     fn execute(
         self: Arc<Self>,
         tool_call_id: String,
@@ -512,7 +492,6 @@ pub trait AgentTool: Send + Sync {
         signal: AbortSignal,
         on_update: AgentToolUpdateCallback,
     ) -> BoxFut<'static, anyhow::Result<AgentToolResult>>;
-    /// Per-tool execution mode override.
     fn execution_mode(&self) -> Option<ToolExecutionMode> {
         None
     }
@@ -526,7 +505,7 @@ pub struct AgentContext {
     pub tools: Vec<Arc<dyn AgentTool>>,
 }
 
-/// Events emitted by the agent loop (TS `AgentEvent`).
+/// Events emitted by the agent loop.
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
     AgentStart,
@@ -601,7 +580,6 @@ pub struct BeforeToolCallContext {
     pub context: AgentContext,
 }
 
-/// Context passed to `afterToolCall`.
 #[derive(Clone)]
 pub struct AfterToolCallContext {
     pub assistant_message: AssistantMessage,

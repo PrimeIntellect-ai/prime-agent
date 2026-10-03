@@ -1,9 +1,7 @@
-//! The `!`/`!!` execution card (TS `BashExecutionComponent`,
-//! bash-execution.ts): the bordered run box — the `$ command` header, the
-//! `Running...` loader, the 20-line tail preview, and the settled status
-//! rows — shared by the live `bash_start`/`bash_output`/`bash_end` mount,
-//! the replayed durable `bashExecution` row, and the pending-while-streaming
-//! hold (TS mounts the same component class in all three spots).
+//! The `!`/`!!` execution card: the bordered run box — the `$ command`
+//! header, the `Running...` loader, the 20-line tail preview, and the
+//! settled status rows — shared by the live mount, the replayed
+//! `bashExecution` row, and the pending-while-streaming hold.
 
 use crate::chat::LOADER_FRAMES;
 use crate::error_summary::strip_ansi;
@@ -11,24 +9,23 @@ use crate::theme::{Theme, ThemeColor};
 use crate::width::wrap_text;
 use crate::{Line, Span};
 
-/// The preview's visual-line budget (TS `PREVIEW_LINES`).
+/// The preview's visual-line budget.
 const PREVIEW_LINES: usize = 20;
 
-/// One user-bash run card. `output` mirrors the TS component's
-/// accumulation (chunks merge into the open line), kept to the tail the
-/// renderer needs.
+/// One user-bash run card: chunks merge into the open line, kept to the
+/// tail the renderer needs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BashExecutionCard {
     /// The live card's transcript identity (durable rows render
-    /// id-lessly like other settled entries).
+    /// id-lessly).
     pub id: String,
     pub command: String,
     /// The `!!` variant: the border and header render dim instead of the
-    /// bash-mode color (TS `excludeFromContext` picks the color key).
+    /// bash-mode color.
     pub excluded: bool,
-    /// The accumulated output (ANSI-stripped, newlines normalized), kept
-    /// to its last `TAIL_MAX_BYTES + 1` bytes — all `truncate_tail` needs
-    /// for the same window and truncation flag.
+    /// The accumulated output (ANSI-stripped, newlines normalized), kept to its last
+    /// `TAIL_MAX_BYTES + 1` bytes — all `truncate_tail` needs for the same window and
+    /// truncation flag.
     pub output: String,
     /// Whether the run is still going (the loader owns the status row).
     pub running: bool,
@@ -45,8 +42,7 @@ pub struct BashExecutionCard {
 }
 
 impl BashExecutionCard {
-    /// A running card for one dispatched command (TS the constructor's
-    /// `Running...` loader state).
+    /// A running card for one dispatched command.
     #[must_use]
     pub fn new_running(id: &str, command: &str, excluded: bool) -> Self {
         Self {
@@ -64,9 +60,7 @@ impl BashExecutionCard {
         }
     }
 
-    /// A settled card for a replayed durable `bashExecution` row (TS
-    /// `addMessageToChat` constructs the component, appends the recorded
-    /// output, and completes it).
+    /// A settled card for a replayed durable `bashExecution` row.
     #[must_use]
     pub fn settled(command: &str, excluded: bool) -> Self {
         let mut card = Self::new_running("", command, excluded);
@@ -74,10 +68,9 @@ impl BashExecutionCard {
         card
     }
 
-    /// One streamed chunk (TS `appendOutput`): strip ANSI, normalize
-    /// carriage returns, merge into the accumulated output (the first
-    /// new line continues the last open line), then keep only the tail
-    /// `truncate_tail` needs.
+    /// One streamed chunk: strip ANSI, normalize carriage returns, merge into the
+    /// accumulated output (the first new line continues the last open line), then keep
+    /// only the tail needed.
     pub fn append_output(&mut self, chunk: &str) {
         let clean = strip_ansi(chunk).replace("\r\n", "\n").replace('\r', "\n");
         self.output.push_str(&clean);
@@ -89,8 +82,8 @@ impl BashExecutionCard {
         self.output.drain(..keep_from);
     }
 
-    /// The run settled (TS `setComplete`): cancelled outranks the exit
-    /// code; a non-zero exit marks the run failed.
+    /// The run settled: cancelled outranks the exit code; a non-zero
+    /// exit marks the run failed.
     pub fn set_complete(
         &mut self,
         exit_code: Option<i64>,
@@ -105,25 +98,22 @@ impl BashExecutionCard {
         self.full_output_path = full_output_path;
     }
 
-    /// The run failed before producing a result (TS `setFailed`, e.g. a
-    /// spawn failure).
+    /// The run failed before producing a result (e.g. a spawn failure).
     pub fn set_failed(&mut self, message: &str) {
         self.running = false;
         self.error_message = Some(message.to_string());
     }
 
-    /// Whether the status row shows a failure marker (TS `setComplete`
-    /// classifies `exit !== 0` as the error status).
+    /// Whether the status row shows a failure marker (a non-zero exit
+    /// is the error status).
     #[must_use]
     pub fn failed(&self) -> bool {
         self.error_message.is_some() || self.exit_code.is_some_and(|code| code != 0)
     }
 }
 
-/// The card's rows (TS the component's render): the full-width borders,
-/// the `$ command` header, the output preview, and the loader or status
-/// rows. The leading spacer and the click-to-expand affordance live with
-/// the caller (the chat entry spacing and the mouse surface own them).
+/// The card's rows: the full-width borders, the `$ command` header, the output preview,
+/// and the loader or status rows; the spacer and click affordance live with the caller.
 #[must_use]
 pub fn render_bash_execution(
     card: &BashExecutionCard,
@@ -138,10 +128,8 @@ pub fn render_bash_execution(
     } else {
         theme.fg_style(ThemeColor::BashMode)
     };
-    // TS's constructor renders the command row through the color key (dim
-    // for `!!`); the first `updateDisplay` — any output chunk, the settle,
-    // a failure — re-renders it bash-mode (bash-execution.ts), so that is
-    // the row a run shows in flight with output or at rest.
+    // The first update — any output chunk, the settle, a failure —
+    // re-renders the command row bash-mode (dim only until then).
     let command_style = if card.running && card.output.is_empty() {
         key_style
     } else {
@@ -154,8 +142,7 @@ pub fn render_bash_execution(
     let content_width = width.saturating_sub(2).max(1);
     let mut rows: Vec<Line> = Vec::new();
     rows.push(border(width));
-    // The `$ command` header (TS styles the text, the leading space is
-    // the Text padding and stays uncolored).
+    // The leading space is Text padding and stays uncolored.
     for wrapped in wrap_text(&format!("$ {}", card.command), content_width) {
         let mut row: Line = vec![Span::raw(" ".to_string())];
         row.extend(
@@ -165,15 +152,11 @@ pub fn render_bash_execution(
         );
         rows.push(row);
     }
-    // The output block: the context-truncated tail (the same 2000-line /
-    // 50KB budget the bash tool applies), then either the full muted text
-    // or the preview — the LAST twenty logical lines, wrapped, then cut
-    // to twenty VISUAL lines keeping the tail (TS `truncateToVisualLines`
-    // over the 20-logical-line slice).
+    // The output block: the context-truncated tail, then either the full muted text or
+    // the LAST twenty logical lines cut to twenty visual lines.
     let (context, context_truncated) = crate::bash_bang::truncate_tail(&card.output);
-    // TS renders no output block while the accumulated content is empty
-    // (`availableLines = content ? content.split("\n") : []`), so a run
-    // with no output yet shows only the command row and the loader.
+    // No output block while the accumulated content is empty: a run with
+    // no output yet shows only the command row and the loader.
     let logical: Vec<&str> = if context.is_empty() {
         Vec::new()
     } else {
@@ -203,8 +186,7 @@ pub fn render_bash_execution(
         }
     }
     if !visual.is_empty() {
-        // TS styles the block with a leading `\n` (`new Text("\n...")`),
-        // so the block opens with a blank row.
+        // The block opens with a blank row.
         visual.insert(0, Vec::new());
         if !expanded && visual.len() > PREVIEW_LINES {
             visual = visual.split_off(visual.len() - PREVIEW_LINES);
@@ -212,8 +194,8 @@ pub fn render_bash_execution(
         rows.extend(visual);
     }
     if card.running {
-        // The loader (TS `Loader`: a blank row, then the spinner and the
-        // message, both muted around an unstyled gap).
+        // The loader: a blank row, then the spinner and message, muted
+        // around an unstyled gap.
         rows.push(Vec::new());
         let spinner = LOADER_FRAMES[frame % LOADER_FRAMES.len()];
         rows.push(vec![
@@ -223,8 +205,8 @@ pub fn render_bash_execution(
             Span::styled(format!("Running... ({cancel_hint} to cancel)"), muted),
         ]);
     } else {
-        // The status rows (TS `statusParts`, each on its own padded row
-        // after a leading blank).
+        // The status rows, each on its own padded row after a leading
+        // blank.
         let mut parts: Vec<(String, ratatui::style::Style)> = Vec::new();
         if !expanded {
             let hidden = logical.len().saturating_sub(PREVIEW_LINES);
@@ -277,9 +259,6 @@ mod tests {
         line.iter().map(|span| span.content.as_str()).collect()
     }
 
-    /// Chunks merge into the open line the TS way: the first line of a
-    /// chunk continues the last accumulated line, later chunk lines open
-    /// their own rows, and carriage returns normalize to newlines.
     #[test]
     fn chunks_merge_into_the_open_line() {
         let mut card = BashExecutionCard::new_running("u-1", "echo x", false);
@@ -289,9 +268,7 @@ mod tests {
         assert_eq!(card.output, "hello\nworld\n!");
     }
 
-    /// The collapsed preview keeps the LAST twenty visual lines and the
-    /// `... N more lines` row names the logical tail (TS counts hidden
-    /// LOGICAL lines while `truncateToVisualLines` hides visual ones).
+    /// The `... N more lines` row counts hidden LOGICAL lines; the preview cut hides visual ones.
     #[test]
     fn collapsed_preview_keeps_the_last_twenty_visual_lines() {
         let mut card = BashExecutionCard::new_running("u-1", "seq", false);
@@ -321,9 +298,7 @@ mod tests {
         );
     }
 
-    /// The settled run marks itself with `(exit N)` for a non-zero exit,
-    /// `(cancelled)` for a cancellation, and the truncation notice only
-    /// when a spill file exists (TS `statusParts` ordering).
+    /// The truncation notice shows only when a spill file exists.
     #[test]
     fn settled_status_markers_match_the_ts_shape() {
         let mut card = BashExecutionCard::new_running("u-1", "false", false);
@@ -352,9 +327,6 @@ mod tests {
         );
     }
 
-    /// The `!!` variant renders the borders and header through the dim
-    /// color (TS `excludeFromContext` picks the color key), and a running
-    /// card owns the loader row with its cancel hint.
     #[test]
     fn excluded_runs_render_dim_and_the_loader_names_the_cancel_key() {
         let card = BashExecutionCard::new_running("u-1", "secret", true);
@@ -370,8 +342,7 @@ mod tests {
         assert!(rows[0][0].style == dim, "the border is dim for !!");
     }
 
-    /// The expanded card shows the full context-truncated output (no
-    /// `... N more lines` row).
+    /// The expanded card shows the full context-truncated output (no `... N more lines` row).
     #[test]
     fn expanded_card_shows_everything() {
         let mut card = BashExecutionCard::new_running("u-1", "seq", false);
@@ -388,19 +359,16 @@ mod tests {
         );
     }
 
-    /// A long stream retains only the budget suffix `truncate_tail`
-    /// needs (bounded memory), while the rendered rows stay
-    /// byte-identical to the untrimmed stream's: the retained buffer is
-    /// a suffix that already exceeds `TAIL_MAX_BYTES`, so the tail window
-    /// and its truncation flag are the same.
+    /// A long stream retains only the budget suffix (bounded memory), and the rendered rows
+    /// stay byte-identical to the untrimmed stream's: the retained suffix already exceeds
+    /// `TAIL_MAX_BYTES`, so the tail window and truncation flag are the same.
     #[test]
     fn long_streams_retain_a_budget_suffix_and_render_unchanged() {
         let mut card = BashExecutionCard::settled("big", false);
         card.set_complete(Some(0), false, false, Some("/tmp/spill.txt".to_string()));
         let mut full = String::new();
-        // Three shapes: budget-overflowing short lines with multibyte
-        // heads, one oversize open line with no newline, then the newline
-        // that closes it.
+        // Three shapes: budget-overflowing short lines with multibyte heads, one oversize
+        // open line with no newline, then the newline that closes it.
         let phases: [Vec<String>; 3] = [
             (0..6000).map(|n| format!("é line {n}\n")).collect(),
             std::iter::repeat_n("日本".repeat(1000), 20).collect(),

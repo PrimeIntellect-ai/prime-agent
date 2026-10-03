@@ -1,11 +1,6 @@
-//! `OpenAI` Codex Responses streaming provider (`openai-codex-responses`).
-//!
-//! Port of `packages/ai/src/providers/openai-codex-responses.ts`: the `ChatGPT`
-//! backend Codex endpoint over WebSocket (session-cached connections with
-//! connection-anchored continuation deltas, SSE fallback on transport
-//! failures) and plain SSE, JWT `chatgpt-account-id` extraction, usage-limit
-//! friendly errors, and service-tier pricing. The stream processing itself is
-//! the shared Responses processor ([`crate::providers::openai_responses_shared`]).
+//! `OpenAI` Codex Responses streaming provider (`openai-codex-responses`): the `ChatGPT` backend
+//! Codex endpoint over WebSocket (session-cached connections with connection-anchored continuation
+//! deltas, SSE fallback on transport failures) and plain SSE.
 
 use serde_json::{json, Map, Value};
 
@@ -55,7 +50,7 @@ pub(crate) mod websocket;
 
 pub const API_OPENAI_CODEX_RESPONSES: &str = "openai-codex-responses";
 
-/// Provider-native options (`OpenAICodexResponsesOptions` in the TS).
+/// Provider-native options.
 #[derive(Clone, Default)]
 pub struct OpenAICodexResponsesOptions {
     pub base: StreamOptions,
@@ -96,8 +91,7 @@ impl CodexTextVerbosity {
     }
 }
 
-/// `reasoningSummary` option: the TS also accepts raw string forms
-/// ("on"/"off"/null); map them through the shared enum.
+/// `reasoningSummary` option; the TS also accepts raw string forms ("on"/"off"/null).
 fn reasoning_summary_value(summary: Option<ReasoningSummary>) -> &'static str {
     match summary {
         Some(ReasoningSummary::Auto) | None => "auto",
@@ -106,7 +100,6 @@ fn reasoning_summary_value(summary: Option<ReasoningSummary>) -> &'static str {
     }
 }
 
-/// Port of `streamOpenAICodexResponses`.
 pub fn stream_openai_codex_responses(
     model: &Model,
     context: &Context,
@@ -149,9 +142,8 @@ pub fn stream_openai_codex_responses(
                 } else {
                     StopReason::Error
                 };
-                // The TS provider surfaces `error.message` verbatim (including
-                // the usage-limit friendly text), not the classified
-                // stream-failure rewrite other providers apply.
+                // The TS provider surfaces `error.message` verbatim (including the usage-limit
+                // friendly text), not the classified stream-failure rewrite other providers apply.
                 output.error_message = Some(error.to_string());
                 record_stream_failure(
                     (&model.provider, &model.id, &model.api),
@@ -170,7 +162,7 @@ pub fn stream_openai_codex_responses(
     reader
 }
 
-// Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+// Long by design: mirrors the provider's stream shape.
 #[allow(clippy::too_many_lines)]
 async fn run_stream(
     model: &Model,
@@ -236,10 +228,8 @@ async fn run_stream(
 
     if transport != Transport::Sse && !websocket_disabled_for_session {
         let mut websocket_started = false;
-        // Retry a stale previous_response_id once on a fresh connection: the
-        // failed attempt's error cleanup already dropped the cached
-        // connection, so the retry resends the full request body. Any further
-        // failure takes the shared error handling below.
+        // Retry a stale previous_response_id once on a fresh connection (the failed attempt's
+        // cleanup dropped the cached one); the retry resends the full request body.
         let mut chain_reset_retried = false;
         loop {
             let attempt = run_websocket_attempt(
@@ -270,28 +260,24 @@ async fn run_stream(
                         .signal
                         .as_ref()
                         .is_some_and(tokio_util::sync::CancellationToken::is_cancelled);
-                    // Only reset the chain while nothing was streamed yet:
-                    // after the first event the retry would duplicate
-                    // "start"/content events.
+                    // Only reset the chain while nothing was streamed yet: after the first event
+                    // the retry would duplicate "start"/content events.
                     if !aborted
                         && !websocket_started
                         && !chain_reset_retried
                         && is_stale_codex_continuation_error(&error)
                     {
                         chain_reset_retried = true;
-                        // A failed attempt may have supplied response
-                        // metadata before rejecting the continuation. Do
-                        // not retain that dead anchor (TS #2374
-                        // `delete output.responseId`).
+                        // A failed attempt may have supplied response metadata before rejecting the
+                        // continuation; do not retain that dead anchor (TS #2374).
                         output.response_id = None;
                         continue;
                     }
                     if aborted || error.is_non_transport_error() {
                         return Err(error.into_provider_error());
                     }
-                    // Aborts and non-transport errors (API/protocol) were
-                    // handled above; only transport failures reach the SSE
-                    // fallback with their diagnostic.
+                    // Aborts and non-transport errors were handled above; only transport failures
+                    // reach the SSE fallback.
                     let transport_error = match &error {
                         CodexStreamError::Transport(transport) => transport,
                         CodexStreamError::Api(_) | CodexStreamError::Protocol(_) => {
@@ -343,9 +329,8 @@ async fn run_stream(
         on_response(
             crate::types::ProviderResponse {
                 status: response.status,
-                // Collected into the ordered map: the hook payload can
-                // serialize, and the HTTP header arrival order is not a
-                // stable serialization order.
+                // Collected into the ordered map: the hook payload can serialize, and the HTTP
+                // header arrival order is not a stable serialization order.
                 headers: response.headers.clone().into_iter().collect(),
             },
             model,
@@ -374,20 +359,15 @@ async fn run_stream(
     Ok(())
 }
 
-/// Whether one parsed Codex WebSocket event can produce assistant output
-/// consumed by the shared responses processor (TS #2374
-/// `isCodexVisibleResponseEvent`): the terminal families plus the output,
-/// reasoning, content, refusal, and function streams. Lifecycle
-/// (`response.created`/`response.in_progress`), telemetry, and vendor
-/// metadata cannot, so they stay internal and never mark the attempt as
-/// user-visible.
+/// Whether one parsed Codex WebSocket event can produce assistant output: lifecycle,
+/// telemetry, and vendor metadata stay internal and never mark the attempt user-visible.
 fn is_codex_visible_response_event(event: &Value) -> bool {
     let Some(event_type) = event.get("type").and_then(Value::as_str) else {
         return false;
     };
-    // `response.done` normalizes to `response.completed` before the TS
-    // classifier sees a mapped event, so the raw-type check here must
-    // accept it too (a terminal-only stream still starts visibly).
+    // `response.done` normalizes to `response.completed` before the TS classifier sees a mapped
+    // event, so the raw-type check here must accept it too (a terminal-only stream still starts
+    // visibly).
     event_type == "response.completed"
         || event_type == "response.done"
         || event_type == "response.incomplete"
@@ -398,9 +378,9 @@ fn is_codex_visible_response_event(event: &Value) -> bool {
         || event_type.starts_with("response.function_")
 }
 
-/// One WebSocket attempt (port of the websocket branch of `streamOpenAICodexResponses`).
+/// One WebSocket attempt.
 #[allow(clippy::too_many_arguments)]
-// Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+// Long by design: mirrors the provider's stream shape.
 #[allow(clippy::too_many_lines)]
 async fn run_websocket_attempt(
     model: &Model,
@@ -425,9 +405,8 @@ async fn run_websocket_attempt(
         options.base.transport,
         Some(Transport::WebsocketCached | Transport::Auto) | None
     );
-    // ChatGPT Codex Responses rejects `store: true` ("Store must be set to
-    // false"). WebSocket continuation still works via connection-scoped
-    // previous_response_id state.
+    // ChatGPT Codex Responses rejects `store: true` ("Store must be set to false"). WebSocket
+    // continuation still works via connection-scoped previous_response_id state.
     let full_body = body;
     let continuation = if use_cached_context && connection.cached {
         take_continuation_for(
@@ -468,17 +447,14 @@ async fn run_websocket_attempt(
         };
         let mut start_emitted = false;
         let mut processor = ResponsesStreamProcessor::new(model, output, writer, hooks);
-        // The TS catch settles partial tool calls before the error event
-        // carries the message (TS PR #2783).
+        // The TS catch settles partial tool calls before the error event carries the message.
         let streamed: Result<(), CodexStreamError> = async {
             while let Some(event) = events.recv().await {
                 match event {
                     websocket::WorkerEvent::Event(event) => {
-                        // Codex can emit lifecycle, telemetry, or vendor
-                        // metadata before rejecting a stale continuation.
-                        // Keep the attempt retryable until an event can
-                        // produce output consumed by the shared processor
-                        // (TS #2374's visible-event gate).
+                        // Codex can emit lifecycle, telemetry, or vendor metadata before rejecting
+                        // a stale continuation; keep the attempt retryable until a visible event
+                        // arrives.
                         if !start_emitted && is_codex_visible_response_event(&event) {
                             start_emitted = true;
                             *websocket_started = true;
@@ -558,13 +534,13 @@ async fn run_websocket_attempt(
     }
 }
 
-/// Rebuild an `AssistantMessage` as a `Message` for continuation-item
-/// conversion (the TS passes `{ messages: [output] }` directly).
+/// Rebuild an `AssistantMessage` as a `Message` for continuation-item conversion (the TS passes `{
+/// messages: [output] }` directly).
 fn assistant_as_message(output: &AssistantMessage) -> crate::types::Message {
     crate::types::Message::Assistant(output.clone())
 }
 
-/// Port of `processStream`: SSE decoding + shared processor with codex hooks.
+/// SSE decoding + shared processor with codex hooks.
 async fn run_sse_stream(
     response: &mut HttpResponse,
     model: &Model,
@@ -581,8 +557,7 @@ async fn run_sse_stream(
         })),
     };
     let mut processor = ResponsesStreamProcessor::new(model, output, writer, hooks);
-    // The TS catch settles partial tool calls before the error event carries
-    // the message (TS PR #2783).
+    // The TS catch settles partial tool calls before the error event carries the message.
     let stream_result: Result<(), ProviderError> = async {
         let mut decoder = SseDecoder::new();
         loop {
@@ -641,7 +616,6 @@ fn process_sse_chunk(
     Ok(())
 }
 
-/// Port of `buildRequestBody`.
 fn build_request_body(
     model: &Model,
     context: &Context,
@@ -757,7 +731,6 @@ fn transport_debug_name(transport: Transport) -> &'static str {
     }
 }
 
-/// Port of `streamSimpleOpenAICodexResponses`.
 pub fn stream_simple_openai_codex_responses(
     model: &Model,
     context: &Context,
@@ -839,10 +812,8 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    /// The user-facing text for a failed codex stream is the verbatim error
-    /// message; the raw-`fetch` SSE connection failure surfaces the
-    /// runtime's own refused-connect text (the codex provider uses no HTTP
-    /// SDK).
+    /// The user-facing text for a failed codex stream is the verbatim error message; the
+    /// raw-`fetch` connection failure surfaces the runtime's own refused-connect text.
     #[test]
     fn codex_error_message_shapes() {
         let usage_limit =
@@ -914,10 +885,8 @@ mod tests {
         }
     }
 
-    /// Replay a codex wire turn that issues one function call (the event
-    /// shapes the #222 codex suite replays) and return the recorded
-    /// assistant message. `item_id` omits the `fc_` item id from the wire
-    /// items, the degenerate shape that produced the dogfood
+    /// Replay a codex wire turn that issues one function call and return the recorded assistant
+    /// message. `item_id` omits the `fc_` item id, the degenerate shape that produced the
     /// `[ApiParam][invalid_id]` rejection on the follow-up turn.
     fn replay_codex_tool_call_turn(model: &Model, item_id: Option<&str>) -> AssistantMessage {
         let function_call_item = |arguments: &str| {
@@ -1071,16 +1040,13 @@ mod tests {
             .unwrap_or_else(|| panic!("missing function_call item in {items:?}"))
     }
 
-    /// Wire-level verifier: after a codex tool-call turn, the follow-up
-    /// request replays the recorded rows and every input item carries valid
-    /// ids (the dogfood bug sent `input[2].id: ""` and the API rejected the
-    /// turn with `[ApiParam][invalid_id]`).
+    /// The follow-up request replays the recorded rows and every input item carries valid ids (the
+    /// dogfood bug sent `input[2].id: ""`, rejected with `[ApiParam][invalid_id]`).
     #[test]
     fn codex_tool_call_followup_request_carries_valid_ids() {
         let model = codex_wire_model();
         let output = replay_codex_tool_call_turn(&model, Some("fc_123"));
-        // The recorded rows carry the `call_id|item_id` encoding and the
-        // streamed arguments.
+        // The recorded rows carry the `call_id|item_id` encoding and the streamed arguments.
         let tool_call = match output.content.last() {
             Some(crate::types::AssistantContent::ToolCall(tool_call)) => tool_call,
             other => panic!("expected a recorded tool call, got {other:?}"),
@@ -1099,9 +1065,9 @@ mod tests {
         assert_eq!(function_call.get("call_id"), Some(&json!("call_abc")));
     }
 
-    /// Degenerate wire shape: `function_call` items without an `fc_` item id.
-    /// The recorded tool call id carries an empty item segment; the
-    /// follow-up request must omit the `id` key (never `id: ""`).
+    /// Degenerate wire shape: `function_call` items without an `fc_` item id. The recorded tool
+    /// call id carries an empty item segment; the follow-up request must omit the `id` key (never
+    /// `id: ""`).
     #[test]
     fn codex_followup_omits_missing_item_id_instead_of_sending_empty() {
         let model = codex_wire_model();
@@ -1121,12 +1087,7 @@ mod tests {
         assert_eq!(function_call.get("call_id"), Some(&json!("call_abc")));
     }
 
-    // --- TS #2374: the stale-chain retry gate arms on real output only ---
-
-    /// Whether an event family can produce assistant output (the TS
-    /// `isCodexVisibleResponseEvent` classifier): the terminal, output,
-    /// reasoning, content, refusal, and function families do; lifecycle,
-    /// telemetry, and vendor metadata do not.
+    // TS #2374: the stale-chain retry gate arms on real output only.
     #[test]
     fn codex_visible_event_classifier() {
         let visible = [
@@ -1165,10 +1126,9 @@ mod tests {
         assert!(!is_codex_visible_response_event(&json!({ "other": 1 })));
     }
 
-    /// A mock Codex websocket server: one listener serving connections
-    /// sequentially, each connection answering its scripted requests. The
-    /// `response.create` bodies are captured (masked client frames), so
-    /// the tests can assert the continuation anchoring.
+    /// A mock Codex websocket server: one listener serving connections sequentially,
+    /// each answering its scripted requests; the `response.create` bodies are captured so
+    /// tests can assert the continuation anchoring.
     struct ScriptedCodexServer {
         port: u16,
         sent_bodies: std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
@@ -1194,10 +1154,9 @@ mod tests {
                 "content_index": 0,
                 "delta": text,
             }),
-            // No `output_index` on the done item (the recorded-turn shape):
-            // the processor retires the slot keyed by the done event's own
-            // index before reading it back, so a done event carrying one
-            // would skip the item's text-signature capture.
+            // No `output_index` on the done item (the recorded-turn shape): the processor retires
+            // the slot keyed by the done event's own index before reading it back, so a done event
+            // carrying one would skip the item's text-signature capture.
             json!({
                 "type": "response.output_item.done",
                 "item": { "type": "message", "id": message_id, "role": "assistant", "status": "completed", "content": [{ "type": "output_text", "text": text }] },
@@ -1280,9 +1239,9 @@ mod tests {
         Ok(())
     }
 
-    /// Spawn the scripted server: `scripts[connection][request]` is the
-    /// event list the server answers that request with. A connection whose
-    /// scripts are exhausted is held until the client closes it.
+    /// Spawn the scripted server: `scripts[connection][request]` is the event list the server
+    /// answers that request with. A connection whose scripts are exhausted is held until the client
+    /// closes it.
     async fn spawn_scripted_codex_server(scripts: Vec<Vec<Vec<Value>>>) -> ScriptedCodexServer {
         use base64::Engine as _;
         use sha1::Digest as _;
@@ -1328,11 +1287,8 @@ mod tests {
                         .expect("mock write");
                     let mut request_number = 0usize;
                     loop {
-                        // One frame per iteration: requests answer their
-                        // script in order; a close frame ends the connection
-                        // (answered, so the client's close handshake
-                        // completes) and anything after the scripted
-                        // requests holds without a response.
+                        // One frame per iteration: requests answer their script in order; a close
+                        // frame ends the connection (answered, so the close handshake completes).
                         let Some((opcode, payload)) = read_client_frame(&mut socket).await? else {
                             break;
                         };
@@ -1347,10 +1303,8 @@ mod tests {
                             for event in script {
                                 write_server_frame(&mut socket, event).await?;
                             }
-                            // A script that ends in an error closes the
-                            // connection (the real server ends the request
-                            // with the error; the client's read loop needs
-                            // the close to finish its terminal bookkeeping).
+                            // A script that ends in an error closes the connection: the client's
+                            // read loop needs the close to finish its terminal bookkeeping.
                             let ends_in_error = script
                                 .last()
                                 .and_then(|event| event.get("type"))
@@ -1414,9 +1368,8 @@ mod tests {
         }
     }
 
-    /// The follow-up turn's context: the full conversation (the first
-    /// user row, the first assistant row, then the new user row), like
-    /// the TS fixture (`[...firstContext.messages, first, { user }]`).
+    /// The follow-up turn's context: the full conversation (the first user row, the first assistant
+    /// row, then the new user row).
     fn codex_followup_context(first: &AssistantMessage, text: &str) -> Context {
         Context {
             system_prompt: Some("You are a helpful assistant.".to_string()),
@@ -1445,17 +1398,14 @@ mod tests {
         })
     }
 
-    /// TS #2374 regression: lifecycle and vendor metadata events before a
-    /// stale `previous_response_id` rejection keep the attempt retryable —
-    /// the provider retries once on a fresh socket with the full request
-    /// body (no `previous_response_id`), the consumer sees exactly one
-    /// `start`, and the recovered response id lands.
+    /// Lifecycle and vendor metadata events before a stale `previous_response_id` rejection
+    /// keep the attempt retryable; the provider retries once on a fresh socket with the full
+    /// request body.
     #[tokio::test]
     async fn recovers_stale_chain_after_metadata_events() {
         let server = spawn_scripted_codex_server(vec![
-            // Connection 1: request 1 completes (the cached chain anchor),
-            // request 2 rejects the stale continuation after lifecycle and
-            // vendor metadata events.
+            // Connection 1: request 1 completes (the cached chain anchor), request 2 rejects the
+            // stale continuation after metadata events.
             vec![
                 codex_response_events("resp_1", "msg_1", "Hello"),
                 vec![
@@ -1463,8 +1413,6 @@ mod tests {
                     json!({ "type": "response.in_progress", "response": { "id": "resp_stale" } }),
                     json!({ "type": "codex.response.metadata", "headers": {} }),
                     json!({ "type": "responsesapi.websocket_timing", "elapsed_ms": 1 }),
-                    // The pre-fix gate died here: metadata armed the
-                    // start flag, the stale rejection surfaced.
                     codex_error_events(
                         "previous_response_not_found",
                         "Previous response with id 'resp_1' not found.",
@@ -1507,7 +1455,6 @@ mod tests {
         assert_eq!(second.stop_reason, StopReason::Stop);
         assert_eq!(codex_message_text(&second).as_deref(), Some("Done"));
         assert_eq!(second.response_id.as_deref(), Some("resp_2"));
-        // Exactly one start on the recovered attempt, and a final done.
         assert_eq!(
             events
                 .iter()
@@ -1530,14 +1477,12 @@ mod tests {
             bodies[2].get("previous_response_id").is_none(),
             "the retry sends the full context without the dead anchor: {bodies:?}"
         );
-        // The metadata-supplied stale response id must not survive into
-        // the surfaced message.
+        // The metadata-supplied stale response id must not survive into the surfaced message.
         assert_eq!(second.response_id.as_deref(), Some("resp_2"));
     }
 
-    /// The second half of the TS #2374 fix: when the chain-reset retry also
-    /// fails, the surfaced error carries no dead continuation anchor (the
-    /// stale attempt's `response.created` id was cleared before retrying).
+    /// The second half of the TS #2374 fix: when the chain-reset retry also fails, the surfaced
+    /// error carries no dead continuation anchor.
     #[tokio::test]
     async fn retry_failure_surfaces_no_stale_response_id() {
         let server = spawn_scripted_codex_server(vec![
@@ -1579,7 +1524,6 @@ mod tests {
             second.error_message.as_deref(),
             Some("Codex error: Previous response with id 'resp_9' not found.")
         );
-        // The pre-fix bug kept the stale attempt's response id.
         assert!(
             second.response_id.is_none(),
             "the dead continuation anchor must not survive the surfaced error"

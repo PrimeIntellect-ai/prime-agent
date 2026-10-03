@@ -1,7 +1,5 @@
 //! Session slash-command argument parsing and status formatting for `/goal`
-//! and `/autonomous`. Ports of agent-session.ts `_parseGoalSlashCommand`,
-//! `_parseAutonomousSlashCommand`, `parseAutonomousBudgetOptions`, and
-//! `_formatAutonomousStatus`; the strings are user-facing and byte-identical.
+//! and `/autonomous`; the strings are user-facing and byte-identical to TS.
 
 use crate::autonomous::{AgentAutonomousConfig, AgentAutonomousStatus, UNLIMITED_AUTONOMOUS_LIMIT};
 use crate::goals::{validate_goal_objective, MAX_THREAD_GOAL_OBJECTIVE_CHARS};
@@ -26,14 +24,11 @@ pub enum GoalCommand {
 ///
 /// # Errors
 ///
-/// Returns a usage-error string when the budget flag is given without a
-/// value or an objective, when the budget is not a positive integer, or
-/// when the objective is missing or exceeds the configured character limit.
+/// Returns a usage-error string when the budget or objective is missing or invalid.
 ///
 /// # Panics
 ///
-/// The `expect` on the `=` separator cannot fire: the branch is guarded by
-/// the flag-prefix checks that require it.
+/// The `expect` on the `=` separator cannot fire: the branch is guarded by the flag-prefix checks.
 pub fn parse_goal_command(args: &str) -> Result<GoalCommand, String> {
     let rest = args.trim();
     let normalized = rest.to_lowercase();
@@ -159,8 +154,7 @@ const AUTONOMOUS_BUDGET_FLAGS: [&str; 8] = [
 ///
 /// # Errors
 ///
-/// Returns a usage-error string for an unknown budget flag or a missing or
-/// invalid flag value.
+/// Returns a usage-error string for an unknown budget flag or a missing or invalid flag value.
 pub fn parse_autonomous_budget_options(tokens: &[String]) -> Result<AgentAutonomousConfig, String> {
     let mut config = AgentAutonomousConfig::default();
     let mut gate_commands: Vec<String> = Vec::new();
@@ -234,9 +228,8 @@ pub fn parse_autonomous_budget_options(tokens: &[String]) -> Result<AgentAutonom
         let gates = config.gates.get_or_insert_with(Default::default);
         gates.commands = Some(gate_commands);
     }
-    // Named budget flags define the whole budget: any limit the user did not
-    // name stops cutting the run short. With no budget flags at all, the
-    // configured or default limits still apply.
+    // Named budget flags define the whole budget: any limit the user did not name stops cutting the
+    // run short. With no budget flags at all, the configured or default limits still apply.
     if config.max_continuations.is_some()
         || config.max_turns.is_some()
         || config.max_tokens.is_some()
@@ -437,7 +430,6 @@ mod tests {
         };
         assert_eq!(config.max_turns, Some(5));
         assert_eq!(config.max_tokens, Some(1_000));
-        // Unnamed limits become unlimited once one limit is named.
         assert_eq!(config.max_continuations, Some(UNLIMITED_AUTONOMOUS_LIMIT));
         assert_eq!(
             parse_autonomous_command("bogus").unwrap_err(),

@@ -1,9 +1,6 @@
-//! The custom-tool pre-render step of the HTML export: walks the export
-//! entries and pre-renders every tool call/result whose tool is not one
-//! of the template-rendered tools, through the caller's renderer seam.
-//! The renderer (the session layer, like the TS `createToolHtmlRenderer`)
-//! produces the tool's line-oriented representation; ANSI styling
-//! converts to HTML here, at the export step.
+//! The custom-tool pre-render step of the HTML export: walks the export entries and
+//! pre-renders every tool call/result whose tool the template does not render
+//! natively, through the caller's renderer seam.
 
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -37,12 +34,9 @@ pub struct RenderedToolResult {
     pub expanded: Option<String>,
 }
 
-/// The render seam for custom tools in the export: resolves the tool and
-/// renders its call/result to styled HTML (implementers convert their
-/// line-oriented output with [`ansi_lines_to_html`]). Mirrors the TS
-/// `ToolHtmlRenderer` the session builds at export time: `None` means the
-/// tool has no custom renderer and the export falls back to the
-/// template's generic tool rendering.
+/// The render seam for custom tools in the export: resolves the tool and renders its call/result to
+/// styled HTML. `None` means no custom renderer — fall back to the template's generic tool
+/// rendering.
 pub trait ToolHtmlRenderer {
     /// Render a tool call to HTML.
     fn render_call(&self, tool_call_id: &str, tool_name: &str, args: &Value) -> Option<String>;
@@ -60,9 +54,8 @@ pub trait ToolHtmlRenderer {
 /// A message content array guard for entries without one.
 const NO_BLOCKS: &[Value] = &[];
 
-/// Whether a rendered line is blank once SGR sequences strip away (the
-/// TS `isBlankRenderedLine`; only SGR escapes count, other control bytes
-/// are visible content).
+/// Whether a rendered line is blank once SGR sequences strip away (only
+/// SGR escapes count; other control bytes are visible content).
 fn is_blank_rendered_line(line: &str) -> bool {
     let mut plain = String::with_capacity(line.len());
     let mut rest = line;
@@ -91,8 +84,6 @@ fn is_blank_rendered_line(line: &str) -> bool {
     plain.trim().is_empty()
 }
 
-/// Trim leading/trailing blank lines from a rendered result (the TS
-/// `trimRenderedResultLines`).
 #[must_use]
 pub fn trim_rendered_result_lines(lines: &[String]) -> &[String] {
     let mut start = 0;
@@ -106,15 +97,11 @@ pub fn trim_rendered_result_lines(lines: &[String]) -> &[String] {
     &lines[start..end]
 }
 
-/// Walk the export entries and pre-render custom-tool calls/results
-/// through `renderer`, keyed by tool-call id (the TS
-/// `preRenderCustomTools`): assistant `toolCall` blocks outside
-/// [`TEMPLATE_RENDERED_TOOLS`] render their call; `toolResult` messages
-/// for tools outside that set (or with a pre-rendered call) render their
-/// result, merged onto any existing entry.
+/// Walk the export entries and pre-render custom-tool calls/results through `renderer`, keyed by
+/// tool-call id: assistant `toolCall` blocks outside [`TEMPLATE_RENDERED_TOOLS`] render their call;
+/// `toolResult` messages render their result.
 ///
-/// `None` when nothing rendered — the export omits the section entirely
-/// (the TS exporter drops an empty map to `undefined`).
+/// `None` when nothing rendered — the export omits the section.
 pub fn pre_render_custom_tools(
     entries: &[Value],
     renderer: &dyn ToolHtmlRenderer,
@@ -145,8 +132,8 @@ pub fn pre_render_custom_tools(
                 }
                 let no_args = Value::Null;
                 let args = block.get("arguments").unwrap_or(&no_args);
-                // A render failure skips the entry, like the TS
-                // `try { } catch { return undefined }` around the renderer.
+                // A render failure skips the entry (TS catches and
+                // returns undefined).
                 if let Some(call_html) = renderer.render_call(id, name, args) {
                     let tool_html = RenderedToolHtml {
                         call_html: Some(call_html),
@@ -164,9 +151,8 @@ pub fn pre_render_custom_tools(
                 .get("toolName")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            // TS: `existing || !TEMPLATE_RENDERED_TOOLS.has(toolName)` — a
-            // template-rendered tool only renders when its call already did
-            // (e.g. another tool overriding the name).
+            // TS: `existing || !has(toolName)` — a template-rendered tool
+            // only renders when its call already did.
             let existing = rendered_tools.get(tool_call_id).cloned();
             if existing.is_none() && TEMPLATE_RENDERED_TOOLS.contains(&tool_name) {
                 continue;
@@ -210,8 +196,7 @@ mod tests {
     use serde_json::json;
 
     /// A test renderer: renders ANSI-styled call/result HTML for tools
-    /// whose name starts with `custom`, both through
-    /// [`ansi_lines_to_html`]; nothing for anything else.
+    /// whose name starts with `custom`; nothing for anything else.
     struct TestRenderer;
 
     fn call_row(tool_call_id: &str, name: &str) -> String {
@@ -274,8 +259,6 @@ mod tests {
         })
     }
 
-    /// A custom tool's call and result pre-render, keyed by tool-call id,
-    /// with the merged call/result sections.
     #[test]
     fn renders_custom_call_and_result() {
         let entries = vec![
@@ -297,8 +280,6 @@ mod tests {
             .is_some_and(|html| html.contains("more detail")));
     }
 
-    /// Template-rendered tools never pre-render; a call for them leaves
-    /// the map empty so the export omits the section.
     #[test]
     fn template_tools_and_empty_map_omit_the_section() {
         let entries = vec![
@@ -307,7 +288,6 @@ mod tests {
             tool_call("t2", "edit"),
         ];
         assert_eq!(pre_render_custom_tools(&entries, &TestRenderer), None);
-        // A message without tool blocks changes nothing.
         let plain = vec![json!({
             "type": "message",
             "message": { "role": "assistant", "content": [{ "type": "text", "text": "hi" }] },
@@ -325,9 +305,6 @@ mod tests {
         assert!(rendered["tc9"]["resultHtmlExpanded"].is_string());
     }
 
-    /// Blank leading/trailing lines trim away before conversion (the TS
-    /// `trimRenderedResultLines` behavior sits with the renderer; the
-    /// helper is the shared piece).
     #[test]
     fn blank_lines_trim() {
         let lines = vec![

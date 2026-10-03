@@ -1,32 +1,7 @@
-//! Session-event subscribers: the send-time routing index.
-//!
-//! TS parity (`daemon-supervisor.ts handleWorkerFrame`, l.5971): a session
-//! event's delivery set is the clients attached to its session, evaluated
-//! in the SAME synchronous pass that writes the socket (`for (const client
-//! of this.clients) { if (!client.attachedActiveSessionIds.has(...))
-//! continue; ... this.writeSerialized(client, ...) }`, l.6353). The Rust
-//! ring evaluated that predicate at RECV time in every connection's event
-//! arm — a superset in the attach/detach race window that TS cannot
-//! produce (an event published before an attach could still be delivered
-//! after it, duplicating a row the attach snapshot already carried).
-//!
-//! This registry moves the predicate to the publish site: every
-//! session-event publisher resolves the session's subscriber set under one
-//! lock and enqueues into per-connection bounded queues, so delivery is
-//! O(attached) instead of O(connections) — the wakeup floor the
-//! concurrent-io lane measured (~5.9us/session/append at N=100) — and the
-//! delivery boundary is the frame-processing instant, exactly TS's.
-//!
-//! Ordering: the per-connection queue is FIFO and every publisher takes
-//! the registry lock, so per-(session, connection) wire order equals
-//! publish order — the same total order the ring gave session events.
-//! Broadcast-class events stay on the ring (untouched semantics); the
-//! registry never reorders within a session.
-//!
-//! Loss visibility (finding 4a): a full queue drops the frame and the
-//! transition lands in the daemon log — one line per stall cycle per
-//! connection, the ring's `Lagged` cadence. Senders whose receiver is gone
-//! prune their entry, so a disconnect racing its own cleanup cannot leak.
+//! Session-event subscribers: the send-time routing index (TS `handleWorkerFrame`:
+//! the delivery set is the session's attached clients, evaluated in the socket-write
+//! pass). Publishers resolve the set under one lock and enqueue into per-connection
+//! bounded queues; a full queue drops with one log line per stall cycle.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -34,13 +9,9 @@ use std::sync::{Arc, Mutex};
 use serde_json::Value;
 use tokio::sync::mpsc;
 
-/// One connection's subscription state: the session list (the routing
-/// index's per-connection view) and the bounded queue its targeted frames
-/// ride. Every dispatch path that mutated the old `attached` vec takes
-/// this handle; the methods keep the registry and the session list
-/// consistent in one direction (the list may briefly lead the registry on
-/// attach and lag it on detach, so disconnect cleanup — which walks the
-/// list — always covers the registry).
+/// One connection's subscription state: the session list and the bounded queue its
+/// targeted frames ride. The list leads the registry on attach and lags on detach, so
+/// disconnect cleanup always covers the registry.
 pub(crate) struct ClientSubscriptions {
     connection_id: String,
     sessions: Mutex<Vec<String>>,
@@ -71,9 +42,7 @@ impl ClientSubscriptions {
     }
 
     /// Attach: the session list first (the routing superset), then the
-    /// registry — the registry insertion is the delivery boundary, the
-    /// same point TS flips `attachedActiveSessionIds` before writing
-    /// `session_attached`.
+    /// registry — the registry insertion is the delivery boundary.
     pub(crate) fn attach(&self, registry: &SessionSubscribers, active_session_id: &str) {
         {
             let mut sessions = self.sessions.lock().unwrap();
@@ -94,11 +63,9 @@ impl ClientSubscriptions {
             .retain(|id| id != active_session_id);
     }
 
-    /// The stale-id rebind seam: the connection keeps exactly its prior
-    /// attached-ness under the current id. The registry's id move is atomic
-    /// (one lock spans the unregister and the register, so no publish sees
-    /// both or neither), then the session list follows. Returns whether it
-    /// was attached (the caller's binding-notice gate).
+    /// The stale-id rebind seam: the connection keeps its prior attached-ness
+    /// under the current id. The registry's id move is atomic (one lock spans
+    /// the unregister and the register). Returns whether it was attached.
     pub(crate) fn rebind(
         &self,
         registry: &SessionSubscribers,
@@ -117,9 +84,8 @@ impl ClientSubscriptions {
         was_attached
     }
 
-    /// Disconnect: every list entry's registry subscription goes (the
-    /// list is the superset, so a momentary attach-in-flight cannot leak),
-    /// then the caller routes the worker-side detaches as before.
+    /// Disconnect: every list entry's registry subscription goes (the list is the
+    /// superset, so an attach-in-flight cannot leak).
     pub(crate) fn detach_all(&self, registry: &SessionSubscribers) {
         for active_session_id in self.sessions.lock().unwrap().clone() {
             registry.unregister(&active_session_id, &self.connection_id);
@@ -208,11 +174,9 @@ impl SessionSubscribers {
         );
     }
 
-    /// The send-time delivery pass: enqueue to every attached connection
-    /// under the registry lock. A full queue drops the frame and the
-    /// stall-cycle transition is returned for the daemon log; a closed
-    /// queue prunes its entry (the receiver left; its cleanup either ran
-    /// or lost the race, and the prune is the backstop).
+    /// The send-time delivery pass: enqueue to every attached connection under the
+    /// registry lock. A full queue drops the frame (the stall-cycle lands in the daemon
+    /// log); a closed queue prunes its entry.
     pub(crate) fn publish(&self, active_session_id: &str, payload: &Arc<Value>) -> PublishOutcome {
         let mut outcome = PublishOutcome::default();
         let mut sessions = self.sessions.lock().unwrap();

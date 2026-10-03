@@ -1,19 +1,7 @@
-//! The compact-trigger auto-refine on the ACP turn path: the serialized
-//! scheduling TS gives the ACP mode (main.ts
-//! `serializedRefine: appMode !== "interactive" && appMode !== "daemon"`
-//! — true for ACP), mapped onto this transport's boundaries.
-//!
-//! TS ground truth: a successful compaction arms the trigger
-//! (`_scheduleAutoRefineAfterCompaction`'s serialized arm sets
-//! `_compactAutoRefinePending`); the serialized checkpoint between turns
-//! consumes it after servicing the requested `refine.run`
-//! (`_runSerializedRefineCheckpointAfterBackground`'s compact step, with
-//! its `enabled`/`compact` gates and the cooldown preserving the trigger),
-//! and session disposal drains a trigger no turn serviced (the
-//! serialized dispose drain). An approved round runs the refinement and
-//! publishes the same `refinement` meta the `/refine` command produces
-//! (`RefineComplete`/`RefineFailed`); a declined review surfaces
-//! nothing (TS: only the cooldown is stamped).
+//! The compact-trigger auto-refine on the ACP turn path. A successful
+//! compaction arms the trigger; the serialized checkpoint between turns
+//! consumes it, and session disposal drains a trigger no turn serviced.
+//! An approved round publishes the `refinement` meta; a decline surfaces nothing.
 
 use pa_core::refinement::RefinementResult;
 use pa_core::session_engine::auto_refine_trigger::CompactAutoRefineSurface;
@@ -23,8 +11,7 @@ use super::session::AcpSession;
 use super::AcpModeState;
 
 /// The namespaced `refinement` meta event one applied refinement
-/// publishes (the same shape the `/refine` command and the requested
-/// `refine.run` round publish).
+/// publishes (the same shape the `/refine` command produces).
 pub(super) fn refine_complete_event(result: &RefinementResult) -> AcpEngineEvent {
     let changes = result
         .applied_edits
@@ -50,16 +37,10 @@ pub(super) fn refine_complete_event(result: &RefinementResult) -> AcpEngineEvent
 
 impl AcpSession {
     /// Consume an armed trigger at the serialized checkpoint between
-    /// turns (TS `_runSerializedRefineCheckpointAfterBackground`'s
-    /// compact step): the gates and the review run in the pa-core seam;
-    /// an approved round publishes its `refinement` meta exactly like
-    /// the requested refinement round, and a failed round publishes the
-    /// `RefineFailed` mapping (TS emits `refine_failed` on the wire for
-    /// a failed serialized round). A declined review stays silent.
+    /// turns: the gates and the review run in the pa-core seam; an
+    /// approved round publishes its `refinement` meta, a failed round
+    /// the `RefineFailed` mapping, a declined review nothing.
     pub(super) async fn consume_compact_auto_refine(&self, mode: &AcpModeState) {
-        // The config queue serializes the round against picker switches:
-        // the armed trigger runs on the model the session reports, never
-        // on the pre-switch pair mid-switch.
         let _guard = mode.config_queue.lock().await;
         let Some(model) = mode.current_model().await else {
             return;
@@ -70,16 +51,11 @@ impl AcpSession {
         self.publish_compact_auto_refine_outcome(outcome).await;
     }
 
-    /// The disposal drain (TS `dispose`'s serialized arm: "a serialized
-    /// compaction can finish without another model turn — drain its
-    /// pending review here so disposal does not silently lose the
-    /// trigger"): session close services an armed trigger one last
-    /// time; a trigger under the cooldown drops without a review. The
-    /// round is best-effort like the TS drain — close proceeds even
-    /// when the review fails.
+    /// The disposal drain: session close services an armed trigger one
+    /// last time; a trigger under the cooldown drops without a review.
+    /// The round is best-effort — close proceeds even when it fails.
     pub(super) async fn drain_compact_auto_refine_at_close(&self, mode: &AcpModeState) {
-        // Same serialization as the mid-session checkpoint (the close
-        // path drains the queue first, then the round takes it cleanly).
+        // Same serialization as the mid-session checkpoint.
         let _guard = mode.config_queue.lock().await;
         let Some(model) = mode.current_model().await else {
             return;
@@ -135,10 +111,9 @@ impl AcpSession {
 }
 
 #[cfg(test)]
-// The faux provider registry is process-global and shared with the
-// daemon engine tests: the std lock serializes every test that drives
-// it, and the async tests here hold it across their awaits on purpose
-// (the tests are the only contenders, so no cross-task deadlock).
+// The faux provider registry is process-global: the std lock serializes
+// every test that drives it, and the async tests hold it across their
+// awaits on purpose (the only contenders, so no cross-task deadlock).
 #[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
@@ -159,7 +134,6 @@ mod tests {
     use super::super::prompt::handle_session_prompt;
     use super::super::{ConnectionState, SessionEntry};
 
-    /// The ACP meta namespace on the wire.
     const META: &str = "ai.primeintellect.prime-agent";
 
     /// A declining review reply.
@@ -348,7 +322,6 @@ mod tests {
                 .clone()
         }
 
-        /// The published `refinement` metas among a turn's notifications.
         fn refinement_metas(notifications: &[serde_json::Value]) -> Vec<serde_json::Value> {
             notifications
                 .iter()
@@ -366,7 +339,6 @@ mod tests {
                 .collect()
         }
 
-        /// The published `compaction` metas.
         fn compaction_metas(notifications: &[serde_json::Value]) -> Vec<serde_json::Value> {
             notifications
                 .iter()
@@ -394,10 +366,8 @@ mod tests {
         }
     }
 
-    /// The threshold compaction at the settled boundary arms the trigger
-    /// and the serialized checkpoint consumes it in the same prompt: the
-    /// review declines (the queued reply after it serves the next turn)
-    /// and nothing surfaces.
+    /// The review declines and nothing surfaces; the queued reply after it
+    /// serves the next turn.
     #[tokio::test]
     async fn threshold_compaction_consumes_the_trigger_at_the_checkpoint() {
         let _faux = FAUX_TEST_LOCK
@@ -438,7 +408,7 @@ mod tests {
         assert_eq!(response["result"]["stopReason"], "end_turn");
         assert!(AcpAutorefineBed::compaction_metas(&notifications).is_empty());
         // The crossing turn compacts and the checkpoint consumes the
-        // armed trigger: the decline review ran and surfaced nothing.
+        // trigger; the decline surfaced nothing.
         let (response, notifications) = bed
             .prompt(format!("crossing turn {}", "x".repeat(8_000)))
             .await;
@@ -470,9 +440,6 @@ mod tests {
         );
     }
 
-    /// An approving checkpoint round publishes the `refinement` complete
-    /// meta (the same mapping the `/refine` command produces) and applies
-    /// the durable rows.
     #[tokio::test]
     async fn an_approving_checkpoint_round_publishes_the_refinement_meta() {
         let _faux = FAUX_TEST_LOCK
@@ -518,7 +485,6 @@ mod tests {
         assert_eq!(metas[0]["status"], "complete");
         assert_eq!(metas[0]["summary"], "note the tactic");
         assert_eq!(metas[0]["changes"], json!(["create memory:m1"]));
-        // The durable rows persisted.
         let rows: Vec<String> = bed
             .engine
             .session
@@ -541,10 +507,8 @@ mod tests {
         );
     }
 
-    /// The session-close drain (TS `dispose`): a `/compact` session
-    /// command arms the trigger no turn services, and the close runs the
-    /// round — an approving review publishes its refinement meta before
-    /// the subscription tears down.
+    /// A `/compact` arms the trigger no turn services, and the close runs
+    /// the round — the review publishes before the subscription tears down.
     #[tokio::test]
     async fn session_close_drains_an_armed_trigger() {
         let _faux = FAUX_TEST_LOCK
@@ -605,7 +569,6 @@ mod tests {
             !bed.engine.session.compact_auto_refine_pending(),
             "the drain consumed the trigger"
         );
-        // The approved round published its refinement meta.
         let mut metas = Vec::new();
         while let Ok(frame) = bed.frames.try_recv() {
             if let Some(meta) = frame

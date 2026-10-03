@@ -1,36 +1,7 @@
 //! The direct-ACP goal continuation boundary: the goal arms of the
-//! settled-turn loop on the in-process ACP transport.
-//!
-//! TS ruling (the #244 direct-ACP gap, read off agent-session.ts,
-//! agent-loop.ts, and in-process-agent-connection.ts): the TS ACP mode
-//! hosts the goal continuation loop — not as a mode-level construct, but
-//! inside the session's own turn run. `AgentSession` installs
-//! `agent.getContinuationMessages` (`_installAgentContinuationHook`), the
-//! agent loop consults the hook at its natural turn end (`runLoop`), and
-//! the in-process `promptAndWait` runs that loop directly, so the direct
-//! ACP path drives every continuation INSIDE the one `session/prompt`
-//! request: continuation turns surface as events of the same prompt turn,
-//! and the response settles only after the goal run ends (complete /
-//! paused / `budget_limited` / error, or genuinely nothing more to do). The
-//! daemon-attached transport rides the worker's queue (the #244 lane);
-//! this module is the in-process counterpart: the prompt turn's settle
-//! loop consults the same arms at each settled boundary.
-//!
-//! Arms ported per settled boundary (TS `_shouldStopAfterTurn`'s goal arms
-//! plus `_getContinuationMessages`'s goal arm, which takes exclusive
-//! priority over the autonomous arm):
-//! - the budget-limit wrap-up steer: the turn that crossed the goal's
-//!   token budget runs the budget-limit context as the next turn (TS
-//!   `_accountGoalUsageForAssistantMessage` arming the steer),
-//! - the natural continuation mint (TS `_getGoalContinuationMessages`):
-//!   an active goal mints one goal-context turn per settled boundary.
-//!
-//! Two TS gates hold trivially on this surface: the RLM quiescence
-//! deferral (`_hasUnsettledRlmQuiescenceWork` — the in-process engine
-//! runs with `NoRlmChildren`, so no descendant work can exist) and the
-//! queued-input deferral (`queuedActionCount > 0` — the ACP connection
-//! admits one prompt turn at a time, so no session input can queue behind
-//! the running turn). Neither mint therefore defers or rolls back here.
+//! settled-turn loop on the in-process ACP transport, which drives every
+//! continuation INSIDE the one `session/prompt` request. Arms per settled
+//! boundary: the budget-limit wrap-up steer, then the natural mint.
 
 use pa_core::goals::{create_goal_context_message, GoalContextKind, GoalStatus};
 use pa_types::session::CustomMessage;
@@ -48,17 +19,13 @@ pub(super) enum GoalFollowUp {
     Turn(Box<CustomMessage>),
 }
 
-/// Mint one goal continuation and announce it (the shared
-/// `continuationsUsed` bump publishes before the continuation turn
-/// starts, mirroring the TS `_setGoalState` -> `_emitGoalUpdate` at every
-/// mint site). `None` when the goal cannot mint (inactive, or no
-/// objective); the caller decides what that means at its own site.
+/// Mint one goal continuation and announce it; the `continuationsUsed` bump
+/// publishes before the turn starts. `None` when the goal cannot mint.
 pub(super) async fn mint_goal_continuation(
     mode: &AcpModeState,
     session: &AcpSession,
 ) -> Option<CustomMessage> {
-    // The progress check's input (the 402 diagnosis's (a)) + the failed
-    // pair's drop ((c)), read before the driver lock.
+    // Read before the driver lock (the 402 diagnosis).
     let last_turn =
         mode.engine
             .session
@@ -105,12 +72,9 @@ pub(super) async fn mint_goal_continuation(
             return None;
         }
     };
-    // The minted continuation is handed to the settle loop as the very
-    // next turn of the same prompt (the in-run model, TS
-    // `pendingMessages`): the admission is immediate, so the pending
-    // guard releases here — no queued window exists on this surface. A
-    // refused mint (`Ok(None)`: the driver's pending guard held) keeps
-    // the guard armed.
+    // The minted continuation runs as the very next turn of the same
+    // prompt: the admission is immediate, so the pending guard releases
+    // here (no queued window exists on this surface).
     if message.is_some() {
         driver.continuation_consumed();
     }
@@ -119,12 +83,9 @@ pub(super) async fn mint_goal_continuation(
     message
 }
 
-/// The goal boundary consult for the settle loop: the budget steer runs
-/// first (TS `_shouldStopAfterTurn` precedes the continuation hook), then
-/// the natural mint (TS `_getGoalContinuationMessages`). The budget
-/// crossing is the settle loop's read of the usage listener's flag; a
-/// false alarm (the goal since completed or cleared) falls through to the
-/// natural mint.
+/// The goal boundary consult for the settle loop: the budget steer
+/// first, then the natural mint. A false budget alarm (the goal since
+/// completed or cleared) falls through to the natural mint.
 pub(super) async fn goal_follow_up(mode: &AcpModeState, session: &AcpSession) -> GoalFollowUp {
     if session.take_goal_budget_crossed() {
         let steer = {
@@ -147,8 +108,7 @@ pub(super) async fn goal_follow_up(mode: &AcpModeState, session: &AcpSession) ->
     }
 }
 
-/// Withdraw a threshold-queue mint whose compaction was cancelled (TS
-/// `_clearQueuedGoalContinuationAfterCancelledThresholdCompaction`): the
+/// Withdraw a threshold-queue mint whose compaction was cancelled: the
 /// slot rolls back so the next natural stop re-mints without
 /// double-counting.
 pub(super) async fn rollback_goal_mint(mode: &AcpModeState) {
@@ -161,9 +121,7 @@ pub(super) async fn rollback_goal_mint(mode: &AcpModeState) {
     }
 }
 
-/// TS `_finishGoalForTerminalAssistantMessage` for a failed run: an
-/// error assistant message fails an active goal (an abort keeps it). The
-/// state change announces through the shared goal-update channel.
+/// An error assistant message fails an active goal; an abort keeps it.
 pub(super) async fn fail_goal_for_terminal_error(
     mode: &AcpModeState,
     session: &AcpSession,
@@ -186,10 +144,9 @@ pub(super) async fn fail_goal_for_terminal_error(
 }
 
 #[cfg(test)]
-// The faux provider registry is process-global and shared across the
-// daemon engine tests: the std lock serializes every test that drives it,
-// and the async tests here hold it across their awaits on purpose (the
-// tests are the only contenders, so no cross-task deadlock).
+// The faux provider registry is process-global: the std lock serializes
+// every test that drives it, and the async tests hold it across their
+// awaits on purpose (the only contenders, so no cross-task deadlock).
 #[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
@@ -210,7 +167,6 @@ mod tests {
     use super::super::prompt::handle_session_prompt;
     use super::super::{ConnectionState, SessionEntry};
 
-    /// The ACP meta namespace on the wire.
     const META: &str = "ai.primeintellect.prime-agent";
 
     /// One armed ACP prompt turn over an in-process faux engine whose
@@ -229,8 +185,6 @@ mod tests {
     }
 
     impl AcpGoalBed {
-        /// Build the bed: a faux engine with compaction enabled over the
-        /// given reserve (the harness contract), one hosted session.
         async fn new(script: serde_json::Value, reserve_tokens: u64) -> AcpGoalBed {
             let dir = tempfile::TempDir::new().unwrap();
             let agent_dir = dir.path().join("agent");
@@ -400,7 +354,6 @@ mod tests {
             .await;
         }
 
-        /// Send the `session/cancel` notification for the hosted session.
         async fn notify_cancel(&self) {
             super::super::handle_notification(
                 "session/cancel".to_string(),
@@ -436,7 +389,6 @@ mod tests {
             driver.start(&mut persistence, objective, budget).unwrap();
         }
 
-        /// The goal driver's current state.
         async fn goal_state(&self) -> pa_core::goals::GoalState {
             self.engine.goal_driver.lock().await.state().clone()
         }
@@ -463,7 +415,6 @@ mod tests {
                 .collect()
         }
 
-        /// The streamed text answers among a turn's notifications.
         fn streamed_answers(notifications: &[serde_json::Value]) -> Vec<String> {
             notifications
                 .iter()
@@ -480,8 +431,7 @@ mod tests {
         }
     }
 
-    /// The turn-failure detail the settle loop reports (the wire shape
-    /// the prompt response carries).
+    /// The turn-failure detail the prompt response carries.
     fn turn_error_details(response: &serde_json::Value) -> String {
         response["error"]["data"]["details"]
             .as_str()
@@ -489,12 +439,7 @@ mod tests {
             .to_string()
     }
 
-    /// The natural continuation loop: an active goal mints one
-    /// continuation per settled turn, every minted turn runs inside the
-    /// same prompt request, and a failed turn fails the goal. The
-    /// scripted responses bound the run: the fourth minted turn errors
-    /// (no responses left), which fails the goal and settles the prompt
-    /// with the turn error.
+    /// The fourth minted turn errors (script exhausted), failing the goal.
     #[tokio::test]
     async fn goal_continuation_loop_mints_per_settled_turn() {
         let _faux = FAUX_TEST_LOCK
@@ -503,8 +448,6 @@ mod tests {
         let mut bed =
             AcpGoalBed::new(json!({ "responses": ["one", "two", "three"] }), 128_000).await;
         let (response, notifications) = bed.prompt("/goal keep working".to_string()).await;
-        // Three settled continuation turns ran inside the one prompt;
-        // the fourth minted turn hit the exhausted script and failed.
         assert_eq!(
             bed.goal_state().await.continuations_used,
             3,
@@ -533,10 +476,7 @@ mod tests {
         );
     }
 
-    /// The budget-limit wrap-up steer: the turn whose usage crossed the
-    /// goal budget runs the budget-limit context as the prompt's last
-    /// model segment, the goal settles `budget_limited`, and no
-    /// continuation is minted (the steer consumes no slot).
+    /// The steer consumes no continuation slot and settles the goal `budget_limited`.
     #[tokio::test]
     async fn budget_crossing_runs_the_wrap_up_steer_and_settles() {
         let _faux = FAUX_TEST_LOCK
@@ -567,12 +507,8 @@ mod tests {
         );
     }
 
-    /// The threshold arm's goal queue: a crossing turn with an active
-    /// goal mints the continuation BEFORE the compaction runs (the
-    /// goal-update frame precedes the compaction frame), and the held
-    /// turn runs as the post-compaction turn. A skipped compaction keeps
-    /// the mint (TS `resumeAfterFailure`); the run continues until the
-    /// scripted responses end and the failed turn fails the goal.
+    /// The mint announces before the compaction (TS event order); a skipped
+    /// compaction keeps the mint.
     #[tokio::test]
     async fn threshold_arm_queues_the_goal_continuation_before_compacting() {
         let _faux = FAUX_TEST_LOCK
@@ -592,10 +528,9 @@ mod tests {
             128_000u64.saturating_sub(FAUX_REQUEST_BUDGET + 500),
         )
         .await;
-        // The harness shape: a seeded crossing turn whose boundary
-        // compaction skips (a single-turn session has nothing to
-        // summarize), then the goal's crossing turn whose boundary
-        // compaction runs over the seeded turn.
+        // A seeded crossing turn whose boundary compaction skips
+        // (single-turn), then the goal's crossing turn whose compaction
+        // runs over the seeded turn.
         let (response, _) = bed.prompt(format!("turn one {}", "x".repeat(8_000))).await;
         assert_eq!(response["result"]["stopReason"], "end_turn");
         bed.start_goal("keep working", None).await;
@@ -615,11 +550,9 @@ mod tests {
             bed.goal_state().await.continuations_used >= 2,
             "the queue minted"
         );
-        // A compaction ran (the summary) and the goal mint's update frame
-        // precedes it: the mint happens before the compaction like the TS
-        // event order. (The pre-turn skip disclosure also carries the
-        // empty compaction meta, so the ordering check targets the
-        // summary-carrying frame.)
+        // The goal mint's update frame precedes the compaction frame; the
+        // ordering check targets the summary-carrying frame because the
+        // pre-turn skip disclosure also carries the empty compaction meta.
         let ran_compaction_at = notifications
             .iter()
             .position(|frame| {
@@ -641,9 +574,7 @@ mod tests {
         );
     }
 
-    /// The compact-with-active-goal continue (TS `compact()`'s `didCompact`
-    /// finally arm): a successful `/compact` with an active goal mints the
-    /// continuation and runs it as the command turn's model segment.
+    /// The minted continue runs as the command turn's model segment.
     #[tokio::test]
     async fn compact_command_with_active_goal_mints_the_continue() {
         let _faux = FAUX_TEST_LOCK
@@ -663,18 +594,14 @@ mod tests {
         }
         bed.start_goal("keep working", None).await;
         let (response, notifications) = bed.prompt("/compact".to_string()).await;
-        // The compact ran, the minted continue ran as the segment, and
-        // the natural loop continued until the scripted responses ended.
         let details = turn_error_details(&response);
         assert!(
             details.contains("No more faux responses queued"),
             "response: {response:?}"
         );
-        // The compact ran (its summary wraps the scripted reply) and the
-        // minted continue ran as the command turn's model segment; the
-        // armed compact-trigger review services at the continuation
+        // The armed compact-trigger review services at the continuation
         // turn's boundary (it consumes the next scripted reply), then
-        // the natural mint continues the loop until the responses end.
+        // the natural mint continues the loop.
         let compaction_ran = notifications.iter().any(|frame| {
             let meta = &frame["params"]["update"]["_meta"][META]["compaction"];
             meta.get("summary")
@@ -689,9 +616,7 @@ mod tests {
         assert!(bed.goal_state().await.continuations_used >= 2);
     }
 
-    /// A cancelled threshold compaction withdraws the queued mint: the
-    /// slot rolls back (continuationsUsed never counted the withdrawn
-    /// turn), and the cancellation settles the prompt.
+    /// `continuationsUsed` never counts the withdrawn mint.
     #[tokio::test]
     async fn cancelled_threshold_compaction_rolls_back_the_mint() {
         let _faux = FAUX_TEST_LOCK
@@ -709,9 +634,9 @@ mod tests {
             128_000u64.saturating_sub(FAUX_REQUEST_BUDGET + 500),
         )
         .await;
-        // The harness shape: a seeded crossing turn (its boundary
-        // compaction skips — single turn), then the goal's crossing turn
-        // whose boundary compaction runs over the seeded turn.
+        // A seeded crossing turn (boundary compaction skips — single
+        // turn), then the goal's crossing turn whose compaction runs over
+        // the seeded turn.
         let (response, _) = bed.prompt(format!("turn one {}", "x".repeat(8_000))).await;
         assert_eq!(response["result"]["stopReason"], "end_turn");
         bed.start_goal("keep working", None).await;

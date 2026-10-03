@@ -11,8 +11,8 @@ pub fn now_ms() -> u64 {
         .map_or(0, |duration| duration.as_millis() as u64)
 }
 
-/// The current instant as ISO-8601 with millisecond precision (the TS
-/// `toISOString()` shape the status file records).
+/// The current instant as ISO-8601 with millisecond precision (the TS `toISOString()` shape the
+/// status file records).
 #[must_use]
 pub fn now_iso8601() -> String {
     pa_daemon::util::iso_from_unix_ms(now_ms())

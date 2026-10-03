@@ -1,5 +1,4 @@
-//! Private Prime Inference models (prime-inference-models.ts) and the
-//! private-model id predicate (packages/ai prime-inference-model-catalog.ts).
+//! Private Prime Inference models and the private-model id predicate.
 
 use pa_types::ai::{CompatKind, Model, ModelCompat, ModelCost};
 use pa_types::JsNumber;
@@ -102,9 +101,6 @@ mod tests {
         assert_eq!(PRIME_INFERENCE_BASE_URL, expected);
     }
 
-    /// Internal consistency: every bundled prime-inference catalog entry in
-    /// the generated model registry carries the same base URL as the
-    /// private-model / live-catalog constant.
     #[test]
     fn generated_catalog_base_urls_match_const() {
         let models = pa_ai::models_generated::get_models("prime-inference");

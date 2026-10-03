@@ -1,10 +1,7 @@
-//! Per-OS daemon endpoint naming (TS: `daemon-socket.ts`
-//! `defaultDaemonSocketPath` / `daemon-supervisor.ts` `workerSocketPath`).
-//!
-//! Unix: socket files under `<tmpdir>/prime-agent-<uid>/`. Windows: named
-//! pipes in the `\\.\pipe\` namespace (fixed daemon pipe name, hashed worker
-//! pipe names) - the TS product's exact split.
-
+//! Per-OS daemon endpoint naming: Unix socket files under
+//! `<tmpdir>/prime-agent-<uid>/`; Windows named pipes in the `\\.\\pipe\\`
+//! namespace (fixed daemon pipe, hashed worker pipes) - the TS product's
+//! exact split.
 use std::path::{Path, PathBuf};
 
 use crate::paths::hash_key;
@@ -17,12 +14,8 @@ pub fn socket_dir() -> PathBuf {
     tmp.join(format!("prime-agent-{uid}"))
 }
 
-/// The socket-dir half of a discovery state root on Windows. Daemon
-/// endpoints are named pipes with no directory, but TS still computes
-/// `<tmpdir>/prime-agent-user` there (`getuid` is undefined, so the uid
-/// suffix is the literal `user`) so `DaemonStateRoot` keeps one shape, and
-/// discovery never sweeps it (the socket-dir scan returns nothing on
-/// Windows).
+/// The socket-dir half of a discovery state root on Windows: TS computes
+/// `<tmpdir>/prime-agent-user` so `DaemonStateRoot` keeps one shape.
 #[cfg(not(unix))]
 #[must_use]
 pub fn socket_dir() -> PathBuf {
@@ -82,9 +75,8 @@ pub fn worker_socket_path(supervisor_socket_path: &Path, worker_id: &str) -> Pat
 }
 
 // Socket-filesystem identity is the shared platform contract
-// `pa_types::platform::socket_identity` (re-exported through
-// `crate::platform`): the same helper serves stale-file cleanup here and
-// direct-transport ticket validation in pa-tui/pa-cli clients.
+// `pa_types::platform::socket_identity`: the same helper serves stale-file
+// cleanup here and direct-transport ticket validation in the clients.
 
 pub use pa_types::daemon::SocketIdentity;
 pub use pa_types::platform::socket_identity;
@@ -104,10 +96,8 @@ mod tests {
         assert!(a.starts_with(socket_dir()));
     }
 
-    /// The Windows endpoint names (TS `daemon-socket.ts` /
-    /// `daemon-supervisor.ts` win32 arms): the fixed daemon pipe name and
-    /// the hashed worker pipe name in the `\\.\pipe\` namespace. Runs
-    /// only on the windows-latest job; the cross job compiles it.
+    /// The Windows endpoint names (TS win32 arms): the fixed daemon pipe
+    /// name and the hashed worker pipe name in the `\\.\\pipe\\` namespace.
     #[test]
     #[cfg(windows)]
     fn windows_endpoints_are_the_ts_pipe_names() {

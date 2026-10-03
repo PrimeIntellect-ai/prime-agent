@@ -1,10 +1,7 @@
-//! Anthropic Messages streaming provider.
-//!
-//! Full port of `packages/ai/src/providers/anthropic.ts`, split across
-//! submodules: request headers and options here, message/tool conversion in
-//! [`convert`], params assembly in [`params`], and the SSE streaming core in
-//! [`stream`]. OAuth/Claude-Code header modes, beta headers, and adaptive vs
-//! budget-based thinking selection live here.
+//! Anthropic Messages streaming provider: request headers and options here, message/tool conversion
+//! in [`convert`], params assembly in [`params`], and the SSE streaming core in [`stream`].
+//! OAuth/Claude-Code header modes, beta headers, and adaptive vs budget-based thinking selection
+//! live here.
 
 use serde_json::{json, Map, Value};
 
@@ -32,9 +29,9 @@ mod stream_tests;
 
 pub const API_ANTHROPIC_MESSAGES: &str = "anthropic-messages";
 
-/// Claude Code version mimicked in OAuth mode. The API gates newer models
-/// on the claimed client version (e.g. claude-opus-5.5 requires >= 2.280),
-/// so keep this at or above the latest released Claude Code.
+/// Claude Code version mimicked in OAuth mode. The API gates newer models on the claimed client
+/// version (e.g. claude-opus-5.5 requires >= 2.280), so keep this at or above the latest released
+/// Claude Code.
 const CLAUDE_CODE_VERSION: &str = "2.1.281";
 const FINE_GRAINED_TOOL_STREAMING_BETA: &str = "fine-grained-tool-streaming-2025-05-14";
 const INTERLEAVED_THINKING_BETA: &str = "interleaved-thinking-2025-05-14";
@@ -138,7 +135,7 @@ impl AnthropicToolChoice {
     }
 }
 
-/// Provider-native options (`AnthropicOptions` in the TS reference).
+/// Provider-native options.
 #[derive(Clone, Default)]
 pub struct AnthropicOptions {
     pub base: StreamOptions,
@@ -225,9 +222,8 @@ pub(crate) fn get_cache_control(
     (retention, Some(CacheControl { ttl }))
 }
 
-/// Fable/Mythos models — and Claude Opus 5.5 — think every turn and reject an
-/// explicit `thinking: {type: "disabled"}` (and any sampling params) with a
-/// 400.
+/// Fable/Mythos models — and Claude Opus 5.5 — think every turn and reject an explicit `thinking:
+/// {type: "disabled"}` (and any sampling params) with a 400.
 pub(crate) fn is_always_on_adaptive_thinking_model(model_id: &str) -> bool {
     model_id.contains("fable-5")
         || model_id.contains("mythos-5")
@@ -316,9 +312,8 @@ pub(crate) fn headers_to_pairs(headers: &Map<String, Value>) -> Vec<(String, Str
         .collect()
 }
 
-/// Build the request headers for the messages endpoint, mirroring the SDK
-/// client configurations (OAuth/Claude Code mode, cloudflare gateway,
-/// github-copilot, plain API key).
+/// Build the request headers for the messages endpoint, mirroring the SDK client configurations
+/// (OAuth/Claude Code mode, cloudflare gateway, github-copilot, plain API key).
 pub(crate) fn build_request_headers(
     model: &Model,
     api_key: &str,
@@ -433,7 +428,6 @@ pub(crate) fn build_request_headers(
     (pairs, is_oauth)
 }
 
-/// Port of `streamSimpleAnthropic`.
 pub fn stream_simple_anthropic(
     model: &Model,
     context: &Context,
@@ -592,10 +586,9 @@ mod subscription_identity_tests {
     use super::build_request_headers;
     use crate::types::{zero_model_cost, Model, ModelInput};
 
-    // TS #2645's wire-contract assertions (anthropic-thinking-disable.test.ts):
-    // subscription requests claim the Claude Code client identity, and the
-    // claimed version must stay at or above what the API's model gates require
-    // (the opus-5.5 family rejects anything below 2.280).
+    // TS #2645's wire-contract assertions (anthropic-thinking-disable.test.ts): subscription
+    // requests claim the Claude Code client identity, and the claimed version must stay at or above
+    // what the API's model gates require (the opus-5.5 family rejects anything below 2.280).
     fn test_model() -> Model {
         Model {
             id: "claude-opus-5-5".into(),

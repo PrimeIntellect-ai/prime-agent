@@ -42,8 +42,7 @@ pub const OFFICIAL_INSTALLER_URL: &str = "https://app.primeintellect.ai/prime-ag
 /// forwards `install.sh`, so nightly updates fetch it from the base).
 pub const BETA_INSTALLER_FILE: &str = "install-beta.sh";
 
-/// The small-file budget for the script download (the script is a few KB;
-/// a hung fetch must not hang the update).
+/// The small-file budget for the script download; a hung fetch must not hang the update.
 const SCRIPT_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 /// The launcher `--version` probe budget (the same bound the release
 /// probe uses; a hung launcher must not hang the report).
@@ -94,9 +93,8 @@ pub fn install_prefix() -> PathBuf {
         .join(".local")
 }
 
-/// The continuous matrix's target triple for one platform pair
-/// (`std::env::consts`' vocabulary: the installer's own `uname -s`/`-m`
-/// mapping over the same four targets).
+/// The target triple for one platform pair (`std::env::consts`' vocabulary:
+/// the installer's own `uname -s`/`-m` mapping over the same four targets).
 #[must_use]
 pub fn target_for(os: &str, arch: &str) -> Option<&'static str> {
     match (os, arch) {
@@ -109,12 +107,10 @@ pub fn target_for(os: &str, arch: &str) -> Option<&'static str> {
     }
 }
 
-/// The target triple this machine's update would install (the same matrix
-/// the installer refuses with, so the failure names it identically).
+/// The target triple this machine's update would install.
 ///
 /// # Errors
-/// Returns an error naming the machine when no continuous build is
-/// published for its platform.
+/// Returns an error naming the machine when no continuous build is published for its platform.
 pub fn current_target() -> Result<&'static str> {
     target_for(std::env::consts::OS, std::env::consts::ARCH).ok_or_else(|| {
         anyhow!(
@@ -150,8 +146,7 @@ pub fn running_commit(version: &str) -> Option<&str> {
 /// Where the installer's output goes while it runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstallerOutput {
-    /// The CLI's run: the installer's own progress streams to the user's
-    /// terminal.
+    /// The CLI's run: the installer's own progress streams to the user's terminal.
     Inherit,
     /// The TUI's run: the output is captured (the live frame stays intact)
     /// and the failure tail becomes the message; the run is detached from
@@ -159,8 +154,7 @@ pub enum InstallerOutput {
     Capture,
 }
 
-/// What a completed installer run landed: the new build's version line
-/// (the launcher's own `--version` answer), when the probe found one.
+/// What a completed installer run landed: the new build's version line, when the probe found one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Installed {
     pub version: Option<String>,
@@ -201,9 +195,7 @@ pub async fn run_installer(
 /// mid-publish crash).
 ///
 /// # Errors
-/// Returns the failure message for every non-installing outcome: an
-/// unsupported platform, a script download that failed, or an installer
-/// run that exited nonzero.
+/// Returns the failure message for every non-installing outcome.
 pub async fn run_installer_from(
     url: &str,
     prefix: &Path,
@@ -221,20 +213,15 @@ pub async fn run_installer_from(
     Ok(Installed { version })
 }
 
-/// The installed payload's channel, read from the install marker (the
-/// installer's own `.prime-agent-install` under the prefix's share dir;
-/// its first line is "channel <name>"). `None` when the marker is absent
-/// (a pre-marker install or a foreign tree) or carries no known channel —
-/// the update then rides the fetched script's own default.
+/// The installed payload's channel, read from the install marker under the
+/// prefix's share dir; `None` rides the fetched script's own default.
 #[must_use]
 pub fn installed_channel(prefix: &Path) -> Option<&'static str> {
     let marker =
         std::fs::read_to_string(prefix.join("share/prime-agent/.prime-agent-install")).ok()?;
     // The marker's first line must be the installer's OWN write shape —
-    // "install-rust.sh channel <name>" — not merely any line that ends in
-    // a channel claim: a foreign marker ("other installer channel beta")
-    // must never steer the update onto a channel; the exact prefix is the
-    // ownership proof, exactly like the share tree's own marker file.
+    // "install-rust.sh channel <name>" — the exact prefix is the ownership
+    // proof, so a foreign marker never steers the update onto a channel.
     let channel = marker
         .lines()
         .next()?
@@ -248,8 +235,7 @@ pub fn installed_channel(prefix: &Path) -> Option<&'static str> {
     }
 }
 
-/// Fetch the installer script to a per-run temp file (the small-file
-/// budget; the file is the exact bytes the branch serves).
+/// Fetch the installer script to a per-run temp file.
 ///
 /// # Errors
 /// Returns an error when the request fails, answers a non-success status,
@@ -386,9 +372,8 @@ async fn execute_script(
     }
 }
 
-/// The last informative lines of a captured installer run (the script's
-/// die messages go to stderr; a silent failure falls back to stdout's
-/// last line).
+/// The last informative lines of a captured installer run (die messages go
+/// to stderr; a silent failure falls back to stdout's last line).
 fn output_tail(captured: &std::process::Output) -> Option<String> {
     let stderr = String::from_utf8_lossy(&captured.stderr);
     let mut last_stderr: Vec<String> = stderr
@@ -413,12 +398,9 @@ fn output_tail(captured: &std::process::Output) -> Option<String> {
     (!joined.is_empty()).then_some(joined)
 }
 
-/// The installed launcher's `--version` answer, when one is there: the
-/// takeover layout's `bin/prime-agent` first, the pre-takeover
-/// `bin/prime-agent-rust` second, and only answers stamped
-/// `-continuous.<commit>` count — the TypeScript product's own
-/// `bin/prime-agent` (still present until the takeover's uninstall) never
-/// matches, so the probe can never report its version.
+/// The installed launcher's `--version` answer: the takeover layout's `bin/prime-agent` first, the
+/// pre-takeover `bin/prime-agent-rust` second, and only answers stamped `-continuous.<commit>`
+/// count (the TS product's launcher never matches).
 async fn launcher_version(prefix: &Path) -> Option<String> {
     // The launcher names: the .cmd twin on Windows (the sh-script launcher
     // cannot be exec'd by CreateProcess; Rust runs .cmd through cmd.exe),
@@ -495,10 +477,7 @@ mod tests {
     fn installed_channel_reads_the_publish_marker() {
         let dir = tempfile::TempDir::new().unwrap();
         let prefix = dir.path().join("prefix");
-        // No marker at all: no channel (the script's default rides).
         assert_eq!(installed_channel(&prefix), None);
-        // The installer's ACTUAL write shape: "install-rust.sh channel
-        // <name>" then "version <v>" (the publish's printf).
         let share = prefix.join("share/prime-agent");
         std::fs::create_dir_all(&share).unwrap();
         std::fs::write(
@@ -513,27 +492,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(installed_channel(&prefix), Some("stable"));
-        // A foreign/garbage marker: never a channel claim.
         std::fs::write(share.join(".prime-agent-install"), "nightly\n").unwrap();
         assert_eq!(installed_channel(&prefix), None);
-        // A FOREIGN channel claim (not the installer's own write shape):
-        // never a channel — the exact prefix is the ownership proof.
         std::fs::write(
             share.join(".prime-agent-install"),
             "other installer channel beta\n",
         )
         .unwrap();
         assert_eq!(installed_channel(&prefix), None);
-        // A bare channel line (not the installer's shape): also None —
-        // the update rides the fetched script's own default.
         std::fs::write(share.join(".prime-agent-install"), "channel beta\n").unwrap();
         assert_eq!(installed_channel(&prefix), None);
     }
 
-    /// Serve `body` over one plain HTTP request (the hermetic source the
-    /// funnel fetches its mock installer from): bind an ephemeral loopback
-    /// socket, answer the first request, return the URL the funnel uses.
-    /// Unix only: its callers are the unix shell-installer tests.
+    /// Serve `body` over one plain HTTP request: bind an ephemeral loopback socket,
+    /// answer the first request, return the URL the funnel uses. Unix only.
     #[cfg(unix)]
     fn serve(body: &'static str) -> String {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
@@ -541,9 +513,8 @@ mod tests {
         std::thread::spawn(move || {
             use std::io::Write as _;
             if let Ok((mut stream, _)) = listener.accept() {
-                // Read the request head first: answering before the
-                // request is drained can reset the connection mid-write
-                // (the client then reports a broken response).
+                // Read the request head first: answering before the request is drained can
+                // reset the connection mid-write (the client then reports a broken response).
                 let mut head = Vec::new();
                 let mut byte = [0_u8; 1];
                 while !head.ends_with(b"\r\n\r\n") {
@@ -564,9 +535,8 @@ mod tests {
         format!("http://{address}/install.sh")
     }
 
-    /// The sandboxed preserve fixture: a session file under a home the
-    /// installer world shares (`<home>/.prime/agent/sessions/…`), with
-    /// its exact bytes snapshotted for the byte-identity assert.
+    /// The sandboxed preserve fixture: a session file under a home the installer
+    /// world shares, with its exact bytes snapshotted for the byte-identity assert.
     struct Preserve {
         // The byte-identity readers are the unix `assert_untouched`
         // checks; on other platforms the fixture only stages the file.
@@ -593,9 +563,7 @@ mod tests {
             }
         }
 
-        /// The session store must survive the update byte-identical.
-        /// Unix only: the update-flow tests that read the snapshot sit
-        /// behind the unix gate.
+        /// Unix only: the update-flow tests that read the snapshot sit behind the unix gate.
         #[cfg(unix)]
         fn assert_untouched(&self) {
             let observed =
@@ -607,11 +575,8 @@ mod tests {
         }
     }
 
-    /// The mock installer the funnel downloads in the tests: it installs a
-    /// launcher that answers a stamped `--version`, exactly the takeover's
-    /// contract (the real script's own artifact download stays the
-    /// installer-takeover lane's sandbox test). Unix only: the script is
-    /// `#!/bin/sh` and its users are the unix installer tests.
+    /// The mock installer the funnel downloads in the tests: it installs a launcher
+    /// that answers a stamped `--version`, exactly the takeover's contract. Unix only.
     #[cfg(unix)]
     const MOCK_INSTALLER: &str = r#"#!/bin/sh
 set -eu
@@ -624,9 +589,8 @@ printf '%s' "${PRIME_AGENT_RELEASE_CHANNEL:-}" > "${PRIME_AGENT_RUST_PREFIX}/cha
 echo "installed: 9.9.9-continuous.0123456789abcdef"
 "#;
 
-    /// The pre-takeover installer: the launcher carries the legacy
-    /// `prime-agent-rust` name the probe still accepts. Unix only: same
-    /// sh-script class as [`MOCK_INSTALLER`].
+    /// The pre-takeover installer: the launcher carries the legacy `prime-agent-rust`
+    /// name the probe still accepts. Unix only: same sh-script class as [`MOCK_INSTALLER`].
     #[cfg(unix)]
     const LEGACY_INSTALLER: &str = r#"#!/bin/sh
 set -eu
@@ -822,9 +786,6 @@ echo "installed: 9.9.8-continuous.fedcba9876543210"
     #[cfg(unix)]
     async fn a_failed_installer_keeps_the_previous_install_and_reports_the_error() {
         let (root, preserve, prefix) = sandbox();
-        // A previous install exists; the failing script must leave it in
-        // place (the real script's own rollback is its lane's contract;
-        // the funnel's contract is to change nothing itself).
         std::fs::create_dir_all(prefix.join("bin")).expect("bin dir");
         let previous = prefix.join("bin/prime-agent");
         std::fs::write(&previous, "#!/bin/sh\necho 9.9.7-continuous.0000001\n")
@@ -845,7 +806,6 @@ echo "installed: 9.9.8-continuous.fedcba9876543210"
             failure.message
         );
         assert!(failure.message.contains("code 3"), "{}", failure.message);
-        // The previous install is still there and still answers.
         let version = launcher_version(&prefix).await;
         assert_eq!(version.as_deref(), Some("9.9.7-continuous.0000001"));
         preserve.assert_untouched();
@@ -855,7 +815,6 @@ echo "installed: 9.9.8-continuous.fedcba9876543210"
     #[tokio::test]
     async fn an_unfetchable_script_fails_without_installing() {
         let (_root, _preserve, prefix) = sandbox();
-        // A port with no listener: the fetch fails, nothing runs.
         let failure = run_installer_from(
             "http://127.0.0.1:9/install-rust.sh",
             &prefix,

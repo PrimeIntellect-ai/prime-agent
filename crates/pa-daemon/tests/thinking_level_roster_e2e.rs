@@ -1,27 +1,18 @@
-//! End-to-end verifier for the agents-view thinking-level roster push: a
-//! `thinking_level_change` (the `set_thinking_level` command) must reach the
-//! roster surfaces immediately, in the same turn-free window the TS worker
-//! covers (`ROSTER_SESSION_EVENT_TRIGGERS` includes `thinking_level_changed`,
-//! and the `set_model`/`cycle_model` handlers flush explicitly) — a raise
-//! the roster never carries leaves the agents view rendering the stale
-//! `model:low` until the next turn's busy flip.
-// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
-// the full rationale).
-// Stack-resident futures by design on the daemon's hot paths; boxing the
-// call sites for a lint tick is a perf regression with zero correctness gain.
+//! E2e for the agents-view thinking-level roster push: a
+//! `thinking_level_change` must reach the roster surfaces immediately, in
+//! the same turn-free window the TS worker covers
+//! (`ROSTER_SESSION_EVENT_TRIGGERS` includes `thinking_level_changed`).
+// Stack-resident futures by design on the daemon's hot paths.
 #![allow(clippy::large_futures)]
-// 64-bit-only targets; the narrowing casts sit at OS boundaries
-// (pid/fd/time/size) where the values are bounded by the kernel - the
-// dead-guard expect()s would add panic paths where silent wrap was
-// deliberate.
+// Narrowing casts sit at OS boundaries (pid/fd/time/size) where the kernel
+// bounds the values.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// The fn-length threshold is a style gate, not correctness; the structure
-// campaign owns the god-fn splits as a follow-up.
+// Style gate only, not correctness.
 #![allow(clippy::too_many_lines)]
 // API-shape opinions, not defects; the surfaces are deliberate.
 #![allow(
@@ -68,9 +59,8 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path) -> Supervisor {
         .env_remove("PRIME_API_KEY")
         .env_remove("PRIME_AGENT_CODING_AGENT_DIR")
         // A supervisor killed at teardown must not leak its session workers
-        // into later test binaries: the worker's supervisor-lost exit (TS
-        // `exitIfSupervisorOrphanedForTooLong`) runs on this short window
-        // instead of the 5-minute default.
+        // into later test binaries: the worker's supervisor-lost exit runs
+        // on this short window instead of the 5-minute default.
         .env(
             pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
             "15000",
@@ -90,10 +80,8 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path) -> Supervisor {
     panic!("supervisor socket never appeared");
 }
 
-/// The client the agents view stands in for: a roster subscriber that keeps
-/// every `roster_update` push (a push read while awaiting a command
-/// response must not be dropped — the push and the response race, and
-/// either order is valid).
+/// A roster subscriber that keeps every `roster_update` push: the push
+/// and the command response race, and either order is valid.
 struct Client {
     reader: BufReader<UnixStream>,
     writer: UnixStream,
@@ -133,8 +121,7 @@ impl Client {
         }
     }
 
-    /// One buffered line, if one arrived inside the short window (None on
-    /// the read timeout): the quiet-window assertions poll with it.
+    /// None on the read timeout: the quiet-window assertions poll with it.
     fn try_read_line(&mut self) -> Option<Value> {
         let mut line = String::new();
         self.reader
@@ -166,8 +153,6 @@ impl Client {
             .unwrap_or_else(|error| panic!("write command {id}: {error}"));
     }
 
-    /// The response for one command id; `roster_update` pushes read on the
-    /// way are parked in the buffer instead of dropped.
     fn request(&mut self, id: &str) -> Value {
         let deadline = Instant::now() + Duration::from_mins(2);
         loop {
@@ -183,9 +168,6 @@ impl Client {
         }
     }
 
-    /// The first `roster_update` push whose changed entries satisfy
-    /// `accept` — buffered or live (the frame the subscribed agents view
-    /// renders).
     fn next_roster_update<F>(&mut self, accept: F) -> Value
     where
         F: Fn(&Value) -> bool,
@@ -212,11 +194,9 @@ impl Client {
         }
     }
 
-    /// Drain buffered and live `roster_update` pushes until the socket
-    /// stays quiet for the window: the create's `SessionCreated`
-    /// re-registration refreshes the roster row with the persisted session
-    /// id (a benign idempotent push that can land any time after the
-    /// create), so a quiet-window measurement drains it first.
+    /// Drain until the socket stays quiet for the window: the create's
+    /// `SessionCreated` re-registration refresh is a benign idempotent
+    /// push that can land any time after the create.
     fn drain_roster_pushes(&mut self, quiet: Duration) {
         self.roster_updates.clear();
         let mut last_line = Instant::now();
@@ -230,8 +210,6 @@ impl Client {
         }
     }
 
-    /// The `roster_update` pushes that arrive inside the window (any
-    /// buffered push counts as an in-window arrival too).
     fn roster_pushes_within(&mut self, window: Duration) -> Vec<Value> {
         let mut seen = Vec::new();
         seen.append(&mut self.roster_updates);
@@ -267,9 +245,7 @@ fn setup(name: &str) -> Harness {
     std::fs::create_dir_all(&session_dir).expect("session dir");
     // `mock-1` reasons without a thinkingLevelMap (off..high); `mock-2`
     // does not reason at all, so a switch to it clamps the level to `off`.
-    // No prompt ever runs: the thinking switches and the roster pushes they
-    // trigger are turn-free paths, so the mock provider is just the
-    // registry entry the engine resolves from disk.
+    // No prompt ever runs.
     std::fs::write(
         agent_dir.join("models.json"),
         json!({
@@ -346,7 +322,6 @@ fn setup(name: &str) -> Harness {
 }
 
 impl Harness {
-    /// The parent's session file (the child create's parentSessionPath).
     fn session_file(&self) -> PathBuf {
         std::fs::read_dir(&self.session_dir)
             .expect("read session dir")
@@ -357,18 +332,13 @@ impl Harness {
     }
 }
 
-/// The spawn-child / raise / watch-the-roster repro: the raise must reach
-/// the roster entries the agents view renders, for a spawned subagent and
-/// the top-level session both — and a model switch that clamps the level
-/// flushes the roster too (TS flushes `set_model` explicitly).
+/// A model switch that clamps the level flushes the roster too.
 #[test]
 fn thinking_level_changes_reach_the_roster_push() {
     let mut harness = setup("thinking-roster");
     let parent_id = harness.session_id.clone();
     let session_file = harness.session_file();
 
-    // Spawn a subagent at low thinking (the spawn create carries the level
-    // into the child's summary, so the roster snapshot starts at low).
     let child_dir = harness.agent_dir.join("subagents");
     std::fs::create_dir_all(&child_dir).expect("child dir");
     harness.client.send_command(
@@ -412,7 +382,6 @@ fn thinking_level_changes_reach_the_roster_push() {
         .expect("child active session id")
         .to_string();
 
-    // Probe: a plain child read answers before the switch (routing sanity).
     harness.client.send_command(
         "gs-child",
         &json!({ "type": "get_state", "activeSessionId": child_id }),
@@ -420,7 +389,6 @@ fn thinking_level_changes_reach_the_roster_push() {
     let probed = harness.client.request("gs-child");
     assert_eq!(probed["success"], true, "child get_state failed: {probed}");
 
-    // Subscribe: the snapshot carries both rows at low.
     harness
         .client
         .send_command("rs", &json!({ "type": "roster_subscribe" }));
@@ -454,9 +422,6 @@ fn thinking_level_changes_reach_the_roster_push() {
         "the snapshot parent row is at low: {parent_row}"
     );
 
-    // Raise the child: the roster push must carry the raised level without
-    // a turn (the agents view's Model column reads `model:level` right
-    // after the raise, never the stale low).
     harness.client.send_command(
         "stl-child",
         &json!({ "type": "set_thinking_level", "activeSessionId": child_id, "level": "high" }),
@@ -484,7 +449,6 @@ fn thinking_level_changes_reach_the_roster_push() {
         "the raised child stays idle in the roster push: {update}"
     );
 
-    // The top-level raise rides the same push path.
     harness.client.send_command(
         "stl-parent",
         &json!({ "type": "set_thinking_level", "activeSessionId": parent_id, "level": "high" }),
@@ -503,9 +467,6 @@ fn thinking_level_changes_reach_the_roster_push() {
         })
     });
 
-    // A model switch that clamps the level flushes the roster too: the
-    // non-reasoning model forces `off`, and the push carries BOTH the new
-    // model and the clamped level (TS `set_model` schedules the flush).
     harness.client.send_command(
         "sm",
         &json!({
@@ -536,8 +497,6 @@ fn thinking_level_changes_reach_the_roster_push() {
         "the switched parent stays idle in the roster push: {update}"
     );
 
-    // The durable row the raise persisted backs the saved surfaces (the
-    // agents view's saved-catalog rows read the same level).
     let entries: Vec<Value> = std::fs::read_to_string(&session_file)
         .expect("read session file")
         .lines()
@@ -552,8 +511,6 @@ fn thinking_level_changes_reach_the_roster_push() {
     );
 }
 
-/// An unchanged request answers success without a roster push: the flush
-/// is the effective-change trigger, not the command itself.
 #[test]
 fn unchanged_thinking_level_answers_without_a_roster_push() {
     let mut harness = setup("thinking-roster-quiet");
@@ -568,14 +525,10 @@ fn unchanged_thinking_level_answers_without_a_roster_push() {
         "subscribe failed: {subscribed}"
     );
 
-    // Drain the create's benign roster pushes first (the `SessionCreated`
-    // re-registration refresh carries the persisted session id), so the
-    // quiet window below only measures `set_thinking_level` pushes.
     harness
         .client
         .drain_roster_pushes(Duration::from_millis(600));
 
-    // low again: no change, success, and no push inside the quiet window.
     harness.client.send_command(
         "stl-same",
         &json!({ "type": "set_thinking_level", "activeSessionId": parent_id, "level": "low" }),

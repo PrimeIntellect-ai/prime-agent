@@ -1,11 +1,5 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
-// by design on hot paths (boxing 130 fns is allocation-churn with zero
-// correctness gain); the fn-length threshold is a style gate, not
-// correctness (the harness fns are intentionally linear); 64-bit targets -
-// the narrowing sits at OS/protocol boundaries where the values are
-// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
-// guarded parses), and checked conversions would add panic paths where
-// silent wrap was deliberate.
+// Tier-C/D ruling (fleet-uniform, 2026-09-28): large_futures stack by design on hot
+// paths; too_many_lines is a style gate; casts narrow bounded OS/protocol values.
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -15,12 +9,9 @@
     clippy::cast_precision_loss
 )]
 
-//! End-to-end verifier for the agents-view reply composer (TS
-//! `sendReply` through the real daemon): the space-armed composer sends
-//! a live session's reply through the UNATTACHED roster client (the
-//! view never attaches — the supervisor must route the prompt), and a
-//! saved fixture row resumes into a fresh session whose file carries the
-//! reply — `create` with the session path, then the prompt.
+//! E2E verifier for the agents-view reply composer: the space-armed composer sends a
+//! live session's reply through the UNATTACHED roster client (the view never attaches),
+//! and a saved row resumes into a fresh session whose file carries the reply.
 #![cfg(unix)]
 
 use std::fmt::Write as _;
@@ -47,7 +38,6 @@ impl Drop for Supervisor {
     }
 }
 
-/// Stop the daemon on `socket` by protocol; kill the child when it fails.
 fn graceful_shutdown(socket: &Path) {
     let Ok(stream) = UnixStream::connect(socket) else {
         return;
@@ -118,8 +108,6 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
     panic!("supervisor socket never appeared");
 }
 
-/// One saved-session fixture: header, display name, and a user/assistant
-/// exchange.
 fn write_fixture(dir: &Path, id: &str, name: &str, turns: &[(&str, &str)]) -> PathBuf {
     let path = dir.join(format!("{id}.jsonl"));
     let mut content = format!(
@@ -142,8 +130,6 @@ fn write_fixture(dir: &Path, id: &str, name: &str, turns: &[(&str, &str)]) -> Pa
     path
 }
 
-/// The daemon-connection ask behind one raw command: the hello-greeting
-/// envelope, the request, and the response line.
 fn ask(socket: &Path, command: &serde_json::Value) -> Option<serde_json::Value> {
     let stream = UnixStream::connect(socket).ok()?;
     let write_half = stream.try_clone().ok()?;
@@ -170,12 +156,8 @@ fn ask(socket: &Path, command: &serde_json::Value) -> Option<serde_json::Value> 
     serde_json::from_str(&response).ok()
 }
 
-/// The create config with the faux engine's script file (the daemon
-/// worker's verification seam: `{"engine": "faux", ...}` drives the
-/// REAL agent engine over the scripted provider, so the send path has a
-/// real worker with real session persistence behind it — the resumed
-/// fixture file gains the reply's user message exactly like a live
-/// session would).
+/// The create config pointing at the faux engine's script: the send path runs
+/// through the REAL agent engine with real session persistence.
 fn faux_engine_config(dir: &Path, responses: &[&str]) -> serde_json::Value {
     let script = dir.join("faux-engine.json");
     std::fs::write(
@@ -214,11 +196,6 @@ fn view_options(socket: &Path, session_dir: &Path, config: serde_json::Value) ->
     }
 }
 
-/// The reply composer against a LIVE session: the space arm, the typed
-/// reply, and Enter deliver the prompt through the view's UNATTACHED
-/// roster client (the supervisor routes it — the verification item),
-/// the status reports the send, and the session's own transcript holds
-/// the reply.
 #[tokio::test]
 async fn reply_to_live_session_delivers_the_prompt() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -226,12 +203,10 @@ async fn reply_to_live_session_delivers_the_prompt() {
     let session_dir = agent_dir.join("sessions");
     std::fs::create_dir_all(&session_dir).expect("session dir");
     let supervisor = spawn_supervisor(dir.path());
-    // Two scripted responses: the warm-up turn consumes the first, the
-    // view's reply the second.
+    // Two scripted responses: the warm-up turn consumes the first, the view's reply the second.
     let config = faux_engine_config(dir.path(), &["warm reply", "the reply landed"]);
 
-    // Create the live session through the daemon itself (the roster row
-    // the view lists).
+    // Create through the daemon: the roster row the view lists must exist.
     let created = ask(
         &supervisor.socket,
         &serde_json::json!({ "type": "create", "config": config }),
@@ -245,8 +220,7 @@ async fn reply_to_live_session_delivers_the_prompt() {
         .and_then(serde_json::Value::as_str)
         .expect("the created session is live")
         .to_string();
-    // The raw roster must carry the fresh worker before the view runs
-    // (the view's rows come from roster_subscribe's snapshot).
+    // The raw roster must carry the fresh worker before the view runs.
     let roster_carries = |tries: usize| {
         (0..tries).any(|attempt| {
             if attempt > 0 {
@@ -277,11 +251,9 @@ async fn reply_to_live_session_delivers_the_prompt() {
         roster_carries(50),
         "the raw roster never carried the created session"
     );
-    // Warm the session up (one prompt turn through the daemon): a
-    // message-less top-level draft (lifecycle "draft") never surfaces as
-    // a roster row (TS `shouldShowAgentsViewSession`), so the view's
-    // reply target needs the session live with a first exchange — and
-    // the warm-up turn must COMPLETE before the view runs.
+    // A message-less draft never surfaces as a roster row (TS
+    // `shouldShowAgentsViewSession`), so the reply target needs a live session with
+    // a first exchange; the warm-up must complete before the view runs.
     let warmed = ask(
         &supervisor.socket,
         &serde_json::json!({
@@ -355,10 +327,7 @@ async fn reply_to_live_session_delivers_the_prompt() {
         "the send's status rendered ({} frames):\n{rendered}",
         outcome.frames.len()
     );
-    // The reply ran on the targeted session: its last assistant text
-    // echoes the prompt through the faux script.
-    // The reply's turn runs behind the send's ack: poll the session's
-    // last assistant text until the reply's scripted answer lands.
+    // The reply's turn runs behind the send's ack: poll until its scripted answer lands.
     let mut last = String::new();
     let reply_landed = (0..50).any(|attempt| {
         if attempt > 0 {
@@ -384,10 +353,6 @@ async fn reply_to_live_session_delivers_the_prompt() {
     );
 }
 
-/// The reply composer against a SAVED row: the space arm shows the
-/// resume placeholder, Enter resumes the fixture into a live session
-/// (`create` with the session path) and delivers the reply, and the
-/// fixture file on disk gains the reply's user message.
 #[tokio::test]
 async fn reply_to_saved_session_resumes_and_sends() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -408,8 +373,7 @@ async fn reply_to_saved_session_resumes_and_sends() {
     let plan = AgentsHeadlessPlan {
         steps: vec![
             AgentsStep::WaitSettle { timeout_ms: 1000 },
-            // The saved row lists in the Inactive section; it is the
-            // only row.
+            // The saved row is the Inactive section's only row.
             AgentsStep::Key("space".to_string()),
             AgentsStep::WaitRender {
                 needle: "Write a prompt to resume this session".to_string(),
@@ -435,9 +399,8 @@ async fn reply_to_saved_session_resumes_and_sends() {
         rendered.contains("Reply sent"),
         "the resume's status rendered:\n{rendered}"
     );
-    // The fixture file carries the reply: the resumed session appended
-    // the user message to the SAME durable file (the turn persists
-    // behind the send's ack — poll until it lands).
+    // The resumed session appends to the SAME durable file, persisting behind the
+    // send's ack — poll until it lands.
     let mut content = String::new();
     let reply_persisted = (0..50).any(|attempt| {
         if attempt > 0 {
@@ -450,7 +413,6 @@ async fn reply_to_saved_session_resumes_and_sends() {
         reply_persisted,
         "the resumed session's file holds the reply:\n{content}"
     );
-    // The resumed session is live on the daemon.
     let list = ask(&supervisor.socket, &serde_json::json!({ "type": "list" }))
         .expect("the list answered")
         .get("data")

@@ -1,6 +1,5 @@
 //! `/heartbeat` job management: create/pause/resume/clear lifecycle plus
 //! the heartbeat management actions (pause/resume/stop).
-//! Section of the port of the `AgentCronJobStore` half of core/cron-jobs.ts.
 
 use uuid::Uuid;
 
@@ -36,13 +35,12 @@ impl AgentCronJobStore {
             .max_by_key(|job| parse_iso_millis(&job.updated_at).unwrap_or(0))
     }
 
-    /// Create the heartbeat job for a session, cancelling its existing
-    /// active/paused heartbeat first.
+    /// Create the heartbeat job for a session, cancelling its existing active/paused
+    /// heartbeat first.
     ///
     /// # Errors
     ///
-    /// Returns an error when the schedule text cannot be parsed, when the
-    /// schedule is not recurring, or when the heartbeat instruction is empty.
+    /// Returns an error when the schedule is invalid or not recurring.
     pub fn create_heartbeat(
         &self,
         input: &CreateAgentCronJobInput,
@@ -57,7 +55,6 @@ impl AgentCronJobStore {
             anyhow::bail!("Heartbeat instruction cannot be empty");
         }
         let now_iso = iso_from_millis(now);
-        // Cancel existing active/paused heartbeats for this session.
         let existing: Vec<AgentCronJob> = self
             .read_jobs()
             .into_iter()
@@ -132,13 +129,12 @@ impl AgentCronJobStore {
         paused
     }
 
-    /// Resume the heartbeat for a session, recomputing its next run time.
-    /// Returns `Ok(None)` when the session has no heartbeat.
+    /// Resume the heartbeat for a session, recomputing its next run time. `Ok(None)`
+    /// when the session has no heartbeat.
     ///
     /// # Errors
     ///
-    /// Returns an error when the stored schedule is invalid or not
-    /// recurring.
+    /// Returns an error when the stored schedule is invalid or not recurring.
     pub fn resume_heartbeat(
         &self,
         active_session_id: &str,
@@ -198,14 +194,12 @@ impl AgentCronJobStore {
         cleared
     }
 
-    /// Apply a pause, stop, or resume management action to a heartbeat job.
-    /// Returns `Ok(None)` when no matching heartbeat job was found (cancelled
-    /// and completed jobs are left untouched).
+    /// Apply a pause, stop, or resume management action to a heartbeat job. `Ok(None)`
+    /// when no matching job was found (cancelled and completed jobs are left untouched).
     ///
     /// # Errors
     ///
-    /// Returns an error when resuming a job whose stored schedule is invalid
-    /// or not recurring.
+    /// Returns an error when resuming a job whose stored schedule is invalid.
     pub fn manage_heartbeat(
         &self,
         active_session_id: &str,
@@ -291,15 +285,12 @@ mod tests {
             .create_heartbeat(&input("continue the mission", "every 5m", now))
             .unwrap();
         assert_eq!(store.get_heartbeat("live-1").unwrap().id, heartbeat.id);
-        // Pause clears nextRunAt.
         let paused = store.pause_heartbeat("live-1", now + 1).unwrap();
         assert_eq!(paused.status, JobStatus::Paused);
         assert_eq!(paused.next_run_at, None);
-        // Resume recomputes nextRunAt.
         let resumed = store.resume_heartbeat("live-1", now + 2).unwrap().unwrap();
         assert_eq!(resumed.status, JobStatus::Active);
         assert!(resumed.next_run_at.is_some());
-        // A second create cancels the first.
         let second = store
             .create_heartbeat(&input("new instruction", "every 2m", now + 3))
             .unwrap();
@@ -308,10 +299,8 @@ mod tests {
         let jobs = store.list();
         let cancelled_first = jobs.iter().find(|job| job.id != second.id).unwrap();
         assert_eq!(cancelled_first.status, JobStatus::Cancelled);
-        // Clear cancels.
         let cleared = store.clear_heartbeat("live-1", now + 4).unwrap();
         assert_eq!(cleared.status, JobStatus::Cancelled);
-        // One-shot schedules are rejected for heartbeats.
         assert!(store
             .create_heartbeat(&input("nope", "in 10m", now))
             .is_err());

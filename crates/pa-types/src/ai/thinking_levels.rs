@@ -1,14 +1,10 @@
-//! Thinking-level semantics over the shared [`Model`] type: which levels a
-//! model supports, how a requested level clamps, and the level's wire
-//! vocabulary. These helpers are pure functions over `pa-types` data, so they
-//! live with the type they interpret — every crate that holds a `Model`
-//! (client pickers, daemon registries, providers) needs them without a
-//! dependency on `pa-ai`.
+//! Thinking-level semantics over the shared [`Model`] type: which levels a model supports, how a
+//! requested level clamps, and the wire vocabulary. Pure functions over `pa-types` data, so every
+//! crate that holds a `Model` gets them without depending on `pa-ai`.
 
 use crate::ai::{Model, ModelThinkingLevel};
 
-/// The full thinking-level ladder, weakest to strongest
-/// (`EXTENDED_THINKING_LEVELS` in the TS reference).
+/// The full thinking-level ladder, weakest to strongest (TS `EXTENDED_THINKING_LEVELS`).
 pub const EXTENDED_THINKING_LEVELS: [ModelThinkingLevel; 7] = [
     ModelThinkingLevel::Off,
     ModelThinkingLevel::Minimal,
@@ -25,8 +21,7 @@ pub const SUPPORTED_THINKING_LEVELS: [ModelThinkingLevel; 7] = EXTENDED_THINKING
 ///
 /// # Panics
 ///
-/// Panics if `level` is not one of the variants listed in
-/// [`EXTENDED_THINKING_LEVELS`].
+/// Panics if `level` is not one of the variants listed in [`EXTENDED_THINKING_LEVELS`].
 #[must_use]
 pub fn thinking_level_index(level: ModelThinkingLevel) -> usize {
     EXTENDED_THINKING_LEVELS
@@ -35,14 +30,10 @@ pub fn thinking_level_index(level: ModelThinkingLevel) -> usize {
         .expect("thinking level is always in EXTENDED_THINKING_LEVELS")
 }
 
-/// Whether the model has a thinking surface at all (the TS session's
-/// `supportsThinking`): the coarse `reasoning` flag, or a thinking-level
-/// map that maps at least one level to a wire value. A route that
-/// declares addressable thinking levels is thinking-capable even when the
-/// flag is false (the live catalog ships `gpt-5.3-chat-latest` as
-/// `reasoning: false` with an addressable `xhigh`); an all-null map is the
-/// "keep reasoning output, send no unverified controls" encoding, not a
-/// capability claim of its own.
+/// Whether the model has a thinking surface at all (TS `supportsThinking`): the coarse `reasoning`
+/// flag, or a thinking-level map with at least one wired level (the live catalog ships `reasoning:
+/// false` models with an addressable `xhigh`). An all-null map is the "keep reasoning output, send
+/// no unverified controls" encoding, not a capability claim.
 #[must_use]
 pub fn supports_thinking(model: &Model) -> bool {
     model.reasoning
@@ -175,10 +166,8 @@ mod tests {
             clamp_thinking_level(&m, ModelThinkingLevel::Off),
             ModelThinkingLevel::Off
         );
-        // TS ground truth (verified against packages/ai/src/models.ts): minimal is
-        // always supported on reasoning models; medium maps to null (unsupported)
-        // so it clamps up to high; xhigh requires an explicit mapping and clamps down
-        // to high via the nearest-higher-then-lower rule.
+        // TS ground truth: medium maps to null so it clamps up to high;
+        // xhigh clamps down to high via the nearest-higher-then-lower rule.
         assert_eq!(
             clamp_thinking_level(&m, ModelThinkingLevel::Minimal),
             ModelThinkingLevel::Minimal
@@ -208,8 +197,7 @@ mod tests {
 
     #[test]
     fn an_addressable_map_enables_thinking_without_the_reasoning_flag() {
-        // The live catalog's `gpt-5.3-chat-latest` shape: `reasoning: false`
-        // with `off` nulled and `xhigh` addressable — the map is the
+        // The live catalog's `gpt-5.3-chat-latest` shape: the map is the
         // stronger capability signal, so the levels answer from it.
         let map = thinking_level_map(&[
             (ModelThinkingLevel::Off, None),
@@ -234,10 +222,8 @@ mod tests {
 
     #[test]
     fn an_all_null_map_keeps_the_non_thinking_collapse() {
-        // The xAI subscription's unverified-control encoding: an all-null
-        // map claims no addressable level, so a non-reasoning model stays
-        // "off"-only (and a reasoning model's map filter is unchanged —
-        // it never claimed an addressable level either).
+        // The xAI subscription's unverified-control encoding: an all-null map claims no addressable
+        // level, so a non-reasoning model stays "off"-only.
         let all_null = thinking_level_map(&[
             (ModelThinkingLevel::Off, None),
             (ModelThinkingLevel::Minimal, None),
@@ -261,8 +247,7 @@ mod tests {
     fn supports_thinking_reads_the_flag_and_the_map() {
         assert!(supports_thinking(&model(true, None)));
         assert!(!supports_thinking(&model(false, None)));
-        // A map that only disables (`off` → "none") still addresses a
-        // thinking level: the surface exists.
+        // A map that only disables (`off` → "none") still addresses a level.
         let toggle = thinking_level_map(&[(ModelThinkingLevel::Off, Some("none"))]);
         assert!(supports_thinking(&model(false, Some(toggle))));
     }
@@ -275,8 +260,7 @@ mod tests {
             (ModelThinkingLevel::High, Some("high")),
         ]);
         let m = model(true, Some(map));
-        // Off is explicitly null (disabled); xhigh/max need an explicit
-        // mapping; everything else on the ladder stays supported.
+        // Off is null (disabled); xhigh/max need an explicit mapping.
         assert_eq!(
             get_supported_thinking_levels(&m),
             vec![

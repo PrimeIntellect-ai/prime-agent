@@ -1,9 +1,8 @@
-//! Line-delimited JSON-RPC 2.0 framing for the ACP stdio transport.
-//!
-//! One JSON object per line. Requests carry `method` + `params` + `id`;
-//! responses carry exactly one of `result` / `error`; notifications omit
-//! `id`. Parse failures answer with the JSON-RPC error codes so a client
-//! never sees a dropped line.
+//! Line-delimited JSON-RPC 2.0 framing for the ACP stdio transport: one
+//! JSON object per line; requests carry `method` + `params` + `id`,
+//! responses exactly one of `result` / `error`, notifications omit `id`.
+//! Parse failures answer with the JSON-RPC error codes so a client never
+//! sees a dropped line.
 
 use serde_json::{json, Value};
 
@@ -34,7 +33,7 @@ pub enum Incoming {
 
 /// Parse one line into an incoming message. `Err` carries the error
 /// response value to write back (JSON-RPC requires an answer even for
-/// malformed input, with `id: null` when the id is unknowable).
+/// malformed input, with `id: null` when unknowable).
 pub fn parse_line(line: &str) -> Result<Incoming, Value> {
     let trimmed = line.trim();
     let bad_request = || error_response(&Value::Null, INVALID_REQUEST, "Invalid Request", None);

@@ -1,38 +1,22 @@
 //! Headless e2e for the agents view's hover + click affordances (operator
-//! directive 2026-09-29): a mock supervisor serves a parent/child roster
-//! plus one saved session, and the headless harness feeds the same SGR
-//! reports a terminal's mouse sends — the `?1003` buttonless motions of
-//! the hover and the press/release pair of a click.
-//!
-//! Verifies the affordance pass's row contract: EVERY row opens on a
-//! plain click — the inactive saved rows resume, the merged `N
-//! subagents (M running)` summary row expands its dropdown (the click
-//! is the toggle, not an open), and the expanded child rows open the
-//! subagent — and the hover motions ride the same path without
-//! disturbing the click grammar.
+//! directive 2026-09-29): EVERY row opens on a plain click (inactive
+//! saved rows resume, the merged summary row expands its dropdown,
+//! expanded child rows open the subagent); hover motions ride along.
 #![cfg(unix)]
-// Pedantic-gate exceptions (every other pedantic warning in this crate is
-// fixed in place; each exception carries its one-line justification):
-// - the casts: terminal-layout arithmetic narrows structurally bounded
-//   values (screen coordinates, byte counts, timestamps); guarded
-//   conversions would add panic paths the bounds guarantee away.
+// Casts: structurally bounded terminal-layout arithmetic; guarded conversions add panic paths.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// - the render routes are flat tables (one arm per route); splitting them
-//   would add indirection without changing the flow.
+// Render routes are flat tables (one arm per route); splitting adds indirection.
 #![allow(clippy::too_many_lines)]
-// - widget state structs carry independent flag bits; a nested struct
-//   would add indirection without changing the shape.
+// Widget state structs carry independent flag bits.
 #![allow(clippy::struct_excessive_bools, clippy::fn_params_excessive_bools)]
-// - the futures are bounded by the surface's lifetime; boxing them would
-//   add an allocation to the steady-state loop.
+// Futures are bounded by the surface's lifetime; boxing adds a steady-state allocation.
 #![allow(clippy::large_futures)]
-// - the wrappers preserve a uniform Result-returning API surface; unwrap
-//   removals would ripple through the callers without changing behavior.
+// The wrappers preserve a uniform Result-returning API surface.
 #![allow(clippy::unnecessary_wraps)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -46,12 +30,10 @@ use pa_tui::agents_view::{
 use pa_tui::interactive::SessionSelection;
 use serde_json::{json, Value};
 
-/// Mouse tracking is process-global state, so the headless runs
-/// serialize through one lock (the click dispatch gates on it). The
-/// lock is tokio's so the guard can ride the run's awaits.
+/// Mouse tracking is process-global state, so the headless runs serialize through one lock (the
+/// click dispatch gates on it; tokio's, so the guard rides the run's awaits).
 static RUN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// One roster row's wire summary.
 fn roster_row(id: &str, status: &str, summary: &Value) -> Value {
     json!({ "agentId": id, "status": status, "summary": summary })
 }
@@ -111,9 +93,6 @@ impl MockSupervisor {
         }
     }
 
-    /// Serve the view connection: the parent/child roster mounts the
-    /// merged summary line, and the saved catalog mounts the inactive
-    /// section's row.
     fn serve(self) {
         let (stream, _) = self.listener.accept().expect("accept view connection");
         stream
@@ -211,8 +190,7 @@ fn respond_failure(writer: &mut UnixStream, id: &str, command: &str, error: &str
     );
 }
 
-/// One line with a bounded quiet window; `None` ends the serve loop on
-/// EOF or the quiet cap.
+/// One line with a bounded quiet window; `None` ends the serve loop on EOF or the quiet cap.
 fn read_line(reader: &mut BufReader<UnixStream>) -> Option<String> {
     const QUIET_WINDOW_MS: u32 = 90;
     let mut quiet_windows: u32 = 0;
@@ -263,9 +241,8 @@ fn view_options(socket: &std::path::Path) -> AgentsViewOptions {
     }
 }
 
-/// Run one headless plan against a fresh mock supervisor and return the
-/// outcome. Holds the run lock: the click dispatch gates on the
-/// process-global tracking state the headless setup arms.
+/// Run one headless plan and return the outcome. Holds the run lock: the click dispatch gates on
+/// the process-global tracking state.
 async fn run_plan(steps: Vec<AgentsStep>) -> pa_tui::agents_view::AgentsViewOutcome {
     let _guard = RUN_LOCK.lock().await;
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -289,9 +266,8 @@ async fn run_plan(steps: Vec<AgentsStep>) -> pa_tui::agents_view::AgentsViewOutc
     outcome
 }
 
-/// The settled roster's frames: the plan holds until the merged summary
-/// line and the saved catalog's row both render (the catalog lands on
-/// the event cadence, so the condition wait rides out its latency).
+/// The settled roster's frames: the plan holds until the merged summary line and the saved
+/// catalog's row both render (the catalog lands on the event cadence).
 async fn settled_frames(needle: &str) -> Vec<String> {
     run_plan(vec![
         AgentsStep::WaitSettle { timeout_ms: 2500 },
@@ -304,7 +280,7 @@ async fn settled_frames(needle: &str) -> Vec<String> {
     .frames
 }
 
-/// The last frame holding a needle and the needle's row within it.
+/// The last frame holding a needle and its row.
 fn locate_row(frames: &[String], needle: &str) -> Option<usize> {
     frames
         .iter()
@@ -318,14 +294,14 @@ fn locate_row(frames: &[String], needle: &str) -> Option<usize> {
         .map(|(row, _)| row)
 }
 
-/// The `?1003` buttonless motion report (the hover affordance's input),
-/// one-based cells like the terminal sends.
+/// The `?1003` buttonless motion report (the hover affordance's input), one-based cells like the
+/// terminal sends.
 fn motion(col: usize, row: usize) -> String {
     format!("\x1b[<35;{};{}M", col + 1, row + 1)
 }
 
-/// A plain click on the INACTIVE saved row opens it: the resume
-/// selection — every row is clickable, the archived ones included.
+/// A plain click on the INACTIVE saved row opens it: the resume selection — every row is clickable,
+/// the archived ones included.
 #[tokio::test]
 async fn a_click_on_an_inactive_row_opens_it() {
     let frames = settled_frames("archived run").await;
@@ -348,9 +324,8 @@ async fn a_click_on_an_inactive_row_opens_it() {
     );
 }
 
-/// A plain click on the merged `N subagents (M running)` row EXPANDS
-/// the dropdown — the toggle, not an open: the frame renders the
-/// child rows and the run keeps running with no selection.
+/// A plain click on the merged `N subagents (M running)` row EXPANDS the dropdown — the toggle, not
+/// an open: the frame renders the child rows and the run keeps running with no selection.
 #[tokio::test]
 async fn a_click_on_the_merged_summary_expands_the_dropdown() {
     let frames = settled_frames("subagents (").await;
@@ -379,8 +354,8 @@ async fn a_click_on_the_merged_summary_expands_the_dropdown() {
     );
 }
 
-/// A plain click on the expanded CHILD row opens the subagent — the
-/// Enter action on the drilled-in row.
+/// A plain click on the expanded CHILD row opens the subagent — the Enter action on the drilled-in
+/// row.
 #[tokio::test]
 async fn a_click_on_the_expanded_child_opens_the_subagent() {
     let frames = settled_frames("subagents (").await;
@@ -426,9 +401,8 @@ async fn a_click_on_the_expanded_child_opens_the_subagent() {
     );
 }
 
-/// The `?1003` hover motions ride the rows without disturbing the click
-/// grammar: motions across the merged line, the child rows, and the
-/// headings, then a plain click — the subagent still opens.
+/// The `?1003` hover motions ride the rows without disturbing the click grammar: motions across the
+/// merged line, the child rows, and the headings, then a plain click — the subagent still opens.
 #[tokio::test]
 async fn hover_motions_never_disturb_the_agents_view_click() {
     let frames = settled_frames("subagents (").await;
@@ -456,9 +430,8 @@ async fn hover_motions_never_disturb_the_agents_view_click() {
             needle: "subagents (".to_string(),
             timeout_ms: 8000,
         },
-        // Hover motions across the parent row, the merged line, the
-        // heading, and the expanded child (the buttonless reports the
-        // real terminal sends under any-event tracking).
+        // Hover motions across the parent row, the merged line, the heading, and the expanded child
+        // (the buttonless reports the real terminal sends under any-event tracking).
         AgentsStep::Mouse(motion(4, 0)),
         AgentsStep::Mouse(motion(4, summary)),
         AgentsStep::Mouse(motion(2, summary - 1)),

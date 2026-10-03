@@ -1,7 +1,5 @@
-//! `OpenAI` Completions streaming core.
-//! Section of the port of `packages/ai/src/providers/openai-completions.ts`:
-//! chunk-driven block state (`text/thinking/toolcalls/reasoning_details`), SSE
-//! decoding, and the provider stream function.
+//! `OpenAI` Completions streaming core: chunk-driven block state
+//! (`text/thinking/toolcalls/reasoning_details`), SSE decoding, and the provider stream function.
 
 use std::collections::HashMap;
 
@@ -202,7 +200,7 @@ fn finish_blocks(state: &mut StreamingState, writer: &AssistantMessageEventWrite
 }
 
 /// Handle one parsed SSE chunk. Returns the chunk value for testability.
-// Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+// Long by design: mirrors the provider's stream shape.
 #[allow(clippy::too_many_lines)]
 fn handle_chunk(
     chunk: &Value,
@@ -266,7 +264,6 @@ fn handle_chunk(
         return;
     };
 
-    // Text content.
     if let Some(content) = delta.get("content").and_then(|value| value.as_str()) {
         if !content.is_empty() {
             let index = state.ensure_text_block(writer);
@@ -281,9 +278,8 @@ fn handle_chunk(
         }
     }
 
-    // Some endpoints return reasoning in reasoning_content (llama.cpp),
-    // or reasoning (other openai compatible endpoints). Use the first
-    // non-empty reasoning field to avoid duplication.
+    // Some endpoints return reasoning in reasoning_content (llama.cpp), or reasoning (other openai
+    // compatible endpoints). Use the first non-empty reasoning field to avoid duplication.
     let mut found_reasoning_field: Option<(&str, &str)> = None;
     for field in REASONING_FIELDS {
         if let Some(value) = delta.get(field).and_then(|value| value.as_str()) {
@@ -305,7 +301,6 @@ fn handle_chunk(
         });
     }
 
-    // Tool calls.
     if let Some(tool_calls) = delta.get("tool_calls").and_then(|value| value.as_array()) {
         for tool_call in tool_calls {
             let stream_index = tool_call.get("index").and_then(serde_json::Value::as_u64);
@@ -407,8 +402,8 @@ fn handle_chunk(
                 }
             }
         }
-        // The signature is encoded once at stream end (and on the error path)
-        // by `encode_reasoning_details_signature`, not per delta (TS PR #2783).
+        // The signature is encoded once at stream end (and on the error path) by
+        // `encode_reasoning_details_signature`, not per delta.
         if !state.reasoning_details_by_index.is_empty() && state.reasoning_details_block.is_none() {
             state
                 .output
@@ -429,9 +424,8 @@ fn handle_chunk(
     }
 }
 
-/// Port of the TS `encodeReasoningDetailsSignature`: encode the merged
-/// reasoning-details signature once at stream end and on the error path,
-/// instead of on every `reasoning_details` delta.
+/// Encode the merged reasoning-details signature once at stream end and on the error path, not on
+/// every `reasoning_details` delta (TS `encodeReasoningDetailsSignature`).
 fn encode_reasoning_details_signature(state: &mut StreamingState) {
     let Some(block_index) = state.reasoning_details_block else {
         return;
@@ -447,8 +441,8 @@ fn encode_reasoning_details_signature(state: &mut StreamingState) {
     }
 }
 
-/// Port of the TS catch settle: finalize tool-call blocks whose parsed
-/// preview may lag the accumulated text under the growth throttle.
+/// Port of the TS catch settle: finalize tool-call blocks whose parsed preview may lag the
+/// accumulated text under the growth throttle.
 fn settle_partial_tool_calls(state: &mut StreamingState) {
     for (index, accumulator) in &mut state.tool_call_partial_args {
         let Some(AssistantContent::ToolCall(block)) = state.output.content.get_mut(*index) else {
@@ -473,7 +467,6 @@ fn error_to_message(error: &ProviderError) -> String {
     message
 }
 
-/// Port of `streamOpenAICompletions`.
 pub fn stream_openai_completions(
     model: &Model,
     context: &Context,
@@ -534,7 +527,7 @@ pub fn stream_openai_completions(
     reader
 }
 
-// Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+// Long by design: mirrors the provider's stream shape.
 #[allow(clippy::too_many_lines)]
 async fn run_stream(
     model: &Model,
@@ -614,18 +607,15 @@ async fn run_stream(
         on_response(
             crate::types::ProviderResponse {
                 status: response.status,
-                // Collected into the ordered map: the hook payload can
-                // serialize, and the HTTP header arrival order is not a
-                // stable serialization order.
                 headers: response.headers.clone().into_iter().collect(),
             },
             model,
         );
     }
 
-    // The TS provider goes through the `openai` SDK, which throws on every
-    // non-OK status (2xx only) and whose `APIError` message the provider
-    // surfaces verbatim as the assistant message's error message.
+    // The TS provider goes through the `openai` SDK, which throws on every non-OK status (2xx only)
+    // and whose `APIError` message the provider surfaces verbatim as the assistant message's error
+    // message.
     if !(200..300).contains(&response.status) {
         let body = response.read_all_text().await.unwrap_or_default();
         return Err(openai_http_error(
@@ -646,9 +636,8 @@ async fn run_stream(
             Ok(Some(chunk)) => chunk,
             Ok(None) => break,
             Err(error) => {
-                // TS catch: encode the reasoning-details signature, then
-                // settle the partial tool calls before the error event
-                // carries the message (TS PR #2783).
+                // TS catch: encode the reasoning-details signature, then settle the partial tool
+                // calls before the error event carries the message.
                 encode_reasoning_details_signature(&mut state);
                 settle_partial_tool_calls(&mut state);
                 *output = state.output;
@@ -768,13 +757,10 @@ mod tests {
     use std::net::SocketAddr;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    // The thinking-channel pins (the two provider envelopes) live in
-    // their own child module with this file's test harness.
     #[path = "stream_pins.rs"]
     mod stream_pins;
 
-    /// Serve one SSE response body for the provider's POST and return the
-    /// bound address.
+    /// Serve one SSE response body for the provider's POST and return the bound address.
     async fn serve_sse(body: String) -> SocketAddr {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -791,8 +777,7 @@ mod tests {
         addr
     }
 
-    /// Run the provider stream against the SSE body and return the final
-    /// assistant message.
+    /// Run the provider stream against the SSE body and return the final assistant message.
     async fn stream_final_message(mut model: Value, body: String) -> AssistantMessage {
         let addr = serve_sse(body).await;
         model["baseUrl"] = json!(format!("http://{addr}"));
@@ -835,9 +820,8 @@ mod tests {
         })
     }
 
-    // Captured chat-completions chunk shapes: OpenAI echoes `service_tier` on
-    // the chunks that served the request; the final usage-only chunk carries
-    // the token accounting.
+    // Captured chat-completions chunk shapes: OpenAI echoes `service_tier` on the chunks that
+    // served the request; the final usage-only chunk carries the token accounting.
     const TIERED_CONTENT_CHUNK: &str = "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-5.5\",\"service_tier\":\"priority\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hi\"},\"finish_reason\":null}]}\n\n";
     const USAGE_CHUNK: &str = "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-5.5\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1000000,\"completion_tokens\":1000000,\"total_tokens\":2000000,\"prompt_tokens_details\":{\"cached_tokens\":0}}}\n\n";
     const DONE: &str = "data: [DONE]\n\n";
@@ -848,8 +832,8 @@ mod tests {
         format!("{content}{usage}{DONE}")
     }
 
-    // Captured OpenRouter chunk shapes: the gateway echoes the upstream
-    // model and tier, and reports billing in the final usage chunk.
+    // Captured OpenRouter chunk shapes: the gateway echoes the upstream model and tier, and reports
+    // billing in the final usage chunk.
     fn openrouter_sse(usage_fields: &str) -> String {
         let content = "data: {\"id\":\"gen-01\",\"object\":\"chat.completion.chunk\",\"model\":\"anthropic/claude-fable-5\",\"service_tier\":\"priority\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hi\"}}]}\n\n";
         let usage = format!("data: {{\"id\":\"gen-01\",\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{{\"prompt_tokens\":50000,\"completion_tokens\":50000,\"total_tokens\":100000,\"prompt_tokens_details\":{{\"cached_tokens\":0}}{usage_fields}}}}}\n\n");
@@ -899,8 +883,6 @@ mod tests {
     async fn gateway_service_tier_not_applied_to_openrouter() {
         let model = completions_model("anthropic/claude-fable-5", "openrouter", 0.5, 0.5);
         let message = stream_final_message(model, openrouter_sse("")).await;
-        // The tier multiplier table is OpenAI's own; gateways price their
-        // tiers per endpoint, so the catalog estimate stands.
         assert!((message.usage.cost.input.as_f64() - 0.025).abs() < 1e-9);
         assert!((message.usage.cost.output.as_f64() - 0.025).abs() < 1e-9);
         assert!((message.usage.cost.total.as_f64() - 0.05).abs() < 1e-9);

@@ -1,9 +1,4 @@
 //! Model helpers: cost calculation over the shared model types.
-//! Ported from `packages/ai/src/models.ts` (model registry plumbing excluded —
-//! the generated catalog is ported separately). Thinking-level support,
-//! clamping, and model equality moved to `pa_types::ai::thinking_levels`
-//! (pure functions over the shared `Model` type, needed above `pa-ai` too);
-//! they stay re-exported here for provider code.
 
 use pa_types::JsNumber;
 
@@ -20,7 +15,7 @@ pub struct CostOverrides {
     pub cache_write: Option<f64>,
 }
 
-/// Compute and write the cost breakdown for a usage, in place on `usage.cost`.
+/// Compute and write the cost breakdown in place on `usage.cost`.
 pub fn calculate_cost(model: &Model, usage: &mut Usage, overrides: Option<&CostOverrides>) {
     usage.cost = calculate_cost_values(model, usage, overrides);
 }
@@ -113,7 +108,6 @@ mod tests {
 
     #[test]
     fn thinking_helpers_stay_re_exported() {
-        // The pa-types move keeps the pa_ai::models call sites working.
         let m = model(false, None);
         assert_eq!(
             get_supported_thinking_levels(&m),

@@ -1,8 +1,7 @@
 //! Translate agent-loop events into ACP `session/update` payloads.
-//!
-//! Pure mapping: one loop event fans out to zero or more updates. The
+//! Pure mapping: one loop event fans out to zero or more updates; the
 //! mapping state correlates streamed chunks with their owning assistant
-//! message, exactly like the TS event adapter.
+//! message.
 
 use serde_json::{json, Value};
 
@@ -10,7 +9,6 @@ use super::meta::PrimeAgentSessionMeta;
 use super::types::{AcpSessionUpdate, TextBlock, ToolCallContent};
 pub use super::types::{AcpToolKind, AcpToolStatus};
 
-/// The model-facing Python REPL tool.
 pub const IPYTHON_TOOL_NAME: &str = "ipython";
 
 /// Correlates streamed assistant chunks with their owning message and bash
@@ -34,8 +32,8 @@ impl MappingState {
     }
 
     /// The owning message id for a streamed chunk, allocating one lazily if
-    /// the stream began without a `message_start` (the TS adapter does the
-    /// same, so a missed start never crashes the stream).
+    /// the stream began without a `message_start` (a missed start never
+    /// crashes the stream).
     fn message_started(&mut self) -> &str {
         if self.active_assistant_message_id.is_none() {
             self.start_assistant_message();
@@ -46,11 +44,10 @@ impl MappingState {
     }
 }
 
-/// The event kinds the ACP adapter consumes from the agent loop.
-///
-/// A thin projection of the loop's `AgentEvent`: only the discriminants the
-/// adapter maps to ACP updates, with the fields the mapping reads. Keeping
-/// it as a value enum makes the mapping testable without a live agent.
+/// The event kinds the ACP adapter consumes from the agent loop: a thin
+/// projection of `AgentEvent` with only the discriminants the adapter maps
+/// to ACP updates. A value enum keeps the mapping testable without a live
+/// agent.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AcpEngineEvent {
     MessageStart {
@@ -87,20 +84,16 @@ pub enum AcpEngineEvent {
         token_budget: Option<u64>,
         tokens_used: Option<u64>,
     },
-    /// A continual-harness refinement completed.
     RefineComplete {
         summary: String,
         changes: Vec<String>,
     },
-    /// A continual-harness refinement failed.
     RefineFailed {
         error: String,
     },
-    /// One RLM subagent roster change.
-    ///
-    /// No in-process producer yet: in-process sessions have no RLM
-    /// children. The mapping is the daemon-attached parity contract
-    /// (slice 4) and is locked by unit tests.
+    /// One RLM subagent roster change. No in-process producer yet
+    /// (in-process sessions have no RLM children); the mapping is the
+    /// daemon-attached parity contract, locked by unit tests.
     #[allow(dead_code)]
     RlmChildUpdate {
         child: RlmChildRow,
@@ -153,12 +146,9 @@ pub struct RlmChildRow {
 
 /// Map one loop event to zero or more ACP updates.
 ///
-/// - Assistant reasoning deltas become `agent_thought_chunk` and visible
-///   text deltas become `agent_message_chunk`, so a client can render or
-///   hide them separately.
-/// - Tool calls become `tool_call` / `tool_call_update` pairs keyed by the
-///   loop's tool-call id.
-/// - Everything else has no ACP representation and maps to nothing.
+/// - Reasoning deltas become `agent_thought_chunk`, visible text deltas
+///   `agent_message_chunk`, so a client can render or hide them separately.
+/// - Tool calls become `tool_call` / `tool_call_update` pairs keyed by id.
 pub fn acp_updates_for_event(
     event: &AcpEngineEvent,
     state: &mut MappingState,
@@ -372,7 +362,6 @@ pub fn acp_updates_for_event(
     }
 }
 
-/// A `session_info_update` carrying one namespaced payload.
 fn session_info_update(meta: &PrimeAgentSessionMeta) -> AcpSessionUpdate {
     AcpSessionUpdate::SessionInfoUpdate {
         meta: super::meta::prime_agent_meta(meta),
@@ -408,11 +397,11 @@ fn tool_result_text(result: &Value) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join("\n"))
 }
 
-/// Rich kernel output that ACP has no content type for: media the cell loaded
-/// into context plus the number of diffs it displayed, reported under the
-/// `_meta` namespace. Attachment payloads are never inlined (ACP already
-/// carries images as content blocks); the decoded byte length is reported
-/// instead of a `bytes` field the kernel never sends.
+/// Rich kernel output that ACP has no content type for: media the cell
+/// loaded into context plus the number of diffs it displayed, reported
+/// under the `_meta` namespace. Attachment payloads are never inlined (ACP
+/// already carries images as content blocks); the decoded byte length is
+/// reported instead of a `bytes` field the kernel never sends.
 fn ipython_rich_output(result: &Value) -> Option<Value> {
     let details = result.get("details")?.as_object()?;
     let attachments = details

@@ -1,16 +1,7 @@
-//! Tty line-discipline verification (the platform wall for the dying-
-//! surface restore).
-//!
-//! crossterm's `disable_raw_mode` restores the termios its *first*
-//! `enable_raw_mode` saved and swallows every error, so a forced exit can
-//! still leave the tty raw two ways: the saved "original" was itself raw
-//! (the process started on a tty a killed previous run never restored,
-//! so crossterm adopted that state as the baseline), or the restore
-//! write failed silently under load. The live report - a forced exit
-//! left the shell echoing `;`-coded sequences on every keypress until
-//! `stty sane` - is exactly that state. Lives here because pa-tui
-//! depends on pa-types alone and opts into the workspace `unsafe_code`
-//! forbid (the process-suspend precedent).
+//! Tty line-discipline verification (the platform wall for the dying-surface restore). crossterm's
+//! `disable_raw_mode` restores the termios its *first* `enable_raw_mode` saved and swallows every
+//! error, so a forced exit can still leave the tty raw: the saved "original" was itself raw (a
+//! killed previous run never restored the tty), or the restore write failed silently.
 
 #[cfg(unix)]
 use std::fs::File;
@@ -19,9 +10,8 @@ use std::io;
 #[cfg(unix)]
 use std::os::unix::io::AsRawFd;
 
-/// The classic control characters `stty sane` restores (Linux
-/// defaults): a poisoned tty may carry zeroes here, and canonical
-/// editing depends on them (`VERASE`, `VEOF`, ...).
+/// The classic control characters `stty sane` restores (Linux defaults); a poisoned tty may carry
+/// zeroes here, and canonical editing depends on them.
 #[cfg(unix)]
 const SANE_CONTROL_CHARS: [(usize, u8); 12] = [
     (libc::VINTR, 3),
@@ -45,8 +35,7 @@ pub enum TtyCooked {
     AlreadyCooked,
     /// The tty read raw and the sane reconstruction was applied.
     Repaired,
-    /// No tty or no termios access: nothing to verify (the headless
-    /// harness, a dead terminal).
+    /// No tty or no termios access: nothing to verify (headless harness, dead terminal).
     Unavailable,
 }
 
@@ -57,19 +46,16 @@ fn cooked(attrs: &libc::termios) -> bool {
     attrs.c_lflag & (libc::ICANON | libc::ECHO) == (libc::ICANON | libc::ECHO)
 }
 
-/// `OLCUC` (map lowercase to uppercase on output) is the one recipe
-/// flag only Linux termios carries - macOS never grew the bit, so
-/// there is nothing to clear off it there.
+/// `OLCUC` (map lowercase to uppercase on output) is the one recipe flag
+/// only Linux termios carries - macOS never grew the bit.
 #[cfg(target_os = "linux")]
 const OLCUC: libc::tcflag_t = libc::OLCUC;
-/// Other unixes (and every non-unix build, where `tcflag_t` does not
-/// exist) never see the flag: the constant itself stays unix-only.
+/// Other unixes never see the flag; the constant itself stays unix-only.
 #[cfg(all(unix, not(target_os = "linux")))]
 const OLCUC: libc::tcflag_t = 0;
 
-/// Rebuild a sane cooked mode in place (the `stty sane` recipe): the
-/// line discipline on, signal characters live, echo with erase
-/// rendering, and the classic control characters restored.
+/// Rebuild a sane cooked mode in place (the `stty sane` recipe): canonical
+/// input, echo, signal characters, and classic control characters restored.
 #[cfg(unix)]
 fn make_sane(attrs: &mut libc::termios) {
     attrs.c_iflag &=
@@ -93,9 +79,8 @@ const STDIN_TTY_PATH: &str = "/proc/self/fd/0";
 #[cfg(all(unix, not(target_os = "linux")))]
 const STDIN_TTY_PATH: &str = "/dev/fd/0";
 
-/// The process tty (`/dev/tty`, stdin when no controlling terminal
-/// exists - the restore path must still be able to repair the pane it
-/// owns).
+/// The process tty (`/dev/tty`, stdin when no controlling terminal - the
+/// restore must still repair the pane it owns).
 #[cfg(unix)]
 fn tty() -> Option<File> {
     match File::open("/dev/tty") {
@@ -104,20 +89,11 @@ fn tty() -> Option<File> {
     }
 }
 
-/// Lift a pending Ctrl+S output stop on the process tty: the stop the
-/// line discipline armed from a VSTOP received while the tty was
-/// cooked (a Ctrl+S at the shell prompt, or in a suspend window) is
-/// RUNTIME state — it survives every `tcsetattr`, and an exit restore
-/// that never re-arms raw would leave the shell on a frozen prompt
-/// until Ctrl+Q. The kernel lifts it on one condition only: the IXON
-/// transition to off (`n_tty` clears the stopped flag when software
-/// flow control turns off; a `tcflow(TCOON)` clears only the separate
-/// `TCOFF` state, and an identical-attrs write clears nothing). The
-/// two-step toggle clears IXON for one `tcsetattr` (lifting any armed
-/// stop) and writes the captured attributes straight back, so the
-/// shell's own flow-control configuration returns byte-equal.
-/// Best-effort: no tty means nothing to lift, and the caller proceeds
-/// (the same swallow-first contract as `disable_raw_mode`).
+/// Lift a pending Ctrl+S output stop on the process tty: a stop armed from a VSTOP received while
+/// cooked is RUNTIME state - it survives every `tcsetattr`, and the kernel lifts it only on the
+/// IXON
+/// transition to off (`tcflow(TCOON)` clears only the separate `TCOFF` state). The two-step toggle
+/// clears IXON once (lifting the stop), then writes the captured attributes back.
 #[cfg(unix)]
 pub fn restart_output() {
     let Some(tty) = tty() else {
@@ -144,10 +120,9 @@ pub fn restart_output() {
 #[cfg(not(unix))]
 pub fn restart_output() {}
 
-/// Verify the process tty and repair a raw state: the force-quit
-/// restore already ran its best-effort `disable_raw_mode`, so a raw
-/// read here means the saved original was poisoned or the restore write
-/// failed - the sane reconstruction applies directly.
+/// Verify the process tty and repair a raw state: the force-quit restore
+/// already ran its best-effort `disable_raw_mode`, so a raw read here
+/// means the saved original was poisoned or the restore write failed.
 #[cfg(unix)]
 #[must_use]
 pub fn ensure_cooked_tty() -> TtyCooked {
@@ -187,9 +162,8 @@ pub fn ensure_cooked_tty() -> TtyCooked {
 mod tests {
     use super::*;
 
-    /// Linux's `termios` alone carries the `c_line` line-discipline
-    /// field (macOS omits it), so the all-zero construction splits by
-    /// shape; every flag field is identical.
+    /// Linux's `termios` alone carries the `c_line` field (macOS omits
+    /// it), so the all-zero construction splits by shape.
     #[cfg(target_os = "linux")]
     fn attrs_with(lflag: libc::tcflag_t) -> libc::termios {
         libc::termios {
@@ -217,8 +191,7 @@ mod tests {
         }
     }
 
-    /// A tty missing either canonical input or echo reads as not
-    /// cooked - the exact state the live report described.
+    /// A tty missing either canonical input or echo reads as not cooked.
     #[test]
     fn cooked_requires_icanon_and_echo() {
         assert!(!cooked(&attrs_with(0)));
@@ -227,9 +200,7 @@ mod tests {
         assert!(cooked(&attrs_with(libc::ICANON | libc::ECHO)));
     }
 
-    /// The repair rebuilds the `stty sane` mode from any poisoned
-    /// baseline: the line discipline, echo, and the classic control
-    /// characters all return.
+    /// The repair rebuilds the `stty sane` mode from any poisoned baseline.
     #[test]
     fn sane_restores_the_line_discipline_and_control_chars() {
         let mut attrs = attrs_with(0);

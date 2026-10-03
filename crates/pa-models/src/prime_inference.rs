@@ -1,24 +1,7 @@
 //! Prime Inference: the live, credentialed model catalog.
 //!
-//! Ported from `packages/coding-agent/src/core/prime-inference-model-catalog.ts`
-//! and `packages/ai/src/prime-inference-model-catalog.ts`:
-//! - fetched live from `https://api.pinference.ai/api/v1/models` with
-//!   `Authorization: Bearer <api key>` and `X-Prime-Team-ID` when a team is
-//!   configured — this is what makes private/internal models appear for
-//!   entitled users;
-//! - the disk cache is scope-keyed by an HMAC-SHA256 fingerprint of the key
-//!   over the team id, so one account's private models can never leak into
-//!   another scope; 401/403 clears only that scope;
-//! - the same hourly background cadence, with the compiled 110-entry
-//!   offline fallback so onboarding works before the first credentialed
-//!   fetch;
-//! - entries without a compiled template are accepted only when they carry
-//!   full specs; the coverage gate (>= 50% of compiled entries) keeps a
-//!   partial/failed fetch from replacing a good snapshot;
-//! - the live routes' `supported_parameters`/`reasoning` declarations drive
-//!   their reasoning request controls (effort routes, reasoning-object
-//!   toggles, `enable_thinking` routes), so stale bundled templates never
-//!   override what the gateway accepts.
+//! `X-Prime-Team-ID` (when a team is configured) is what makes
+//! private/internal models appear for entitled users.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -36,10 +19,8 @@ use crate::cache::{CatalogCache, RefreshOptions};
 use crate::fetch::CatalogFetcher;
 use crate::transports;
 
-/// The Prime Inference API base URL (models at `/models`).
 pub const PRIME_INFERENCE_BASE_URL: &str = "https://api.pinference.ai/api/v1";
 
-/// Hard response cap for the credentialed fetch (2 MiB in the TS reference).
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 
 /// Minimum share of compiled entries a live fetch must cover.
@@ -66,17 +47,14 @@ pub struct PrimeInferenceEntry {
     /// Reasoning effort values the live route declares; absent when the
     /// route has no effort selector.
     pub reasoning_efforts: Option<Vec<String>>,
-    /// Whether the live route rejects requests that disable reasoning.
     pub reasoning_mandatory: Option<bool>,
 }
 
 /// Reasoning request controls derived from a live Prime Inference catalog
-/// entry (`getPrimeInferenceReasoningControls` in the TS reference). The
-/// gateway validates reasoning values per route and rejects undeclared
-/// efforts, so only declared values are ever sent.
+/// entry. The gateway validates reasoning values per route and rejects
+/// undeclared efforts, so only declared values are ever sent.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PrimeInferenceReasoningControls {
-    /// Whether the route accepts a top-level `reasoning_effort` parameter.
     pub supports_reasoning_effort: bool,
     /// Thinking format required to address the route's declared reasoning
     /// parameters.
@@ -86,8 +64,6 @@ pub struct PrimeInferenceReasoningControls {
     pub thinking_level_map: Option<ThinkingLevelMap>,
 }
 
-/// The reasoning effort levels of the request vocabulary, in ladder order
-/// (`REASONING_EFFORT_LEVELS` in the TS reference).
 const REASONING_EFFORT_LEVELS: [ModelThinkingLevel; 6] = [
     ModelThinkingLevel::Minimal,
     ModelThinkingLevel::Low,
@@ -97,10 +73,9 @@ const REASONING_EFFORT_LEVELS: [ModelThinkingLevel; 6] = [
     ModelThinkingLevel::Max,
 ];
 
-/// Derive reasoning request controls from the parameters a live route
-/// declares. Returns `None` when the route does not report parameter
-/// support; callers then keep their bundled template compat instead of
-/// guessing.
+/// Derive reasoning request controls from the parameters a live route declares. Returns `None`
+/// when the route does not report parameter support; callers then keep their bundled template
+/// compat.
 #[must_use]
 pub fn prime_inference_reasoning_controls(
     entry: &PrimeInferenceEntry,
@@ -165,14 +140,12 @@ pub fn prime_inference_reasoning_controls(
     })
 }
 
-/// Credentials for one Prime Inference scope.
 #[derive(Debug, Clone)]
 pub struct PrimeInferenceCredentials {
     pub api_key: String,
     pub team_id: Option<String>,
 }
 
-/// Whether a model id is private (internal/, dev/, or alias-qualified with `:`).
 #[must_use]
 pub fn is_private_prime_inference_model_id(model_id: &str) -> bool {
     let normalized = model_id.to_ascii_lowercase();
@@ -181,15 +154,13 @@ pub fn is_private_prime_inference_model_id(model_id: &str) -> bool {
         || normalized.contains(':')
 }
 
-/// The scope key for a credential+team pair: HMAC-SHA256 of the team id over
-/// the api key with a domain-separation prefix (`privatePrimeAuthorizationFingerprint`
-/// in the TS reference). The api key is the MAC key, never a hashed password:
-/// the fingerprint stays stable for disk cache reuse without leaking it.
+/// The scope key for a credential+team pair: HMAC-SHA256 of the team id over the api key with a
+/// domain-separation prefix (`privatePrimeAuthorizationFingerprint`). The api key is the MAC key,
+/// never a hashed password: the fingerprint stays stable for disk cache reuse without leaking it.
 ///
 /// # Panics
 ///
-/// Never for any input: `Hmac::<Sha256>::new_from_slice` accepts api keys of
-/// every length, so the context construction is infallible.
+/// Never for any input: `Hmac::<Sha256>::new_from_slice` accepts api keys of every length.
 #[must_use]
 pub fn scope_key(api_key: &str, team_id: &str) -> String {
     let mut mac =
@@ -210,9 +181,7 @@ struct WireItem {
     specs: WireSpecs,
     /// The raw `supported_parameters` list: non-strings drop during
     /// sanitization, so a mixed array must not fail the whole item. Feeds
-    /// both the tool-capability filter (a declaration without "tools"
-    /// drops the entry: a session always attaches tools) and the reasoning
-    /// controls.
+    /// the tool-capability filter and the reasoning controls.
     #[serde(default)]
     supported_parameters: Option<serde_json::Value>,
     /// The raw `reasoning` object (`supported_efforts`, `mandatory`).
@@ -259,9 +228,8 @@ fn positive_integer(value: Option<u64>) -> Option<u64> {
     value.filter(|value| *value > 0)
 }
 
-/// A non-empty, de-duplicated list of non-empty strings
-/// (`parseStringArray` in the TS reference): absent or empty input is
-/// `None`, non-strings drop silently.
+/// A non-empty, de-duplicated list of non-empty strings: absent or
+/// empty input is `None`, non-strings drop silently.
 fn parse_string_array(value: Option<&serde_json::Value>) -> Option<Vec<String>> {
     let items = value?.as_array()?;
     let mut entries: Vec<String> = Vec::with_capacity(items.len());
@@ -280,15 +248,13 @@ fn parse_string_array(value: Option<&serde_json::Value>) -> Option<Vec<String>> 
     (!entries.is_empty()).then_some(entries)
 }
 
-/// Parse the Prime Inference `/models` payload. Entries with unusable data
-/// drop silently; duplicate ids reject the whole payload.
+/// Parse the Prime Inference `/models` payload.
 ///
 /// # Errors
 ///
 /// Fails when the payload carries no `data` array, on a duplicate model
 /// id, or when every entry was dropped and `allow_empty` is false.
-// TS-parity parser: entry sanitization stays one pass over each item;
-// extraction is out of scope for the zero-behavior-change sweep.
+// TS-parity parser: entry sanitization stays one pass over each item.
 #[allow(clippy::too_many_lines)]
 pub fn parse_prime_inference_model_catalog(
     value: &serde_json::Value,
@@ -332,15 +298,10 @@ pub fn parse_prime_inference_model_catalog(
             return Err(format!("Duplicate Prime Inference model {}", wire.id));
         }
         let supported_parameters = parse_string_array(wire.supported_parameters.as_ref());
-        // Capability filtering (documented deviation from the TS parser,
-        // which never reads this field): a model that declares its
-        // supported request parameters without "tools" can never serve a
-        // prime-agent turn — the session always attaches its tool set and
-        // the router answers `404 No endpoints found that support tool use`
-        // — so it never enters the selectable catalog. Entries without the
-        // field stay: no signal, historical behavior. The check reads the
-        // sanitized list, so a declaration with mixed junk still keeps its
-        // "tools" (a raw Value iter would drop it).
+        // Capability filtering (a documented deviation from the TS parser, which never reads this
+        // field): a route declaring its supported parameters without "tools" can never serve a
+        // session (the router answers `404 No endpoints found that support tool use`); entries
+        // without the field stay.
         if supported_parameters
             .as_ref()
             .is_some_and(|parameters| !parameters.iter().any(|parameter| parameter == "tools"))
@@ -430,10 +391,8 @@ fn default_compat() -> ModelCompat {
 ///
 /// # Panics
 ///
-/// Panics if a `ThinkingFormat` fails to serialize into JSON; the format
-/// is a plain string enum, so this cannot happen.
-// Entry merge/coverage is one pass over the bundled templates; extraction
-// is out of scope for the zero-behavior-change sweep.
+/// Panics if a `ThinkingFormat` fails to serialize into JSON (unreachable: a plain string enum).
+// Entry merge/coverage is one pass over the bundled templates.
 #[allow(clippy::too_many_lines)]
 pub fn build_prime_inference_models(
     bundled: &[Model],
@@ -560,9 +519,8 @@ pub fn build_prime_inference_models(
             compat: Some(compat),
         });
     }
-    // Coverage gate: `ceil()` of a non-negative `len * ratio` product is
-    // exact and fits `usize` for any real catalog; the float round-trip is
-    // the intended computation.
+    // Coverage gate: the float round-trip is the intended computation;
+    // `ceil()` fits `usize` for any real catalog.
     #[allow(
         clippy::cast_possible_truncation,
         clippy::cast_precision_loss,
@@ -601,9 +559,8 @@ pub struct PrimeInferenceCatalog {
 }
 
 impl PrimeInferenceCatalog {
-    /// A catalog persisted beside `models_dir` (cache file
-    /// `prime-inference-models-cache.json`), using the compiled entries as
-    /// templates.
+    /// A catalog persisted beside `models_dir`, using the compiled entries
+    /// as templates.
     #[must_use]
     pub fn new(models_dir: Option<PathBuf>) -> Self {
         let templates = Arc::new(transports::prime_inference_offline_entries());
@@ -652,7 +609,6 @@ impl PrimeInferenceCatalog {
         }
     }
 
-    /// The credential scope key for `credentials`.
     pub fn scope_for(&self, credentials: &PrimeInferenceCredentials) -> String {
         scope_key(
             &credentials.api_key,
@@ -748,10 +704,6 @@ mod tests {
         assert_eq!(a.len(), 64, "hex sha256");
     }
 
-    /// Capability filtering: a model that declares its supported request
-    /// parameters without "tools" can never serve a session (the router
-    /// answers 404 "No endpoints found that support tool use"), so it
-    /// never enters the catalog. Entries without the declaration stay.
     #[test]
     fn parse_filters_entries_without_tool_support() {
         let mut with_tools = wire_entry("z-ai/glm-5.3", 1.0, 2.0);
@@ -864,9 +816,6 @@ mod tests {
         assert_eq!(kept.len(), compiled.len());
     }
 
-    /// Port of the TS test: the parser sanitizes the live reasoning
-    /// declarations (non-strings drop, duplicates collapse, only a true
-    /// `mandatory` is kept).
     #[test]
     fn parses_and_sanitizes_live_reasoning_declarations() {
         let value = json!({"data": [{
@@ -923,9 +872,6 @@ mod tests {
             .collect()
     }
 
-    /// Port of the TS test: maps live `/models` reasoning metadata onto
-    /// request controls. The gateway rejects undeclared efforts, and
-    /// "none" disables non-mandatory effort routes.
     #[test]
     fn maps_declared_route_shapes_onto_reasoning_controls() {
         let mandatory_map = level_map(&[
@@ -965,8 +911,6 @@ mod tests {
         assert!(controls.supports_reasoning_effort);
         assert_eq!(controls.thinking_level_map, Some(optional_map));
 
-        // Toggle routes: the reasoning object only, through the openrouter
-        // format; declared efforts without reasoning_effort stay unused.
         let toggle_map = level_map(&[
             (ModelThinkingLevel::Minimal, None),
             (ModelThinkingLevel::Low, None),
@@ -987,7 +931,6 @@ mod tests {
             assert_eq!(controls.thinking_level_map, Some(toggle_map.clone()));
         }
 
-        // Reasoning-free route: no reasoning parameter is ever sent.
         let controls =
             prime_inference_reasoning_controls(&declared_entry(Some(&["max_tokens"]), None, None))
                 .expect("reasoning-free route declares controls");
@@ -995,12 +938,10 @@ mod tests {
         assert_eq!(controls.thinking_format, None);
         assert_eq!(controls.thinking_level_map, None);
 
-        // Route without declarations: no controls; callers keep templates.
         assert!(prime_inference_reasoning_controls(&declared_entry(None, None, None)).is_none());
     }
 
-    /// `entry` in the TS reference: a full-spec live route without reasoning
-    /// declarations.
+    /// A full-spec live route without reasoning declarations.
     fn route_entry(id: &str) -> PrimeInferenceEntry {
         PrimeInferenceEntry {
             id: id.into(),
@@ -1103,12 +1044,8 @@ mod tests {
             .get(key)
     }
 
-    /// Port of the TS build tests: the live catalog is authoritative for
-    /// which reasoning parameters a route accepts, so a stale template's
-    /// zai format never survives a declared route.
     #[test]
     fn live_declarations_rebuild_reasoning_controls() {
-        // Effort route: reasoning_effort only; mandatory routes hide off.
         let built = build_prime_inference_models(
             &[stale_template("z-ai/glm-5.3")],
             &[effort_entry("z-ai/glm-5.3")],
@@ -1132,8 +1069,6 @@ mod tests {
         .collect();
         assert_eq!(live.thinking_level_map, Some(expected));
 
-        // Toggle route: the reasoning object only, through the openrouter
-        // format.
         let built = build_prime_inference_models(
             &[stale_template("z-ai/glm-4.7")],
             &[toggle_entry("z-ai/glm-4.7")],
@@ -1159,7 +1094,6 @@ mod tests {
         .collect();
         assert_eq!(live.thinking_level_map, Some(expected));
 
-        // Route without live declarations keeps the stale template.
         let built = build_prime_inference_models(
             &[stale_template("z-ai/glm-5.3")],
             &[route_entry("z-ai/glm-5.3")],
@@ -1178,7 +1112,6 @@ mod tests {
             .collect();
         assert_eq!(live.thinking_level_map, Some(expected));
 
-        // Reasoning-free route drops the stale template format and map.
         let mut reasoning_free = route_entry("qwen/qwen3-coder");
         reasoning_free.supported_parameters = Some(vec!["max_tokens".into()]);
         let built = build_prime_inference_models(
@@ -1194,8 +1127,6 @@ mod tests {
         assert_eq!(live.thinking_level_map, None);
     }
 
-    /// Port of the TS test: live models without a compiled template get the
-    /// conservative default compat, plus whatever their routes declare.
     #[test]
     fn new_live_models_get_the_conservative_default_plus_declared_controls() {
         let built = build_prime_inference_models(

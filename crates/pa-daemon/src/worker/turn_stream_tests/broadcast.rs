@@ -1,12 +1,10 @@
-//! The wire broadcast family (moved with its concern): the custom-row
-//! replacement, the agent-message row, the per-run `agent_end`
-//! broadcast (and its bare fallback), with the `DoneOnlyEngine` +
-//! custom-message turn fixtures.
+//! The wire broadcast family: the custom-row replacement, the
+//! agent-message row, the per-run `agent_end` broadcast (and its bare
+//! fallback).
 use super::*;
 
-/// A turn that settles without a model turn (the session-command /
-/// pre-model-failure shape): only the trailing `Done` reaches the
-/// worker, so the run closes on the bare fallback frames.
+/// A turn that settles without a model turn: only the trailing `Done`
+/// reaches the worker, so the run closes on the bare fallback frames.
 struct DoneOnlyEngine;
 
 impl SessionEngine for DoneOnlyEngine {
@@ -61,8 +59,8 @@ impl SessionEngine for DoneOnlyEngine {
     }
 }
 
-/// Run one scripted turn and return its session-event frames in wire
-/// order, with the queued item carrying an injected custom row.
+/// Run one scripted turn and return its session-event frames, with
+/// the queued item carrying an injected custom row.
 async fn turn_session_events_with_custom_message(
     engine: Arc<dyn SessionEngine>,
     custom_message: Value,
@@ -99,10 +97,6 @@ async fn turn_session_events_with_custom_message(
     events
 }
 
-/// An injected custom row replaces the turn's user row: the wire carries
-/// the custom message's `message_start`/`message_end` pair and no
-/// user-message frame, while the model turn still runs on the notice
-/// text (the RLM child terminal-notice path).
 #[tokio::test]
 async fn an_injected_custom_turn_replaces_the_user_row() {
     let engine = Arc::new(
@@ -126,39 +120,29 @@ async fn an_injected_custom_turn_replaces_the_user_row() {
 
     let starts = positions_of(&events, "message_start");
     let ends = positions_of(&events, "message_end");
-    // The custom row opens as a message_start pair; the scripted
-    // assistant reply opens as a `message_update` (the scripted
-    // harness carries no provider `start` stream event), so exactly
-    // one start is on the wire and both rows settle.
+    // The scripted assistant reply opens as a `message_update` (the harness
+    // carries no provider `start` stream event), so exactly one start is
+    // on the wire.
     assert_eq!(starts.len(), 1, "only the custom row opens a start");
     assert_eq!(
         ends.len(),
         2,
         "the custom row and the assistant reply settle"
     );
-    // The first row is the custom notice, not a user message.
     assert_eq!(events[starts[0]]["message"]["role"], "custom");
     assert_eq!(
         events[starts[0]]["message"]["customType"],
         "rlm_child_terminal_notice"
     );
-    // No user row was recorded for the turn.
     let user_rows = events.iter().any(|event| {
         event.get("type").and_then(Value::as_str) == Some("message_start")
             && event["message"]["role"] == "user"
     });
     assert!(!user_rows, "the injected turn must not emit a user row");
-    // The model turn ran on the notice text and settled the reply
-    // (the scripted engine carries the reply as a plain string).
     assert_eq!(events[ends[1]]["message"]["role"], "assistant");
     assert_eq!(events[ends[1]]["message"]["content"], "notice acknowledged");
 }
 
-/// A delivered agent message (the `worker_deliver_message` arm) runs
-/// as its `agent_message` custom row: the accepted-row frames carry
-/// the custom pair the collapsed card decodes from, no plain user row
-/// reaches the wire, and the model turn still runs on the rendered
-/// prompt.
 #[tokio::test]
 async fn a_delivered_agent_message_turn_emits_the_custom_row() {
     let dir = std::env::temp_dir().join(format!("pa-worker-amw-{}", uuid::Uuid::new_v4()));
@@ -182,8 +166,8 @@ async fn a_delivered_agent_message_turn_emits_the_custom_row() {
         )
         .await;
     assert!(created.success, "create failed: {created:?}");
-    // A busy session parks the delivery on the steering lane, so the
-    // queued item is exactly what the served runner would pop.
+    // A busy session parks the delivery on the steering lane, so the queued
+    // item is exactly what the served runner would pop.
     worker.core.lock().unwrap().busy = true;
     let delivered = worker
         .dispatch(
@@ -196,7 +180,7 @@ async fn a_delivered_agent_message_turn_emits_the_custom_row() {
                     "sessionName": "research-lane",
                     "runtimeKind": "subagent",
                     // The child label derives from this parent edge,
-                    // never from the runtime kind alone.
+                    // never the runtime kind alone.
                     "parentActiveSessionId": "target-session",
                 },
             }),
@@ -223,8 +207,6 @@ async fn a_delivered_agent_message_turn_emits_the_custom_row() {
             }
         }
     }
-    // The accepted row is the agent_message custom pair - the
-    // collapsed card's wire form - and no user row rides the turn.
     let starts = positions_of(&events, "message_start");
     assert_eq!(
         starts.len(),
@@ -242,17 +224,12 @@ async fn a_delivered_agent_message_turn_emits_the_custom_row() {
             && event["message"]["role"] == "user"
     });
     assert!(!user_rows, "the delivered turn must not emit a user row");
-    // The model turn ran on the rendered prompt and settled the reply.
     let ends = positions_of(&events, "message_end");
     assert_eq!(ends.len(), 2, "the custom row and the reply settle");
     assert_eq!(events[ends[1]]["message"]["role"], "assistant");
 }
 
-/// A settled turn's wire `agent_end` (TS parity): the engine's per-run
-/// frame carries the run's message set — the accepted user row and the
-/// settled assistant row — and the worker's trailing synthesized frame
-/// stays silent (the fallback exists only for runs that ended without
-/// a model turn; TS emits one `agent_end` per agent run).
+/// TS emits one `agent_end` per agent run; the worker's trailing fallback stays silent.
 #[tokio::test]
 async fn a_settled_turn_broadcasts_the_engine_agent_end_with_its_messages() {
     let engine = Arc::new(
@@ -289,8 +266,6 @@ async fn a_settled_turn_broadcasts_the_engine_agent_end_with_its_messages() {
         json!("settled reply"),
         "the settled assistant row rides the payload"
     );
-    // The frame order: the terminal `turn_end` precedes the run's
-    // `agent_end`.
     let turn_ends = positions_of(&events, "turn_end");
     assert_eq!(turn_ends.len(), 1, "the scripted turn's turn_end");
     assert!(
@@ -299,10 +274,7 @@ async fn a_settled_turn_broadcasts_the_engine_agent_end_with_its_messages() {
     );
 }
 
-/// The bare `agent_end` fallback (a Rust-only shape kept for the TUI's
-/// silent-failure backstop): a turn that ended without a model turn —
-/// no `turn_end`, no `agent_end` from the engine — still closes with
-/// the bare pair, like a session-command or pre-model-failure run.
+/// The bare `agent_end` fallback (a Rust-only shape kept for the TUI's silent-failure backstop).
 #[tokio::test]
 async fn a_turn_without_a_model_turn_keeps_the_bare_fallback_frames() {
     let events = turn_session_events(Arc::new(DoneOnlyEngine)).await;
@@ -328,12 +300,9 @@ async fn a_turn_without_a_model_turn_keeps_the_bare_fallback_frames() {
     );
 }
 
-/// One `agent_end` per agent run on the wire (TS parity on a retried
-/// turn): the failed run's frame carries the accepted rows plus the
-/// failed assistant row, the retry run re-opens with its own
-/// `agent_start` + `turn_start` frames (a boundary already passed), and
-/// its `agent_end` carries only the retry's messages. No bare
-/// synthesized frame trails the runs.
+/// One `agent_end` per agent run on the wire: the retry run re-opens with
+/// its own `agent_start` + `turn_start` frames, and its `agent_end`
+/// carries only the retry's messages; no bare synthesized frame trails.
 #[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
 #[tokio::test]
 async fn a_retried_turn_broadcasts_one_agent_end_per_run() {
@@ -397,10 +366,9 @@ async fn a_retried_turn_broadcasts_one_agent_end_per_run() {
         )
         .await;
     assert!(prompt.success, "prompt failed: {prompt:?}");
-    // The turn runs detached (`prompt` answers immediately) and the
-    // faux retry settles in milliseconds, so the busy flag is not a
-    // reliable admission marker: drain the stream until both runs'
-    // `agent_end` frames arrived.
+    // The busy flag is not a reliable admission marker (the faux retry
+    // settles in milliseconds): drain the stream until both runs' `agent_end`
+    // frames arrived.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let mut events = Vec::new();
     loop {
@@ -428,8 +396,8 @@ async fn a_retried_turn_broadcasts_one_agent_end_per_run() {
         );
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
-    // The turn settled: drain the trailing frames (the settle-side
-    // queue snapshot rides after the final `agent_end`).
+    // The turn settled: drain the trailing frames (the settle-side queue
+    // snapshot rides after the final `agent_end`).
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     while let Ok(frame) = subscription.try_recv() {
         if frame.outbound_type != "session_event" {
@@ -470,10 +438,6 @@ async fn a_retried_turn_broadcasts_one_agent_end_per_run() {
         json!([{ "type": "text", "text": "recovered reply" }]),
         "the retried run's settled row"
     );
-    // The retry run restarted with its own opening frames: two
-    // `agent_start` and two `turn_start` frames total (the worker's
-    // run-opening pair plus the forwarded retry-run pair), the retry
-    // run's frames after the retry start.
     let agent_starts = positions_of(&events, "agent_start");
     assert_eq!(agent_starts.len(), 2, "one agent_start per run: {events:?}");
     let turn_starts = positions_of(&events, "turn_start");
@@ -491,8 +455,6 @@ async fn a_retried_turn_broadcasts_one_agent_end_per_run() {
             && turn_starts[1] < agent_ends[1],
         "the retry run's frames sit between the two agent_ends: {events:?}"
     );
-    // No bare synthesized frame trails the runs: every agent_end on
-    // the wire carries the messages payload.
     assert!(
         events.iter().all(|event| {
             event.get("type").and_then(Value::as_str) != Some("agent_end")
