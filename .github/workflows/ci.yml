@@ -323,6 +323,13 @@ jobs:
         with:
           name: shard-manifest-${{ matrix.shard }}
           path: ${{ runner.temp }}/shard-manifest-${{ matrix.shard }}.json
+          # A failed-shard re-run must REPLACE its previous attempt's
+          # manifest, not coexist with it: upload-artifact names are
+          # unique per attempt, not per run, so the summary's
+          # merge-multiple download could otherwise serve the stale
+          # failed-attempt manifest and keep the summary red after a
+          # green re-run (#3219).
+          overwrite: true
 
   # The aggregate: audits the partition (same enumeration everywhere,
   # disjoint shards, every assigned unit executed — coverage can never
