@@ -159,6 +159,14 @@ pub(crate) trait EnvCredentialSource: Send + Sync {
     fn api_key(&self, provider: &str) -> Option<String>;
     /// Raw `PRIME_TEAM_ID` value if set; the caller trims and rejects empty.
     fn prime_team_id(&self) -> Option<String>;
+    /// Raw `PRIME_CONTEXT` value if set: the prime CLI context that replaces
+    /// a directory's `.prime/context.json`.
+    fn prime_context(&self) -> Option<String>;
+    /// The home whose `.prime` is the prime CLI's global config (the
+    /// directory walk's stop and the saved contexts' location).
+    fn home_dir(&self) -> Option<std::path::PathBuf> {
+        pa_types::platform::home_dir()
+    }
     /// Identity material for ambient multi-variable credential sources
     /// (AWS profiles, container credentials, Google ADC projects).
     fn ambient_identity_material(&self, provider: &str) -> String;
@@ -185,6 +193,10 @@ impl EnvCredentialSource for NoEnvCredentials {
         None
     }
 
+    fn prime_context(&self) -> Option<String> {
+        None
+    }
+
     fn ambient_identity_material(&self, provider: &str) -> String {
         provider.to_string()
     }
@@ -201,6 +213,10 @@ impl EnvCredentialSource for ProcessEnvCredentials {
 
     fn prime_team_id(&self) -> Option<String> {
         std::env::var("PRIME_TEAM_ID").ok()
+    }
+
+    fn prime_context(&self) -> Option<String> {
+        std::env::var("PRIME_CONTEXT").ok()
     }
 
     fn ambient_identity_material(&self, provider: &str) -> String {
@@ -257,6 +273,10 @@ pub type FallbackResolver = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 /// Deferred value-fingerprint resolver (command keys).
 type ValueFingerprintResolver = Arc<dyn Fn() -> Option<String> + Send + Sync>;
 
+/// A resolved prime CLI directory context, or why it is broken.
+type DirectorySelectionMemo =
+    std::sync::OnceLock<Result<Option<super::PrimeDirectorySelection>, String>>;
+
 pub struct AuthStorage {
     storage: Arc<dyn AuthStorageBackend>,
     oauth: Arc<dyn OAuthIntegration>,
@@ -274,6 +294,13 @@ pub struct AuthStorage {
     /// resolver) is recomputed on every call, and stale checks run against
     /// the memoized candidate — candidates are immutable.
     candidate_memos: std::sync::Mutex<HashMap<String, (String, AuthSourceCandidate)>>,
+    /// The session directory whose prime CLI directory context selects the
+    /// Prime Inference team and key (see `with_project_dir`); `None` never
+    /// reads one.
+    project_dir: Option<std::path::PathBuf>,
+    /// The memoized directory context resolution: one walk and parse (and
+    /// one warning for a broken pin) per instance, reset by `reload`.
+    directory_selection: DirectorySelectionMemo,
 }
 
 impl AuthStorage {
@@ -292,6 +319,8 @@ impl AuthStorage {
             load_error: None,
             errors: Vec::new(),
             candidate_memos: std::sync::Mutex::new(HashMap::new()),
+            project_dir: None,
+            directory_selection: DirectorySelectionMemo::default(),
         };
         auth.reload();
         auth
@@ -370,6 +399,8 @@ impl AuthStorage {
             load_error: None,
             errors: Vec::new(),
             candidate_memos: std::sync::Mutex::new(HashMap::new()),
+            project_dir: None,
+            directory_selection: DirectorySelectionMemo::default(),
         };
         auth.reload();
         auth
@@ -385,6 +416,7 @@ impl AuthStorage {
 
     /// Reload credentials from storage.
     pub fn reload(&mut self) {
+        self.directory_selection = DirectorySelectionMemo::default();
         // The pure-read arm: a locked protocol read on any cache miss, the
         // process-cached copy on a hit (see `AuthStorageBackend::read`).
         let result = self.storage.read();
@@ -591,8 +623,8 @@ impl AuthStorage {
     }
 
     /// Candidate priority: runtime first; prime-inference prefers environment
-    /// over stored; everyone else prefers stored over environment; fallback
-    /// last.
+    /// over the directory's saved context over stored; everyone else prefers
+    /// stored over environment; fallback last.
     fn auth_source_candidates(
         &self,
         provider: &str,
@@ -602,10 +634,18 @@ impl AuthStorage {
             .then(|| self.fallback_candidate(provider))
             .flatten();
         if provider == PRIME_INFERENCE_PROVIDER_ID {
+            // A saved context the session directory selects replaces the
+            // stored login there: the stored key is another account's.
+            let directory = self.directory_context_candidate(provider);
+            let stored = directory
+                .is_none()
+                .then(|| self.stored_candidate(provider))
+                .flatten();
             vec![
                 self.runtime_candidate(provider),
                 self.environment_candidate(provider),
-                self.stored_candidate(provider),
+                directory,
+                stored,
                 fallback,
             ]
         } else {
@@ -789,42 +829,5 @@ impl AuthStorage {
         }
         // Reload from what we wrote.
         self.reload();
-    }
-
-    /// API-key resolution: runtime > (prime-inference: env) > stored (`api_key`
-    /// resolved, oauth refreshed on expiry) > env > fallback. Stale sources
-    /// are skipped.
-    /// Provider-scoped request headers (prime-inference team header only).
-    pub fn get_provider_headers(
-        &self,
-        provider_id: &str,
-    ) -> Option<std::collections::HashMap<String, String>> {
-        if provider_id != PRIME_INFERENCE_PROVIDER_ID {
-            return None;
-        }
-        let team_id = self
-            .env_credentials
-            .prime_team_id()
-            .and_then(|value| {
-                let trimmed = value.trim().to_string();
-                (!trimmed.is_empty()).then_some(trimmed)
-            })
-            .or_else(|| {
-                // Stored team selection: the stored primeTeam survives runtime
-                // and environment API-key overrides (fleet P5) — an ambient
-                // `PRIME_API_KEY` supplies the key, never the team, so the
-                // stored login's team still scopes the header.
-                match self.data.credential(provider_id) {
-                    Some(AuthCredential::ApiKey { prime_team, .. }) => {
-                        prime_team.as_ref().map(|team| team.team_id.clone())
-                    }
-                    _ => None,
-                }
-            });
-        team_id.map(|team_id| {
-            let mut headers = std::collections::HashMap::new();
-            headers.insert("X-Prime-Team-ID".to_string(), team_id);
-            headers
-        })
     }
 }

@@ -58,9 +58,7 @@ impl AgentSessionEngine {
             pa_core::settings::SettingsManager::create(self.cwd(), &self.config.agent_dir);
         let image_model_reference = settings.get_image_model();
         let block_images = settings.get_block_images();
-        let auth = pa_core::auth::AuthStorage::create(&self.config.agent_dir);
-        let mut registry =
-            pa_core::models::ModelRegistry::create(auth, self.config.agent_dir.join("models.json"));
+        let mut registry = self.session_model_registry();
         registry.load_private_authorization_from_cache();
         let available: Vec<pa_types::ai::Model> =
             registry.get_available().into_iter().cloned().collect();

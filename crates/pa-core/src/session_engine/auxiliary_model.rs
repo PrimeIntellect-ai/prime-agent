@@ -22,7 +22,8 @@ pub struct AuxiliaryModelContext {
 
 /// The session fallback for a summarizer call, WITH its merged request
 /// headers: the registry (auth storage + models.json) is the single owner
-/// of the team header, so a fallback call ships the stored team exactly
+/// of the team header, so a fallback call ships the session's team (the
+/// session directory's prime CLI context, else the stored team) exactly
 /// like the session's own requests (TS `_resolveAuxiliaryModel`'s fallback
 /// resolves through the same storage the session request path uses).
 pub(crate) fn session_fallback_with_headers(
@@ -30,9 +31,7 @@ pub(crate) fn session_fallback_with_headers(
     session_model: &Model,
     session_api_key: Option<String>,
 ) -> ResolvedAuxiliaryModel {
-    let auth = crate::auth::AuthStorage::create(&context.agent_dir);
-    let mut registry =
-        crate::models::ModelRegistry::create(auth, context.agent_dir.join("models.json"));
+    let mut registry = crate::models::ModelRegistry::for_session(&context.agent_dir, &context.cwd);
     let resolved = registry.get_api_key_and_headers(session_model, session_model.headers.as_ref());
     ResolvedAuxiliaryModel {
         model: session_model.clone(),
@@ -109,9 +108,7 @@ pub fn resolve_auxiliary_model(
     // The TS find runs over the authenticated, non-stale catalog
     // (`_authenticatedRlmModels`); the registry's searchable set is the
     // same filter.
-    let auth = crate::auth::AuthStorage::create(&context.agent_dir);
-    let mut registry =
-        crate::models::ModelRegistry::create(auth, context.agent_dir.join("models.json"));
+    let mut registry = crate::models::ModelRegistry::for_session(&context.agent_dir, &context.cwd);
     registry.load_private_authorization_from_cache();
     let model = registry
         .get_rlm_searchable_models()
@@ -215,6 +212,47 @@ mod tests {
             Some("team-1"),
             "the stored team ships on the fallback summarizer call"
         );
+    }
+
+    /// A session directory pinned to a Prime team (`prime switch <team>
+    /// --local`) bills its summarizer passes to that team, like the
+    /// session's own turns: both the session fallback and a routed
+    /// `auxiliaryModel` resolve the directory context.
+    #[test]
+    fn summarizer_passes_carry_the_session_directory_team() {
+        let (dir, context) = context_with_settings(&serde_json::json!({
+            "auxiliaryModel": "prime-inference/z-ai/glm-5.3",
+        }));
+        std::fs::write(
+            dir.path().join("auth.json"),
+            serde_json::json!({
+                "prime-inference": {
+                    "type": "api_key",
+                    "key": "test-key",
+                    "primeTeam": { "teamId": "team-1", "name": "Test Team" }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.path().join(".prime")).unwrap();
+        std::fs::write(
+            dir.path().join(".prime/context.json"),
+            r#"{"team_id": "pinned-team"}"#,
+        )
+        .unwrap();
+        let team = |routed: &ResolvedAuxiliaryModel| {
+            routed
+                .headers
+                .as_ref()
+                .and_then(|headers| headers.get("X-Prime-Team-ID").cloned())
+        };
+        let session = model("session-model", "prime-inference", 8_000);
+        let fallback = session_fallback_with_headers(&context, &session, None);
+        assert_eq!(team(&fallback).as_deref(), Some("pinned-team"));
+        let routed = resolve_auxiliary_model(&context, "compaction summary", &session, None, None);
+        assert_eq!(routed.model.id, "z-ai/glm-5.3");
+        assert_eq!(team(&routed).as_deref(), Some("pinned-team"));
     }
 
     #[test]

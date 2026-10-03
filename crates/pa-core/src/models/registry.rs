@@ -171,6 +171,19 @@ impl ModelRegistry {
         Self::new(auth, Some(models_json_path.into()))
     }
 
+    /// The registry a session's model requests resolve through
+    /// ([`AuthStorage::for_session`] over `agent_dir/models.json`): the
+    /// Prime Inference team and key follow the session directory's prime
+    /// CLI context. Catalog refreshes shared per agent dir keep
+    /// [`Self::create`] and the stored login.
+    #[must_use]
+    pub fn for_session(agent_dir: &std::path::Path, cwd: impl Into<PathBuf>) -> Self {
+        Self::create(
+            AuthStorage::for_session(agent_dir, cwd),
+            agent_dir.join("models.json"),
+        )
+    }
+
     pub fn in_memory(auth: AuthStorage) -> Self {
         Self::new(auth, None)
     }

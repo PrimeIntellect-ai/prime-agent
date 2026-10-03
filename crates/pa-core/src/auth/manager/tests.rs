@@ -29,6 +29,17 @@ impl EnvCredentialSource for ScriptedEnv {
         self.0.get("PRIME_TEAM_ID").cloned()
     }
 
+    fn prime_context(&self) -> Option<String> {
+        self.0.get("PRIME_CONTEXT").cloned()
+    }
+
+    fn home_dir(&self) -> Option<std::path::PathBuf> {
+        self.0
+            .get("HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(pa_types::platform::home_dir)
+    }
+
     fn ambient_identity_material(&self, provider: &str) -> String {
         format!("{provider}:scripted-ambient")
     }
@@ -288,6 +299,242 @@ fn provider_headers_team_selection() {
         headers.get("X-Prime-Team-ID").map(String::as_str),
         Some("env-team")
     );
+}
+
+#[test]
+fn provider_headers_follow_the_directory_context() {
+    /// (case, pin, env, session dir set, expected team header)
+    type Case<'a> = (
+        &'a str,
+        &'a str,
+        &'a [(&'a str, &'a str)],
+        bool,
+        Option<&'a str>,
+    );
+    let cases: [Case; 5] = [
+        (
+            "team pin",
+            r#"{"team_id": "pinned"}"#,
+            &[],
+            true,
+            Some("pinned"),
+        ),
+        ("personal pin", r#"{"team_id": null}"#, &[], true, None),
+        (
+            "PRIME_TEAM_ID over pin",
+            r#"{"team_id": "pinned"}"#,
+            &[("PRIME_TEAM_ID", "env-team")],
+            true,
+            Some("env-team"),
+        ),
+        ("broken pin", "[]", &[], true, Some("team-1")),
+        (
+            "no session dir",
+            r#"{"team_id": "pinned"}"#,
+            &[],
+            false,
+            Some("team-1"),
+        ),
+    ];
+    for (name, pin, env, with_dir, expected) in cases {
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("repo");
+        std::fs::create_dir_all(repo.join(".prime")).unwrap();
+        std::fs::write(repo.join(".prime/context.json"), pin).unwrap();
+        let env = env
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()));
+        let mut auth = storage_with_env(
+            &serde_json::json!({
+                "prime-inference": {
+                    "type": "api_key",
+                    "key": "pi-key",
+                    "primeTeam": { "teamId": "team-1", "name": "Team 1" }
+                }
+            }),
+            ScriptedEnv(env.collect()),
+        );
+        if with_dir {
+            auth = auth.with_project_dir(&repo);
+        }
+        let header = auth
+            .get_provider_headers(PRIME_INFERENCE_PROVIDER_ID)
+            .and_then(|headers| headers.get("X-Prime-Team-ID").cloned());
+        assert_eq!(header.as_deref(), expected, "{name}");
+    }
+}
+
+/// A home whose prime CLI config saves the contexts `customer` (its own
+/// account) and `dev` (a non-production API), a repo under it, and the
+/// stored login `pi-key` on `team-1`.
+fn saved_context_layout() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let root = tempfile::tempdir().unwrap();
+    let home = std::fs::canonicalize(root.path()).unwrap().join("home");
+    let environments = home.join(".prime/environments");
+    std::fs::create_dir_all(&environments).unwrap();
+    std::fs::write(
+        environments.join("customer.json"),
+        r#"{"api_key": "customer-key", "team_id": "customer-team"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        environments.join("dev.json"),
+        r#"{"base_url": "http://localhost:8000", "api_key": "dev-key", "team_id": "dev-team"}"#,
+    )
+    .unwrap();
+    let repo = home.join("code/repo");
+    std::fs::create_dir_all(repo.join(".prime")).unwrap();
+    (root, home, repo)
+}
+
+fn stored_prime_login() -> serde_json::Value {
+    serde_json::json!({
+        "prime-inference": {
+            "type": "api_key",
+            "key": "pi-key",
+            "primeTeam": { "teamId": "team-1", "name": "Team 1" }
+        }
+    })
+}
+
+/// A pinned saved context is the prime CLI's account in that directory:
+/// its key replaces the stored login (key and team from one resolution),
+/// `PRIME_API_KEY` still wins, and the stored credential is untouched.
+#[test]
+fn a_saved_directory_context_supplies_the_key_and_team() {
+    /// (case, pin, env, expected key, expected team header)
+    type Case<'a> = (
+        &'a str,
+        &'a str,
+        &'a [(&'a str, &'a str)],
+        &'a str,
+        Option<&'a str>,
+    );
+    let cases: [Case; 7] = [
+        (
+            "context pin",
+            r#"{"context": "customer"}"#,
+            &[],
+            "customer-key",
+            Some("customer-team"),
+        ),
+        (
+            "team_id over the context keeps its key",
+            r#"{"context": "customer", "team_id": "t1"}"#,
+            &[],
+            "customer-key",
+            Some("t1"),
+        ),
+        (
+            "PRIME_API_KEY over the context key",
+            r#"{"context": "customer"}"#,
+            &[("PRIME_API_KEY", "env-key")],
+            "env-key",
+            Some("customer-team"),
+        ),
+        (
+            "PRIME_CONTEXT over a team pin",
+            r#"{"team_id": "t1"}"#,
+            &[("PRIME_CONTEXT", "customer")],
+            "customer-key",
+            Some("customer-team"),
+        ),
+        (
+            "team pin keeps the stored key",
+            r#"{"team_id": "t1"}"#,
+            &[],
+            "pi-key",
+            Some("t1"),
+        ),
+        (
+            "non-production context keeps the stored login",
+            r#"{"context": "dev", "team_id": "t1"}"#,
+            &[],
+            "pi-key",
+            Some("team-1"),
+        ),
+        (
+            "broken pin keeps the stored login",
+            r#"{"context": "gone", "team_id": "t1"}"#,
+            &[],
+            "pi-key",
+            Some("team-1"),
+        ),
+    ];
+    for (name, pin, env, expected_key, expected_team) in cases {
+        let (_root, home, repo) = saved_context_layout();
+        std::fs::write(repo.join(".prime/context.json"), pin).unwrap();
+        let mut env: HashMap<String, String> = env
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+        env.insert("HOME".to_string(), home.display().to_string());
+        let mut auth =
+            storage_with_env(&stored_prime_login(), ScriptedEnv(env)).with_project_dir(&repo);
+        assert_eq!(
+            auth.get_api_key(PRIME_INFERENCE_PROVIDER_ID).as_deref(),
+            Some(expected_key),
+            "{name}"
+        );
+        let header = auth
+            .get_provider_headers(PRIME_INFERENCE_PROVIDER_ID)
+            .and_then(|headers| headers.get("X-Prime-Team-ID").cloned());
+        assert_eq!(header.as_deref(), expected_team, "{name}");
+        assert_eq!(
+            auth.get_all().credential(PRIME_INFERENCE_PROVIDER_ID),
+            Some(AuthCredential::ApiKey {
+                key: "pi-key".to_string(),
+                prime_team: Some(team("team-1", "Team 1")),
+            }),
+            "{name}: the stored login is untouched"
+        );
+    }
+}
+
+/// The context key reports its source, and a rejected (stale) context key
+/// never falls back to the stored login: that key is another account's,
+/// and the directory's team would ride on it.
+#[test]
+fn a_stale_context_key_does_not_fall_back_to_the_stored_login() {
+    let (_root, home, repo) = saved_context_layout();
+    std::fs::write(
+        repo.join(".prime/context.json"),
+        r#"{"context": "customer"}"#,
+    )
+    .unwrap();
+    let env = HashMap::from([("HOME".to_string(), home.display().to_string())]);
+    let mut auth =
+        storage_with_env(&stored_prime_login(), ScriptedEnv(env)).with_project_dir(&repo);
+    let status = auth.get_auth_status(PRIME_INFERENCE_PROVIDER_ID);
+    assert_eq!(status.source, Some(AuthSource::PrimeCli));
+    assert_eq!(status.label.as_deref(), Some("Prime context 'customer'"));
+    assert!(auth.mark_auth_stale(PRIME_INFERENCE_PROVIDER_ID));
+    assert_eq!(auth.get_api_key(PRIME_INFERENCE_PROVIDER_ID), None);
+    assert_eq!(
+        auth.get_auth_status(PRIME_INFERENCE_PROVIDER_ID).source,
+        Some(AuthSource::Stale)
+    );
+}
+
+/// One walk and parse per instance: a pin edited after the first read
+/// applies from the next instance (or `reload`).
+#[test]
+fn the_directory_context_resolves_once_per_instance() {
+    let (_root, home, repo) = saved_context_layout();
+    let pin = repo.join(".prime/context.json");
+    std::fs::write(&pin, r#"{"team_id": "pinned"}"#).unwrap();
+    let env = HashMap::from([("HOME".to_string(), home.display().to_string())]);
+    let mut auth =
+        storage_with_env(&stored_prime_login(), ScriptedEnv(env)).with_project_dir(&repo);
+    let team_header = |auth: &AuthStorage| {
+        auth.get_provider_headers(PRIME_INFERENCE_PROVIDER_ID)
+            .and_then(|headers| headers.get("X-Prime-Team-ID").cloned())
+    };
+    assert_eq!(team_header(&auth).as_deref(), Some("pinned"));
+    std::fs::remove_file(&pin).unwrap();
+    assert_eq!(team_header(&auth).as_deref(), Some("pinned"));
+    auth.reload();
+    assert_eq!(team_header(&auth).as_deref(), Some("team-1"));
 }
 
 fn team(id: &str, name: &str) -> PrimeTeamCredential {

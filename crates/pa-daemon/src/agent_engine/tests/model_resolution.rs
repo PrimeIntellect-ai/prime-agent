@@ -441,6 +441,170 @@ async fn request_auth_carries_the_stored_team_header() {
     );
 }
 
+/// A session whose directory pins a team through the prime CLI directory
+/// context (`.prime/context.json`) sends that team, not the stored one.
+#[tokio::test]
+async fn request_auth_follows_the_session_directory_context() {
+    let dir = tempfile::TempDir::new().unwrap();
+    write_prime_auth(&dir.path().join("agent"));
+    std::fs::create_dir_all(dir.path().join(".prime")).unwrap();
+    std::fs::write(
+        dir.path().join(".prime/context.json"),
+        r#"{"team_id": "pinned-team"}"#,
+    )
+    .unwrap();
+    let engine = restore_test_engine(dir.path(), Some("prime-inference"), None);
+    let model = engine.resolve_registry_model().expect("resolved model");
+    let (_, headers) = engine.resolve_request_key_and_headers(&model);
+    assert_eq!(
+        headers
+            .expect("merged request headers")
+            .get("X-Prime-Team-ID")
+            .map(String::as_str),
+        Some("pinned-team")
+    );
+}
+
+/// A pin changed mid-session (`prime switch <team> --local` while the
+/// session is open) bills the new team from the next turn: the team header
+/// the session was built with does not stick to its later requests.
+#[test]
+fn a_mid_session_pin_change_moves_the_next_turns_team_header() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let rejection = br#"{"error":{"message":"rejected by the test server"}}"#;
+    let response = [
+        format!(
+            "HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n",
+            rejection.len()
+        )
+        .into_bytes(),
+        rejection.to_vec(),
+    ]
+    .concat();
+    let server = runtime.block_on(MockCatalogServer::start(vec![response; 16]));
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_prime_auth(&agent_dir);
+    std::fs::write(
+        agent_dir.join("models.json"),
+        serde_json::json!({
+            "providers": { "prime-inference": { "baseUrl": server.url("/api/v1") } }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    install_loopback_catalog(&agent_dir, &server);
+    let pin = |team: &str| {
+        std::fs::create_dir_all(dir.path().join(".prime")).unwrap();
+        std::fs::write(
+            dir.path().join(".prime/context.json"),
+            serde_json::json!({ "team_id": team }).to_string(),
+        )
+        .unwrap();
+    };
+    let engine = std::sync::Arc::new(restore_test_engine(
+        dir.path(),
+        Some("prime-inference"),
+        None,
+    ));
+    engine.register_arc();
+    let run_turn = || {
+        engine.run_prompt(
+            0,
+            PromptRequest {
+                batch: Vec::new(),
+                images: Vec::new(),
+                message: "hello".to_string(),
+                source: "user".to_string(),
+                agent_message_id: None,
+                custom_message: None,
+            },
+            &|| false,
+            &mut |_| true,
+        );
+    };
+    // The team header of every model request the server saw so far.
+    let request_teams = || -> Vec<String> {
+        server
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|head| head.starts_with("POST "))
+            .filter_map(|head| {
+                head.lines().find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("x-prime-team-id")
+                        .then(|| value.trim().to_string())
+                })
+            })
+            .collect()
+    };
+
+    pin("team-a");
+    run_turn();
+    let mut first = request_teams();
+    pin("team-b");
+    run_turn();
+    let mut second = request_teams().split_off(first.len());
+    // A retried request repeats its turn's header.
+    first.dedup();
+    second.dedup();
+    assert_eq!(
+        (first, second),
+        (vec!["team-a".to_string()], vec!["team-b".to_string()])
+    );
+}
+
+/// A broken prime CLI directory context (here a pin naming a saved
+/// context that does not exist) fails a Prime Inference turn at the
+/// preflight, before any request, instead of billing the stored team.
+#[test]
+fn a_broken_directory_context_fails_the_prime_inference_turn() {
+    let dir = tempfile::TempDir::new().unwrap();
+    write_prime_auth(&dir.path().join("agent"));
+    std::fs::create_dir_all(dir.path().join(".prime")).unwrap();
+    std::fs::write(
+        dir.path().join(".prime/context.json"),
+        r#"{"context": "missing-context"}"#,
+    )
+    .unwrap();
+    let engine = std::sync::Arc::new(restore_test_engine(
+        dir.path(),
+        Some("prime-inference"),
+        None,
+    ));
+    engine.register_arc();
+    let mut events: Vec<EngineEvent> = Vec::new();
+    engine.run_prompt(
+        0,
+        PromptRequest {
+            batch: Vec::new(),
+            images: Vec::new(),
+            message: "hello".to_string(),
+            source: "user".to_string(),
+            agent_message_id: None,
+            custom_message: None,
+        },
+        &|| false,
+        &mut |event| {
+            events.push(event);
+            true
+        },
+    );
+    let Some(EngineEvent::Done(Err(error))) = events.last() else {
+        panic!("the turn fails: {events:?}");
+    };
+    assert!(
+        error.starts_with("Invalid Prime team selection: Prime context 'missing-context' from "),
+        "{error}"
+    );
+    assert!(
+        error.ends_with("run `prime config unpin` in this directory."),
+        "{error}"
+    );
+}
+
 /// The revival race this lane fixes (the 2026-09-23 05:57 fleet kill):
 /// a revived session (scheduled wake / update restore / worker
 /// relaunch — a create without model flags) resolves against the cold

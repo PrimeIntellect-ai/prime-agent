@@ -101,6 +101,24 @@ pub fn is_executable(path: &Path) -> bool {
     path.is_file()
 }
 
+/// True when the current (real) user owns the file `metadata` describes,
+/// so a file another user planted is never trusted (the prime CLI's
+/// `st_uid == getuid()` rule for directory contexts).
+#[cfg(unix)]
+#[must_use]
+pub fn is_owned_by_current_user(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    metadata.uid() == nix::unistd::Uid::current().as_raw()
+}
+
+/// Windows arm of [`is_owned_by_current_user`]: there is no uid to
+/// compare (the prime CLI skips the check there too), so every file counts
+/// as owned.
+#[cfg(not(unix))]
+pub fn is_owned_by_current_user(_metadata: &std::fs::Metadata) -> bool {
+    true
+}
+
 /// True when the current process may read and write the file (access(2)
 /// semantics: real/effective uid checks, not just the file mode).
 #[cfg(unix)]

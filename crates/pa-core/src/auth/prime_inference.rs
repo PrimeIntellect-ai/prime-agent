@@ -207,7 +207,7 @@ pub fn default_prime_cli_config_path() -> PathBuf {
 }
 
 /// A trimmed, non-empty string field (TS `stringField`).
-fn string_field(data: &serde_json::Value, key: &str) -> Option<String> {
+pub(super) fn string_field(data: &serde_json::Value, key: &str) -> Option<String> {
     data.as_object()?
         .get(key)?
         .as_str()

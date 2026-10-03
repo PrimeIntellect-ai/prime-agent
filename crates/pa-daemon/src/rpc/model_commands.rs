@@ -15,11 +15,10 @@ use super::commands::RpcState;
 use super::protocol::ResponseData;
 
 /// The available-models registry over the mode's agent dir (the same
-/// resolution `set_model` uses).
+/// resolution `set_model` uses), with the session directory's Prime
+/// Inference team and key.
 fn registry(state: &RpcState) -> pa_core::models::ModelRegistry {
-    let auth = pa_core::auth::AuthStorage::create(&state.agent_dir);
-    let mut registry =
-        pa_core::models::ModelRegistry::create(auth, state.agent_dir.join("models.json"));
+    let mut registry = pa_core::models::ModelRegistry::for_session(&state.agent_dir, &state.cwd);
     registry.load_private_authorization_from_cache();
     registry
 }

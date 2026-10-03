@@ -31,9 +31,9 @@ impl StartupModelProbe {
     /// the startup model, and whether it carries configured auth.
     fn resolve(&self) -> (Option<pa_types::ai::Model>, bool) {
         let settings = pa_core::settings::SettingsManager::create(&self.cwd, &self.agent_dir);
-        let auth = pa_core::auth::AuthStorage::create(&self.agent_dir);
-        let mut registry =
-            pa_core::models::ModelRegistry::create(auth, self.agent_dir.join("models.json"));
+        // The session directory's saved Prime context counts as signed in
+        // there, as its requests use it.
+        let mut registry = pa_core::models::ModelRegistry::for_session(&self.agent_dir, &self.cwd);
         // Sync resolution on a fresh registry must adopt the on-disk private
         // authorization cache before `get_available` (same rule as the daemon
         // create path).
@@ -80,7 +80,7 @@ impl StartupModelProbe {
         };
         let provider_category =
             pa_core::session_engine::telemetry::provider_category(Some(&model.provider));
-        let auth = pa_core::auth::AuthStorage::create(&self.agent_dir);
+        let auth = pa_core::auth::AuthStorage::for_session(&self.agent_dir, &self.cwd);
         let status = auth.get_auth_status(&model.provider);
         let credential = auth.get_all().credential(&model.provider);
         let auth_category = match status.source {

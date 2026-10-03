@@ -2,7 +2,8 @@
 //! locked read/modify/write of the prime-inference credential, the api-key
 //! store with its team selection, the team rebind, and the stored team
 //! read (TS setPrimeInferenceApiKey / setPrimeInferenceTeamSelection /
-//! getPrimeInferenceTeamSelection). The methods stay inherent on
+//! getPrimeInferenceTeamSelection), and the team header and key those
+//! selections and a prime CLI directory context feed. The methods stay inherent on
 //! `AuthStorage`: the impl owns the private lock and reload machinery they
 //! wrap.
 
@@ -131,5 +132,144 @@ impl AuthStorage {
             },
             _ => StoredPrimeTeam::NotSelected,
         }
+    }
+
+    /// File-backed storage for a session in `cwd`: the stored credentials,
+    /// with the Prime Inference team and key the directory's prime CLI
+    /// context selects. Every request path builds its auth through this
+    /// (or [`crate::models::ModelRegistry::for_session`]).
+    #[must_use]
+    pub fn for_session(
+        agent_dir: impl AsRef<std::path::Path>,
+        cwd: impl Into<std::path::PathBuf>,
+    ) -> Self {
+        Self::create(agent_dir).with_project_dir(cwd)
+    }
+
+    /// Resolve the Prime Inference team and key from the prime CLI
+    /// directory context (`PRIME_CONTEXT`, else the nearest
+    /// `.prime/context.json`) of the session directory `cwd`, ahead of the
+    /// stored credential. The stored credential is untouched.
+    #[must_use]
+    pub fn with_project_dir(mut self, cwd: impl Into<std::path::PathBuf>) -> Self {
+        self.project_dir = Some(cwd.into());
+        self.directory_selection = DirectorySelectionMemo::default();
+        self
+    }
+
+    /// What the project directory's prime CLI directory context selects:
+    /// `None` without a project directory or when no context applies.
+    ///
+    /// # Errors
+    ///
+    /// A malformed pin, or a pin or `PRIME_CONTEXT` naming a missing or
+    /// malformed saved context. The request auth falls back to the stored
+    /// credential; the turn preflight refuses Prime Inference runs until
+    /// it is fixed.
+    pub fn prime_directory_selection(
+        &self,
+    ) -> Result<Option<crate::auth::PrimeDirectorySelection>, String> {
+        self.resolved_directory_selection().clone()
+    }
+
+    /// The memoized resolution; a broken context is logged once.
+    fn resolved_directory_selection(
+        &self,
+    ) -> &Result<Option<crate::auth::PrimeDirectorySelection>, String> {
+        self.directory_selection.get_or_init(|| {
+            let (Some(cwd), Some(home)) =
+                (self.project_dir.as_deref(), self.env_credentials.home_dir())
+            else {
+                return Ok(None);
+            };
+            let resolved = crate::auth::prime_directory::resolve_directory_selection(
+                cwd,
+                &home,
+                self.env_credentials.prime_context().as_deref(),
+            );
+            if let Err(error) = &resolved {
+                tracing::warn!(%error, "invalid Prime directory context; using the stored login");
+            }
+            resolved
+        })
+    }
+
+    /// The directory's selection, a broken one read as none.
+    fn directory_selection(&self) -> Option<&crate::auth::PrimeDirectorySelection> {
+        self.resolved_directory_selection().as_ref().ok()?.as_ref()
+    }
+
+    /// The API key of the saved context the directory selects: ranked after
+    /// the environment and ahead of the stored login it replaces.
+    pub(super) fn directory_context_candidate(
+        &self,
+        provider: &str,
+    ) -> Option<AuthSourceCandidate> {
+        if provider != PRIME_INFERENCE_PROVIDER_ID {
+            return None;
+        }
+        let selection = self.directory_selection()?;
+        let api_key = selection.api_key.clone()?;
+        let context = selection.context.clone()?;
+        let label = format!("Prime context '{context}'");
+        Some(self.reuse_auth_source_candidate(
+            AuthSource::PrimeCli,
+            provider,
+            format!("{context} {api_key}"),
+            move || AuthSourceCandidate {
+                source: AuthSource::PrimeCli,
+                configured: false,
+                label: Some(label),
+                identity_fingerprint: fingerprint(
+                    AuthSource::PrimeCli,
+                    &format!("identity:prime-context {context}"),
+                ),
+                value_fingerprint: Some(fingerprint(
+                    AuthSource::PrimeCli,
+                    &format!("value:prime-context {context} {api_key}"),
+                )),
+                resolve_value_fingerprint: None,
+            },
+        ))
+    }
+
+    /// The saved context key the directory selects (see
+    /// [`Self::directory_context_candidate`]).
+    pub(super) fn directory_context_api_key(&self) -> Option<String> {
+        self.directory_selection()?.api_key.clone()
+    }
+
+    /// Provider-scoped request headers (prime-inference team header only):
+    /// `PRIME_TEAM_ID`, then the directory context, then the stored team.
+    /// The stored primeTeam survives runtime and environment API-key
+    /// overrides (fleet P5): an ambient `PRIME_API_KEY` supplies the key,
+    /// never the team.
+    pub fn get_provider_headers(
+        &self,
+        provider_id: &str,
+    ) -> Option<std::collections::HashMap<String, String>> {
+        if provider_id != PRIME_INFERENCE_PROVIDER_ID {
+            return None;
+        }
+        let env_team = self
+            .env_credentials
+            .prime_team_id()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let team_id = match env_team {
+            Some(team_id) => Some(team_id),
+            None => match self.directory_selection() {
+                Some(directory) => directory.team_id.clone(),
+                None => match self.data.credential(provider_id) {
+                    Some(AuthCredential::ApiKey { prime_team, .. }) => {
+                        prime_team.map(|team| team.team_id)
+                    }
+                    _ => None,
+                },
+            },
+        };
+        team_id.map(|team_id| {
+            std::collections::HashMap::from([("X-Prime-Team-ID".to_string(), team_id)])
+        })
     }
 }

@@ -593,6 +593,7 @@ fn login_blocking_on_panel(
                                 crate::prime_inference_login::prime_cli_config_path(&agent_dir)
                                     .as_deref(),
                             prime_team_id: std::env::var("PRIME_TEAM_ID").ok().as_deref(),
+                            cwd: Some(&cwd),
                             poll_interval_ms: None,
                         },
                         &crate::prime_inference_login::PanelPrimeLoginUi::new(panel),

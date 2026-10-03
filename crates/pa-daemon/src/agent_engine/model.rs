@@ -8,6 +8,18 @@ use super::{
 };
 
 impl AgentSessionEngine {
+    /// This session's auth: the stored credentials, with the Prime
+    /// Inference team and key the session directory's prime CLI directory
+    /// context (`.prime/context.json`) selects.
+    pub(crate) fn session_auth(&self) -> pa_core::auth::AuthStorage {
+        pa_core::auth::AuthStorage::for_session(&self.config.agent_dir, self.cwd())
+    }
+
+    /// A model registry over [`Self::session_auth`].
+    pub(crate) fn session_model_registry(&self) -> pa_core::models::ModelRegistry {
+        pa_core::models::ModelRegistry::for_session(&self.config.agent_dir, self.cwd())
+    }
+
     /// The TS `createAgentSession` startup chain (the no-flagged-model
     /// arm of [`Self::resolve_registry_model`]): the saved settings
     /// default, then the featured default, then the first available
@@ -150,9 +162,7 @@ impl AgentSessionEngine {
         let Some((provider, model_id)) = saved.model else {
             return;
         };
-        let auth = pa_core::auth::AuthStorage::create(&self.config.agent_dir);
-        let mut registry =
-            pa_core::models::ModelRegistry::create(auth, self.config.agent_dir.join("models.json"));
+        let mut registry = self.session_model_registry();
         registry.load_private_authorization_from_cache();
         let restored = pa_core::models::find_session_model_with_readiness_wait(
             &mut registry,
@@ -263,9 +273,7 @@ impl AgentSessionEngine {
     /// arm (TS `resolveCliModel`) or the TS `createAgentSession` startup
     /// chain.
     fn resolve_registry_model_unchecked(&self) -> anyhow::Result<Model> {
-        let auth = pa_core::auth::AuthStorage::create(&self.config.agent_dir);
-        let mut registry =
-            pa_core::models::ModelRegistry::create(auth, self.config.agent_dir.join("models.json"));
+        let mut registry = self.session_model_registry();
         // A fresh registry gates private Prime Inference models out until the
         // async authorization refresh runs; adopt the on-disk authorization
         // cache so create-time resolution can pick the session's private
@@ -441,9 +449,7 @@ impl AgentSessionEngine {
         Option<String>,
         Option<std::collections::BTreeMap<String, String>>,
     ) {
-        let auth = pa_core::auth::AuthStorage::create(&self.config.agent_dir);
-        let mut registry =
-            pa_core::models::ModelRegistry::create(auth, self.config.agent_dir.join("models.json"));
+        let mut registry = self.session_model_registry();
         let resolved = registry.get_api_key_and_headers(model, model.headers.as_ref());
         if let Some(api_key) = &self.current_selection().api_key {
             // The create-config key override pins the key, never the
@@ -461,9 +467,7 @@ impl AgentSessionEngine {
         if let Some(api_key) = &self.current_selection().api_key {
             return Some(api_key.clone());
         }
-        let auth = pa_core::auth::AuthStorage::create(&self.config.agent_dir);
-        let mut registry =
-            pa_core::models::ModelRegistry::create(auth, self.config.agent_dir.join("models.json"));
+        let mut registry = self.session_model_registry();
         registry
             .get_api_key_and_headers(model, model.headers.as_ref())
             .api_key

@@ -1,8 +1,9 @@
 //! The API-key lookup + OAuth refresh arm (moved with its concern): the
 //! resolution walk over the candidate sources (runtime override, prime
-//! inference env-before-stored, stored, environment, fallback) with the
-//! staleness gate, the OAuth expiry refresh under the per-provider
-//! single-flight, and the passthrough `get_api_key` (TS getApiKey).
+//! inference env and then the directory's saved context before stored,
+//! stored, environment, fallback) with the staleness gate, the OAuth
+//! expiry refresh under the per-provider single-flight, and the
+//! passthrough `get_api_key` (TS getApiKey).
 
 use super::{
     now_epoch_ms, parse_storage_data, refresh_flight, resolve_config_value,
@@ -45,8 +46,26 @@ impl AuthStorage {
             }
         }
 
+        // 2b. Prime-inference: the saved context the session directory
+        // selects. Its key replaces the stored login there (the stored key
+        // is another account's), so a stale context key skips stored too.
+        let directory_candidate = self.directory_context_candidate(provider_id);
+        if let Some(candidate) = &directory_candidate {
+            if !self.is_stale(provider_id, candidate) {
+                return AuthApiKeyResult {
+                    api_key: self.directory_context_api_key(),
+                    source_token: Self::token_for(provider_id, candidate),
+                    credential_type: Some("api_key"),
+                };
+            }
+        }
+
         // 3. Stored credential.
-        if let Some(credential) = self.data.credential(provider_id) {
+        if let Some(credential) = self
+            .data
+            .credential(provider_id)
+            .filter(|_| directory_candidate.is_none())
+        {
             if let Some(candidate) = self.stored_candidate(provider_id) {
                 if !self.is_stale(provider_id, &candidate) {
                     match &credential {

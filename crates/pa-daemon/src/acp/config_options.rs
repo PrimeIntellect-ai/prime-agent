@@ -215,10 +215,10 @@ pub async fn publish_config_options(
 /// The in-process transport's model discovery: the registry the CLI
 /// composition resolved against (auth storage + `models.json`, with the
 /// private-authorization cache adopted), reading the auth-configured
-/// available models (the TS `refreshAvailableModels` seam).
-pub(crate) fn acp_model_registry(agent_dir: &Path) -> pa_core::models::ModelRegistry {
-    let auth = pa_core::auth::AuthStorage::create(agent_dir);
-    let mut registry = pa_core::models::ModelRegistry::create(auth, agent_dir.join("models.json"));
+/// available models (the TS `refreshAvailableModels` seam). The Prime
+/// Inference team and key follow the session directory `cwd`.
+pub(crate) fn acp_model_registry(agent_dir: &Path, cwd: &Path) -> pa_core::models::ModelRegistry {
+    let mut registry = pa_core::models::ModelRegistry::for_session(agent_dir, cwd);
     registry.load_private_authorization_from_cache();
     registry
 }
@@ -226,8 +226,11 @@ pub(crate) fn acp_model_registry(agent_dir: &Path) -> pa_core::models::ModelRegi
 /// The in-process transport's discovery result (TS
 /// `getAvailableModels`): `Err` carries the discovery failure the
 /// caller reports as "unavailable, try again later".
-pub(crate) fn discover_available_models(agent_dir: &Path) -> anyhow::Result<Vec<Model>> {
-    let registry = acp_model_registry(agent_dir);
+pub(crate) fn discover_available_models(
+    agent_dir: &Path,
+    cwd: &Path,
+) -> anyhow::Result<Vec<Model>> {
+    let registry = acp_model_registry(agent_dir, cwd);
     // A malformed models.json must surface as a discovery failure (the
     // handler's "try again later"), never as an empty catalog the picker
     // then answers with "Unavailable model".

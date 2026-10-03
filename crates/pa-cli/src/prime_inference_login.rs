@@ -94,6 +94,9 @@ pub(crate) struct PrimeLoginInputs<'a> {
     pub http: &'a dyn PrimeHttp,
     pub prime_cli_config_path: Option<&'a Path>,
     pub prime_team_id: Option<&'a str>,
+    /// The session directory whose prime CLI directory context
+    /// (`.prime/context.json`) selects the team ahead of the stored one.
+    pub cwd: Option<&'a Path>,
     /// The challenge poll interval (the product's 5s default; tests use
     /// milliseconds so the race's arms resolve deterministically).
     pub poll_interval_ms: Option<u64>,
@@ -257,7 +260,10 @@ async fn complete_login(
     if ui.is_cancelled() {
         return ProviderAuthOutcome::Cancelled;
     }
-    let mut auth = AuthStorage::create(inputs.agent_dir);
+    let mut auth = match inputs.cwd {
+        Some(cwd) => AuthStorage::for_session(inputs.agent_dir, cwd),
+        None => AuthStorage::create(inputs.agent_dir),
+    };
     auth.set_prime_inference_api_key(api_key, team);
     if let Some(error) = auth.drain_errors().pop() {
         return ProviderAuthOutcome::Error(format!(
@@ -283,15 +289,18 @@ async fn select_team(
     ui: &dyn PrimeLoginUi,
 ) -> String {
     // A pinned PRIME_TEAM_ID wins: nothing is stored (TS reloads and
-    // reports the env status).
+    // reports the env status). So does the session directory's prime CLI
+    // context (`prime switch <team> --local`), as `prime login` skips the
+    // team selection there; a broken one is reported, not bypassed.
     if inputs
         .prime_team_id
         .map(str::trim)
         .as_ref()
         .is_some_and(|value| !value.is_empty())
+        || !matches!(auth.prime_directory_selection(), Ok(None))
     {
         auth.reload();
-        return "Using team from PRIME_TEAM_ID.".to_string();
+        return default_team_status(auth, inputs.prime_team_id);
     }
     // The pane exited: the stored key keeps its standing selection (the
     // same state as a failed fetch below).
@@ -349,7 +358,11 @@ async fn select_team(
 }
 
 /// TS `getPrimeInferenceDefaultTeamStatus`: the env pin, the stored
-/// selection, else the personal account.
+/// selection, else the personal account. Between the env pin and the
+/// stored selection, the session directory's prime CLI context (no TS
+/// equivalent). A saved context with its own key replaces the saved login
+/// in this directory, so the status says so instead of implying the key
+/// just saved is the one in use.
 fn default_team_status(auth: &AuthStorage, prime_team_id: Option<&str>) -> String {
     if prime_team_id
         .map(str::trim)
@@ -357,6 +370,28 @@ fn default_team_status(auth: &AuthStorage, prime_team_id: Option<&str>) -> Strin
         .is_some_and(|value| !value.is_empty())
     {
         return "Using team from PRIME_TEAM_ID.".to_string();
+    }
+    match auth.prime_directory_selection() {
+        Ok(Some(directory)) => {
+            let account = match (directory.team_id, directory.name) {
+                (Some(_), Some(name)) => format!("team \"{name}\""),
+                (Some(team_id), None) => format!("team {team_id}"),
+                (None, _) => "personal account".to_string(),
+            };
+            if let (Some(context), Some(_)) = (directory.context, directory.api_key) {
+                return format!(
+                    "In this directory, Prime context '{context}' from {} supplies the API key and {account}; the saved login applies elsewhere.",
+                    directory.source
+                );
+            }
+            return format!("Using {account} from {}.", directory.source);
+        }
+        Ok(None) => {}
+        Err(error) => {
+            return format!(
+                "Invalid Prime team selection: {error}. Fix it or run `prime config unpin`."
+            );
+        }
     }
     match auth.get_prime_inference_team_selection() {
         StoredPrimeTeam::Team(team) => format!("Using team \"{}\".", team.name),
@@ -729,6 +764,7 @@ mod tests {
                 http,
                 prime_cli_config_path,
                 prime_team_id,
+                cwd: None,
                 // A short poll keeps the browser arm's pending round
                 // deterministically slower than the armed paste.
                 poll_interval_ms: Some(10),
@@ -1022,6 +1058,51 @@ mod tests {
         );
         // No team list request went out (the browser challenge and the
         // manual key's check did).
+        assert!(!http
+            .requests()
+            .iter()
+            .any(|request| request.contains("/api/v1/user/teams")));
+    }
+
+    /// A session directory pinned to a team (`prime switch <team>
+    /// --local`) wins like `PRIME_TEAM_ID`: no team list, and the status
+    /// names the pin instead of a stored team this directory never uses.
+    #[tokio::test]
+    async fn a_pinned_session_directory_skips_the_team_list() {
+        let http = ScriptedHttp::new(vec![whoami_ok()]);
+        let dir = tempfile::tempdir().expect("temp dir");
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).expect("agent dir");
+        let repo = std::fs::canonicalize(dir.path()).expect("canonical dir");
+        std::fs::create_dir_all(repo.join(".prime")).expect("pin dir");
+        std::fs::write(
+            repo.join(".prime/context.json"),
+            r#"{"team_id": "t-pinned", "team_name": "Pinned"}"#,
+        )
+        .expect("pin");
+        let ui = ScriptedUi::new(vec![Some("sk-new".to_string())], vec![]);
+        let outcome = run_prime_inference_login(
+            PrimeLoginInputs {
+                agent_dir: &agent_dir,
+                provider_name: "Prime Inference",
+                config: &production_config(),
+                http: &http,
+                prime_cli_config_path: None,
+                prime_team_id: None,
+                cwd: Some(&repo),
+                poll_interval_ms: Some(10),
+            },
+            &ui,
+        )
+        .await;
+        assert_eq!(
+            outcome,
+            ProviderAuthOutcome::Status(format!(
+                "Saved API key for Prime Inference. Credentials saved to {}. Using team \"Pinned\" from {}.",
+                agent_dir.join("auth.json").display(),
+                repo.join(".prime/context.json").display()
+            ))
+        );
         assert!(!http
             .requests()
             .iter()

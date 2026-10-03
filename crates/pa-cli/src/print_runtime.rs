@@ -495,16 +495,27 @@ async fn build_headless_engine_with(
 ) -> Result<HeadlessEngine, String> {
     let config = &options.config;
 
-    // Model registry: composed catalog + models.json with real auth.
-    let auth = pa_core::auth::AuthStorage::create(&config.agent_dir);
-    let mut registry =
-        pa_core::models::ModelRegistry::create(auth, config.agent_dir.join("models.json"));
+    // Model registry: composed catalog + models.json with real auth (the
+    // Prime Inference team and key follow the session directory).
+    let mut registry = pa_core::models::ModelRegistry::for_session(&config.agent_dir, &config.cwd);
     registry.load_private_authorization_from_cache();
     let model = select_model(
         &mut registry,
         config.provider.as_deref(),
         config.model.as_deref(),
     )?;
+    // A broken prime CLI directory context fails a Prime Inference run
+    // instead of billing the stored login (the daemon turn preflight's
+    // rule; the prime CLI refuses to run under it too).
+    if model.provider == pa_core::auth::PRIME_INFERENCE_PROVIDER_ID {
+        pa_core::auth::AuthStorage::for_session(&config.agent_dir, &config.cwd)
+            .prime_directory_selection()
+            .map_err(|error| {
+                format!(
+                    "Invalid Prime team selection: {error}\n\nFix it, or run `prime config unpin` in this directory."
+                )
+            })?;
+    }
 
     // Resolve request auth once (single-shot mode): the merged headers
     // ship on the request (the TS `getApiKeyAndHeaders` single-owner path;
@@ -720,6 +731,7 @@ fn headless_image_model_router(
     // still holds the route from one a mid-run `/model` switch rewrote.
     let armed_to = armed_target;
     let decide_agent_dir = agent_dir.clone();
+    let swap_cwd = cwd.clone();
     let decide_provider_target = std::sync::Arc::clone(provider_target);
     let decide_armed_from = std::sync::Arc::clone(&armed_from);
     let decide = std::sync::Arc::new(
@@ -757,9 +769,7 @@ fn headless_image_model_router(
             let settings = pa_core::settings::SettingsManager::create(&cwd, &decide_agent_dir);
             let image_model_reference = settings.get_image_model();
             let block_images = settings.get_block_images();
-            let auth = pa_core::auth::AuthStorage::create(&decide_agent_dir);
-            let mut registry =
-                pa_core::models::ModelRegistry::create(auth, decide_agent_dir.join("models.json"));
+            let mut registry = pa_core::models::ModelRegistry::for_session(&decide_agent_dir, &cwd);
             registry.load_private_authorization_from_cache();
             let available: Vec<pa_types::ai::Model> =
                 registry.get_available().into_iter().cloned().collect();
@@ -814,9 +824,8 @@ fn headless_image_model_router(
                 }
                 // The routed model's request auth resolves like the
                 // session model's did at startup (registry + headers).
-                let auth = pa_core::auth::AuthStorage::create(&agent_dir);
                 let mut registry =
-                    pa_core::models::ModelRegistry::create(auth, agent_dir.join("models.json"));
+                    pa_core::models::ModelRegistry::for_session(&agent_dir, &swap_cwd);
                 registry.load_private_authorization_from_cache();
                 let resolved_auth = registry
                     .get_api_key_and_headers(&resolved.model, resolved.model.headers.as_ref());

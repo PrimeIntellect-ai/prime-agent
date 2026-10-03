@@ -40,7 +40,8 @@ pub(crate) struct InProcessConfig {
 pub(super) async fn admit_session_config(mode: &AcpModeState) -> Arc<InProcessConfig> {
     let models = tokio::task::spawn_blocking({
         let agent_dir = Arc::clone(&mode.agent_dir);
-        move || discover_available_models(&agent_dir)
+        let cwd = Arc::clone(&mode.actual_cwd);
+        move || discover_available_models(&agent_dir, &cwd)
     })
     .await
     .ok()
@@ -186,7 +187,8 @@ async fn apply_in_process_config(
             // are the handler's "try again later" invalid-params.
             let models = tokio::task::spawn_blocking({
                 let agent_dir = Arc::clone(&mode.agent_dir);
-                move || discover_available_models(&agent_dir)
+                let cwd = Arc::clone(&mode.actual_cwd);
+                move || discover_available_models(&agent_dir, &cwd)
             })
             .await
             .map_err(|_| ConfigOptionError::Internal("model discovery task failed".to_string()))?
@@ -259,7 +261,8 @@ async fn apply_in_process_model_switch(
     // model's own auth).
     let mut registry = tokio::task::spawn_blocking({
         let agent_dir = Arc::clone(&mode.agent_dir);
-        move || acp_model_registry(&agent_dir)
+        let cwd = Arc::clone(&mode.actual_cwd);
+        move || acp_model_registry(&agent_dir, &cwd)
     })
     .await
     .map_err(|_| anyhow::anyhow!("model registry task failed"))?;

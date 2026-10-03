@@ -51,12 +51,24 @@ impl AgentSessionEngine {
         let preflight_model = self
             .armed_image_route()
             .map_or_else(|| model.clone(), |route| route.target.model);
+        // A broken prime CLI directory context (a malformed
+        // `.prime/context.json`, or one naming a missing saved context)
+        // fails a Prime Inference run instead of billing the stored team,
+        // as the prime CLI refuses to run under it (no TS equivalent).
+        if self.config.faux_script.is_none()
+            && preflight_model.provider == pa_core::auth::PRIME_INFERENCE_PROVIDER_ID
+        {
+            if let Err(error) = self.session_auth().prime_directory_selection() {
+                return TurnResult::Error {
+                    error: format!(
+                        "Invalid Prime team selection: {error}\n\nFix it, or run `prime config unpin` in this directory."
+                    ),
+                    assistant: None,
+                };
+            }
+        }
         if self.config.faux_script.is_none() && self.current_selection().api_key.is_none() {
-            let auth = pa_core::auth::AuthStorage::create(&self.config.agent_dir);
-            let mut registry = pa_core::models::ModelRegistry::create(
-                auth,
-                self.config.agent_dir.join("models.json"),
-            );
+            let mut registry = self.session_model_registry();
             registry.load_private_authorization_from_cache();
             if !registry.has_configured_auth(&preflight_model) {
                 let uses_oauth = registry
@@ -95,6 +107,34 @@ impl AgentSessionEngine {
                 }
             }
         };
+        // The serving target's Prime Inference key and team header were
+        // resolved when the session was built (or its model last switched).
+        // Re-resolve them for every turn so a `.prime/context.json` change
+        // mid-session (`prime switch --local`) bills the team the preflight
+        // above just validated, not the one the session started with. The
+        // target keeps its model: only the request auth moves.
+        let serving = self
+            .provider_target
+            .read()
+            .expect("provider target lock")
+            .as_ref()
+            .map(|target| target.model.clone())
+            .filter(|serving| serving.provider == pa_core::auth::PRIME_INFERENCE_PROVIDER_ID);
+        if let Some(serving) = serving {
+            let (api_key, headers) = self.resolve_request_key_and_headers(&serving);
+            if let Some(target) = self
+                .provider_target
+                .write()
+                .expect("provider target lock")
+                .as_mut()
+                .filter(|target| {
+                    target.model.provider == serving.provider && target.model.id == serving.id
+                })
+            {
+                target.api_key = api_key;
+                target.headers = headers;
+            }
+        }
         // The delivery's cancel flag is consulted at the admission, before
         // the agent run registers: an abort that landed after this
         // delivery's pickup but before the registration (the lazy session
