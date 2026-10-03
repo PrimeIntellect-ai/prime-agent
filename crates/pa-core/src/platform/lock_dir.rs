@@ -332,6 +332,14 @@ impl LockDir {
             && io::Error::last_os_error().kind() == io::ErrorKind::WouldBlock)
     }
 
+    /// Transfer the acquired lock path to a caller that manages ownership
+    /// and release itself (for long-lived leases with inode-guarded cleanup).
+    #[must_use]
+    pub fn into_path(self) -> PathBuf {
+        let mut this = std::mem::ManuallyDrop::new(self);
+        std::mem::take(&mut this.path)
+    }
+
     /// Release: remove the lock directory. A missing directory means someone
     /// else already reclaimed it (e.g. a stale takeover) - matching the TS
     /// release, which tolerates ENOENT. Other failures are surfaced to the

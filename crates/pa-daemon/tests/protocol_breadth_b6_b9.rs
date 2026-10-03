@@ -71,7 +71,10 @@ struct Client {
 #[allow(dead_code)]
 impl Client {
     fn connect(socket: &std::path::Path) -> (Self, serde_json::Value) {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        // A previous supervisor in this fixture is force-killed at block exit.
+        // Its renewable lock must become stale (5s) before the next holder
+        // reclaims the socket; wait through the full acquisition retry budget.
+        let deadline = Instant::now() + Duration::from_secs(20);
         let stream = loop {
             match UnixStream::connect(socket) {
                 Ok(stream) => break stream,
