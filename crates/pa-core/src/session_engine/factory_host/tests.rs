@@ -363,6 +363,38 @@ fn a_local_title_wins_over_a_global_id_of_the_same_name() {
     );
 }
 
+/// Among duplicate titles within a tier, the kernel's title scan reads
+/// `harness.list` — sorted by (kind, path, title, id) — so it picks the
+/// (path, id)-least entry; the preflight must read the same one, not
+/// whichever entry the harness map's iteration order happens to offer.
+#[test]
+fn a_duplicate_title_resolves_the_kernel_list_order() {
+    let dir = tempfile::tempdir().unwrap();
+    write_catalog(dir.path());
+    let spec = json!({
+        "states": [{ "id": "a", "entry": true, "subagent": "researcher" }]
+    });
+    write_harness_state(
+        dir.path(),
+        &[
+            machine_entry("spec", &spec),
+            // Two same-title locals; the kernel's sorted title scan picks
+            // the (path, id)-least: path "", id "aaa-worker".
+            titled_subagent("zzz-worker", "researcher", "testprov/other-model"),
+        ],
+        &[
+            titled_subagent("aaa-worker", "researcher", "testprov/declared-model"),
+            titled_subagent("mmm-worker", "researcher", "testprov/shared-id"),
+        ],
+    );
+    let bridge = host(dir.path(), None, None, true);
+    assert_eq!(
+        bridge.spec_model_selectors("spec").unwrap(),
+        vec!["testprov/declared-model".to_string()],
+        "the (path, id)-least same-title entry is the one the preflight reads"
+    );
+}
+
 /// The local overlay shadows the global spec by id (the merge's `local:`
 /// rule keeps the shadowed global reachable under its own id).
 #[test]

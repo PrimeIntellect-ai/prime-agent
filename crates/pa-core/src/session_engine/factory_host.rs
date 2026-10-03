@@ -186,7 +186,12 @@ impl FactoryHost {
                 // unprefixed tier). A global id must not shadow a local
                 // title — the old id-first sweep matched the global id
                 // while the kernel spawned the local titled subagent,
-                // validating (and allowlisting) the wrong model.
+                // validating (and allowlisting) the wrong model. Among
+                // duplicate titles within a tier, the kernel's title
+                // scan reads `harness.list`, sorted by (kind, path,
+                // title, id), so it picks the (path, id)-least entry —
+                // the preflight must pick the same one, not whichever
+                // entry the store's map iteration happens to offer.
                 let Some(reference) = subagent.as_str() else {
                     continue;
                 };
@@ -195,19 +200,23 @@ impl FactoryHost {
                     Scope::Any => true,
                     other => other == scope,
                 };
-                let tier_entry =
-                    |tier: Scope, key: fn(&crate::refinement::HarnessEntry) -> &str| {
-                        subagents.iter().find(|(scope, candidate)| {
-                            *scope == tier && allows(*scope) && key(candidate) == reference
+                let id_in_tier = |tier: Scope| {
+                    subagents.iter().find(|(scope, candidate)| {
+                        *scope == tier && allows(*scope) && candidate.id == reference
+                    })
+                };
+                let title_in_tier = |tier: Scope| {
+                    subagents
+                        .iter()
+                        .filter(|(scope, candidate)| {
+                            *scope == tier && allows(*scope) && candidate.title == reference
                         })
-                    };
+                        .min_by(|a, b| (&a.1.path, &a.1.id).cmp(&(&b.1.path, &b.1.id)))
+                };
                 [Scope::Local, Scope::Global]
                     .into_iter()
                     .filter(|tier| allows(*tier))
-                    .find_map(|tier| {
-                        tier_entry(tier, |candidate| &candidate.id)
-                            .or_else(|| tier_entry(tier, |candidate| &candidate.title))
-                    })
+                    .find_map(|tier| id_in_tier(tier).or_else(|| title_in_tier(tier)))
                     .and_then(|(_, entry)| entry.metadata.get("model"))
                     .and_then(Value::as_str)
             };

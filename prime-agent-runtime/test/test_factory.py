@@ -1707,7 +1707,7 @@ class ValidateFactoryMachineTest(unittest.TestCase):
                 validate_factory_machine(
                     machine_with({"output": "verdict", "op": "eq", "value": bad})
                 ),
-                ["transitions[0] when.value must be finite (JSON carries no NaN or Infinity)"],
+                ["transitions[0] when.value must be finite JSON data (JSON carries no NaN or Infinity, and only JSON shapes serialize: lists, objects, strings, numbers, booleans, null)"],
                 repr(bad),
             )
         nested = machine_with(
@@ -1715,7 +1715,7 @@ class ValidateFactoryMachineTest(unittest.TestCase):
         )
         self.assertEqual(
             validate_factory_machine(nested),
-            ["transitions[0] when.value must be finite (JSON carries no NaN or Infinity)"],
+            ["transitions[0] when.value must be finite JSON data (JSON carries no NaN or Infinity, and only JSON shapes serialize: lists, objects, strings, numbers, booleans, null)"],
         )
 
     def test_guard_value_object_keys_must_be_strings(self) -> None:
@@ -1740,10 +1740,18 @@ class ValidateFactoryMachineTest(unittest.TestCase):
             {float("nan"): 1},
             {1: "x"},
             {"ok": {("tuple",): 2}},
+            # Non-JSON container leaves reject at the source: a tuple
+            # serializes as something other than the declared shape (an
+            # array) if the encoder accepts it at all, and the floats it
+            # carries would ride past the finiteness traversal.
+            (float("nan"),),
+            ("plain", "tuple"),
+            {"set", "of", "strings"},
+            b"bytes",
         ):
             self.assertEqual(
                 validate_factory_machine(machine_with(["ok", bad])),
-                ["transitions[0] when.value must be finite (JSON carries no NaN or Infinity)"],
+                ["transitions[0] when.value must be finite JSON data (JSON carries no NaN or Infinity, and only JSON shapes serialize: lists, objects, strings, numbers, booleans, null)"],
                 repr(bad),
             )
         # String keys with finite values stay valid.
@@ -1773,13 +1781,13 @@ class ValidateFactoryMachineTest(unittest.TestCase):
         cycle.append(cycle)
         self.assertEqual(
             validate_factory_machine(machine_with(cycle)),
-            ["transitions[0] when.value must be finite (JSON carries no NaN or Infinity)"],
+            ["transitions[0] when.value must be finite JSON data (JSON carries no NaN or Infinity, and only JSON shapes serialize: lists, objects, strings, numbers, booleans, null)"],
         )
         nested: dict[str, Any] = {"flag": True}
         nested["self"] = nested
         self.assertEqual(
             validate_factory_machine(machine_with([nested])),
-            ["transitions[0] when.value must be finite (JSON carries no NaN or Infinity)"],
+            ["transitions[0] when.value must be finite JSON data (JSON carries no NaN or Infinity, and only JSON shapes serialize: lists, objects, strings, numbers, booleans, null)"],
         )
         # A shared-but-acyclic reference is NOT a cycle: the same object
         # appearing twice (a diamond) stays a valid comparison value.
