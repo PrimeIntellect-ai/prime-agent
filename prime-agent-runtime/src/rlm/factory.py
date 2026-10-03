@@ -3297,6 +3297,34 @@ def machine_library_dirs(
     return [("repo", repo), ("user", user)]
 
 
+def _read_library_machine(path: Path) -> "tuple[MachineFile | None, str]":
+    """One library file's validity verdict, shared by scan and resolve.
+
+    The four gates both surfaces apply — read, decode, the file format's
+    strict parser, the write-time spec validator — in one helper, so
+    `factory list` and `resolve_machine` can never disagree: a file
+    invalid here is never listed as usable and never claims its name at
+    resolve time. Returns ``(machine, "")`` when the file parses and
+    validates, ``(None, "<path>: <exact errors>")`` when it fails to read,
+    decode, or parse, and ``(machine, "<path>: <exact spec errors>")``
+    when it parses but its spec fails the validator (the machine rides
+    along so resolve can tell which name the file carries).
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as error:
+        return None, f"{path}: unreadable ({error})"
+    except UnicodeDecodeError as error:
+        return None, f"{path}: not valid UTF-8 ({error})"
+    machine, errors = parse_machine_file(text, source=str(path))
+    if machine is None or errors:
+        return None, f"{path}: {'; '.join(errors)}"
+    spec_errors = validate_factory_spec(machine.spec)
+    if spec_errors:
+        return machine, f"{path}: {'; '.join(spec_errors)}"
+    return machine, ""
+
+
 def _scan_machine_library(
     *, repo_dir: "str | Path | None" = None, user_dir: "str | Path | None" = None
 ) -> "tuple[list[dict[str, Any]], list[str]]":
@@ -3305,10 +3333,12 @@ def _scan_machine_library(
 
     The shared scan behind ``list_machines`` and the CLI's ``factory list``:
     both levels resolve identically, repo wins on name conflicts, and the
-    gates are the file format's strict parser plus the write-time spec
-    validator — a machine the listing shows always parses and validates
-    for resolve/run/import, while the files it skips surface as warnings
-    here and with their exact errors when a run or import touches them.
+    gates are ``_read_library_machine`` — the same verdict
+    ``resolve_machine`` applies, so a machine the listing shows always
+    parses and validates for resolve/run/import, while the files it skips
+    surface as warnings here and never claim their name on the resolve
+    surface either (their exact errors surface there only when no valid
+    machine carries the name).
     """
     machines: dict[str, dict[str, Any]] = {}
     warnings: list[str] = []
@@ -3316,21 +3346,9 @@ def _scan_machine_library(
         if not directory.is_dir():
             continue
         for path in sorted(directory.glob(f"*/{MACHINE_FILE_NAME}")):
-            try:
-                text = path.read_text(encoding="utf-8")
-            except OSError as error:
-                warnings.append(f"{path}: unreadable ({error})")
-                continue
-            except UnicodeDecodeError as error:
-                warnings.append(f"{path}: not valid UTF-8 ({error})")
-                continue
-            machine, errors = parse_machine_file(text, source=str(path))
-            if machine is None or errors:
-                warnings.append(f"{path}: {'; '.join(errors)}")
-                continue
-            spec_errors = validate_factory_spec(machine.spec)
-            if spec_errors:
-                warnings.append(f"{path}: {'; '.join(spec_errors)}")
+            machine, error = _read_library_machine(path)
+            if error:
+                warnings.append(error)
                 continue
             if machine.name in machines:
                 continue  # repo first: the earlier level keeps the name
@@ -3360,9 +3378,10 @@ def list_machines(
 class MachineResolutionError(ValueError):
     """One library lookup failure, with its kind.
 
-    ``broken`` distinguishes the two outcomes a caller must not blur: a
-    machine file exists for the name but failed to parse or validate (its
-    errors say why) versus no machine carrying the name at all.
+    ``broken`` distinguishes the two outcomes a caller must not blur: the
+    name's only carriers are machine files that failed to parse or
+    validate (the first file's errors say why) versus no machine carrying
+    the name at all.
     """
 
     def __init__(self, message: str, *, broken: bool) -> None:
@@ -3379,41 +3398,42 @@ def resolve_machine(
     """Resolve one machine by name: repo directory first, user second.
 
     The fast path reads ``<dir>/<name>/MACHINE.md`` directly, but only
-    returns it when its DECLARED name matches — a directory named ``x``
-    holding ``name: y`` is not the machine ``x`` (the declared name is the
-    machine's name); such a file resolves only through the scan below,
-    under its declared name like it does in the skill library. A file that
-    exists but fails to parse, or carries a spec the write-time validator
-    rejects, raises ``MachineResolutionError`` with ``broken=True`` and
-    the exact errors; a name no machine carries raises it with
-    ``broken=False``.
+    serves what passes ``_read_library_machine`` — the SAME validity
+    verdict the listing scan applies — and only when its DECLARED name
+    matches: a directory named ``x`` holding ``name: y`` is not the
+    machine ``x`` (the declared name is the machine's name); such a file
+    resolves only through the scan below, under its declared name like it
+    does in the skill library. A file that fails to read, decode, or
+    parse, or carries a spec the write-time validator rejects, never
+    claims its name on either surface: resolution falls through to the
+    next level exactly like the listing does, so `factory list`,
+    ``rlm.factory.run``, and export can never disagree about a name. A
+    name whose only carriers are invalid files raises
+    ``MachineResolutionError`` with ``broken=True`` and the first file's
+    exact errors (in repo-to-user order) — broken, never missing; a name
+    no machine carries raises it with ``broken=False``.
     """
     errors = machine_name_errors(name)
     if errors:
         raise ValueError("; ".join(errors))
+    broken: str | None = None
     for _source, directory in machine_library_dirs(repo_dir=repo_dir, user_dir=user_dir):
         path = directory / str(name) / MACHINE_FILE_NAME
-        if path.is_file():
-            try:
-                text = path.read_text(encoding="utf-8")
-            except OSError as error:
-                raise MachineResolutionError(
-                    f"machine {name!r} at {path} is unreadable ({error})", broken=True
-                ) from None
-            except UnicodeDecodeError as error:
-                raise MachineResolutionError(
-                    f"machine {name!r} at {path} is not valid UTF-8 ({error})", broken=True
-                ) from None
-            machine, parse_errors = parse_machine_file(text, source=str(path))
-            if machine is None or parse_errors:
-                raise MachineResolutionError("; ".join(parse_errors), broken=True)
-            if machine.name == name:
-                spec_errors = validate_factory_spec(machine.spec)
-                if spec_errors:
-                    raise MachineResolutionError(
-                        f"{path}: {'; '.join(spec_errors)}", broken=True
-                    )
-                return machine, path
+        if not path.is_file():
+            continue
+        machine, file_error = _read_library_machine(path)
+        if file_error:
+            # The same verdict the listing scan applied: an invalid file
+            # does not claim the name, so the next level gets its chance.
+            # Keep the broken frame only for a file that carries the name
+            # — one that fails outright (machine is None) or declares
+            # this name — because a file declaring another name never
+            # carried this one.
+            if broken is None and (machine is None or machine.name == name):
+                broken = file_error
+            continue
+        if machine.name == name:
+            return machine, path
     listed = list_machines(repo_dir=repo_dir, user_dir=user_dir)
     for entry in listed:
         if entry["name"] == name:
@@ -3423,6 +3443,8 @@ def resolve_machine(
             if machine is None or parse_errors:
                 raise MachineResolutionError("; ".join(parse_errors), broken=True)
             return machine, Path(entry["path"])
+    if broken is not None:
+        raise MachineResolutionError(broken, broken=True)
     listing = ", ".join(entry["name"] for entry in listed)
     raise MachineResolutionError(
         f"unknown machine {name!r}: no MACHINE.md for it in the machine library (machines: {listing or 'none'})",
@@ -3941,7 +3963,7 @@ detail, and the event ledger until then.
   team directory) first, the personal `machines/` library under the agent
   dir second; the earlier level wins on name conflicts. `prime-agent
   factory list | import | export` manages them: list shows only what
-  parses (broken files print as warnings), import runs the same
+  parses and validates (broken files print as warnings), import runs the same
   write-time validation as a stored spec so an invalid machine never
   persists, and export copies a library machine verbatim to a fresh path
   (an existing target is refused, never overwritten). `rlm.factory.run('<name>')`

@@ -81,6 +81,7 @@ from rlm.factory import (
     cli_dispatch,
     compile_factory_dag,
     export_factory_spec,
+    export_library_machine,
     export_machine,
     import_machine,
     list_machines,
@@ -2323,10 +2324,11 @@ class FactoryHelpTest(unittest.TestCase):
         )
         self.assertIn(
             "`prime-agent factory list | import | export` manages them: list shows "
-            "only what parses (broken files print as warnings), import runs the "
-            "same write-time validation as a stored spec so an invalid machine "
-            "never persists, and export copies a library machine verbatim to a "
-            "fresh path (an existing target is refused, never overwritten)",
+            "only what parses and validates (broken files print as warnings), "
+            "import runs the same write-time validation as a stored spec so an "
+            "invalid machine never persists, and export copies a library machine "
+            "verbatim to a fresh path (an existing target is refused, never "
+            "overwritten)",
             flat,
         )
         self.assertIn(
@@ -6163,30 +6165,31 @@ class MachineLibraryResolutionTest(unittest.TestCase):
     def test_resolve_machine_reports_non_utf8_files_as_broken(self) -> None:
         # A machine file that exists but does not decode is a broken library
         # file, exactly like one that fails to parse: the decode error rides
-        # the broken frame. (UnicodeDecodeError is a ValueError, so an
-        # unguarded read would instead surface through run_factory's
-        # name-rule arm as an invalid id.)
+        # the broken frame with the SAME sentence the listing scan warns
+        # with (the shared verdict's wording, path-prefixed).
+        # (UnicodeDecodeError is a ValueError, so an unguarded read would
+        # instead surface through run_factory's name-rule arm as an
+        # invalid id.)
         corrupt = self.user / "broken" / "MACHINE.md"
         corrupt.parent.mkdir(parents=True, exist_ok=True)
         corrupt.write_bytes(b"\xff\xfe\xff not utf-8")
         with self.assertRaises(MachineResolutionError) as ctx:
             resolve_machine("broken", repo_dir=self.repo, user_dir=self.user)
         self.assertTrue(ctx.exception.broken)
-        self.assertIn("is not valid UTF-8", str(ctx.exception))
+        self.assertIn("not valid UTF-8", str(ctx.exception))
         self.assertIn(str(corrupt), str(ctx.exception))
 
     def test_resolve_machine_reports_spec_invalid_files_as_broken(self) -> None:
         # A file that parses but carries a spec the write-time validator
-        # rejects is the exists-but-broken case at resolve time — the
-        # exact broken frame naming the file, never a usable machine the
-        # run rejects late. The fast path raises for a spec-invalid file
-        # at the requested name even when a valid user machine carries
-        # the same name (repo files keep repo-first precedence, exactly
-        # like parse-broken ones), and the scan path below skips one in a
-        # differently-named directory, so an unknown name keeps the
-        # missing frame instead of resolving a spec-invalid file.
+        # rejects is the exists-but-broken case at resolve time when it is
+        # the name's only carrier — the exact broken frame naming the file,
+        # never a usable machine the run rejects late, and never a missing
+        # frame. The scan path below skips one in a differently-named
+        # directory, so an unknown name keeps the missing frame instead of
+        # resolving a spec-invalid file, and a file at the name's directory
+        # that DECLARES another name never carried the requested one: the
+        # invalid file claims no name on either surface.
         invalid = self.store(self.repo, "sweep", "The broken repo machine.", spec={"states": []})
-        self.store(self.user, "sweep", "The user machine.")
         with self.assertRaises(MachineResolutionError) as ctx:
             resolve_machine("sweep", repo_dir=self.repo, user_dir=self.user)
         self.assertTrue(ctx.exception.broken)
@@ -6205,6 +6208,56 @@ class MachineLibraryResolutionTest(unittest.TestCase):
             resolve_machine("ghost", repo_dir=self.repo, user_dir=self.user)
         self.assertFalse(scan_ctx.exception.broken)
         self.assertIn("unknown machine 'ghost'", str(scan_ctx.exception))
+        misnamed = self.repo / "warp"
+        misnamed.mkdir(parents=True)
+        (misnamed / "MACHINE.md").write_text(
+            machine_file_text(
+                name="other", description="Not warp.", spec_json=json.dumps({"states": []})
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaises(MachineResolutionError) as misnamed_ctx:
+            resolve_machine("warp", repo_dir=self.repo, user_dir=self.user)
+        self.assertFalse(misnamed_ctx.exception.broken)
+        self.assertIn("unknown machine 'warp'", str(misnamed_ctx.exception))
+
+    def test_list_and_resolve_agree_on_spec_invalid_files(self) -> None:
+        # Cursor's finding: the scan skips a spec-invalid repo machine so
+        # the listing surfaces a valid user machine of the same name, but
+        # resolve still raised broken on the repo file — `factory list`
+        # advertised a machine that run and export refused. Both surfaces
+        # now share _read_library_machine's verdict: an invalid file never
+        # claims its name, so the valid user machine serves exactly where
+        # the listing shows it, and export copies it verbatim.
+        self.store(self.repo, "sweep", "The broken repo machine.", spec={"states": []})
+        user_path = self.store(self.user, "sweep", "The user machine.")
+        listed = list_machines(repo_dir=self.repo, user_dir=self.user)
+        self.assertEqual([entry["name"] for entry in listed], ["sweep"])
+        self.assertEqual(listed[0]["source"], "user")
+        machine, path = resolve_machine("sweep", repo_dir=self.repo, user_dir=self.user)
+        self.assertEqual(path, user_path)
+        self.assertEqual(machine.description, "The user machine.")
+        self.assertEqual(validate_factory_spec(machine.spec), [])
+        out = self.user.parent / "exported.MACHINE.md"
+        result = export_library_machine("sweep", out, repo_dir=self.repo, user_dir=self.user)
+        self.assertEqual(result["source"], "library")
+        self.assertEqual(out.read_text(encoding="utf-8"), user_path.read_text(encoding="utf-8"))
+
+    def test_resolve_falls_through_parse_broken_files_to_valid_user_machines(self) -> None:
+        # The shared verdict covers every invalidity class: a repo file
+        # that fails to parse claims its name no more than a spec-invalid
+        # one, so the valid user machine serves on both surfaces (the
+        # listing always skipped it) instead of resolve raising broken on
+        # the repo file.
+        broken = self.repo / "sweep" / "MACHINE.md"
+        broken.parent.mkdir(parents=True)
+        broken.write_text("no frontmatter", encoding="utf-8")
+        user_path = self.store(self.user, "sweep", "The user machine.")
+        listed = list_machines(repo_dir=self.repo, user_dir=self.user)
+        self.assertEqual([entry["name"] for entry in listed], ["sweep"])
+        machine, path = resolve_machine("sweep", repo_dir=self.repo, user_dir=self.user)
+        self.assertEqual(path, user_path)
+        self.assertEqual(machine.description, "The user machine.")
 
     def test_one_non_utf8_file_never_poisons_the_listing_scan(self) -> None:
         # The shared scan skips a non-decodable file like any other broken
@@ -6736,13 +6789,14 @@ class FactoryRunFromLibraryTest(unittest.TestCase):
         self.assertEqual(self.host.calls, [])
 
     @async_test
-    async def test_an_invalid_repo_machine_never_shadows_a_valid_user_machine_as_usable(self) -> None:
-        # The finding's case: repo sweep/ holds a file that parses but
-        # fails the spec validator while a valid user sweep exists. The
-        # invalid repo file never masquerades as usable (the run would
-        # reject its spec late) and never silently falls through to the
-        # user machine: the exists-but-broken frame names the repo file,
-        # exactly like a parse-broken repo file.
+    async def test_an_invalid_repo_machine_never_shadows_a_valid_user_machine(self) -> None:
+        # Cursor's follow-up finding: the listing scan skips a spec-invalid
+        # repo machine so a valid user machine of the same name surfaces,
+        # but the run still raised exists-but-broken on the repo file —
+        # `factory list` advertised a machine the run refused. Run, resolve,
+        # and export share the listing's verdict, so the run serves the
+        # user machine the listing advertises; the invalid repo file never
+        # shadows it and never masquerades as usable.
         self.store_machine_file("sweep", {"states": []})
         agent_home = Path(os.environ["PRIME_AGENT_CODING_AGENT_DIR"])
         user_file = agent_home / "machines" / "sweep" / "MACHINE.md"
@@ -6755,14 +6809,17 @@ class FactoryRunFromLibraryTest(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        with self.assertRaises(ValueError) as raised:
-            await rlm_module.rlm.factory.run("sweep")
-        message = str(raised.exception)
-        self.assertIn("exists but is broken", message)
-        self.assertIn(str(self.library / "sweep" / "MACHINE.md"), message)
-        self.assertIn("factory machine must declare between 1 and 1024 states, got 0", message)
-        self.assertNotIn("no library machine with that name", message)
-        self.assertEqual(self.host.calls, [])
+        listed = list_machines()
+        self.assertEqual([entry["name"] for entry in listed], ["sweep"])
+        self.assertEqual(listed[0]["source"], "user")
+        result = await rlm_module.rlm.factory.run("sweep")
+        self.assertEqual(result["spec_id"], "sweep")
+        self.assertEqual(result["machine"], "sweep")
+        self.assertEqual(result["machine_path"], str(user_file))
+        self.assertEqual(result["started"], ["a"])
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "done")
+        self.assertEqual(status["spec_id"], "sweep")
 
     @async_test
     async def test_a_non_utf8_library_file_is_broken_not_an_invalid_name(self) -> None:
