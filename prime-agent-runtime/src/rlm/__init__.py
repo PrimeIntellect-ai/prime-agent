@@ -538,14 +538,23 @@ class _RLMFactoryNamespace:
     memory only; children stay supervisor-owned. Every call is async, so
     always await it: ``await rlm.factory.run('<id>')``.
 
+    When no stored entry carries the id, ``run`` falls back to the machine
+    library: the bundled seeds ship inside the runtime (the personal
+    library lives under the agent dir), and the template runs directly
+    without creating a harness entry:
+    ``await rlm.factory.run('review-sweep')``.
+    ``prime-agent factory list | import | export`` manages the library (a
+    broken machine names its exact errors; a missing one lists what the
+    library has).
+
     The factory is opt-in: while the ``factory.enabled`` setting is off (the
     default; the user turns it on with ``/factory on``), every call above
     refuses with one clean message and only ``help()`` answers, so the
     guide stays readable before opting in.
 
     ``help()`` returns the full embedded authoring reference and API guide
-    (states, ports, guards, joins, foreach, budgets, and the API with
-    worked examples): ``rlm.factory.help()``.
+    (states, ports, guards, joins, foreach, budgets, the machine library,
+    and the API with worked examples): ``rlm.factory.help()``.
     """
 
     async def run(self, spec_id: str, *, name: str | None = None) -> dict[str, Any]:
