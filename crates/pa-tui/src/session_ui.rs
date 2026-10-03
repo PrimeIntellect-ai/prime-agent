@@ -71,6 +71,7 @@ use crate::heartbeats_picker::{
 use crate::image_load::LoadedImage;
 use crate::image_markers::{
     collect_marked_images, evict_images_to_budget, format_image_marker, image_marker_ids,
+    strip_image_markers,
 };
 use crate::info_commands;
 use crate::info_panel::{InfoContent, InfoPanelAction};

@@ -221,6 +221,13 @@ pub trait InteractionTelemetry: Send + Sync {
     /// An image was pasted into the editor from the clipboard (event
     /// `tui image pasted`); `mime_type` is the attachment's sniffed format.
     fn image_pasted(&self, mime_type: &str) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+    /// The image-routing fallback dialog (event `tui image fallback`):
+    /// an image-bearing prompt met a text-only model with no configured
+    /// imageModel. `action` is `opened` (the panel mounted) or the landed
+    /// choice — `send_text_only` / `ask_agent` / `cancel` (the panel's
+    /// escape arm counts as `cancel`). Never the prompt text.
+    fn image_fallback(&self, action: &'static str)
+        -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
     /// A submission parked in the follow-up queue behind a running turn:
     /// `lane` is `steering` (Enter) / `follow_up` (the follow-up key);
     /// `steering_mode` is the session's queue delivery mode (TS

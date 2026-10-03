@@ -92,6 +92,12 @@ pub(crate) use config::CreateSessionResources;
 pub use config::SupervisorLinkConfig;
 use config::{GoalRuntimeHandles, ProducerUsageSink, RestoredSessionModel, StartupScope};
 
+// The image-turn delegation dispatch seam (Kevin's product ruling for
+// `settings.imageModel`: a daemon-backed worker delegates the image
+// reading to one image-model child and serves the parent's turn
+// text-only with the child's description row).
+mod image_delegation;
+
 // The `SessionEngine` trait impl moved to the child module whole -
 // one impl block per trait+type is a rustc constraint (E0119).
 mod session_engine_impl;

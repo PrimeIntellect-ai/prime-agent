@@ -55,6 +55,24 @@ pub fn collect_marked_images<'a, T>(
         .collect()
 }
 
+/// The text without its image markers (the image-routing fallback's
+/// send-text-only choice: the outgoing turn carries neither the marker
+/// text nor the image bytes — submit collects images from the markers).
+/// A marker and one flanking space go together, so a mid-sentence marker
+/// leaves no gap.
+pub fn strip_image_markers(text: &str) -> String {
+    let mut stripped = text.to_string();
+    for id in image_marker_ids(text) {
+        let marker = format_image_marker(id);
+        stripped = stripped
+            .replace(&format!(" {marker} "), " ")
+            .replace(&format!(" {marker}"), "")
+            .replace(&format!("{marker} "), "")
+            .replace(&marker, "");
+    }
+    stripped.trim().to_string()
+}
+
 /// Evict oldest entries (insertion order) from `images` until the total of
 /// `size_of` is within `max_bytes`. Ids in `keep` are never evicted, so an
 /// image whose marker is still live retains its bytes even if that holds
@@ -106,6 +124,26 @@ mod tests {
             collect_marked_images(&pending, "text [image #1] more [image #2] [image #1]");
         assert_eq!(collected, vec![(1, &"first"), (2, &"second")]);
         assert!(collect_marked_images(&pending, "").is_empty());
+    }
+
+    #[test]
+    fn strip_removes_markers_and_one_flanking_space() {
+        assert_eq!(
+            strip_image_markers("what is [image #1] here"),
+            "what is here"
+        );
+        // A repeated marker id strips every occurrence, and mixed ids keep
+        // their sentence shape.
+        assert_eq!(
+            strip_image_markers("a [image #1] b [image #2] [image #1]"),
+            "a b"
+        );
+        // A marker glued to a word takes no space with it.
+        assert_eq!(strip_image_markers("x[image #3]y"), "xy");
+        // An image-only prompt strips to nothing (the choice's empty
+        // submit guard).
+        assert_eq!(strip_image_markers("[image #1]"), "");
+        assert_eq!(strip_image_markers("no markers"), "no markers");
     }
 
     #[test]

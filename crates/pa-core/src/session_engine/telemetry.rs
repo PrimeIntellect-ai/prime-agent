@@ -42,8 +42,8 @@ use super::error_classify::classify_error_message;
 mod track;
 pub use track::{
     track_catalog_refresh, track_compaction_abort_declared, track_daemon_event_summary,
-    track_deleted_child_usage_captured, track_model_refused, track_sessions_archived,
-    track_worker_adoption, track_worker_children_closed,
+    track_deleted_child_usage_captured, track_image_delegation, track_model_refused,
+    track_sessions_archived, track_worker_adoption, track_worker_children_closed,
 };
 
 // The outcome/provider/model/error classification family (the TS

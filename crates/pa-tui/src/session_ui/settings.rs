@@ -6,7 +6,7 @@
 //! ruling removed the setting and the command).
 use super::{
     key_event_to_id, AgentView, DaemonCommand, Duration, KeyEvent, Map, PathBuf, Result, SessionUi,
-    StatusKind, Value, UI_REQUEST_TIMEOUT_MS,
+    StatusKind, SubmitBehavior, Value, UI_REQUEST_TIMEOUT_MS,
 };
 
 /// The `/reload` task's report: the daemon reloaded the session's live
@@ -26,6 +26,13 @@ pub(super) enum PendingConfirm {
     /// download+install never touches the session — the confirm guards
     /// the binary replacement, not the session).
     Update,
+    /// An image-bearing prompt parked at the image-routing fallback (a
+    /// text-only model, no configured imageModel): the draft with its
+    /// markers and bytes until one of the panel's three choices lands.
+    ImagePrompt {
+        text: String,
+        behavior: SubmitBehavior,
+    },
 }
 
 impl SessionUi {
@@ -84,23 +91,40 @@ impl SessionUi {
             crate::confirm::ConfirmAction::None => {}
             crate::confirm::ConfirmAction::Cancel => {
                 view.confirm = None;
-                self.pending_confirm = None;
+                // The image fallback's parked prompt keeps its draft: the
+                // editor cleared when the submit opened the panel, and
+                // the panel owned the frame while open, so the draft
+                // returns un-clobbered.
+                if let Some(PendingConfirm::ImagePrompt { text, .. }) = self.pending_confirm.take()
+                {
+                    self.track_image_fallback("cancel");
+                    view.editor.set_text(&text);
+                }
             }
             crate::confirm::ConfirmAction::Select(option) => {
                 let pending = self.pending_confirm.take();
                 view.confirm = None;
-                if option == "Yes" {
-                    match pending {
-                        Some(PendingConfirm::Import { path }) => {
-                            self.run_import(&path, None, view).await?;
+                match pending {
+                    Some(PendingConfirm::ImagePrompt { text, behavior }) => {
+                        self.apply_image_prompt_choice(&option, &text, behavior, view)?;
+                    }
+                    pending => {
+                        if option == "Yes" {
+                            match pending {
+                                Some(PendingConfirm::Import { path }) => {
+                                    self.run_import(&path, None, view).await?;
+                                }
+                                Some(PendingConfirm::ImportCwdFallback { path, fallback_cwd }) => {
+                                    self.run_import(&path, Some(&fallback_cwd), view).await?;
+                                }
+                                Some(PendingConfirm::Update) => {
+                                    self.spawn_update(view);
+                                }
+                                // The image prompt's choice dispatched in the
+                                // outer arm; it never reaches the Yes ladder.
+                                Some(PendingConfirm::ImagePrompt { .. }) | None => {}
+                            }
                         }
-                        Some(PendingConfirm::ImportCwdFallback { path, fallback_cwd }) => {
-                            self.run_import(&path, Some(&fallback_cwd), view).await?;
-                        }
-                        Some(PendingConfirm::Update) => {
-                            self.spawn_update(view);
-                        }
-                        None => {}
                     }
                 }
             }

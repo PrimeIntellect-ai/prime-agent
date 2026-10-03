@@ -189,7 +189,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 }
                 watcher_record.lock().await.prompt_admitted = true;
                 if let Err(error) = watcher_this
-                    .prompt_child(&child_active_session_id, &prompt)
+                    .prompt_child(&child_active_session_id, &prompt, &[])
                     .await
                 {
                     // The route can fail ambiguously around a worker
@@ -206,7 +206,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                         Ok(())
                     } else {
                         watcher_this
-                            .prompt_child(&child_active_session_id, &prompt)
+                            .prompt_child(&child_active_session_id, &prompt, &[])
                             .await
                     };
                     if let Err(retry_error) = retried {
