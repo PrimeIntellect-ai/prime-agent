@@ -252,6 +252,23 @@ fn bash_cell_renders_bash_mode_line() {
 }
 
 #[test]
+fn running_cell_summary_ticks_live_elapsed() {
+    // The live timer (operator feature 2026-10-03): while the cell runs,
+    // the duration slot ticks the elapsed since the execution start; the
+    // kernel's `durationMs` lands in the same slot when the cell settles.
+    let mut card = cell_card("time.sleep(2)", json!({ "status": "ok" }), false, true);
+    card.started_at = Some(
+        std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_millis(1500))
+            .expect("the clock is past the start"),
+    );
+    let lines = render(&card, 0, Detail::Overview, &theme(), 100, true);
+    let text = text_of(&lines[0]);
+    assert!(text.contains("↑ 1 lines · 1."), "got: {text}");
+    assert!(!text.contains("Took "), "got: {text}");
+}
+
+#[test]
 fn background_shell_duration_label_and_exit() {
     let code = "h = bash('sleep 0.1')";
     let details = json!({

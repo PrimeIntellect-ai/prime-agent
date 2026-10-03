@@ -221,6 +221,46 @@ pub(crate) fn format_bash_duration(ms: u128) -> String {
     format!("{:.1}s", ms as f64 / 1000.0)
 }
 
+/// The instant a still-running call started (the live-timer gate,
+/// operator feature 2026-10-03): `Some` while the card saw its execution
+/// start and the final result never landed — every settle path stamps
+/// `ended_at` together with the result — `None` once settled or when the
+/// card never saw its start (the TS render-state lifecycle). A running
+/// call exists only inside an active turn, and the turn's loader spinner
+/// keeps the loop repainting at its 80ms phase cadence (#3296's wake), so
+/// a duration rendered from this instant ticks on those repaints without
+/// adding a wake of its own.
+fn live_started(card: &ToolCallCard) -> Option<Instant> {
+    card.started_at.filter(|_| card.ended_at.is_none())
+}
+
+/// The `Elapsed`/`Took` duration row the panel shells render below the
+/// call's content (the bash card's TS `Took 1.2s` row): while the call
+/// runs the label is `Elapsed` and the value is recomputed on every
+/// paint — the loader spinner's 80ms phase repaints tick it — and once
+/// the final result lands the row is the exact static `Took` timing the
+/// settled card always rendered. A card that never saw its execution
+/// start renders no row.
+fn duration_row(
+    card: &ToolCallCard,
+    theme: &Theme,
+    content_width: usize,
+    rows: &mut layout::RowOutput,
+) {
+    let Some(started) = card.started_at else {
+        return;
+    };
+    let label = if card.ended_at.is_some() {
+        "Took"
+    } else {
+        "Elapsed"
+    };
+    let elapsed = card.ended_at.unwrap_or_else(Instant::now) - started;
+    let text = format!("{label} {}", format_bash_duration(elapsed.as_millis()));
+    rows.blank();
+    rows.wrapped_text(&text, theme.fg_style(ThemeColor::Dim), content_width);
+}
+
 /// The bash tool's output byte budget (TS `DEFAULT_MAX_BYTES`), used in the
 /// truncation warning when the spill carries no `maxBytes`.
 pub const DEFAULT_MAX_BYTES: usize = 50 * 1024;

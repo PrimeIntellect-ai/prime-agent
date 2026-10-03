@@ -68,6 +68,14 @@ fn traverse(
         );
     }
     out.images(card.result.as_ref(), show_images, theme);
+    // The live timer (operator feature 2026-10-03): while the call runs,
+    // the panel carries the same `Elapsed x.xs` row the bash panel shows,
+    // ticking on the loader spinner's repaints. The settled card keeps
+    // its exact TS shape — the fallback panel renders no duration row —
+    // so the tick retires with the call.
+    if super::live_started(card).is_some() {
+        super::duration_row(card, theme, content_width, out);
+    }
 }
 
 /// Preview the first three source lines, not the first three wrapped rows.
@@ -105,6 +113,13 @@ mod tests {
 
     fn theme() -> Theme {
         Theme::builtin("prime", ColorMode::TrueColor)
+    }
+
+    /// The instant `ms` milliseconds ago: the live timer's start.
+    fn started_ms_ago(ms: u64) -> std::time::Instant {
+        std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_millis(ms))
+            .expect("the clock is past the start")
     }
 
     fn text_of(line: &Line) -> String {
@@ -178,6 +193,57 @@ mod tests {
         let rows = render(&card, 0, Detail::All, &theme(), 120, true);
         let flat: Vec<String> = rows.iter().map(text_of).collect();
         assert!(!flat.iter().any(|r| r.contains("[image/png")));
+    }
+
+    #[test]
+    fn running_card_renders_live_elapsed() {
+        // The live timer (operator feature 2026-10-03): a running call
+        // carries the same `Elapsed x.xs` row the bash panel shows,
+        // recomputed on every repaint.
+        let card = ToolCallCard {
+            id: "t".into(),
+            name: "custom".into(),
+            args: json!({ "query": "sweep" }),
+            started: true,
+            started_at: Some(started_ms_ago(300)),
+            ..Default::default()
+        };
+        let rows = render(&card, 3, Detail::Overview, &theme(), 120, true);
+        let flat: Vec<String> = rows.iter().map(text_of).collect();
+        assert!(
+            flat.iter().any(|r| r.contains("Elapsed 0.")),
+            "got: {flat:?}"
+        );
+        assert!(!flat.iter().any(|r| r.contains("Took ")), "got: {flat:?}");
+    }
+
+    #[test]
+    fn settled_card_renders_no_duration_row() {
+        // The settled card keeps its exact TS shape: the fallback panel
+        // renders no timing, and the live tick retires with the call.
+        let now = std::time::Instant::now();
+        let card = ToolCallCard {
+            id: "t".into(),
+            name: "custom".into(),
+            args: json!({ "query": "sweep" }),
+            started: true,
+            started_at: Some(now),
+            ended_at: Some(now),
+            result: Some(super::super::ToolResultView {
+                content: vec![json!({ "type": "text", "text": "ok" })],
+                details: json!({}),
+                is_error: false,
+            }),
+            result_partial: false,
+            ..Default::default()
+        };
+        let rows = render(&card, 0, Detail::Overview, &theme(), 120, true);
+        let flat: Vec<String> = rows.iter().map(text_of).collect();
+        assert!(
+            flat.iter()
+                .all(|r| !(r.contains("Elapsed ") || r.contains("Took "))),
+            "got: {flat:?}"
+        );
     }
 
     #[test]

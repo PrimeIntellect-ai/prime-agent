@@ -8,7 +8,7 @@
 use serde_json::Value;
 
 use super::layout::{panel_content_width, RowOutput};
-use super::{format_bash_duration, ToolCallCard, ToolResultView};
+use super::{ToolCallCard, ToolResultView};
 use crate::chat::Detail;
 use crate::code_preview::{preview_bash_command, CodePreviewLanguage};
 use crate::theme::{Theme, ThemeColor};
@@ -54,7 +54,6 @@ fn visit(card: &ToolCallCard, detail: Detail, theme: &Theme, width: usize, rows:
     rows.wrapped_line(&format_bash_call(card, theme), content_width);
     if let Some(result) = &card.result {
         bash_result_rows(
-            card,
             result,
             detail.tool_output_expanded(),
             theme,
@@ -62,6 +61,11 @@ fn visit(card: &ToolCallCard, detail: Detail, theme: &Theme, width: usize, rows:
             rows,
         );
     }
+    // The live `Took`/`Elapsed` duration row: the shared emitter ticks
+    // the running card's elapsed on every repaint (a running call has no
+    // result rows yet, so the row is the card's only timing until the
+    // streamed output arrives).
+    super::duration_row(card, theme, content_width, rows);
 }
 
 /// The `$ command` call row (TS `formatBashCall`): dim, with the command
@@ -102,7 +106,6 @@ fn format_bash_call(card: &ToolCallCard, theme: &Theme) -> Line {
 /// The result rows (TS `rebuildBashResultRenderComponent`): output rows,
 /// the truncation warning, the duration row.
 fn bash_result_rows(
-    card: &ToolCallCard,
     result: &ToolResultView,
     expanded: bool,
     theme: &Theme,
@@ -166,17 +169,6 @@ fn bash_result_rows(
         rows.blank();
         rows.wrapped_text(&warning, theme.fg_style(ThemeColor::Warning), content_width);
     }
-    if let Some(started) = card.started_at {
-        let label = if card.result_partial {
-            "Elapsed"
-        } else {
-            "Took"
-        };
-        let elapsed = card.ended_at.unwrap_or_else(std::time::Instant::now) - started;
-        let text = format!("{label} {}", format_bash_duration(elapsed.as_millis()));
-        rows.blank();
-        rows.wrapped_text(&text, theme.fg_style(ThemeColor::Dim), content_width);
-    }
 }
 
 /// The truncation notice (`[Full output: ... . Truncated: ...]`, warning
@@ -237,6 +229,13 @@ mod tests {
 
     fn theme() -> Theme {
         Theme::builtin("prime", ColorMode::TrueColor)
+    }
+
+    /// The instant `ms` milliseconds ago: the live timer's start.
+    fn started_ms_ago(ms: u64) -> std::time::Instant {
+        std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_millis(ms))
+            .expect("the clock is past the start")
     }
 
     fn done_card(command: &str, output: &str) -> ToolCallCard {
@@ -380,6 +379,39 @@ mod tests {
         let flat: Vec<String> = rows.iter().map(text_of).collect();
         assert!(flat.iter().any(|r| r.contains("running")), "got: {flat:?}");
         assert!(flat.iter().any(|r| r.contains("Elapsed ")), "got: {flat:?}");
+    }
+
+    #[test]
+    fn running_card_renders_live_elapsed_before_any_result() {
+        // The quiet window between `tool_execution_start` and the first
+        // streamed frame: the card has a start and no result at all, and
+        // the live timer is the only timing it shows. The value follows
+        // the execution start (the 80ms repaints recompute it).
+        let card = ToolCallCard {
+            id: "t".into(),
+            name: "bash".into(),
+            args: json!({ "command": "sleep 1" }),
+            started: true,
+            started_at: Some(started_ms_ago(300)),
+            ..Default::default()
+        };
+        let rows = render(&card, 3, Detail::Overview, &theme(), 120, true);
+        let flat: Vec<String> = rows.iter().map(text_of).collect();
+        assert!(
+            flat.iter().any(|r| r.contains("Elapsed 0.")),
+            "got: {flat:?}"
+        );
+        assert!(!flat.iter().any(|r| r.contains("Took ")), "got: {flat:?}");
+        let older = ToolCallCard {
+            started_at: Some(started_ms_ago(4000)),
+            ..card
+        };
+        let rows = render(&older, 4, Detail::Overview, &theme(), 120, true);
+        let flat: Vec<String> = rows.iter().map(text_of).collect();
+        assert!(
+            flat.iter().any(|r| r.contains("Elapsed 4.")),
+            "got: {flat:?}"
+        );
     }
 
     #[test]

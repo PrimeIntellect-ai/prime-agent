@@ -1775,6 +1775,9 @@ fn a_landing_result_with_receipts_settles_the_card() {
             }),
             is_error: false,
         });
+        // The final result settles the call (the pipeline stamps
+        // `ended_at` with every settle path): the live timer stops.
+        card.ended_at = Some(std::time::Instant::now());
     }
     view.mark_entry_stale(index);
     let text = transcript_text(&mut view, 80);
