@@ -42,5 +42,11 @@ tokio = { workspace = true, features = ["test-util"] }
 name = "pa-daemon"
 path = "src/main.rs"
 
+# The swarm starvation eval driver (#2353): a real-token harness, never run
+# in CI. The deterministic harness logic lives in `pa_core::swarm_eval`.
+[[bin]]
+name = "swarm-starvation-eval"
+path = "src/bin/swarm-starvation-eval.rs"
+
 [lints]
 workspace = true
