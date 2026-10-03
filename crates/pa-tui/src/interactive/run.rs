@@ -150,6 +150,61 @@ async fn run_interactive_route(
     }
 }
 
+/// The `SubmitAndSettle` barrier's daemon round trip: submit the message
+/// as a `prompt_and_wait`, then read the session's event sequence through
+/// `get_rlm_children` — the one read-only command that reports it. Both
+/// requests are bounded by `timeout_ms`.
+async fn settled_sequence(
+    client: &DaemonClient,
+    active_session_id: String,
+    message: String,
+    timeout_ms: u64,
+) -> anyhow::Result<u64> {
+    let input = pa_types::daemon::PromptInput {
+        content: None,
+        images: None,
+        streaming_behavior: Some(pa_types::daemon::StreamingBehavior::Steer),
+        queue_if_busy: Some(true),
+        expand_prompt_templates: None,
+        source: None,
+        agent_message_id: None,
+        custom_message: None,
+        queue_key: None,
+        prefix_messages: None,
+        admission_id: None,
+        rlm_notice_nonce: None,
+    };
+    let waited = client
+        .request_with_timeout(
+            pa_types::daemon::DaemonCommand::PromptAndWait {
+                id: None,
+                active_session_id: active_session_id.clone(),
+                message,
+                input,
+                rest: serde_json::Map::default(),
+            },
+            timeout_ms,
+        )
+        .await?;
+    anyhow::ensure!(waited.success, "prompt_and_wait failed: {:?}", waited.error);
+    let children = client
+        .request_with_timeout(
+            pa_types::daemon::DaemonCommand::GetRlmChildren {
+                id: None,
+                active_session_id,
+                rest: serde_json::Map::default(),
+            },
+            timeout_ms,
+        )
+        .await?;
+    children
+        .data
+        .as_ref()
+        .and_then(|data| data.get("eventSequence"))
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| anyhow::anyhow!("get_rlm_children carried no eventSequence"))
+}
+
 async fn run_interactive_surface(
     options: InteractiveOptions,
     ui: UiMode,
@@ -631,6 +686,8 @@ async fn run_interactive_surface(
     let mut hint_painted = false;
     let mut running = true;
     let mut wait_idle_deadline: Option<Instant> = None;
+    // The headless `SubmitAndSettle` barrier's target and deadline.
+    let mut settle_target: Option<(u64, Instant)> = None;
     // The headless render barrier's armed state: its deadline, and the
     // frames captured at arming (the `WaitRender` condition scans only
     // frames rendered after the barrier became the queue's head, so a
@@ -740,6 +797,45 @@ async fn run_interactive_surface(
                 } else {
                     wait_idle_deadline = None;
                     pending.pop_front();
+                }
+            } else if let Some((text, timeout_ms)) = match pending.front() {
+                Some(UiInput::SubmitAndSettle { text, timeout_ms }) => {
+                    Some((text.clone(), *timeout_ms))
+                }
+                _ => None,
+            } {
+                // The supervisor races its response and event queues in
+                // one select, so the response arriving proves nothing:
+                // hold until this run has processed the settled sequence.
+                let Some((settled, deadline)) = settle_target else {
+                    match settled_sequence(
+                        &session.client,
+                        session.active_session_id.clone(),
+                        text,
+                        timeout_ms,
+                    )
+                    .await
+                    {
+                        Ok(settled) => {
+                            settle_target =
+                                Some((settled, Instant::now() + Duration::from_millis(timeout_ms)));
+                        }
+                        Err(error) => {
+                            session.note(&format!("settle barrier failed: {error:#}"), &mut view);
+                            pending.pop_front();
+                        }
+                    }
+                    continue;
+                };
+                if session.last_event_sequence >= settled {
+                    settle_target = None;
+                    pending.pop_front();
+                } else if Instant::now() > deadline {
+                    session.note("timed out waiting for the turn to settle", &mut view);
+                    settle_target = None;
+                    pending.pop_front();
+                } else {
+                    inputs_pending = false;
                 }
             } else if let Some((needle, timeout_ms, present)) = match pending.front() {
                 Some(UiInput::WaitRender { needle, timeout_ms }) => {
@@ -1029,7 +1125,9 @@ async fn run_interactive_surface(
                             view.set_terminal_rows(height);
                         }
                     }
-                    UiInput::WaitIdle { .. } => unreachable!("barrier handled above"),
+                    UiInput::WaitIdle { .. } | UiInput::SubmitAndSettle { .. } => {
+                        unreachable!("barrier handled above")
+                    }
                 }
                 // Paint the handled input in this iteration: the select below can
                 // otherwise wait out its 50ms tick before the next draw, and
@@ -1174,9 +1272,13 @@ async fn run_interactive_surface(
         if session.dirty && render_deadline.is_none() {
             render_deadline = Some(Instant::now());
         }
-        for deadline in [wait_idle_deadline, wait_render_deadline]
-            .into_iter()
-            .flatten()
+        for deadline in [
+            wait_idle_deadline,
+            wait_render_deadline,
+            settle_target.map(|(_, deadline)| deadline),
+        ]
+        .into_iter()
+        .flatten()
         {
             if render_deadline.is_none_or(|armed| deadline < armed) {
                 render_deadline = Some(deadline);

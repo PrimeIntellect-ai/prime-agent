@@ -617,7 +617,7 @@ impl Worker {
                 // session's scheduled jobs rebind onto the forked
                 // session file — future restores target the fork, not the
                 // source branch.
-                self.refresh_replaced_session_state();
+                self.refresh_replaced_session_state().await;
                 self.reseed_service_tier_for_replacement();
                 self.bind_scheduled_jobs().await;
                 self.prewarm_replacement_session();

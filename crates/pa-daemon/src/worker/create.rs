@@ -158,26 +158,41 @@ impl Worker {
         // The subagent runtime identity (TS `runtimeMetadata` on the create
         // command): the child id and the parent's live/persisted ids ride
         // the session summaries so the roster can key children
-        // `parentPath#childId` like TS `rosterAgentIdForSummary`.
-        let (rlm_child_id, parent_active_session_id, parent_session_id) = match payload
-            .get("runtimeMetadata")
-        {
-            Some(metadata) if metadata.get("kind").and_then(Value::as_str) == Some("subagent") => (
-                metadata
-                    .get("rlmChildId")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                metadata
-                    .get("parentActiveSessionId")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                metadata
-                    .get("parentSessionId")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-            ),
-            _ => (None, None, None),
-        };
+        // `parentPath#childId` like TS `rosterAgentIdForSummary`. The
+        // semantic spawn origin (TS `semanticParentSessionId` +
+        // `semanticSpawnedByRequestId`) exists only for this arm: a
+        // resumed saved subagent file is a top-level runtime and spawns
+        // no edge.
+        let (rlm_child_id, parent_active_session_id, parent_session_id, semantic_spawn) =
+            match payload.get("runtimeMetadata") {
+                Some(metadata)
+                    if metadata.get("kind").and_then(Value::as_str) == Some("subagent") =>
+                {
+                    let parent_session_id = metadata
+                        .get("parentSessionId")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    (
+                        metadata
+                            .get("rlmChildId")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        metadata
+                            .get("parentActiveSessionId")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        parent_session_id.clone(),
+                        Some(crate::engine::SemanticSpawnOrigin {
+                            parent_session_id,
+                            spawned_by_request_id: payload
+                                .get("spawnedByRequestId")
+                                .and_then(Value::as_str)
+                                .map(str::to_string),
+                        }),
+                    )
+                }
+                _ => (None, None, None, None),
+            };
         let thinking = payload
             .get("thinking")
             .and_then(Value::as_str)
@@ -643,9 +658,11 @@ impl Worker {
             session_file: summary.session_file.clone(),
             thinking,
             child_script: child_script.clone(),
+            semantic_spawn,
         }) {
             return response_failure(None, "create", &error.to_string(), None);
         }
+        self.reseed_rlm_children().await;
         // The built-in Herdr connector binds here, per session: the pane
         // identity comes from the create payload's client env (the client
         // that owns the pane sent it), never from this process's ambient

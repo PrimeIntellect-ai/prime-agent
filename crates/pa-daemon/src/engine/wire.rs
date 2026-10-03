@@ -329,6 +329,22 @@ pub struct RlmSessionIdentity {
     /// `sessionConfig`; the harness analog carries the create's
     /// `childScript` down the recursion). Product sessions carry `None`.
     pub child_script: Option<String>,
+    /// The session's semantic-edge spawn origin (TS
+    /// `semanticParentSessionId` + `semanticSpawnedByRequestId`, carried
+    /// by a subagent create): `Some` only for a create whose runtime
+    /// metadata declares `kind: "subagent"` — a resumed saved subagent
+    /// file is a top-level runtime and spawns no edge, and a replacement
+    /// runtime has none.
+    pub semantic_spawn: Option<SemanticSpawnOrigin>,
+}
+
+/// A created session's semantic-edge provenance (TS
+/// `semanticParentSessionId`/`semanticSpawnedByRequestId`): the parent's
+/// durable session id and the request whose turn spawned this child.
+#[derive(Debug, Clone)]
+pub struct SemanticSpawnOrigin {
+    pub parent_session_id: Option<String>,
+    pub spawned_by_request_id: Option<String>,
 }
 
 /// The resource snapshot for a session without a resource surface (the TS

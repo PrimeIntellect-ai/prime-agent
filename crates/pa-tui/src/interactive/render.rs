@@ -257,6 +257,14 @@ impl Renderer {
                                     return;
                                 }
                             }
+                            HeadlessStep::SubmitAndSettle { text, timeout_ms } => {
+                                if ui_tx
+                                    .send(UiInput::SubmitAndSettle { text, timeout_ms })
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                            }
                             HeadlessStep::Type(text) => {
                                 for key in typed_keys(&text) {
                                     if ui_tx.send(UiInput::Key(key)).is_err() {

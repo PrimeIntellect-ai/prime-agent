@@ -620,9 +620,27 @@ async fn build_headless_engine_with(
         .map_err(|error| format!("MCP manager construction failed: {error}"))?;
         std::sync::Arc::new(std::sync::Mutex::new(manager))
     };
+    // TS print mode records too (`semanticEdgeLedgerPath`): the session
+    // id names the ledger under the session artifact dir; `--no-session`
+    // runs on the in-memory manager (no artifact dir), so the identity is
+    // ledger-less but the request ids still go on the wire.
+    let session_manager = session_manager
+        .unwrap_or_else(|| pa_core::session::manager::SessionManager::in_memory(&config.cwd));
+    let semantic_edges = Some(
+        pa_core::session_engine::semantic_edges::SemanticEdgeIdentity {
+            session_id: session_manager.get_session_id().to_string(),
+            ledger_path: pa_core::session_engine::semantic_edges::semantic_edge_ledger_path(
+                None,
+                session_manager.get_session_artifact_dir().as_deref(),
+            ),
+            parent_session_id: None,
+            spawned_by_request_id: None,
+        },
+    );
     let engine = pa_core::session_engine::engine::create_session(
         pa_core::session_engine::engine::SessionEngineConfig {
             cron_store: None,
+            semantic_edges,
             telemetry,
             steering_mode,
             follow_up_mode,
@@ -637,7 +655,7 @@ async fn build_headless_engine_with(
             prompt_guidelines: config.append_system_prompt.clone(),
             generic_mcp_servers: vec![],
             allow_recursion: None,
-            session_manager,
+            session_manager: Some(session_manager),
             extra_host_handlers: None,
             conversation_log_path: None,
             additional_skill_paths: config
@@ -1714,6 +1732,7 @@ async fn build_faux_engine_with(
         pa_core::session_engine::engine::SessionEngineConfig {
             cron_store: None,
             // Faux verification harness: no product telemetry.
+            semantic_edges: None,
             steering_mode: None,
             follow_up_mode: None,
             telemetry: None,
