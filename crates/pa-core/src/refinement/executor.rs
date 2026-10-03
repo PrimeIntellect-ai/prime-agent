@@ -290,9 +290,12 @@ fn assistant_text(reply: &AssistantMessage) -> String {
 }
 
 /// Apply a plan to the (re-read) harness state. `factory_enabled` is the
-/// resolved `factory.enabled` opt-in (default off): while it is off,
-/// factory create/update edits refuse with the one disabled message, the
-/// same gate the kernel-side factory writers raise.
+/// `factory.enabled` opt-in (default off), resolved by the caller
+/// immediately before this call — after the planning request — so the
+/// synchronous apply always decides on the current setting, never a
+/// pre-request snapshot: while it is off, factory create/update edits
+/// refuse with the one disabled message, the same gate the kernel-side
+/// factory writers raise.
 pub fn apply_refinement_plan(
     state: &mut HarnessState,
     plan: RefinementPlan,

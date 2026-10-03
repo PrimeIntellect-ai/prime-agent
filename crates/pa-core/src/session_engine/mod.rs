@@ -204,13 +204,13 @@ pub struct AgentSession {
     /// summarizer completion — no deltas, no broadcast, no behavior
     /// change.
     compaction_summary_sink: std::sync::Mutex<Option<compaction_exec::SummaryDeltaSink>>,
-    /// The session's agent dir (the settings root): the refine flow reads
-    /// the `factory.enabled` opt-in from its settings.json on every run,
-    /// mirroring the kernel-side factory gate that reads the same file
-    /// through `PRIME_AGENT_CODING_AGENT_DIR`. `None` until the engine
-    /// wiring resolves it (verification harnesses building the session
-    /// directly keep `None`, which reads as the fail-closed disabled
-    /// default).
+    /// The session's agent dir (the settings root): the refine flow
+    /// resolves the `factory.enabled` opt-in from its settings.json on
+    /// every run, immediately before the plan applies, mirroring the
+    /// kernel-side factory gate that reads the same file through
+    /// `PRIME_AGENT_CODING_AGENT_DIR`. `None` until the engine wiring
+    /// resolves it (verification harnesses building the session directly
+    /// keep `None`, which reads as the fail-closed disabled default).
     agent_dir: Option<std::path::PathBuf>,
 }
 
