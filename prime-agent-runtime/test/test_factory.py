@@ -1718,6 +1718,40 @@ class ValidateFactoryMachineTest(unittest.TestCase):
             ["transitions[0] when.value must be finite (JSON carries no NaN or Infinity)"],
         )
 
+    def test_guard_value_object_keys_must_be_strings(self) -> None:
+        # The same wire-cleanliness rule at the object's keys: a
+        # non-finite float key serializes as the non-JSON ``NaN`` token
+        # and breaks the strict consumers, and a non-string key is either
+        # coerced by the encoder (the wire object no longer matches the
+        # declared machine) or rejected by it — a guard declaring one
+        # never survives the reply frames.
+        def machine_with(value: Any) -> dict[str, Any]:
+            return {
+                "states": [
+                    state("a", entry=True, outputs=[{"name": "verdict", "type": "json"}]),
+                    state("b"),
+                ],
+                "transitions": [
+                    {"from": "a", "to": "b", "when": {"output": "verdict", "op": "contains", "value": value}}
+                ],
+            }
+
+        for bad in (
+            {float("nan"): 1},
+            {1: "x"},
+            {"ok": {("tuple",): 2}},
+        ):
+            self.assertEqual(
+                validate_factory_machine(machine_with(["ok", bad])),
+                ["transitions[0] when.value must be finite (JSON carries no NaN or Infinity)"],
+                repr(bad),
+            )
+        # String keys with finite values stay valid.
+        self.assertEqual(
+            validate_factory_machine(machine_with(["ok", {"flag": True, "nested": {"count": 2}}])),
+            [],
+        )
+
     def test_guard_rules(self) -> None:
         def machine_with(when: Any) -> dict[str, Any]:
             return {

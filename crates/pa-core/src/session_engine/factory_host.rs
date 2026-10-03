@@ -121,10 +121,18 @@ impl FactoryHost {
                         .and_then(|entries| entries.get(spec_id))
                 }),
         }?;
+        // JSON null is absent, the read every settled seam makes
+        // (`refinement::planner`'s dag/machine reads, the kernel's Python
+        // writers): a stored `"machine": null` beside a `dag` is the dag
+        // form. `Value::Null` is `Some` here without the filter, so the
+        // fall-through never reached the `dag` and the preflight read "no
+        // declared models" — exempting the dag's selectors from the
+        // allowlist and auth checks.
         let arguments = entry
             .arguments
             .get("machine")
-            .or_else(|| entry.arguments.get("dag"))?;
+            .filter(|value| !value.is_null())
+            .or_else(|| entry.arguments.get("dag").filter(|value| !value.is_null()))?;
         let Some(argument_object) = arguments.as_object() else {
             return Some(Vec::new());
         };

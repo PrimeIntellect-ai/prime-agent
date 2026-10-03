@@ -102,18 +102,27 @@ def _is_positive_int(value: Any) -> bool:
 
 
 def _value_is_finite(value: Any) -> bool:
-    """True when every float inside a guard comparison value is finite.
+    """True when a guard comparison value is JSON-object clean: every
+    nested float finite, and every object key a string.
     JSON carries no NaN/Infinity tokens, so a non-finite float would
     serialize as the non-JSON ``NaN``/``Infinity`` tokens and break every
     strict consumer of the reply frames (the host bridge's parser
-    included) — a machine declaring one is invalid at the source.
+    included) — a machine declaring one is invalid at the source. Object
+    keys must be strings for the same reason at both ends: a non-finite
+    float key carries the token into the frame the same way, and a
+    non-string key (an int, a tuple) is either coerced by the encoder —
+    so the wire object no longer matches the machine's declared one —
+    or rejected by it; either way it is not the declared comparison.
     """
     if isinstance(value, float):
         return math.isfinite(value)
     if isinstance(value, list):
         return all(_value_is_finite(item) for item in value)
     if isinstance(value, dict):
-        return all(_value_is_finite(item) for item in value.values())
+        return all(
+            isinstance(key, str) and _value_is_finite(item)
+            for key, item in value.items()
+        )
     return True
 
 

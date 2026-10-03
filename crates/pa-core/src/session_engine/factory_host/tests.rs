@@ -205,6 +205,78 @@ fn declared_model_selectors_cover_both_subagent_forms_and_spec_forms() {
     assert!(bridge.spec_model_selectors("missing").is_none());
 }
 
+/// A stored `"machine": null` beside a `dag` is the dag form — the
+/// null-is-absent read every settled seam makes — so the preflight must
+/// fall through to the dag's declared models, never read the null as an
+/// empty machine (which exempted the dag's inline model selections from
+/// the allowlist and auth checks before any child spawned).
+#[test]
+fn a_null_machine_falls_through_to_the_dag_spec() {
+    let dir = tempfile::tempdir().unwrap();
+    write_catalog(dir.path());
+    write_harness_state(
+        dir.path(),
+        &[
+            // The poisoned shape only the /refine writer can store: the
+            // kernel's Python `create_factory` writes exactly one of the
+            // two keys; the planner's null-is-absent validation accepts
+            // the dag form with an explicit null machine.
+            factory_entry(
+                "swept",
+                &json!({
+                    "dag": {
+                        "nodes": [
+                            { "id": "a",
+                              "subagent": { "prompt": "p", "model": "testprov/declared-model" } }
+                        ]
+                    },
+                    "machine": serde_json::Value::Null,
+                }),
+            ),
+            // The bare null-dag mirror: the machine form wins, the null
+            // dag must not shadow it.
+            factory_entry(
+                "machined",
+                &json!({
+                    "machine": {
+                        "states": [
+                            { "id": "a", "entry": true,
+                              "subagent": { "prompt": "p", "model": "testprov/declared-model" } }
+                        ]
+                    },
+                    "dag": serde_json::Value::Null,
+                }),
+            ),
+        ],
+        &[],
+    );
+    let bridge = host(dir.path(), None, None, false);
+    assert_eq!(
+        bridge.spec_model_selectors("swept").unwrap(),
+        vec!["testprov/declared-model".to_string()],
+        "the null machine falls through to the dag's declared models"
+    );
+    assert_eq!(
+        bridge.spec_model_selectors("machined").unwrap(),
+        vec!["testprov/declared-model".to_string()],
+        "the null dag never shadows the machine form"
+    );
+    // End to end: the allowlist blocks the dag's declared model, so the
+    // preflight must refuse the run (before the fix the read answered no
+    // declared models and the preflight passed).
+    let gated = host(
+        dir.path(),
+        None,
+        Some(vec!["otherprov/allowed".to_string()]),
+        false,
+    );
+    let refused = gated.preflight_run("swept");
+    assert!(
+        refused.is_err(),
+        "the allowlist gate sees the dag form's declared model: {refused:?}"
+    );
+}
+
 /// The local overlay shadows the global spec by id (the merge's `local:`
 /// rule keeps the shadowed global reachable under its own id).
 #[test]
