@@ -134,6 +134,26 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         "--json  Print JSON",
     ]),
     CommandSpec::new(
+        &["tailscale"],
+        "tailscale [status|serve]",
+        "Tailscale tailnet support: status, and expose a local port via serve/funnel",
+    ),
+    CommandSpec::new(
+        &["tailscale", "status"],
+        "tailscale status [--json]",
+        "Show tailnet state, MagicDNS name, and served endpoints (the default)",
+    )
+    .options(&["--json  Print machine-readable output"]),
+    CommandSpec::new(
+        &["tailscale", "serve"],
+        "tailscale serve --port <n> [--funnel]",
+        "Expose localhost:<n> on your tailnet (wraps `tailscale serve --bg`)",
+    )
+    .options(&[
+        "--port <n>  The local port to expose",
+        "--funnel    Expose publicly via Tailscale Funnel",
+    ]),
+    CommandSpec::new(
         &["incident"],
         "incident [--since <time>] [--until <time>] [--session <id>]",
         "Reconstruct a daemon incident from its logs",
