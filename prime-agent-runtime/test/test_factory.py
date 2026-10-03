@@ -6005,6 +6005,38 @@ class MachineLibraryResolutionTest(unittest.TestCase):
         listed = list_machines(repo_dir=self.repo, user_dir=self.user)
         self.assertEqual([entry["name"] for entry in listed], ["sweep"])
 
+    def test_the_declared_name_wins_over_the_directory_name(self) -> None:
+        # The fast path reads <dir>/<name>/MACHINE.md but only returns it
+        # when its DECLARED name matches: a directory named `misdir`
+        # holding `name: actual` is not the machine `misdir` — it resolves
+        # as `actual` (and a repo machine declared `sweep` is never
+        # shadowed by a `sweep/` directory that declares another name).
+        directory = self.user / "misdir"
+        directory.mkdir(parents=True)
+        (directory / "MACHINE.md").write_text(
+            machine_file_text(name="actual", description="Declared, not directory-named."),
+            encoding="utf-8",
+        )
+        machine, path = resolve_machine("actual", repo_dir=self.repo, user_dir=self.user)
+        self.assertEqual(path, directory / "MACHINE.md")
+        with self.assertRaises(ValueError) as raised:
+            resolve_machine("misdir", repo_dir=self.repo, user_dir=self.user)
+        self.assertIn("unknown machine 'misdir'", str(raised.exception))
+
+    def test_a_directory_named_machine_shadowing_is_refused(self) -> None:
+        # repo/sweep/ declares `other`: asking for `sweep` must not return
+        # that file, and a user machine legitimately named `sweep` wins.
+        misnamed = self.repo / "sweep"
+        misnamed.mkdir(parents=True)
+        (misnamed / "MACHINE.md").write_text(
+            machine_file_text(name="other", description="Not sweep."),
+            encoding="utf-8",
+        )
+        self.store(self.user, "sweep", "The real sweep.")
+        machine, path = resolve_machine("sweep", repo_dir=self.repo, user_dir=self.user)
+        self.assertEqual(path, self.user / "sweep" / "MACHINE.md")
+        self.assertEqual(machine.description, "The real sweep.")
+
     def test_user_dir_serves_names_the_repo_does_not_have(self) -> None:
         self.store(self.repo, "repo-only", "The repo machine.")
         user_path = self.store(self.user, "mine", "The user machine.")
@@ -6296,6 +6328,41 @@ class ExportMachineTest(unittest.TestCase):
         self.assertEqual(result["source"], "library")
         self.assertEqual(out.read_text(encoding="utf-8"), text)
 
+    def test_export_refuses_a_symlinked_target_without_following_it(self) -> None:
+        # The no-overwrite path creates the file exclusively, so a symlink
+        # planted at the target refuses instead of being followed and its
+        # victim keeps its bytes.
+        text = machine_file_text(description="A machine that sweeps.", spec_json=json.dumps(valid_dag()))
+        directory = self.library / "sweep"
+        directory.mkdir(parents=True)
+        (directory / "MACHINE.md").write_text(text, encoding="utf-8")
+        victim = self.out_dir / "victim.txt"
+        victim.write_text("keep me", encoding="utf-8")
+        link = self.out_dir / "link.MACHINE.md"
+        link.symlink_to(victim)
+        with self.assertRaises(ValueError) as raised:
+            export_machine("sweep", link, repo_dir=None, user_dir=self.library)
+        self.assertIn("already exists", str(raised.exception))
+        self.assertEqual(victim.read_text(encoding="utf-8"), "keep me")
+        self.assertTrue(link.is_symlink())
+
+    def test_multiline_entry_content_exports_as_one_line(self) -> None:
+        # A stored entry's content is free prose; a machine description
+        # must be a single line, so the export collapses it instead of
+        # refusing a perfectly ordinary entry.
+        self.harness.create_factory(
+            "multiline", "First line of prose.\nSecond line of prose.\n\nThird paragraph.",
+            machine={"states": [{"id": "a", "entry": True, "subagent": {"prompt": "P."}}]},
+        )
+        out = self.out_dir / "multiline.MACHINE.md"
+        result = export_machine("multiline", out)
+        self.assertEqual(result["source"], "spec")
+        rendered = out.read_text(encoding="utf-8")
+        self.assertIn(
+            "description: First line of prose. Second line of prose. Third paragraph.",
+            rendered,
+        )
+
     def test_spec_export_refuses_to_silently_overwrite_the_target(self) -> None:
         out = self.out_dir / "spec.MACHINE.md"
         export_factory_spec(valid_machine(), out, name="sweep", description="A machine that sweeps.")
@@ -6467,6 +6534,20 @@ class FactoryRunFromLibraryTest(unittest.TestCase):
         except ValueError as error:
             self.assertIn("no stored factory entry", str(error))
             self.assertIn("no library machine with that name", str(error))
+
+    @async_test
+    async def test_an_invalid_name_still_reports_the_unknown_spec_frame(self) -> None:
+        # A stored-entry id that is not a legal machine name (spaces,
+        # capitals) can never resolve from the library: the lookup must
+        # not surface the bare name-rule sentence, losing the unknown-spec
+        # frame.
+        with self.assertRaises(ValueError) as raised:
+            await rlm_module.rlm.factory.run("My Spec")
+        message = str(raised.exception)
+        self.assertIn("unknown factory spec 'My Spec'", message)
+        self.assertIn("not a valid machine name", message)
+        self.assertIn("lowercase a-z, 0-9, hyphens", message)
+        self.assertEqual(self.host.calls, [])
 
     @async_test
     async def test_a_broken_library_file_names_its_errors_not_a_missing_name(self) -> None:

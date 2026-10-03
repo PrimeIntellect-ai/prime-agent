@@ -15,8 +15,10 @@ at a time), and one aggregator child merges the per-file verdicts into a
 single issue list.
 
 The review state is a `foreach`: the `files` input (a JSON list) expands to
-one reviewer instance per file, and every reviewer's one-line verdict joins
-into the `found` text port the aggregator reads.
+one reviewer instance per changed file (the `foreach.max` cap of 256 only
+bounds pathological diffs; `run.max_parallel: 8` is what bounds how many
+reviewers run at once), and every reviewer's one-line verdict joins into
+the `found` text port the aggregator reads.
 
 ## How to run it
 
@@ -72,7 +74,7 @@ settle answer of the `report` state.
       ],
       "foreach": {
         "over": "files",
-        "max": 8
+        "max": 256
       },
       "budget_ms": 240000
     },

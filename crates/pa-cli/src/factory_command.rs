@@ -332,16 +332,25 @@ fn run_export(name: &str, out: &str, json: bool) -> i32 {
     }
 }
 
+/// The failed dispatch's error sentences (the validator's exact text,
+/// unwrapped from the JSON envelope — printing the `Value` would show the
+/// JSON quoting around every sentence).
+fn dispatch_error_sentences(result: &Value) -> Vec<&str> {
+    result
+        .get("errors")
+        .and_then(Value::as_array)
+        .map(|errors| errors.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default()
+}
+
 /// Print a failed dispatch's errors verbatim (the validator's exact
 /// sentences); `Some(exit code)` when the result is not an ok-payload.
 fn print_dispatch_errors(result: &Value) -> Option<i32> {
     if result.get("ok").and_then(Value::as_bool).unwrap_or(false) {
         return None;
     }
-    if let Some(errors) = result.get("errors").and_then(Value::as_array) {
-        for error in errors {
-            eprintln!("Error: {error}");
-        }
+    for error in dispatch_error_sentences(result) {
+        eprintln!("Error: {error}");
     }
     Some(1)
 }
@@ -452,6 +461,12 @@ mod tests {
         // Errors go to stderr inside print_dispatch_result; the exit code is the pin.
         assert_eq!(print_dispatch_result(&failure, false, "imported"), 1);
         assert_eq!(render_list(&failure, false), 1);
+        // The sentence prints verbatim: unwrapped from the JSON envelope,
+        // never with JSON quoting.
+        assert_eq!(
+            dispatch_error_sentences(&failure),
+            ["run max_parallel must be an integer between 1 and 64"]
+        );
     }
 
     #[test]

@@ -2852,6 +2852,14 @@ async def run_factory(spec_id: str, *, name: str | None = None) -> dict[str, Any
                 f"unknown factory spec {spec_id!r}: no stored factory entry and "
                 f"no library machine with that name ({error})"
             ) from None
+        except ValueError as error:
+            # An id that is not a legal machine name (spaces, capitals) can
+            # never resolve from the library either; the unknown-spec frame
+            # must not lose the lookup to the name-rule sentence.
+            raise ValueError(
+                f"unknown factory spec {spec_id!r}: no stored factory entry, and "
+                f"the id is not a valid machine name either ({error})"
+            ) from None
         return await executor.run_machine(machine, machine_path=path, name=name)
     return await executor.run(spec_id, name=name)
 
@@ -3354,10 +3362,11 @@ def resolve_machine(
 ) -> "tuple[MachineFile, Path]":
     """Resolve one machine by name: repo directory first, user second.
 
-    The fast path reads ``<dir>/<name>/MACHINE.md`` directly; when no
-    directory carries that name, the frontmatter names win like they do in
-    the skill library (a directory may be named differently from its
-    declared machine), so the library is scanned once more. A file that
+    The fast path reads ``<dir>/<name>/MACHINE.md`` directly, but only
+    returns it when its DECLARED name matches — a directory named ``x``
+    holding ``name: y`` is not the machine ``x`` (the declared name is the
+    machine's name); such a file resolves only through the scan below,
+    under its declared name like it does in the skill library. A file that
     exists but fails to parse raises ``MachineResolutionError`` with
     ``broken=True`` and the exact errors; a name no machine carries raises
     it with ``broken=False``.
@@ -3377,7 +3386,8 @@ def resolve_machine(
             machine, parse_errors = parse_machine_file(text, source=str(path))
             if machine is None or parse_errors:
                 raise MachineResolutionError("; ".join(parse_errors), broken=True)
-            return machine, path
+            if machine.name == name:
+                return machine, path
     listed = list_machines(repo_dir=repo_dir, user_dir=user_dir)
     for entry in listed:
         if entry["name"] == name:
@@ -3421,6 +3431,39 @@ def import_machine(path: "str | Path", *, target_dir: "str | Path | None" = None
     return {"name": machine.name, "path": str(destination), "created": created}
 
 
+def _single_line(text: Any) -> str:
+    """Collapse free prose onto one line (whitespace runs become spaces).
+
+    A stored entry's ``content`` is free prose while a machine description
+    must be a single line, so exports collapse rather than refuse.
+    """
+    if not isinstance(text, str):
+        return ""
+    return " ".join(text.split())
+
+
+def _write_export_target(destination: Path, text: str, *, overwrite: bool) -> None:
+    """Write an export target, never silently clobbering one.
+
+    The no-overwrite path creates the file exclusively (``open(..., "x"``):
+    the existence check and the creation are one atomic step, so a file
+    created concurrently after a plain ``exists()`` check cannot slip past
+    the refusal, and a symlink planted at the target refuses instead of
+    being followed); ``overwrite=True`` is the explicit opt-in that
+    replaces whatever is there.
+    """
+    if overwrite:
+        destination.write_text(text, encoding="utf-8")
+        return
+    try:
+        with open(destination, "x", encoding="utf-8") as handle:
+            handle.write(text)
+    except FileExistsError:
+        raise ValueError(
+            f"export path {destination} already exists (pass overwrite=True to replace it)"
+        ) from None
+
+
 def export_factory_spec(
     spec: Any,
     out_path: "str | Path",
@@ -3455,12 +3498,8 @@ def export_factory_spec(
     destination = Path(out_path).expanduser()
     if destination.is_dir():
         raise ValueError(f"export path {destination} is a directory (pass a file path)")
-    if destination.exists() and not overwrite:
-        raise ValueError(
-            f"export path {destination} already exists (pass overwrite=True to replace it)"
-        )
     destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_text(render_machine_file(machine), encoding="utf-8")
+    _write_export_target(destination, render_machine_file(machine), overwrite=overwrite)
     return {"name": name, "path": str(destination), "source": "spec"}
 
 
@@ -3485,12 +3524,10 @@ def export_library_machine(
     destination = Path(out_path).expanduser()
     if destination.is_dir():
         raise ValueError(f"export path {destination} is a directory (pass a file path)")
-    if destination.exists() and not overwrite:
-        raise ValueError(
-            f"export path {destination} already exists (pass overwrite=True to replace it)"
-        )
     destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+    _write_export_target(
+        destination, path.read_text(encoding="utf-8"), overwrite=overwrite
+    )
     return {"name": machine.name, "path": str(destination), "source": "library"}
 
 
@@ -3525,7 +3562,7 @@ def export_machine(
             raise ValueError(
                 "; ".join(errors + [f"the stored entry id {target!r} cannot become a machine name"])
             )
-        description = (entry.content or "").strip() or entry.title
+        description = _single_line(entry.content) or _single_line(entry.title)
         return export_factory_spec(
             spec, out_path, name=target, description=description, overwrite=overwrite
         )
@@ -3536,7 +3573,7 @@ def export_machine(
             raise ValueError(
                 "; ".join(errors + [f"the run's spec id {run.spec_id!r} cannot become a machine name"])
             )
-        description = (run.name or f"factory run {run.run_id}").strip()
+        description = _single_line(run.name) or f"factory run {run.run_id}"
         return export_factory_spec(
             run.machine, out_path, name=run.spec_id, description=description, overwrite=overwrite
         )
