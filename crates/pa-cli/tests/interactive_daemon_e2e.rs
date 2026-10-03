@@ -5883,3 +5883,146 @@ async fn tui_refused_submit_restores_the_draft_after_the_round_trip() {
     );
     drop(supervisor);
 }
+
+/// A prompt accepted before the worker is killed must surface the TS
+/// connection-closed error row, not a quiet status note. The killer waits
+/// for the worker's `isStreaming` state (an external admission condition),
+/// so I/O stalls cannot move a fixed submit/kill clock across the edge.
+#[tokio::test]
+async fn tui_accepted_then_killed_turn_renders_closed_error() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let session_dir = dir.path().join("agent/sessions");
+    std::fs::create_dir_all(&session_dir).expect("session dir");
+    let supervisor = spawn_supervisor(dir.path());
+    let script = serde_json::json!({ "responses": [
+        { "text": "reply must not arrive", "delayMs": 60_000 },
+    ] });
+    let script_path = dir.path().join("script.json");
+    let session_id = create_session_via_daemon(
+        &supervisor.socket,
+        &script_path,
+        &script,
+        dir.path(),
+        &session_dir,
+    )
+    .await;
+    let kill_socket = supervisor.socket.clone();
+    let kill_session_id = session_id.clone();
+    let kill_task = tokio::spawn(async move {
+        let (client, _events) = pa_tui::daemon_client::DaemonClient::connect(&kill_socket)
+            .await
+            .expect("connect supervisor for kill");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let state = client
+                .request_ok(DaemonCommand::GetConnectionState {
+                    id: None,
+                    active_session_id: kill_session_id.clone(),
+                    rest: serde_json::Map::default(),
+                })
+                .await
+                .expect("get worker connection state");
+            if state["isStreaming"] == true {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "worker never began the accepted turn: {state}"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        client
+            .request_ok(DaemonCommand::Kill {
+                id: None,
+                active_session_id: kill_session_id,
+                rest: serde_json::Map::default(),
+            })
+            .await
+            .expect("kill admitted session");
+        client.close();
+    });
+    let options = pa_tui::interactive::InteractiveOptions {
+        models: None,
+        socket_path: supervisor.socket.clone(),
+        cwd: dir.path().to_path_buf(),
+        session_dir: Some(session_dir),
+        script_path: Some(script_path),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
+        model_catalog: Vec::new(),
+        model_configured_providers: std::collections::HashSet::default(),
+        model_recent_models: Vec::new(),
+        default_thinking_level: None,
+        no_session: false,
+        session: pa_tui::interactive::SessionSelection::Attach(session_id),
+        show_images: true,
+        fullscreen_mouse: true,
+        initial_message: None,
+        theme: "prime".to_string(),
+        code_block_indent: "  ".to_string(),
+        tree_filter_mode: String::new(),
+        branch_summary_skip_prompt: false,
+        version: "0.0.0".to_string(),
+        onboarding: None,
+        telemetry_disabled: None,
+        client_auth: None,
+        traces: None,
+        provider_auth: None,
+        update_commands: None,
+        telemetry: None,
+        keybindings: pa_tui::keybindings::KeybindingsManager::new(),
+        session_rlm_depth: None,
+        prompt_stash: std::sync::Arc::default(),
+        session_has_children: false,
+        restore_dock_focus: false,
+        client_settings: None,
+    };
+    let error_row = "⚠ Error: The daemon stopped this agent session. Its transcript remains saved and can be reopened from Agents View.";
+    let plan = pa_tui::interactive::HeadlessPlan {
+        steps: vec![
+            pa_tui::interactive::HeadlessStep::Submit("held accepted prompt".to_string()),
+            // The cancellation status is a later, replaceable note. Require
+            // it first so the error assertion covers the end state after
+            // the status that used to overwrite `session closed (killed)`.
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: "turn failed: prompt cancelled".to_string(),
+                timeout_ms: 30_000,
+            },
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: error_row.to_string(),
+                timeout_ms: 30_000,
+            },
+        ],
+        width: 180,
+        height: 30,
+    };
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
+    kill_task.await.expect("the kill task");
+    let rendered = outcome.frames.join("\n");
+    assert!(
+        rendered.contains(error_row),
+        "killed turn had {} frames without the TS error row; old_info={}; final={}",
+        outcome.frames.len(),
+        rendered.contains("session closed (killed)"),
+        outcome.frames.last().expect("final frame")
+    );
+    assert!(
+        !rendered.contains("reply must not arrive"),
+        "held response leaked:\n{rendered}"
+    );
+    let last = outcome.frames.last().expect("final frame");
+    assert!(
+        last.contains("turn failed: prompt cancelled"),
+        "the post-close cancellation must reach the frame:\n{last}"
+    );
+    assert!(
+        last.contains(error_row),
+        "close error row must persist after cancellation:\n{last}"
+    );
+    assert!(
+        !last.contains("session closed (killed)"),
+        "info downgrade remains:\n{last}"
+    );
+    drop(supervisor);
+}
