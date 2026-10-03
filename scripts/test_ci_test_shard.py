@@ -13,6 +13,9 @@ only - no builds):
     masquerade as a full one, and coverage can never silently regress;
   - a mixed-scope wave (one shard claiming a different selection) fails
     the audit instead of auditing a chimera;
+  - a wave assembled from two workflow attempts (a re-run of individual
+    shard jobs) fails the audit instead of merging an earlier attempt's
+    green with the re-run shard's;
   - a shard that skips one of its selected units fails;
   - a unit that runs outside the selection fails;
   - --print-selection reports the selection without running anything and
@@ -118,7 +121,8 @@ class AuditTestCase(unittest.TestCase):
                           if u["package"] == cls.crate]
 
     def green_wave(self, directory: Path, crates, break_shard=None,
-                   drop_unit=False, add_outside=False, scope_by_shard=None):
+                   drop_unit=False, add_outside=False, scope_by_shard=None,
+                   attempt_by_shard=None):
         selection = [u["id"] for u in self.units
                      if crates is None or u["package"] in set(crates)]
         for shard in range(1, TOTAL + 1):
@@ -134,9 +138,13 @@ class AuditTestCase(unittest.TestCase):
                     results.append(dict(id=outside[0], rc=0, seconds=1.0,
                                         failed_tests=[]))
             use_crates = scope_by_shard(shard) if scope_by_shard else crates
+            path = directory / f"shard-manifest-{shard}.json"
             SHARD.write_manifest(
-                directory / f"shard-manifest-{shard}.json", shard, TOTAL,
-                self.all_ids, results, use_crates)
+                path, shard, TOTAL, self.all_ids, results, use_crates)
+            if attempt_by_shard:
+                manifest = json.loads(path.read_text(encoding="utf-8"))
+                manifest["attempt"] = attempt_by_shard(shard)
+                path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
 
     def test_a_full_wave_audits_green(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -164,6 +172,60 @@ class AuditTestCase(unittest.TestCase):
             result = run_summary(directory)
             self.assertEqual(result.returncode, 1, result.stdout)
             self.assertIn("different selection scopes", result.stdout)
+
+    def test_a_re_run_of_individual_shards_fails_the_audit(self):
+        """`gh run rerun --failed` re-runs only the failed jobs, so the
+        summary merges attempt-1 manifests with the re-run shard's. The
+        merged verdict would cover units the re-run never re-ran."""
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            self.green_wave(directory, [self.crate],
+                            attempt_by_shard=lambda shard: 2 if shard == 5 else 1)
+            result = run_summary(directory)
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertIn("different workflow attempts", result.stdout)
+            self.assertIn("shard 5: attempt 2", result.stdout)
+            self.assertIn("shard 4: attempt 1", result.stdout)
+
+    def test_a_single_attempt_re_run_audits_green(self):
+        """Every shard re-ran (a full re-run, or the first run): one attempt
+        across the wave is the normal case and must stay green."""
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            self.green_wave(directory, [self.crate],
+                            attempt_by_shard=lambda shard: 2)
+            result = run_summary(directory)
+            self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertIn("- attempt: 2", result.stdout)
+
+    def test_a_manifest_without_an_attempt_reads_as_the_first_attempt(self):
+        """Manifests written before the field existed (and the local gates,
+        which run outside Actions) carry none; they must still audit green
+        against a first-attempt wave rather than read as a mix."""
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            self.green_wave(directory, [self.crate])
+            for path in directory.glob("shard-manifest-*.json"):
+                manifest = json.loads(path.read_text(encoding="utf-8"))
+                del manifest["attempt"]
+                path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+            result = run_summary(directory)
+            self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertIn("- attempt: 1", result.stdout)
+
+    def test_a_stale_attempt_manifest_cannot_pass_as_green(self):
+        """The regression this pins: a re-run shard goes green while the other
+        shards keep their earlier-attempt manifests. Before the fix the summary
+        merged the two attempts and reported the wave green, so a lane could
+        read a verdict for units the re-run never re-ran."""
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            self.green_wave(directory, [self.crate],
+                            attempt_by_shard=lambda shard: 2 if shard == 5 else 1)
+            result = run_summary(directory)
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertNotIn("all units green", result.stdout)
+            self.assertIn("PARTITION AUDIT FAILED", result.stdout)
 
     def test_a_shard_that_skips_a_selected_unit_fails(self):
         with tempfile.TemporaryDirectory() as tmp:

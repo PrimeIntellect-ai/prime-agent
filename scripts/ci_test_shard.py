@@ -196,10 +196,22 @@ def write_manifest(path: Path, shard: int, total: int, all_ids: list[str],
                    results: list[dict], crates: list[str] | None = None) -> None:
     selection_ids = [i for i in all_ids
                      if crates is None or _unit_package(i) in set(crates)]
+    # The attempt this manifest was produced by. `GITHUB_RUN_ATTEMPT` is the
+    # runner's own counter and rises on every re-run, so it is the one value
+    # that separates a manifest an earlier attempt wrote from one the attempt
+    # in flight wrote. It is absent outside Actions (the local gates), where
+    # every manifest is attempt 1.
+    attempt = os.environ.get("GITHUB_RUN_ATTEMPT", "")
     manifest = {
         "schema": 1,
         "shard": shard,
         "total": total,
+        # A `gh run rerun --failed` wave re-runs only the failed jobs, so the
+        # shards that were already green keep their earlier-attempt manifests
+        # while the re-run shard writes a new one. Recording the attempt lets
+        # the summary NAME that mix instead of auditing a two-attempt wave as
+        # if one attempt produced it.
+        "attempt": int(attempt) if attempt.isdigit() else 1,
         "all_unit_ids": all_ids,
         "digest": hashlib.sha256("\n".join(all_ids).encode("utf-8")).hexdigest(),
         "scope": scope_manifest(crates),
