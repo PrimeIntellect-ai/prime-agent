@@ -373,6 +373,29 @@ impl SessionEngine for AgentSessionEngine {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(summary);
     }
 
+    /// The session's newest accepted progress note; `None` before the
+    /// first build and after a run boundary cleared it.
+    fn progress_note(&self) -> Option<String> {
+        self.progress_notes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .and_then(|notes| notes.latest_note())
+            .map(|(note, _)| note)
+    }
+
+    /// Clears the stored note at the run boundary; the throttle clock stays.
+    fn clear_progress_note(&self) {
+        if let Some(notes) = self
+            .progress_notes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            notes.clear();
+        }
+    }
+
     fn configure_service_tier(&self, tier: Option<pa_types::ai::ServiceTier>) {
         *self.service_tier.write().expect("service tier lock") = tier;
         if let Some(target) = self

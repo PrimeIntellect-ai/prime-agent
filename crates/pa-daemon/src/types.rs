@@ -101,6 +101,10 @@ pub struct SessionSummary {
     pub modified: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_message: Option<String>,
+    /// The run's latest accepted `rlm.progress.note`, cleared at the run
+    /// boundaries so an idle row never carries one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress_note: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_session_path: Option<String>,
     /// The parent's live active-session id (subagent summaries).

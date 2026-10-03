@@ -207,6 +207,8 @@ impl AgentSessionEngine {
             overflow_recovery: std::sync::Mutex::new(OverflowRecovery::default()),
             auto_compaction_abort: std::sync::Mutex::new(None),
             compaction_summary_sink: std::sync::Mutex::new(None),
+            progress_notes: std::sync::Mutex::new(None),
+            progress_note_emit: std::sync::Mutex::new(None),
             model_refusal_telemetry,
             semantic_identity: std::sync::Mutex::new(None),
         })
@@ -327,6 +329,22 @@ impl AgentSessionEngine {
             .expect("compaction summary sink lock") = Some(sink);
     }
 
+    /// Installs the worker's accepted-note announcer, threaded into every
+    /// session build.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the announcer slot's mutex is poisoned.
+    pub fn set_progress_note_emit(
+        &self,
+        emit: pa_core::session_engine::rlm_host::RlmProgressNoteEmit,
+    ) {
+        *self
+            .progress_note_emit
+            .lock()
+            .expect("progress note emit lock") = Some(emit);
+    }
+
     /// Post-build adoption, shared by every build path (the async funnel
     /// and the turn-driven `session_agent` build): mirror the goal
     /// runtime, flush a depth override that landed before the build, and
@@ -373,6 +391,11 @@ impl AgentSessionEngine {
 
     async fn adopt_built_session(&self, built: &CoreSessionEngine) -> anyhow::Result<()> {
         self.mirror_goal_runtime(built).await;
+        *self
+            .progress_notes
+            .lock()
+            .expect("progress notes mirror lock") =
+            Some(std::sync::Arc::clone(&built.rlm_progress_notes));
         // The live compaction summary-delta sink (the worker's
         // `compaction_summary_delta` broadcast): adopted onto the built
         // session like the goal runtime mirrors, so every rebuild's
@@ -759,6 +782,7 @@ impl AgentSessionEngine {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         *self.goal_runtime.lock().expect("goal runtime lock") = None;
+        *self.progress_notes.lock().expect("progress notes lock") = None;
         *self.turn_agent.lock().expect("turn agent lock") = None;
         *self
             .autonomous_boundary
@@ -1116,6 +1140,11 @@ impl AgentSessionEngine {
             .lock()
             .expect("goal queue purge lock")
             .clone();
+        let progress_note_emit = self
+            .progress_note_emit
+            .lock()
+            .expect("progress note emit lock")
+            .clone();
         // TS `AgentSession` wires `onBackgroundWorkSettled` onto the kernel
         // provisioner (agent-session.ts): the kernel's last live background
         // `bash()` handle settling — or the kernel tearing down while one
@@ -1173,6 +1202,7 @@ impl AgentSessionEngine {
             rlm_subagent_host: self.children.clone().map(|children| {
                 children as Arc<dyn pa_core::session_engine::rlm_host::RlmSubagentHost>
             }),
+            progress_note_emit,
             rlm_depth: Some(self.rlm_depth.load(std::sync::atomic::Ordering::Relaxed)),
             model_info: Some(model.clone()),
             // TS main.ts `createDefaultRuntimeFactory` passes

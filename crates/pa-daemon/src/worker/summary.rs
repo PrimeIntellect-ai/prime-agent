@@ -28,6 +28,7 @@ impl Worker {
             self.user_bash.is_running(),
             self.engine.is_quota_parked(),
             self.engine.has_running_subagents(),
+            self.engine.progress_note(),
         );
         // The worker's roster-delta counter at snapshot time, and the
         // process instance that read it — the pair is one snapshot:
@@ -321,6 +322,7 @@ pub(crate) fn push_roster_delta(context: &RosterPushContext) {
             context.user_bash.is_running(),
             context.engine.is_quota_parked(),
             context.engine.has_running_subagents(),
+            context.engine.progress_note(),
         )
     };
     // The embedded counter is the pre-stamp value read under the order
@@ -355,6 +357,9 @@ pub(crate) fn push_roster_delta(context: &RosterPushContext) {
     });
 }
 
+// The engine-derived scalars feed both roster composers; a struct for them
+// would be churn for a second caller.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn session_summary(
     core: &SessionCore,
     thinking_level: &str,
@@ -363,6 +368,7 @@ pub(crate) fn session_summary(
     bash_running: bool,
     quota_parked: bool,
     subagents_running: bool,
+    progress_note: Option<String>,
 ) -> SessionSummary {
     let store = core.store.as_ref();
     let streaming = core.busy;
@@ -440,6 +446,7 @@ pub(crate) fn session_summary(
         created: store.map(|s| s.header.timestamp.clone()),
         modified,
         first_message: store.and_then(crate::session_store::SessionFile::first_message),
+        progress_note,
         parent_session_path: store.and_then(|store| store.header.parent_session.clone()),
         parent_active_session_id: core.parent_active_session_id.clone(),
         parent_session_id: core.parent_session_id.clone(),

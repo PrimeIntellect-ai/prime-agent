@@ -37,6 +37,9 @@ pub struct RlmWiring {
     /// Child-session machinery backing `rlm.spawn`/`rlm.create_session` and
     /// the roster/collect/delete surface.
     pub subagent_host: Option<Arc<dyn RlmSubagentHost>>,
+    /// Announces every accepted `rlm.progress.note`; `None` keeps the store
+    /// the only surface.
+    pub progress_note_emit: Option<super::rlm_host::RlmProgressNoteEmit>,
 }
 
 /// The embedding's cron wiring for the kernel's `rlm_heartbeat.*` host
@@ -186,6 +189,7 @@ pub fn wire_session_runtime(
         model_registry,
         rlm.subagent_host,
         rlm_usage.clone(),
+        rlm.progress_note_emit,
     ));
     register_rlm_host_handlers(&mut handlers, &rlm_bridge);
     SessionKernelWiring {

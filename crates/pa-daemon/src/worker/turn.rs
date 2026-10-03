@@ -426,6 +426,7 @@ impl TurnRunner {
         let Some((first, batched)) = items.split_first() else {
             return;
         };
+        engine.clear_progress_note();
         self.emit_turn_event(json!({ "type": "agent_start" }));
         self.emit_turn_event(json!({ "type": "turn_start" }));
         // The pane reporter's run boundary (TS `agent_start`): working.
@@ -487,6 +488,7 @@ impl TurnRunner {
         // clone), and fences its rows on the session identity it serviced
         // (a branch move or replacement swaps the store mid-review).
         let review_engine = std::sync::Arc::clone(&engine);
+        let settle_engine = std::sync::Arc::clone(&engine);
         let review_session_id = {
             let core = self.core.lock().unwrap();
             core.store
@@ -612,8 +614,13 @@ impl TurnRunner {
                 if matches!(event, EngineEvent::TurnEnd { .. }) {
                     engine_turn_ended = true;
                 }
+                if matches!(event, EngineEvent::AgentStart) {
+                    engine.clear_progress_note();
+                }
                 if matches!(event, EngineEvent::AgentEnd { .. }) {
                     engine_agent_end_seen.store(true, std::sync::atomic::Ordering::SeqCst);
+                    // Clear before the frame: its roster flush must not publish the stale note.
+                    engine.clear_progress_note();
                 }
                 let aborted_row = matches!(
                     &event,
@@ -1259,6 +1266,7 @@ impl TurnRunner {
         // session-command or pre-model-failure run).
         let engine_reported_run_end = engine_agent_end.load(std::sync::atomic::Ordering::SeqCst);
         if !engine_reported_run_end && !abort_gate_armed.load(std::sync::atomic::Ordering::SeqCst) {
+            settle_engine.clear_progress_note();
             self.emit_turn_event(json!({ "type": "agent_end" }));
         }
         {

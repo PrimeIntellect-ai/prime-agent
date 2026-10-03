@@ -56,6 +56,9 @@ pub struct SessionEngineConfig {
     pub extra_builtin_skill_overrides: Vec<String>,
     /// Daemon child-session host backing the `rlm.*` recursion surface.
     pub rlm_subagent_host: Option<Arc<dyn super::rlm_host::RlmSubagentHost>>,
+    /// Announces every accepted `rlm.progress.note`; `None` keeps the store
+    /// the only surface.
+    pub progress_note_emit: Option<super::rlm_host::RlmProgressNoteEmit>,
     /// The session's depth in the RLM recursion tree (0 for top-level
     /// sessions). Gates the `refine.*` host requests, like the TS
     /// `_autoRefineAllowedForSession` depth check.
@@ -168,6 +171,9 @@ pub struct SessionEngine {
     /// session facts captured in `create_session` (the #3184 capture
     /// pattern) and reached through [`SessionEngine::factory_activity`].
     pub factory_host: super::factory_host::FactoryHost,
+    /// The progress-note store the `rlm.progress.note` handler throttles
+    /// into; the embedding mirrors the Arc for sync reads.
+    pub rlm_progress_notes: std::sync::Arc<super::rlm_host::RlmProgressNotes>,
     /// The session's kernel provisioner. The engine is the STRONG owner on
     /// purpose: the `ipython` tool on the agent and the compaction
     /// kernel-state probe on the session hold weak references, because the
@@ -252,6 +258,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         super::runtime_wiring::RlmWiring {
             model_registry: None,
             subagent_host: config.rlm_subagent_host.clone(),
+            progress_note_emit: config.progress_note_emit.clone(),
         },
         config.queued_goal_context_purge.clone(),
         config.cron_store.clone(),
@@ -883,6 +890,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         telemetry,
         rlm_usage: wiring.rlm_usage,
         factory_host,
+        rlm_progress_notes: Arc::clone(&wiring.rlm.notes),
         provisioner,
     })
 }

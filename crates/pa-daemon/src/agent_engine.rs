@@ -347,6 +347,15 @@ pub struct AgentSessionEngine {
     /// pump (tests, headless embeds): no streaming, no deltas.
     compaction_summary_sink:
         std::sync::Mutex<Option<pa_core::session_engine::compaction_exec::SummaryDeltaSink>>,
+    /// The built session's progress-note store, mirrored at every build
+    /// adoption; `None` until the first build.
+    pub(crate) progress_notes: std::sync::Mutex<
+        Option<std::sync::Arc<pa_core::session_engine::rlm_host::RlmProgressNotes>>,
+    >,
+    /// The worker's accepted-note announcer, threaded into every session
+    /// build; `None` without a worker pump.
+    progress_note_emit:
+        std::sync::Mutex<Option<pa_core::session_engine::rlm_host::RlmProgressNoteEmit>>,
     /// The attribution producer the children registry's sink last got:
     /// the session's live children outlive an engine rebuild, and their
     /// spawn registrations live on the producer of the build that
