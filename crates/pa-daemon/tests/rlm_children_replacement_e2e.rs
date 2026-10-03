@@ -341,7 +341,16 @@ fn write_child_script(dir: &Path) -> PathBuf {
     let script = dir.join("child.json");
     std::fs::write(
         &script,
-        json!({ "responses": [ { "text": "kid still working", "delayMs": 30_000 } ] }).to_string(),
+        // The delay keeps the kid live at the replacement close (the test's
+        // stated intent: the death close lands on a live child), but must
+        // fit inside the kill route's budget: the child's kill handler
+        // blocks behind its running turn (the turn holds the worker core
+        // across the provider wait), so the close completes only after the
+        // hold ends. 3s keeps the kid streaming at the close and settles
+        // the kill well inside the budget; the previous 30s hold was dead
+        // config while the childScript seam was broken (the kid never ran
+        // the script) and only became live with that seam's fix.
+        json!({ "responses": [ { "text": "kid still working", "delayMs": 3_000 } ] }).to_string(),
     )
     .expect("write child script");
     script

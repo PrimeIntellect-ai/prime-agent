@@ -375,13 +375,19 @@ impl SupervisorChildSessionsInner {
         let mut record = record.lock().await;
         if record.settled_status.is_none() {
             record.settled_status = Some("done");
-            // A settled preview is never overwritten with a later miss, but
-            // a `None` capture (the settle raced the admission-to-run
-            // hand-off) recovers on a later refresh.
-            if !record.answer_captured || record.answer_preview.is_none() {
-                record.answer_preview = answer;
-                record.answer_captured = true;
-            }
+        }
+        // A settled preview is never overwritten with a later miss, but a
+        // `None` capture (the settle raced the admission-to-run hand-off:
+        // the child read idle between the prompt's admission and its turn
+        // popping) MUST recover on a later refresh — the capture guard
+        // cannot sit inside the settle guard, or a record that settled
+        // before its answer existed keeps a settled-done result with no
+        // answer forever, and every `rlm.collect` reader consumes the
+        // child's output as empty (the factory executor lost whole
+        // downstream chains to exactly that).
+        if !record.answer_captured || record.answer_preview.is_none() {
+            record.answer_preview = answer;
+            record.answer_captured = true;
         }
     }
 

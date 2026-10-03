@@ -1037,3 +1037,45 @@ fn an_already_settled_child_never_re_scores_as_an_unreachable_error() {
     noticed.notice_delivered = true;
     assert!(!super::lifecycle::should_mark_unreachable_error(&noticed));
 }
+
+/// The capture-recovery regression: a record that settled while its child
+/// sat in the admission-to-run hand-off window (the settle raced the turn
+/// pop) keeps `answer_preview: None`, and a later `collect` MUST re-capture
+/// the answer from the worker — the factory executor (and any
+/// `rlm.collect` reader) consumes the settle result once, so a settled
+/// record with no answer loses the child's output forever. Before the fix,
+/// the answer capture sat inside the `settled_status.is_none()` guard and
+/// a prematurely-settled record never re-captured.
+#[tokio::test]
+async fn collect_recaptures_the_answer_of_a_settled_child_whose_capture_raced() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let (sessions, _kill_rx) =
+        sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success, FakeChild::Healthy).await;
+    sessions
+        .push_test_settled_child(
+            RlmChildIdentity {
+                rlm_child_id: "sub-capture-raced".to_string(),
+                session_name: "capture-raced".to_string(),
+                active_session_id: "child-live".to_string(),
+                session_id: Some("child-file".to_string()),
+            },
+            Some("done"),
+            None,
+        )
+        .await;
+    let results = sessions
+        .collect(vec!["sub-capture-raced".to_string()], 0)
+        .await
+        .expect("collect the raced child");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].status, "done");
+    assert!(
+        results[0].settled,
+        "the raced settle stays settled (it was a real completion)"
+    );
+    assert_eq!(
+        results[0].answer_preview.as_deref(),
+        Some("the child final answer"),
+        "the answer re-captures on the collect read"
+    );
+}

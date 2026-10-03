@@ -42,5 +42,13 @@ tokio = { workspace = true, features = ["test-util"] }
 name = "pa-daemon"
 path = "src/main.rs"
 
+# The factory capability eval driver (#2402): a real-token harness, never
+# run in CI; its deterministic halves are unit-tested in pa-core's
+# factory_eval and the daemon-level flow is smoke-tested by
+# tests/factory_workflow_e2e.rs.
+[[bin]]
+name = "factory-eval"
+path = "src/bin/factory-eval.rs"
+
 [lints]
 workspace = true
