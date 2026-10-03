@@ -276,6 +276,10 @@ pub struct RefinementTranscript<'a> {
 /// session, when the refinement plan (LLM or rollback) fails, when applying
 /// or persisting the refined harness state fails, or when appending the
 /// audit, outcome, or notice entries fails.
+// One refine funnel: the transcript, the store dirs, the model seam, the
+// options, the source, and the resolved gates ride the same call
+// (same style as the daemon's too_many_arguments seams).
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_refinement(
     session: &mut SessionManager,
     transcript: RefinementTranscript<'_>,
@@ -284,6 +288,7 @@ pub async fn execute_refinement(
     options: &RefineOptions,
     source: RefinementSource,
     refine_call: crate::refinement::executor::RefinerFn,
+    agent_dir: Option<&Path>,
 ) -> anyhow::Result<RefinementResult> {
     Ok(execute_refinement_with_rows(
         session,
@@ -293,6 +298,7 @@ pub async fn execute_refinement(
         options,
         source,
         refine_call,
+        agent_dir,
     )
     .await?
     .0)
@@ -306,6 +312,17 @@ pub async fn execute_refinement(
 /// # Errors
 ///
 /// Returns the same errors as [`execute_refinement`].
+///
+/// `agent_dir` is the session's settings root: its settings.json holds
+/// the `factory.enabled` opt-in (default off), re-read immediately before
+/// the plan applies — after the (long) model request, never snapshotted
+/// before it — so the gate decides on the CURRENT setting. While it is
+/// off, factory create/update edits refuse with the one disabled message —
+/// the same gate the kernel-side factory writers raise
+/// (`rlm.factory.require_factory_enabled`), so a refinement cannot
+/// author factories the user has not opted into. `None` (a session
+/// without a wired agent dir) keeps the fail-closed disabled default.
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_refinement_with_rows(
     session: &mut SessionManager,
     transcript: RefinementTranscript<'_>,
@@ -314,6 +331,7 @@ pub async fn execute_refinement_with_rows(
     options: &RefineOptions,
     source: RefinementSource,
     refine_call: crate::refinement::executor::RefinerFn,
+    agent_dir: Option<&Path>,
 ) -> anyhow::Result<(RefinementResult, Vec<String>)> {
     let RefinementTranscript {
         messages,
@@ -386,7 +404,31 @@ pub async fn execute_refinement_with_rows(
         HarnessScope::Local => local_harness_dir.clone(),
     };
     let mut state = load_harness_state(&target_dir, target_scope);
-    let mut result = apply_refinement_plan(&mut state, plan, &core_options, Some(baseline_state));
+    // The factory opt-in resolves HERE — immediately before the apply,
+    // after the planning request — so a setting that changed during the
+    // request (`/factory off` mid-plan) decides, not a snapshot captured
+    // before it. The read rides `spawn_blocking` so the settings I/O
+    // never blocks the async runtime worker (the refine arm holds the
+    // session lock across this whole call). A session without a wired
+    // agent dir keeps the fail-closed disabled default, and a panicked
+    // read task reads as disabled — the same fail-closed leniency as
+    // `factory_enabled` itself.
+    let factory_enabled = match agent_dir {
+        Some(agent_dir) => {
+            let agent_dir = agent_dir.to_path_buf();
+            tokio::task::spawn_blocking(move || crate::refinement::factory_enabled(&agent_dir))
+                .await
+                .unwrap_or(false)
+        }
+        None => false,
+    };
+    let mut result = apply_refinement_plan(
+        &mut state,
+        plan,
+        &core_options,
+        Some(baseline_state),
+        factory_enabled,
+    );
     result.harness_state_path = save_harness_state(&target_dir, &state)?
         .to_string_lossy()
         .to_string();
@@ -663,6 +705,17 @@ mod tests {
         })
     }
 
+    /// A refiner seam that rewrites the factory settings file mid-request
+    /// (the `/factory` flip during the model request), then returns the
+    /// plan authored under the pre-flip value.
+    fn flip_seam(settings: &Path, flipped: &'static str, reply: &'static str) -> RefinerFn {
+        let settings = settings.to_path_buf();
+        Box::new(move |_model, _system, _prompt| {
+            std::fs::write(&settings, flipped).unwrap();
+            Box::pin(async move { Ok(text_assistant(reply)) })
+        })
+    }
+
     fn test_model() -> Model {
         Model {
             id: "test".to_string(),
@@ -787,6 +840,135 @@ Reviewer instructions: record it"
     }
 
     #[tokio::test]
+    async fn factory_edits_in_a_refinement_respect_the_opt_in_gate() {
+        // The host /refine flow funnels factory create edits through the
+        // same opt-in gate as the kernel writers: while `factory.enabled`
+        // is off, the edit refuses with the one exact disabled message
+        // and nothing persists; enabled, the same proposal applies.
+        let dir = TempDir::new().unwrap();
+        let mut session = persisted_session(&dir);
+        let global_dir = dir.path().join("harness");
+        let reply = r#"{"summary":"sweep","edits":[{"action":"create","kind":"factory","id":"sweep","title":"Factory","content":"Sweep review.","arguments":{"machine":{"states":[{"id":"collect","entry":true,"subagent":"worker"}],"transitions":[]}}}]}"#;
+        let disabled = execute_refinement(
+            &mut session,
+            RefinementTranscript {
+                messages: &[user_message("do a thing twice")],
+                refinement_history: &[],
+            },
+            &global_dir,
+            &test_model(),
+            &RefineOptions::default(),
+            RefinementSource::User,
+            seam(reply),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(!disabled.applied_edits[0].applied);
+        assert_eq!(
+            disabled.applied_edits[0].error.as_deref(),
+            Some(crate::refinement::FACTORY_DISABLED_MESSAGE)
+        );
+        let harness_dir =
+            crate::refinement::get_local_harness_state_dir(Some(session.get_session_dir()))
+                .unwrap();
+        let state = load_harness_state(&harness_dir, HarnessScope::Local);
+        assert!(state.entries[&crate::refinement::RefinementKind::Factory].is_empty());
+        // The user opts in: the same proposal applies, read live from the
+        // agent dir's settings.json.
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::write(
+            agent_dir.join(crate::refinement::FACTORY_SETTINGS_FILE_NAME),
+            r#"{"factory": {"enabled": true}}"#,
+        )
+        .unwrap();
+        let enabled = execute_refinement(
+            &mut session,
+            RefinementTranscript {
+                messages: &[user_message("do a thing twice")],
+                refinement_history: &[],
+            },
+            &global_dir,
+            &test_model(),
+            &RefineOptions::default(),
+            RefinementSource::User,
+            seam(reply),
+            Some(&agent_dir),
+        )
+        .await
+        .unwrap();
+        assert!(enabled.applied_edits[0].applied);
+        assert!(enabled.applied_edits[0].error.is_none());
+        let state = load_harness_state(&harness_dir, HarnessScope::Local);
+        assert!(state.entries[&crate::refinement::RefinementKind::Factory].contains_key("sweep"));
+    }
+
+    #[tokio::test]
+    async fn factory_gate_decides_on_the_apply_time_setting_not_a_planning_snapshot() {
+        // The opt-in re-reads immediately before the apply — after the
+        // planning request — so a `/factory` flip during the model request
+        // decides, not the value the plan was authored under: a plan
+        // authored while enabled that lands after the setting turned off
+        // refuses with the one exact disabled message and nothing
+        // persists, and a plan authored while disabled that lands after
+        // the opt-in applies.
+        let dir = TempDir::new().unwrap();
+        let mut session = persisted_session(&dir);
+        let global_dir = dir.path().join("harness");
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let settings = agent_dir.join(crate::refinement::FACTORY_SETTINGS_FILE_NAME);
+        let reply = r#"{"summary":"sweep","edits":[{"action":"create","kind":"factory","id":"sweep","title":"Factory","content":"Sweep review.","arguments":{"machine":{"states":[{"id":"collect","entry":true,"subagent":"worker"}],"transitions":[]}}}]}"#;
+        // Authored while enabled; the request flips the setting off.
+        std::fs::write(&settings, r#"{"factory": {"enabled": true}}"#).unwrap();
+        let turned_off = execute_refinement(
+            &mut session,
+            RefinementTranscript {
+                messages: &[user_message("do a thing twice")],
+                refinement_history: &[],
+            },
+            &global_dir,
+            &test_model(),
+            &RefineOptions::default(),
+            RefinementSource::User,
+            flip_seam(&settings, r#"{"factory": {"enabled": false}}"#, reply),
+            Some(&agent_dir),
+        )
+        .await
+        .unwrap();
+        assert!(!turned_off.applied_edits[0].applied);
+        assert_eq!(
+            turned_off.applied_edits[0].error.as_deref(),
+            Some(crate::refinement::FACTORY_DISABLED_MESSAGE)
+        );
+        let harness_dir =
+            crate::refinement::get_local_harness_state_dir(Some(session.get_session_dir()))
+                .unwrap();
+        let state = load_harness_state(&harness_dir, HarnessScope::Local);
+        assert!(state.entries[&crate::refinement::RefinementKind::Factory].is_empty());
+        // Authored while disabled; the request opts in.
+        std::fs::write(&settings, r#"{"factory": {"enabled": false}}"#).unwrap();
+        let turned_on = execute_refinement(
+            &mut session,
+            RefinementTranscript {
+                messages: &[user_message("do a thing twice")],
+                refinement_history: &[],
+            },
+            &global_dir,
+            &test_model(),
+            &RefineOptions::default(),
+            RefinementSource::User,
+            flip_seam(&settings, r#"{"factory": {"enabled": true}}"#, reply),
+            Some(&agent_dir),
+        )
+        .await
+        .unwrap();
+        assert!(turned_on.applied_edits[0].applied);
+        assert!(turned_on.applied_edits[0].error.is_none());
+    }
+
+    #[tokio::test]
     async fn execute_refinement_persists_state_and_entries() {
         let dir = TempDir::new().unwrap();
         let mut session = persisted_session(&dir);
@@ -806,6 +988,7 @@ Reviewer instructions: record it"
             &RefineOptions::default(),
             RefinementSource::User,
             seam(reply),
+            None,
         )
         .await
         .unwrap();
@@ -866,6 +1049,7 @@ Reviewer instructions: record it"
             &RefineOptions::default(),
             RefinementSource::User,
             seam(reply),
+            None,
         )
         .await
         .unwrap_err();
@@ -982,6 +1166,7 @@ Reviewer instructions: record it"
                     let reply = reply;
                     Box::pin(async move { Ok(text_assistant(&reply)) })
                 }),
+                None,
             )
             .await
             .unwrap_or_else(|error| panic!("'{leg}' leg failed: {error:#}"));
@@ -1059,6 +1244,7 @@ Reviewer instructions: record it"
             },
             RefinementSource::SelfRefine,
             seam(reply),
+            None,
         )
         .await
         .unwrap();
@@ -1087,6 +1273,7 @@ Reviewer instructions: record it"
             },
             RefinementSource::User,
             seam("unused"),
+            None,
         )
         .await
         .unwrap();

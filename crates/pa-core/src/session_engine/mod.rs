@@ -185,8 +185,8 @@ pub struct AgentSession {
     /// reads `resourceLoader.getSkills()` at expansion time; the engine
     /// wiring installs the loaded list once the session is assembled).
     skills: Vec<crate::skills::Skill>,
-    /// The telemetry handle for the `skill used` adoption event the
-    /// prompt path owns (`None` in sessions without telemetry).
+    /// The telemetry handle for the `skill_use_count` counter the prompt
+    /// path owns (`None` in sessions without telemetry).
     skill_telemetry: Option<std::sync::Arc<telemetry::SessionTelemetry>>,
     /// The image-model routing host seam (`None` keeps the session model on
     /// image turns: verification harnesses, and the daemon worker whose
@@ -204,6 +204,14 @@ pub struct AgentSession {
     /// summarizer completion — no deltas, no broadcast, no behavior
     /// change.
     compaction_summary_sink: std::sync::Mutex<Option<compaction_exec::SummaryDeltaSink>>,
+    /// The session's agent dir (the settings root): the refine flow
+    /// resolves the `factory.enabled` opt-in from its settings.json on
+    /// every run, immediately before the plan applies, mirroring the
+    /// kernel-side factory gate that reads the same file through
+    /// `PRIME_AGENT_CODING_AGENT_DIR`. `None` until the engine wiring
+    /// resolves it (verification harnesses building the session directly
+    /// keep `None`, which reads as the fail-closed disabled default).
+    agent_dir: Option<std::path::PathBuf>,
 }
 
 impl AgentSession {
@@ -269,6 +277,7 @@ impl AgentSession {
             skill_telemetry: None,
             image_model_router: None,
             compaction_summary_sink: std::sync::Mutex::new(None),
+            agent_dir: None,
         };
         this.ensure_harness_digest_context().await?;
         Ok(this)

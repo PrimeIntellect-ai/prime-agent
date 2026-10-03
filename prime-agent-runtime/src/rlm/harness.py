@@ -9,6 +9,7 @@ Execution still belongs to Prime Agent's TypeScript host and the existing
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 import os
@@ -21,12 +22,14 @@ from pathlib import Path
 from uuid import uuid4
 from typing import Any, Literal
 
-HarnessKind = Literal["prompt", "memory", "skill", "subagent"]
+from .factory import require_factory_enabled, validate_factory_spec
+
+HarnessKind = Literal["prompt", "memory", "skill", "subagent", "factory"]
 HarnessScope = Literal["local", "global"]
 
 _DEFAULT_FILE_NAME = "harness_state.json"
 _DEFAULT_HARNESS_DIR_NAME = "harness"
-_KINDS: tuple[HarnessKind, ...] = ("prompt", "memory", "skill", "subagent")
+_KINDS: tuple[HarnessKind, ...] = ("prompt", "memory", "skill", "subagent", "factory")
 _state_cache: dict[tuple[Path, HarnessScope], "HarnessState"] = {}
 
 
@@ -257,6 +260,44 @@ def _require_optional_record(kind: str, entry_name: str, field: str, value: Any)
         )
 
 
+def _factory_spec_argument(
+    dag: Any, machine: Any
+) -> "tuple[Any, Literal['dag', 'machine']]":
+    """Pick the factory spec payload and its arguments key from the call.
+
+    Supplying both forms at once is an error. A bare ``dag=None,
+    machine=None`` passes ``None`` through in the dag slot so the write-time
+    validation rejects it with the standard wording.
+    """
+    if dag is not None and machine is not None:
+        raise ValueError("pass either dag or machine, not both")
+    if machine is not None:
+        return machine, "machine"
+    return dag, "dag"
+
+
+def _validate_factory_arguments(entry_name: str, arguments: dict[str, Any]) -> None:
+    """Shared-path dry run for every factory write.
+
+    ``create_factory``/``update_factory`` validate their own spec, but a
+    generic ``create``/``update`` (or a refinement edit) writes
+    ``arguments`` directly; an invalid spec must never reach the store
+    through any writer, so the spec found in ``arguments`` is validated
+    here too.
+    """
+    dag, machine = arguments.get("dag"), arguments.get("machine")
+    if dag is not None and machine is not None:
+        raise ValueError(f"factory entry {entry_name!r} rejected: pass either dag or machine, not both")
+    spec = machine if machine is not None else dag
+    if not isinstance(spec, dict):
+        raise ValueError(
+            f"factory entry {entry_name!r} rejected: factory entries require a dag or machine object in arguments"
+        )
+    errors = validate_factory_spec(spec)
+    if errors:
+        raise ValueError(f"factory entry {entry_name!r} rejected: {'; '.join(errors)}")
+
+
 def _validate_entry_shape(
     kind: str,
     entry_id: Any,
@@ -294,6 +335,24 @@ def _validate_entry_shape(
                 raise ValueError(f"skill entry {entry_name!r} rejected: skill entries require a Python reference")
         else:
             _validate_python_skill_reference(reference, entry_name)
+    if kind == "factory":
+        # Every factory writer funnels through here, so the opt-in gate and
+        # the spec dry run cover them all: create_factory validates, and the
+        # generic create/update path (a refinement edit) gets the same
+        # treatment. The gate comes first: while `factory.enabled` is off
+        # (the default) every factory write refuses with the one disabled
+        # message, before any spec work. A
+        # NEW factory requires its spec (an arguments-less factory would
+        # store an unusable entry that run() later rejects); an update that
+        # omits arguments (None) preserves the stored spec and skips
+        # validation, exactly like update_skill treats reference.
+        require_factory_enabled()
+        if arguments is None and existing is None:
+            raise ValueError(
+                f"factory entry {entry_name!r} rejected: factory entries require a dag or machine object in arguments"
+            )
+        if arguments is not None:
+            _validate_factory_arguments(entry_name, arguments)
 
 
 def _validate_refinement_event(trigger: Any, changes: Any, *, evidence: Any, outcome: Any) -> None:
@@ -588,7 +647,10 @@ class HarnessState:
             if reference is not None:
                 existing.reference = dict(reference)
             if arguments is not None:
-                existing.arguments = dict(arguments)
+                # Factory specs are deep-copied: the nested dag/machine object
+                # is caller-owned, and a later mutation must never change the
+                # stored (validated) spec without a write-time dry run.
+                existing.arguments = copy.deepcopy(arguments) if kind == "factory" else dict(arguments)
             if metadata is not None:
                 existing.metadata = dict(metadata)
             existing.source = source
@@ -604,7 +666,7 @@ class HarnessState:
                 path=path if path is not None else "general",
                 scope=self.scope,
                 reference=dict(reference or {}),
-                arguments=dict(arguments or {}),
+                arguments=copy.deepcopy(arguments or {}) if kind == "factory" else dict(arguments or {}),
                 metadata=dict(metadata or {}),
                 source=source,
             )
@@ -892,6 +954,85 @@ class HarnessState:
     def delete_subagent(self, id: str, *, global_: bool = False, **kwargs: Any) -> bool:
         return self.delete("subagent", id, global_=global_, **kwargs)
 
+    def create_factory(
+        self,
+        title: str,
+        content: str,
+        *,
+        id: str | None = None,
+        path: str = "general",
+        dag: dict[str, Any] | None = None,
+        machine: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+        global_: bool = False,
+        **kwargs: Any,
+    ) -> HarnessEntry:
+        # The opt-in gate precedes the dry run, so a disabled factory
+        # refuses with the one disabled message whatever the spec looks like.
+        require_factory_enabled()
+        # Write-time dry run: an invalid spec (either form) never reaches the
+        # store. The spec is deep-copied before storing: mutating the caller's
+        # dict after creation must not change the live entry (a later update
+        # that omits both forms would preserve the mutated, unvalidated spec).
+        spec, key = _factory_spec_argument(dag, machine)
+        errors = validate_factory_spec(spec)
+        if errors:
+            raise ValueError("; ".join(errors))
+        return self.create(
+            "factory",
+            title,
+            content,
+            id=id,
+            path=path,
+            arguments={key: copy.deepcopy(spec)},
+            metadata=metadata,
+            global_=global_,
+            **kwargs,
+        )
+
+    def update_factory(
+        self,
+        id: str,
+        title: str,
+        content: str,
+        *,
+        path: str | None = None,
+        dag: dict[str, Any] | None = None,
+        machine: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+        global_: bool = False,
+        **kwargs: Any,
+    ) -> HarnessEntry:
+        # The opt-in gate precedes the spec and existence checks, so a
+        # disabled factory refuses with the one disabled message whatever the
+        # update carries.
+        require_factory_enabled()
+        # Only validate a spec when one is supplied; omitting both preserves the
+        # stored arguments (see _upsert) rather than forcing every title/content
+        # update to re-send the full spec, exactly like update_skill treats reference.
+        if dag is not None or machine is not None:
+            spec, key = _factory_spec_argument(dag, machine)
+            errors = validate_factory_spec(spec)
+            if errors:
+                raise ValueError("; ".join(errors))
+            arguments = {key: copy.deepcopy(spec)}
+        else:
+            arguments = None
+        return self.update(
+            "factory",
+            id,
+            title,
+            content,
+            path=path,
+            arguments=arguments,
+            metadata=metadata,
+            global_=global_,
+            **kwargs,
+        )
+
+    def delete_factory(self, id: str, *, global_: bool = False, **kwargs: Any) -> bool:
+        return self.delete("factory", id, global_=global_, **kwargs)
+
     def record_refinement(
         self,
         trigger: str,
@@ -956,6 +1097,12 @@ class HarnessState:
             "files; children reply with await agent_message.send(message, receiver_role='parent'). Use "
             "await rlm.list_subagents() to recover direct child handles and await agent_message.send(..., "
             "receiver_role='child', receiver_name=handle.name) for follow-ups.",
+            "Factory entries declare validated state-machine workflows of subagent states in arguments['machine'] "
+            "(the original DAG sugar in arguments['dag'] compiles to machine form): manage them with "
+            "create_factory/update_factory/delete_factory (create_factory validates either form at write time); run "
+            "them with await rlm.factory.run(\"<id>\"), watch with await rlm.factory.status(run_id), stop with "
+            "await rlm.factory.stop(run_id), and resume an escalate-paused run with "
+            "await rlm.factory.resume(run_id).",
         ]
         for kind in _KINDS:
             records = self.list(kind)[:max_entries_per_kind]

@@ -711,6 +711,13 @@ impl pa_tui::interactive::OnboardingSink for FreshHomeOnboardingSink {
         pa_core::settings::SettingsManager::create(&self.cwd, &self.agent_dir)
             .set_onboarding_shown(true)
     }
+
+    fn onboarding_incomplete(
+        &self,
+        _outcome: &'static str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(std::future::ready(()))
+    }
 }
 
 /// The product sink whose completion write always fails (the failed
@@ -737,6 +744,13 @@ impl pa_tui::interactive::OnboardingSink for FailingMarkOnboardingSink {
 
     fn mark_onboarding_complete(&self) -> anyhow::Result<()> {
         Err(anyhow::anyhow!("settings disk full"))
+    }
+
+    fn onboarding_incomplete(
+        &self,
+        _outcome: &'static str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(std::future::ready(()))
     }
 }
 

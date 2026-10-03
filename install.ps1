@@ -5,6 +5,11 @@
 #
 #   irm https://app.primeintellect.ai/prime-agent/install.ps1 | iex
 #
+# The repo copy's defaults are the same bucket-root base, so the raw form
+# works out of the box too (the README's Windows command):
+#
+#   irm https://raw.githubusercontent.com/PrimeIntellect-ai/prime-agent/main/install.ps1 | iex
+#
 # The Git Bash route is the same channel through install-rust.sh (the sh
 # one-liner `curl -fsSL .../install.sh | sh` under Git Bash/MSYS2/Cygwin);
 # this script is the PowerShell-native form. Both routes publish the SAME
@@ -17,6 +22,12 @@
 # release prefix serves the tarball plus its SHA256SUMS; the checksum is
 # verified before anything is published. NO GITHUB SURFACE anywhere in the
 # user path.
+#
+# THE WINDOWS CHANNEL FALLBACK: the stable releases predate Windows
+# support, so the stable manifest carries no win32-x64 row until the first
+# stable release ships one; a default-channel Windows install falls back
+# to the beta channel with a printed notice, and a channel asked for by
+# name refuses instead (the beta route spelled out).
 #
 # NO TYPESCRIPT TAKEOVER STEPS: the TypeScript product never shipped a
 # Windows build, so there is no TS daemon, native install, or npm package
@@ -79,7 +90,8 @@ try {
 
 # --- the knobs ----------------------------------------------------------------
 $baseUrl = if ($env:PRIME_AGENT_DOWNLOAD_BASE_URL) { $env:PRIME_AGENT_DOWNLOAD_BASE_URL } else { $DownloadBaseUrlDefault }
-$channel = if ($env:PRIME_AGENT_RELEASE_CHANNEL) { $env:PRIME_AGENT_RELEASE_CHANNEL } else { $ReleaseChannelDefault }
+$channelRequested = $env:PRIME_AGENT_RELEASE_CHANNEL
+$channel = if ($channelRequested) { $channelRequested } else { $ReleaseChannelDefault }
 $versionPin = $env:PRIME_AGENT_VERSION
 $prefix = if ($env:PRIME_AGENT_RUST_PREFIX) { $env:PRIME_AGENT_RUST_PREFIX } else { Join-Path $HOME '.local' }
 
@@ -103,9 +115,9 @@ if (@('stable', 'beta') -notcontains $channel) { Fail "unknown release channel: 
 # a directory path, not an existing FILE.
 if (Test-Path $prefix -PathType Leaf) { Fail "the install prefix names an existing file: $prefix" }
 
-# The channel files: the pointer names the version, the manifest the rows.
-$manifestName = if ($channel -eq 'beta') { 'beta.json' } else { 'latest.json' }
-$pointerName = $channel
+# The channel files: the pointer (<base>/stable or <base>/beta) names the
+# version, the channel manifest (<base>/latest.json or <base>/beta.json)
+# the rows; the version resolution below reads the pair per channel.
 
 # The platform this script serves: the channel manifest's win32-x64 row
 # (the TS NATIVE_PLATFORMS spelling pa-core::update::install reads) — a
@@ -137,50 +149,90 @@ function ExpectedFileName($version, $platform) {
 # PAIR, retrying once on a version mismatch (the publish writes the
 # manifest first and the pointer second: a read between the two writes sees
 # the old pointer with the new manifest — a transient window, not a broken
-# channel — install-rust.sh's consistency retry).
-$manifest = $null
-$manifestVersion = $null
-$row = $null
-if ($versionPin) {
-    $version = $versionPin.Trim().TrimStart('v')
-    Write-Host "installing prime-agent $version (pinned) from the $channel channel ($platform)"
-} else {
+# channel — install-rust.sh's consistency retry). The pair reader is a
+# function so the Windows channel fallback below re-resolves the beta
+# channel through the same retry discipline.
+function Read-ChannelPair($channelName) {
+    $pairPointer = $channelName
+    $pairManifestName = if ($channelName -eq 'beta') { 'beta.json' } else { 'latest.json' }
     $attempt = 0
     while ($true) {
         # The pointer is published bare ("1.2.3") but a `v`-prefixed
         # spelling is a valid historical form - normalize it (the manifest's
         # version is bare; the release prefix and the artifact names carry
         # no extra `v` - the bots' finding).
-        $version = (Invoke-RestMethod -Uri "$baseUrl/$pointerName").ToString().Trim().TrimStart('v')
-        if (-not $version) { Fail "could not resolve the latest $channel version from $baseUrl/$pointerName" }
-        $manifest = Invoke-RestMethod -Uri "$baseUrl/$manifestName"
-        $manifestVersion = ($manifest.version).ToString().TrimStart('v')
-        if ($manifestVersion -eq $version) { break }
+        $pairVersion = (Invoke-RestMethod -Uri "$baseUrl/$pairPointer").ToString().Trim().TrimStart('v')
+        if (-not $pairVersion) { Fail "could not resolve the latest $channelName version from $baseUrl/$pairPointer" }
+        $pairManifest = Invoke-RestMethod -Uri "$baseUrl/$pairManifestName"
+        $pairManifestVersion = ($pairManifest.version).ToString().TrimStart('v')
+        if ($pairManifestVersion -eq $pairVersion) { break }
         $attempt += 1
         if ($attempt -gt 2) {
-            Fail "the $channel manifest's version $manifestVersion does not match the channel pointer $version (re-read twice; the channel looks inconsistent)"
+            Fail "the $channelName manifest's version $pairManifestVersion does not match the channel pointer $pairVersion (re-read twice; the channel looks inconsistent)"
         }
-        Write-Host "the $channel pointer and manifest disagree (a publish's consistency window); re-reading the pair..."
+        Write-Host "the $channelName pointer and manifest disagree (a publish's consistency window); re-reading the pair..."
         Start-Sleep -Seconds 1
     }
+    return [pscustomobject]@{ Version = $pairVersion; Manifest = $pairManifest }
+}
+
+# The manifest's row for this platform: the channel naming contract gives
+# the file name the row must carry (the reader's own rule,
+# pa-core::update::release::parse_channel_manifest).
+function Find-PlatformRow($rowManifest, $rowVersion) {
+    $expected = ExpectedFileName $rowVersion $platform
+    $found = $null
+    foreach ($candidate in @($rowManifest.binaries_v2) + @($rowManifest.binaries)) {
+        if ($candidate -and $candidate.platform -eq $platform) {
+            if ($candidate.file -ne $expected) {
+                Fail "the manifest's $platform row names '$($candidate.file)' instead of the channel naming '$expected'"
+            }
+            $found = $candidate
+            break
+        }
+    }
+    return $found
+}
+
+$manifest = $null
+$row = $null
+if ($versionPin) {
+    $version = $versionPin.Trim().TrimStart('v')
+    Write-Host "installing prime-agent $version (pinned) from the $channel channel ($platform)"
+} else {
+    $pair = Read-ChannelPair $channel
+    $version = $pair.Version
+    $manifest = $pair.Manifest
+    $row = Find-PlatformRow $manifest $version
+    # THE WINDOWS CHANNEL FALLBACK (the operator's real-machine report,
+    # 2026-10-02): the plain one-liner threw "no artifact row for platform
+    # win32-x64 in the stable manifest" - the stable releases predate
+    # Windows support, and the win32-x64 build ships on the beta channel
+    # only. A channel the user asked for BY NAME gets the honest refusal
+    # (the beta route spelled out); the DEFAULT channel falls back to beta
+    # with a printed notice, so the plain one-liner just works.
+    if (-not $row) {
+        if ($channelRequested -and $channelRequested -ne 'beta') {
+            Fail ('the explicitly requested ' + $channelRequested + ' channel ships no ' + $platform + ' build yet; Windows builds ride the beta channel - re-run with the beta channel: ' + '$env:PRIME_AGENT_RELEASE_CHANNEL = ''beta''; irm https://raw.githubusercontent.com/PrimeIntellect-ai/prime-agent/main/install.ps1 | iex')
+        } elseif ($channel -ne 'beta') {
+            Write-Host "$channel does not ship Windows builds yet; installing from the beta channel"
+            $channel = 'beta'
+            $pair = Read-ChannelPair $channel
+            $version = $pair.Version
+            $manifest = $pair.Manifest
+            $row = Find-PlatformRow $manifest $version
+            if (-not $row) { Fail "no artifact row for platform $platform in the $channel manifest either (the Windows fallback found no beta build)" }
+        } else {
+            Fail "no artifact row for platform $platform in the $channel manifest"
+        }
+    }
+    if ($row.sha256 -notmatch '^[0-9a-f]{64}$') { Fail "the channel manifest's sha256 for $(ExpectedFileName $version $platform) is malformed" }
     Write-Host "installing prime-agent $version from the $channel channel ($platform)"
 }
 
 # --- the channel manifest row (unpinned) / the naming contract (pinned) ------
 $expectedFile = ExpectedFileName $version $platform
-if (-not $versionPin) {
-    foreach ($candidate in @($manifest.binaries_v2) + @($manifest.binaries)) {
-        if ($candidate -and $candidate.platform -eq $platform) {
-            if ($candidate.file -ne $expectedFile) {
-                Fail "the manifest's $platform row names '$($candidate.file)' instead of the channel naming '$expectedFile'"
-            }
-            $row = $candidate
-            break
-        }
-    }
-    if (-not $row) { Fail "no artifact row for platform $platform in the $channel manifest" }
-    if ($row.sha256 -notmatch '^[0-9a-f]{64}$') { Fail "the channel manifest's sha256 for $expectedFile is malformed" }
-} else {
+if ($versionPin) {
     Write-Host "pinned ${version}: installing from the versioned release prefix (the channel naming contract names the row)"
 }
 

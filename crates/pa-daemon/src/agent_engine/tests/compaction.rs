@@ -488,7 +488,12 @@ fn mirror_telemetry_properties(
 /// turn's compaction counts into the open run's `compaction_count` and
 /// the session total (TS `compaction_end` handling).
 #[test]
+#[cfg_attr(
+    not(debug_assertions),
+    ignore = "release builds send to the real endpoint"
+)]
 fn threshold_compaction_counts_into_the_run_telemetry() {
+    let _telemetry = super::telemetry_opt_in();
     let _faux = FAUX_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -548,7 +553,12 @@ fn threshold_compaction_counts_into_the_run_telemetry() {
 /// The requested arm feeds the same seam: the boundary compaction the
 /// kernel's `compact.run` scheduled counts into the open run.
 #[test]
+#[cfg_attr(
+    not(debug_assertions),
+    ignore = "release builds send to the real endpoint"
+)]
 fn requested_compaction_counts_into_the_run_telemetry() {
+    let _telemetry = super::telemetry_opt_in();
     let _faux = FAUX_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -608,7 +618,12 @@ fn requested_compaction_counts_into_the_run_telemetry() {
 /// the same seam: the compaction the `CompactionManager` runs counts
 /// into the still-open run it interrupts.
 #[test]
+#[cfg_attr(
+    not(debug_assertions),
+    ignore = "release builds send to the real endpoint"
+)]
 fn manual_wire_compaction_counts_into_the_run_telemetry() {
+    let _telemetry = super::telemetry_opt_in();
     let _faux = FAUX_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);

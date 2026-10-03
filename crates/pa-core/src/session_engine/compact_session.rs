@@ -145,8 +145,9 @@ fn context_tokens(entries: &[FileEntry], leaf_id: Option<&str>) -> u64 {
 pub struct CompactRun {
     pub result: CompactionResult,
     pub entry: pa_types::session::CompactionEntry,
-    /// The whole compaction's wall duration (the `agent timing` compaction
-    /// stage; measured here once, centrally, for every arm).
+    /// The whole compaction's wall duration (the run's
+    /// `compaction_duration_ms`; measured here once, centrally, for every
+    /// arm).
     pub duration_ms: u64,
     /// The post-compaction `ipython_state` kernel-persistence notice, when a
     /// kernel was running (TS `_syncKernelStateAfterCompaction`): the row is

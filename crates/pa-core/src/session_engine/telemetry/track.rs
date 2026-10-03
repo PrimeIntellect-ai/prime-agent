@@ -5,14 +5,26 @@
 //! privacy contract).
 use super::{base_properties, model_category, provider_category, TelemetryClient, Value};
 
-/// Track a supervision-lifecycle event (`daemon event`, schema v1): kinds
-/// and counts only, never session payload. `exit_reason` rides only the
-/// `worker_exited` kind.
-pub fn track_daemon_event(client: &TelemetryClient, kind: &str, exit_reason: Option<&str>) {
+/// Track the supervision summary (`daemon event`, kind `summary`): the
+/// frequent supervision events of one window as `<kind>_count`
+/// properties. Kinds and counts only, never session payload.
+pub fn track_daemon_event_summary(
+    client: &TelemetryClient,
+    window_ms: u64,
+    counts: &std::collections::BTreeMap<String, u64>,
+    saved_sessions_usage_rows_max: u64,
+) {
     let mut properties = base_properties("daemon");
-    properties.set("kind", Value::from(kind));
-    if let Some(reason) = exit_reason {
-        properties.set("exit_reason", Value::from(reason));
+    properties.set("kind", Value::from("summary"));
+    properties.set("window_ms", Value::from(window_ms));
+    for (key, count) in counts {
+        properties.set(key, Value::from(*count));
+    }
+    if counts.contains_key("saved_sessions_list_count") {
+        properties.set(
+            "saved_sessions_usage_rows_max",
+            Value::from(saved_sessions_usage_rows_max),
+        );
     }
     client.track("daemon event", properties);
 }
@@ -94,17 +106,6 @@ pub fn track_worker_adoption(
 pub fn track_catalog_refresh(client: &TelemetryClient, count: usize) {
     let mut properties = base_properties("daemon");
     properties.set("kind", Value::from("catalog_refresh"));
-    properties.set("count", Value::from(count));
-    client.track("daemon event", properties);
-}
-
-/// Track the saved-session catalog's usage-bearing rows (`daemon event`,
-/// schema v1, kind `saved_sessions_usage`): how many rows a served
-/// `list_saved_sessions` pass publish with a usage summary — the
-/// agents-view spend columns' data. A count only, never session payload.
-pub fn track_saved_sessions_usage(client: &TelemetryClient, count: usize) {
-    let mut properties = base_properties("daemon");
-    properties.set("kind", Value::from("saved_sessions_usage"));
     properties.set("count", Value::from(count));
     client.track("daemon event", properties);
 }

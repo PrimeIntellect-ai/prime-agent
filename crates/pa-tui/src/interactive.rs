@@ -116,7 +116,7 @@ pub enum SessionSelection {
 }
 
 /// Cap on the exit-path telemetry flush (the `tui exit` event's bound):
-/// the `PostHog` sink alone allows up to 1.5s, so an exit-path event is
+/// the analytics sink alone allows up to 1.5s, so an exit-path event is
 /// dropped rather than awaited past the exit-within-1s contract. The
 /// interactive loop and the composition root's exit paths share this one
 /// bound.
@@ -136,9 +136,9 @@ pub struct ModelSelection {
     pub thinking: Option<pa_types::ai::ModelThinkingLevel>,
 }
 
-/// Adoption telemetry for interactive-view interactions (schema v1 events
-/// `tui scroll used`, `tui selection used`, and `tui exit`). pa-tui stays
-/// pa-types-only, so the
+/// Adoption telemetry for interactive-view interactions: the composition
+/// root counts them and reports the counters with `tui exit` (plus `agent
+/// command used` per command). pa-tui stays pa-types-only, so the
 /// composition root implements this against the telemetry client.
 /// The seam is object-safe (held as `Arc<dyn InteractionTelemetry>` in the
 /// options and session UI), so the async methods return boxed futures with an
@@ -158,12 +158,12 @@ pub trait InteractionTelemetry: Send + Sync {
     /// `surface` is `transcript` (a card expand click) / `editor` (a
     /// prompt-bar caret placement) / `picker` (a menu row select).
     fn click_used(&self, surface: &'static str) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
-    /// A builtin client command was submitted (`agent command used`):
-    /// `command` is the canonical name (`model`, `effort`, ...). Session
-    /// commands report through the session telemetry instead.
+    /// A builtin command was submitted (`agent command used`): `command`
+    /// is the canonical name (`model`, `compact`, ...), client and session
+    /// commands alike (TS `captureAgentCommandUsed`).
     fn command_used(&self, command: &'static str) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
-    /// A user-visible feature attempt's observed outcome (#2117
-    /// `agent feature outcome`): `feature` is the fixed feature name
+    /// A user-visible feature attempt's observed outcome (the
+    /// `feature_<name>_<outcome>_count` counters): `feature` is the fixed feature name
     /// (`model`, `effort`, `new`, `resume`, `fork`, `clone`, `tree`,
     /// `login`, `logout`, `goal`, ...), `outcome` the #2117 vocabulary
     /// (`initiated` for an open-picker dispatch, `completed`/`failed`/
@@ -175,7 +175,7 @@ pub trait InteractionTelemetry: Send + Sync {
         outcome: &'static str,
         duration_ms: Option<u64>,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
-    /// One input lifecycle observation (#2117 `agent input stage`): the
+    /// One input lifecycle observation (the `input_<stage>_*` counters): the
     /// submission's id (a fresh uuid per submit) and the observed stage
     /// (`queued` / `dispatch` / `rejected`), with the duration since the
     /// submit was accepted.
@@ -465,7 +465,13 @@ impl InteractiveOptions {
     /// `AgentsViewModeOptions.config`).
     #[must_use]
     pub fn create_config(&self) -> Value {
-        let mut config = json!({ "cwd": self.cwd.display().to_string() });
+        // `executionMode` is the telemetry execution mode the daemon
+        // worker stamps on the session's events (TS main.ts
+        // `executionMode: appMode`).
+        let mut config = json!({
+            "cwd": self.cwd.display().to_string(),
+            "executionMode": "interactive",
+        });
         if let Some(session_dir) = &self.session_dir {
             config["sessionDir"] = json!(session_dir.display().to_string());
         }

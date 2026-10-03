@@ -147,6 +147,15 @@ fn create_config_carries_the_requested_thinking_level() {
     assert_eq!(config["thinking"], "max");
 }
 
+/// The daemon worker stamps the client's mode on the session's telemetry
+/// (TS `executionMode: appMode`): interactive sessions report
+/// `interactive`, never the worker's own `daemon` context.
+#[test]
+fn create_config_names_the_interactive_execution_mode() {
+    let config = options(ModelSelection::default()).create_config();
+    assert_eq!(config["executionMode"], "interactive");
+}
+
 #[test]
 fn create_config_omits_thinking_when_no_flag_was_given() {
     let config = options(ModelSelection::default()).create_config();
@@ -164,6 +173,7 @@ fn create_config_binds_a_new_child_to_its_parent() {
         opts.create_config(),
         json!({
             "cwd": "/tmp",
+            "executionMode": "interactive",
             "parentSessionPath": "/x/p.jsonl",
             "rlmDepth": 2
         })

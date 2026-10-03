@@ -103,6 +103,10 @@ fn run_acp_mode(options: &RunOptions) -> Result<i32, String> {
 }
 
 async fn acp_mode_main(options: &RunOptions) -> Result<i32, String> {
+    // The disclosure prints on the ACP client's stderr before any
+    // transport starts (TS pushes the daemon-created session's diagnostics
+    // to the client; the Rust stderr surface prints it here).
+    crate::telemetry_notice::print_if_due(&options.config);
     // Flag > env > default: the same `PRIME_AGENT_DAEMON_SOCKET` contract
     // as every other mode (the `prime-agent` launcher written by
     // install-rust.sh pins that env, so the ACP path must honor it or it
@@ -165,6 +169,8 @@ fn daemon_acp_create(
     let mut create_config = serde_json::json!({
         "cwd": cwd.display().to_string(),
         "sessionDir": session_dir.display().to_string(),
+        // The telemetry execution mode (TS main.ts `executionMode: appMode`).
+        "executionMode": "acp",
     });
     if let Some(provider) = &config.provider {
         create_config["provider"] = serde_json::json!(provider);
@@ -407,7 +413,9 @@ fn run_print_mode(options: &RunOptions) -> Result<i32, String> {
 }
 
 async fn print_mode_main(options: &RunOptions) -> Result<i32, String> {
-    let headless = build_headless_engine(options, "print").await?;
+    // `print` or `json`: the telemetry execution mode is the app mode (TS
+    // main.ts `executionMode: appMode`).
+    let headless = build_headless_engine(options, options.app_mode.as_str()).await?;
     let engine = std::sync::Arc::new(headless.engine);
     // The CLI `--goal` seed (TS constructor seeding): a fresh root branch
     // starts the goal and queues its continuation context as the first
@@ -463,6 +471,11 @@ async fn build_headless_engine_parts_with_lease(
     options: &RunOptions,
     execution_mode: &str,
 ) -> Result<(HeadlessEngine, Option<pa_daemon::lease::SessionLease>), String> {
+    // Every headless mode discloses immediately (TS main: only the
+    // interactive `deferTelemetryNoticeForOnboarding` holds the notice
+    // back behind onboarding; `--list-models` never reaches this
+    // assembly, matching the TS exit before its diagnostics report).
+    crate::telemetry_notice::print_if_due(&options.config);
     let (session_manager, lease) = select_session_manager_with_lease(options)?;
     if let Ok(script) = std::env::var("PRIME_AGENT_FAUX_SCRIPT") {
         let engine =
@@ -568,6 +581,12 @@ async fn build_headless_engine_with(
             client: pa_core::session_engine::telemetry::build_client(&settings, &config.agent_dir),
             execution_mode: Some(execution_mode.to_string()),
             now: None,
+            telemetry_enabled: Some(
+                pa_core::session_engine::telemetry::telemetry_enabled_switch(
+                    &config.cwd,
+                    &config.agent_dir,
+                ),
+            ),
         }
     });
     // TS `sdk.ts` seeds the Agent's queue modes from the settings manager

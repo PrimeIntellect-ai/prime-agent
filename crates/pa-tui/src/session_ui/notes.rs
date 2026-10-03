@@ -180,6 +180,30 @@ impl SessionUi {
     /// would not warn anyway, and it fails OPEN (an absent field from an
     /// older daemon, or an unreadable state, draws the warning rather
     /// than suppressing it).
+    /// The once-per-installation telemetry disclosure (TS
+    /// agent-session-services): the interactive session renders it as an
+    /// info row — the alt screen hides any pre-TUI stderr print, so the
+    /// row is the only shape the user actually sees — and the shown
+    /// marker persists the moment the row renders (TS
+    /// `setTelemetryNoticeShown`).
+    pub(crate) fn maybe_show_telemetry_notice(&mut self, view: &mut AgentView) {
+        let Some(settings) = self.client_settings.clone() else {
+            return;
+        };
+        if !settings.telemetry_notice_due() {
+            return;
+        }
+        view.push_entry(ChatEntry::Status {
+            // The same disclosure text the print-mode notice carries
+            // (pa-cli `telemetry_notice`), plus the interactive switch.
+            text: "Prime Agent sends pseudonymous usage and performance metrics without prompts, responses, tool content, file paths, or repository data. Disable this with /telemetry off, telemetry.enabled=false, PRIME_AGENT_TELEMETRY=0, DO_NOT_TRACK=1, or offline mode."
+                .to_string(),
+            kind: StatusKind::Info,
+        });
+        let _ = settings.set_telemetry_notice_shown();
+        self.dirty = true;
+    }
+
     pub(crate) async fn maybe_warn_anthropic_subscription_auth_if_subscribed(
         &mut self,
         provider: Option<&str>,

@@ -8,7 +8,7 @@ use super::{
     RefinementAction, RefinementKind,
 };
 
-pub const REFINEMENT_SYSTEM_PROMPT: &str = "You are Prime Agent's /refine continual harness subsystem.\n\nYour job is to improve the editable continual harness state from the current trajectory.\nThis is similar in spirit to context compaction, but instead of summarizing the\nconversation you emit precise Create, Update, or Delete edits to reusable state.\nThe continual harness is the persistent, editable set of prompt notes, memories,\nskills, and subagent specs that lets Prime Agent improve reusable behavior\noutside the token history.\nUse \"continual harness\" for that persistent artifact layer; keep \"RLM\" for the\nruntime, Python REPL kernel, and native call interface that executes those artifacts.\n\nContinual harness components:\n- prompt: supplemental prompt notes only. The base system prompt is immutable and MUST NOT be rewritten.\n- memory: durable facts, decisions, failures, preferences, and outcomes.\n- skill: installed Python REPL skill. Skill create/update edits MUST include a `reference` object with `{\"type\":\"python\"}`, a Python import, and a callable or call pattern; they also MUST include an `arguments` object describing accepted inputs, required fields, defaults, and constraints. Use `{}` for `arguments` only when the Python callable truly needs no external inputs. Include the RLM-native call form `await <skill_import>(...)`.\n- subagent: reusable delegation specs, including purpose, instructions, and when to invoke. Include the RLM-native call form: compose a concise task prompt and spawn with `handle = await rlm.spawn(\"sub-task\", name=\"worker\")`; admission returns immediately with `rlm_child_id`, `name`, `session_dir`, and `model`, never the child's answer. Results arrive only through explicit `agent_message` replies or files; children reply with `await agent_message.send(message, receiver_role=\"parent\")`. Use `await rlm.list_subagents()` to recover direct child handles and `await agent_message.send(..., receiver_role=\"child\", receiver_name=handle.name)` for follow-ups. Do not invent wrappers like `run_subagent(...)`.\n\nScope and persistence policy:\n- The default editable continual harness store is local to the current Prime Agent session. Use it for session-specific progress, active task state, current-run coordination notes, temporary blockers, and project facts that should not affect other sessions.\n- A caller may explicitly request global refinement. Global edits must be stable cross-session lessons, durable user preferences, reusable skills/subagents, or tool/environment facts that should affect future sessions.\n- Entry ids in the harness overview may carry a display-only `local:` or `global:` prefix. Always use the bare id (no prefix) in edits.\n- All edits in one refinement apply only to the requested scope's store. During a local refinement, global entries are read-only context: never propose update or delete edits for them; create a local entry instead when a session-specific override is genuinely needed.\n- Project/workspace-specific lessons may be persisted globally only when the title, path, or content explicitly names the project/workspace and the lesson is likely to be reused in future sessions for that project. Prefer local edits when the lesson only belongs in the current conversation.\n- Use memory for declarative facts and preferences, skill for repeatable procedures exposed as Python calls, prompt for narrow behavioral policy addendums, and subagent for reusable delegation roles.\n- Create or update the smallest relevant component: repeated delegation roles should become subagent specs, repeated procedures should become skills, durable facts/preferences should become memories, and narrow behavioral policies should become prompt addendums.\n- When an edit is persisted, include metadata such as `{\"scope\":\"local\"}` or `{\"scope\":\"global\"}` when that helps future review understand the intended blast radius.\n\nUse the trajectory, current continual harness state, and prior refinement history. Prefer\nsmall evidence-backed edits. If prior refinements caused issues, rollback or\nreplace the faulty editable entries. Never edit source files directly. Output\nJSON only with this exact shape:\n\n{\n  \"summary\": \"one sentence\",\n  \"rationale\": \"why these edits are justified by trajectory evidence\",\n  \"expectedOutcome\": \"what should improve and how to validate it\",\n  \"edits\": [\n    {\n      \"action\": \"create|update|delete\",\n      \"kind\": \"prompt|memory|skill|subagent\",\n      \"id\": \"stable id for update/delete, optional for create\",\n      \"title\": \"required for create/update except delete\",\n      \"content\": \"required for create/update except delete\",\n      \"path\": \"optional grouping path\",\n      \"reference\": {\"type\": \"python\", \"import\": \"package.module\", \"callable\": \"function_name\", \"call_pattern\": \"await function_name(...)\"},\n      \"arguments\": {\"name\": {\"type\": \"string\", \"required\": true, \"description\": \"accepted input\"}},\n      \"metadata\": {},\n      \"reason\": \"why this edit is useful\"\n    }\n  ]\n}";
+pub const REFINEMENT_SYSTEM_PROMPT: &str = "You are Prime Agent's /refine continual harness subsystem.\n\nYour job is to improve the editable continual harness state from the current trajectory.\nThis is similar in spirit to context compaction, but instead of summarizing the\nconversation you emit precise Create, Update, or Delete edits to reusable state.\nThe continual harness is the persistent, editable set of prompt notes, memories,\nskills, and subagent specs that lets Prime Agent improve reusable behavior\noutside the token history.\nUse \"continual harness\" for that persistent artifact layer; keep \"RLM\" for the\nruntime, Python REPL kernel, and native call interface that executes those artifacts.\n\nContinual harness components:\n- prompt: supplemental prompt notes only. The base system prompt is immutable and MUST NOT be rewritten.\n- memory: durable facts, decisions, failures, preferences, and outcomes.\n- skill: installed Python REPL skill. Skill create/update edits MUST include a `reference` object with `{\"type\":\"python\"}`, a Python import, and a callable or call pattern; they also MUST include an `arguments` object describing accepted inputs, required fields, defaults, and constraints. Use `{}` for `arguments` only when the Python callable truly needs no external inputs. Include the RLM-native call form `await <skill_import>(...)`.\n- subagent: reusable delegation specs, including purpose, instructions, and when to invoke. Include the RLM-native call form: compose a concise task prompt and spawn with `handle = await rlm.spawn(\"sub-task\", name=\"worker\")`; admission returns immediately with `rlm_child_id`, `name`, `session_dir`, and `model`, never the child's answer. Results arrive only through explicit `agent_message` replies or files; children reply with `await agent_message.send(message, receiver_role=\"parent\")`. Use `await rlm.list_subagents()` to recover direct child handles and `await agent_message.send(..., receiver_role=\"child\", receiver_name=handle.name)` for follow-ups. Do not invent wrappers like `run_subagent(...)`.\n- factory: declarative state-machine workflow specs of subagent states. The spec lives in `arguments.machine` (the original DAG sugar in `arguments.dag` compiles to machine form; pass exactly one form). The kernel validator (`rlm.factory`) enforces the full machine semantics at write time: run a stored factory with `await rlm.factory.run('<id>')`, watch with `await rlm.factory.status(run_id)`, stop with `await rlm.factory.stop(run_id)`, and resume an escalate-paused run with `await rlm.factory.resume(run_id)`.\n\nScope and persistence policy:\n- The default editable continual harness store is local to the current Prime Agent session. Use it for session-specific progress, active task state, current-run coordination notes, temporary blockers, and project facts that should not affect other sessions.\n- A caller may explicitly request global refinement. Global edits must be stable cross-session lessons, durable user preferences, reusable skills/subagents, or tool/environment facts that should affect future sessions.\n- Entry ids in the harness overview may carry a display-only `local:` or `global:` prefix. Always use the bare id (no prefix) in edits.\n- All edits in one refinement apply only to the requested scope's store. During a local refinement, global entries are read-only context: never propose update or delete edits for them; create a local entry instead when a session-specific override is genuinely needed.\n- Project/workspace-specific lessons may be persisted globally only when the title, path, or content explicitly names the project/workspace and the lesson is likely to be reused in future sessions for that project. Prefer local edits when the lesson only belongs in the current conversation.\n- Use memory for declarative facts and preferences, skill for repeatable procedures exposed as Python calls, prompt for narrow behavioral policy addendums, and subagent for reusable delegation roles.\n- Create or update the smallest relevant component: repeated delegation roles should become subagent specs, repeated procedures should become skills, durable facts/preferences should become memories, and narrow behavioral policies should become prompt addendums.\n- When an edit is persisted, include metadata such as `{\"scope\":\"local\"}` or `{\"scope\":\"global\"}` when that helps future review understand the intended blast radius.\n\nUse the trajectory, current continual harness state, and prior refinement history. Prefer\nsmall evidence-backed edits. If prior refinements caused issues, rollback or\nreplace the faulty editable entries. Never edit source files directly. Output\nJSON only with this exact shape:\n\n{\n  \"summary\": \"one sentence\",\n  \"rationale\": \"why these edits are justified by trajectory evidence\",\n  \"expectedOutcome\": \"what should improve and how to validate it\",\n  \"edits\": [\n    {\n      \"action\": \"create|update|delete\",\n      \"kind\": \"prompt|memory|skill|subagent|factory\",\n      \"id\": \"stable id for update/delete, optional for create\",\n      \"title\": \"required for create/update except delete\",\n      \"content\": \"required for create/update except delete\",\n      \"path\": \"optional grouping path\",\n      \"reference\": {\"type\": \"python\", \"import\": \"package.module\", \"callable\": \"function_name\", \"call_pattern\": \"await function_name(...)\"},\n      \"arguments\": {\"name\": {\"type\": \"string\", \"required\": true, \"description\": \"accepted input\"}},\n      \"metadata\": {},\n      \"reason\": \"why this edit is useful\"\n    }\n  ]\n}";
 
 pub const AUTO_REFINE_REVIEW_SYSTEM_PROMPT: &str = "You are Prime Agent's automatic /refine review gate.\n\nDecide whether this checkpoint should run /refine. Auto /refine writes local continual harness state by default, so approve when the trajectory contains evidence useful to this session's future turns.\nReject one-off noise, unsupported hypotheses, and transient tool outputs. Ask for global refinement only for durable cross-session lessons or explicitly project-qualified lessons likely to be reused in future sessions.\n\nReturn JSON only:\n{\n  \"shouldRefine\": true|false,\n  \"rationale\": \"short reason\",\n  \"instructions\": \"optional concise instructions for /refine if shouldRefine is true\"\n}";
 
@@ -209,7 +209,8 @@ fn validate_edit(edit: &RefinementEdit, computed_id: Option<&str>) -> Option<Str
         RefinementKind::Prompt
         | RefinementKind::Memory
         | RefinementKind::Skill
-        | RefinementKind::Subagent => {}
+        | RefinementKind::Subagent
+        | RefinementKind::Factory => {}
     }
     if kind == RefinementKind::Prompt
         && (edit.id.as_deref() == Some("base_system_prompt")
@@ -258,6 +259,33 @@ fn validate_edit(edit: &RefinementEdit, computed_id: Option<&str>) -> Option<Str
             );
         }
     }
+    if action != RefinementAction::Delete
+        && kind == RefinementKind::Factory
+        && (action == RefinementAction::Create || edit.arguments.is_some())
+    {
+        // Structural check only: the kernel validator (`rlm.factory`) enforces
+        // the full machine semantics at write time; do not reimplement it here.
+        // A create requires its spec; an update may omit `arguments` entirely
+        // and keep the stored spec (apply preserves `before.arguments`),
+        // exactly like update_factory treats dag/machine.
+        let arguments = edit.arguments.as_ref();
+        // JSON null is treated as absent, exactly like the kernel's Python
+        // writers (arguments.get("machine") returning None): a supplied
+        // "machine": null never counts as the machine form.
+        let dag = arguments
+            .and_then(|args| args.get("dag"))
+            .filter(|value| !value.is_null());
+        let machine = arguments
+            .and_then(|args| args.get("machine"))
+            .filter(|value| !value.is_null());
+        if dag.is_some() && machine.is_some() {
+            return Some("pass either dag or machine form, not both".to_string());
+        }
+        let spec = machine.or(dag);
+        if !matches!(spec, Some(serde_json::Value::Object(_))) {
+            return Some("factory entry requires a dag or machine object in arguments".to_string());
+        }
+    }
     None
 }
 
@@ -273,6 +301,11 @@ pub struct ApplyOptions {
     /// Target-scope state captured before planning; edits whose entry changed
     /// since the baseline are rejected.
     pub baseline_state: Option<HarnessState>,
+    /// The resolved `factory.enabled` opt-in (default off). While it is off,
+    /// factory create/update edits refuse with the one disabled message, the
+    /// same gate the kernel-side factory writers raise
+    /// (`rlm.factory.require_factory_enabled`).
+    pub factory_enabled: bool,
 }
 
 /// Apply a proposal to the state (mutating entries and recording the event).
@@ -342,6 +375,23 @@ pub fn apply_refinement_proposal(
             let mut row = AppliedRefinementEdit::planned(edit, action, kind, id.clone());
             row.before = before;
             row.error = Some("entry changed during refinement planning".to_string());
+            applied_edits.push(row);
+            continue;
+        }
+        // The opt-in gate, the host-side mirror of the kernel writers'
+        // one refusal (`require_factory_enabled`): while `factory.enabled`
+        // is off, a refinement cannot author or re-author factory entries,
+        // exactly like every kernel factory write. The refusal precedes
+        // the create/update existence checks, so the disabled message is
+        // unconditional while off. A delete is not authoring: cleanup
+        // stays available, the gate's documented split.
+        if kind == RefinementKind::Factory
+            && action != RefinementAction::Delete
+            && !options.factory_enabled
+        {
+            let mut row = AppliedRefinementEdit::planned(edit, action, kind, id.clone());
+            row.before = before;
+            row.error = Some(super::FACTORY_DISABLED_MESSAGE.to_string());
             applied_edits.push(row);
             continue;
         }
@@ -518,6 +568,7 @@ fn kind_name(kind: RefinementKind) -> &'static str {
         RefinementKind::Memory => "memory",
         RefinementKind::Skill => "skill",
         RefinementKind::Subagent => "subagent",
+        RefinementKind::Factory => "factory",
     }
 }
 
@@ -681,6 +732,82 @@ mod tests {
     }
 
     #[test]
+    fn factory_edits_accept_exactly_one_spec_form() {
+        // Structural check only (TS shape): the kernel validator enforces
+        // the full machine semantics at write time.
+        let machine = serde_json::json!({
+            "states": [{ "id": "collect", "entry": true, "subagent": "worker" }],
+            "transitions": []
+        });
+        let dag = serde_json::json!({ "nodes": [{ "id": "collect", "subagent": "worker" }] });
+        let mut edit = RefinementEdit {
+            action: Some(RefinementAction::Create),
+            kind: Some(RefinementKind::Factory),
+            id: Some("sweep".to_string()),
+            title: Some("Factory".into()),
+            content: Some("Sweep review across changed files.".into()),
+            ..Default::default()
+        };
+        // A dag object passes.
+        edit.arguments = Some(serde_json::from_value(serde_json::json!({ "dag": dag })).unwrap());
+        assert_eq!(validate_edit(&edit, None), None);
+        // A machine object passes.
+        edit.arguments =
+            Some(serde_json::from_value(serde_json::json!({ "machine": machine })).unwrap());
+        assert_eq!(validate_edit(&edit, None), None);
+        // Both forms at once are rejected with the kernel wording.
+        edit.arguments = Some(
+            serde_json::from_value(serde_json::json!({ "dag": dag, "machine": machine })).unwrap(),
+        );
+        assert_eq!(
+            validate_edit(&edit, None),
+            Some("pass either dag or machine form, not both".to_string())
+        );
+        // Neither form (or a non-object spec) is rejected.
+        edit.arguments = Some(serde_json::Map::default());
+        assert_eq!(
+            validate_edit(&edit, None),
+            Some("factory entry requires a dag or machine object in arguments".to_string())
+        );
+        edit.arguments = Some(
+            serde_json::from_value(serde_json::json!({ "machine": "not an object" })).unwrap(),
+        );
+        assert_eq!(
+            validate_edit(&edit, None),
+            Some("factory entry requires a dag or machine object in arguments".to_string())
+        );
+        edit.arguments = None;
+        assert!(validate_edit(&edit, None)
+            .unwrap()
+            .contains("requires a dag or machine object"));
+        // Delete edits carry no spec requirement.
+        edit.action = Some(RefinementAction::Delete);
+        assert_eq!(validate_edit(&edit, None), None);
+        // An update that omits `arguments` keeps the stored spec (apply
+        // preserves `before.arguments`), exactly like update_factory.
+        edit.action = Some(RefinementAction::Update);
+        edit.arguments = None;
+        assert_eq!(validate_edit(&edit, None), None);
+        // An update that does supply arguments gets the same shape checks.
+        edit.arguments =
+            Some(serde_json::from_value(serde_json::json!({ "machine": machine })).unwrap());
+        assert_eq!(validate_edit(&edit, None), None);
+        // JSON null is absent, exactly like the kernel's Python writers: a
+        // valid dag with "machine": null is a dag-form edit, not both forms.
+        edit.arguments = Some(
+            serde_json::from_value(serde_json::json!({ "dag": dag, "machine": null })).unwrap(),
+        );
+        assert_eq!(validate_edit(&edit, None), None);
+        edit.arguments = Some(
+            serde_json::from_value(serde_json::json!({ "dag": dag, "machine": machine })).unwrap(),
+        );
+        assert_eq!(
+            validate_edit(&edit, None),
+            Some("pass either dag or machine form, not both".to_string())
+        );
+    }
+
+    #[test]
     fn apply_create_update_delete() {
         let mut state = empty_harness_state();
         let proposal = RefinementProposal {
@@ -697,6 +824,7 @@ mod tests {
                 rollback_of: None,
                 scope: Some(HarnessScope::Local),
                 baseline_state: None,
+                factory_enabled: false,
             },
         );
         assert_eq!(result.applied_edits.len(), 1);
@@ -719,6 +847,7 @@ mod tests {
                 rollback_of: None,
                 scope: None,
                 baseline_state: None,
+                factory_enabled: false,
             },
         );
         assert!(!duplicate.applied_edits[0].applied);
@@ -742,6 +871,7 @@ mod tests {
                 rollback_of: None,
                 scope: None,
                 baseline_state: None,
+                factory_enabled: false,
             },
         );
         assert_eq!(state.entries[&RefinementKind::Memory]["m1"].version, 2);
@@ -755,10 +885,155 @@ mod tests {
                 rollback_of: Some("r1".to_string()),
                 scope: None,
                 baseline_state: None,
+                factory_enabled: false,
             },
         );
         assert!(rolled.applied_edits[0].applied);
         // r1 created m1 with no before snapshot, so the rollback deletes it.
         assert!(!state.entries[&RefinementKind::Memory].contains_key("m1"));
+    }
+
+    #[test]
+    fn factory_edits_refuse_while_the_opt_in_is_disabled() {
+        // The opt-in gate on the apply path: while `factory.enabled` is
+        // off, a refinement cannot author or re-author factory entries —
+        // the same refusal, byte for byte, the kernel-side factory
+        // writers raise (`rlm.factory.require_factory_enabled`).
+        let machine = serde_json::json!({
+            "states": [{ "id": "collect", "entry": true, "subagent": "worker" }],
+            "transitions": []
+        });
+        let factory_edit = |action: RefinementAction, id: &str| RefinementEdit {
+            action: Some(action),
+            kind: Some(RefinementKind::Factory),
+            id: Some(id.to_string()),
+            title: Some("Factory".into()),
+            content: Some("Sweep review across changed files.".into()),
+            arguments: Some(
+                serde_json::from_value(serde_json::json!({ "machine": machine })).unwrap(),
+            ),
+            ..Default::default()
+        };
+        let mut state = empty_harness_state();
+        let proposal = |edits: Vec<RefinementEdit>| RefinementProposal {
+            summary: "sweep".to_string(),
+            rationale: String::new(),
+            expected_outcome: String::new(),
+            edits,
+        };
+        let disabled = apply_refinement_proposal(
+            &mut state,
+            &proposal(vec![factory_edit(RefinementAction::Create, "sweep")]),
+            ApplyOptions {
+                id: "r1".to_string(),
+                rollback_of: None,
+                scope: Some(HarnessScope::Local),
+                baseline_state: None,
+                factory_enabled: false,
+            },
+        );
+        assert!(!disabled.applied_edits[0].applied);
+        assert_eq!(
+            disabled.applied_edits[0].error.as_deref(),
+            Some(super::super::FACTORY_DISABLED_MESSAGE)
+        );
+        assert!(state.entries[&RefinementKind::Factory].is_empty());
+        // An update of a stored entry refuses too: cleanup is not
+        // authoring, but re-authoring while disabled is.
+        state
+            .entries
+            .get_mut(&RefinementKind::Factory)
+            .unwrap()
+            .insert(
+                "sweep".to_string(),
+                HarnessEntry {
+                    id: "sweep".to_string(),
+                    kind: RefinementKind::Factory,
+                    title: "Factory".to_string(),
+                    content: "Sweep.".to_string(),
+                    path: "general".to_string(),
+                    scope: Some(HarnessScope::Local),
+                    reference: serde_json::Map::default(),
+                    arguments: serde_json::Map::default(),
+                    metadata: serde_json::Map::default(),
+                    source: "refine".to_string(),
+                    created_at: String::new(),
+                    updated_at: String::new(),
+                    version: 1,
+                },
+            );
+        let refused_update = apply_refinement_proposal(
+            &mut state,
+            &proposal(vec![factory_edit(RefinementAction::Update, "sweep")]),
+            ApplyOptions {
+                id: "r2".to_string(),
+                rollback_of: None,
+                scope: None,
+                baseline_state: None,
+                factory_enabled: false,
+            },
+        );
+        assert!(!refused_update.applied_edits[0].applied);
+        assert_eq!(
+            refused_update.applied_edits[0].error.as_deref(),
+            Some(super::super::FACTORY_DISABLED_MESSAGE)
+        );
+        // A delete is not authoring: cleanup stays available while
+        // disabled (the gate's documented split).
+        let cleanup = apply_refinement_proposal(
+            &mut state,
+            &proposal(vec![{
+                let mut edit = factory_edit(RefinementAction::Delete, "sweep");
+                edit.arguments = None;
+                edit
+            }]),
+            ApplyOptions {
+                id: "r3".to_string(),
+                rollback_of: None,
+                scope: None,
+                baseline_state: None,
+                factory_enabled: false,
+            },
+        );
+        assert!(cleanup.applied_edits[0].applied);
+        assert!(state.entries[&RefinementKind::Factory].is_empty());
+    }
+
+    #[test]
+    fn factory_edits_apply_when_the_opt_in_is_enabled() {
+        let machine = serde_json::json!({
+            "states": [{ "id": "collect", "entry": true, "subagent": "worker" }],
+            "transitions": []
+        });
+        let mut state = empty_harness_state();
+        let result = apply_refinement_proposal(
+            &mut state,
+            &RefinementProposal {
+                summary: "sweep".to_string(),
+                rationale: String::new(),
+                expected_outcome: String::new(),
+                edits: vec![RefinementEdit {
+                    action: Some(RefinementAction::Create),
+                    kind: Some(RefinementKind::Factory),
+                    id: Some("sweep".to_string()),
+                    title: Some("Factory".into()),
+                    content: Some("Sweep review across changed files.".into()),
+                    arguments: Some(
+                        serde_json::from_value(serde_json::json!({ "machine": machine })).unwrap(),
+                    ),
+                    ..Default::default()
+                }],
+            },
+            ApplyOptions {
+                id: "r1".to_string(),
+                rollback_of: None,
+                scope: Some(HarnessScope::Local),
+                baseline_state: None,
+                factory_enabled: true,
+            },
+        );
+        assert!(result.applied_edits[0].applied);
+        assert!(result.applied_edits[0].error.is_none());
+        assert!(state.entries[&RefinementKind::Factory].contains_key("sweep"));
     }
 }

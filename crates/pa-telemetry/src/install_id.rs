@@ -81,18 +81,60 @@ pub fn install_id(agent_dir: &Path) -> Result<String> {
     }
 }
 
+/// The stored installation id, read-only: `None` when `telemetry.json` is
+/// absent, unreadable, or invalid (status surfaces must not create one).
+#[must_use]
+pub fn existing_install_id(agent_dir: &Path) -> Option<String> {
+    read_install_id(&agent_dir.join(STATE_FILE)).ok().flatten()
+}
+
 /// Valid stored id, or `None` when the file is absent or holds invalid state.
 fn read_install_id(path: &Path) -> Result<Option<String>> {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
+    // The state is opened non-blocking (unix O_NONBLOCK): a special
+    // file swapped onto the path (a FIFO) would block a plain read
+    // forever, and no caller — including the `/telemetry` confirmation
+    // after a saved opt-out — may hang on the telemetry state. A
+    // non-blocking FIFO with no writer reads empty and parses to no id.
+    let mut file = match open_state_nonblocking(path) {
+        Ok(file) => file,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(err).with_context(|| format!("read {}", path.display())),
+        Err(err) => return Err(err).with_context(|| format!("open {}", path.display())),
     };
+    let mut bytes = Vec::new();
+    match std::io::Read::read_to_end(&mut file, &mut bytes) {
+        Ok(_) => {}
+        // A non-blocking empty read (EAGAIN on a writer-less FIFO) is
+        // no id, not an error.
+        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => return Ok(None),
+        Err(err) => return Err(err).with_context(|| format!("read {}", path.display())),
+    }
     let state: Option<State> = serde_json::from_slice(&bytes).ok();
     let valid = state
         .filter(|s| s.version == STATE_VERSION && is_uuid(&s.installation_id))
         .map(|s| s.installation_id);
     Ok(valid)
+}
+
+/// Open the state file read-only, non-blocking on unix (`O_NONBLOCK`):
+/// whatever now sits on the path — a regular state file or a swapped-in
+/// special file — opens and reads without ever parking the caller.
+#[cfg(unix)]
+fn open_state_nonblocking(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(
+            rustix::fs::OFlags::NONBLOCK
+                .bits()
+                .try_into()
+                .expect("O_NONBLOCK fits the open flags"),
+        )
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_state_nonblocking(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new().read(true).open(path)
 }
 
 /// Outcome of trying to publish a candidate state file exclusively.
@@ -218,6 +260,26 @@ fn is_uuid(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A special file on the state path (a FIFO) is the blocking-read
+    /// hazard: the id read must come back empty (no id) instead of
+    /// parking the caller — the `/telemetry` confirmation after a saved
+    /// opt-out may never hang on the telemetry state.
+    #[test]
+    #[cfg(unix)]
+    fn a_fifo_on_the_state_path_reads_as_no_id() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).expect("agent dir");
+        // A FIFO with no writer: a plain read would block forever.
+        let fifo = agent_dir.join(STATE_FILE);
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo");
+        assert!(status.success(), "mkfifo created the fifo");
+        assert_eq!(existing_install_id(&agent_dir), None);
+    }
 
     #[test]
     fn uuid_validation() {
