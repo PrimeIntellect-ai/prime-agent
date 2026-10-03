@@ -121,6 +121,79 @@ fn run_cli(root: &Path, args: &[&str]) -> Output {
     command.output().expect("spawn CLI binary")
 }
 
+/// The same launcher used before the TUI attaches must create a supervisor
+/// outside the TUI's terminal session. Otherwise closing that terminal can
+/// hang up a daemon that still serves other clients.
+#[test]
+fn interactive_launcher_detaches_supervisor_from_client_session() {
+    use std::io::{BufRead as _, BufReader};
+
+    let fixture = tempfile::tempdir().expect("fixture");
+    let agent_dir = fixture.path().join("agent");
+    let socket = fixture.path().join("launched.sock");
+    let _daemon = DetachedDaemon {
+        socket: socket.clone(),
+    };
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime
+            .block_on(pa_cli::ensure_daemon_running_with(
+                &cli_binary(),
+                &socket,
+                fixture.path(),
+            ))
+            .expect("launch supervisor");
+    } // The spawning client's runtime and probe connection are gone.
+
+    let stream = UnixStream::connect(&socket).expect("daemon socket");
+    let mut hello = String::new();
+    BufReader::new(stream)
+        .read_line(&mut hello)
+        .expect("read daemon hello");
+    let hello: Value = serde_json::from_str(&hello).expect("parse daemon hello");
+    let pid = hello["supervisorPid"].as_i64().expect("supervisor pid") as i32;
+    assert_eq!(unsafe { libc::getsid(pid) }, pid, "daemon owns its session");
+    assert_ne!(
+        unsafe { libc::getsid(0) },
+        pid,
+        "daemon must not share the launching client's terminal session"
+    );
+    assert!(
+        UnixStream::connect(&socket).is_ok(),
+        "daemon remains available"
+    );
+}
+
+/// Cleanup for a daemon spawned by the interactive launcher rather than by
+/// this test process's `Command`, including a failed assertion's unwind.
+struct DetachedDaemon {
+    socket: PathBuf,
+}
+
+impl Drop for DetachedDaemon {
+    fn drop(&mut self) {
+        let _ = run_shutdown_on_socket(&self.socket);
+    }
+}
+
+fn run_shutdown_on_socket(socket: &Path) -> std::io::Result<()> {
+    use std::io::{BufRead as _, BufReader, Write as _};
+    let mut stream = UnixStream::connect(socket)?;
+    let mut hello = String::new();
+    BufReader::new(stream.try_clone()?).read_line(&mut hello)?;
+    let command = serde_json::json!({
+        "type": "command", "id": "test-cleanup",
+        "protocol": { "name": "prime-agent.daemon", "version": pa_types::daemon::DAEMON_PROTOCOL_VERSION },
+        "command": { "type": "shutdown", "force": true }
+    });
+    writeln!(stream, "{command}")?;
+    Ok(())
+}
+
 fn stdout(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
