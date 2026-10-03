@@ -1031,10 +1031,14 @@ async fn startup_flush_never_blocks_the_first_frame() {
             // The batch must have entered the sink before the boundary
             // is meaningful: a release that beats the send's entry
             // drains without ever hanging, and the hand-off below would
-            // pass vacuously.
-            let entered =
-                tokio::time::timeout(std::time::Duration::from_secs(2), sink.wait_until_entered())
-                    .await;
+            // pass vacuously. The entry deadline sits under the outer
+            // hand-off bound, so a sink that never starts reports
+            // here, not as a blocked paint path.
+            let entered = tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                sink.wait_until_entered(),
+            )
+            .await;
             assert!(
                 entered.is_ok(),
                 "the tracked startup batch entered the gated sink"
@@ -1049,7 +1053,7 @@ async fn startup_flush_never_blocks_the_first_frame() {
             // the timeout only bounds failure — no polling loop.
             sink.release();
             let delivered = tokio::time::timeout(
-                std::time::Duration::from_secs(2),
+                std::time::Duration::from_secs(1),
                 sink.wait_until_delivered(),
             )
             .await;
@@ -1071,7 +1075,7 @@ async fn startup_flush_never_blocks_the_first_frame() {
             // handle under the shared exit bound when a run ends inside
             // the delivery window — the join settles with the drain, so
             // the events never die with the runtime teardown.
-            let joined = tokio::time::timeout(std::time::Duration::from_secs(2), flush).await;
+            let joined = tokio::time::timeout(std::time::Duration::from_millis(500), flush).await;
             assert!(
                 matches!(joined, Ok(Ok(()))),
                 "the exit join settled once the drain delivered"
