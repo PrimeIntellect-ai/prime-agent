@@ -50,6 +50,8 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import subprocess
 import time
 import unittest
 from pathlib import Path
@@ -2303,24 +2305,36 @@ class FactoryHelpTest(unittest.TestCase):
         self.assertIn("an unbounded payload truncates at the cap and fails to bind", flat)
 
         # The Discovery section ships the machine library as present (this
-        # branch merges it): the seed names, the CLI surface, and the
-        # run-from-library fallback — every phrase fact-checked against the
-        # machine-library code (parse/import gate/run fallback).
+        # branch merges it): the bundled location, the seed names, the CLI
+        # surface, and the run-from-library fallback — every phrase
+        # fact-checked against the machine-library code (parse/import
+        # gate/run fallback).
         self.assertIn(
             "The machine library: machines are `MACHINE.md` files (frontmatter plus "
             "one fenced `machine-spec` block), one directory per machine, resolved "
-            "from the repository's `machines/` first and the personal `machines/` "
-            "library under the agent dir second",
+            "from two levels — the bundled seeds shipped inside the runtime "
+            "(visible in every install; `PRIME_AGENT_MACHINES_DIR` redirects the "
+            "level at a team directory) first, the personal `machines/` library "
+            "under the agent dir second",
             flat,
         )
         self.assertIn(
-            "`prime-agent factory list | import | export` manages them: import runs "
-            "the same write-time validation as a stored spec, so an invalid machine "
-            "never persists",
+            "`prime-agent factory list | import | export` manages them: list shows "
+            "only what parses (broken files print as warnings), import runs the "
+            "same write-time validation as a stored spec so an invalid machine "
+            "never persists, and export copies a library machine verbatim to a "
+            "fresh path (an existing target is refused, never overwritten)",
             flat,
         )
-        self.assertIn("`rlm.factory.run('<name>')` runs a library machine directly", flat)
-        self.assertIn("The seeds are `builder`, `pr-manager`, and `review-sweep`", flat)
+        self.assertIn(
+            "`rlm.factory.run('<name>')` runs a library machine directly without "
+            "creating a harness entry; a machine that exists but is broken names "
+            "its errors instead of pretending the name is unknown",
+            flat,
+        )
+        self.assertIn(
+            "The bundled seeds are `builder`, `pr-manager`, and `review-sweep`", flat
+        )
 
         # The configured inline subagent name contract.
         self.assertIn("The optional `name` labels the spawned children", flat)
@@ -6052,13 +6066,23 @@ class MachineLibraryResolutionTest(unittest.TestCase):
         machine, path = resolve_machine("sweep")
         self.assertEqual(path, self.repo / "sweep" / "MACHINE.md")
 
+    def test_the_bundled_library_ships_inside_the_runtime_package(self) -> None:
+        # The repo level is the packaged library: the machines directory
+        # beside this module (site-packages/rlm/machines in an installed
+        # kernel, src/rlm/machines in a checkout), so an installed kernel
+        # resolves the seeds a checkout does. The env override still wins.
+        packaged = Path(factory_module.__file__).resolve().parent / "machines"
+        repo_dir = repo_machines_dir()
+        self.assertEqual(repo_dir, packaged)
+        self.assertTrue(packaged.is_dir())
+        with patch.dict(os.environ, {"PRIME_AGENT_MACHINES_DIR": str(self.repo)}):
+            self.assertEqual(repo_machines_dir(), self.repo)
+
     def test_the_shipped_seed_machines_validate_clean(self) -> None:
-        # The repo-level library resolves in a source checkout and the
+        # The repo-level library resolves as the packaged directory and the
         # shipped examples parse, validate, and canonicalize: a broken seed
         # fails here before it can ship.
         repo_dir = repo_machines_dir()
-        if repo_dir is None or not (repo_dir / "review-sweep").exists():
-            self.skipTest("no source-checkout machines directory in this run")
         names = {entry["name"] for entry in list_machines(repo_dir=repo_dir, user_dir=Path("/nonexistent-user-machines"))}
         self.assertIn("review-sweep", names)
         self.assertIn("builder", names)
@@ -6074,13 +6098,21 @@ class MachineLibraryResolutionTest(unittest.TestCase):
 
 
 class MachineCliDispatchTest(unittest.TestCase):
-    """The JSON facade the CLI's factory import/export subcommands drive."""
+    """The JSON facade the CLI's factory subcommands drive.
+
+    The payload carries only what the user typed (an op, a path, a name, an
+    out target); the dispatch process resolves every library directory
+    itself through the production env seams (`PRIME_AGENT_MACHINES_DIR`,
+    `PRIME_AGENT_CODING_AGENT_DIR`), so these tests exercise the same
+    resolution a real CLI invocation runs.
+    """
 
     def setUp(self) -> None:
         temp = TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         root = Path(temp.name).resolve()
-        self.library = root / "machines"
+        self.repo = root / "repo-machines"
+        self.agent_home = root / "agent-home"
         self.sources = root / "sources"
         self.out_dir = root / "out"
         self.source_text = machine_file_text(
@@ -6089,17 +6121,20 @@ class MachineCliDispatchTest(unittest.TestCase):
         self.sources.mkdir(parents=True, exist_ok=True)
         self.source_path = self.sources / "machine.MACHINE.md"
         self.source_path.write_text(self.source_text, encoding="utf-8")
-
-    def test_import_dispatch_returns_ok_with_the_destination(self) -> None:
-        result = cli_dispatch({
-            "op": "import",
-            "path": str(self.source_path),
-            "target_dir": str(self.library),
+        env = patch.dict(os.environ, {
+            "PRIME_AGENT_MACHINES_DIR": str(self.repo),
+            "PRIME_AGENT_CODING_AGENT_DIR": str(self.agent_home),
         })
+        env.start()
+        self.addCleanup(env.stop)
+
+    def test_import_dispatch_persists_into_the_user_library(self) -> None:
+        result = cli_dispatch({"op": "import", "path": str(self.source_path)})
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["name"], "sweep")
-        self.assertTrue(Path(result["path"]).is_file())
-        self.assertEqual(Path(result["path"]).read_text(encoding="utf-8"), self.source_text)
+        destination = self.agent_home / "machines" / "sweep" / "MACHINE.md"
+        self.assertEqual(Path(result["path"]), destination)
+        self.assertEqual(destination.read_text(encoding="utf-8"), self.source_text)
 
     def test_import_dispatch_surfaces_gate_errors_as_data(self) -> None:
         bad = self.sources / "bad.MACHINE.md"
@@ -6109,19 +6144,17 @@ class MachineCliDispatchTest(unittest.TestCase):
             ]})),
             encoding="utf-8",
         )
-        result = cli_dispatch({"op": "import", "path": str(bad), "target_dir": str(self.library)})
+        result = cli_dispatch({"op": "import", "path": str(bad)})
         self.assertFalse(result["ok"])
-        self.assertFalse(self.library.exists())
+        self.assertFalse((self.agent_home / "machines").exists())
         self.assertTrue(any("max_parallel must be an integer between 1 and 64" in e for e in result["errors"]), result)
 
     def test_export_dispatch_resolves_library_machines(self) -> None:
-        import_machine(self.source_path, target_dir=self.library)
+        import_machine(self.source_path, target_dir=self.repo)
         result = cli_dispatch({
             "op": "export",
             "name": "sweep",
             "out": str(self.out_dir / "shared.MACHINE.md"),
-            "repo_dir": None,
-            "user_dir": str(self.library),
         })
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["source"], "library")
@@ -6129,16 +6162,60 @@ class MachineCliDispatchTest(unittest.TestCase):
             Path(result["path"]).read_text(encoding="utf-8"), self.source_text
         )
 
+    def test_export_dispatch_refuses_to_overwrite_the_target(self) -> None:
+        import_machine(self.source_path, target_dir=self.repo)
+        target = self.out_dir / "shared.MACHINE.md"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("keep me", encoding="utf-8")
+        result = cli_dispatch({
+            "op": "export",
+            "name": "sweep",
+            "out": str(target),
+        })
+        self.assertFalse(result["ok"])
+        self.assertTrue(any("already exists" in e for e in result["errors"]), result)
+        self.assertEqual(target.read_text(encoding="utf-8"), "keep me")
+
+    def test_export_dispatch_resolves_the_library_only(self) -> None:
+        # A fresh CLI process has no session state, so the dispatch resolves
+        # library machines only: a stored factory entry never intercepts
+        # the CLI's export, even when one exists.
+        self.agent_home.mkdir(parents=True, exist_ok=True)
+        (self.agent_home / "settings.json").write_text(
+            json.dumps({"factory": {"enabled": True}}), encoding="utf-8"
+        )
+        harness = HarnessState(Path(self.agent_home) / "harness_state.json")
+        previous_executor = factory_module._DEFAULT_EXECUTOR
+        factory_module._DEFAULT_EXECUTOR = FactoryExecutor(harness=harness)
+        self.addCleanup(lambda: setattr(factory_module, "_DEFAULT_EXECUTOR", previous_executor))
+        harness.create_factory(
+            "sweep", "Stored.",
+            machine={"states": [{"id": "a", "entry": True, "subagent": {"prompt": "P."}}]},
+        )
+        result = cli_dispatch({"op": "export", "name": "sweep", "out": str(self.out_dir / "s.MACHINE.md")})
+        self.assertFalse(result["ok"])
+        self.assertTrue(any("unknown machine 'sweep'" in e for e in result["errors"]), result)
+
     def test_export_dispatch_reports_unknown_machines(self) -> None:
         result = cli_dispatch({
             "op": "export",
             "name": "ghost",
             "out": str(self.out_dir / "ghost.MACHINE.md"),
-            "repo_dir": None,
-            "user_dir": str(self.library),
         })
         self.assertFalse(result["ok"])
         self.assertTrue(any("unknown machine 'ghost'" in e for e in result["errors"]), result)
+
+    def test_list_dispatch_lists_the_library_with_warnings(self) -> None:
+        (self.repo / "sweep").mkdir(parents=True)
+        (self.repo / "sweep" / "MACHINE.md").write_text(self.source_text, encoding="utf-8")
+        broken = self.agent_home / "machines" / "broken"
+        broken.mkdir(parents=True)
+        (broken / "MACHINE.md").write_text("no frontmatter", encoding="utf-8")
+        result = cli_dispatch({"op": "list"})
+        self.assertTrue(result["ok"], result)
+        self.assertEqual([m["name"] for m in result["machines"]], ["sweep"])
+        self.assertEqual(result["machines"][0]["source"], "repo")
+        self.assertTrue(any("broken" in warning for warning in result["warnings"]), result)
 
     def test_dispatch_rejects_bad_payloads(self) -> None:
         self.assertEqual(cli_dispatch("nope")["ok"], False)
@@ -6148,6 +6225,7 @@ class MachineCliDispatchTest(unittest.TestCase):
         unknown_op = cli_dispatch({"op": "wat"})
         self.assertFalse(unknown_op["ok"])
         self.assertIn("unknown factory cli op", unknown_op["errors"][0])
+        self.assertIn("'list'", unknown_op["errors"][0])
 
 
 class ExportMachineTest(unittest.TestCase):
@@ -6200,6 +6278,34 @@ class ExportMachineTest(unittest.TestCase):
         result = export_machine("sweep", out, repo_dir=None, user_dir=self.library)
         self.assertEqual(result["source"], "library")
         self.assertEqual(out.read_text(encoding="utf-8"), text)
+
+    def test_export_refuses_to_silently_overwrite_the_target(self) -> None:
+        # A fresh target only: an existing file refuses (overwrite=True is
+        # the explicit opt-in), so an export never clobbers a user file.
+        text = machine_file_text(description="A machine that sweeps.", spec_json=json.dumps(valid_dag()))
+        directory = self.library / "sweep"
+        directory.mkdir(parents=True)
+        (directory / "MACHINE.md").write_text(text, encoding="utf-8")
+        out = self.out_dir / "shared.MACHINE.md"
+        out.write_text("keep me", encoding="utf-8")
+        with self.assertRaises(ValueError) as raised:
+            export_machine("sweep", out, repo_dir=None, user_dir=self.library)
+        self.assertIn("already exists", str(raised.exception))
+        self.assertEqual(out.read_text(encoding="utf-8"), "keep me")
+        result = export_machine("sweep", out, repo_dir=None, user_dir=self.library, overwrite=True)
+        self.assertEqual(result["source"], "library")
+        self.assertEqual(out.read_text(encoding="utf-8"), text)
+
+    def test_spec_export_refuses_to_silently_overwrite_the_target(self) -> None:
+        out = self.out_dir / "spec.MACHINE.md"
+        export_factory_spec(valid_machine(), out, name="sweep", description="A machine that sweeps.")
+        out.write_text("keep me", encoding="utf-8")
+        with self.assertRaises(ValueError) as raised:
+            export_factory_spec(valid_machine(), out, name="sweep", description="Overwrite.")
+        self.assertIn("already exists", str(raised.exception))
+        self.assertEqual(out.read_text(encoding="utf-8"), "keep me")
+        export_factory_spec(valid_machine(), out, name="sweep", description="Overwrite.", overwrite=True)
+        self.assertIn("Overwrite.", out.read_text(encoding="utf-8"))
 
     def test_exports_a_stored_entry_spec_byte_pretty(self) -> None:
         self.harness.create_factory("Sweep", "A machine that sweeps.", id="sweep", dag=valid_dag())
@@ -6363,6 +6469,22 @@ class FactoryRunFromLibraryTest(unittest.TestCase):
             self.assertIn("no library machine with that name", str(error))
 
     @async_test
+    async def test_a_broken_library_file_names_its_errors_not_a_missing_name(self) -> None:
+        # A file that exists but fails to parse reports the exact parse
+        # errors; it never pretends the name is unknown.
+        directory = self.library / "broken"
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "MACHINE.md").write_text(
+            "---\nname: broken\n---\n\n```machine-spec\n{}\n```\n", encoding="utf-8"
+        )
+        with self.assertRaises(ValueError) as raised:
+            await rlm_module.rlm.factory.run("broken")
+        self.assertIn("exists but is broken", str(raised.exception))
+        self.assertIn("frontmatter description is required", str(raised.exception))
+        self.assertNotIn("no library machine with that name", str(raised.exception))
+        self.assertEqual(self.host.calls, [])
+
+    @async_test
     async def test_the_opt_in_gate_refuses_library_runs_while_disabled(self) -> None:
         # The library run routes through rlm.factory.run, so it inherits the
         # opt-in gate and the refusal precedes library resolution: while the
@@ -6421,3 +6543,189 @@ class FactoryRunFromLibraryTest(unittest.TestCase):
                 return await rlm_module.rlm.factory.status(run_id)
             await yield_loop_turn()
         self.fail(f"run {run_id} never left the running state")
+
+
+# ---------------------------------------------------------------------------
+# The installed-runtime library: the wheel a kernel venv actually installs.
+# ---------------------------------------------------------------------------
+
+_INSTALLED_LIBRARY_RUNNER = r"""
+import asyncio
+import json
+
+
+class ScriptedHost:
+    # Deterministic fake for the rlm host bridge: spawn registers a child,
+    # collect settles it with the review-sweep node's scripted answer.
+    def __init__(self):
+        self.children = {}
+        self.counter = 0
+
+    @staticmethod
+    def answer_for(name):
+        if name.startswith("files-source"):
+            return "```json\n{\"files\": [\"sample.ts\"]}\n```"
+        if name.startswith("file-reviewer"):
+            return "sample.ts: clean"
+        if name.startswith("review-aggregator"):
+            return "```json\n{\"issues\": [], \"clean\": 1}\n```"
+        return "done"
+
+    async def __call__(self, request_type, payload=None):
+        payload = payload or {}
+        if request_type == "rlm.run":
+            self.counter += 1
+            child_id = f"child-{self.counter}"
+            name = payload["kwargs"]["name"]
+            self.children[child_id] = name
+            return {
+                "rlm_child_id": child_id,
+                "name": name,
+                "session_dir": f"/tmp/{child_id}",
+                "model": "test/worker",
+            }
+        if request_type == "rlm.collect":
+            results = []
+            for target in payload["targets"]:
+                name = self.children.get(target)
+                if name is None:
+                    continue
+                results.append({
+                    "rlm_child_id": target,
+                    "session_name": name,
+                    "session_dir": f"/tmp/{target}",
+                    "status": "done",
+                    "settled": True,
+                    "answer_preview": self.answer_for(name),
+                    "tool_use_count": 1,
+                    "duration_ms": 5,
+                })
+            return {"results": results}
+        if request_type == "rlm.delete_subagent":
+            self.children.pop(payload["target"], None)
+            return {"outcome": "deleted"}
+        return {}
+
+
+async def main():
+    import rlm as rlm_module
+    import rlm.factory as factory_module
+    from rlm.factory import FactoryExecutor
+
+    rlm_module.host_request = ScriptedHost()
+
+    async def instant_sleep(_seconds):
+        await asyncio.sleep(0)
+
+    factory_module._DEFAULT_EXECUTOR = FactoryExecutor(sleep=instant_sleep)
+    factory = rlm_module.rlm.factory
+    result = await factory.run("review-sweep")
+    status = None
+    for _ in range(500):
+        status = await factory.status(result["run_id"])
+        if status["state"] != "running":
+            break
+        await asyncio.sleep(0.02)
+    print(json.dumps({
+        "state": status["state"],
+        "spec_id": result["spec_id"],
+        "machine": result["machine"],
+        "machine_path": result["machine_path"],
+        "nodes": sorted(node["id"] for node in status["nodes"]),
+        "events": status["events"][-8:],
+    }))
+
+
+asyncio.run(main())
+"""
+
+
+class InstalledRuntimeLibraryTest(unittest.TestCase):
+    """A kernel venv built from a staged runtime runs the bundled machines.
+
+    The kernel installs prime-agent-runtime non-editably into its venv (the
+    bootstrap's ``uv pip install <staged runtime>`` builds the hatchling
+    wheel, whose target package is ``src/rlm``), so the machine library
+    must resolve from the installed package — ``site-packages/rlm/
+    machines`` — not from any source-checkout path. This stages the
+    runtime the way the release does, installs it into a fresh venv, and
+    runs ``rlm.factory.run("review-sweep")`` end-to-end in that interpreter
+    against a scripted host, asserting the machine came from the installed
+    wheel.
+    """
+
+    # Names the release staging drops from the runtime tree (the assemble
+    # script's RUNTIME_EXCLUDED_NAMES): the venv bootstrap installs the
+    # staged layout, so the test stages the same way.
+    STAGING_EXCLUDED = frozenset({"test", "uv.lock", ".venv", "__pycache__", ".pytest_cache"})
+
+    def setUp(self) -> None:
+        temp = TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name).resolve()
+
+    def stage_runtime(self) -> Path:
+        """Copy the runtime tree the release-staging way, minus its excludes."""
+        runtime_dir = Path(__file__).resolve().parents[1]
+        staged = self.root / "payload" / "prime-agent-runtime"
+        for source in runtime_dir.rglob("*"):
+            relative = source.relative_to(runtime_dir)
+            if any(part in self.STAGING_EXCLUDED for part in relative.parts):
+                continue
+            target = staged / relative
+            if source.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(source.read_bytes())
+        return staged
+
+    def test_kernel_venv_runs_review_sweep_from_the_installed_wheel(self) -> None:
+        if os.name != "posix":
+            self.skipTest("the staged kernel-venv path is POSIX-shaped")
+        uv = shutil.which("uv")
+        if uv is None:
+            self.skipTest("uv is not available to build the kernel venv")
+        staged = self.stage_runtime()
+        venv = self.root / "kernel-venv"
+        agent_home = self.root / "agent-home"
+        agent_home.mkdir(parents=True)
+        (agent_home / "settings.json").write_text(
+            json.dumps({"factory": {"enabled": True}}), encoding="utf-8"
+        )
+        for args in (
+            [uv, "venv", str(venv)],
+            [uv, "pip", "install", "--python", str(venv / "bin" / "python"), "--no-deps", str(staged)],
+        ):
+            install = subprocess.run(
+                args, capture_output=True, text=True, timeout=240, check=False
+            )
+            self.assertEqual(
+                install.returncode, 0,
+                f"{' '.join(args)} failed:\n{install.stdout}\n{install.stderr}",
+            )
+        run_result = subprocess.run(
+            [
+                str(venv / "bin" / "python"), "-I", "-c", _INSTALLED_LIBRARY_RUNNER,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+            env={**os.environ, "PRIME_AGENT_CODING_AGENT_DIR": str(agent_home)},
+        )
+        self.assertEqual(
+            run_result.returncode, 0,
+            f"the installed-runtime run failed:\n{run_result.stdout}\n{run_result.stderr}",
+        )
+        payload = json.loads(run_result.stdout)
+        self.assertEqual(payload["state"], "done", payload)
+        self.assertEqual(payload["spec_id"], "review-sweep")
+        self.assertEqual(payload["machine"], "review-sweep")
+        machine_path = Path(payload["machine_path"])
+        self.assertTrue(machine_path.is_file(), machine_path)
+        self.assertIn("site-packages", str(machine_path), machine_path)
+        self.assertIn(os.path.join("rlm", "machines"), str(machine_path), machine_path)
+        # The installed package is the wheel copy, not this checkout's source.
+        self.assertNotIn("prime-agent-runtime", str(machine_path), machine_path)
+        self.assertEqual(payload["nodes"], ["files", "report", "review"])

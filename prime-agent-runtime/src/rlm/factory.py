@@ -901,11 +901,13 @@ __all__ = [
     "FactoryExecutor",
     "FactoryRun",
     "MachineFile",
+    "MachineResolutionError",
     "canonicalize_factory_spec",
     "cli_dispatch",
     "compile_factory_dag",
     "default_factory_executor",
     "export_factory_spec",
+    "export_library_machine",
     "export_machine",
     "factory_enabled",
     "import_machine",
@@ -2841,7 +2843,11 @@ async def run_factory(spec_id: str, *, name: str | None = None) -> dict[str, Any
     if harness.get("factory", spec_id) is None:
         try:
             machine, path = resolve_machine(spec_id)
-        except ValueError as error:
+        except MachineResolutionError as error:
+            if error.broken:
+                raise ValueError(
+                    f"the library machine {spec_id!r} exists but is broken ({error})"
+                ) from None
             raise ValueError(
                 f"unknown factory spec {spec_id!r}: no stored factory entry and "
                 f"no library machine with that name ({error})"
@@ -2878,11 +2884,10 @@ async def resume_factory(run_id: str) -> dict[str, Any]:
 # (machine form, or dag sugar that compiles to one) -- no new spec parser.
 # The library resolves from two levels, repo first, user second:
 #
-# - repo: ``<prime-agent checkout>/machines/<name>/MACHINE.md`` (the shipped
-#   examples, team-shared through git and pull-request review), resolved the
-#   way the bundled skills directory resolves (a source-checkout walk-up that
-#   never fires from an arbitrary ancestor); ``PRIME_AGENT_MACHINES_DIR``
-#   overrides it.
+# - repo: the bundled machines shipped INSIDE the runtime package
+#   (``src/rlm/machines/<name>/MACHINE.md``, wheel package data, so every
+#   installed kernel sees the same seeds a checkout does);
+#   ``PRIME_AGENT_MACHINES_DIR`` redirects the level at a team directory.
 # - user: ``<agent dir>/machines/<name>/MACHINE.md`` (personal machines).
 #
 # ``import_machine`` is the library's gate: it parses the file, passes the
@@ -3234,28 +3239,21 @@ def _machine_env_dir(name: str) -> str | None:
     return value or None
 
 
-def repo_machines_dir() -> "Path | None":
-    """The repo-level machines directory, resolved like the bundled skills.
+def repo_machines_dir() -> Path:
+    """The bundled machine library shipped inside the runtime package.
 
-    An explicit ``PRIME_AGENT_MACHINES_DIR`` wins; otherwise this only
-    resolves inside a source checkout (the runtime package sits under
-    ``<checkout>/prime-agent-runtime/`` and carries its own pyproject plus
-    the repl entry), never from an arbitrary ancestor, so a stray
-    ``machines`` directory above an installed venv can never masquerade as
-    the team library.
+    An explicit ``PRIME_AGENT_MACHINES_DIR`` wins (a team can point the
+    shared level at their own directory); otherwise the library resolves
+    relative to this module — ``src/rlm/machines`` in a checkout, exactly
+    the wheel-package data a kernel venv installs into
+    ``site-packages/rlm/machines`` — so an installed kernel sees the same
+    seeds a checkout does, with no source-tree walk-up that could pick up
+    a stray directory above an installed venv.
     """
     override = _machine_env_dir("PRIME_AGENT_MACHINES_DIR")
     if override:
         return Path(override).expanduser().resolve()
-    runtime_dir = Path(__file__).resolve().parents[2]
-    if (
-        (runtime_dir / "pyproject.toml").is_file()
-        and (runtime_dir / "src" / "rlm" / "repl.py").is_file()
-    ):
-        machines = runtime_dir.parent / MACHINES_DIR_NAME
-        if machines.is_dir():
-            return machines
-    return None
+    return Path(__file__).resolve().parent / MACHINES_DIR_NAME
 
 
 def user_machines_dir() -> Path:
@@ -3271,33 +3269,45 @@ def user_machines_dir() -> Path:
 def machine_library_dirs(
     *, repo_dir: "str | Path | None" = None, user_dir: "str | Path | None" = None
 ) -> "list[tuple[str, Path]]":
-    """Library levels in resolution order: repo first, user second."""
+    """Library levels in resolution order: repo first, user second.
+
+    Both levels always exist (the repo level is the packaged library;
+    the user level is the personal directory under the agent dir); a
+    missing directory is simply empty, so listing and resolving skip it.
+    """
     repo = Path(repo_dir).expanduser() if repo_dir is not None else repo_machines_dir()
     user = Path(user_dir).expanduser() if user_dir is not None else user_machines_dir()
-    dirs: list[tuple[str, Path]] = []
-    if repo is not None:
-        dirs.append(("repo", repo))
-    if user is not None:
-        dirs.append(("user", user))
-    return dirs
+    return [("repo", repo), ("user", user)]
 
 
-def list_machines(
+def _scan_machine_library(
     *, repo_dir: "str | Path | None" = None, user_dir: "str | Path | None" = None
-) -> "list[dict[str, Any]]":
-    """Library contents with descriptions, resolution-deduped (repo wins)."""
+) -> "tuple[list[dict[str, Any]], list[str]]":
+    """One pass over both levels: the listed machines and broken-file
+    warnings (``<path>: <errors>``).
+
+    The shared scan behind ``list_machines`` and the CLI's ``factory list``:
+    both levels resolve identically, repo wins on name conflicts, and the
+    parse gate is the file format's strict parser — a machine the listing
+    shows always parses and validates for resolve/run/import, while the
+    files it skips surface as warnings here and with their exact errors
+    when a run or import touches them.
+    """
     machines: dict[str, dict[str, Any]] = {}
+    warnings: list[str] = []
     for source, directory in machine_library_dirs(repo_dir=repo_dir, user_dir=user_dir):
         if not directory.is_dir():
             continue
         for path in sorted(directory.glob(f"*/{MACHINE_FILE_NAME}")):
             try:
                 text = path.read_text(encoding="utf-8")
-            except OSError:
+            except OSError as error:
+                warnings.append(f"{path}: unreadable ({error})")
                 continue
             machine, errors = parse_machine_file(text, source=str(path))
             if machine is None or errors:
-                continue  # a broken file surfaces with exact errors on resolve/run/import
+                warnings.append(f"{path}: {'; '.join(errors)}")
+                continue
             if machine.name in machines:
                 continue  # repo first: the earlier level keeps the name
             machines[machine.name] = {
@@ -3308,7 +3318,32 @@ def list_machines(
                 "source": source,
                 "path": str(path),
             }
-    return [machines[name] for name in sorted(machines)]
+    return [machines[name] for name in sorted(machines)], warnings
+
+
+def list_machines(
+    *, repo_dir: "str | Path | None" = None, user_dir: "str | Path | None" = None
+) -> "list[dict[str, Any]]":
+    """Library contents with descriptions, resolution-deduped (repo wins).
+
+    Broken files are skipped silently here (the agent-facing list);
+    ``cli_dispatch``'s ``list`` op surfaces them as warnings so the CLI's
+    ``factory list`` can say why a machine does not show.
+    """
+    return _scan_machine_library(repo_dir=repo_dir, user_dir=user_dir)[0]
+
+
+class MachineResolutionError(ValueError):
+    """One library lookup failure, with its kind.
+
+    ``broken`` distinguishes the two outcomes a caller must not blur: a
+    machine file exists for the name but failed to parse (its errors say
+    why) versus no machine carrying the name at all.
+    """
+
+    def __init__(self, message: str, *, broken: bool) -> None:
+        super().__init__(message)
+        self.broken = broken
 
 
 def resolve_machine(
@@ -3322,7 +3357,10 @@ def resolve_machine(
     The fast path reads ``<dir>/<name>/MACHINE.md`` directly; when no
     directory carries that name, the frontmatter names win like they do in
     the skill library (a directory may be named differently from its
-    declared machine), so the library is scanned once more.
+    declared machine), so the library is scanned once more. A file that
+    exists but fails to parse raises ``MachineResolutionError`` with
+    ``broken=True`` and the exact errors; a name no machine carries raises
+    it with ``broken=False``.
     """
     errors = machine_name_errors(name)
     if errors:
@@ -3333,10 +3371,12 @@ def resolve_machine(
             try:
                 text = path.read_text(encoding="utf-8")
             except OSError as error:
-                raise ValueError(f"machine {name!r} at {path} is unreadable ({error})") from None
+                raise MachineResolutionError(
+                    f"machine {name!r} at {path} is unreadable ({error})", broken=True
+                ) from None
             machine, parse_errors = parse_machine_file(text, source=str(path))
             if machine is None or parse_errors:
-                raise ValueError("; ".join(parse_errors))
+                raise MachineResolutionError("; ".join(parse_errors), broken=True)
             return machine, path
     listed = list_machines(repo_dir=repo_dir, user_dir=user_dir)
     for entry in listed:
@@ -3345,11 +3385,12 @@ def resolve_machine(
                 Path(entry["path"]).read_text(encoding="utf-8"), source=entry["path"]
             )
             if machine is None or parse_errors:
-                raise ValueError("; ".join(parse_errors))
+                raise MachineResolutionError("; ".join(parse_errors), broken=True)
             return machine, Path(entry["path"])
     listing = ", ".join(entry["name"] for entry in listed)
-    raise ValueError(
-        f"unknown machine {name!r}: no MACHINE.md for it in the machine library (machines: {listing or 'none'})"
+    raise MachineResolutionError(
+        f"unknown machine {name!r}: no MACHINE.md for it in the machine library (machines: {listing or 'none'})",
+        broken=False,
     )
 
 
@@ -3388,12 +3429,14 @@ def export_factory_spec(
     description: str,
     version: str = "1",
     author: str = "",
+    overwrite: bool = False,
 ) -> "dict[str, Any]":
     """Serialize any spec (stored entry or run machine) to MACHINE.md.
 
     Byte-pretty and stable: the same spec always renders to the same bytes.
     The spec passes through the write-time validator first, so an exported
-    file always re-imports.
+    file always re-imports. The out target is never overwritten silently: an
+    existing file refuses unless ``overwrite=True`` says otherwise.
     """
     errors = validate_factory_spec(spec)
     errors.extend(machine_name_errors(name))
@@ -3412,9 +3455,43 @@ def export_factory_spec(
     destination = Path(out_path).expanduser()
     if destination.is_dir():
         raise ValueError(f"export path {destination} is a directory (pass a file path)")
+    if destination.exists() and not overwrite:
+        raise ValueError(
+            f"export path {destination} already exists (pass overwrite=True to replace it)"
+        )
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(render_machine_file(machine), encoding="utf-8")
     return {"name": name, "path": str(destination), "source": "spec"}
+
+
+def export_library_machine(
+    name: str,
+    out_path: "str | Path",
+    *,
+    repo_dir: "str | Path | None" = None,
+    user_dir: "str | Path | None" = None,
+    overwrite: bool = False,
+) -> "dict[str, Any]":
+    """Export one library machine to MACHINE.md at ``out_path``.
+
+    Resolution is the library contract only (repo directory first, user
+    second); the file copies verbatim so the shared documentation travels
+    with the spec. The out target is never overwritten silently: an
+    existing file refuses unless ``overwrite=True`` says otherwise. The
+    CLI dispatches here because a fresh CLI process has no session state
+    (stored entries and live runs) to resolve from.
+    """
+    machine, path = resolve_machine(name, repo_dir=repo_dir, user_dir=user_dir)
+    destination = Path(out_path).expanduser()
+    if destination.is_dir():
+        raise ValueError(f"export path {destination} is a directory (pass a file path)")
+    if destination.exists() and not overwrite:
+        raise ValueError(
+            f"export path {destination} already exists (pass overwrite=True to replace it)"
+        )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+    return {"name": machine.name, "path": str(destination), "source": "library"}
 
 
 def export_machine(
@@ -3423,6 +3500,7 @@ def export_machine(
     *,
     repo_dir: "str | Path | None" = None,
     user_dir: "str | Path | None" = None,
+    overwrite: bool = False,
 ) -> "dict[str, Any]":
     """Export one machine to MACHINE.md at ``out_path``.
 
@@ -3448,7 +3526,9 @@ def export_machine(
                 "; ".join(errors + [f"the stored entry id {target!r} cannot become a machine name"])
             )
         description = (entry.content or "").strip() or entry.title
-        return export_factory_spec(spec, out_path, name=target, description=description)
+        return export_factory_spec(
+            spec, out_path, name=target, description=description, overwrite=overwrite
+        )
     run = executor._runs.get(target)
     if run is not None and run.machine:
         errors = machine_name_errors(run.spec_id)
@@ -3457,32 +3537,38 @@ def export_machine(
                 "; ".join(errors + [f"the run's spec id {run.spec_id!r} cannot become a machine name"])
             )
         description = (run.name or f"factory run {run.run_id}").strip()
-        return export_factory_spec(run.machine, out_path, name=run.spec_id, description=description)
-    machine, path = resolve_machine(target, repo_dir=repo_dir, user_dir=user_dir)
-    destination = Path(out_path).expanduser()
-    if destination.is_dir():
-        raise ValueError(f"export path {destination} is a directory (pass a file path)")
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
-    return {"name": machine.name, "path": str(destination), "source": "library"}
+        return export_factory_spec(
+            run.machine, out_path, name=run.spec_id, description=description, overwrite=overwrite
+        )
+    return export_library_machine(
+        target, out_path, repo_dir=repo_dir, user_dir=user_dir, overwrite=overwrite
+    )
 
 
 def cli_dispatch(payload: Any) -> "dict[str, Any]":
-    """JSON facade for the ``prime-agent factory import/export`` subcommands.
+    """JSON facade for the ``prime-agent factory`` subcommands.
 
     The CLI resolves the kernel Python, feeds one JSON payload on stdin,
     and reads one JSON result from stdout: ``{"ok": true, ...}`` or
     ``{"ok": false, "errors": [...]}``. Every error surfaces as data, so
     the exact validator sentences reach the command's output verbatim.
+    The payload carries only what the user typed (an op, a path, a name,
+    an out target); this process resolves every library directory itself,
+    so the kernel is the single resolution contract for list, import, and
+    export alike — a fresh CLI process has no session state (stored
+    entries, live runs), so export resolves the library only.
     """
     if not isinstance(payload, dict):
         return {"ok": False, "errors": ["factory cli payload must be a JSON object"]}
     op = payload.get("op")
+    if op == "list":
+        machines, warnings = _scan_machine_library()
+        return {"ok": True, "machines": machines, "warnings": warnings}
     if op == "import":
         if not isinstance(payload.get("path"), str) or not payload["path"]:
             return {"ok": False, "errors": ["factory import requires a `path` string"]}
         try:
-            result = import_machine(payload["path"], target_dir=payload.get("target_dir"))
+            result = import_machine(payload["path"])
         except (ValueError, OSError) as error:
             return {"ok": False, "errors": [str(error)]}
         return {"ok": True, **result}
@@ -3492,18 +3578,13 @@ def cli_dispatch(payload: Any) -> "dict[str, Any]":
         if not isinstance(payload.get("out"), str) or not payload["out"]:
             return {"ok": False, "errors": ["factory export requires an `out` string"]}
         try:
-            result = export_machine(
-                payload["name"],
-                payload["out"],
-                repo_dir=payload.get("repo_dir"),
-                user_dir=payload.get("user_dir"),
-            )
+            result = export_library_machine(payload["name"], payload["out"])
         except (ValueError, OSError) as error:
             return {"ok": False, "errors": [str(error)]}
         return {"ok": True, **result}
     return {
         "ok": False,
-        "errors": [f"unknown factory cli op {op!r} (expected 'import' or 'export')"],
+        "errors": [f"unknown factory cli op {op!r} (expected 'list', 'import' or 'export')"],
     }
 
 
@@ -3792,14 +3873,20 @@ detail, and the event ledger until then.
 
 - The machine library: machines are `MACHINE.md` files (frontmatter plus
   one fenced `machine-spec` block), one directory per machine, resolved
-  from the repository's `machines/` first and the personal `machines/`
-  library under the agent dir second — repo wins on name conflicts.
-  `prime-agent factory list | import | export` manages them: import runs
-  the same write-time validation as a stored spec, so an invalid machine
-  never persists. `rlm.factory.run('<name>')` runs a library machine
-  directly without creating a harness entry. The seeds are `builder`,
-  `pr-manager`, and `review-sweep`; the worked examples above derive from
-  their shapes.
+  from two levels — the bundled seeds shipped inside the runtime (visible
+  in every install; `PRIME_AGENT_MACHINES_DIR` redirects the level at a
+  team directory) first, the personal `machines/` library under the agent
+  dir second; the earlier level wins on name conflicts. `prime-agent
+  factory list | import | export` manages them: list shows only what
+  parses (broken files print as warnings), import runs the same
+  write-time validation as a stored spec so an invalid machine never
+  persists, and export copies a library machine verbatim to a fresh path
+  (an existing target is refused, never overwritten). `rlm.factory.run('<name>')`
+  runs a library machine directly without creating a harness entry; a
+  machine that exists but is broken names its errors
+  instead of pretending the name is unknown. The bundled seeds are
+  `builder`, `pr-manager`, and `review-sweep`; the worked examples above
+  derive from their shapes.
 - The TUI factory page: the activity dock's `⚙ N factory` group (Enter or
   click) opens one live diagram per run, newest run first. `j`/`k` move the
   selection, `s` stops the selected run, `r` resumes it, `m` copies it as

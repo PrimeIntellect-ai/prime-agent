@@ -249,8 +249,8 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
     )
     .description(
         "Machines are MACHINE.md templates (frontmatter plus a fenced machine-spec block) \
-resolved repo-first, then from the personal library under the agent dir. \
-Run one with `await rlm.factory.run(\"<name>\")` from a session.",
+resolved from the bundled library shipped inside the runtime, then from the personal \
+library under the agent dir. Run one with `await rlm.factory.run(\"<name>\")` from a session.",
     ),
     CommandSpec::new(
         &["factory", "list"],
@@ -258,7 +258,8 @@ Run one with `await rlm.factory.run(\"<name>\")` from a session.",
         "List the machine library",
     )
     .description(
-        "Lists the shipped repo machines and the personal machines with their descriptions.",
+        "Lists the bundled machines and the personal machines with their descriptions; \
+files that fail the parser skip with a warning.",
     )
     .options(&["--json  Print JSON"]),
     CommandSpec::new(
@@ -277,8 +278,9 @@ never persists and the exact errors print verbatim.",
         "Export a machine to a MACHINE.md file",
     )
     .description(
-        "Resolves a stored factory entry, a live run, or the library machine named <name> \
-(both library levels, repo first) and writes its MACHINE.md to the output path.",
+        "Resolves the library machine named <name> (bundled first, then the personal \
+library) and copies its MACHINE.md to the output path; an existing target is \
+refused, never overwritten.",
     )
     .options(&[
         "--out <path>  Destination MACHINE.md path",

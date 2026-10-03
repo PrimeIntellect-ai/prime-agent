@@ -1,13 +1,13 @@
 //! `prime-agent factory`: the machine library commands.
 //!
-//! The library mirrors the skills conventions: repo-level machines
-//! (team-shared, resolved like the bundled skills directory) plus the
-//! personal `machines/` library under the agent dir. `list` reads
-//! frontmatter metadata directly; `import` and `export` go through the
-//! kernel Python, where the machine-spec gate lives: the payload's spec
-//! passes the SAME write-time validator as every factory write, so an
-//! invalid spec never persists and the exact error sentences reach the
-//! command's output verbatim.
+//! Every subcommand — list included — is one `rlm.factory.cli_dispatch`
+//! payload through the kernel Python. The kernel owns the whole library
+//! contract: the bundled seeds ship as wheel package data inside the
+//! runtime, the personal library lives under the agent dir, the strict
+//! MACHINE.md parser gates what lists, and the write-time validator gates
+//! what persists (an invalid spec never persists; the exact error
+//! sentences reach this command's output verbatim). The CLI never
+//! re-implements resolution or parsing, so the two sides cannot drift.
 
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -15,9 +15,19 @@ use std::process::{Command, Stdio};
 
 use serde_json::{json, Value};
 
-use pa_core::machines::MachineListing;
-
-use crate::config::get_agent_dir;
+/// One machine as the kernel lists it (`cli_dispatch`'s `list` op).
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+struct MachineListing {
+    name: String,
+    description: String,
+    #[serde(default)]
+    version: String,
+    #[serde(default)]
+    author: String,
+    /// The library level: `repo` (the bundled library) or `user`.
+    source: String,
+    path: String,
+}
 
 /// The thin runner executed by the kernel Python: one JSON payload in on
 /// stdin, one JSON result out on stdout (`rlm.factory.cli_dispatch`).
@@ -139,24 +149,71 @@ pub fn run_factory_command(args: &[String]) -> i32 {
     }
 }
 
+/// The `list` payload: the op alone — the kernel resolves every library
+/// directory itself.
+fn list_payload() -> Value {
+    json!({"op": "list"})
+}
+
+/// The `import` payload: the machine file the user pointed at.
+fn import_payload(path: &std::path::Path) -> Value {
+    json!({
+        "op": "import",
+        "path": path.display().to_string(),
+    })
+}
+
+/// The `export` payload: the name and the out target the user chose.
+fn export_payload(name: &str, out: &std::path::Path) -> Value {
+    json!({
+        "op": "export",
+        "name": name,
+        "out": out.display().to_string(),
+    })
+}
+
 /// `factory list`: library contents with descriptions.
 fn run_list(json: bool) -> i32 {
-    let user_dir = pa_core::machines::user_machines_dir(&get_agent_dir());
-    let repo_dir = pa_core::machines::repo_machines_dir();
-    let (machines, warnings) = pa_core::machines::list_machines(repo_dir.as_deref(), &user_dir);
-    for warning in &warnings {
-        eprintln!("Warning: {warning}");
+    let payload = list_payload();
+    match resolve_kernel_python().and_then(|python| dispatch_via_kernel(&python, &payload)) {
+        Ok(result) => render_list(&result, json),
+        Err(error) => {
+            eprintln!("Error: {error}");
+            1
+        }
+    }
+}
+
+/// Render one `list` dispatch result: errors verbatim, warnings as
+/// warnings, machines as rows (or the whole payload for `--json`).
+fn render_list(result: &Value, json: bool) -> i32 {
+    if let Some(code) = print_dispatch_errors(result) {
+        return code;
     }
     if json {
-        let payload = json!({
-            "machines": machines,
-            "warnings": warnings,
-        });
         println!(
             "{}",
-            serde_json::to_string_pretty(&payload).unwrap_or_default()
+            serde_json::to_string_pretty(result).unwrap_or_default()
         );
         return 0;
+    }
+    let machines: Vec<MachineListing> = result
+        .get("machines")
+        .cloned()
+        .map(|value| serde_json::from_value(value).unwrap_or_default())
+        .unwrap_or_default();
+    for warning in result
+        .get("warnings")
+        .and_then(Value::as_array)
+        .map(|warnings| {
+            warnings
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+    {
+        eprintln!("Warning: {warning}");
     }
     if machines.is_empty() {
         println!("No machines in the library.");
@@ -253,20 +310,8 @@ fn run_import(path: &str, json: bool) -> i32 {
         eprintln!("Error: machine file not found: {}", source.display());
         return 1;
     }
-    let python = match resolve_kernel_python() {
-        Ok(python) => python,
-        Err(error) => {
-            eprintln!("Error: {error}");
-            return 1;
-        }
-    };
-    let target_dir = pa_core::machines::user_machines_dir(&get_agent_dir());
-    let payload = json!({
-        "op": "import",
-        "path": source.display().to_string(),
-        "target_dir": target_dir.display().to_string(),
-    });
-    match dispatch_via_kernel(&python, &payload) {
+    let payload = import_payload(&source);
+    match resolve_kernel_python().and_then(|python| dispatch_via_kernel(&python, &payload)) {
         Ok(result) => print_dispatch_result(&result, json, "imported"),
         Err(error) => {
             eprintln!("Error: {error}");
@@ -277,23 +322,8 @@ fn run_import(path: &str, json: bool) -> i32 {
 
 /// `factory export <name> --out <path>`: serialize a machine to MACHINE.md.
 fn run_export(name: &str, out: &str, json: bool) -> i32 {
-    let python = match resolve_kernel_python() {
-        Ok(python) => python,
-        Err(error) => {
-            eprintln!("Error: {error}");
-            return 1;
-        }
-    };
-    let user_dir = pa_core::machines::user_machines_dir(&get_agent_dir());
-    let repo_dir = pa_core::machines::repo_machines_dir();
-    let payload = json!({
-        "op": "export",
-        "name": name,
-        "out": crate::config::expand_tilde_path(out).display().to_string(),
-        "repo_dir": repo_dir.as_ref().map(|dir| dir.display().to_string()),
-        "user_dir": user_dir.display().to_string(),
-    });
-    match dispatch_via_kernel(&python, &payload) {
+    let payload = export_payload(name, &crate::config::expand_tilde_path(out));
+    match resolve_kernel_python().and_then(|python| dispatch_via_kernel(&python, &payload)) {
         Ok(result) => print_dispatch_result(&result, json, "exported"),
         Err(error) => {
             eprintln!("Error: {error}");
@@ -302,17 +332,26 @@ fn run_export(name: &str, out: &str, json: bool) -> i32 {
     }
 }
 
-/// Print one dispatch result: errors verbatim (the validator's exact
-/// sentences), or the ok-payload as text or JSON.
-fn print_dispatch_result(result: &Value, json: bool, verb: &str) -> i32 {
-    let ok = result.get("ok").and_then(Value::as_bool).unwrap_or(false);
-    if !ok {
-        if let Some(errors) = result.get("errors").and_then(Value::as_array) {
-            for error in errors {
-                eprintln!("Error: {error}");
-            }
+/// Print a failed dispatch's errors verbatim (the validator's exact
+/// sentences); `Some(exit code)` when the result is not an ok-payload.
+fn print_dispatch_errors(result: &Value) -> Option<i32> {
+    if result.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+        return None;
+    }
+    if let Some(errors) = result.get("errors").and_then(Value::as_array) {
+        for error in errors {
+            eprintln!("Error: {error}");
         }
-        return 1;
+    }
+    Some(1)
+}
+
+/// Print one dispatch result: errors verbatim (the validator's exact
+/// sentences), or the ok-payload as text or JSON. `verb` is the done-word
+/// of the subcommand that ran ("imported" or "exported").
+fn print_dispatch_result(result: &Value, json: bool, verb: &str) -> i32 {
+    if let Some(code) = print_dispatch_errors(result) {
+        return code;
     }
     if json {
         println!(
@@ -330,11 +369,13 @@ fn print_dispatch_result(result: &Value, json: bool, verb: &str) -> i32 {
         .and_then(Value::as_str)
         .unwrap_or_default();
     let source = result.get("source").and_then(Value::as_str);
-    match (verb, source) {
-        ("imported", _) => println!("Imported {name} into {path}."),
-        ("exported", Some(source)) => println!("Exported {name} to {path} (from {source})."),
-        ("exported", None) => println!("Exported {name} to {path}."),
-        _ => println!("{name} {path}"),
+    if verb == "exported" {
+        match source {
+            Some(source) => println!("Exported {name} to {path} (from {source})."),
+            None => println!("Exported {name} to {path}."),
+        }
+    } else {
+        println!("Imported {name} into {path}.");
     }
     0
 }
@@ -410,6 +451,7 @@ mod tests {
         .expect("fixture");
         // Errors go to stderr inside print_dispatch_result; the exit code is the pin.
         assert_eq!(print_dispatch_result(&failure, false, "imported"), 1);
+        assert_eq!(render_list(&failure, false), 1);
     }
 
     #[test]
@@ -419,18 +461,58 @@ mod tests {
     }
 
     #[test]
+    fn payloads_carry_only_what_the_user_typed() {
+        // The kernel resolves every library directory itself, so the
+        // payloads carry no directory fields to drift out of sync.
+        assert_eq!(list_payload(), serde_json::json!({"op": "list"}));
+        assert_eq!(
+            import_payload(std::path::Path::new("/tmp/m.MACHINE.md")),
+            serde_json::json!({"op": "import", "path": "/tmp/m.MACHINE.md"})
+        );
+        assert_eq!(
+            export_payload("sweep", std::path::Path::new("/tmp/s.MACHINE.md")),
+            serde_json::json!({
+                "op": "export",
+                "name": "sweep",
+                "out": "/tmp/s.MACHINE.md",
+            })
+        );
+    }
+
+    #[test]
     fn listing_row_renders_name_source_description() {
         let listing = MachineListing {
             name: "sweep".to_string(),
             description: "A machine that sweeps.".to_string(),
-            version: Some("1".to_string()),
-            author: Some("Tester".to_string()),
-            source: pa_core::machines::MachineSource::Repo,
-            path: PathBuf::from("/machines/sweep/MACHINE.md"),
+            version: "1".to_string(),
+            author: "Tester".to_string(),
+            source: "repo".to_string(),
+            path: "/machines/sweep/MACHINE.md".to_string(),
         };
         assert_eq!(
             listing_row(&listing, 5),
             "sweep  repo  A machine that sweeps."
         );
+    }
+
+    #[test]
+    fn render_list_parses_the_kernel_listing() {
+        let result: Value = serde_json::from_str(
+            r#"{"ok": true, "machines": [
+                {"name": "review-sweep", "description": "Sweep a branch.", "version": "1", "author": "Prime Agent", "source": "repo", "path": "/rlm/machines/review-sweep/MACHINE.md"},
+                {"name": "mine", "description": "Personal.", "version": "", "author": "", "source": "user", "path": "/agent/machines/mine/MACHINE.md"}
+            ], "warnings": []}"#,
+        )
+        .expect("fixture");
+        // The rows print to stdout; the exit code pins the ok-path.
+        assert_eq!(render_list(&result, false), 0);
+        assert_eq!(render_list(&result, true), 0);
+    }
+
+    #[test]
+    fn render_list_exits_cleanly_with_no_machines() {
+        let result: Value = serde_json::from_str(r#"{"ok": true, "machines": [], "warnings": []}"#)
+            .expect("fixture");
+        assert_eq!(render_list(&result, false), 0);
     }
 }
