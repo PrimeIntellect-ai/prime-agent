@@ -917,7 +917,14 @@ struct GatedSink {
     delivered: std::sync::Mutex<Vec<String>>,
     /// The release flag the hanging send waits on.
     released: std::sync::atomic::AtomicBool,
+    /// The hang gate's waker: `notify_waiters` on release, no
+    /// permits — a stale permit would unhang the sink before the
+    /// test releases it.
     notify: tokio::sync::Notify,
+    /// Delivery completion: `notify_one` stores a permit when no
+    /// waiter is registered yet, so the completion future is
+    /// race-free in both orders and can be awaited directly.
+    delivered_notify: tokio::sync::Notify,
 }
 
 impl GatedSink {
@@ -929,6 +936,11 @@ impl GatedSink {
 
     fn delivered_names(&self) -> Vec<String> {
         self.delivered.lock().expect("gate lock").clone()
+    }
+
+    /// The first delivery's completion future.
+    fn wait_until_delivered(&self) -> impl std::future::Future<Output = ()> + '_ {
+        self.delivered_notify.notified()
     }
 }
 
@@ -961,6 +973,7 @@ impl pa_telemetry::TelemetrySink for GatedSink {
             for event in &events {
                 delivered.push(event.name.clone());
             }
+            self.delivered_notify.notify_one();
             pa_telemetry::SinkOutcome::Sent
         })
     }
@@ -1019,16 +1032,18 @@ async fn startup_flush_never_blocks_the_first_frame() {
             );
 
             // The released drain still delivers the tracked startup
-            // events.
+            // events: completion is awaited on the sink's own notify,
+            // the timeout only bounds failure — no polling loop.
             sink.release();
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-            while sink.delivered_names().is_empty() {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "the released drain delivered the tracked startup events"
-                );
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
+            let delivered = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                sink.wait_until_delivered(),
+            )
+            .await;
+            assert!(
+                delivered.is_ok(),
+                "the released drain delivered the tracked startup events"
+            );
             let names = sink.delivered_names();
             assert!(
                 names.contains(&"startup".to_string()),
