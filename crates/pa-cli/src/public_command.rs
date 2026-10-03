@@ -171,6 +171,7 @@ pub fn handle_public_command(args: &[String]) -> PublicCommandResult {
         "schedule" => run_nested_agent_command("schedule", "cron", &rest),
         "status" => run_status(&rest),
         "doctor" => run_doctor(&rest),
+        "telemetry" => run_telemetry(&rest),
         "incident" => run_incident_command(&rest),
         "shutdown" => run_shutdown(&rest),
         "package" => run_package(&rest),
@@ -179,6 +180,7 @@ pub fn handle_public_command(args: &[String]) -> PublicCommandResult {
         "model" => rewrite_nested_command("model", "list", "--list-models", &rest),
         "session" => rewrite_nested_command("session", "export", "--export", &rest),
         "prompt" => handled_with_exit(crate::prompt_command::run_prompt_command(&rest)),
+        "factory" => handled_with_exit(crate::factory_command::run_factory_command(&rest)),
         "config" => {
             if !rest.is_empty() {
                 return fail(format!("Usage: {APP_NAME} config"), None);
@@ -479,6 +481,39 @@ fn run_doctor(args: &[String]) -> PublicCommandResult {
         );
     }
     handled()
+}
+
+/// `prime-agent telemetry [status|on|off]`: the same report and settings
+/// switch as the `/telemetry` slash command, for the current directory's
+/// settings scope.
+fn run_telemetry(args: &[String]) -> PublicCommandResult {
+    let usage = || fail(format!("Usage: {APP_NAME} telemetry [status|on|off]"), None);
+    if args.len() > 1 {
+        return usage();
+    }
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let agent_dir = crate::config::get_agent_dir();
+    let mut settings = pa_core::settings::SettingsManager::create(&cwd, &agent_dir);
+    let report = match args.first().map(String::as_str) {
+        None | Some("status") => Ok(pa_core::session_engine::telemetry::telemetry_status_text(
+            &settings, &agent_dir,
+        )),
+        Some(choice @ ("on" | "off")) => {
+            pa_core::session_engine::telemetry::set_telemetry_enabled_text(
+                &mut settings,
+                &agent_dir,
+                choice == "on",
+            )
+        }
+        Some(_) => return usage(),
+    };
+    match report {
+        Ok(report) => {
+            println!("{report}");
+            handled()
+        }
+        Err(error) => fail(format!("{error:#}"), None),
+    }
 }
 
 /// `prime-agent incident` (TS `runIncidentCommand`): parse the options,

@@ -431,9 +431,10 @@ fn sigkill(pid: u32) {
 /// A parent worker killed with SIGKILL cannot run any teardown (#246's
 /// closes all live in the worker), so the supervisor's death monitoring
 /// closes its resident children: the spawned child's worker leaves the
-/// roster, its session archives, the respawned parent's registry reads
-/// empty, and the child stays visible as a passive ledger row (the close
-/// is a plain stop - the spawn edge survives, no delete record).
+/// roster, its session archives, the respawned parent relists the child
+/// as a settled row from the surviving spawn edge, and the child stays
+/// visible as a passive ledger row (the close is a plain stop - the
+/// spawn edge survives, no delete record).
 #[test]
 fn sigkill_closes_the_spawned_child_and_passivates_the_row() {
     let Some(kernel_python) = kernel_python() else {
@@ -539,21 +540,13 @@ fn sigkill_closes_the_spawned_child_and_passivates_the_row() {
         "the parent-death close keeps the child's resume entry (no archive): {child_session}"
     );
 
-    // The respawned parent's registry is fresh: the parent died before it
-    // could track anything, and the death close owns its children now.
-    // (get_rlm_children fails while the worker restarts; poll for the
-    // respawned answer.)
+    // The respawned parent reseeds the spawn edge the death close kept.
+    // Its display still says running, so TS exposes the interrupted task
+    // as error rather than presenting it as a completed child.
     wait_until(&mut client, Duration::from_mins(1), |client| {
-        client.send_command(
-            "g3",
-            &json!({ "type": "get_rlm_children", "activeSessionId": parent_id }),
-        );
-        let response = client.read_response("g3");
-        (response["success"] == true
-            && response["data"]["children"]
-                .as_array()
-                .is_some_and(std::vec::Vec::is_empty))
-        .then_some(())
+        rlm_children_rows(client, "g3", &parent_id)
+            .into_iter()
+            .find(|row| row["id"] == json!(child_id) && row["status"] == "error")
     });
 
     // The passive row per TS: the spawn edge survived the close (a stop,

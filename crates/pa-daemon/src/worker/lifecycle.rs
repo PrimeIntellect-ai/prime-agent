@@ -237,6 +237,20 @@ impl Worker {
         }
     }
 
+    /// Relist the bound session's ledger children (TS
+    /// `listPassiveRlmSubagents`): awaited where the identity is bound -
+    /// create, and the replacement rebind inside the gate - so the scan is
+    /// ordered with the close walk that follows a later replacement.
+    pub(crate) async fn reseed_rlm_children(&self) {
+        if let Some(children) = self
+            .agent_engine
+            .as_ref()
+            .and_then(|engine| engine.children.clone())
+        {
+            children.reseed_from_ledger().await;
+        }
+    }
+
     /// Wait until the replacement teardown can retire the runtime: no
     /// turn and no compaction in flight. Like the navigation settle, the
     /// park rides a timeout backstop - the turn runner notifies the idle
@@ -314,7 +328,7 @@ impl Worker {
     /// catalog rebind runs separately (`bind_scheduled_jobs`), like the
     /// TS dispatch handlers that call `rebindCronJobsToState` after the
     /// runtime call.
-    pub(crate) fn refresh_replaced_session_state(&self) {
+    pub(crate) async fn refresh_replaced_session_state(&self) {
         let (rlm_depth, summary, child_script) = {
             let mut core = self
                 .core
@@ -340,7 +354,7 @@ impl Worker {
         // child engine file rides along: TS children inherit the
         // replacement runtime's `sessionConfig`, which the runtime keeps
         // across its swaps.
-        if let Err(error) = self
+        match self
             .engine
             .configure_rlm_identity(crate::engine::RlmSessionIdentity {
                 rlm_depth,
@@ -352,9 +366,9 @@ impl Worker {
                 child_script,
                 // A TS replacement runtime has no semantic spawn.
                 semantic_spawn: None,
-            })
-        {
-            eprintln!("pa-daemon: replacement identity rebind failed: {error:#}");
+            }) {
+            Ok(()) => self.reseed_rlm_children().await,
+            Err(error) => eprintln!("pa-daemon: replacement identity rebind failed: {error:#}"),
         }
         if let Ok(summary_value) = serde_json::to_value(&summary) {
             self.engine.set_session_summary(summary_value);

@@ -448,6 +448,33 @@ impl SupervisorChildSessionsInner {
                 // pending edge must be on the parent's ledger before the
                 // notice's follow-up turn mints its own request.
                 self.record_child_return(record).await;
+                // Only a successful run completes the display (TS
+                // `completeRlmSubagentRuntime`); a cancelled or failed run
+                // stays `running`, which a restart relists as `error`.
+                let completed = {
+                    let record = record.lock().await;
+                    (record.settled_status == Some("done"))
+                        .then(|| (record.session_dir.clone(), record.rlm_child_id.clone()))
+                };
+                if let Some((session_dir, child_id)) = completed {
+                    if let Err(error) = tokio::task::spawn_blocking(move || {
+                        let Some(mut display) =
+                            crate::rlm_ledger::read_rlm_subagent_display(Path::new(&session_dir))
+                        else {
+                            return Ok(());
+                        };
+                        if display.child_id != child_id || display.status != "running" {
+                            return Ok(());
+                        }
+                        display.status = "completed".to_string();
+                        crate::rlm_ledger::write_rlm_subagent_display(&display).map(|_| ())
+                    })
+                    .await
+                    .unwrap_or_else(|error| Err(anyhow!(error)))
+                    {
+                        eprintln!("pa-daemon: RLM child display completion failed: {error:#}");
+                    }
+                }
                 self.deliver_settle_notice(record).await;
                 // A settled child releases an owed goal continuation (TS
                 // `_maybeResumeGoalContinuationAfterRlmWork` at the child

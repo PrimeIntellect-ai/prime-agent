@@ -400,7 +400,6 @@ impl SessionUi {
         resolved: &pa_types::slash_commands::ResolvedSlashCommand,
         view: &mut AgentView,
     ) -> Result<()> {
-        self.track_command_used("mcp");
         // `/mcp` is menu-only: the TS `handleMcpCommand` typed subcommands
         // (login/logout/...) are deliberately removed — the connections
         // view resolves its own auth internally, and a submitted argument

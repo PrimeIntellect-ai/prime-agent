@@ -305,20 +305,6 @@ mod tests {
             any::<bool>().prop_map(|restored| InjectedPromptKind::KernelRestored { restored }),
             prop::collection::vec("[a-z 数据]{1,12}", 0..4)
                 .prop_map(|skills| InjectedPromptKind::PythonSkillsUnavailable { skills }),
-            (
-                prop::sample::select(vec![
-                    RlmChildOutcome::Finished,
-                    RlmChildOutcome::Failed,
-                    RlmChildOutcome::Cancelled,
-                ]),
-                "[a-z 数据]{1,12}",
-            )
-                .prop_map(|(outcome, session_name)| {
-                    InjectedPromptKind::RlmChildStatus {
-                        outcome,
-                        session_name,
-                    }
-                }),
         ]
     }
 

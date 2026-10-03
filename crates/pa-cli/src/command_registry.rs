@@ -117,6 +117,14 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         "Show background service status",
     ),
     CommandSpec::new(
+        &["telemetry"],
+        "telemetry [status|on|off]",
+        "Show or change usage telemetry",
+    )
+    .description(
+        "Prime Agent sends pseudonymous usage and performance metrics, never prompts, responses, tool content, file paths, or repository data. status (the default) shows whether telemetry is on and why, where it sends, and the installation id; on and off save the choice in settings.",
+    ),
+    CommandSpec::new(
         &["doctor"],
         "doctor [--fix] [--json]",
         "Inspect and safely clean up background services",
@@ -234,6 +242,51 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         "Export a saved session to HTML",
     ),
     CommandSpec::new(&["config"], "config", "Configure package resources"),
+    CommandSpec::new(
+        &["factory"],
+        "factory <list|import|export>",
+        "Share and run factory machines from the machine library",
+    )
+    .description(
+        "Machines are MACHINE.md templates (frontmatter plus a fenced machine-spec block) \
+resolved from the bundled library shipped inside the runtime, then from the personal \
+library under the agent dir. Run one with `await rlm.factory.run(\"<name>\")` from a session.",
+    ),
+    CommandSpec::new(
+        &["factory", "list"],
+        "factory list [--json]",
+        "List the machine library",
+    )
+    .description(
+        "Lists the bundled machines and the personal machines with their descriptions; \
+files that fail the parser skip with a warning.",
+    )
+    .options(&["--json  Print JSON"]),
+    CommandSpec::new(
+        &["factory", "import"],
+        "factory import <path> [--json]",
+        "Validate and import a MACHINE.md into the personal library",
+    )
+    .description(
+        "The machine's spec passes the kernel's write-time validator; an invalid spec \
+never persists and the exact errors print verbatim.",
+    )
+    .options(&["--json  Print JSON"]),
+    CommandSpec::new(
+        &["factory", "export"],
+        "factory export <name> --out <path> [--json]",
+        "Export a machine to a MACHINE.md file",
+    )
+    .description(
+        "Resolves the library machine named <name> (bundled first, then the personal \
+library) and copies its MACHINE.md to the output path; an existing target is \
+refused, never overwritten.",
+    )
+    .options(&[
+        "--out <path>  Destination MACHINE.md path",
+        "--json        Print JSON",
+    ])
+    .examples(&["factory export review-sweep --out shared-review-sweep.MACHINE.md"]),
     CommandSpec::new(
         &["prompt"],
         "prompt [--model <selector>] [--cwd <dir>] [--json]",

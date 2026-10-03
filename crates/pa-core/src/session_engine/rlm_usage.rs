@@ -87,8 +87,8 @@ pub struct RlmChildUsageAttributions {
     /// session that runs sequential children must not accumulate their
     /// registrations.
     children: std::sync::Mutex<HashMap<String, String>>,
-    /// The `rlm child usage attributed` adoption event's handle (`None`
-    /// in sessions without telemetry — subagents never double-report).
+    /// The `rlm_child_*` session counters' handle (`None` in sessions
+    /// without telemetry — subagents never double-report).
     telemetry: std::sync::Mutex<Option<std::sync::Arc<super::telemetry::SessionTelemetry>>>,
     /// The producer a rebuild handed observation over to: an in-flight
     /// emission that cloned the retired sink still delivers through this
@@ -115,8 +115,8 @@ impl RlmChildUsageAttributions {
         }
     }
 
-    /// Bind the telemetry handle the `rlm child usage attributed`
-    /// adoption event reports through (the engine wiring installs it
+    /// Bind the telemetry handle the `rlm_child_*` session counters count
+    /// through (the engine wiring installs it
     /// once the session telemetry is assembled; depth-0 sessions only).
     ///
     /// # Panics
@@ -264,11 +264,6 @@ impl RlmChildUsageAttributions {
                         .as_ref()
                     {
                         telemetry.note_child_usage_attributed(
-                            match origin {
-                                ChildUsageOrigin::SpawnTask => "spawn_task",
-                                ChildUsageOrigin::AgentMessage => "agent_message",
-                                ChildUsageOrigin::DirectUser => "direct_user",
-                            },
                             usage.input,
                             usage.output,
                             usage.cache_read,

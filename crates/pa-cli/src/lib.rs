@@ -37,6 +37,7 @@ pub(crate) mod daemon_command;
 pub(crate) mod daemon_discovery;
 pub(crate) mod daemon_mode;
 pub(crate) mod daemon_session_list;
+pub(crate) mod factory_command;
 pub(crate) mod file_processor;
 pub(crate) mod global_flags;
 pub(crate) mod headless_autonomous;
@@ -57,6 +58,7 @@ pub(crate) mod self_update;
 pub(crate) mod session_export;
 pub(crate) mod sessions_table_format;
 pub(crate) mod subscription_login;
+pub(crate) mod telemetry_notice;
 pub(crate) mod traces_login;
 
 /// The runtime boundary: everything a mode-runner crate implements to plug
@@ -92,6 +94,10 @@ pub fn main_with_runtime(args: &[String], runtime: &dyn mode::Runtime) -> i32 {
 
 fn main_impl(args: &[String], runtime: &dyn mode::Runtime) -> Result<i32, String> {
     use std::io::IsTerminal;
+
+    // Telemetry reports the version `--version` prints: the beta channel
+    // restamps only the packaged manifest, never the compiled-in version.
+    pa_telemetry::set_version(crate::config::version());
 
     let offline_mode = args.iter().any(|arg| arg == "--offline")
         || crate::config::is_truthy_env_flag(

@@ -269,6 +269,11 @@ pub fn format_harness_state_for_prompt(
         let kind_name = kind;
         if kind_name == "subagent" && !entries.is_empty() && include_ipython {
             lines.push(format!("{kind_name}: {} (invoke a spec by turning it into a concise task prompt and spawning with `await rlm.spawn('<task>', name='<worker>')`; admission returns a child handle, never the answer)", entries.len()));
+        } else if kind_name == "factory" && !entries.is_empty() && include_ipython {
+            lines.push(format!(
+                "{kind_name}: {} (state-machine workflow specs; run one with `await rlm.factory.run('<id>')`; watch with `await rlm.factory.status(run_id)`, stop with `await rlm.factory.stop(run_id)`, resume a paused run with `await rlm.factory.resume(run_id)`)",
+                entries.len()
+            ));
         } else {
             lines.push(format!("{kind_name}: {}", entries.len()));
         }
@@ -397,6 +402,7 @@ fn refinement_kind_name(kind: RefinementKind) -> &'static str {
         RefinementKind::Memory => "memory",
         RefinementKind::Skill => "skill",
         RefinementKind::Subagent => "subagent",
+        RefinementKind::Factory => "factory",
     }
 }
 
@@ -539,6 +545,7 @@ fn kind_for(name: &str) -> RefinementKind {
         "prompt" => RefinementKind::Prompt,
         "memory" => RefinementKind::Memory,
         "skill" => RefinementKind::Skill,
+        "factory" => RefinementKind::Factory,
         _ => RefinementKind::Subagent,
     }
 }
@@ -656,6 +663,78 @@ mod tests {
         );
         assert!(rendered.contains("[global:rare]"));
         assert!(rendered.contains("+1 more memory entries"));
+    }
+
+    #[test]
+    fn factory_digest_line_renders_with_the_run_watch_stop_hint() {
+        // TS shape: the factory line renders only when entries exist and
+        // IPython examples are on (the await forms follow the accepted
+        // review fix for the coroutine-object pitfall).
+        let mut state = empty_harness_state();
+        let mut factory = make_entry("sweep", "PR review sweep", "Sweep review.", "review");
+        factory.kind = RefinementKind::Factory;
+        state
+            .entries
+            .get_mut(&RefinementKind::Factory)
+            .unwrap()
+            .insert("sweep".to_string(), factory);
+        let rendered = format_harness_state_for_prompt(
+            &state,
+            &HarnessStatePromptOptions {
+                max_entries_per_kind: Some(40),
+                query_terms: None,
+                include_ipython_examples: Some(true),
+                ..Default::default()
+            },
+        );
+        assert!(rendered.contains(
+            "factory: 1 (state-machine workflow specs; run one with `await rlm.factory.run('<id>')`; watch with `await rlm.factory.status(run_id)`, stop with `await rlm.factory.stop(run_id)`, resume a paused run with `await rlm.factory.resume(run_id)`)"
+        ));
+        assert!(rendered.contains("- [global:sweep] PR review sweep (review, v1): Sweep review."));
+        // Without IPython examples the hint line stays a plain count.
+        let plain = format_harness_state_for_prompt(
+            &state,
+            &HarnessStatePromptOptions {
+                max_entries_per_kind: Some(40),
+                query_terms: None,
+                include_ipython_examples: Some(false),
+                ..Default::default()
+            },
+        );
+        assert!(plain.contains("\nfactory: 1\n"));
+        // An empty factory section renders no invoke hint.
+        let empty = empty_harness_state();
+        let rendered_empty = format_harness_state_for_prompt(
+            &empty,
+            &HarnessStatePromptOptions {
+                max_entries_per_kind: Some(40),
+                query_terms: None,
+                include_ipython_examples: Some(true),
+                ..Default::default()
+            },
+        );
+        assert!(rendered_empty.contains("\nfactory: 0\n"));
+        assert!(!rendered_empty.contains("rlm.factory.run"));
+        // Fingerprint stability: a factory entry participates like any
+        // other kind; its content change re-fingerprints (arguments render
+        // only for skills, so an arguments-only change stays inert, exactly
+        // like the TS fingerprint material).
+        let flags = HarnessDigestRenderFlags {
+            include_ipython_examples: true,
+            include_shell_examples: false,
+            include_refine_examples: false,
+        };
+        let baseline = harness_digest_fingerprint(&state, flags);
+        let mut changed = state.clone();
+        changed
+            .entries
+            .get_mut(&RefinementKind::Factory)
+            .unwrap()
+            .get_mut("sweep")
+            .unwrap()
+            .content
+            .push_str(" more");
+        assert_ne!(harness_digest_fingerprint(&changed, flags), baseline);
     }
 
     #[test]

@@ -79,6 +79,16 @@ impl SettingsManager {
         Self::from_storage(storage)
     }
 
+    /// A new manager over the same settings store (a fresh read; the
+    /// runtime overrides carry over), for long-lived readers such as the
+    /// telemetry switch.
+    #[must_use]
+    pub fn reopen(&self) -> Self {
+        let mut fresh = Self::from_storage(Arc::clone(&self.storage));
+        fresh.apply_overrides(&self.runtime_overrides);
+        fresh
+    }
+
     /// In-memory manager (tests, embedded hosts).
     #[must_use]
     pub fn in_memory(initial: &Settings) -> Self {
@@ -913,6 +923,20 @@ impl SettingsManager {
         self.merged.transport.unwrap_or(TransportSetting::Auto)
     }
 
+    /// `telemetry.enabled` when any scope sets it (`None`: nothing set, the
+    /// default-on posture), resolved like [`Self::get_telemetry_enabled`].
+    #[must_use]
+    pub fn telemetry_enabled_setting(&self) -> Option<bool> {
+        let set = [
+            self.global.telemetry.as_ref(),
+            self.project.telemetry.as_ref(),
+            self.runtime_overrides.telemetry.as_ref(),
+        ]
+        .iter()
+        .any(|scope| scope.and_then(|t| t.enabled).is_some());
+        set.then(|| self.get_telemetry_enabled())
+    }
+
     /// Telemetry is enabled only when every scope says so (default true).
     #[must_use]
     pub fn get_telemetry_enabled(&self) -> bool {
@@ -1066,6 +1090,19 @@ mod tests {
         );
         manager.reload().unwrap();
         assert_eq!(manager.get_default_model(), Some("z-ai/glm-5.3"));
+    }
+
+    #[test]
+    fn reopen_keeps_the_runtime_overrides_in_the_merged_settings() {
+        let mut manager = SettingsManager::in_memory(&Settings::default());
+        manager.apply_overrides(&Settings {
+            markdown: Some(MarkdownSettings {
+                code_block_indent: Some("    ".to_string()),
+                mermaid: None,
+            }),
+            ..Settings::default()
+        });
+        assert_eq!(manager.reopen().get_code_block_indent(), "    ");
     }
 
     #[test]
