@@ -1026,6 +1026,13 @@ async fn startup_flush_never_blocks_the_first_frame() {
             // The hand-off: while the sink still hangs, it must already
             // be done — the first frame paints with delivery pending.
             let flush = flush_startup_telemetry(client);
+            // The batch must have entered the sink before the boundary
+            // is meaningful: a release that beats the send's entry
+            // drains without ever hanging, and the hand-off below would
+            // pass vacuously.
+            while !sink.entered.load(std::sync::atomic::Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
             assert!(
                 sink.delivered_names().is_empty(),
                 "delivery was still pending when the paint path proceeded"
