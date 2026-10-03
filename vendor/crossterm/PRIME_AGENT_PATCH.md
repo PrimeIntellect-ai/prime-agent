@@ -61,3 +61,49 @@ the enhancement for the RTT>50ms class (the product's primary remote-SSH
 deployment shape) while buying only the silent class's raced-transition
 stall, which no user rides. The timed contract is locked by
 `crates/pa-cli/tests/kitty_verdict_time_e2e.rs`.
+
+# Kitty-printable twin dedup at the byte layer (2026-10-03, issue #3250)
+
+A duplicate-reporting kitty terminal (TS #3780, Italian-style layouts)
+sends BOTH `CSI <cp>u` and the raw UTF-8 character for one unmodified
+printable keypress. crossterm folds both encodings into the same
+unmodified `Char` press, so the byte stream inside the Parser is the
+only place the two forms are distinguishable — the event layer cannot
+tell a raw twin from a typed repeat (macOS dictation "will" types "wil",
+IME commits, and batched auto-repeat all send raw pairs in one read).
+
+New `KittyPrintableDedup` in `src/event/sys/unix/parse.rs` is a byte-level
+port of the TS `StdinBuffer.#pendingKittyPrintableCodepoint` +
+`#pendingKittyPrintableAtMs` (stdin-buffer.ts): an unmodified `CSI <cp>u`
+(`parseUnmodifiedKittyPrintableCodepoint` — digit fields only, no `;`
+modifier/event-type section, codepoint >= 32) arms the pending; a raw
+single-BMP-character sequence matching that codepoint within 25ms
+(`KITTY_PRINTABLE_DEDUP_WINDOW`) is the twin and drops; every other
+emitted sequence — and every parse failure — overwrites the pending with
+`undefined` (clears it). The `Parser::advance` loops in
+`src/event/source/unix/mio.rs` and `src/event/source/unix/tty.rs` feed it
+each completed sequence's raw bytes; both keep identical behavior because
+their parse loops are identical. Windows console input is structured
+(`INPUT_RECORD`s, no byte stream; kitty is impossible there) and needs no
+twin check.
+
+pa-tui's `filter_enhanced_key_events` previously guessed the twin by
+equality at the event layer (drop an identical back-to-back plain char
+within one drained chunk, kitty-gated); that guess is removed — the
+filter now drops only releases. Free improvements over the guess:
+`CSI 127u` + DEL twins dedup (the guess never saw `KeyCode::Backspace`),
+cross-read pairs dedup (the pending is parser state, not chunk-local),
+and no `kitty_active()` gate is needed (an armed pending cannot outlive
+its sequence — a stale pushed level cannot arm it wrongly). Multi-codepoint
+IME commits stay unhandled, matching the upstream TS limitation exactly.
+
+Coverage: the `parse.rs` test module pins the state machine (`cargo test`
+inside this tree — `Cargo.toml` carries an own-workspace marker because
+the parent workspace does not list this vendored package as a member,
+and the stale upstream `[[example]]` targets pointing at a non-vendored
+examples/ directory were dropped so cargo can operate here);
+`crates/pa-tui/src/input.rs`'s tests pin the pass-through; the real-pty
+oracle is `crates/pa-cli/tests/kitty_early_typing_e2e.rs`
+(`kitty_twins_dedup_at_the_byte_layer_and_raw_pairs_survive`). Prefer
+upstreaming a provenance-carrying key event (CSI-u origin on
+`KeyEventState`) to crossterm before removing this vendor patch.

@@ -861,6 +861,87 @@ pub(crate) fn parse_utf8_char(buffer: &[u8]) -> io::Result<Option<char>> {
     }
 }
 
+/// Byte-level dedup for terminals that report one unmodified printable
+/// keypress twice: first as `CSI <codepoint>u`, then again as the raw
+/// UTF-8 character (the duplicate-reporting behavior some kitty-style
+/// terminals enable for legacy applications).
+///
+/// Both encodings parse into the same unmodified `KeyCode::Char` press,
+/// so the twin is only distinguishable here, before the raw byte
+/// sequences become `KeyEvent`s: this tracks the last emitted
+/// unmodified `CSI <cp>u` and drops a matching single-character
+/// sequence that follows it inside the dedup window. A `Parser` feeds
+/// it every completed sequence via [`push_sequence`](Self::push_sequence)
+/// and clears it on parse errors via [`reset`](Self::reset).
+///
+/// Ported from the TS product's `StdinBuffer` pending-kitty-printable
+/// state (`#pendingKittyPrintableCodepoint` + `#pendingKittyPrintableAtMs`).
+#[derive(Debug, Default)]
+pub(crate) struct KittyPrintableDedup {
+    pending: Option<(u32, std::time::Instant)>,
+}
+
+/// The dedup window: a raw twin lands adjacent to its CSI-u form in the
+/// same terminal write; a same character arriving later is real input,
+/// not a duplicate report.
+const KITTY_PRINTABLE_DEDUP_WINDOW: std::time::Duration = std::time::Duration::from_millis(25);
+
+impl KittyPrintableDedup {
+    /// Observe one completed input sequence (the exact bytes that parsed
+    /// into an event). Returns `false` when the sequence is the raw twin
+    /// of an armed `CSI <cp>u` press and its event must be dropped. Every
+    /// non-arming sequence clears the pending, so at most one twin drops
+    /// per CSI-u report.
+    pub(crate) fn push_sequence(&mut self, sequence: &[u8]) -> bool {
+        if let Some(codepoint) = parse_unmodified_kitty_printable_codepoint(sequence) {
+            self.pending = Some((codepoint, std::time::Instant::now()));
+            return true;
+        }
+        let emit = !self.is_raw_twin(sequence);
+        self.pending = None;
+        emit
+    }
+
+    /// A failed parse clears the pending: a malformed sequence consumed
+    /// the position where a twin could have landed.
+    pub(crate) fn reset(&mut self) {
+        self.pending = None;
+    }
+
+    fn is_raw_twin(&self, sequence: &[u8]) -> bool {
+        match self.pending {
+            Some((codepoint, armed_at)) if armed_at.elapsed() <= KITTY_PRINTABLE_DEDUP_WINDOW => {
+                raw_char_codepoint(sequence) == Some(codepoint)
+            }
+            _ => false,
+        }
+    }
+}
+
+/// The codepoint of an unmodified `CSI <cp>u` report: digits only, no
+/// `;` modifier/event-type or `:` alternate-key section. Control
+/// codepoints below 32 never arm - their raw forms (Tab, CR, Esc) are
+/// ambiguous with edited-line input, matching the TS bound.
+fn parse_unmodified_kitty_printable_codepoint(sequence: &[u8]) -> Option<u32> {
+    let digits = sequence.strip_prefix(b"\x1B[")?.strip_suffix(b"u")?;
+    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    let codepoint = digits.iter().try_fold(0u32, |acc, byte| {
+        acc.checked_mul(10)?.checked_add(u32::from(*byte - b'0'))
+    })?;
+    (codepoint >= 32).then_some(codepoint)
+}
+
+/// The codepoint of a raw-character sequence: UTF-8 decoding to exactly
+/// one BMP scalar (the twin form of a `CSI <cp>u` report).
+fn raw_char_codepoint(sequence: &[u8]) -> Option<u32> {
+    let text = std::str::from_utf8(sequence).ok()?;
+    let mut chars = text.chars();
+    let codepoint = u32::from(chars.next()?);
+    (chars.next().is_none() && codepoint < 0x1_0000).then_some(codepoint)
+}
+
 #[cfg(test)]
 mod tests {
     use crate::event::{KeyEventState, KeyModifiers, MouseButton, MouseEvent};
@@ -1502,5 +1583,89 @@ mod tests {
                 KeyEventKind::Release,
             )))),
         );
+    }
+
+    #[test]
+    fn kitty_printable_dedup_drops_the_raw_twin_of_a_csi_u_report() {
+        let mut dedup = KittyPrintableDedup::default();
+        // One unmodified 'a' press reported as CSI-u then raw char: the
+        // CSI-u emits and arms the pending; the raw twin drops; the
+        // pending is consumed, so a third 'a' is real input again.
+        assert!(dedup.push_sequence(b"\x1B[97u"));
+        assert!(!dedup.push_sequence(b"a"));
+        assert!(dedup.push_sequence(b"a"));
+    }
+
+    #[test]
+    fn kitty_printable_dedup_keeps_ordinary_repeated_characters() {
+        let mut dedup = KittyPrintableDedup::default();
+        // "will": both l's are raw bytes; nothing armed, nothing drops.
+        assert!(dedup.push_sequence(b"w"));
+        assert!(dedup.push_sequence(b"i"));
+        assert!(dedup.push_sequence(b"l"));
+        assert!(dedup.push_sequence(b"l"));
+    }
+
+    #[test]
+    fn kitty_printable_dedup_keeps_a_twin_when_the_window_expired() {
+        let mut dedup = KittyPrintableDedup::default();
+        dedup.pending = Some((
+            u32::from('a'),
+            std::time::Instant::now() - std::time::Duration::from_millis(50),
+        ));
+        assert!(dedup.push_sequence(b"a"));
+    }
+
+    #[test]
+    fn kitty_printable_dedup_ignores_modified_and_typed_csi_u_forms() {
+        for non_printable in [
+            &b"\x1B[97;5u"[..],   // ctrl+a
+            &b"\x1B[97;1:3u"[..], // release event type
+            &b"\x1B[13u"[..],     // control codepoint, below the floor
+            &b"\x1B[97:98u"[..],  // alternate-key section
+        ] {
+            let mut dedup = KittyPrintableDedup::default();
+            assert!(dedup.push_sequence(non_printable));
+            // None of these armed the pending, so the raw char emits.
+            assert!(dedup.push_sequence(b"a"));
+        }
+    }
+
+    #[test]
+    fn kitty_printable_dedup_matches_the_codepoint_not_the_event_shape() {
+        let mut dedup = KittyPrintableDedup::default();
+        // CSI 127u parses to KeyCode::Backspace; its raw twin is a single
+        // DEL byte - a pair the event layer cannot tell from typed input.
+        assert!(dedup.push_sequence(b"\x1B[127u"));
+        assert!(!dedup.push_sequence(b"\x7F"));
+    }
+
+    #[test]
+    fn kitty_printable_dedup_clears_the_pending_on_other_sequences() {
+        let mut dedup = KittyPrintableDedup::default();
+        assert!(dedup.push_sequence(b"\x1B[97u"));
+        // A different completed sequence consumes the pending...
+        assert!(dedup.push_sequence(b"\x1B[B"));
+        assert!(dedup.push_sequence(b"a"));
+        // ...and so does a raw char that does not match it.
+        assert!(dedup.push_sequence(b"\x1B[98u"));
+        assert!(dedup.push_sequence(b"a"));
+        assert!(dedup.push_sequence(b"b"));
+        // ...as does a failed parse (the Parser's Err arm calls reset).
+        assert!(dedup.push_sequence(b"\x1B[99u"));
+        dedup.reset();
+        assert!(dedup.push_sequence(b"c"));
+    }
+
+    #[test]
+    fn kitty_printable_dedup_rejects_multi_character_and_non_bmp_twins() {
+        let mut dedup = KittyPrintableDedup::default();
+        assert!(dedup.push_sequence(b"\x1B[97u"));
+        // An IME commit is a multi-codepoint sequence: not a twin.
+        assert!(dedup.push_sequence("ab".as_bytes()));
+        let mut dedup = KittyPrintableDedup::default();
+        assert!(dedup.push_sequence(b"\x1B[97u"));
+        // A non-BMP raw character can never twin-match a BMP pending.
+        assert!(dedup.push_sequence("\u{1F600}".as_bytes()));
     }
 }

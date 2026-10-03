@@ -43,53 +43,6 @@ all-features = true
 name = "crossterm"
 path = "src/lib.rs"
 
-[[example]]
-name = "event-read"
-required-features = [
-    "bracketed-paste",
-    "events",
-]
-
-[[example]]
-name = "event-match-modifiers"
-required-features = [
-    "bracketed-paste",
-    "events",
-]
-
-[[example]]
-name = "event-poll-read"
-required-features = [
-    "bracketed-paste",
-    "events",
-]
-
-[[example]]
-name = "event-stream-async-std"
-required-features = [
-    "event-stream",
-    "events",
-]
-
-[[example]]
-name = "event-stream-tokio"
-required-features = [
-    "event-stream",
-    "events",
-]
-
-[[example]]
-name = "event-read-char-line"
-required-features = ["events"]
-
-[[example]]
-name = "stderr"
-required-features = ["events"]
-
-[[example]]
-name = "key-display"
-required-features = ["events"]
-
 [dependencies.bitflags]
 version = "2.3"
 
@@ -200,3 +153,12 @@ features = [
     "winerror",
 ]
 optional = true
+
+# Prime Agent vendor patch: an own-workspace marker so `cargo test` inside
+# this tree runs the vendored tests — the parent workspace does not list
+# this package as a member, and Cargo otherwise refuses to operate here.
+# (Inert for dependents: a `[patch]` path dependency's workspace table is
+# not consulted.) The upstream `[[example]]` entries were also dropped:
+# the examples/ directory was never vendored, and the stale targets made
+# every cargo command in this tree error before the lib could build.
+[workspace]

@@ -208,6 +208,66 @@ fn a_kitty_terminal_upgrades_and_a_da1_terminal_settles_without_flags() {
     da1.finish();
 }
 
+/// The kitty-printable twin dedup (TS `StdinBuffer`
+/// `pendingKittyPrintableCodepoint`, issue #3250): with the kitty
+/// protocol armed, a duplicate-reporting terminal's `CSI <cp>u` + raw
+/// character pair is ONE keypress, while a raw identical pair —
+/// dictation, an IME commit, a batched key repeat — is real input. The
+/// dedup lives in the vendored crossterm parser (the byte stream is the
+/// only place the two encodings are still distinguishable; the event
+/// layer folds both into the same unmodified `Char` press), and this
+/// e2e is its served-path oracle over a real pty. The ledger counts
+/// rendered 'Z' cells — uppercase Z never appears inside an ANSI
+/// sequence, and a settled frame does not re-emit an unchanged row —
+/// so the post-quiet count is exact: the raw pair paints two, the
+/// CSI-u/raw twin paints one.
+#[test]
+fn kitty_twins_dedup_at_the_byte_layer_and_raw_pairs_survive() {
+    let _lock = match HARNESS_LOCK.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let mut harness = EarlyTypingHarness::start();
+
+    // The kitty class (the dedup's terminal): the answered probe
+    // upgrades before the input audit starts.
+    let t_query = harness
+        .chunk_time_of(KITTY_QUERY)
+        .expect("the kitty capability query is on the wire");
+    EarlyTypingHarness::sleep_until(t_query + Duration::from_millis(20));
+    harness.write(KITTY_ANSWER);
+    let mark = harness.mark();
+    harness.wait_from(mark, KITTY_FLAGS_PUSH, "the kitty flags push");
+
+    // Raw `ZZ` — the doubled-letter shape dictation, IME commits, and
+    // batched repeats send: both presses are real input and both paint
+    // (the event-layer equality guess dropped the second and rendered
+    // one, #3250).
+    let mark = harness.mark();
+    harness.write(b"ZZ");
+    harness.wait_from(mark, b"Z", "the raw pair's first press renders");
+    harness.drain_until_quiet(10);
+    let painted = find_subsequence_all(&harness.output()[mark..], b"Z").len();
+    assert!(
+        painted >= 2,
+        "a raw identical pair painted {painted} 'Z' cells — the second press was dropped"
+    );
+
+    // `CSI 90u` + raw `Z` — the duplicate-reporting terminal's two
+    // encodings of ONE 'Z' press: the parser drops the raw twin, so
+    // exactly one more 'Z' cell paints.
+    let mark = harness.mark();
+    harness.write(b"\x1b[90uZ");
+    harness.wait_from(mark, b"Z", "the twin press renders once");
+    harness.drain_until_quiet(10);
+    let painted = find_subsequence_all(&harness.output()[mark..], b"Z").len();
+    assert_eq!(
+        painted, 1,
+        "the CSI-u/raw twin painted {painted} 'Z' cells — the raw duplicate leaked"
+    );
+    harness.finish();
+}
+
 /// One pty-backed product child plus the mock supervisor it attaches to,
 /// with a chunk-accurate timing ledger over the raw byte stream.
 struct EarlyTypingHarness {

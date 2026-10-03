@@ -477,16 +477,19 @@ const EXIT_DRAIN_MAX: Duration = Duration::from_millis(400);
 /// Whether the kitty keyboard protocol is active (the probe answered).
 /// The key-id layer and the input reader use this to switch the TS
 /// mode-aware semantics: the LF mapping (`\n` is shift+enter under kitty,
-/// enter in legacy mode) and the kitty-printable dedup only apply while
-/// kitty events can actually arrive.
+/// enter in legacy mode) and the macOS-Terminal meta repair only apply
+/// while kitty events can actually arrive. The kitty-printable twin
+/// dedup is deliberately NOT gated on it — it lives in the vendored
+/// crossterm parser, where the CSI-u provenance is known exactly; a
+/// stale pushed level cannot arm it wrongly.
 pub(crate) fn kitty_active() -> bool {
     KITTY_ACTIVE.load(Ordering::SeqCst)
 }
 
 /// Flip the kitty flag for unit tests of other modules (the id layer's
-/// mode-aware mappings and the reader's dedup read [`kitty_active`]);
-/// each test serializes through its own lock the way this module's state
-/// tests do.
+/// mode-aware mappings and the reader's meta repair read
+/// [`kitty_active`]); each test serializes through its own lock the way
+/// this module's state tests do.
 #[cfg(test)]
 pub(crate) fn set_kitty_active_for_tests(active: bool) {
     KITTY_ACTIVE.store(active, Ordering::SeqCst);
