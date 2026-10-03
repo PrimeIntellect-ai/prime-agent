@@ -10,6 +10,15 @@
 //! the script, then reports what landed; every install/uninstall decision
 //! stays in the script the installer-takeover lane owns, so the two
 //! surfaces can never drift from it.
+//!
+//! The Windows exception to "run it, then report" is the payload handoff
+//! ([`RunOutcome::Handoff`]): on Windows a running executable keeps its own
+//! directory un-renameable, and the running CLI is exactly the payload
+//! binary the installer replaces — so a spawn-and-wait funnel can never let
+//! the installer's publish (the rename of `<prefix>/share/prime-agent`)
+//! happen. When the caller IS that payload binary, the funnel spawns the
+//! installer detached (never waited on) and tells the caller to exit; the
+//! publish lands once the process is gone.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -41,6 +50,18 @@ pub const OFFICIAL_INSTALLER_URL: &str = "https://app.primeintellect.ai/prime-ag
 /// The nightly installer's file under the download base (the domain only
 /// forwards `install.sh`, so nightly updates fetch it from the base).
 pub const BETA_INSTALLER_FILE: &str = "install-beta.sh";
+
+/// The line both update surfaces print for the Windows payload handoff
+/// (see [`RunOutcome::Handoff`]): the installer owns the rest of the run
+/// from here, so the window can close and the new build answers once it
+/// finishes.
+pub const HANDOFF_LINE: &str = "the update continues in a separate installer process — this window can close; run `prime-agent --version` to see the new build once it finishes";
+
+/// The payload binary's file name under `<prefix>/share/prime-agent` (the
+/// file the `.cmd` and sh launchers exec): the process the Windows handoff
+/// replaces.
+#[cfg(windows)]
+const PAYLOAD_BINARY: &str = "prime-agent.exe";
 
 /// The small-file budget for the script download (the script is a few KB;
 /// a hung fetch must not hang the update).
@@ -166,6 +187,23 @@ pub struct Installed {
     pub version: Option<String>,
 }
 
+/// One installer run's outcome: the completed install's report, or the
+/// Windows payload handoff.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunOutcome {
+    /// The installer ran to completion; [`Installed`] is the launcher
+    /// probe's report.
+    Installed(Installed),
+    /// THE WINDOWS PAYLOAD HANDOFF: the funnel's own process was the
+    /// install's payload binary, so the installer was spawned detached
+    /// and is never waited on — Windows keeps a running executable's
+    /// directory un-renameable, so the installer's publish (the rename of
+    /// `<prefix>/share/prime-agent`) can only happen once this process
+    /// exits. The calling surface prints [`HANDOFF_LINE`] and exits
+    /// immediately (the unix funnel never produces this outcome).
+    Handoff,
+}
+
 /// Why an update run failed: the actionable message the surfaces print
 /// (the CLI as its `Error:` line, the TUI as the error row).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -180,11 +218,12 @@ pub struct UpdateFailure {
 ///
 /// # Errors
 /// Returns the failure message for every non-installing outcome (see
-/// [`run_installer_from`]).
+/// [`run_installer_from`]); [`RunOutcome::Handoff`] reports the Windows
+/// payload handoff instead of a failure.
 pub async fn run_installer(
     channel: Option<&'static str>,
     output: InstallerOutput,
-) -> std::result::Result<Installed, UpdateFailure> {
+) -> std::result::Result<RunOutcome, UpdateFailure> {
     let prefix = install_prefix();
     let channel = channel.or_else(|| installed_channel(&prefix));
     run_installer_from(&installer_script_url(channel), &prefix, channel, output).await
@@ -198,7 +237,9 @@ pub async fn run_installer(
 /// `~/.prime/agent` preserve). On success the
 /// launcher's `--version` answers the new version; on failure the
 /// previous install is kept (the script's own rollback covers a
-/// mid-publish crash).
+/// mid-publish crash). On Windows, when the caller IS the install's
+/// payload binary, the run hands off instead of waiting (see
+/// [`RunOutcome::Handoff`]).
 ///
 /// # Errors
 /// Returns the failure message for every non-installing outcome: an
@@ -209,16 +250,23 @@ pub async fn run_installer_from(
     prefix: &Path,
     channel: Option<&'static str>,
     output: InstallerOutput,
-) -> std::result::Result<Installed, UpdateFailure> {
+) -> std::result::Result<RunOutcome, UpdateFailure> {
     current_target().map_err(|error| UpdateFailure {
         message: format!("{error:#}"),
     })?;
     let script = fetch_script(url).await.map_err(|error| UpdateFailure {
         message: format!("could not download the installer from {url}: {error:#}"),
     })?;
-    execute_script(&script, prefix, channel, output).await?;
-    let version = launcher_version(prefix).await;
-    Ok(Installed { version })
+    match execute_script(&script, prefix, channel, output).await? {
+        // The handoff never reaches the probe: the publish has not run
+        // (this process must exit first), and the launcher still answers
+        // the previous version until the detached installer finishes.
+        RunOutcome::Handoff => Ok(RunOutcome::Handoff),
+        RunOutcome::Installed(_) => {
+            let version = launcher_version(prefix).await;
+            Ok(RunOutcome::Installed(Installed { version }))
+        }
+    }
 }
 
 /// The installed payload's channel, read from the install marker (the
@@ -246,6 +294,38 @@ pub fn installed_channel(prefix: &Path) -> Option<&'static str> {
         "beta" => Some("beta"),
         _ => None,
     }
+}
+
+/// THE WINDOWS HANDOFF GATE: true when THIS process is the install's
+/// payload binary — `<prefix>/share/prime-agent/prime-agent.exe` in a
+/// marked tree — so the installer the funnel runs replaces the directory
+/// this process lives in. Windows keeps a running executable's directory
+/// un-renameable for the process's lifetime, so the installer's publish
+/// (the rename of that directory into its kept generation) can only
+/// happen once this process is gone: the funnel hands off (see
+/// [`RunOutcome::Handoff`]).
+#[cfg(windows)]
+fn caller_is_payload_binary(prefix: &Path) -> bool {
+    match std::env::current_exe() {
+        Ok(exe) => is_payload_binary_of(&exe, prefix),
+        Err(_) => false,
+    }
+}
+
+/// The shape + ownership check behind the gate: `exe` is the payload
+/// binary of the marked installer tree under `prefix`. The comparison
+/// runs through `canonicalize` on both sides — the module path's casing
+/// and spelling (a `\\?\` verbatim prefix, MSYS forward slashes) must
+/// not fool it — and the install marker (the ownership proof the channel
+/// read already validates) must be this installer's own write shape.
+#[cfg(windows)]
+fn is_payload_binary_of(exe: &Path, prefix: &Path) -> bool {
+    let payload = prefix.join("share/prime-agent").join(PAYLOAD_BINARY);
+    let (Ok(exe), Ok(payload)) = (std::fs::canonicalize(exe), std::fs::canonicalize(&payload))
+    else {
+        return false;
+    };
+    exe == payload && installed_channel(prefix).is_some()
 }
 
 /// Fetch the installer script to a per-run temp file (the small-file
@@ -291,6 +371,9 @@ async fn fetch_script(url: &str) -> Result<PathBuf> {
 /// The script's own die messages already streamed with
 /// [`InstallerOutput::Inherit`]; with [`InstallerOutput::Capture`] the
 /// tail becomes the failure message.
+/// THE WINDOWS EXCEPTION: when the caller IS the install's payload binary,
+/// the script is spawned detached and never waited on (see
+/// [`RunOutcome::Handoff`]) — a waited-on installer could never publish.
 ///
 /// # Errors
 /// Returns the failure when the script cannot start or exits nonzero.
@@ -299,7 +382,7 @@ async fn execute_script(
     prefix: &Path,
     channel: Option<&'static str>,
     output: InstallerOutput,
-) -> std::result::Result<(), UpdateFailure> {
+) -> std::result::Result<RunOutcome, UpdateFailure> {
     // The interpreter: the trusted absolute /bin/sh on unix (never
     // PATH-resolved, so a poisoned PATH cannot substitute the interpreter
     // that runs the installer with the inherited credentials); on Windows
@@ -338,13 +421,42 @@ async fn execute_script(
     if let Some(channel) = channel.or_else(|| installed_channel(prefix)) {
         command.env(ENV_RELEASE_CHANNEL, channel);
     }
+    // THE WINDOWS HANDOFF: when THIS process is the install's payload
+    // binary, the spawn-and-wait below can never let the installer
+    // publish. Windows keeps a running executable's directory
+    // un-renameable for the process's lifetime, and the installer's
+    // publish renames exactly that directory (`<prefix>/share/prime-agent`
+    // into its kept generation) — a waiting caller wedges the installer
+    // mid-publish forever. Hand off instead: spawn the installer
+    // detached, never wait, and report [`RunOutcome::Handoff`] so the
+    // calling surface exits; the publish lands once this process is gone.
+    // Unix never hands off (its rename succeeds under the running binary),
+    // so the deterministic spawn-and-wait and its e2e tests stay
+    // untouched.
+    #[cfg(windows)]
+    if caller_is_payload_binary(prefix) {
+        // The installer can never prompt: the process that could answer
+        // is exiting, so stdin is null (the same contract the TUI's
+        // captured run holds).
+        command.stdin(std::process::Stdio::null());
+        // The detached spawn (the product's one detached-spawn contract:
+        // CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS | CREATE_NO_WINDOW)
+        // — the installer survives this process's exit, keeps the
+        // inherited output handles (its progress still streams to the
+        // user's terminal), and ignores the console's Ctrl+C.
+        crate::platform::process::set_new_process_group(command.as_std_mut());
+        command.spawn().map_err(|error| UpdateFailure {
+            message: format!("could not run the installer: {error}"),
+        })?;
+        return Ok(RunOutcome::Handoff);
+    }
     match output {
         InstallerOutput::Inherit => {
             let status = command.status().await.map_err(|error| UpdateFailure {
                 message: format!("could not run the installer: {error}"),
             })?;
             if status.success() {
-                return Ok(());
+                return Ok(RunOutcome::Installed(Installed { version: None }));
             }
             Err(UpdateFailure {
                 message: match status.code() {
@@ -368,7 +480,7 @@ async fn execute_script(
                 message: format!("could not run the installer: {error}"),
             })?;
             if captured.status.success() {
-                return Ok(());
+                return Ok(RunOutcome::Installed(Installed { version: None }));
             }
             let tail = output_tail(&captured);
             let detail = tail.map_or_else(String::new, |tail| format!(":\n{tail}"));
@@ -530,6 +642,45 @@ mod tests {
         assert_eq!(installed_channel(&prefix), None);
     }
 
+    /// THE WINDOWS HANDOFF GATE: only the payload binary of a marked
+    /// installer tree — `<prefix>/share/prime-agent/prime-agent.exe` —
+    /// hands off; a binary anywhere else (the launcher, a managed release,
+    /// a development build, another prefix) keeps the deterministic
+    /// spawn-and-wait. Windows only: the gate (like the handoff it serves)
+    /// is the Windows lock's answer, and the windows battery runs it.
+    #[test]
+    #[cfg(windows)]
+    fn the_handoff_gate_needs_the_payload_binary_of_a_marked_tree() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let prefix = dir.path().join("prefix");
+        let payload = prefix.join("share/prime-agent");
+        std::fs::create_dir_all(&payload).unwrap();
+        let exe = payload.join(PAYLOAD_BINARY);
+        std::fs::write(&exe, b"").expect("the payload binary exists");
+        // No marker: not installer-owned, no handoff.
+        assert!(!is_payload_binary_of(&exe, &prefix));
+        std::fs::write(
+            payload.join(".prime-agent-install"),
+            "install-rust.sh channel stable\nversion 9.9.9\n",
+        )
+        .unwrap();
+        assert!(is_payload_binary_of(&exe, &prefix));
+        // A FOREIGN marker (not the installer's own write shape): never
+        // the ownership proof.
+        std::fs::write(
+            payload.join(".prime-agent-install"),
+            "other installer channel beta\n",
+        )
+        .unwrap();
+        assert!(!is_payload_binary_of(&exe, &prefix));
+        // A binary that is not the payload — the launcher in `bin` —
+        // never hands off even in a marked tree.
+        let launcher = prefix.join("bin/prime-agent.exe");
+        std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+        std::fs::write(&launcher, b"").unwrap();
+        assert!(!is_payload_binary_of(&launcher, &prefix));
+    }
+
     /// Serve `body` over one plain HTTP request (the hermetic source the
     /// funnel fetches its mock installer from): bind an ephemeral loopback
     /// socket, answer the first request, return the URL the funnel uses.
@@ -635,6 +786,18 @@ printf '#!/bin/sh\necho "9.9.8-continuous.fedcba9876543210"\n' > "${PRIME_AGENT_
 chmod 0755 "${PRIME_AGENT_RUST_PREFIX}/bin/prime-agent-rust"
 echo "installed: 9.9.8-continuous.fedcba9876543210"
 "#;
+
+    /// The completed install's report: the unix funnel never hands off, so
+    /// every unix test run unwraps the Installed arm (its callers are the
+    /// unix-gated funnel tests).
+    #[cfg(unix)]
+    fn installed(result: std::result::Result<RunOutcome, UpdateFailure>) -> Installed {
+        match result {
+            Ok(RunOutcome::Installed(installed)) => installed,
+            Ok(RunOutcome::Handoff) => panic!("the unix funnel never hands off"),
+            Err(failure) => panic!("the funnel install failed: {}", failure.message),
+        }
+    }
 
     fn sandbox() -> (tempfile::TempDir, Preserve, PathBuf) {
         let root = tempfile::tempdir().expect("sandbox root");
@@ -777,14 +940,15 @@ echo "installed: 9.9.8-continuous.fedcba9876543210"
     #[cfg(unix)]
     async fn the_funnel_runs_the_downloaded_installer_and_preserves_the_session_store() {
         let (root, preserve, prefix) = sandbox();
-        let installed = run_installer_from(
-            &serve(MOCK_INSTALLER),
-            &prefix,
-            None,
-            InstallerOutput::Capture,
-        )
-        .await
-        .expect("the funnel installs the mock build");
+        let installed = installed(
+            run_installer_from(
+                &serve(MOCK_INSTALLER),
+                &prefix,
+                None,
+                InstallerOutput::Capture,
+            )
+            .await,
+        );
         assert_eq!(
             installed.version.as_deref(),
             Some("9.9.9-continuous.0123456789abcdef"),
@@ -802,14 +966,15 @@ echo "installed: 9.9.8-continuous.fedcba9876543210"
     #[cfg(unix)]
     async fn the_probe_still_reads_a_pre_takeover_launchers_version() {
         let (root, _preserve, prefix) = sandbox();
-        let installed = run_installer_from(
-            &serve(LEGACY_INSTALLER),
-            &prefix,
-            None,
-            InstallerOutput::Capture,
-        )
-        .await
-        .expect("the funnel installs the legacy-named build");
+        let installed = installed(
+            run_installer_from(
+                &serve(LEGACY_INSTALLER),
+                &prefix,
+                None,
+                InstallerOutput::Capture,
+            )
+            .await,
+        );
         assert_eq!(
             installed.version.as_deref(),
             Some("9.9.8-continuous.fedcba9876543210"),

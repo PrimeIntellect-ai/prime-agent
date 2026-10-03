@@ -3,9 +3,12 @@
 //! Every route that ends the TUI surface funnels through this module: the
 //! deliberate teardown tails (`Renderer::finish`'s parity exit in
 //! `interactive.rs`/`agents_view.rs`), the config selector and the replay
-//! surface exits, the force-quit watchdog, the fatal error return, and a
-//! panic unwind. The contract is the whole-terminal invariant set, in one
-//! place:
+//! surface exits, the force-quit watchdog, the fatal error return, a
+//! panic unwind, and the composition root's Windows update handoff (the
+//! one route that ends the process outside the TUI's own surfaces — the
+//! update must replace this binary, so [`restore_terminal`] runs before
+//! the process exits). The contract is the whole-terminal invariant set, in
+//! one place:
 //!
 //! 1. the kitty probe stands down first ([`crate::enhanced_keys::release_for_exit`])
 //!    — an answer landing after the pop would re-arm CSI-u reporting on
@@ -74,7 +77,7 @@ pub(crate) static TEST_STATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(
 /// process-global flag, so a restore after a deliberate teardown only
 /// re-emits the two unconditional bytes (`?2026l`, SGR reset) and the
 /// cursor show. A no-op off a terminal (headless harness pipes).
-pub(crate) fn restore_terminal() {
+pub fn restore_terminal() {
     #[cfg(test)]
     RESTORE_ATTEMPTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     // The output-stop lift runs FIRST: a tty still holding a Ctrl+S stop

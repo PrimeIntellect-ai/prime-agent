@@ -63,7 +63,7 @@ pub mod effort_picker;
 mod enhanced_keys;
 pub mod error_summary;
 pub mod exit_guard;
-pub(crate) mod exit_restore;
+pub mod exit_restore;
 pub mod export_share;
 mod external_editor;
 pub mod fuzzy;

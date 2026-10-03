@@ -103,7 +103,7 @@ pub fn run(options: &UpdateOptions) -> i32 {
         Some(channel),
         InstallerOutput::Inherit,
     )) {
-        Ok(installed) => {
+        Ok(installer::RunOutcome::Installed(installed)) => {
             match installed.version {
                 Some(version) => {
                     println!("updated to {version} — restart prime-agent to run the new build");
@@ -117,6 +117,16 @@ pub fn run(options: &UpdateOptions) -> i32 {
             if let Some(channel) = options.channel {
                 save_channel(channel);
             }
+            0
+        }
+        // THE WINDOWS PAYLOAD HANDOFF: the installer was spawned detached
+        // and this process must exit for its publish to run (Windows
+        // holds a running payload directory un-renameable). The explicit
+        // channel switch is NOT persisted as a completed run here — the
+        // detached installer carries it (its env knob), and the publish
+        // marker the new install writes is the durable channel record.
+        Ok(installer::RunOutcome::Handoff) => {
+            println!("{}", installer::HANDOFF_LINE);
             0
         }
         Err(failure) => {
