@@ -46,6 +46,7 @@
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -478,6 +479,12 @@ fn kill_cancels_goal_and_heartbeat_and_no_wake_revives_the_session() {
     }
     // A's stop tombstone is in place for the next boot's adoption scan.
     std::fs::write(&planted_path, planted_content).expect("replant the tombstoned descriptor");
+    // An unrelated process can claim the stopped worker's stale socket
+    // pathname. Its connectable listener must not make the DEAD descriptor
+    // a live worker: the recorded pid/start identity is the authority.
+    let stopped_socket = PathBuf::from(tombstoned["socketPath"].as_str().expect("socket path"));
+    std::fs::remove_file(&stopped_socket).ok();
+    let _silent_impostor = UnixListener::bind(&stopped_socket).expect("bind silent impostor");
     std::fs::remove_file(&socket).ok();
 
     // The second generation: the adoption scan must finish A's stop (the

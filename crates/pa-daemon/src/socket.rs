@@ -213,10 +213,50 @@ pub fn cleanup_socket_path(path: &Path, expected_identity: Option<SocketIdentity
     let _ = std::fs::remove_file(path);
 }
 
+/// The exit cleanup after the owner's own listener is closed (the TS
+/// graceful-shutdown sequence closes before cleanup). A successor's live
+/// listener must survive even when a poisoned bind-time identity capture
+/// names the successor's inode. A nonblocking connect can distinguish a
+/// definitely closed listener (`ECONNREFUSED`) from a saturated backlog
+/// (`EAGAIN` on Linux); unknown outcomes preserve the socket path. Only
+/// after definite refusal may the existing cleanup lock and identity gate
+/// unlink the stale, still-ours socket. TS cleanup checks identity alone,
+/// so the poisoned-capture case remains a disclosed TS difference.
+#[cfg(unix)]
+pub fn cleanup_socket_path_after_close(path: &Path, expected_identity: Option<SocketIdentity>) {
+    if !path.exists() || !pa_types::platform::transport::unix_listener_definitely_closed(path) {
+        return;
+    }
+    cleanup_socket_path(path, expected_identity);
+}
+
+#[cfg(not(unix))]
+pub fn cleanup_socket_path_after_close(_path: &Path, _expected_identity: Option<SocketIdentity>) {}
+
 /// Restrict the bound socket file to its owner (Unix mode 0o600; Windows
 /// named pipes use ACLs on the pipe object instead).
 pub fn restrict_socket_path(path: &Path) {
     let _ = pa_core::platform::perms::restrict_file(path);
+}
+
+/// The bind-capture gap seam (the `PA_DAEMON_EVENT_LOG` seam family): a
+/// replacement landing between the bind and the bind-time identity capture
+/// poisons the captured identity - the exact residual the
+/// close-listener exit cleanup exists to survive. Production leaves the
+/// gap unset, so the bind and the capture stay back-to-back; the
+/// poisoned-capture oracle sets the gap so the replacement provably lands
+/// in the window instead of racing microseconds.
+pub const BIND_CAPTURE_GAP_ENV: &str = "PA_DAEMON_BIND_CAPTURE_GAP_MS";
+
+/// Sleep the bounded bind-capture fault-injection gap in debug builds only.
+/// Production binaries never pause startup between bind and identity capture.
+pub async fn bind_capture_gap() {
+    #[cfg(debug_assertions)]
+    if let Ok(raw) = std::env::var(BIND_CAPTURE_GAP_ENV) {
+        if let Ok(ms @ 1..=2_000) = raw.parse::<u64>() {
+            tokio::time::sleep(Duration::from_millis(ms)).await;
+        }
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -270,6 +310,153 @@ mod tests {
         assert!(socket.exists());
         assert!(can_connect(&socket, Duration::from_millis(250)).await);
         drop(listener);
+    }
+
+    /// Dropping the bound listener is the graceful close the exit
+    /// cleanups run before their unlink (the TS `server.close` step,
+    /// daemon-mode.ts:8011-8018): the bind releases (a fresh connect is
+    /// refused) while the socket FILE survives (the close never
+    /// unlinks), an in-flight accepted stream keeps serving across the
+    /// close, and the listener's own fd is closed while the in-flight
+    /// stream's fd stays open - no fd is leaked on the bound socket
+    /// across the exit sequence.
+    #[tokio::test]
+    async fn dropping_the_listener_is_the_graceful_exit_close() {
+        use std::io::Write;
+        use std::os::fd::AsRawFd;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        fn fd_exists(fd: std::os::fd::RawFd) -> bool {
+            std::fs::read_link(format!("/proc/self/fd/{fd}")).is_ok()
+        }
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let socket = dir.path().join("daemon.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        // One accepted connection in flight: the client connected, the
+        // listener accepted; the stream must survive the listener's close.
+        let mut client = std::os::unix::net::UnixStream::connect(&socket).unwrap();
+        let mut accepted = listener.accept().await.unwrap().0;
+        let listener_fd = listener.as_raw_fd();
+        let accepted_fd = accepted.as_raw_fd();
+        assert!(fd_exists(listener_fd));
+        drop(listener);
+        assert!(
+            !fd_exists(listener_fd),
+            "the listener's fd closed at the drop: no fd leaked on the bound socket"
+        );
+        assert!(
+            fd_exists(accepted_fd),
+            "the in-flight accepted stream's fd survives the close"
+        );
+        assert!(socket.exists(), "the close never unlinks the file");
+        assert!(
+            !can_connect(&socket, Duration::from_millis(250)).await,
+            "the bind released at the drop"
+        );
+        // The in-flight stream still moves bytes across the close.
+        client.write_all(b"ping").unwrap();
+        let mut buffer = [0u8; 4];
+        accepted.read_exact(&mut buffer).await.unwrap();
+        assert_eq!(&buffer, b"ping");
+        assert!(accepted.flush().await.is_ok());
+    }
+
+    /// The exit cleanup after the owner's listener closed spares a LIVE
+    /// successor even when the expected identity matches that
+    /// successor's file exactly - the poisoned capture a replacement
+    /// landing in the bind->capture window produces - and still unlinks
+    /// the dead file the matching identity describes (the still-ours
+    /// direction: a respawn does not wait out the stale-socket path).
+    #[tokio::test]
+    async fn exit_cleanup_after_close_spares_a_live_successor_with_a_matching_identity() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let socket = dir.path().join("daemon.sock");
+        // The owner's own bind, closed exactly like the exit sequences
+        // close it before their cleanup.
+        let owner = bind_transport(&socket).await.unwrap();
+        drop(owner);
+        // The poisoned capture: the successor binds the path after the
+        // owner's file is renamed aside, and the "captured" identity is
+        // the successor's own file (a replacement landing in the
+        // bind->capture window stores exactly this).
+        let aside = dir.path().join("owner.sock");
+        std::fs::rename(&socket, &aside).unwrap();
+        let successor = bind_transport(&socket).await.unwrap();
+        let poisoned = socket_identity(&socket).unwrap();
+        cleanup_socket_path_after_close(&socket, Some(poisoned.clone()));
+        assert!(
+            socket.exists(),
+            "a live successor is never unlinked, even with a matching identity"
+        );
+        assert!(can_connect(&socket, Duration::from_millis(250)).await);
+        drop(successor);
+        // The same matching identity now describes a dead file: the
+        // probe passes it through and the gate unlinks it.
+        cleanup_socket_path_after_close(&socket, Some(poisoned));
+        assert!(!socket.exists(), "the dead still-ours file is unlinked");
+        std::fs::remove_file(&aside).unwrap();
+    }
+
+    /// A full accept queue is not proof of a dead listener: the successor's
+    /// inode can exactly match a poisoned bind-time identity capture.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn exit_cleanup_preserves_a_backlogged_successor_with_a_matching_identity() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let socket = dir.path().join("daemon.sock");
+        let owner = bind_transport(&socket).await.unwrap();
+        drop(owner);
+        let aside = dir.path().join("owner.sock");
+        std::fs::rename(&socket, &aside).unwrap();
+        let successor = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        socket2::SockRef::from(&successor).listen(1).unwrap();
+        let poisoned = socket_identity(&socket).unwrap();
+        let mut queued = Vec::new();
+        // Never accept: hold each successful connection until the queue fills.
+        for _ in 0..4 {
+            match tokio::time::timeout(
+                Duration::from_millis(100),
+                tokio::net::UnixStream::connect(&socket),
+            )
+            .await
+            {
+                Ok(Ok(stream)) => queued.push(stream),
+                _ => break,
+            }
+        }
+        assert!(!queued.is_empty());
+        assert!(
+            !can_connect(&socket, Duration::from_millis(100)).await,
+            "the successor's queue must be saturated for this oracle"
+        );
+        cleanup_socket_path_after_close(&socket, Some(poisoned.clone()));
+        assert!(
+            socket.exists(),
+            "a live backlogged successor must not be unlinked"
+        );
+        drop(successor);
+        cleanup_socket_path_after_close(&socket, Some(poisoned));
+        assert!(
+            !socket.exists(),
+            "the same inode unlinks after its listener closes"
+        );
+        drop(queued);
+        std::fs::remove_file(&aside).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn exit_cleanup_unlinks_a_closed_listener_on_a_long_socket_path() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let deep = dir.path().join("a".repeat(80)).join("b".repeat(80));
+        std::fs::create_dir_all(&deep).unwrap();
+        let socket = deep.join("daemon.sock");
+        let owner = bind_transport(&socket).await.unwrap();
+        let identity = socket_identity(&socket).unwrap();
+        drop(owner);
+        cleanup_socket_path_after_close(&socket, Some(identity));
+        assert!(!socket.exists(), "deep stale path still unlinks");
     }
 
     #[tokio::test]

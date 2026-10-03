@@ -20,6 +20,36 @@ pub(super) const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 pub(super) const STABLE_LIFETIME_MS: u64 = 30_000;
 const BASE_BACKOFF_MS: u64 = 250;
 const MAX_BACKOFF_MS: u64 = 30_000;
+
+/// A failed/cancelled authentication must close both pump-owned socket halves.
+struct PreAuthPumps {
+    writer: tokio::task::JoinHandle<()>,
+    reader: tokio::task::JoinHandle<()>,
+    resident: Arc<ResidentWorker>,
+    epoch: u64,
+    installed: bool,
+}
+
+impl Drop for PreAuthPumps {
+    fn drop(&mut self) {
+        if !self.installed {
+            self.writer.abort();
+            self.reader.abort();
+            self.resident.note_connection_lost(self.epoch);
+            // A cancelled auth future skips route_command_on's timed-out
+            // cleanup. Its dropped oneshot receiver identifies only this
+            // attempt's pending slot, without disturbing newer routes.
+            let resident = Arc::clone(&self.resident);
+            tokio::spawn(async move {
+                resident
+                    .pending
+                    .lock()
+                    .await
+                    .retain(|_, reply| !reply.is_closed());
+            });
+        }
+    }
+}
 /// The adopted-worker liveness poll used only where the kernel exit watch
 /// cannot register (no pidfd, descriptor exhaustion, Windows).
 const ADOPTED_EXIT_FALLBACK_POLL: Duration = Duration::from_secs(30);
@@ -528,6 +558,25 @@ impl Supervisor {
         resident: &Arc<ResidentWorker>,
         connect_deadline: tokio::time::Instant,
     ) -> Result<()> {
+        self.connect_worker_with_auth_floor(resident, connect_deadline, true)
+            .await
+    }
+
+    pub(super) async fn connect_worker_for_stop(
+        self: &Arc<Self>,
+        resident: &Arc<ResidentWorker>,
+        connect_deadline: tokio::time::Instant,
+    ) -> Result<()> {
+        self.connect_worker_with_auth_floor(resident, connect_deadline, false)
+            .await
+    }
+
+    async fn connect_worker_with_auth_floor(
+        self: &Arc<Self>,
+        resident: &Arc<ResidentWorker>,
+        connect_deadline: tokio::time::Instant,
+        auth_floor: bool,
+    ) -> Result<()> {
         let (socket_path, token) = {
             let descriptor = resident.descriptor.lock().await;
             (
@@ -535,9 +584,14 @@ impl Supervisor {
                 descriptor.authentication_token.clone(),
             )
         };
-        let stream = connect_transport(&socket_path)
-            .await
-            .with_context(|| format!("connect worker socket {}", socket_path.display()))?;
+        let stream = if auth_floor {
+            connect_transport(&socket_path).await
+        } else {
+            tokio::time::timeout_at(connect_deadline, connect_transport(&socket_path))
+                .await
+                .map_err(|_| anyhow!("Session worker timed out"))?
+        }
+        .with_context(|| format!("connect worker socket {}", socket_path.display()))?;
         let (reader, mut writer) = stream.split();
         // Bounded at the in-flight capacity (the admission seam in
         // `route_command` refuses or waits before enqueueing): no
@@ -557,7 +611,7 @@ impl Supervisor {
         // the resident is dropped (the pump exits via `recv() == None` when
         // the last sender drops).
         let writer_resident = Arc::downgrade(resident);
-        tokio::spawn(async move {
+        let writer_pump = tokio::spawn(async move {
             while let Some(request) = cmd_rx.recv().await {
                 let header = json!({
                     "kind": "command",
@@ -603,7 +657,7 @@ impl Supervisor {
             }
         });
         // Reader: route responses to pending requests, forward session events.
-        {
+        let reader_pump = {
             let reader_resident = Arc::clone(resident);
             let reader_supervisor = Arc::clone(self);
             tokio::spawn(async move {
@@ -800,8 +854,15 @@ impl Supervisor {
                         })
                         .await;
                 }
-            });
-        }
+            })
+        };
+        let mut pumps = PreAuthPumps {
+            writer: writer_pump,
+            reader: reader_pump,
+            resident: Arc::clone(resident),
+            epoch: connection_epoch,
+            installed: false,
+        };
         // The handshake owns the channel privately (TS `pendingClient`):
         // the channel is NOT installed for routing until the auth answer
         // proves the connection — the worker answers any command other
@@ -828,10 +889,17 @@ impl Supervisor {
         // and a fully-spent budget included. The launch's failure mode
         // stays the connect-budget error instead of a misleading route
         // timeout on a worker that just came up.
-        let auth_budget_ms = connect_deadline
+        let remaining_ms = connect_deadline
             .saturating_duration_since(tokio::time::Instant::now())
-            .as_millis()
-            .max(WORKER_AUTH_FLOOR_MS.into()) as u64;
+            .as_millis() as u64;
+        let auth_budget_ms = if auth_floor {
+            remaining_ms.max(WORKER_AUTH_FLOOR_MS)
+        } else {
+            if remaining_ms == 0 {
+                return Err(anyhow!("Session worker timed out"));
+            }
+            remaining_ms
+        };
         let response = self
             .route_command_on_typed(
                 resident,
@@ -898,6 +966,7 @@ impl Supervisor {
         resident
             .peer_transport_capable
             .store(peer_transport_capable, Ordering::SeqCst);
+        pumps.installed = true;
         Ok(())
     }
 }

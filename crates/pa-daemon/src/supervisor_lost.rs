@@ -109,13 +109,13 @@ async fn monitor(worker: Arc<Worker>) {
 }
 
 /// The TS give-up exit: dispose the session's kernel, persist the recovery
-/// journal, remove the worker's own socket file, and end the process (the
-/// same sequence the routed `shutdown` command runs; the monitor only
-/// reaches this with no session work in flight, so nothing else needs to
-/// settle first). The kernel dispose is the TS `shutdown(0)` close pass
-/// (`closeSession` -> runtime dispose -> `IpythonKernelProvisioner.dispose`):
-/// the process exit runs no destructors, so an undisposed kernel would be
-/// orphaned here.
+/// journal, close the listener and remove the worker's own socket file,
+/// and end the process (the same sequence the routed `shutdown` command
+/// runs; the monitor only reaches this with no session work in flight,
+/// so nothing else needs to settle first). The kernel dispose is the TS
+/// `shutdown(0)` close pass (`closeSession` -> runtime dispose ->
+/// `IpythonKernelProvisioner.dispose`): the process exit runs no
+/// destructors, so an undisposed kernel would be orphaned here.
 async fn exit_orphaned(worker: &Worker, absent_since: tokio::time::Instant) {
     eprintln!(
         "pa-daemon worker: supervisor {} unreachable for {}s; exiting orphaned worker",
@@ -126,14 +126,14 @@ async fn exit_orphaned(worker: &Worker, absent_since: tokio::time::Instant) {
         agent_engine.dispose_kernel().await;
     }
     let _ = worker.record_recovery(false, "shutdown");
-    // The bind-time identity (captured in `serve`) is the unlink's
-    // expected identity, so a REPLACED file at the path - a successor
-    // worker's live socket, the deterministic-path relaunch - survives
-    // this exit.
-    crate::socket::cleanup_socket_path(
-        &worker.config.socket_path,
-        worker.bound_socket_identity.lock().unwrap().clone(),
-    );
+    // The listener closes FIRST and the cleanup probes the path with the
+    // owner's bind provably released (the TS graceful-shutdown sequence,
+    // shared with `exit_after_close`), so both a REPLACED file and a
+    // POISONED capture (a replacement landing in the bind->capture
+    // window) spare a successor worker's live socket - the
+    // deterministic-path relaunch - while the worker's own dead file
+    // still unlinks through the identity gate.
+    worker.close_listener_then_cleanup_socket().await;
     std::process::exit(0);
 }
 

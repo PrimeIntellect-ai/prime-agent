@@ -62,6 +62,13 @@ async fn retry_backoff(supervisor: &Supervisor) {
 /// Serve clients until `begin_shutdown` completes its stop pass and
 /// sets the accept-loop exit flag.
 ///
+/// Owns the bound listener: every return path drops it, so the listener
+/// is closed before the caller's exit cleanup runs (the TS graceful-
+/// shutdown order - daemon-supervisor.ts:7436-7491 awaits the "daemon
+/// server" close step, then runs the "daemon socket" cleanup step). A
+/// live listener at the socket path after this returns can only be a
+/// successor's, which is what makes the cleanup's liveness probe sound.
+///
 /// # Errors
 ///
 /// Returns the transport's accept error once [`GIVE_UP_AFTER`]
@@ -69,7 +76,7 @@ async fn retry_backoff(supervisor: &Supervisor) {
 /// budget; the caller exits the process, releasing the socket bind.
 pub(super) async fn serve(
     supervisor: &Arc<Supervisor>,
-    listener: &dyn TransportListener,
+    listener: Box<dyn TransportListener>,
 ) -> Result<()> {
     let mut consecutive_failures = 0u32;
     let mut recoverable_streak = 0u32;
@@ -146,13 +153,18 @@ mod tests {
 
     use super::*;
 
+    /// The scripted accept results, shared so the test can read what the
+    /// loop consumed after the stand-in is moved into `serve` (the
+    /// owned-listener shape the production loop takes now).
+    type ScriptedResults = Arc<Mutex<VecDeque<io::Result<Box<dyn TransportStream>>>>>;
+
     /// A stand-in transport listener that replays a scripted accept
     /// sequence. When the script drains, the stand-in runs the
     /// supervisor's shutdown wake (the accept-loop exit flag plus the
     /// notify) and parks: `serve` falls out of its loop exactly the way
     /// a real listener does once `begin_shutdown` completes.
     struct ScriptedAccepts {
-        results: Mutex<VecDeque<io::Result<Box<dyn TransportStream>>>>,
+        results: ScriptedResults,
         supervisor: Arc<Supervisor>,
     }
 
@@ -222,7 +234,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let supervisor = test_supervisor(&dir);
         let scripted = ScriptedAccepts {
-            results: Mutex::new(
+            results: Arc::new(Mutex::new(
                 vec![
                     accept_error(ErrorKind::ConnectionAborted, "aborted"),
                     accept_error(ErrorKind::ConnectionReset, "reset"),
@@ -230,11 +242,12 @@ mod tests {
                     Ok(accepted_stream()),
                 ]
                 .into(),
-            ),
+            )),
             supervisor: Arc::clone(&supervisor),
         };
+        let results = Arc::clone(&scripted.results);
         let started = tokio::time::Instant::now();
-        serve(&supervisor, &scripted)
+        serve(&supervisor, Box::new(scripted))
             .await
             .expect("the loop must survive recoverable accept errors");
         assert!(
@@ -243,7 +256,7 @@ mod tests {
             started.elapsed()
         );
         assert!(
-            scripted.results.lock().unwrap().is_empty(),
+            results.lock().unwrap().is_empty(),
             "the loop kept accepting past every error and served a client"
         );
     }
@@ -263,11 +276,12 @@ mod tests {
         }
         results.push_back(Ok(accepted_stream()));
         let scripted = ScriptedAccepts {
-            results: Mutex::new(results),
+            results: Arc::new(Mutex::new(results)),
             supervisor: Arc::clone(&supervisor),
         };
+        let results = Arc::clone(&scripted.results);
         let started = tokio::time::Instant::now();
-        serve(&supervisor, &scripted)
+        serve(&supervisor, Box::new(scripted))
             .await
             .expect("a recoverable storm must never exit the loop");
         let elapsed = started.elapsed();
@@ -281,7 +295,7 @@ mod tests {
             "exactly one backoff per storm (elapsed {elapsed:?})"
         );
         assert!(
-            scripted.results.lock().unwrap().is_empty(),
+            results.lock().unwrap().is_empty(),
             "the client behind the storm was served"
         );
     }
@@ -294,17 +308,18 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let supervisor = test_supervisor(&dir);
         let scripted = ScriptedAccepts {
-            results: Mutex::new(
+            results: Arc::new(Mutex::new(
                 vec![
                     accept_error(ErrorKind::Other, "too many open files"),
                     Ok(accepted_stream()),
                 ]
                 .into(),
-            ),
+            )),
             supervisor: Arc::clone(&supervisor),
         };
+        let results = Arc::clone(&scripted.results);
         let started = tokio::time::Instant::now();
-        serve(&supervisor, &scripted)
+        serve(&supervisor, Box::new(scripted))
             .await
             .expect("one hard error must not exit the loop");
         let elapsed = started.elapsed();
@@ -317,7 +332,7 @@ mod tests {
             "exactly one backoff for one error (elapsed {elapsed:?})"
         );
         assert!(
-            scripted.results.lock().unwrap().is_empty(),
+            results.lock().unwrap().is_empty(),
             "the loop kept serving after the error"
         );
     }
@@ -340,14 +355,15 @@ mod tests {
             results.push_back(accept_error(ErrorKind::Other, "transient"));
         }
         let scripted = ScriptedAccepts {
-            results: Mutex::new(results),
+            results: Arc::new(Mutex::new(results)),
             supervisor: Arc::clone(&supervisor),
         };
-        serve(&supervisor, &scripted)
+        let results = Arc::clone(&scripted.results);
+        serve(&supervisor, Box::new(scripted))
             .await
             .expect("two sub-budget bursts with a served client between them never escalate");
         assert!(
-            scripted.results.lock().unwrap().is_empty(),
+            results.lock().unwrap().is_empty(),
             "every scripted accept was served"
         );
     }
@@ -369,10 +385,11 @@ mod tests {
             results.push_back(accept_error(ErrorKind::Other, "listener broken"));
         }
         let scripted = ScriptedAccepts {
-            results: Mutex::new(results),
+            results: Arc::new(Mutex::new(results)),
             supervisor: Arc::clone(&supervisor),
         };
-        let error = serve(&supervisor, &scripted)
+        let results = Arc::clone(&scripted.results);
+        let error = serve(&supervisor, Box::new(scripted))
             .await
             .expect_err("a permanently broken listener must escalate");
         assert_eq!(
@@ -381,7 +398,7 @@ mod tests {
             "the escalation carries the transport error"
         );
         assert_eq!(
-            scripted.results.lock().unwrap().len(),
+            results.lock().unwrap().len(),
             overflow as usize,
             "the loop gave up at exactly the budget"
         );
@@ -400,11 +417,12 @@ mod tests {
             results.push_back(accept_error(ErrorKind::Other, "shutting down"));
         }
         let scripted = ScriptedAccepts {
-            results: Mutex::new(results),
+            results: Arc::new(Mutex::new(results)),
             supervisor: Arc::clone(&supervisor),
         };
+        let results = Arc::clone(&scripted.results);
         let started = tokio::time::Instant::now();
-        serve(&supervisor, &scripted)
+        serve(&supervisor, Box::new(scripted))
             .await
             .expect("shutdown-window errors never escalate");
         assert!(
@@ -413,7 +431,7 @@ mod tests {
             started.elapsed()
         );
         assert!(
-            scripted.results.lock().unwrap().is_empty(),
+            results.lock().unwrap().is_empty(),
             "every error continued immediately"
         );
     }
@@ -426,7 +444,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let supervisor = test_supervisor(&dir);
         let scripted = ScriptedAccepts {
-            results: Mutex::new(vec![accept_error(ErrorKind::Other, "hard error")].into()),
+            results: Arc::new(Mutex::new(
+                vec![accept_error(ErrorKind::Other, "hard error")].into(),
+            )),
             supervisor: Arc::clone(&supervisor),
         };
         // The terminal wake fires mid-backoff: after a 100ms pause the
@@ -439,7 +459,7 @@ mod tests {
             shutting_down.shutdown_notify.notify_one();
         });
         let started = tokio::time::Instant::now();
-        serve(&supervisor, &scripted)
+        serve(&supervisor, Box::new(scripted))
             .await
             .expect("the shutdown wake ends the loop");
         assert!(
