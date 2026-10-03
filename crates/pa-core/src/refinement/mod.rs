@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 /// Refinement entry kinds (the continual harness component set).
-pub const REFINEMENT_KINDS: [&str; 4] = ["prompt", "memory", "skill", "subagent"];
+pub const REFINEMENT_KINDS: [&str; 5] = ["prompt", "memory", "skill", "subagent", "factory"];
 
 /// Directory name under the agent dir (or session artifact dir).
 pub const HARNESS_STATE_DIR_NAME: &str = "harness";
@@ -28,6 +28,7 @@ pub enum RefinementKind {
     Memory,
     Skill,
     Subagent,
+    Factory,
 }
 
 /// Edit action against a harness entry.
@@ -108,6 +109,7 @@ pub fn empty_harness_state() -> HarnessState {
             (RefinementKind::Memory, BTreeMap::new()),
             (RefinementKind::Skill, BTreeMap::new()),
             (RefinementKind::Subagent, BTreeMap::new()),
+            (RefinementKind::Factory, BTreeMap::new()),
         ]
         .into_iter()
         .collect(),
@@ -120,6 +122,7 @@ fn kind_from_name(name: &str) -> RefinementKind {
         "prompt" => RefinementKind::Prompt,
         "memory" => RefinementKind::Memory,
         "skill" => RefinementKind::Skill,
+        "factory" => RefinementKind::Factory,
         _ => RefinementKind::Subagent,
     }
 }
@@ -137,6 +140,39 @@ pub fn get_local_harness_state_dir(session_artifact_dir: Option<&Path>) -> Optio
 #[must_use]
 pub fn get_harness_state_path(harness_state_dir: &Path) -> PathBuf {
     harness_state_dir.join("harness_state.json")
+}
+
+/// The settings file the factory opt-in gate reads: the agent dir's
+/// settings.json, the same document the kernel-side gate resolves through
+/// `PRIME_AGENT_CODING_AGENT_DIR` (the host exports the session's agent
+/// dir to the kernel, so both sides read one setting).
+pub const FACTORY_SETTINGS_FILE_NAME: &str = "settings.json";
+
+/// The one refusal every gated factory surface raises while the opt-in is
+/// off. Byte-identical to the kernel's `FACTORY_DISABLED_MESSAGE`
+/// (`prime-agent-runtime/src/rlm/factory.py`), so one exact message pins
+/// both sides of the gate.
+pub const FACTORY_DISABLED_MESSAGE: &str = "the factory is disabled; run /factory on to enable it";
+
+/// The `factory.enabled` opt-in setting (default off), read leniently from
+/// the agent dir's settings.json exactly like the kernel-side
+/// `rlm.factory.factory_enabled()`: a missing file or key, a wrong-typed
+/// value, or a corrupt document all read as the fail-closed disabled
+/// default, so an unreadable setting refuses the factory instead of
+/// silently enabling it.
+#[must_use]
+pub fn factory_enabled(agent_dir: &Path) -> bool {
+    let Ok(raw) = std::fs::read_to_string(agent_dir.join(FACTORY_SETTINGS_FILE_NAME)) else {
+        return false;
+    };
+    let Ok(document) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    document
+        .get("factory")
+        .and_then(|factory| factory.get("enabled"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
 }
 
 /// Load harness state; a corrupt or unreadable file degrades to empty rather
@@ -498,6 +534,7 @@ fn kind_name(kind: RefinementKind) -> &'static str {
         RefinementKind::Memory => "memory",
         RefinementKind::Skill => "skill",
         RefinementKind::Subagent => "subagent",
+        RefinementKind::Factory => "factory",
     }
 }
 
@@ -538,6 +575,50 @@ mod tests {
             updated_at: "2024-01-01T00:00:00.000Z".to_string(),
             version: 1,
         }
+    }
+
+    #[test]
+    fn factory_opt_in_reads_leniently_and_fails_closed() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No settings file: the opt-in default is disabled.
+        assert!(!factory_enabled(tmp.path()));
+        // The enabled shape the settings surface writes.
+        std::fs::write(
+            tmp.path().join(FACTORY_SETTINGS_FILE_NAME),
+            r#"{"factory": {"enabled": true}, "compaction": {"enabled": true}}"#,
+        )
+        .unwrap();
+        assert!(factory_enabled(tmp.path()));
+        // An explicit false stays disabled.
+        std::fs::write(
+            tmp.path().join(FACTORY_SETTINGS_FILE_NAME),
+            r#"{"factory": {"enabled": false}}"#,
+        )
+        .unwrap();
+        assert!(!factory_enabled(tmp.path()));
+        // A wrong-typed value reads as unset, which means disabled.
+        std::fs::write(
+            tmp.path().join(FACTORY_SETTINGS_FILE_NAME),
+            r#"{"factory": {"enabled": "yes"}, "factory.enabled": true}"#,
+        )
+        .unwrap();
+        assert!(!factory_enabled(tmp.path()));
+        // A missing key is unset.
+        std::fs::write(
+            tmp.path().join(FACTORY_SETTINGS_FILE_NAME),
+            r#"{"compaction": {}}"#,
+        )
+        .unwrap();
+        assert!(!factory_enabled(tmp.path()));
+        // A corrupt document reads as the disabled default, never a crash.
+        std::fs::write(tmp.path().join(FACTORY_SETTINGS_FILE_NAME), "{ not json").unwrap();
+        assert!(!factory_enabled(tmp.path()));
+        // The refusal is the one exact message, byte-identical to the
+        // kernel-side FACTORY_DISABLED_MESSAGE (rlm/factory.py).
+        assert_eq!(
+            FACTORY_DISABLED_MESSAGE,
+            "the factory is disabled; run /factory on to enable it"
+        );
     }
 
     #[test]

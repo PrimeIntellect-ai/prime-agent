@@ -397,6 +397,16 @@ impl AgentSession {
         } = parts.await?;
         let (result, context_row_ids) = {
             let mut session = self.session.lock().await;
+            // The factory opt-in resolves at apply time, not here: the
+            // agent dir (the same settings.json the kernel-side factory
+            // gate reads) rides down to the refinement, which re-reads
+            // `factory.enabled` immediately before applying the plan, off
+            // the async worker (`spawn_blocking`). The arm performs no
+            // synchronous settings read while holding this session lock,
+            // and the long planning request can no longer leave the gate
+            // deciding on a snapshot the request made stale. A session
+            // without a wired agent dir keeps the fail-closed disabled
+            // default.
             refine::execute_refinement_with_rows(
                 &mut session,
                 refine::RefinementTranscript {
@@ -408,6 +418,7 @@ impl AgentSession {
                 options,
                 source,
                 refine_call,
+                self.agent_dir.as_deref(),
             )
             .await?
         };

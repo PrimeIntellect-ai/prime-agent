@@ -675,6 +675,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     )
     .await?;
     session.set_auto_refine(auto_refine_allowed, auto_refine_gates);
+    session.set_agent_dir(config.agent_dir.clone());
     // Every compaction path reads the session's resolved compaction
     // settings (TS `getCompactionSettings`): `/compact` matches the
     // `compact.*` turn-boundary tool's `keepRecentTokens`/`reserveTokens`.

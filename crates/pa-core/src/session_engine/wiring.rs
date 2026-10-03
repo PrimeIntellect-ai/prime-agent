@@ -135,6 +135,15 @@ impl AgentSession {
         self.auto_refine = gates;
     }
 
+    /// Bind the session's agent dir (the settings root). The refine flow
+    /// reads the `factory.enabled` opt-in from the agent dir's
+    /// settings.json on every run — the same live read the kernel-side
+    /// factory gate performs — so a session without a wired agent dir
+    /// keeps the fail-closed disabled default.
+    pub fn set_agent_dir(&mut self, agent_dir: std::path::PathBuf) {
+        self.agent_dir = Some(agent_dir);
+    }
+
     /// Bind the kernel-state probe behind the post-compaction
     /// `ipython_state` notice (the engine wiring hands over the session's
     /// kernel provisioner, TS `AgentSession._ipythonKernelProvisioner`).

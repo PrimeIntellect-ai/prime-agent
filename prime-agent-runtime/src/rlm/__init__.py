@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .bash import BashHandle, BashResult, bash
+from .factory import FACTORY_HELP, resume_factory, run_factory, status_factory, stop_factory
 from .harness import HarnessEntry, HarnessScope, HarnessState, RefinementEvent, get_harness_state
 
 _NOT_CALLABLE_MESSAGE = "'rlm' is not callable; spawn a child with: handle = await rlm.spawn('sub-task', name='worker')"
@@ -527,6 +528,43 @@ class _HarnessProxy:
 _harness_state = _HarnessProxy()
 
 
+class _RLMFactoryNamespace:
+    """Run stored state-machine factories: rlm.factory.run/status/stop/resume.
+
+    ``run('<spec_id>')`` validates a stored factory entry (machine form, or
+    dag sugar that compiles to one), enters the entry states up to the
+    spec's max_parallel, and returns immediately; a kernel asyncio task
+    continues the run (nonblocking control loop). Runs live in kernel
+    memory only; children stay supervisor-owned. Every call is async, so
+    always await it: ``await rlm.factory.run('<id>')``.
+
+    The factory is opt-in: while the ``factory.enabled`` setting is off (the
+    default; the user turns it on with ``/factory on``), every call above
+    refuses with one clean message and only ``help()`` answers, so the
+    guide stays readable before opting in.
+
+    ``help()`` returns the full embedded authoring reference and API guide
+    (states, ports, guards, joins, foreach, budgets, and the API with
+    worked examples): ``rlm.factory.help()``.
+    """
+
+    async def run(self, spec_id: str, *, name: str | None = None) -> dict[str, Any]:
+        return await run_factory(spec_id, name=name)
+
+    async def status(self, run_id: str) -> dict[str, Any]:
+        return await status_factory(run_id)
+
+    async def stop(self, run_id: str) -> dict[str, Any]:
+        return await stop_factory(run_id)
+
+    async def resume(self, run_id: str) -> dict[str, Any]:
+        return await resume_factory(run_id)
+
+    def help(self) -> str:
+        """Return the embedded factory authoring reference and API guide."""
+        return FACTORY_HELP
+
+
 class _RLMNamespace:
     harness = _harness_state
     get_harness_state = staticmethod(get_harness_state)
@@ -565,6 +603,8 @@ class _RLMNamespace:
 
     async def collect(self, targets: Any = None, *, timeout_ms: int = 0) -> list[RLMChildResult]:
         return await collect(targets, timeout_ms=timeout_ms)
+
+    factory = _RLMFactoryNamespace()
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         raise TypeError(_NOT_CALLABLE_MESSAGE)
