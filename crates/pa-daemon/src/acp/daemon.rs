@@ -266,6 +266,8 @@ pub(crate) struct HostedSession {
     turn: Option<ActiveTurn>,
     /// The newest assistant stop reason observed on the event stream.
     assistant_stop_reason: Option<String>,
+    /// The event mapping state lives and dies with the session, like TS.
+    mapping: WireMappingState,
 }
 
 struct ActiveTurn {
@@ -330,7 +332,6 @@ pub async fn run_daemon_attached_acp_mode(options: DaemonAcpOptions) -> anyhow::
         let link = Arc::clone(&link);
         let state = Arc::clone(&state);
         tokio::spawn(async move {
-            let mut mapping = WireMappingState::default();
             let mut frames = link.frames.lock().await;
             while let Some(frame) = frames.recv().await {
                 match frame {
@@ -352,7 +353,7 @@ pub async fn run_daemon_attached_acp_mode(options: DaemonAcpOptions) -> anyhow::
                                 current.assistant_stop_reason = stop.stop_reason;
                             }
                             let turn_id = current.producer.active_prompt_turn().await;
-                            for update in wire_events::wire_updates(&event, &mut mapping) {
+                            for update in wire_events::wire_updates(&event, &mut current.mapping) {
                                 let _ = current
                                     .producer
                                     .publish(&update, turn_id, PrimeAgentEventPhase::Event, None)
@@ -909,6 +910,7 @@ async fn handle_session_new(
         mcp_server_names: Vec::new(),
         turn: None,
         assistant_stop_reason: None,
+        mapping: WireMappingState::default(),
     };
     // The ACP MCP servers ride the wire command, not a local manager.
     if let Err(error) = replace_session_servers(link, &hosted, &resolved).await {

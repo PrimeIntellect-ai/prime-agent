@@ -910,16 +910,17 @@ fn new_session(client: &mut AcpChild) -> String {
         .to_string()
 }
 
-fn assert_prompt_ends_turn(client: &mut AcpChild, session_id: &str, text: &str) {
+fn assert_prompt_ends_turn(client: &mut AcpChild, session_id: &str, text: &str) -> Vec<Value> {
     let prompt = client.request(
         "session/prompt",
         &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": text }] }),
     );
-    let (prompt_response, _) = client.wait_response(prompt, Duration::from_mins(2));
+    let (prompt_response, updates) = client.wait_response(prompt, Duration::from_mins(2));
     assert_eq!(
         prompt_response["result"]["stopReason"], "end_turn",
         "{prompt_response}"
     );
+    updates
 }
 
 /// The supervisor's live sessions (`list`).
@@ -1118,7 +1119,16 @@ fn acp_daemon_attached_close_keeps_the_worker_and_new_rebinds_it() {
 
     let second = new_session(&mut client);
     assert_ne!(second, first);
-    assert_prompt_ends_turn(&mut client, &second, "Name a mountain.");
+    let updates = assert_prompt_ends_turn(&mut client, &second, "Name a mountain.");
+    let chunk = updates
+        .iter()
+        .find(|update| update["params"]["update"]["sessionUpdate"] == "agent_message_chunk")
+        .expect("a message chunk");
+    // The event mapping restarts with the session, like TS.
+    assert_eq!(
+        chunk["params"]["update"]["messageId"],
+        "prime-agent-assistant-1"
+    );
     let sessions = live_sessions(&socket);
     assert_eq!(sessions.len(), 1, "{sessions:?}");
     assert_eq!(
