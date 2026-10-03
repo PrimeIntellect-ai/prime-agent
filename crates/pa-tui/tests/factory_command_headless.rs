@@ -5,7 +5,12 @@
 //! seam round-trip test), and a bad argument gets the usage error. The
 //! harness daemon advertises no `factory_activity` lane, so the dock
 //! mounts no factory group anywhere while it stays unadvertised (the
-//! opt-in contract's off surface).
+//! opt-in contract's off surface). The lane-advertised battery below
+//! drives the off guard end to end, and the page battery opens the
+//! dock's factory group into the live page and pins the picker keys'
+//! repaint contract (the input loop paints every dispatched input — the
+//! moved selection lands on the arrow's own repaint, never waiting for
+//! the refresh poll).
 #![cfg(unix)]
 // Pedantic-gate exceptions (every other pedantic warning in this crate is
 // fixed in place; each exception carries its one-line justification):
@@ -36,6 +41,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 
 use anyhow::Result;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use pa_tui::interactive::{
     run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, ModelSelection,
     SessionSelection, UiMode,
@@ -779,5 +785,99 @@ fn factory_off_proceeds_when_the_kernel_is_not_running() {
     assert!(
         !all.contains("Cannot disable the factory"),
         "no refusal without a kernel to host live runs:\n{all}"
+    );
+}
+
+/// One live named run row for the page battery (the wire shape the
+/// kernel's graph lane sends): the name the panel header paints.
+fn factory_page_run(id: &str, name: &str) -> Value {
+    json!({
+        "runId": id,
+        "specId": "sw",
+        "name": name,
+        "state": "running",
+        "elapsedMs": 100,
+        "machine": { "states": [], "transitions": [] },
+        "nodes": [],
+        "usage": { "running": 0 },
+    })
+}
+
+/// One alt+a key event (the dock's focus hand-off).
+fn alt_a() -> KeyEvent {
+    KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT)
+}
+
+/// One right-arrow key event (the dock's next-section step).
+fn dock_right() -> KeyEvent {
+    KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)
+}
+
+/// One down-arrow key event (the page's `tui.select.down`).
+fn down() -> KeyEvent {
+    KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)
+}
+
+/// One plain Enter key event (the dock's focused-section open).
+fn enter() -> KeyEvent {
+    KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+}
+
+/// One Esc key event (`tui.select.cancel`: the open page closes).
+fn escape() -> KeyEvent {
+    KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
+}
+
+/// The page's picker keys repaint on the key itself, never waiting for
+/// the 2-second refresh poll (the input loop's render contract: every
+/// dispatched input paints — the same TS `handleInput` parity that
+/// carries the dock's arrows and every other picker key). The pin closes
+/// the page on the input right after the arrow, so no poll window can
+/// sit between the move and the paint: the moved selection marker must
+/// land in a captured frame on the arrow's own repaint — and the poll
+/// alone could never produce it, because a fold preserves the selected
+/// run id, so a picker key that skipped its repaint would leave the
+/// marker on the old run forever (the fold repaints the same unmoved
+/// selection).
+#[test]
+fn factory_page_picker_keys_paint_the_moved_selection_on_the_key() {
+    // Oldest first on the wire; the page reads newest-first, so
+    // second-run is the opening selection and first-run is one Down away.
+    let graph = json!({
+        "runs": [
+            factory_page_run("run-old", "first-run"),
+            factory_page_run("run-new", "second-run"),
+        ]
+    });
+    let steps = vec![
+        // Focus the dock and step to the factory group (subagents ->
+        // heartbeats -> shells -> factory); Enter opens the page.
+        HeadlessStep::Key(alt_a()),
+        HeadlessStep::Key(dock_right()),
+        HeadlessStep::Key(dock_right()),
+        HeadlessStep::Key(dock_right()),
+        HeadlessStep::Key(enter()),
+        // The page opens on the feed's live head: the newest run.
+        HeadlessStep::WaitRender {
+            needle: "factory: second-run".to_string(),
+            timeout_ms: 5_000,
+        },
+        // Down moves the selection to the older run, and Esc closes the
+        // page on the very next input — no poll cycle can land between
+        // the two, so the moved marker below can only be the arrow's own
+        // repaint.
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(escape()),
+        HeadlessStep::WaitMs(200),
+    ];
+    let frames = run_plan_config(vec!["factory_activity".to_string()], Some(graph), steps);
+    let all = flat_text(&frames);
+    assert!(
+        all.contains("factory: second-run"),
+        "the page mounted on the newest run:\n{all}"
+    );
+    assert!(
+        all.contains("\u{25b8} factory: first-run"),
+        "the arrow's own repaint painted the moved selection before the page closed:\n{all}"
     );
 }
