@@ -1752,6 +1752,40 @@ class ValidateFactoryMachineTest(unittest.TestCase):
             [],
         )
 
+    def test_guard_value_cycles_reject_without_exhausting_the_stack(self) -> None:
+        # A self-referential container can never serialize (the encoder
+        # refuses circular references outright), so it is not a valid
+        # comparison value: the traversal must reject it at the cycle
+        # instead of chasing it to a RecursionError, and the write path
+        # must answer the validation error, not crash.
+        def machine_with(value: Any) -> dict[str, Any]:
+            return {
+                "states": [
+                    state("a", entry=True, outputs=[{"name": "verdict", "type": "json"}]),
+                    state("b"),
+                ],
+                "transitions": [
+                    {"from": "a", "to": "b", "when": {"output": "verdict", "op": "contains", "value": value}}
+                ],
+            }
+
+        cycle: list[Any] = ["ok"]
+        cycle.append(cycle)
+        self.assertEqual(
+            validate_factory_machine(machine_with(cycle)),
+            ["transitions[0] when.value must be finite (JSON carries no NaN or Infinity)"],
+        )
+        nested: dict[str, Any] = {"flag": True}
+        nested["self"] = nested
+        self.assertEqual(
+            validate_factory_machine(machine_with([nested])),
+            ["transitions[0] when.value must be finite (JSON carries no NaN or Infinity)"],
+        )
+        # A shared-but-acyclic reference is NOT a cycle: the same object
+        # appearing twice (a diamond) stays a valid comparison value.
+        shared = {"flag": True}
+        self.assertEqual(validate_factory_machine(machine_with([shared, shared])), [])
+
     def test_guard_rules(self) -> None:
         def machine_with(when: Any) -> dict[str, Any]:
             return {

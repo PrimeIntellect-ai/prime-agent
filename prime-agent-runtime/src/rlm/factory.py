@@ -101,9 +101,9 @@ def _is_positive_int(value: Any) -> bool:
     return _is_int(value) and value > 0
 
 
-def _value_is_finite(value: Any) -> bool:
+def _value_is_finite(value: Any, _seen: "frozenset[int] | None" = None) -> bool:
     """True when a guard comparison value is JSON-object clean: every
-    nested float finite, and every object key a string.
+    nested float finite, every object key a string, and no cycle.
     JSON carries no NaN/Infinity tokens, so a non-finite float would
     serialize as the non-JSON ``NaN``/``Infinity`` tokens and break every
     strict consumer of the reply frames (the host bridge's parser
@@ -112,15 +112,26 @@ def _value_is_finite(value: Any) -> bool:
     float key carries the token into the frame the same way, and a
     non-string key (an int, a tuple) is either coerced by the encoder —
     so the wire object no longer matches the machine's declared one —
-    or rejected by it; either way it is not the declared comparison.
+    or rejected by it; either way it is not the declared comparison. A
+    self-referential container is rejected the same way — the encoder
+    refuses circular references outright, so it can never be a valid
+    comparison value — and the traversal stops at the cycle instead of
+    exhausting the interpreter's stack chasing it. ``_seen`` threads the
+    per-branch ancestry (a shared-but-acyclic reference appearing twice
+    stays valid: each branch checks it independently).
     """
+    seen = _seen or frozenset()
+    if isinstance(value, (list, dict)):
+        if id(value) in seen:
+            return False
+        seen = seen | {id(value)}
     if isinstance(value, float):
         return math.isfinite(value)
     if isinstance(value, list):
-        return all(_value_is_finite(item) for item in value)
+        return all(_value_is_finite(item, seen) for item in value)
     if isinstance(value, dict):
         return all(
-            isinstance(key, str) and _value_is_finite(item)
+            isinstance(key, str) and _value_is_finite(item, seen)
             for key, item in value.items()
         )
     return True
