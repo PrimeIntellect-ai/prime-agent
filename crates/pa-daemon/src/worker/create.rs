@@ -1,9 +1,9 @@
 //! Session creation and reuse on the worker: the create command's
 //! construction of the live session.
 use super::{
-    default_server_capabilities, json, paths, response_failure, response_success,
-    restore_queue_snapshot, session_file_name, Arc, EngineModelSelection, Result,
-    RlmSessionIdentity, SessionEngine, SessionFile, VecDeque, Worker,
+    json, paths, response_failure, response_success, restore_queue_snapshot, session_file_name,
+    Arc, EngineModelSelection, Result, RlmSessionIdentity, SessionEngine, SessionFile, VecDeque,
+    Worker,
 };
 
 use serde::Deserialize as _;
@@ -814,8 +814,10 @@ pub(super) fn active_session_id_of(payload: &[u8]) -> String {
         .unwrap_or_default()
 }
 
-pub(super) fn worker_server_capabilities() -> Vec<String> {
-    default_server_capabilities()
+pub(super) fn worker_server_capabilities(agent_dir: &std::path::Path) -> Vec<String> {
+    // The factory lane advertises only while its opt-in gate reads
+    // enabled (`factory.enabled`, default off).
+    crate::factory_activity::advertised_server_capabilities(agent_dir)
 }
 
 /// RLM depth fields of a create payload: `(depth, max_depth)`. Values must

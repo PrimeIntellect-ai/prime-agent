@@ -208,6 +208,11 @@ async fn run_interactive_surface(
     let (auth_panel_tx, mut auth_panel_rx) =
         mpsc::unbounded_channel::<crate::auth_panel::AuthPanelRequest>();
     let (bash_tx, mut bash_rx) = mpsc::unbounded_channel::<crate::session_ui::BashActivityUpdate>();
+    // Background factory refreshes (the factory page's watch+graph
+    // cadence and the dock count's poll) report here; the loop folds them
+    // into the session — the open page's panels and the dock's count.
+    let (factory_tx, mut factory_rx) =
+        mpsc::unbounded_channel::<crate::session_ui::FactoryUpdate>();
     // Background slash-command-catalog refreshes (`get_commands`) report
     // here; the loop folds the session's skill commands into the
     // autocomplete provider.
@@ -331,6 +336,7 @@ async fn run_interactive_surface(
             let auth_panel_tx = auth_panel_tx.clone();
             let heartbeats_tx = heartbeats_tx.clone();
             let bash_tx = bash_tx.clone();
+            let factory_tx = factory_tx.clone();
             let commands_tx = commands_tx.clone();
             async move {
                 let (client, events) = match first {
@@ -354,6 +360,7 @@ async fn run_interactive_surface(
                     crate::session_ui::ActivityUpdates {
                         heartbeats: heartbeats_tx,
                         bash: bash_tx,
+                        factory: factory_tx,
                         commands: commands_tx,
                     },
                 )
@@ -605,6 +612,7 @@ async fn run_interactive_surface(
 
     let mut pending: VecDeque<UiInput> = VecDeque::new();
     let mut last_bash_refresh = Instant::now();
+    let mut last_factory_refresh = Instant::now();
     // The enhanced-key modes settle once (kitty answer or fallback) and
     // report one adoption event; headless runs hold pipes and never probe.
     let mut enhanced_keys_pending = renderer.is_terminal();
@@ -1212,6 +1220,7 @@ async fn run_interactive_surface(
         let autocomplete_pending = view.editor.has_pending_autocomplete();
         let auto_scroll_armed = session.selection_auto_scroll_armed();
         let bash_refresh_wanted = session.kernel_bash_supported();
+        let factory_refresh_wanted = session.factory_activity_supported();
         // A settle waiting out a member is pending work like the
         // autocomplete park: the gate runs at the loop top, so its
         // re-check (and the settle bound's expiry) needs this arm's
@@ -1522,6 +1531,11 @@ async fn run_interactive_surface(
             maybe_bash = bash_rx.recv() => {
                 if let Some(update) = maybe_bash {
                     session.apply_bash_activity(update, &mut view);
+                }
+            }
+            maybe_factory = factory_rx.recv() => {
+                if let Some(update) = maybe_factory {
+                    session.apply_factory_update(update, &mut view);
                 }
             }
             maybe_commands = commands_rx.recv() => {
@@ -1883,6 +1897,24 @@ async fn run_interactive_surface(
             } => {
                 last_bash_refresh = Instant::now();
                 session.spawn_bash_activity_refresh();
+            }
+            () = async {
+                // The factory lane's 2s poll: the bash poll's cadence
+                // and gate, armed on daemons that advertise the
+                // factory lane. The poll runs whether or not the page
+                // is open (the dock's factory count stays live); an
+                // open page adds its selected run's watch ahead of the
+                // graph inside the same serialized cycle.
+                if !factory_refresh_wanted {
+                    std::future::pending::<()>().await;
+                }
+                tokio::time::sleep_until(
+                    tokio::time::Instant::from_std(last_factory_refresh + Duration::from_secs(2)),
+                )
+                .await;
+            } => {
+                last_factory_refresh = Instant::now();
+                session.spawn_factory_refresh();
             }
             _frame = async {
                 match render_deadline {

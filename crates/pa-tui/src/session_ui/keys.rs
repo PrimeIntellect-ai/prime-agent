@@ -127,6 +127,7 @@ impl SessionUi {
             || view.fork_selector.is_some()
             || view.share_loader.is_some()
             || view.mcp_view.is_some()
+            || view.factory_view.is_some()
             || view.onboarding.is_some();
         // TS records the press state before the dispatch: a drag report
         // marks the press, a plain press remembers the link under it.
@@ -422,6 +423,10 @@ impl SessionUi {
         // The `/mcp` connections view owns the frame the same way.
         if view.mcp_view.is_some() {
             return self.handle_mcp_view_key(key, view);
+        }
+        // The factory page owns the frame the same way.
+        if view.factory_view.is_some() {
+            return self.handle_factory_view_key(key, view).await;
         }
         // The `/heartbeats` view owns the frame the same way.
         if view.heartbeats_picker.is_some() {

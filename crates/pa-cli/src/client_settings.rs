@@ -182,6 +182,13 @@ impl ClientSettings for CliClientSettings {
         set_chat_detail
     );
     setting!(
+        factory_enabled,
+        set_factory_enabled,
+        get_factory_enabled,
+        set_factory_enabled,
+        bool
+    );
+    setting!(
         warnings_anthropic_extra_usage,
         set_warnings_anthropic_extra_usage,
         get_warnings_anthropic_extra_usage,
@@ -309,5 +316,27 @@ mod tests {
         // ...and the /nightly on path's.
         settings.set_update_channel("nightly").expect("channel");
         assert_eq!(settings.update_channel().as_deref(), Some("nightly"));
+
+        // The factory's opt-in gate (`/factory on|off|status`): unset reads
+        // as disabled (the default off), and the write persists the exact
+        // nested-camelCase key the kernel's gate and the daemon's lane
+        // advertisement read -- over the same document, leaving the other
+        // keys alone.
+        assert!(!settings.factory_enabled());
+        settings.set_factory_enabled(true).expect("factory enabled");
+        assert!(settings.factory_enabled());
+        let content =
+            std::fs::read_to_string(agent_dir.join("settings.json")).expect("settings file");
+        let value: serde_json::Value = serde_json::from_str(&content).expect("parse");
+        assert_eq!(value["factory"]["enabled"], true);
+        assert_eq!(value["theme"], "dark", "the write leaves the other keys");
+        settings
+            .set_factory_enabled(false)
+            .expect("factory disabled");
+        assert!(!settings.factory_enabled());
+        let content =
+            std::fs::read_to_string(agent_dir.join("settings.json")).expect("settings file");
+        let value: serde_json::Value = serde_json::from_str(&content).expect("parse");
+        assert_eq!(value["factory"]["enabled"], false);
     }
 }

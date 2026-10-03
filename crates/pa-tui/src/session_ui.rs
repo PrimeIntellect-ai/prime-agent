@@ -7,6 +7,7 @@ mod apply;
 mod auth;
 mod bash;
 mod commands;
+mod factory;
 mod heartbeats;
 mod keys;
 mod lifecycle;
@@ -24,6 +25,7 @@ pub(crate) use apply::CompactionAbortNote;
 use auth::{McpAuthIntent, PendingModelSignIn, SetModelOutcome};
 pub(crate) use bash::BashActivityUpdate;
 use bash::{ResyncBash, SideBashRun};
+pub(crate) use factory::FactoryUpdate;
 use heartbeats::paused_heartbeat_count;
 pub(crate) use heartbeats::HeartbeatsUpdate;
 use keys::SelectionAutoScroll;
@@ -412,6 +414,32 @@ pub(crate) struct SessionUi {
     /// response from an older request must not repaint a newer snapshot.
     bash_list_epoch: u64,
     bash_updates: mpsc::UnboundedSender<BashActivityUpdate>,
+    /// The last `factory_activity` graph reply (the dock count's cache and
+    /// the page open's mount, the `bash_activities` pattern): the
+    /// always-on 2s poll keeps it current whether or not the page is
+    /// open.
+    factory_graph: serde_json::Value,
+    /// The durable session id the open `/factory` view was mounted on: the
+    /// rebind fold keeps the view across a same-session reattach (`Unknown
+    /// active session` recovery) and closes it only when a different
+    /// session actually takes the view's place.
+    factory_view_session: Option<String>,
+    /// Whether one factory refresh is still in flight (the heartbeat
+    /// refresh's serialization: the tick is only a cadence floor, so it
+    /// queues behind the in-flight cycle instead of minting a newer epoch
+    /// the in-flight reply could never match).
+    factory_refresh_in_flight: bool,
+    /// A tick that fired while a refresh was in flight: the fold launches
+    /// this trailing refresh once the in-flight cycle delivers.
+    factory_refresh_queued: bool,
+    /// Monotonic id of the latest issued factory refresh; an older
+    /// response never repaints a newer snapshot.
+    factory_list_epoch: u64,
+    /// Where background factory refreshes deliver the run graph (the run
+    /// loop folds them into the open view).
+    factory_updates: mpsc::UnboundedSender<FactoryUpdate>,
+    /// The open view's selected run id: the refresh's watch target.
+    factory_selected_run: Option<String>,
     /// The subagent summary line holds keyboard focus.
     subagents_focused: bool,
     activity_group: crate::chrome::ActivityGroup,

@@ -9,7 +9,15 @@ from pathlib import Path
 from typing import Any
 
 from .bash import BashHandle, BashResult, bash
-from .factory import FACTORY_HELP, resume_factory, run_factory, status_factory, stop_factory
+from .factory import (
+    FACTORY_HELP,
+    graph_factory,
+    resume_factory,
+    run_factory,
+    status_factory,
+    stop_factory,
+    watch_factory,
+)
 from .harness import HarnessEntry, HarnessScope, HarnessState, RefinementEvent, get_harness_state
 
 _NOT_CALLABLE_MESSAGE = "'rlm' is not callable; spawn a child with: handle = await rlm.spawn('sub-task', name='worker')"
@@ -529,7 +537,8 @@ _harness_state = _HarnessProxy()
 
 
 class _RLMFactoryNamespace:
-    """Run stored state-machine factories: rlm.factory.run/status/stop/resume.
+    """Run stored state-machine factories: rlm.factory.run/status/stop/resume,
+    plus graph/watch for live monitoring.
 
     ``run('<spec_id>')`` validates a stored factory entry (machine form, or
     dag sugar that compiles to one), enters the entry states up to the
@@ -546,6 +555,15 @@ class _RLMFactoryNamespace:
     ``prime-agent factory list | import | export`` manages the library (a
     broken machine names its exact errors; a missing one lists what the
     library has).
+
+    ``graph()`` returns the machine structure fused with live runtime state
+    (``status()``'s data plus the static graph): pass a live run id for one
+    run's snapshot, a stored spec id for the static structure, or nothing
+    for every live run. ``watch('<run_id>', timeout)`` blocks until the
+    run's state/instance shape changes or the timeout elapses (bounded),
+    then returns the same snapshot with ``changed`` — an agent can stream
+    progress and drive orchestration programmatically, and the emitted
+    graph model renders as ASCII or genuine Mermaid from one shape.
 
     The factory is opt-in: while the ``factory.enabled`` setting is off (the
     default; the user turns it on with ``/factory on``), every call above
@@ -568,6 +586,12 @@ class _RLMFactoryNamespace:
 
     async def resume(self, run_id: str) -> dict[str, Any]:
         return await resume_factory(run_id)
+
+    async def graph(self, ref: str | None = None) -> dict[str, Any]:
+        return graph_factory(ref)
+
+    async def watch(self, run_id: str, timeout: float = 0.0) -> dict[str, Any]:
+        return await watch_factory(run_id, timeout)
 
     def help(self) -> str:
         """Return the embedded factory authoring reference and API guide."""
