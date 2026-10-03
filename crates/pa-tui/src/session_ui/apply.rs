@@ -312,7 +312,17 @@ impl SessionUi {
                 if active_session_id == self.active_session_id {
                     self.turn_active = false;
                     view.working = None;
-                    self.note(&format!("session closed ({reason})"), view);
+                    match reason.as_str() {
+                        "shutdown" => self.error_row(
+                            "The Prime Agent daemon shut down while this window was attached. The session transcript remains saved; restart Prime Agent and reopen it from Agents View.",
+                            view,
+                        ),
+                        "replaced" => self.error_row(
+                            "The daemon replaced this agent session with another session. Reopen the current session from Agents View.",
+                            view,
+                        ),
+                        _ => self.note(&format!("session closed ({reason})"), view),
+                    }
                 }
             }
             DaemonClientEvent::DirectLinkLost { active_session_id } => {
