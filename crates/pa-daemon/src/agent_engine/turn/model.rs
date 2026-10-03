@@ -305,30 +305,33 @@ impl AgentSessionEngine {
                         // request hits the switched-to provider with its
                         // resolved key.
                         {
-                            // A routed image-model episode keeps serving
-                            // the route's target across the failover
-                            // switch (the image model receives the
-                            // requests; the switch moves only the agent
-                            // state).
-                            if let Some(route) = self.armed_image_route() {
-                                let mut target =
-                                    self.provider_target.write().expect("provider target lock");
-                                *target = Some(route.target);
+                            let (api_key, headers) = self.resolve_request_key_and_headers(&next);
+                            // A routed image-model episode fails over
+                            // WITHIN the routed model: the candidate chain
+                            // derives from the route's model, so the switch
+                            // moves the stream to the candidate's provider.
+                            // Re-pinning the route's own target would resend
+                            // the retry to the provider that just failed
+                            // while `auto_retry_start` claims a backup ran.
+                            // The tier re-clamps for the candidate row (its
+                            // provider's tier support can differ from the
+                            // primary's) — the same clamp the route's
+                            // resolution applied at arm time.
+                            let session_tier =
+                                *self.service_tier.read().expect("service tier lock");
+                            let service_tier = if self.armed_image_route().is_some() {
+                                pa_types::ai::clamp_service_tier(Some(&next), session_tier)
                             } else {
-                                let (api_key, headers) =
-                                    self.resolve_request_key_and_headers(&next);
-                                let mut target =
-                                    self.provider_target.write().expect("provider target lock");
-                                *target = Some(ProviderTarget {
-                                    service_tier: *self
-                                        .service_tier
-                                        .read()
-                                        .expect("service tier lock"),
-                                    api_key,
-                                    model: next.clone(),
-                                    headers,
-                                });
-                            }
+                                session_tier
+                            };
+                            let mut target =
+                                self.provider_target.write().expect("provider target lock");
+                            *target = Some(ProviderTarget {
+                                service_tier,
+                                api_key,
+                                model: next.clone(),
+                                headers,
+                            });
                         }
                         agent.set_model(agent_model).await;
                         agent.set_thinking_level(map_thinking_level(clamped)).await;

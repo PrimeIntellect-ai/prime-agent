@@ -579,4 +579,251 @@ mod tests {
         );
         registration.unregister();
     }
+
+    /// The failover battery's models.json: `battery-a` serves the
+    /// text-only session model and the routed image model (the primary),
+    /// `battery-b` serves the same image model id as the failover
+    /// candidate (`failover_candidates` keys on the id across providers).
+    fn write_image_failover_models_json(agent_dir: &std::path::Path) {
+        std::fs::create_dir_all(agent_dir).unwrap();
+        std::fs::write(
+            agent_dir.join("models.json"),
+            serde_json::json!({
+                "providers": {
+                    "battery-a": {
+                        "api": "mock-battery-a",
+                        "baseUrl": "http://127.0.0.1:9",
+                        "apiKey": "sk-battery-a",
+                        "models": [
+                            {
+                                "id": "mock-1",
+                                "name": "Mock 1",
+                                "api": "mock-battery-a",
+                                "contextWindow": 128_000,
+                                "maxTokens": 4096
+                            },
+                            {
+                                "id": "mock-vision",
+                                "name": "Mock Vision",
+                                "api": "mock-battery-a",
+                                "contextWindow": 128_000,
+                                "maxTokens": 4096,
+                                "input": ["text", "image"]
+                            }
+                        ]
+                    },
+                    "battery-b": {
+                        "api": "mock-battery-b",
+                        "baseUrl": "http://127.0.0.1:9",
+                        "apiKey": "sk-battery-b",
+                        "models": [
+                            {
+                                "id": "mock-vision",
+                                "name": "Mock Vision",
+                                "api": "mock-battery-b",
+                                "contextWindow": 128_000,
+                                "maxTokens": 4096,
+                                "input": ["text", "image"]
+                            }
+                        ]
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    /// The failover battery's engine: same shape as
+    /// [`image_route_engine`], on the two-provider models.json.
+    fn image_failover_engine(
+        dir: &std::path::Path,
+        settings: &serde_json::Value,
+    ) -> AgentSessionEngine {
+        let agent_dir = dir.join("agent");
+        write_image_failover_models_json(&agent_dir);
+        write_image_settings(dir, settings);
+        let engine = AgentSessionEngine::new(AgentEngineConfig {
+            cwd: dir.to_path_buf(),
+            agent_dir,
+            provider: None,
+            model: None,
+            api_key: None,
+            thinking: None,
+            session_dir: None,
+            session_file: None,
+            faux_script: None,
+            supervisor_link: None,
+            telemetry_disabled: None,
+            cron_store: None,
+            queued_steering_probe: None,
+        })
+        .unwrap();
+        engine.configure_model(EngineModelSelection {
+            provider: Some("battery-a".to_string()),
+            model: Some("mock-1".to_string()),
+            api_key: None,
+            thinking: None,
+        });
+        engine
+    }
+
+    /// A routed image episode failing over must move the stream to the
+    /// candidate's provider (#3312): the failover switch used to re-pin
+    /// the route's own target, so every "backup" retry resent to the
+    /// provider that just failed while `auto_retry_start` named a backup
+    /// that never ran. The armed route keeps the episode's attribution;
+    /// the target follows the candidate.
+    #[test]
+    fn routed_image_failover_serves_the_candidate_provider() {
+        let _faux = FAUX_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let battery_a =
+            pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
+                api: Some("mock-battery-a".to_string()),
+                provider: Some("battery-a".to_string()),
+                models: Some(vec![
+                    pa_ai::faux::FauxModelDefinition {
+                        id: "mock-1".to_string(),
+                        name: Some("Mock 1".to_string()),
+                        reasoning: Some(false),
+                        input: Some(vec![pa_types::ai::ModelInput::Text]),
+                        cost: None,
+                        context_window: Some(128_000),
+                        max_tokens: Some(4096),
+                    },
+                    pa_ai::faux::FauxModelDefinition {
+                        id: "mock-vision".to_string(),
+                        name: Some("Mock Vision".to_string()),
+                        reasoning: Some(false),
+                        input: Some(vec![
+                            pa_types::ai::ModelInput::Text,
+                            pa_types::ai::ModelInput::Image,
+                        ]),
+                        cost: None,
+                        context_window: Some(128_000),
+                        max_tokens: Some(4096),
+                    },
+                ]),
+                ..Default::default()
+            });
+        // The routed primary always fails (a retryable provider failure,
+        // not a permanent classification).
+        battery_a.set_responses(vec![
+            pa_ai::faux::FauxResponseStep::Message(pa_ai::faux::faux_assistant_text_message(
+                "battery-a outage",
+                pa_ai::faux::FauxAssistantMessageOptions {
+                    stop_reason: Some(pa_types::ai::StopReason::Error),
+                    error_message: Some("battery-a is down".to_string()),
+                    ..Default::default()
+                },
+            )),
+            pa_ai::faux::FauxResponseStep::Message(pa_ai::faux::faux_assistant_text_message(
+                "battery-a still down",
+                pa_ai::faux::FauxAssistantMessageOptions {
+                    stop_reason: Some(pa_types::ai::StopReason::Error),
+                    error_message: Some("battery-a is down".to_string()),
+                    ..Default::default()
+                },
+            )),
+        ]);
+        // battery-b serves the same image model id: the failover
+        // candidate that must receive the retried request.
+        let battery_b =
+            pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
+                api: Some("mock-battery-b".to_string()),
+                provider: Some("battery-b".to_string()),
+                models: Some(vec![pa_ai::faux::FauxModelDefinition {
+                    id: "mock-vision".to_string(),
+                    name: Some("Mock Vision".to_string()),
+                    reasoning: Some(false),
+                    input: Some(vec![
+                        pa_types::ai::ModelInput::Text,
+                        pa_types::ai::ModelInput::Image,
+                    ]),
+                    cost: None,
+                    context_window: Some(128_000),
+                    max_tokens: Some(4096),
+                }]),
+                ..Default::default()
+            });
+        battery_b.set_responses(vec![pa_ai::faux::FauxResponseStep::Message(
+            pa_ai::faux::faux_assistant_text_message(
+                "vision reply from the backup",
+                pa_ai::faux::FauxAssistantMessageOptions::default(),
+            ),
+        )]);
+        let dir = tempfile::TempDir::new().unwrap();
+        // `maxRetries: 0` spends the primary's budget on the first
+        // failure: the failover switch fires immediately (no waits).
+        let engine = image_failover_engine(
+            dir.path(),
+            &serde_json::json!({
+                "imageModel": "battery-a/mock-vision",
+                "retry": { "failover": { "maxRetries": 0, "baseDelayMs": 1 } }
+            }),
+        );
+        let mut events = Vec::new();
+        engine.run_prompt(
+            0,
+            PromptRequest {
+                batch: Vec::new(),
+                images: one_image(),
+                message: "describe this".to_string(),
+                source: "user".to_string(),
+                agent_message_id: None,
+                custom_message: None,
+            },
+            &|| false,
+            &mut |event| {
+                events.push(event);
+                true
+            },
+        );
+        // The switch served the retry on the candidate: the primary saw
+        // only its failed attempt, the backup saw the re-issued request.
+        assert_eq!(
+            battery_a.call_count(),
+            1,
+            "the failed provider must not receive the backup retry"
+        );
+        assert_eq!(
+            battery_b.call_count(),
+            1,
+            "the failover candidate must serve the retried request"
+        );
+        // The named backup is the model that actually served the retry.
+        let retry_start = events
+            .iter()
+            .find_map(|event| match event {
+                EngineEvent::AutoRetryStart {
+                    reason, delay_ms, ..
+                } => Some((reason.clone(), *delay_ms)),
+                _ => None,
+            })
+            .expect("the failover emitted a retry start");
+        assert_eq!(
+            retry_start,
+            (
+                pa_core::session_engine::auto_retry::RetryStartReason::Backup {
+                    backup_model: "battery-b/mock-vision".to_string()
+                },
+                0
+            )
+        );
+        let turn_end = events
+            .iter()
+            .find_map(|event| match event {
+                EngineEvent::TurnEnd { message, .. } => Some(message.clone()),
+                _ => None,
+            })
+            .expect("the routed turn settled");
+        assert_eq!(turn_end["provider"], serde_json::json!("battery-b"));
+        assert_eq!(turn_end["model"], serde_json::json!("mock-vision"));
+        // The settled episode restores the session's model.
+        assert_eq!(engine.session_model().unwrap().id, "mock-1");
+        battery_a.unregister();
+        battery_b.unregister();
+    }
 }
