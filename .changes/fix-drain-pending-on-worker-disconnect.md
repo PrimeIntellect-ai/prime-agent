@@ -1,0 +1,1 @@
+- Session listings no longer freeze for up to 30 seconds while a crashed session worker is being restarted, and a worker that dies while a session is opening now fails the open immediately instead of after up to 10 minutes.

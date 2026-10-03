@@ -800,6 +800,14 @@ impl Supervisor {
                         })
                         .await;
                 }
+                // Fail this connection's in-flight requests now instead of
+                // at their route deadline: after a restart give-up no next
+                // connect clears them. Checking the epoch under the lock
+                // keeps a newer connection's requests out of the drain.
+                let mut pending = reader_resident.pending.lock().await;
+                if reader_resident.connection_is_current(connection_epoch) {
+                    pending.clear();
+                }
             });
         }
         // The handshake owns the channel privately (TS `pendingClient`):
@@ -850,14 +858,17 @@ impl Supervisor {
             )
             .await
             .map_err(|error| {
-                // The handshake route's timeout is the connect budget
-                // running out, not a session command timing out: report the
-                // launch-budget failure so a loaded-box launch failure says
-                // what actually happened (never the generic route timeout
-                // text, which pointed triage at the wrong seam).
-                if error.to_string() == "Session worker timed out" {
-                    // The worker answered nothing inside the launch budget:
-                    // its captured stderr tail rides the failure (the same
+                // The handshake route failed without an auth answer — the
+                // connect budget running out, or the worker dying
+                // mid-handshake — not a session command timing out: report
+                // the launch-budget failure so a launch failure says what
+                // actually happened (never the generic route timeout text,
+                // which pointed triage at the wrong seam).
+                if matches!(
+                    error.to_string().as_str(),
+                    "Session worker timed out" | "Daemon worker socket closed"
+                ) {
+                    // Its captured stderr tail rides the failure (the same
                     // evidence the probe arm carries).
                     crate::worker_stderr::not_ready_with_tail(
                         anyhow!("session worker {} did not come up in time", resident.worker_id),

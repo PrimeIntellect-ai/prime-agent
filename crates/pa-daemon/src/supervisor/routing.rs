@@ -183,7 +183,7 @@ impl Supervisor {
                 Err(anyhow!(WORKER_NOT_CONNECTED))
             }
             Ok(Ok(reply)) => Ok(reply),
-            Ok(Err(_)) => Err(anyhow!("Session worker dropped the request")),
+            Ok(Err(_)) => Err(anyhow!("Daemon worker socket closed")),
             Err(_) => {
                 // A timed-out request's reply slot must not sit in the
                 // pending map forever (a wedged worker never answers, and

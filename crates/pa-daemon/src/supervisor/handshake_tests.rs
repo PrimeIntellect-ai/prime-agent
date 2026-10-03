@@ -76,15 +76,12 @@ async fn answer_supervisor_frame(socket: &mut FakeWorkerSocket, request_id: &str
     .expect("write the auth answer");
 }
 
-/// The handshake owns its channel privately until the auth answer proves
-/// the connection (the TS `pendingClient` boundary): while the handshake
-/// is in flight the resident has NO installed command channel — a
-/// supervisor route that fires in that window fails fast with the
-/// retryable not-connected error instead of racing the handshake onto the
-/// unauthenticated connection.
-#[tokio::test]
-async fn handshake_channel_stays_private_until_auth_answers() {
-    let dir = std::env::temp_dir().join(format!("pa-handshake-{}", uuid::Uuid::new_v4()));
+/// A supervisor with one registered resident whose worker socket the
+/// test binds itself (the fake worker on the far side of `connect_worker`).
+async fn supervisor_with_resident(
+    worker_id: &str,
+) -> (Arc<Supervisor>, Arc<ResidentWorker>, PathBuf) {
+    let dir = std::env::temp_dir().join(format!("pa-{worker_id}-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let socket_path = dir.join("worker.sock");
     let agent_dir = dir.join("agent");
@@ -98,12 +95,12 @@ async fn handshake_channel_stays_private_until_auth_answers() {
     );
     let descriptor: DaemonWorkerDescriptor = serde_json::from_value(serde_json::json!({
         "version": 2,
-        "workerId": "w-handshake",
+        "workerId": worker_id,
         "pid": 4242,
         "socketPath": socket_path.to_string_lossy(),
         "recoveryJournalPath": "/tmp/none.jsonl",
         "supervisorSocketPath": "/tmp/none.sock",
-        "authenticationToken": "handshake-token",
+        "authenticationToken": format!("{worker_id}-token"),
         "rootActiveSessionId": "none",
         "createdAt": "2026-09-23T00:00:00Z",
         "updatedAt": "2026-09-23T00:00:00Z",
@@ -113,12 +110,23 @@ async fn handshake_channel_stays_private_until_auth_answers() {
     }))
     .expect("descriptor");
     let resident = ResidentWorker::new(
-        "w-handshake".to_string(),
+        worker_id.to_string(),
         descriptor,
-        dir.join("w-handshake.json"),
+        dir.join(format!("{worker_id}.json")),
     );
     supervisor.registry.insert(Arc::clone(&resident)).await;
+    (supervisor, resident, socket_path)
+}
 
+/// The handshake owns its channel privately until the auth answer proves
+/// the connection (the TS `pendingClient` boundary): while the handshake
+/// is in flight the resident has NO installed command channel — a
+/// supervisor route that fires in that window fails fast with the
+/// retryable not-connected error instead of racing the handshake onto the
+/// unauthenticated connection.
+#[tokio::test]
+async fn handshake_channel_stays_private_until_auth_answers() {
+    let (supervisor, resident, socket_path) = supervisor_with_resident("w-handshake").await;
     let listener = bind_fake_worker(&socket_path).await;
     let connect = {
         let supervisor = Arc::clone(&supervisor);
@@ -167,37 +175,7 @@ async fn handshake_channel_stays_private_until_auth_answers() {
 /// channel), the registration itself succeeds, and the launch completes.
 #[tokio::test]
 async fn a_mid_handshake_registration_cannot_kill_the_handshake() {
-    let dir = std::env::temp_dir().join(format!("pa-wedge-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let socket_path = dir.join("worker.sock");
-    let agent_dir = dir.join("agent");
-    std::fs::create_dir_all(&agent_dir).unwrap();
-    let supervisor = Arc::new(
-        Supervisor::new(SupervisorOptions {
-            socket_path: dir.join("daemon.sock"),
-            agent_dir: agent_dir.clone(),
-        })
-        .expect("supervisor"),
-    );
-    let descriptor: DaemonWorkerDescriptor = serde_json::from_value(serde_json::json!({
-        "version": 2,
-        "workerId": "w-wedge",
-        "pid": 4242,
-        "socketPath": socket_path.to_string_lossy(),
-        "recoveryJournalPath": "/tmp/none.jsonl",
-        "supervisorSocketPath": "/tmp/none.sock",
-        "authenticationToken": "wedge-token",
-        "rootActiveSessionId": "none",
-        "createdAt": "2026-09-23T00:00:00Z",
-        "updatedAt": "2026-09-23T00:00:00Z",
-        "lifecycle": "ready",
-        "createCommand": {},
-        "consecutiveFailures": 0,
-    }))
-    .expect("descriptor");
-    let resident = ResidentWorker::new("w-wedge".to_string(), descriptor, dir.join("w-wedge.json"));
-    supervisor.registry.insert(Arc::clone(&resident)).await;
-
+    let (supervisor, resident, socket_path) = supervisor_with_resident("w-wedge").await;
     let listener = bind_fake_worker(&socket_path).await;
     let connect = {
         let supervisor = Arc::clone(&supervisor);
@@ -225,7 +203,7 @@ async fn a_mid_handshake_registration_cannot_kill_the_handshake() {
         session_id: None,
         socket_path: socket_path.to_string_lossy().to_string(),
         worker_instance_id: String::new(),
-        token: "wedge-token".to_string(),
+        token: "w-wedge-token".to_string(),
         pid: 4242,
         rest: Map::default(),
     };
@@ -261,6 +239,60 @@ async fn a_mid_handshake_registration_cannot_kill_the_handshake() {
         resident.cmd_tx.lock().await.is_some(),
         "the answered handshake installs the channel for routing"
     );
+}
+
+/// A connection that ends with a request in flight fails it at once: the
+/// dead worker can never answer, and a restart give-up brings no next
+/// connect to clear it.
+#[tokio::test]
+async fn a_closed_connection_fails_its_in_flight_request() {
+    let (supervisor, resident, socket_path) = supervisor_with_resident("w-drop").await;
+    let listener = bind_fake_worker(&socket_path).await;
+    let connect = {
+        let supervisor = Arc::clone(&supervisor);
+        let resident = Arc::clone(&resident);
+        tokio::spawn(async move {
+            supervisor
+                .connect_worker(&resident, worker_connect_deadline())
+                .await
+        })
+    };
+    let mut fake = accept_fake_worker(listener).await;
+    let auth = read_supervisor_frame(&mut fake).await;
+    let auth_id = auth
+        .header
+        .get("requestId")
+        .and_then(Value::as_str)
+        .expect("request id")
+        .to_string();
+    answer_supervisor_frame(&mut fake, &auth_id, "worker_auth").await;
+    connect
+        .await
+        .expect("the connect task lives")
+        .expect("the handshake completes");
+    let route = {
+        let supervisor = Arc::clone(&supervisor);
+        let resident = Arc::clone(&resident);
+        tokio::spawn(async move {
+            supervisor
+                .route_command_typed(
+                    &resident,
+                    "get_state",
+                    json!({}),
+                    ROUTE_TIMEOUT_MS,
+                    RouteAdmission::SupervisorInternal,
+                )
+                .await
+        })
+    };
+    let frame = read_supervisor_frame(&mut fake).await;
+    assert_eq!(frame.header.get("commandType"), Some(&json!("get_state")));
+    drop(fake); // the worker dies without answering
+    let error = route
+        .await
+        .expect("the route task lives")
+        .expect_err("the dead worker never answers");
+    assert_eq!(error.to_string(), "Daemon worker socket closed");
 }
 
 /// The install guard's TOCTOU pin: a stale connect that passed its
