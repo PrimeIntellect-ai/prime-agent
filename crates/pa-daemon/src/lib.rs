@@ -44,6 +44,7 @@ pub(crate) mod bash_notices;
 pub(crate) mod boot_reap;
 pub mod branch_navigation;
 pub(crate) mod child_status_notices;
+pub mod cloud_family;
 mod compact_autorefine;
 pub mod compaction;
 mod compaction_outcome;

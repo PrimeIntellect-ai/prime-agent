@@ -108,6 +108,7 @@ pub struct DaemonEventMeta {
 }
 
 pub mod agent_roster;
+pub mod cloud;
 mod command;
 pub mod framing;
 pub mod herdr_env;
