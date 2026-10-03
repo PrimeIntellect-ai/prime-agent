@@ -153,6 +153,7 @@ async fn abort_during_a_kernel_cell_settles_the_turn_immediately() {
     provider.push_text_turn("the cell completed");
 
     let engine = create_session(SessionEngineConfig {
+        semantic_edges: None,
         cron_store: None,
         steering_mode: None,
         follow_up_mode: None,

@@ -220,6 +220,7 @@ impl AgentSessionEngine {
             auto_compaction_abort: std::sync::Mutex::new(None),
             compaction_summary_sink: std::sync::Mutex::new(None),
             model_refusal_telemetry,
+            semantic_identity: std::sync::Mutex::new(None),
         })
     }
 
@@ -472,6 +473,10 @@ impl AgentSessionEngine {
             )));
             *self.usage_producer.lock().expect("usage producer lock") =
                 Some(std::sync::Arc::clone(&built.rlm_usage));
+            // The semantic-edge handoff (the same per-build pattern): the
+            // settle watcher records a returned child's last committed
+            // request into this recorder.
+            children.set_semantic_edges(built.session.semantic_edges());
         }
         // The eager-abort target rides the same mirror (see
         // [`Self::turn_agent`]).
@@ -1117,7 +1122,16 @@ impl AgentSessionEngine {
                     }
                 }) as pa_core::kernel::shared::BackgroundWorkSettledCallback
             });
+        // The semantic-edge identity stamped by `configure_rlm_identity`
+        // (the create's provenance): every build's recorder reopens the
+        // same ledger, so a rebuild replays instead of re-registering.
+        let semantic_edges = self
+            .semantic_identity
+            .lock()
+            .expect("semantic identity lock")
+            .clone();
         pa_core::session_engine::engine::create_session(SessionEngineConfig {
+            semantic_edges,
             telemetry,
             cwd,
             // TS settings.imageModel routing: the daemon owns the routing
