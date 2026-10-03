@@ -2855,7 +2855,10 @@ async def run_factory(spec_id: str, *, name: str | None = None) -> dict[str, Any
         except ValueError as error:
             # An id that is not a legal machine name (spaces, capitals) can
             # never resolve from the library either; the unknown-spec frame
-            # must not lose the lookup to the name-rule sentence.
+            # must not lose the lookup to the name-rule sentence. Only the
+            # name-rule error can arrive here: every library-file failure
+            # (unreadable, non-UTF-8, unparseable) is a MachineResolutionError
+            # in the first except arm.
             raise ValueError(
                 f"unknown factory spec {spec_id!r}: no stored factory entry, and "
                 f"the id is not a valid machine name either ({error})"
@@ -3312,6 +3315,9 @@ def _scan_machine_library(
             except OSError as error:
                 warnings.append(f"{path}: unreadable ({error})")
                 continue
+            except UnicodeDecodeError as error:
+                warnings.append(f"{path}: not valid UTF-8 ({error})")
+                continue
             machine, errors = parse_machine_file(text, source=str(path))
             if machine is None or errors:
                 warnings.append(f"{path}: {'; '.join(errors)}")
@@ -3383,6 +3389,10 @@ def resolve_machine(
                 raise MachineResolutionError(
                     f"machine {name!r} at {path} is unreadable ({error})", broken=True
                 ) from None
+            except UnicodeDecodeError as error:
+                raise MachineResolutionError(
+                    f"machine {name!r} at {path} is not valid UTF-8 ({error})", broken=True
+                ) from None
             machine, parse_errors = parse_machine_file(text, source=str(path))
             if machine is None or parse_errors:
                 raise MachineResolutionError("; ".join(parse_errors), broken=True)
@@ -3410,13 +3420,15 @@ def import_machine(path: "str | Path", *, target_dir: "str | Path | None" = None
     The spec goes through the SAME write-time validator as every factory
     write (``validate_factory_spec``): an invalid spec never persists, and
     the ``ValueError`` carries every error sentence, so the surface stays
-    user-correctable. Valid files persist verbatim (their own prose and
-    formatting travel with the machine) into the user library.
+    user-correctable. Valid files persist byte-for-byte (their own prose,
+    formatting, and line endings travel with the machine) into the user
+    library.
     """
     source_path = Path(path).expanduser()
     if not source_path.is_file():
         raise ValueError(f"machine file not found: {source_path}")
-    text = source_path.read_text(encoding="utf-8")
+    raw = source_path.read_bytes()
+    text = raw.decode("utf-8")
     machine, errors = parse_machine_file(text, source=str(source_path))
     if machine is None or errors:
         raise ValueError("; ".join(errors))
@@ -3427,7 +3439,7 @@ def import_machine(path: "str | Path", *, target_dir: "str | Path | None" = None
     destination = destination_root / machine.name / MACHINE_FILE_NAME
     destination.parent.mkdir(parents=True, exist_ok=True)
     created = not destination.exists()
-    destination.write_text(text, encoding="utf-8")
+    destination.write_bytes(raw)
     return {"name": machine.name, "path": str(destination), "created": created}
 
 

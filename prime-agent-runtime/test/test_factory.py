@@ -71,9 +71,11 @@ from rlm.factory import (
     SUBAGENT_NAME_MAX_LENGTH,
     FactoryExecutor,
     MachineFile,
+    MachineResolutionError,
     _child_name,
     _guard_passes,
     _parse_json_output,
+    _scan_machine_library,
     _spawn_label,
     canonicalize_factory_spec,
     cli_dispatch,
@@ -5895,6 +5897,26 @@ class ImportGateTest(unittest.TestCase):
         self.assertTrue(stored.is_file())
         self.assertEqual(stored.read_text(encoding="utf-8"), text)
 
+    def test_import_preserves_crlf_and_cr_files_byte_for_byte(self) -> None:
+        # The import persists the SUPPLIED file: a valid CRLF or CR machine
+        # keeps its exact bytes (a read_text/write_text round trip would
+        # silently rewrite every line ending), and the stored copy still
+        # parses.
+        text = machine_file_text(spec_json=json.dumps(valid_dag()))
+        self.sources.mkdir(parents=True, exist_ok=True)
+        for line_ending in ("\r\n", "\r"):
+            source = self.sources / f"{len(line_ending)}-byte-newline.MACHINE.md"
+            source.write_bytes(text.replace("\n", line_ending).encode("utf-8"))
+            result = import_machine(source, target_dir=self.library)
+            stored = Path(result["path"])
+            self.assertEqual(stored.read_bytes(), source.read_bytes())
+            stored_machine, errors = parse_machine_file(
+                stored.read_text(encoding="utf-8"), source=str(stored)
+            )
+            self.assertEqual(errors, [])
+            assert stored_machine is not None
+            self.assertEqual(stored_machine.name, "sweep")
+
     def test_import_rejects_invalid_spec_with_exact_errors_and_persists_nothing(self) -> None:
         invalid_spec = {
             "run": {"max_parallel": None},
@@ -6084,6 +6106,38 @@ class MachineLibraryResolutionTest(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             resolve_machine("broken", repo_dir=self.repo, user_dir=self.user)
         self.assertIn("frontmatter description is required", str(ctx.exception))
+
+    def test_resolve_machine_reports_non_utf8_files_as_broken(self) -> None:
+        # A machine file that exists but does not decode is a broken library
+        # file, exactly like one that fails to parse: the decode error rides
+        # the broken frame. (UnicodeDecodeError is a ValueError, so an
+        # unguarded read would instead surface through run_factory's
+        # name-rule arm as an invalid id.)
+        corrupt = self.user / "broken" / "MACHINE.md"
+        corrupt.parent.mkdir(parents=True, exist_ok=True)
+        corrupt.write_bytes(b"\xff\xfe\xff not utf-8")
+        with self.assertRaises(MachineResolutionError) as ctx:
+            resolve_machine("broken", repo_dir=self.repo, user_dir=self.user)
+        self.assertTrue(ctx.exception.broken)
+        self.assertIn("is not valid UTF-8", str(ctx.exception))
+        self.assertIn(str(corrupt), str(ctx.exception))
+
+    def test_one_non_utf8_file_never_poisons_the_listing_scan(self) -> None:
+        # The shared scan skips a non-decodable file like any other broken
+        # one (its warning rides the CLI list surface), so it can neither
+        # break the listing nor reframe an unrelated unknown name.
+        self.store(self.repo, "builder", "Builds.")
+        corrupt = self.user / "zz-corrupt" / "MACHINE.md"
+        corrupt.parent.mkdir(parents=True, exist_ok=True)
+        corrupt.write_bytes(b"\xff\xfe")
+        listed, warnings = _scan_machine_library(repo_dir=self.repo, user_dir=self.user)
+        self.assertEqual([entry["name"] for entry in listed], ["builder"])
+        self.assertTrue(any("not valid UTF-8" in warning for warning in warnings), warnings)
+        with self.assertRaises(MachineResolutionError) as ctx:
+            resolve_machine("missing", repo_dir=self.repo, user_dir=self.user)
+        self.assertFalse(ctx.exception.broken)
+        self.assertIn("unknown machine 'missing'", str(ctx.exception))
+        self.assertIn("builder", str(ctx.exception))
 
     def test_env_overrides_drive_the_production_dirs(self) -> None:
         env = patch.dict(os.environ, {
@@ -6563,6 +6617,39 @@ class FactoryRunFromLibraryTest(unittest.TestCase):
         self.assertIn("exists but is broken", str(raised.exception))
         self.assertIn("frontmatter description is required", str(raised.exception))
         self.assertNotIn("no library machine with that name", str(raised.exception))
+        self.assertEqual(self.host.calls, [])
+
+    @async_test
+    async def test_a_non_utf8_library_file_is_broken_not_an_invalid_name(self) -> None:
+        # A machine file that exists but does not decode is a broken library
+        # file: the run reports it in the exists-but-broken frame, never as
+        # an invalid machine name (the name-rule arm must not swallow the
+        # decode error).
+        directory = self.library / "sweep"
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "MACHINE.md").write_bytes(b"\xff\xfe\xff not utf-8")
+        with self.assertRaises(ValueError) as raised:
+            await rlm_module.rlm.factory.run("sweep")
+        message = str(raised.exception)
+        self.assertIn("exists but is broken", message)
+        self.assertIn("not valid UTF-8", message)
+        self.assertNotIn("not a valid machine name", message)
+        self.assertEqual(self.host.calls, [])
+
+    @async_test
+    async def test_one_corrupt_library_file_never_reframes_unknown_names(self) -> None:
+        # One non-decodable file skips in the listing scan like any broken
+        # file: an unrelated unknown name keeps the unknown-spec frame, never
+        # the name-rule arm the decode error would otherwise reach.
+        corrupt = self.library / "zz-corrupt"
+        corrupt.mkdir(parents=True, exist_ok=True)
+        (corrupt / "MACHINE.md").write_bytes(b"\xff\xfe")
+        with self.assertRaises(ValueError) as raised:
+            await rlm_module.rlm.factory.run("missing-spec")
+        message = str(raised.exception)
+        self.assertIn("unknown factory spec 'missing-spec'", message)
+        self.assertIn("no library machine with that name", message)
+        self.assertNotIn("not a valid machine name", message)
         self.assertEqual(self.host.calls, [])
 
     @async_test
