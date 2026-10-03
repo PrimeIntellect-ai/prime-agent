@@ -13,7 +13,8 @@ use pa_types::daemon::DaemonCommand;
 use super::AgentView;
 
 use crate::factory_view::{
-    parse_factory_runs, FactoryView, FactoryViewAction, FACTORY_WATCH_TICK_MS,
+    factory_reply_lists_runs, parse_factory_runs, FactoryView, FactoryViewAction,
+    FACTORY_WATCH_TICK_MS,
 };
 use crate::session_ui::{picker_viewport_rows, UI_REQUEST_TIMEOUT_MS};
 
@@ -162,6 +163,45 @@ impl super::SessionUi {
         }
         self.spawn_factory_refresh();
         Ok(())
+    }
+
+    /// The session's live factory-run count, the `/factory off` lifecycle
+    /// guard's read: the same lane request and the same liveness rule the
+    /// dock's count reads (`is_live` — a live state, or children still in
+    /// flight), so the refusal names exactly what the dock shows. The
+    /// request rides regardless of the hello's advertisement: a client
+    /// started before `/factory on` keeps its unadvertised hello, but the
+    /// kernel gate reads the settings live, so runs started after the
+    /// toggle are live in that same client — the guard must see them.
+    /// `None` when the count cannot be read: the request failed (an older
+    /// daemon answers the unknown command with a failure; the no-kernel
+    /// classes cannot carry live runs), or the reply is not the runs list
+    /// — classes with no readable runs, so the off write proceeds.
+    pub(crate) async fn live_factory_runs(&mut self) -> Option<usize> {
+        let reply = self
+            .bounded_request(
+                Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
+                DaemonCommand::FactoryActivity {
+                    id: None,
+                    active_session_id: self.active_session_id.clone(),
+                    action: "graph".to_string(),
+                    run_id: None,
+                    spec_id: None,
+                    timeout_ms: None,
+                    rest: Map::default(),
+                },
+            )
+            .await
+            .ok()?;
+        if !factory_reply_lists_runs(&reply) {
+            return None;
+        }
+        Some(
+            parse_factory_runs(&reply)
+                .iter()
+                .filter(|run| run.is_live())
+                .count(),
+        )
     }
 
     /// The refresh cadence (the run's collect cycle): a bounded watch on

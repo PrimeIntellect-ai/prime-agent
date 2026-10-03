@@ -423,12 +423,12 @@ impl SessionUi {
             // with).
             "factory" => {
                 let arg = resolved.args.trim().to_lowercase();
-                let Some(settings) = &self.client_settings else {
-                    self.note("/factory is not available in this client yet", view);
-                    return Ok(());
-                };
                 match arg.as_str() {
                     "on" => {
+                        let Some(settings) = &self.client_settings else {
+                            self.note("/factory is not available in this client yet", view);
+                            return Ok(());
+                        };
                         if let Err(error) = settings.set_factory_enabled(true) {
                             self.error_row(&format!("{error:#}"), view);
                             return Ok(());
@@ -439,6 +439,34 @@ impl SessionUi {
                         );
                     }
                     "off" => {
+                        // The lifecycle guard (the review round's finding):
+                        // the kernel's control loop is not gated by the
+                        // setting, so `off` while runs are live would keep
+                        // admitting and collecting children while every
+                        // factory surface — the namespace, the activity
+                        // lane, and the page after the next client start —
+                        // refuses: a running factory loses its stop and
+                        // visibility path until the gate is enabled again.
+                        // The write refuses while the session's kernel
+                        // reports live runs, naming the count the dock
+                        // shows; the runs stop first (the page's stop
+                        // action or `rlm.factory.stop`).
+                        if let Some(live) = self.live_factory_runs().await.filter(|live| *live > 0)
+                        {
+                            let runs = if live == 1 { "run is" } else { "runs are" };
+                            let them = if live == 1 { "it" } else { "them" };
+                            self.error_row(
+                                &format!(
+                                    "Cannot disable the factory while {live} {runs} still live — stop {them} first (the factory page's stop action or rlm.factory.stop), then /factory off."
+                                ),
+                                view,
+                            );
+                            return Ok(());
+                        }
+                        let Some(settings) = &self.client_settings else {
+                            self.note("/factory is not available in this client yet", view);
+                            return Ok(());
+                        };
                         if let Err(error) = settings.set_factory_enabled(false) {
                             self.error_row(&format!("{error:#}"), view);
                             return Ok(());
@@ -449,6 +477,10 @@ impl SessionUi {
                         );
                     }
                     "" | "status" => {
+                        let Some(settings) = &self.client_settings else {
+                            self.note("/factory is not available in this client yet", view);
+                            return Ok(());
+                        };
                         if settings.factory_enabled() {
                             self.note(
                                 "The factory is enabled. Run /factory off to disable it.",
@@ -462,6 +494,8 @@ impl SessionUi {
                         }
                     }
                     _ => self.error_row("Usage: /factory [on|off|status]", view),
+                }
+            }
             // `/telemetry [status|on|off]`: the report (on/off and why, the
             // endpoint, the installation id), or the persisted switch the
             // running telemetry clients re-read at their next send.

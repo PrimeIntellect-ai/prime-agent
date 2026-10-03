@@ -44,19 +44,36 @@ use serde_json::{json, Value};
 
 struct MockSupervisor {
     listener: UnixListener,
+    /// The hello's advertised capabilities (the default hello advertises
+    /// none, so the factory lane stays unadvertised).
+    server_capabilities: Vec<String>,
+    /// The `factory_activity` graph reply the mock answers while the
+    /// lane is advertised: `None` answers every action with empty data.
+    factory_graph: Option<Value>,
 }
 
 impl MockSupervisor {
-    fn bind(socket: &std::path::Path) -> Self {
+    fn bind_with(
+        socket: &std::path::Path,
+        server_capabilities: Vec<String>,
+        factory_graph: Option<Value>,
+    ) -> Self {
         MockSupervisor {
             listener: UnixListener::bind(socket).expect("bind mock socket"),
+            server_capabilities,
+            factory_graph,
         }
     }
 
     /// Serve one connection: attach an empty session, then answer the
     /// loop's requests.
     fn serve(self) {
-        let (stream, _) = self.listener.accept().expect("accept");
+        let MockSupervisor {
+            listener,
+            server_capabilities,
+            factory_graph,
+        } = self;
+        let (stream, _) = listener.accept().expect("accept");
         let write_stream = stream.try_clone().expect("clone mock socket");
         let mut writer = write_stream;
         let mut reader = BufReader::new(stream);
@@ -64,7 +81,7 @@ impl MockSupervisor {
         let hello = json!({
             "type": "daemon_hello",
             "protocol": { "name": "prime-agent.daemon", "version": 7 },
-            "serverCapabilities": [],
+            "serverCapabilities": server_capabilities,
             "clientId": "mock",
         });
         write_json(&mut writer, &hello);
@@ -130,6 +147,28 @@ impl MockSupervisor {
                             "id": id,
                             "command": "detach",
                             "success": true,
+                        }),
+                    );
+                }
+                "factory_activity" => {
+                    // The lane's mock: a graph action answers the
+                    // configured runs reply; every other action answers
+                    // empty data (the guard reads the graph list only).
+                    let data = match (
+                        factory_graph.as_ref(),
+                        command.get("action").and_then(Value::as_str),
+                    ) {
+                        (Some(runs), Some("graph")) => runs.clone(),
+                        _ => json!({}),
+                    };
+                    write_json(
+                        &mut writer,
+                        &json!({
+                            "type": "response",
+                            "id": id,
+                            "command": "factory_activity",
+                            "success": true,
+                            "data": data,
                         }),
                     );
                 }
@@ -312,6 +351,12 @@ impl pa_tui::client_settings::ClientSettings for RecordingSettings {
         *self.factory_enabled.lock().expect("factory gate lock") = enabled;
         Ok(())
     }
+    fn telemetry_status(&self) -> String {
+        "telemetry enabled".to_string()
+    }
+    fn set_telemetry_enabled(&self, _enabled: bool) -> Result<String> {
+        Ok("telemetry enabled".to_string())
+    }
     fn warnings_anthropic_extra_usage(&self) -> bool {
         true
     }
@@ -368,10 +413,21 @@ fn options(socket: PathBuf) -> InteractiveOptions {
 }
 
 fn run_plan(steps: Vec<HeadlessStep>) -> Vec<String> {
+    run_plan_config(Vec::new(), None, steps)
+}
+
+/// The harness entry with a configured mock daemon: the hello's
+/// advertised capabilities and the `factory_activity` graph reply (the
+/// `/factory off` lifecycle guard's lane).
+fn run_plan_config(
+    server_capabilities: Vec<String>,
+    factory_graph: Option<Value>,
+    steps: Vec<HeadlessStep>,
+) -> Vec<String> {
     std::env::remove_var("TMUX");
     let dir = tempfile::TempDir::new().expect("temp dir");
     let socket = dir.path().join("tui.sock");
-    let supervisor = MockSupervisor::bind(&socket);
+    let supervisor = MockSupervisor::bind_with(&socket, server_capabilities, factory_graph);
     let handle = std::thread::spawn(move || supervisor.serve());
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -471,5 +527,145 @@ fn factory_on_and_off_round_trip_the_gate_through_the_seam() {
     assert!(
         all.contains("Usage: /factory [on|off|status]"),
         "the usage error rendered:\n{all}"
+    );
+}
+
+/// One factory run row in the wire shape the kernel's graph lane sends
+/// (camelCase): the state a `running` row counts as live, a `done` row
+/// with `running` children in flight counts (the resident lifecycle —
+/// the dock's own liveness rule), and a terminal `done` row with none
+/// does not.
+fn factory_run_row(id: &str, state: &str, running_children: u64) -> Value {
+    json!({
+        "runId": id,
+        "specId": "sw",
+        "state": state,
+        "elapsedMs": 100,
+        "machine": { "states": [], "transitions": [] },
+        "nodes": [],
+        "usage": { "running": running_children },
+    })
+}
+
+/// `/factory off` refuses while the session's kernel reports live runs
+/// (the lifecycle guard, end to end through the daemon lane): the
+/// refusal names the live count, and the gate stays enabled — the runs
+/// keep their stop and visibility path (the page, `rlm.factory.stop`)
+/// until the user stops them. The live count reads the dock's own
+/// liveness rule: a `running` run and a `done` run with children still
+/// in flight both count; a fully terminal run never does.
+#[test]
+fn factory_off_refuses_while_runs_are_live() {
+    let graph = json!({
+        "runs": [
+            factory_run_row("terminal", "done", 0),
+            factory_run_row("resident", "done", 2),
+            factory_run_row("live", "running", 1),
+        ]
+    });
+    let steps = vec![
+        HeadlessStep::Submit("/factory on".to_string()),
+        HeadlessStep::WaitMs(200),
+        HeadlessStep::Submit("/factory off".to_string()),
+        HeadlessStep::WaitMs(400),
+        HeadlessStep::Submit("/factory status".to_string()),
+        HeadlessStep::WaitMs(200),
+    ];
+    let frames = run_plan_config(vec!["factory_activity".to_string()], Some(graph), steps);
+    let all = flat_text(&frames);
+    assert!(
+        all.contains(
+            "Cannot disable the factory while 2 runs are still live — stop them first (the factory page's stop action or rlm.factory.stop), then /factory off."
+        ),
+        "the refusal names the live count:\n{all}"
+    );
+    assert!(
+        all.contains("The factory is enabled. Run /factory off to disable it."),
+        "the gate stayed enabled after the refused off:\n{all}"
+    );
+    assert!(
+        !all.contains("The factory is disabled. The factory group and page disappear on the next client start."),
+        "the off note never rendered:\n{all}"
+    );
+}
+
+/// The complement: once no run is live (a fully terminal history), the
+/// off write proceeds — the guard refuses only while the kernel reports
+/// runs that still need their stop path.
+#[test]
+fn factory_off_proceeds_once_no_runs_are_live() {
+    let graph = json!({
+        "runs": [factory_run_row("terminal", "done", 0)]
+    });
+    let steps = vec![
+        HeadlessStep::Submit("/factory on".to_string()),
+        HeadlessStep::WaitMs(200),
+        HeadlessStep::Submit("/factory off".to_string()),
+        HeadlessStep::WaitMs(400),
+        HeadlessStep::Submit("/factory status".to_string()),
+        HeadlessStep::WaitMs(200),
+    ];
+    let frames = run_plan_config(vec!["factory_activity".to_string()], Some(graph), steps);
+    let all = flat_text(&frames);
+    assert!(
+        all.contains("The factory is disabled. The factory group and page disappear on the next client start."),
+        "the off proceeded with only terminal runs:\n{all}"
+    );
+    assert!(
+        all.contains("The factory is disabled (off by default). Run /factory on to enable it (takes effect on the next client start)."),
+        "the disabled status read back:\n{all}"
+    );
+}
+
+/// The same refusal on a client whose hello predates the gate: a client
+/// started while the factory was off keeps its unadvertised hello (the
+/// running connection never re-reads the advertisement), but `/factory
+/// on` opens the kernel gate immediately — runs started after the toggle
+/// are live in that same client, so the off guard must read the lane even
+/// without the advertisement and refuse while they run.
+#[test]
+fn factory_off_refuses_on_a_client_whose_hello_predates_the_gate() {
+    let graph = json!({
+        "runs": [factory_run_row("live", "running", 1)]
+    });
+    let steps = vec![
+        HeadlessStep::Submit("/factory on".to_string()),
+        HeadlessStep::WaitMs(200),
+        HeadlessStep::Submit("/factory off".to_string()),
+        HeadlessStep::WaitMs(400),
+    ];
+    // The hello advertises nothing; the daemon still answers the lane.
+    let frames = run_plan_config(Vec::new(), Some(graph), steps);
+    let all = flat_text(&frames);
+    assert!(
+        all.contains(
+            "Cannot disable the factory while 1 run is still live — stop it first (the factory page's stop action or rlm.factory.stop), then /factory off."
+        ),
+        "the unadvertised-lane guard still refused:\n{all}"
+    );
+}
+
+/// The None path never blocks off: a daemon that cannot report runs (an
+/// older daemon answers the unknown command with a failure, a session
+/// without a kernel refuses) carries no live runs, so the write proceeds
+/// — the guard refuses only on a readable, nonzero count.
+#[test]
+fn factory_off_proceeds_when_the_lane_cannot_report() {
+    let steps = vec![
+        HeadlessStep::Submit("/factory on".to_string()),
+        HeadlessStep::WaitMs(200),
+        HeadlessStep::Submit("/factory off".to_string()),
+        HeadlessStep::WaitMs(400),
+    ];
+    // The mock answers every factory action with empty data: no runs list.
+    let frames = run_plan_config(Vec::new(), None, steps);
+    let all = flat_text(&frames);
+    assert!(
+        all.contains("The factory is disabled. The factory group and page disappear on the next client start."),
+        "the unreadable count never blocked off:\n{all}"
+    );
+    assert!(
+        !all.contains("Cannot disable the factory"),
+        "no refusal without a readable count:\n{all}"
     );
 }
