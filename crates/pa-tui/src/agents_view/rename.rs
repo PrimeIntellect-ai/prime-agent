@@ -81,6 +81,11 @@ impl AgentsViewMode {
     /// stop-or-delete confirm is already cleared — the key router's
     /// preamble took it before the rename arm ran.
     pub(super) fn enter_rename_mode(&mut self) {
+        // Renames ride the local daemon or the local file; a tailnet
+        // peer's name changes on its own machine (TS #2516).
+        if self.guard_remote_row("rename") {
+            return;
+        }
         let Some((target, name)) = self.rename_target() else {
             // An agent row with neither target reports (TS :1876-1878);
             // any other selection stays silent (:1871).

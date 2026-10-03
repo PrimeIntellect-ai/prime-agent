@@ -2,10 +2,22 @@
 
 use std::path::PathBuf;
 
+use crate::remote_mesh::RemoteAgentMeshOptions;
+
 #[derive(Debug, Clone)]
 pub struct SupervisorOptions {
     pub socket_path: PathBuf,
     pub agent_dir: PathBuf,
+    /// Explicit `--daemon-port` override; the env var, settings, and the
+    /// fail-closed bind policy resolve inside the supervisor (TS #2517).
+    pub tcp_port: Option<u16>,
+    /// Explicit `--daemon-bind` override; env, settings, and the tailnet
+    /// probe resolve inside the supervisor.
+    pub tcp_bind_host: Option<String>,
+    /// Tailnet remote-agent mesh seams (TS #2516). `None` serves a local
+    /// roster only; production discovery wiring ships with the mesh
+    /// integration PR (TS stack 5/5).
+    pub remote_agent_mesh: Option<RemoteAgentMeshOptions>,
 }
 
 /// Which clients a worker outbound frame reaches.

@@ -190,6 +190,9 @@ fn list_command(all: bool) -> DaemonCommand {
         cwd: None,
         session_dir: None,
         include_client_owned: None,
+        // The table renders a host column, so the view opt-in is the
+        // right default here (TS #2516: `list`/`sessions` set it).
+        include_remote_mesh: Some(true),
         rest: serde_json::Map::new(),
     }
 }

@@ -384,6 +384,7 @@ impl SessionUi {
                     cwd: None,
                     session_dir: None,
                     include_client_owned: None,
+                    include_remote_mesh: None,
                     rest: Map::default(),
                 },
             )
@@ -611,6 +612,7 @@ async fn describe_session_open_failure(
             cwd: None,
             session_dir: None,
             include_client_owned: None,
+            include_remote_mesh: None,
             rest: Map::default(),
         }),
     )

@@ -296,6 +296,9 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         Arc::new(
             Supervisor::new(crate::supervisor::SupervisorOptions {
+                tcp_port: None,
+                tcp_bind_host: None,
+                remote_agent_mesh: None,
                 socket_path: dir.path().join("s.sock"),
                 agent_dir: dir.path().join("agent"),
             })

@@ -58,7 +58,13 @@ impl crate::mode::Runtime for PrintRuntime {
                 }
             },
             AppMode::Daemon => {
-                match crate::daemon_mode::run_daemon_mode(options.daemon_socket.as_deref()) {
+                match crate::daemon_mode::run_daemon_mode(
+                    options.daemon_socket.as_deref(),
+                    &crate::daemon_mode::DaemonTcpFlags {
+                        port: options.daemon_port,
+                        bind_host: options.daemon_bind_host.clone(),
+                    },
+                ) {
                     Ok(code) => Ok(code),
                     Err(error) => {
                         eprintln!("Error: {error:#}");
@@ -1139,6 +1145,7 @@ fn session_open_guard(
                 cwd: None,
                 session_dir: None,
                 include_client_owned: None,
+                include_remote_mesh: None,
                 rest: serde_json::Map::default(),
             })
             .map_err(|error| format!("Could not check active sessions: {error:#}"))?;

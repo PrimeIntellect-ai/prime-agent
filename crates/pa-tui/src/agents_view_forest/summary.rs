@@ -16,13 +16,25 @@ pub(crate) fn session_model(summary: &Value) -> String {
     // Live workers publish the model object with `id` (the engine's
     // `model_metadata`); seeded roster rows and saved-session rows carry
     // `modelId` (the persisted selector). Both read as the full model id.
-    let Some(id) = get_str(summary, "model").or_else(|| {
-        summary
-            .get("model")
-            .and_then(|model| model.get("id").or_else(|| model.get("modelId")))
-            .and_then(Value::as_str)
-            .filter(|id| !id.is_empty())
-    }) else {
+    let Some(id) = get_str(summary, "model")
+        .or_else(|| {
+            summary
+                .get("model")
+                .and_then(|model| model.get("id").or_else(|| model.get("modelId")))
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+        })
+        .or_else(|| {
+            // Remote mesh rows carry a display-only model identity (their
+            // daemon's full model object never crosses the wire; TS #2516
+            // `remoteModel`).
+            summary
+                .get("remoteModel")
+                .and_then(|model| model.get("modelId"))
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+        })
+    else {
         return "-".to_string();
     };
     let bare = id.rsplit('/').next().unwrap_or(id).to_string();
@@ -57,8 +69,25 @@ pub fn session_title(summary: &Value) -> String {
     "Untitled agent".to_string()
 }
 
+/// A remote row publishes a peer's own session ids, so every id-derived
+/// key scopes them to their host (TS #2516 `identityScope`): a local
+/// session with the same ids keeps its own row, its own identity, and
+/// its own selection.
+#[must_use]
+pub fn identity_scope(summary: &Value) -> String {
+    summary
+        .get("remoteHost")
+        .and_then(Value::as_str)
+        .filter(|host| !host.is_empty())
+        .map(|host| format!("remote:{host}:"))
+        .unwrap_or_default()
+}
+
 /// The stable row identity of one summary (TS `getAgentsViewSummaryIdentity`):
 /// the roster-qualified child id for subagents, else file, active, session.
+/// Remote rows scope their id identities by host (TS #2516's review fix:
+/// hiding a local live copy must never hide a remote row that shares its
+/// ids).
 #[must_use]
 pub fn summary_identity(summary: &Value) -> String {
     let get = |field: &str| {
@@ -73,16 +102,20 @@ pub fn summary_identity(summary: &Value) -> String {
             pa_types::daemon::agent_roster::roster_agent_id_for_summary(summary)
         );
     }
+    let scope = identity_scope(summary);
     if let Some(file) = get("sessionFile") {
         return format!("file:{file}");
     }
     if let Some(active) = get("activeSessionId") {
-        return format!("active:{active}");
+        return format!("{scope}active:{active}");
     }
-    format!("session:{}", get("sessionId").unwrap_or_default())
+    format!("{scope}session:{}", get("sessionId").unwrap_or_default())
 }
 
-/// The selection key of one summary (TS `getAgentsViewSelectionKey`).
+/// The selection key of one summary (TS `getAgentsViewSelectionKey`): the
+/// id fallbacks carry the row's `remoteHost`, so they only match rows in
+/// the same host scope (TS #2516's review fix: a local session that
+/// reuses a remote row's ids can never take that row's selection).
 #[must_use]
 pub fn selection_key(summary: &Value) -> SelectionKey {
     let get = |field: &str| {
@@ -95,5 +128,6 @@ pub fn selection_key(summary: &Value) -> SelectionKey {
     SelectionKey {
         session_id: get("sessionId"),
         active_session_id: get("activeSessionId"),
+        remote_host: get("remoteHost"),
     }
 }

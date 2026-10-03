@@ -173,6 +173,7 @@ pub fn handle_public_command(args: &[String]) -> PublicCommandResult {
         "doctor" => run_doctor(&rest),
         "telemetry" => run_telemetry(&rest),
         "incident" => run_incident_command(&rest),
+        "tailscale" => run_tailscale_command(&rest),
         "shutdown" => run_shutdown(&rest),
         "package" => run_package(&rest),
         "mcp" => run_mcp(&rest),
@@ -479,8 +480,32 @@ fn run_doctor(args: &[String]) -> PublicCommandResult {
             options.contains("--json"),
             &daemon_discovery::current_state_root(),
         );
+        // `doctor --json` stays pure JSON; the tailscale detection fact is a
+        // human-mode line only.
+        if !options.contains("--json") {
+            for fact in crate::tailscale::tailscale_doctor_facts() {
+                println!("{fact}");
+            }
+        }
     }
     handled()
+}
+
+/// `prime-agent tailscale` (TS `runTailscaleCommand`): parse the argv, then
+/// run status (the default) or serve. Every failure path exits non-zero.
+fn run_tailscale_command(args: &[String]) -> PublicCommandResult {
+    match crate::tailscale::parse_tailscale_args(args) {
+        crate::tailscale::TailscaleArgs::Error(message) => {
+            println!("{}", crate::tailscale::format::red(&message));
+            handled_failed()
+        }
+        crate::tailscale::TailscaleArgs::Status { json } => {
+            handled_with_exit(crate::tailscale::run_tailscale_status(json))
+        }
+        crate::tailscale::TailscaleArgs::Serve { port, funnel } => {
+            handled_with_exit(crate::tailscale::run_tailscale_serve(port, funnel))
+        }
+    }
 }
 
 /// `prime-agent telemetry [status|on|off]`: the same report and settings
@@ -1053,5 +1078,82 @@ mod update_options_tests {
         // A missing value fails.
         assert!(parse(&["--archive"]).is_none());
         assert!(parse(&["--archive", "--source"]).is_none());
+    }
+}
+
+#[cfg(test)]
+mod tailscale_dispatch_tests {
+    use super::*;
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn shows_tailscale_in_the_top_level_command_list() {
+        assert!(format_top_level_help().contains("tailscale"));
+    }
+
+    #[test]
+    fn the_tailscale_help_marks_the_subcommand_optional() {
+        let help = format_command_help(&["tailscale"]).expect("the tailscale spec");
+        // Bare `tailscale` and `tailscale --json` dispatch to status, so the
+        // top-level usage cannot document the subcommand as required.
+        assert!(
+            help.contains("prime-agent tailscale [status|serve]"),
+            "{help}"
+        );
+        assert!(!help.contains("<status|serve>"), "{help}");
+        assert!(help.contains("status"), "{help}");
+        assert!(help.contains("serve"), "{help}");
+        let serve = format_command_help(&["tailscale", "serve"]).expect("the tailscale serve spec");
+        assert!(
+            serve.contains("prime-agent tailscale serve --port <n> [--funnel]"),
+            "{serve}"
+        );
+        let status =
+            format_command_help(&["tailscale", "status"]).expect("the tailscale status spec");
+        assert!(
+            status.contains("prime-agent tailscale status [--json]"),
+            "{status}"
+        );
+    }
+
+    #[test]
+    fn resolves_tailscale_subcommands_in_command_help() {
+        // The detection edge is the pure help route: `help tailscale serve` and
+        // a trailing `--help` both resolve to the serve help without reaching
+        // the tailscale binary.
+        let result = handle_public_command(&args(&["--offline", "help", "tailscale", "serve"]));
+        assert!(result.handled);
+        assert_eq!(result.exit_code, None);
+        let result = handle_public_command(&args(&[
+            "--offline",
+            "tailscale",
+            "serve",
+            "--port",
+            "3000",
+            "--help",
+        ]));
+        assert!(result.handled);
+        assert_eq!(result.exit_code, None);
+    }
+
+    #[test]
+    fn rejects_a_serve_invocation_without_a_port() {
+        let result = handle_public_command(&args(&["tailscale", "serve"]));
+        assert!(result.handled);
+        assert_eq!(result.exit_code, Some(1));
+    }
+
+    #[test]
+    fn rejects_json_with_serve() {
+        let result =
+            handle_public_command(&args(&["tailscale", "serve", "--port", "3000", "--json"]));
+        assert!(result.handled);
+        assert_eq!(result.exit_code, Some(1));
     }
 }

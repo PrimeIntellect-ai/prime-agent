@@ -150,6 +150,12 @@ pub struct Args {
     pub version: bool,
     pub mode: Option<Mode>,
     pub daemon_socket: Option<String>,
+    /// `--daemon-port <n>`: the tailnet mesh listener's TCP port (TS
+    /// #2517). `None` when unset.
+    pub daemon_port: Option<u16>,
+    /// `--daemon-bind <ip>`: the address the mesh listener binds (TS
+    /// #2517). `None` when unset.
+    pub daemon_bind_host: Option<String>,
     pub no_session: bool,
     pub fork: Option<String>,
     pub session_dir: Option<String>,
@@ -276,6 +282,32 @@ pub fn parse_args(args: &[String]) -> Args {
             }
             "--daemon-socket" => {
                 result.daemon_socket = Some(require_value!(arg));
+            }
+            "--daemon-port" => {
+                let value = require_value!(arg);
+                match value.parse::<u16>() {
+                    Ok(port) if (1..=u16::MAX).contains(&port) => {
+                        result.daemon_port = Some(port);
+                    }
+                    _ => {
+                        result.diagnostics.push(Diagnostic::error(format!(
+                            "Invalid --daemon-port \"{value}\": expected an integer between 1 and 65535"
+                        )));
+                    }
+                }
+            }
+            "--daemon-bind" => {
+                let value = require_value!(arg).trim().to_string();
+                // An IP literal binds exactly one interface; a hostname
+                // would resolve through DNS at listen time and could dodge
+                // the tailnet-only default.
+                if value.parse::<std::net::IpAddr>().is_err() {
+                    result.diagnostics.push(Diagnostic::error(format!(
+                        "Invalid --daemon-bind \"{value}\": expected an IP address (e.g. the tailnet address of this machine)"
+                    )));
+                } else {
+                    result.daemon_bind_host = Some(value);
+                }
             }
             "--continue" | "-c" => result.continue_ = true,
             "--resume" | "-r" => match args.get(i + 1) {
@@ -615,5 +647,39 @@ mod tests {
         // The u64 flags accept the same value.
         let parsed = parse(&["--autonomous-timeout-ms", "4294967296"]);
         assert_eq!(parsed.autonomous_timeout_ms, Some(4_294_967_296));
+    }
+    /// `--daemon-port` (TS #2517): a valid port parses; an invalid one is
+    /// a named diagnostic, never silently ignored.
+    #[test]
+    fn daemon_port_parses_and_validates() {
+        let parsed = parse(&["--daemon-port", "4700"]);
+        assert!(parsed.diagnostics.is_empty());
+        assert_eq!(parsed.daemon_port, Some(4700));
+        for bad in ["0", "65536", "not-a-port"] {
+            let parsed = parse(&["--daemon-port", bad]);
+            let error = last_error(&parsed);
+            assert!(error.contains("Invalid --daemon-port"), "{bad}: {error}");
+            assert_eq!(parsed.daemon_port, None, "{bad} must not set a port");
+        }
+    }
+
+    /// `--daemon-bind` (TS #2517): an IP literal parses; a hostname is
+    /// a named diagnostic (a hostname would resolve through DNS at
+    /// listen time and could dodge the tailnet-only default).
+    #[test]
+    fn daemon_bind_requires_an_ip_literal() {
+        let parsed = parse(&["--daemon-bind", "100.64.1.2"]);
+        assert!(parsed.diagnostics.is_empty());
+        assert_eq!(parsed.daemon_bind_host.as_deref(), Some("100.64.1.2"));
+        let parsed = parse(&["--daemon-bind", "::1"]);
+        assert!(parsed.diagnostics.is_empty());
+        assert_eq!(parsed.daemon_bind_host.as_deref(), Some("::1"));
+        let parsed = parse(&["--daemon-bind", "example.com"]);
+        let error = last_error(&parsed);
+        assert!(
+            error.contains("Invalid --daemon-bind") && error.contains("expected an IP address"),
+            "{error}"
+        );
+        assert_eq!(parsed.daemon_bind_host, None);
     }
 }

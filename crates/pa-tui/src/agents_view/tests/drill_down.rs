@@ -53,6 +53,7 @@ fn pending_ancestors_expand_and_selection_restores_after_reentry() {
         selected_key: Some(crate::agents_view_forest::SelectionKey {
             session_id: Some("c".to_string()),
             active_session_id: Some("c-live".to_string()),
+            remote_host: None,
         }),
         status_message: None,
         keybindings: crate::keybindings::KeybindingsManager::new(),

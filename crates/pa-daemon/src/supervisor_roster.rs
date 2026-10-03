@@ -8,6 +8,7 @@ use serde_json::Map;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use pa_types::daemon::agent_roster::AgentRosterEntry;
 use pa_types::daemon::DaemonOutbound;
@@ -35,7 +36,74 @@ pub(crate) struct WorkerRosterDelta {
     pub worker_instance_id: Option<String>,
 }
 
+/// A cold mesh scan pays bounded connect timeouts for every offline
+/// peer; `list` waits no longer than this for it and serves last-known
+/// rows instead (TS `REMOTE_MESH_LIST_REFRESH_WAIT_MS`).
+pub(crate) const REMOTE_MESH_LIST_REFRESH_WAIT: Duration = Duration::from_millis(5_000);
+/// The `send_message` fallback shares the bounded refresh on a tighter
+/// budget: the sender is waiting on an error path, so discovery must not
+/// hold it for `list`'s span (TS `REMOTE_MESH_MESSAGE_REFRESH_WAIT_MS`).
+pub(crate) const REMOTE_MESH_MESSAGE_REFRESH_WAIT: Duration = Duration::from_millis(2_000);
+/// `list_agent_peers` answers a worker request bounded by
+/// [`AGENT_PEER_LIST_REQUEST_TIMEOUT_MS`], and a cold mesh scan pays
+/// bounded connect timeouts for every offline peer: the refresh takes
+/// half that budget and serves last-known rows, so the local siblings and
+/// the response fit in the rest instead of racing the worker's timeout
+/// to a silent empty peer list (TS `REMOTE_MESH_PEERS_REFRESH_WAIT_MS`).
+pub(crate) const REMOTE_MESH_PEERS_REFRESH_WAIT: Duration =
+    Duration::from_millis(crate::protocol::AGENT_PEER_LIST_REQUEST_TIMEOUT_MS / 2);
+
 impl Supervisor {
+    /// The mesh's refreshed entries for the roster snapshot (TS
+    /// `rosterEntriesForClient`'s mesh arm): remote mesh rows have no
+    /// worker, so visibility is unconditional, and the snapshot answers
+    /// from the cache - a scan started now lands as an ordinary roster
+    /// push, so subscribe never blocks on tailnet peers.
+    pub(crate) fn remote_roster_entries(&self) -> Vec<AgentRosterEntry> {
+        self.remote_mesh
+            .as_ref()
+            .map(crate::remote_mesh::RemoteAgentMeshState::entries_for_clients)
+            .unwrap_or_default()
+    }
+
+    /// Bounded on-demand mesh refresh (TS `refreshRemoteMesh`): a no-op
+    /// when no mesh source is configured.
+    pub(crate) async fn refresh_remote_mesh(&self, wait: Duration) {
+        if let Some(mesh) = self.remote_mesh.as_ref() {
+            if mesh.enabled() {
+                mesh.refresh_awaiting(wait).await;
+            }
+        }
+    }
+
+    /// Fresh depth-0 peer rows (TS `remotePeerSummaries`):
+    /// `list_agent_peers` refreshes the mesh itself on a budget that fits
+    /// the worker's request window.
+    pub(crate) async fn remote_peer_summaries(&self) -> Vec<Value> {
+        self.refresh_remote_mesh(REMOTE_MESH_PEERS_REFRESH_WAIT)
+            .await;
+        self.remote_mesh
+            .as_ref()
+            .map(crate::remote_mesh::RemoteAgentMeshState::peer_summaries)
+            .unwrap_or_default()
+    }
+
+    /// Publish one mesh roster change batch (the drain task's arm): the
+    /// changed rows publish through the same content-diff guard as worker
+    /// rows, so an identical remote row broadcasts nothing (the TS
+    /// roster-churn fix rides the supervisor's existing guard).
+    pub(crate) fn push_mesh_roster_update(&self, changed: &[String], removed: Vec<String>) {
+        let entries: Vec<AgentRosterEntry> = changed
+            .iter()
+            .filter_map(|agent_id| {
+                self.remote_mesh
+                    .as_ref()
+                    .and_then(|mesh| mesh.entry_by_id(agent_id))
+            })
+            .collect();
+        self.push_roster_update(entries, removed);
+    }
+
     /// `roster_subscribe` (TS: sets the client flag and answers with the
     /// full roster snapshot; the caller stores the flag). Pure in-memory:
     /// the boot seed and the create path's family seed
@@ -57,7 +125,21 @@ impl Supervisor {
         for handle in pending {
             let _ = handle.await;
         }
-        let roster = self.roster.lock().unwrap().entries();
+        // The snapshot answers from the mesh cache; a scan started now
+        // lands as an ordinary roster push, so subscribe never blocks on
+        // tailnet peers (TS #2516's roster_subscribe arm).
+        {
+            let supervisor = Arc::clone(self);
+            tokio::spawn(async move {
+                if let Some(mesh) = supervisor.remote_mesh.as_ref() {
+                    if mesh.enabled() {
+                        let _ = mesh.refresh_if_stale().await;
+                    }
+                }
+            });
+        }
+        let mut roster = self.roster.lock().unwrap().entries();
+        roster.extend(self.remote_roster_entries());
         response_success(
             Some(command_id),
             type_name,
@@ -730,5 +812,7 @@ fn drain_roster_pushes(
 
 #[cfg(test)]
 mod delta_push;
+#[cfg(test)]
+mod mesh_tests;
 #[cfg(test)]
 mod passivation;

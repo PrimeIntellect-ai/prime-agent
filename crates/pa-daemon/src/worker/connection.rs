@@ -295,7 +295,7 @@ impl Worker {
         let sink = Arc::new(ConnectionSink::new(Arc::clone(&writer), entry_seq));
         // daemon_hello goes out immediately on every connection.
         let hello = DaemonOutbound::DaemonHello {
-            socket_path: self.config.socket_path.to_string_lossy().to_string(),
+            socket_path: Some(self.config.socket_path.to_string_lossy().to_string()),
             protocol: current_protocol_info(),
             schema_id: Some(DAEMON_SCHEMA_ID.to_string()),
             schema_revision: Some(DAEMON_SCHEMA_REVISION),

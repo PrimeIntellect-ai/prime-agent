@@ -582,6 +582,29 @@ enum Composer {
 }
 
 impl AgentsViewMode {
+    /// The remote-row action guard (TS #2516): a tailnet peer's row is
+    /// read-only context on this machine - attach/reply, rename, and
+    /// stop/delete refuse with the machine that owns the session. Returns
+    /// `true` when the selected row is remote (the caller returns).
+    pub(super) fn guard_remote_row(&mut self, verb: &str) -> bool {
+        let Some(row) = self.rows.get(self.selected) else {
+            return false;
+        };
+        let Some(host) = row
+            .summary
+            .get("remoteHost")
+            .and_then(serde_json::Value::as_str)
+            .filter(|host| !host.is_empty())
+            .map(str::to_string)
+        else {
+            return false;
+        };
+        self.set_status(&format!(
+            "Remote agent runs on {host}; {verb} it on that machine"
+        ));
+        true
+    }
+
     fn new(mut options: AgentsViewOptions) -> Self {
         let theme = crate::app::load_theme(&options.theme);
         let query = options.query.clone().unwrap_or_default();

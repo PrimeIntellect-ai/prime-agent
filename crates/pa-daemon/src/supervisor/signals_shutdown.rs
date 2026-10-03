@@ -64,7 +64,10 @@ impl Supervisor {
         // setting the gate alone is not enough — an inbound connection
         // could otherwise fall the loop out mid-stop.
         self.accept_exit.store(true, Ordering::SeqCst);
-        self.shutdown_notify.notify_one();
+        // Both accept loops (unix + the tailnet TCP listener) wait on this
+        // notify: waking every waiter releases the mesh listener with the
+        // unix one (the loop-top flag checks make a spurious wake a no-op).
+        self.shutdown_notify.notify_waiters();
     }
 
     /// The OS-signal drain step (SIGTERM/SIGINT; the loop in

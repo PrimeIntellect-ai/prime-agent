@@ -476,6 +476,7 @@ fn selection_pins_the_one_summary_line_identity() {
     let key = SelectionKey {
         session_id: Some("p".to_string()),
         active_session_id: Some("p-live".to_string()),
+        remote_host: None,
     };
     let index = resolve_selection(&collapsed, 0, Some("subagents:file:/x/p.jsonl"), Some(&key));
     assert_eq!(collapsed[index].kind, RowKind::SubagentSummary);
@@ -512,6 +513,7 @@ fn the_selection_restores_onto_the_merged_group() {
         Some(&SelectionKey {
             session_id: Some("p".to_string()),
             active_session_id: Some("p-live".to_string()),
+            remote_host: None,
         }),
     );
     assert_eq!(collapsed[index].identity, carried);
@@ -526,6 +528,7 @@ fn the_selection_restores_onto_the_merged_group() {
         Some(&SelectionKey {
             session_id: Some("p".to_string()),
             active_session_id: Some("p-live".to_string()),
+            remote_host: None,
         }),
     );
     assert_eq!(expanded[index].kind, RowKind::SubagentSummary);
@@ -540,6 +543,7 @@ fn the_selection_restores_onto_the_merged_group() {
         Some(&SelectionKey {
             session_id: Some("i".to_string()),
             active_session_id: Some("i-live".to_string()),
+            remote_host: None,
         }),
     );
     assert_eq!(expanded[index].title, "old worker");
@@ -582,6 +586,7 @@ fn scoped_rows_lift_direct_children_and_exclude_the_root() {
         &SelectionKey {
             session_id: Some("p".to_string()),
             active_session_id: Some("p-live".to_string()),
+            remote_host: None,
         }
     ));
 }
@@ -711,6 +716,7 @@ fn selection_resolves_identity_then_keys_and_pins_summary_rows() {
         Some(&SelectionKey {
             session_id: Some("p".to_string()),
             active_session_id: Some("p-live".to_string()),
+            remote_host: None,
         }),
     );
     assert_eq!(collapsed[index].kind, RowKind::SubagentSummary);
@@ -724,6 +730,7 @@ fn selection_resolves_identity_then_keys_and_pins_summary_rows() {
         Some(&SelectionKey {
             session_id: None,
             active_session_id: Some("c-live".to_string()),
+            remote_host: None,
         }),
     );
     assert_eq!(expanded[index].title, "worker one");
@@ -1246,4 +1253,66 @@ fn one_dropdown_renders_the_full_fleet_roster() {
             "the row {row:?} renders more than once"
         );
     }
+}
+
+/// The selection's id fallbacks stay host-scoped (TS #2516's review fix):
+/// a local session that reuses a remote row's ids can never take that
+/// row's selection, and a remote key never lands on the local copy.
+#[test]
+fn selection_fallbacks_stay_host_scoped() {
+    let remote_summary = json!({
+        "id": "shared-1",
+        "sessionId": "shared-1",
+        "activeSessionId": "shared-1-live",
+        "lifecycle": "live",
+        "runtimeKind": "top-level",
+        "rlmDepth": 0,
+        "cwd": "/remote",
+        "remoteHost": "milk.tailnet.ts.net",
+        "messageCount": 2,
+    });
+    let local_summary = json!({
+        "id": "shared-1",
+        "sessionId": "shared-1",
+        "activeSessionId": "shared-1-live",
+        "lifecycle": "live",
+        "runtimeKind": "top-level",
+        "rlmDepth": 0,
+        "cwd": "/local",
+        "sessionFile": "/local/shared-1.jsonl",
+        "messageCount": 2,
+    });
+    let roster = vec![
+        roster_entry(
+            "remote:milk.tailnet.ts.net#shared-1",
+            "running",
+            &remote_summary,
+        ),
+        roster_entry("shared-1", "idle", &local_summary),
+    ];
+    let rows = rows_for(&roster, None, &[]);
+    assert_eq!(rows.len(), 2, "both rows render");
+    // A remote-keyed selection restores onto the REMOTE row even though
+    // the local row shares every id.
+    let remote_key = SelectionKey {
+        session_id: Some("shared-1".to_string()),
+        active_session_id: Some("shared-1-live".to_string()),
+        remote_host: Some("milk.tailnet.ts.net".to_string()),
+    };
+    let index = resolve_selection(&rows, 0, None, Some(&remote_key));
+    assert!(
+        rows[index].summary.get("remoteHost").is_some(),
+        "the remote key takes the remote row, not the local copy"
+    );
+    // A local-keyed selection restores onto the LOCAL row.
+    let local_key = SelectionKey {
+        session_id: Some("shared-1".to_string()),
+        active_session_id: Some("shared-1-live".to_string()),
+        remote_host: None,
+    };
+    let index = resolve_selection(&rows, 0, None, Some(&local_key));
+    assert!(
+        rows[index].summary.get("remoteHost").is_none(),
+        "the local key takes the local row, not the remote copy"
+    );
 }

@@ -774,6 +774,9 @@ pub(crate) mod tests {
         write_display_file(&child_file, "/the/real/cwd");
         let supervisor = Arc::new(
             Supervisor::new(crate::supervisor::SupervisorOptions {
+                tcp_port: None,
+                tcp_bind_host: None,
+                remote_agent_mesh: None,
                 socket_path: dir.join("daemon.sock"),
                 agent_dir,
             })

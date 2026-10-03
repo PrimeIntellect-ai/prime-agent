@@ -166,6 +166,23 @@ impl AgentsViewMode {
         status_message: Option<String>,
         selected_identity: Option<String>,
     ) {
+        // Attaching across the mesh is not available (TS #2516): the row
+        // is visible context, and the action names the machine to use.
+        if row
+            .summary
+            .get("remoteHost")
+            .and_then(Value::as_str)
+            .is_some_and(|host| !host.is_empty())
+        {
+            self.set_status(&format!(
+                "Remote agent runs on {}; attaching across the mesh is not available",
+                row.summary
+                    .get("remoteHost")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+            ));
+            return;
+        }
         let summary = &row.summary;
         if let Some(active) = summary
             .get("activeSessionId")

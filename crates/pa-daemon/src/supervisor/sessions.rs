@@ -442,13 +442,14 @@ impl Supervisor {
         lines
     }
 
-    pub(super) async fn handle_list(
+    pub(crate) async fn handle_list(
         self: &Arc<Self>,
         command_id: String,
         type_name: String,
         all: Option<bool>,
         cwd: Option<String>,
         session_dir: Option<String>,
+        include_remote_mesh: bool,
     ) -> DaemonResponse {
         let dir = match session_dir.as_deref() {
             Some(dir) => paths::expand_tilde(dir),
@@ -460,7 +461,7 @@ impl Supervisor {
                 return response_failure(Some(&command_id), &type_name, &error.to_string(), None);
             }
         };
-        let summaries: Vec<Value> = if let Some(true) = all {
+        let mut summaries: Vec<Value> = if let Some(true) = all {
             // TS `buildSessionList` order: saved rows (resident ones
             // replaced in place by their live summary), then passive
             // ledger children, then resident-only rows.
@@ -547,6 +548,23 @@ impl Supervisor {
             }
             summaries
         };
+        // Remote rows are a view opt-in (TS #2516): `sessions` stays a
+        // local-residency response by default - stale-daemon replacement
+        // and update-restart recovery read it and must never mistake a
+        // tailnet peer for a local session. An opting-in caller still
+        // drives the mesh's on-demand refresh, and remote rows carry no
+        // session file, so they never collide with the file-based merge
+        // paths above.
+        if include_remote_mesh {
+            self.refresh_remote_mesh(crate::supervisor_roster::REMOTE_MESH_LIST_REFRESH_WAIT)
+                .await;
+            summaries.extend(
+                self.remote_mesh
+                    .as_ref()
+                    .map(crate::remote_mesh::RemoteAgentMeshState::session_summaries)
+                    .unwrap_or_default(),
+            );
+        }
         response_success(
             Some(&command_id),
             &type_name,

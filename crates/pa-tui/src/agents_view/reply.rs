@@ -250,6 +250,12 @@ impl AgentsViewMode {
     /// TS `toggleReplyTarget` (:1795-1838): arm the reply composer over
     /// the selected agent row — the same target disarms.
     pub(super) fn toggle_reply(&mut self) {
+        // Replies steer or resume through the local daemon; a tailnet
+        // peer's row has no local runtime or file, so the composer cannot
+        // deliver for it (TS #2516 — the row is read-only context here).
+        if self.guard_remote_row("reply to") {
+            return;
+        }
         let Some(target) = self.reply_target() else {
             return;
         };

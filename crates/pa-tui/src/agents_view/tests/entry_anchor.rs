@@ -330,6 +330,7 @@ fn carried_selection_wins_over_the_entry_anchor() {
         selected_key: Some(crate::agents_view_forest::SelectionKey {
             session_id: Some("s1".to_string()),
             active_session_id: Some("s1-live".to_string()),
+            remote_host: None,
         }),
         status_message: None,
         keybindings: crate::keybindings::KeybindingsManager::new(),

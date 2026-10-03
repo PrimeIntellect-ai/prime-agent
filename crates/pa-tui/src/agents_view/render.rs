@@ -636,6 +636,28 @@ impl AgentsViewMode {
             "  ".to_string(),
             ratatui::style::Style::default(),
         ));
+        // The remote row's machine label renders in its own column (TS
+        // #2516: every remote row names its tailnet connection, and the
+        // label is never truncated); local rows render an empty cell so
+        // the table stays aligned, like the CLI's conditional host
+        // column.
+        if layout.host_width > 0 {
+            let host_cell = row.host_label.as_deref().unwrap_or("");
+            let color = if row
+                .host_label
+                .as_deref()
+                .is_some_and(|label| label.ends_with("(offline)"))
+            {
+                ThemeColor::Dim
+            } else {
+                ThemeColor::Muted
+            };
+            line.push(theme.fg(color, cell(host_cell, layout.host_width)));
+            line.push(crate::Span::styled(
+                "  ".to_string(),
+                ratatui::style::Style::default(),
+            ));
+        }
         let details = layout
             .details
             .get(&row.identity)

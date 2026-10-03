@@ -765,6 +765,11 @@ impl Supervisor {
                 peers.push(agent_peer_summary(&summary));
             }
         }
+        // Depth-0 tailnet peers join the sibling lists of local depth-0
+        // agents (TS #2516): this path refreshes the mesh itself on the
+        // budget that fits the worker's request window, so a fresh daemon
+        // does not depend on an unrelated `list` to warm the cache.
+        peers.extend(self.remote_peer_summaries().await);
         (
             vec![response_line(&response_success(
                 Some(command_id),

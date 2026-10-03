@@ -363,6 +363,18 @@ pub struct Settings {
     pub markdown: Option<MarkdownSettings>,
     pub warnings: Option<WarningSettings>,
     pub session_dir: Option<String>,
+    /// TCP port for the optional daemon mesh listener (read from the global
+    /// scope only, TS #2517 `daemonPort`). When set, the daemon listens on
+    /// the machine's Tailscale address at this port in addition to the
+    /// unix socket, requiring the per-machine token on every command.
+    /// Default: unset - no TCP listener.
+    pub daemon_port: Option<u64>,
+    /// Address the daemon TCP listener binds (read from the global scope
+    /// only, TS #2517 `daemonTcpBindHost`). Default: the machine's
+    /// Tailscale address. TCP carries the per-machine token in plaintext,
+    /// so set this only to a trusted interface; `0.0.0.0` exposes the
+    /// token to every on-path peer.
+    pub daemon_tcp_bind_host: Option<String>,
     /// Log per-request provider timing phases to the diagnostic log (TS
     /// `requestTiming`; unset means OFF, exactly the TS default).
     pub request_timing: Option<bool>,

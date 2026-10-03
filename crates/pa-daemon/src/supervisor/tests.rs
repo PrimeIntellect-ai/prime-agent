@@ -105,6 +105,9 @@ async fn a_failed_relaunch_accumulates_to_the_give_up_cap() {
     std::fs::write(agent_dir.join("logs"), "not a directory").unwrap();
     let supervisor = Arc::new(
         Supervisor::new(SupervisorOptions {
+            tcp_port: None,
+            tcp_bind_host: None,
+            remote_agent_mesh: None,
             socket_path: dir.path().join("daemon.sock"),
             agent_dir: agent_dir.clone(),
         })
@@ -168,6 +171,9 @@ async fn a_stop_during_the_storm_leaves_the_terminal_state_to_the_stop() {
     std::fs::write(agent_dir.join("logs"), "not a directory").unwrap();
     let supervisor = Arc::new(
         Supervisor::new(SupervisorOptions {
+            tcp_port: None,
+            tcp_bind_host: None,
+            remote_agent_mesh: None,
             socket_path: dir.path().join("daemon.sock"),
             agent_dir: agent_dir.clone(),
         })
@@ -236,6 +242,9 @@ async fn an_adopted_watch_hands_off_at_exit_without_a_timer() {
     std::fs::write(agent_dir.join("logs"), "not a directory").unwrap();
     let supervisor = Arc::new(
         Supervisor::new(SupervisorOptions {
+            tcp_port: None,
+            tcp_bind_host: None,
+            remote_agent_mesh: None,
             socket_path: dir.path().join("daemon.sock"),
             agent_dir: agent_dir.clone(),
         })
@@ -533,6 +542,9 @@ async fn adoption_settles_then_seeds_the_roster_once() {
     }
     let supervisor = Arc::new(
         Supervisor::new(SupervisorOptions {
+            tcp_port: None,
+            tcp_bind_host: None,
+            remote_agent_mesh: None,
             socket_path: dir.join("daemon.sock"),
             agent_dir: agent_dir.clone(),
         })
@@ -619,6 +631,9 @@ async fn adoption_settles_then_seeds_the_roster_once() {
 async fn a_create_while_shutting_down_is_refused() {
     let dir = tempfile::TempDir::new().unwrap();
     let options = SupervisorOptions {
+        tcp_port: None,
+        tcp_bind_host: None,
+        remote_agent_mesh: None,
         socket_path: dir.path().join("daemon.sock"),
         agent_dir: dir.path().join("agent"),
     };
@@ -657,6 +672,9 @@ async fn a_create_while_shutting_down_is_refused() {
 async fn begin_shutdown_sets_the_accept_exit_after_the_stop_pass() {
     let dir = tempfile::TempDir::new().unwrap();
     let options = SupervisorOptions {
+        tcp_port: None,
+        tcp_bind_host: None,
+        remote_agent_mesh: None,
         socket_path: dir.path().join("daemon.sock"),
         agent_dir: dir.path().join("agent"),
     };
@@ -700,6 +718,9 @@ async fn a_failed_stop_persist_gates_the_kill_stop_belt() {
     std::fs::write(artifacts.join("scheduled-jobs.json"), "{}").unwrap();
     let supervisor = Arc::new(
         Supervisor::new(SupervisorOptions {
+            tcp_port: None,
+            tcp_bind_host: None,
+            remote_agent_mesh: None,
             socket_path: dir.path().join("daemon.sock"),
             agent_dir: agent_dir.clone(),
         })
@@ -780,6 +801,9 @@ async fn an_existing_tombstone_carries_the_stop_past_its_failed_re_write() {
     std::fs::create_dir_all(&sessions_dir).unwrap();
     let supervisor = Arc::new(
         Supervisor::new(SupervisorOptions {
+            tcp_port: None,
+            tcp_bind_host: None,
+            remote_agent_mesh: None,
             socket_path: dir.path().join("daemon.sock"),
             agent_dir: agent_dir.clone(),
         })
@@ -853,6 +877,9 @@ async fn an_existing_tombstone_carries_the_stop_past_its_failed_re_write() {
 async fn first_signal_drains_a_settling_turn_and_rejects_new_work() {
     let dir = tempfile::TempDir::new().unwrap();
     let options = SupervisorOptions {
+        tcp_port: None,
+        tcp_bind_host: None,
+        remote_agent_mesh: None,
         socket_path: dir.path().join("daemon.sock"),
         agent_dir: dir.path().join("agent"),
     };
@@ -1006,6 +1033,9 @@ async fn first_signal_drains_a_settling_turn_and_rejects_new_work() {
 async fn a_signal_during_an_in_flight_shutdown_forces() {
     let dir = tempfile::TempDir::new().unwrap();
     let options = SupervisorOptions {
+        tcp_port: None,
+        tcp_bind_host: None,
+        remote_agent_mesh: None,
         socket_path: dir.path().join("daemon.sock"),
         agent_dir: dir.path().join("agent"),
     };
@@ -1023,6 +1053,9 @@ async fn a_signal_during_an_in_flight_shutdown_forces() {
     // racing it forces.
     let dir = tempfile::TempDir::new().unwrap();
     let options = SupervisorOptions {
+        tcp_port: None,
+        tcp_bind_host: None,
+        remote_agent_mesh: None,
         socket_path: dir.path().join("daemon.sock"),
         agent_dir: dir.path().join("agent"),
     };
@@ -1037,6 +1070,9 @@ async fn a_signal_during_an_in_flight_shutdown_forces() {
     // signal forces without flipping the gate.
     let dir = tempfile::TempDir::new().unwrap();
     let options = SupervisorOptions {
+        tcp_port: None,
+        tcp_bind_host: None,
+        remote_agent_mesh: None,
         socket_path: dir.path().join("daemon.sock"),
         agent_dir: dir.path().join("agent"),
     };
@@ -1057,6 +1093,9 @@ async fn a_signal_during_an_in_flight_shutdown_forces() {
     // tombstone and delete the descriptors the successor must adopt.
     let dir = tempfile::TempDir::new().unwrap();
     let options = SupervisorOptions {
+        tcp_port: None,
+        tcp_bind_host: None,
+        remote_agent_mesh: None,
         socket_path: dir.path().join("daemon.sock"),
         agent_dir: dir.path().join("agent"),
     };
@@ -1098,6 +1137,9 @@ async fn idle_passivation_requires_the_worker_token() {
     std::fs::create_dir_all(&agent_dir).unwrap();
     let supervisor = Arc::new(
         Supervisor::new(SupervisorOptions {
+            tcp_port: None,
+            tcp_bind_host: None,
+            remote_agent_mesh: None,
             socket_path: dir.path().join("daemon.sock"),
             agent_dir: agent_dir.clone(),
         })
@@ -1130,6 +1172,9 @@ async fn idle_passivation_refuses_a_client_owned_worker() {
     std::fs::create_dir_all(&agent_dir).unwrap();
     let supervisor = Arc::new(
         Supervisor::new(SupervisorOptions {
+            tcp_port: None,
+            tcp_bind_host: None,
+            remote_agent_mesh: None,
             socket_path: dir.path().join("daemon.sock"),
             agent_dir: agent_dir.clone(),
         })
@@ -1237,6 +1282,9 @@ async fn a_passivated_row_prompt_joins_an_already_hosting_resident() {
     .unwrap();
     let supervisor = Arc::new(
         Supervisor::new(SupervisorOptions {
+            tcp_port: None,
+            tcp_bind_host: None,
+            remote_agent_mesh: None,
             socket_path: dir.path().join("daemon.sock"),
             agent_dir: agent_dir.clone(),
         })
@@ -1335,6 +1383,9 @@ async fn a_passivated_row_prompt_with_no_rival_falls_through_the_failed_launch()
     .unwrap();
     let supervisor = Arc::new(
         Supervisor::new(SupervisorOptions {
+            tcp_port: None,
+            tcp_bind_host: None,
+            remote_agent_mesh: None,
             socket_path: dir.path().join("daemon.sock"),
             agent_dir: agent_dir.clone(),
         })
@@ -1384,6 +1435,9 @@ async fn a_ledger_delete_of_a_stopped_child_tombstones_without_a_worker() {
     std::fs::create_dir_all(&sessions_dir).unwrap();
     let supervisor = Arc::new(
         Supervisor::new(SupervisorOptions {
+            tcp_port: None,
+            tcp_bind_host: None,
+            remote_agent_mesh: None,
             socket_path: dir.path().join("daemon.sock"),
             agent_dir: agent_dir.clone(),
         })
@@ -1486,6 +1540,9 @@ async fn the_stopped_childs_delete_removes_its_row_and_bills_the_parent() {
     std::fs::create_dir_all(&sessions_dir).unwrap();
     let supervisor = Arc::new(
         Supervisor::new(SupervisorOptions {
+            tcp_port: None,
+            tcp_bind_host: None,
+            remote_agent_mesh: None,
             socket_path: dir.path().join("daemon.sock"),
             agent_dir: agent_dir.clone(),
         })
@@ -1663,6 +1720,9 @@ async fn a_ledger_delete_never_tombstones_an_unrelated_edge_sharing_the_child_id
     std::fs::create_dir_all(&sessions_dir).unwrap();
     let supervisor = Arc::new(
         Supervisor::new(SupervisorOptions {
+            tcp_port: None,
+            tcp_bind_host: None,
+            remote_agent_mesh: None,
             socket_path: dir.path().join("daemon.sock"),
             agent_dir: agent_dir.clone(),
         })
@@ -1738,6 +1798,9 @@ async fn a_ledger_child_wake_joins_an_already_hosting_resident() {
     std::fs::write(&parent_file, "{\"type\":\"session\",\"id\":\"p\"}\n").unwrap();
     let supervisor = Arc::new(
         Supervisor::new(SupervisorOptions {
+            tcp_port: None,
+            tcp_bind_host: None,
+            remote_agent_mesh: None,
             socket_path: dir.path().join("daemon.sock"),
             agent_dir: agent_dir.clone(),
         })
@@ -1837,6 +1900,9 @@ async fn the_exit_flush_sends_the_partial_daemon_event_summary() {
     let supervisor = Supervisor::new(SupervisorOptions {
         socket_path: dir.path().join("daemon.sock"),
         agent_dir: dir.path().join("agent"),
+        tcp_port: None,
+        tcp_bind_host: None,
+        remote_agent_mesh: None,
     })
     .expect("supervisor");
     let mock = Arc::new(pa_telemetry::MockSink::new());
@@ -1875,6 +1941,9 @@ async fn off_window_daemon_events_never_count_into_the_summary() {
     let supervisor = Supervisor::new(SupervisorOptions {
         socket_path: dir.path().join("daemon.sock"),
         agent_dir: agent_dir.clone(),
+        tcp_port: None,
+        tcp_bind_host: None,
+        remote_agent_mesh: None,
     })
     .expect("supervisor");
     let mock = Arc::new(pa_telemetry::MockSink::new());

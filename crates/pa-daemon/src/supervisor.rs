@@ -30,6 +30,7 @@ use launch_budget::WORKER_AUTH_FLOOR_MS;
 #[allow(unused_imports)]
 use signals_shutdown::daemon_closing_shutdown_event;
 mod supervision;
+mod tcp;
 
 #[cfg(test)]
 mod handshake_tests;
@@ -57,6 +58,13 @@ pub use options::SupervisorOptions;
 use update_restart::{salvage_command_type, salvage_id, streamed_attach_lines};
 
 pub(crate) use clients::client_command_payload;
+pub(crate) use tcp::ClientTrust;
+
+/// One batch of mesh roster changes forwarded to the drain task
+/// (changed ids, removed ids).
+pub(crate) type MeshRosterChanges = (Vec<String>, Vec<String>);
+/// The mesh roster-change queue's receiver side.
+pub(crate) type MeshRosterRx = tokio::sync::mpsc::UnboundedReceiver<MeshRosterChanges>;
 
 // The routing consts and refusal string keep their crate::supervisor::* paths stable
 // (external callers: supervisor_parent_death, create_reuse, prompt_admission, update_restore).
@@ -137,6 +145,12 @@ pub struct Supervisor {
     /// mutating that env var (a set value would leak into every
     /// parallel test's launch).
     worker_connect_budget: std::sync::Mutex<Option<Duration>>,
+    /// The per-supervisor authenticated TCP idle-window override:
+    /// `None` rides the production constant (TS #2517's
+    /// `DAEMON_TCP_IDLE_TIMEOUT_MS`), a pinned window keeps the deadline
+    /// state machine's tests bounded without sleeping the production
+    /// 10 minutes.
+    tcp_idle_timeout_budget: std::sync::Mutex<Option<Duration>>,
     /// The durable session-binding table (the stale-active-id rebind
     /// surface): every active id the supervisor has routed stays
     /// addressable through its session's durable identity, so a client
@@ -266,6 +280,21 @@ pub struct Supervisor {
     /// create replay, cleared by a `compaction_end` that did land.
     pub(crate) compaction_journal:
         std::sync::Mutex<crate::compaction_supervision::TerminalCompactionJournal>,
+    /// The bound tailnet TCP listener (TS #2517); absent when no port
+    /// resolved. The accept loop clones the Arc; the shutdown wake takes
+    /// it out here and drops it, so the port is released with the daemon
+    /// instead of surviving teardown into a successor's bind.
+    pub(crate) tcp_listener: std::sync::Mutex<Option<Arc<tokio::net::TcpListener>>>,
+    /// The tailnet remote-agent mesh cache (TS #2516); absent when no mesh
+    /// is configured. The supervisor refreshes it on demand at each roster
+    /// consumer (subscribe, list, peers, send).
+    pub(crate) remote_mesh: Option<crate::remote_mesh::RemoteAgentMeshState>,
+    /// Mesh roster-change queue: the mesh's scan callback (no `Arc<Self>`
+    /// exists at construction time) forwards (changed, removed) here; the
+    /// drain task spawned in [`Supervisor::run`] turns them into
+    /// `roster_update` pushes through the same content-diff guard as
+    /// worker rows.
+    pub(crate) mesh_roster_rx: std::sync::Mutex<Option<MeshRosterRx>>,
 }
 
 impl Supervisor {
@@ -303,11 +332,23 @@ impl Supervisor {
         let compaction_journal = crate::compaction_supervision::TerminalCompactionJournal::open(
             &descriptor_dir.join("compaction-supervision.jsonl"),
         )?;
+        // The mesh cache and its roster-change queue (TS #2516): the scan
+        // callback cannot capture `Arc<Self>` this early, so changes ride
+        // the queue; the drain task in `run` publishes them.
+        let (mesh_roster_tx, mesh_roster_rx) =
+            tokio::sync::mpsc::unbounded_channel::<MeshRosterChanges>();
+        let remote_mesh = options.remote_agent_mesh.clone().map(|mut mesh| {
+            mesh.on_roster_change = Some(Arc::new(move |changed, removed| {
+                let _ = mesh_roster_tx.send((changed.to_vec(), removed.to_vec()));
+            }));
+            crate::remote_mesh::RemoteAgentMeshState::new(mesh)
+        });
         Ok(Supervisor {
             options,
             descriptor_dir,
             bound_socket_identity: std::sync::Mutex::new(None),
             worker_connect_budget: std::sync::Mutex::new(None),
+            tcp_idle_timeout_budget: std::sync::Mutex::new(None),
             session_bindings: crate::session_bindings::SessionBindingTable::new(),
             opening_files: std::sync::Mutex::new(std::collections::HashMap::new()),
             telemetry: std::sync::Mutex::new(None),
@@ -336,6 +377,9 @@ impl Supervisor {
             passive_scan_pending: std::sync::atomic::AtomicBool::new(false),
             passive_catalog_epoch: std::sync::atomic::AtomicU64::new(0),
             compaction_journal: std::sync::Mutex::new(compaction_journal),
+            tcp_listener: std::sync::Mutex::new(None),
+            remote_mesh,
+            mesh_roster_rx: std::sync::Mutex::new(Some(mesh_roster_rx)),
         })
     }
 
@@ -425,6 +469,11 @@ impl Supervisor {
         *self.bound_socket_identity.lock().unwrap() =
             socket::socket_identity(&self.options.socket_path);
         socket::restrict_socket_path(&self.options.socket_path);
+        // The optional tailnet TCP listener (TS #2517): binds beside the
+        // unix socket (never replaces it) when a port resolves (CLI flag >
+        // env > settings); binding failures fail startup loudly, and the
+        // host resolution fails closed without a tailnet address.
+        self.start_tcp_listener().await?;
         self.log
             .append(&format!("supervisor started pid {}", std::process::id()));
         match open_file_limit {
@@ -513,6 +562,22 @@ impl Supervisor {
             let supervisor = Arc::clone(&self);
             tokio::spawn(async move {
                 supervisor.update_prepare_watchdog().await;
+            });
+        }
+
+        // The mesh roster-change drain (TS #2516): a scan's changed and
+        // removed remote rows publish through the same content-diff
+        // `roster_update` machinery as worker rows, so subscribers stay in
+        // sync without a scan blocking any roster consumer.
+        if self.remote_mesh.is_some() {
+            let supervisor = Arc::clone(&self);
+            tokio::spawn(async move {
+                let receiver = supervisor.mesh_roster_rx.lock().unwrap().take();
+                if let Some(mut receiver) = receiver {
+                    while let Some((changed, removed)) = receiver.recv().await {
+                        supervisor.push_mesh_roster_update(&changed, removed);
+                    }
+                }
             });
         }
 

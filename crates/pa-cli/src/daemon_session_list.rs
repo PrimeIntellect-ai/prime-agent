@@ -8,8 +8,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// 12-char display id, mirroring `DISPLAY_ID_LENGTH`.
 const DISPLAY_ID_LENGTH: usize = 12;
 
-/// Display order for the status column.
-const LIST_STATUS_ORDER: [&str; 3] = ["working", "idle", "archived"];
+/// Display order for the status column. `offline` - the remote mesh
+/// reachability axis - sorts between idle and archived (TS #2516).
+const LIST_STATUS_ORDER: [&str; 4] = ["working", "idle", "offline", "archived"];
 
 /// A validated session summary row ready for the table.
 #[derive(Debug, Clone, PartialEq)]
@@ -21,15 +22,29 @@ pub(crate) struct SessionSummary {
     activity: String,
     modified: Option<String>,
     model: Option<(String, String)>,
+    /// Display-only model identity for remote mesh rows (TS #2516
+    /// `remoteModel`); the daemon's full model object never crosses the
+    /// wire.
+    remote_model: Option<(String, String)>,
+    /// `MagicDNS` hostname of the remote daemon owning this session; local
+    /// rows carry none (TS #2516 `remoteHost`).
+    remote_host: Option<String>,
+    /// True when the owning remote daemon was unreachable at the last
+    /// mesh scan (TS #2516 `remoteOffline`).
+    remote_offline: bool,
     message_count: u64,
     attached_clients: u64,
     active_session_id: Option<String>,
 }
 
 impl SessionSummary {
-    /// The derived list status: `archived` by lifecycle, else working/idle.
+    /// The derived list status: the remote mesh reachability axis first
+    /// (an unreachable tailnet peer reads `offline`), else `archived` by
+    /// lifecycle, else working/idle (TS #2516).
     fn list_status(&self) -> &str {
-        if self.lifecycle == "archived" {
+        if self.remote_offline {
+            "offline"
+        } else if self.lifecycle == "archived" {
             "archived"
         } else if self.activity == "working" {
             "working"
@@ -110,6 +125,13 @@ fn session_summary_from_value(value: &Value) -> Option<SessionSummary> {
         activity: string_field(value, "activity")?.to_string(),
         modified: string_field(value, "modified").map(str::to_string),
         model,
+        remote_model: value.get("remoteModel").and_then(|model| {
+            let provider = model.get("provider")?.as_str()?.to_string();
+            let model_id = model.get("modelId")?.as_str()?.to_string();
+            Some((provider, model_id))
+        }),
+        remote_host: string_field(value, "remoteHost").map(str::to_string),
+        remote_offline: bool_field(value, "remoteOffline").unwrap_or(false),
         message_count: number_field(value, "messageCount")? as u64,
         attached_clients: number_field(value, "attachedClients")? as u64,
         active_session_id: string_field(value, "activeSessionId").map(str::to_string),
@@ -177,13 +199,51 @@ pub(crate) fn format_table<const N: usize>(headers: &[&str; N], rows: &[[String;
 const LIST_HEADERS: [&str; 7] = [
     "name", "id", "status", "age", "model", "messages", "clients",
 ];
+/// The host column's header (TS #2516): appears only when a remote mesh
+/// session is present, so a purely local table keeps its column layout
+/// byte-for-byte.
+const HOST_HEADER: &str = "host";
 
 /// The fixed-column table, mirroring `formatSessionListTable` (colors are
-/// TTY-only in TS; this output is color-free like TS piped output).
+/// TTY-only in TS; this output is color-free like TS piped output). The
+/// host column appears only when a remote mesh session is present, and
+/// remote rows carry a display-only model identity (TS #2516).
 pub(crate) fn format_session_list_table(sessions: &[SessionSummary]) -> String {
     let now = now_ms();
     let mut sorted: Vec<&SessionSummary> = sessions.iter().collect();
     sorted.sort_by_key(|session| session.list_status_order());
+    // The host column appears only when a remote mesh session is present,
+    // so a purely local table keeps its long-standing column layout
+    // byte-for-byte.
+    let show_host = sessions.iter().any(|session| session.remote_host.is_some());
+    if show_host {
+        let headers: [&str; 8] = [
+            "name",
+            "id",
+            "status",
+            "age",
+            "model",
+            "messages",
+            "clients",
+            HOST_HEADER,
+        ];
+        let rows: Vec<[String; 8]> = sorted
+            .iter()
+            .map(|session| {
+                [
+                    session.session_name.clone().unwrap_or_default(),
+                    format_session_display_id(&session.id),
+                    session.list_status().to_string(),
+                    format_session_age(session.modified.as_deref(), now),
+                    session_model_cell(session),
+                    session.message_count.to_string(),
+                    session.attached_clients.to_string(),
+                    session.remote_host.clone().unwrap_or_default(),
+                ]
+            })
+            .collect();
+        return format_table(&headers, &rows);
+    }
     let rows: Vec<[String; 7]> = sorted
         .iter()
         .map(|session| {
@@ -192,17 +252,30 @@ pub(crate) fn format_session_list_table(sessions: &[SessionSummary]) -> String {
                 format_session_display_id(&session.id),
                 session.list_status().to_string(),
                 format_session_age(session.modified.as_deref(), now),
-                session
-                    .model
-                    .as_ref()
-                    .map(|(provider, id)| format!("{provider}/{id}"))
-                    .unwrap_or_default(),
+                session_model_cell(session),
                 session.message_count.to_string(),
                 session.attached_clients.to_string(),
             ]
         })
         .collect();
     format_table(&LIST_HEADERS, &rows)
+}
+
+/// The model column's cell: the local model when one exists, else the
+/// remote mesh row's display-only identity (TS #2516
+/// `formatModelSelector`'s `remoteModel` fallback).
+fn session_model_cell(session: &SessionSummary) -> String {
+    session
+        .model
+        .as_ref()
+        .map(|(provider, id)| format!("{provider}/{id}"))
+        .or_else(|| {
+            session
+                .remote_model
+                .as_ref()
+                .map(|(provider, model_id)| format!("{provider}/{model_id}"))
+        })
+        .unwrap_or_default()
 }
 
 /// `formatSessionDisplayId`: the last 12 chars of a hex-normalized id.
@@ -508,5 +581,66 @@ mod tests {
             Some(1_789_583_426_272 + 1_800_000)
         );
         assert_eq!(parse_iso_ms("bogus"), None);
+    }
+    /// The host column appears only when a remote mesh session is present
+    /// (TS #2516's conditional host column): a purely local table keeps
+    /// its long-standing layout byte-for-byte.
+    #[test]
+    fn table_keeps_the_local_layout_without_remote_rows() {
+        let sessions = get_session_summaries(&json!({ "sessions": [summary()] })).unwrap();
+        let table = format_session_list_table(&sessions);
+        let header = table.lines().next().unwrap();
+        assert!(!header.contains("host"), "{header}");
+    }
+
+    /// A remote mesh row renders its host column, its offline status
+    /// sorts between idle and archived, and its display-only model
+    /// identity fills the model cell (TS #2516).
+    #[test]
+    fn remote_rows_render_the_host_column_and_offline_status() {
+        let mut remote = summary();
+        remote["remoteHost"] = json!("milk.tailnet.ts.net");
+        remote["remoteModel"] = json!({ "provider": "prime", "modelId": "glm-x" });
+        remote["model"] = Value::Null;
+        remote["remoteOffline"] = json!(true);
+        let sessions = get_session_summaries(&json!({ "sessions": [summary(), remote] })).unwrap();
+        let table = format_session_list_table(&sessions);
+        let lines: Vec<&str> = table.lines().collect();
+        assert!(
+            lines[0].contains("host"),
+            "the header gains the host column: {lines:?}"
+        );
+        let remote_row = lines
+            .iter()
+            .find(|line| line.contains("milk.tailnet.ts.net"))
+            .expect("the remote row carries its host");
+        assert!(
+            remote_row.contains("offline"),
+            "an unreachable peer reads offline: {remote_row}"
+        );
+        assert!(
+            remote_row.contains("prime/glm-x"),
+            "the remote model fills the model cell: {remote_row}"
+        );
+        // The offline row sorts after idle and before archived.
+        let positions: Vec<(usize, &str)> = lines
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index > 0)
+            .map(|(index, line)| {
+                let status = line.split_whitespace().find(|_| true).map(|_| line);
+                (index, *status.unwrap())
+            })
+            .collect();
+        assert_eq!(positions.len(), 2);
+        let idle_index = lines
+            .iter()
+            .position(|line| line.contains("  idle"))
+            .unwrap();
+        let offline_index = lines
+            .iter()
+            .position(|line| line.contains("offline"))
+            .unwrap();
+        assert!(idle_index < offline_index, "offline sorts after idle");
     }
 }

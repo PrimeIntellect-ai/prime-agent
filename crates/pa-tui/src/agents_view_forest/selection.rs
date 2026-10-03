@@ -69,9 +69,21 @@ pub fn resolve_selection(
             }
         }
     }
+    // Id fallbacks stay host-scoped, like the row identity (TS #2516's
+    // review fix): a local session that reuses a remote row's ids must
+    // never take that row's selection.
+    let selection_scope = key.and_then(|key| key.remote_host.as_deref());
+    let preserves_host = |row: &AgentsViewRow| {
+        row.summary
+            .get("remoteHost")
+            .and_then(Value::as_str)
+            .filter(|host| !host.is_empty())
+            == selection_scope
+    };
     if let Some(active) = key.and_then(|key| key.active_session_id.as_deref()) {
         if let Some(index) = find_selectable(rows, |row| {
             preserves_kind(row)
+                && preserves_host(row)
                 && row
                     .summary
                     .get("activeSessionId")
@@ -90,6 +102,7 @@ pub fn resolve_selection(
     if let Some(session) = key.and_then(|key| key.session_id.as_deref()) {
         if let Some(index) = find_selectable(rows, |row| {
             preserves_kind(row)
+                && preserves_host(row)
                 && row.summary.get("sessionId").and_then(Value::as_str) == Some(session)
         }) {
             return index;

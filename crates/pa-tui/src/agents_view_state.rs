@@ -84,7 +84,13 @@ fn file_identity(path: &str) -> String {
     format!("file:{path}")
 }
 
-/// The aliases of one roster entry summary, in TS order.
+/// The aliases of one roster entry summary, in TS order. A remote row's
+/// id aliases carry its host scope (TS #2516 `summaryIdentityAliases`'s
+/// review fix): a peer publishes its own session ids, so an unscoped
+/// alias would let a local saved session with the same ids join the
+/// remote row's record (absorbing its file) - and remote rows block
+/// attach, so the local copy would become unopenable while the remote
+/// one renders.
 fn daemon_aliases(summary: &Value) -> Vec<String> {
     let mut aliases = Vec::new();
     if get_str(summary, "runtimeKind") == Some("subagent") && summary.get("rlmChildId").is_some() {
@@ -97,14 +103,15 @@ fn daemon_aliases(summary: &Value) -> Vec<String> {
     if let Some(file) = get_str(summary, "sessionFile") {
         aliases.push(file_identity(file));
     }
+    let scope = crate::agents_view_forest::identity_scope(summary);
     if let Some(id) = get_str(summary, "sessionId") {
-        aliases.push(format!("session:{id}"));
+        aliases.push(format!("{scope}session:{id}"));
     }
     if let Some(active) = get_str(summary, "activeSessionId") {
-        aliases.push(format!("active:{active}"));
+        aliases.push(format!("{scope}active:{active}"));
     }
     if let Some(id) = get_str(summary, "id") {
-        aliases.push(format!("active:{id}"));
+        aliases.push(format!("{scope}active:{id}"));
     }
     aliases
 }
@@ -168,7 +175,38 @@ fn record_search_text(record: &UnifiedRecord) -> SessionSearchText {
                 .and_then(|daemon| get_str(daemon, "cwd")),
             record.saved.as_ref().and_then(|row| get_str(row, "cwd")),
         ),
+        // A remote row is findable by its MagicDNS hostname and its
+        // display model id (TS #2516's review fix: filtering by the
+        // tailnet host must surface every remote agent on that machine).
+        host: [
+            get_str(&summary, "remoteHost").map(str::to_string),
+            summary
+                .get("remoteModel")
+                .and_then(|model| model.get("modelId"))
+                .and_then(Value::as_str)
+                .map(|id| {
+                    let provider = model_provider_or_default(&summary);
+                    format!("{provider}/{id}")
+                }),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_string(),
     }
+}
+
+/// The remote model display string's provider half ("provider/modelId"),
+/// with a bare-id fallback.
+fn model_provider_or_default(summary: &Value) -> String {
+    summary
+        .get("remoteModel")
+        .and_then(|model| model.get("provider"))
+        .and_then(Value::as_str)
+        .unwrap_or("remote")
+        .to_string()
 }
 
 /// Merge the live roster entries and the saved catalog rows into unified
@@ -581,6 +619,10 @@ pub struct RowLayout {
     pub legend: String,
     pub name_width: usize,
     pub model_width: usize,
+    /// The host column's width; `0` means no host column renders (a
+    /// purely local table keeps its layout byte-for-byte, TS #2516's
+    /// conditional host column).
+    pub host_width: usize,
     pub details: HashMap<String, String>,
 }
 
@@ -651,6 +693,18 @@ pub fn build_layout(rows: &[crate::agents_view_forest::AgentsViewRow], width: us
         .max(12);
     let model_width = desired_model.min(32).min(available.saturating_sub(12));
     let name_width = (available.saturating_sub(model_width)).min(SESSION_NAME_COLUMN_MAX_CELLS);
+    // The host column appears only when a remote mesh row is present (TS
+    // #2516's conditional host column: a purely local table keeps its
+    // long-standing column layout byte-for-byte), and it is sized to its
+    // content so the machine label is never truncated away (the TS
+    // review round: the 28-cell name column cannot hold a MagicDNS
+    // hostname).
+    let host_width = rows
+        .iter()
+        .filter_map(|row| row.host_label.as_deref())
+        .map(str_width)
+        .max()
+        .unwrap_or(0);
     let detail_line = |cost: &str, age: &str| {
         format!(
             "{}  {}",
@@ -662,6 +716,9 @@ pub fn build_layout(rows: &[crate::agents_view_forest::AgentsViewRow], width: us
         table_cell("Session", name_width),
         table_cell("Model", model_width),
     ];
+    if host_width > 0 {
+        headings.push(table_cell("Host", host_width));
+    }
     headings.push(detail_line("Cost", "Age"));
     let details = rows
         .iter()
@@ -676,6 +733,7 @@ pub fn build_layout(rows: &[crate::agents_view_forest::AgentsViewRow], width: us
         legend: table_cell(&headings.join("  "), width),
         name_width,
         model_width,
+        host_width,
         details,
     }
 }
@@ -1285,5 +1343,177 @@ mod tests {
                 "{query:?} lives in the first prompt, not the displayed title"
             );
         }
+    }
+    // ------------------------------------------------------------------
+    // Tailnet remote-mesh rows (TS #2516)
+    // ------------------------------------------------------------------
+
+    /// A remote row's id aliases carry its host scope (TS #2516's review
+    /// fix): a local saved session sharing the peer's ids keeps its own
+    /// record - the remote row cannot absorb the local file (and remote
+    /// rows block attach, so an absorbed local copy would become
+    /// unopenable while the remote one renders).
+    #[test]
+    fn remote_rows_keep_their_own_identity_scope() {
+        let remote_summary = json!({
+            "id": "shared-1",
+            "sessionId": "shared-1",
+            "activeSessionId": "shared-1-live",
+            "lifecycle": "live",
+            "runtimeKind": "top-level",
+            "rlmDepth": 0,
+            "cwd": "/remote",
+            "remoteHost": "milk.tailnet.ts.net",
+            "messageCount": 2,
+        });
+        let roster = vec![roster_entry(
+            "remote:milk.tailnet.ts.net#shared-1",
+            "running",
+            &remote_summary,
+        )];
+        let saved = vec![json!({
+            "path": "/local/shared-1.jsonl",
+            "id": "shared-1",
+            "cwd": "/local",
+            "rlmDepth": 0,
+            "messageCount": 1,
+        })];
+        let records = reconcile_unified_sessions(&roster, &saved);
+        assert_eq!(records.len(), 2, "the local copy keeps its own record");
+        let remote = records
+            .iter()
+            .find(|record| record.daemon.is_some())
+            .expect("the remote record");
+        assert!(
+            remote.saved.is_none(),
+            "the remote row never absorbs the saved file"
+        );
+        assert!(
+            remote.identity.contains("remote:milk.tailnet.ts.net:"),
+            "{}",
+            remote.identity
+        );
+        let local = records
+            .iter()
+            .find(|record| record.saved.is_some())
+            .expect("the local saved record");
+        assert_eq!(local.identity, "file:/local/shared-1.jsonl");
+    }
+
+    /// The remote row's summary identity is host-scoped (TS #2516
+    /// `getAgentsViewSummaryIdentity`): hiding a local live copy never
+    /// hides a remote row that shares its ids.
+    #[test]
+    fn remote_row_summary_identity_is_host_scoped() {
+        let remote = json!({
+            "sessionId": "s1",
+            "activeSessionId": "a1",
+            "remoteHost": "milk.tailnet.ts.net",
+        });
+        assert_eq!(
+            crate::agents_view_forest::summary_identity(&remote),
+            "remote:milk.tailnet.ts.net:active:a1"
+        );
+        let local = json!({ "sessionId": "s1", "activeSessionId": "a1" });
+        assert_eq!(
+            crate::agents_view_forest::summary_identity(&local),
+            "active:a1"
+        );
+    }
+
+    /// The picker's match targets carry the remote host and display model
+    /// (TS #2516's review fix: filtering by the `MagicDNS` hostname must
+    /// surface every remote agent on that machine).
+    #[test]
+    fn search_text_carries_the_remote_host_and_model() {
+        let remote_summary = json!({
+            "id": "r1",
+            "sessionId": "r1",
+            "lifecycle": "live",
+            "cwd": "/remote",
+            "remoteHost": "milk.tailnet.ts.net",
+            "remoteModel": { "provider": "prime", "modelId": "model-x" },
+            "messageCount": 1,
+        });
+        let roster = vec![roster_entry(
+            "remote:milk.tailnet.ts.net#r1",
+            "idle",
+            &remote_summary,
+        )];
+        let records = reconcile_unified_sessions(&roster, &[]);
+        let search = &records[0].search;
+        assert!(
+            search.host.contains("milk.tailnet.ts.net"),
+            "{:?} {search:?}",
+            search.host
+        );
+        assert!(search.host.contains("prime/model-x"), "{search:?}");
+    }
+
+    /// The host column appears only when a remote mesh row is present (TS
+    /// #2516's conditional host column: a purely local table keeps its
+    /// layout byte-for-byte), and it is sized to its content so the
+    /// machine label is never truncated away.
+    #[test]
+    fn layout_gains_a_host_column_only_for_remote_rows() {
+        let local_roster = vec![roster_entry(
+            "s1",
+            "running",
+            &json!({
+                "sessionId": "s1",
+                "lifecycle": "live",
+                "usage": { "cost": 1.5 },
+            }),
+        )];
+        let records = reconcile_unified_sessions(&local_roster, &[]);
+        let rows = crate::agents_view_forest::build_rows::<std::collections::hash_map::RandomState>(
+            &records,
+            None,
+            &std::collections::HashSet::default(),
+            &std::collections::HashSet::default(),
+            &std::collections::HashMap::default(),
+            None,
+        );
+        let layout = build_layout(&rows, 120);
+        assert_eq!(
+            layout.host_width, 0,
+            "a purely local table has no host column"
+        );
+
+        let remote_summary = json!({
+            "id": "r1",
+            "sessionId": "r1",
+            "lifecycle": "live",
+            "cwd": "/remote",
+            "remoteHost": "milk.tailnet.ts.net",
+            "remoteOffline": true,
+            "messageCount": 1,
+        });
+        let remote_roster = vec![roster_entry(
+            "remote:milk.tailnet.ts.net#r1",
+            "inactive",
+            &remote_summary,
+        )];
+        let records = reconcile_unified_sessions(&remote_roster, &[]);
+        let rows = crate::agents_view_forest::build_rows::<std::collections::hash_map::RandomState>(
+            &records,
+            None,
+            &std::collections::HashSet::default(),
+            &std::collections::HashSet::default(),
+            &std::collections::HashMap::default(),
+            None,
+        );
+        let layout = build_layout(&rows, 120);
+        assert!(
+            layout.host_width >= str_width("on milk.tailnet.ts.net (offline)"),
+            "the host column fits the label: {}",
+            layout.host_width
+        );
+        assert!(layout.legend.contains("Host"), "{}", layout.legend);
+        assert!(
+            rows.iter()
+                .any(|row| row.host_label.as_deref() == Some("on milk.tailnet.ts.net (offline)")),
+            "the offline row carries its machine label"
+        );
     }
 }

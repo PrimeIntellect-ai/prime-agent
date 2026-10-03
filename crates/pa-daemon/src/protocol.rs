@@ -12,7 +12,8 @@ pub use pa_types::daemon::{
     DaemonResponse, DaemonResumeCursor, DaemonRuntimeIdentity, DaemonSavedSessionInfo,
     DaemonServerCapability, DaemonSessionClosedReason, DaemonSessionSnapshot,
     DaemonWorkerDescriptor, DaemonWorkerLifecycle, DurableDaemonCreateCommand,
-    DAEMON_PROTOCOL_NAME, DAEMON_PROTOCOL_VERSION, DAEMON_SCHEMA_ID, DAEMON_SCHEMA_REVISION,
+    AGENT_PEER_LIST_REQUEST_TIMEOUT_MS, DAEMON_PROTOCOL_NAME, DAEMON_PROTOCOL_VERSION,
+    DAEMON_SCHEMA_ID, DAEMON_SCHEMA_REVISION,
 };
 use serde_json::Value;
 

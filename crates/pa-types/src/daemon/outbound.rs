@@ -68,6 +68,10 @@ pub enum DaemonErrorInfo {
         client_id: DaemonClientId,
         command_id: DaemonCommandId,
     },
+    /// The daemon's TCP listener refused a command line whose per-machine
+    /// token was missing or wrong (TS #2517 `tcp_auth_failed`): the refused
+    /// line was answered with a correlatable failure and the socket closed.
+    TcpAuthFailed,
     /// `prepare_update_restart` with a different `updateId` while a prepare
     /// transaction is active: a typed refusal the coordinator maps to
     /// `Join`.
@@ -258,7 +262,11 @@ pub enum DaemonOutbound {
         rest: JsonMap,
     },
     DaemonHello {
-        socket_path: String,
+        /// Local unix socket identity; absent on a TCP connection before
+        /// it authenticates (TS #2517: an untrusted TCP peer gets the
+        /// protocol banner only, and the local path is local-trust data).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        socket_path: Option<String>,
         protocol: DaemonProtocolInfo,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         schema_id: Option<String>,

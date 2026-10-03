@@ -404,6 +404,7 @@ pub(crate) fn probe_daemon(socket_path: &Path) -> ProbeResult {
         cwd: None,
         session_dir: None,
         include_client_owned: None,
+        include_remote_mesh: None,
         rest: serde_json::Map::default(),
     };
     if let Ok(response) = client.request_with_timeout(list, timeout_ms) {

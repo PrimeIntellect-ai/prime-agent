@@ -19,6 +19,7 @@ struct BaseRow {
     summary: Value,
     title: String,
     model: String,
+    host_label: Option<String>,
     age: String,
     own_cost: f64,
     recursive_cost: f64,
@@ -104,6 +105,7 @@ pub(crate) fn build_rows<S: std::hash::BuildHasher + Default>(
         );
         let rollup = rollups.get(&record.identity).copied().unwrap_or_default();
         let model = session_model(&summary);
+        let host_label = remote_host_label(&summary);
         base.push(BaseRow {
             kind,
             section: record.section,
@@ -111,6 +113,7 @@ pub(crate) fn build_rows<S: std::hash::BuildHasher + Default>(
             identity: record.identity.clone(),
             title: session_title(&summary),
             model,
+            host_label,
             age,
             own_cost: summary
                 .get("usage")
@@ -344,6 +347,7 @@ fn agents_row(row: &BaseRow, depth: usize, parent_identity: Option<&str>) -> Age
         summary: row.summary.clone(),
         title: row.title.clone(),
         model: row.model.clone(),
+        host_label: row.host_label.clone(),
         cost: row.recursive_cost,
         age: row.age.clone(),
         depth,
@@ -352,6 +356,25 @@ fn agents_row(row: &BaseRow, depth: usize, parent_identity: Option<&str>) -> Age
         expanded: false,
         has_spawn_code: false,
     }
+}
+
+/// The remote row's machine label (TS `remoteHostLabel`): reads
+/// "on <tailnet-host>", with the offline suffix when the last mesh scan
+/// could not reach the peer.
+fn remote_host_label(summary: &Value) -> Option<String> {
+    let host = summary
+        .get("remoteHost")
+        .and_then(Value::as_str)
+        .filter(|host| !host.is_empty())?;
+    let offline = summary
+        .get("remoteOffline")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    Some(if offline {
+        format!("on {host} (offline)")
+    } else {
+        format!("on {host}")
+    })
 }
 
 /// The subagents line under one agent (the operator's 2026-09-28
@@ -382,6 +405,7 @@ fn merged_summary_row(parent: &BaseRow, depth: usize, expanded: bool) -> AgentsV
         summary: parent.summary.clone(),
         title: format!("{total} subagents ({running} running)"),
         model: String::new(),
+        host_label: None,
         cost: parent.descendant_cost,
         age: String::new(),
         depth,
@@ -424,6 +448,7 @@ fn spawn_code_rows(
         summary: parent.summary.clone(),
         title: title.to_string(),
         model: String::new(),
+        host_label: None,
         cost: 0.0,
         age: String::new(),
         depth,

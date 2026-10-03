@@ -15,6 +15,11 @@ use crate::session::AgentMessage;
 use crate::JsonMap;
 
 pub const DAEMON_PROTOCOL_NAME: &str = "prime-agent.daemon";
+/// Worker-side request budget for `list_agent_peers` (TS #2516
+/// `AGENT_PEER_LIST_REQUEST_TIMEOUT_MS`): the supervisor's mesh refresh
+/// for that command must answer well inside this window (its own budget
+/// is half of it, the supervisor's `REMOTE_MESH_PEERS_REFRESH_WAIT`).
+pub const AGENT_PEER_LIST_REQUEST_TIMEOUT_MS: u64 = 5_000;
 pub const DAEMON_PROTOCOL_VERSION: u64 = 7;
 /// Revision 30 publishes `deletedDescendantUsage` on saved-session rows
 /// (TS #2506's field, landing ahead of TS main: the Rust deletion lifecycle

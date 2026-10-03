@@ -113,6 +113,13 @@ pub enum DaemonCommand {
         session_dir: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         include_client_owned: Option<bool>,
+        /// View opt-in (TS #2516): merge the cached tailnet mesh rows into
+        /// `sessions`. `sessions` stays a local-residency response by
+        /// default - stale-daemon replacement and update-restart recovery
+        /// read it and must never mistake a tailnet peer for a local
+        /// session.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        include_remote_mesh: Option<bool>,
         #[serde(flatten)]
         rest: JsonMap,
     },

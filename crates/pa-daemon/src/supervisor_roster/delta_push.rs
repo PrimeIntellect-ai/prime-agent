@@ -9,6 +9,9 @@ async fn supervisor_with_registered_worker(dir: &Path) -> Supervisor {
     let supervisor = Supervisor::new(crate::supervisor::SupervisorOptions {
         socket_path: dir.join("daemon.sock"),
         agent_dir: dir.join("agent"),
+        tcp_port: None,
+        tcp_bind_host: None,
+        remote_agent_mesh: None,
     })
     .expect("supervisor");
     let descriptor = pa_types::daemon::DaemonWorkerDescriptor {
@@ -127,6 +130,9 @@ async fn worker_roster_delta_drops_stale_sequences() {
         Supervisor::new(crate::supervisor::SupervisorOptions {
             socket_path: dir.join("supervisor.sock"),
             agent_dir: dir.join("agent"),
+            tcp_port: None,
+            tcp_bind_host: None,
+            remote_agent_mesh: None,
         })
         .expect("supervisor"),
     );

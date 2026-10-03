@@ -486,7 +486,11 @@ impl Supervisor {
         // mistake the update restart for a terminal stop pass.
         self.accept_exit.store(true, Ordering::SeqCst);
         self.shutting_down.store(true, Ordering::SeqCst);
-        self.shutdown_notify.notify_one();
+        // Both accept loops (unix + the tailnet TCP listener) wait on this
+        // notify: waking every waiter releases the mesh port with the
+        // socket bind (the loop-top flag checks make a spurious wake a
+        // no-op).
+        self.shutdown_notify.notify_waiters();
     }
 
     /// Apply one abort outcome: delete the prepared artifacts if any, and

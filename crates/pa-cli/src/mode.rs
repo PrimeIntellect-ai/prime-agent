@@ -126,6 +126,11 @@ pub struct RunOptions {
     pub messages: Vec<String>,
     pub file_args: Vec<String>,
     pub daemon_socket: Option<String>,
+    /// `--daemon-port <n>`: the tailnet mesh listener's port (TS #2517).
+    pub daemon_port: Option<u16>,
+    /// `--daemon-bind <ip>`: the tailnet mesh listener's bind host (TS
+    /// #2517).
+    pub daemon_bind_host: Option<String>,
     pub list_models: Option<Option<String>>,
     /// The combined first prompt (stdin + @file text + first message).
     pub initial_message: Option<String>,

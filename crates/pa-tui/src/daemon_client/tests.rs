@@ -84,6 +84,7 @@ async fn handshake_and_request_round_trip() {
             cwd: None,
             session_dir: None,
             include_client_owned: None,
+            include_remote_mesh: None,
             rest: Map::default(),
         })
         .await
@@ -144,6 +145,7 @@ async fn request_timeout_reports_socket() {
                 cwd: None,
                 session_dir: None,
                 include_client_owned: None,
+                include_remote_mesh: None,
                 rest: Map::default(),
             },
             100,
@@ -209,6 +211,7 @@ async fn a_request_after_the_reader_died_refuses_instead_of_riding_the_budget() 
                 cwd: None,
                 session_dir: None,
                 include_client_owned: None,
+                include_remote_mesh: None,
                 rest: Map::default(),
             },
             30_000,
@@ -636,6 +639,7 @@ async fn dead_connection_fails_pending_requests_immediately() {
             cwd: None,
             session_dir: None,
             include_client_owned: None,
+            include_remote_mesh: None,
             rest: Map::default(),
         })
         .await

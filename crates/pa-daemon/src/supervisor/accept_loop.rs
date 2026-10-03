@@ -121,7 +121,10 @@ pub(super) async fn serve(
         recoverable_streak = 0;
         let supervisor = Arc::clone(supervisor);
         tokio::spawn(async move {
-            if let Err(error) = supervisor.handle_client(stream).await {
+            if let Err(error) = supervisor
+                .handle_client(stream, crate::supervisor::ClientTrust::Local)
+                .await
+            {
                 eprintln!("pa-daemon client connection error: {error:#}");
             }
         });
@@ -181,6 +184,9 @@ mod tests {
     fn test_supervisor(dir: &TempDir) -> Arc<Supervisor> {
         Arc::new(
             Supervisor::new(SupervisorOptions {
+                tcp_port: None,
+                tcp_bind_host: None,
+                remote_agent_mesh: None,
                 socket_path: dir.path().join("daemon.sock"),
                 agent_dir: dir.path().join("agent"),
             })

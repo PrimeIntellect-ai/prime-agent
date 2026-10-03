@@ -91,9 +91,45 @@ impl Supervisor {
                         resident
                     }
                     WakeOutcome::Unknown => {
-                        return fail(format!(
-                            "Unknown active session: {target_active_session_id}"
-                        ))
+                        // A confirmed local miss (the wake path's own
+                        // failures stay `Failed` and fail closed above):
+                        // only now may a depth-0 tailnet sibling claim the
+                        // message (TS #2516's remote fallback). Local rows
+                        // keep precedence everywhere - live workers and
+                        // the saved-local wake above - so a remote name
+                        // match never intercepts a message that resumes a
+                        // local session.
+                        // The source summary read for the wake scope rides
+                        // here too (the remote sender endpoint reuses it).
+                        let source = woken_summary.as_ref();
+                        match self
+                            .resolve_remote_send_target(target_active_session_id, source)
+                            .await
+                        {
+                            Ok(Some(remote)) => {
+                                let sender = match source {
+                                    Some(summary) => {
+                                        sender_endpoint_from_summary(summary, client_id)
+                                    }
+                                    None => json!({ "clientId": client_id }),
+                                };
+                                return match self
+                                    .deliver_remote_agent_message(
+                                        command_id, &remote, message, sender,
+                                    )
+                                    .await
+                                {
+                                    Ok(response) => response,
+                                    Err(error) => fail(error),
+                                };
+                            }
+                            Ok(None) => {
+                                return fail(format!(
+                                    "Unknown active session: {target_active_session_id}"
+                                ))
+                            }
+                            Err(error) => return fail(error),
+                        }
                     }
                     WakeOutcome::Failed(error) => return fail(error),
                 }
@@ -155,6 +191,106 @@ impl Supervisor {
             ),
             Err(error) => fail(format!("{error:#}")),
         }
+    }
+
+    /// Resolve a cross-machine send target after every local lookup has
+    /// missed (TS #2516's `send_message` mesh fallback): warm the mesh on
+    /// the sender's error-path budget, then match the selector over the
+    /// remote rows - an exact id or name wins, the 12-character id a
+    /// session table prints resolves by suffix. A peer that drops from a
+    /// scan keeps its rows, marked offline, until the offline TTL forgets
+    /// it, and it can receive nothing meanwhile: a retained ghost must
+    /// not veto a reachable sibling that owns the same name or the same
+    /// copied id, so only deliverable rows make a selector ambiguous; an
+    /// all-offline set still fails loudly in the delivery (`Ok(Some)` of
+    /// the offline row, whose transport call refuses).
+    pub(crate) async fn resolve_remote_send_target(
+        self: &Arc<Self>,
+        selector: &str,
+        source_summary: Option<&Value>,
+    ) -> Result<Option<crate::remote_mesh::RemoteAgentMessageTarget>, String> {
+        let Some(mesh) = self.remote_mesh.as_ref() else {
+            return Ok(None);
+        };
+        if !mesh.enabled() {
+            return Ok(None);
+        }
+        self.refresh_remote_mesh(crate::supervisor_roster::REMOTE_MESH_MESSAGE_REFRESH_WAIT)
+            .await;
+        let matches = mesh.find_message_targets(selector);
+        if matches.is_empty() {
+            return Ok(None);
+        }
+        let reachable: Vec<&crate::remote_mesh::RemoteAgentMessageTarget> =
+            matches.iter().filter(|target| !target.offline).collect();
+        // Session names are unique per daemon, not per tailnet: two
+        // reachable remote matches stay ambiguous exactly like the local
+        // path, but only after the saved-local wake has missed (the wake
+        // above runs first, so a saved local sharing the name wins).
+        if reachable.len() > 1 {
+            return Err(format!("Ambiguous active session: {selector}"));
+        }
+        // The target is the first reachable match, falling back to the
+        // first match when none is reachable: an all-offline selector
+        // still fails loudly in the delivery with the offline refusal.
+        let target = reachable
+            .first()
+            .copied()
+            .or_else(|| matches.first())
+            .expect("matches is non-empty")
+            .clone();
+        // The host-scoped self-send guard (TS #2516's review fix): a
+        // peer publishes its own session ids, so an id names the sender
+        // only inside one host - a copied session on the peer is a
+        // sibling, not this session. The source is local here, so its
+        // scope is the empty host.
+        if let Some(source_summary) = source_summary {
+            if let Some(target_active) = target.active_session_id.as_deref() {
+                let source_id = source_summary
+                    .get("activeSessionId")
+                    .and_then(Value::as_str)
+                    .or_else(|| source_summary.get("id").and_then(Value::as_str))
+                    .unwrap_or_default();
+                let source_host = source_summary
+                    .get("remoteHost")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                if crate::remote_mesh::agent_mesh_identity(Some(source_host), source_id)
+                    == crate::remote_mesh::agent_mesh_identity(
+                        Some(&target.host.tailnet_host),
+                        target_active,
+                    )
+                {
+                    return Err("Agent messaging cannot target the sending session".to_string());
+                }
+            }
+        }
+        Ok(Some(target))
+    }
+
+    /// Deliver an agent message to a remote daemon through the mesh
+    /// transport (TS `deliverRemoteAgentMessage`): offline peers and
+    /// missing transports fail loudly, and the receipt rides the same
+    /// response shape as a local delivery.
+    async fn deliver_remote_agent_message(
+        self: &Arc<Self>,
+        command_id: &str,
+        target: &crate::remote_mesh::RemoteAgentMessageTarget,
+        message: &str,
+        sender: Value,
+    ) -> Result<DaemonResponse, String> {
+        let Some(mesh) = self.remote_mesh.as_ref() else {
+            return Err("Remote agent messaging is not available on this daemon".to_string());
+        };
+        let receipt = mesh
+            .send_agent_message(target, message, Some(sender))
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(response_success(
+            Some(command_id),
+            "send_message",
+            Some(receipt),
+        ))
     }
 
     /// The send source's live session summary (`get_state`), strict: the
@@ -610,6 +746,9 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         Arc::new(
             Supervisor::new(SupervisorOptions {
+                tcp_port: None,
+                tcp_bind_host: None,
+                remote_agent_mesh: None,
                 socket_path: dir.path().join("s.sock"),
                 agent_dir: dir.path().join("agent"),
             })

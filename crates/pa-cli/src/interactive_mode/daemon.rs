@@ -128,6 +128,7 @@ async fn shutdown_stale_daemon(
             cwd: None,
             session_dir: None,
             include_client_owned: None,
+            include_remote_mesh: None,
             rest: serde_json::Map::default(),
         })
         .await;

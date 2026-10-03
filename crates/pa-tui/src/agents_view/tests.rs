@@ -54,6 +54,7 @@ fn mode_with_row(title: &str, model: &str) -> (AgentsViewMode, usize) {
         summary: serde_json::json!({ "sessionName": title }),
         title: title.to_string(),
         model: model.to_string(),
+        host_label: None,
         cost: 0.0,
         age: "1s".to_string(),
         depth: 0,
@@ -278,4 +279,95 @@ fn fresh_mode(roster: Vec<serde_json::Value>) -> AgentsViewMode {
     mode.roster = roster;
     mode.rebuild_rows();
     mode
+}
+
+// -----------------------------------------------------------------------
+// Remote mesh row guards (TS #2516): a tailnet peer's row is read-only
+// context on this machine; every local action refuses and names the
+// machine that owns the session.
+// -----------------------------------------------------------------------
+
+/// A mode whose selected row is a remote mesh row.
+fn mode_with_remote_row() -> AgentsViewMode {
+    let (mut mode, _) = mode_with_row("remote-worker", "model-x");
+    let remote = serde_json::json!({
+        "sessionName": "remote-worker",
+        "remoteHost": "milk.tailnet.ts.net",
+        "activeSessionId": "r1-live",
+        "sessionFile": "/remote/r1.jsonl",
+    });
+    mode.rows[1].summary = remote;
+    mode
+}
+
+/// Opening (attach/resume) a remote row refuses with the machine (TS
+/// #2516's open guard: attaching across the mesh is not available).
+#[test]
+fn opening_a_remote_row_refuses_with_the_machine() {
+    let mut mode = mode_with_remote_row();
+    mode.selected = 1;
+    mode.open_selected();
+    let status = mode.status_text().expect("the open must refuse");
+    assert!(
+        status.contains("Remote agent runs on milk.tailnet.ts.net"),
+        "{status}"
+    );
+    assert!(
+        status.contains("attaching across the mesh is not available"),
+        "{status}"
+    );
+    assert!(mode.opened.is_none(), "no attach or resume may start");
+}
+
+/// Renaming a remote row refuses with the machine (TS #2516's rename
+/// guard: rename it on that machine).
+#[test]
+fn renaming_a_remote_row_refuses_with_the_machine() {
+    let mut mode = mode_with_remote_row();
+    mode.selected = 1;
+    mode.enter_rename_mode();
+    let status = mode.status_text().expect("the rename must refuse");
+    assert!(
+        status.contains("Remote agent runs on milk.tailnet.ts.net"),
+        "{status}"
+    );
+    assert!(status.contains("rename it on that machine"), "{status}");
+}
+
+/// The delete arm's guard refuses with the machine (TS #2516's
+/// stop-or-delete guard).
+#[test]
+fn deleting_a_remote_row_refuses_with_the_machine() {
+    let mut mode = mode_with_remote_row();
+    mode.selected = 1;
+    assert!(mode.guard_remote_row("stop or delete"));
+    let status = mode.status_text().expect("the delete must refuse");
+    assert!(
+        status.contains("Remote agent runs on milk.tailnet.ts.net"),
+        "{status}"
+    );
+    assert!(
+        status.contains("stop or delete it on that machine"),
+        "{status}"
+    );
+}
+
+/// The reply arm's guard refuses with the machine (TS #2516: replies
+/// steer or resume through the local daemon, so the composer cannot
+/// deliver for a tailnet peer's row).
+#[test]
+fn replying_to_a_remote_row_refuses_with_the_machine() {
+    let mut mode = mode_with_remote_row();
+    mode.selected = 1;
+    mode.toggle_reply();
+    let status = mode.status_text().expect("the reply must refuse");
+    assert!(
+        status.contains("Remote agent runs on milk.tailnet.ts.net"),
+        "{status}"
+    );
+    assert!(status.contains("reply to it on that machine"), "{status}");
+    assert!(
+        !matches!(mode.composer, super::Composer::Reply(_)),
+        "no reply composer may arm on a remote row"
+    );
 }

@@ -156,6 +156,9 @@ mod tests {
 
     fn supervisor(dir: &std::path::Path) -> Supervisor {
         Supervisor::new(SupervisorOptions {
+            tcp_port: None,
+            tcp_bind_host: None,
+            remote_agent_mesh: None,
             socket_path: dir.join("daemon.sock"),
             agent_dir: dir.join("agent"),
         })

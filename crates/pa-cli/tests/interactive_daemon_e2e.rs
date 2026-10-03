@@ -662,6 +662,7 @@ async fn tui_attaches_prompts_streams_lists_and_switches() {
             cwd: None,
             session_dir: None,
             include_client_owned: None,
+            include_remote_mesh: None,
             rest: serde_json::Map::default(),
         })
         .await

@@ -35,16 +35,25 @@ pub struct SessionSearchText {
     pub id: String,
     /// The session working directory.
     pub cwd: String,
+    /// The remote row's tailnet host and display model (TS #2516): the
+    /// picker matches remote agents by `MagicDNS` hostname and remote
+    /// model id.
+    pub host: String,
 }
 
 impl SessionSearchText {
     /// The regex-mode corpus: the same restricted fields, joined.
     fn corpus(&self) -> String {
-        [self.name.as_str(), self.id.as_str(), self.cwd.as_str()]
-            .into_iter()
-            .filter(|part| !part.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ")
+        [
+            self.name.as_str(),
+            self.id.as_str(),
+            self.cwd.as_str(),
+            self.host.as_str(),
+        ]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
     }
 }
 
@@ -267,6 +276,16 @@ fn contiguous_token_score(token: &str, targets: &SessionSearchText) -> Option<To
             tier: 8.0,
             quality: found as f64,
         })
+        // The remote row's tailnet host and display model rank last: they
+        // identify the machine, not the session (TS #2516's search fix).
+        .or_else(|| {
+            normalize(&targets.host)
+                .find(&needle)
+                .map(|found| TokenMatch {
+                    tier: 9.0,
+                    quality: found as f64,
+                })
+        })
 }
 
 /// The name tiers: exact, prefix (shorter labels win, VS Code
@@ -320,6 +339,7 @@ mod tests {
             name: "gatewayworker".to_string(),
             id: "01a0b6b3-2e8d-71ab-b1c2-2a7db1bf8077".to_string(),
             cwd: "/home/dev/work/prime-agent".to_string(),
+            host: String::new(),
         }
     }
 
@@ -462,11 +482,13 @@ mod tests {
             name: "gw x 01a0b6b3".to_string(),
             id: "ffff0000".to_string(),
             cwd: "/home/u/ops".to_string(),
+            host: String::new(),
         };
         let weak = SessionSearchText {
             name: "gateway worker".to_string(),
             id: "01a0b6b3".to_string(),
             cwd: "/home/u/ops".to_string(),
+            host: String::new(),
         };
         let parsed = parse_search_query("01a0b6b3 gw");
         let strong_score = score_search(&strong, &parsed).expect("the name record matches");
@@ -514,6 +536,7 @@ mod tests {
             name: format!("{}b", "a".repeat(40)),
             id: "fff-fff".to_string(),
             cwd: "/tmp".to_string(),
+            host: String::new(),
         };
         let parsed = parse_search_query("re:(a+)+$");
         assert!(
@@ -524,5 +547,31 @@ mod tests {
         // run through the fancy engine and match.
         let lookahead = parse_search_query("re:gateway(?=worker)");
         assert!(score_search(&targets(), &lookahead).is_some());
+    }
+    /// A remote mesh row is findable by its `MagicDNS` hostname and its
+    /// display model id (TS #2516's review fix: filtering by the tailnet
+    /// host must surface every remote agent on that machine).
+    #[test]
+    fn search_matches_remote_rows_by_hostname_and_model() {
+        let remote = SessionSearchText {
+            name: "worker".to_string(),
+            id: "r1".to_string(),
+            cwd: "/remote".to_string(),
+            host: "milk.tailnet.ts.net prime/model-x".to_string(),
+        };
+        for query in ["milk.tailnet.ts.net", "model-x", "tailnet"] {
+            let parsed = parse_search_query(query);
+            let score = score_search(&remote, &parsed);
+            assert!(score.is_some(), "{query} must find the remote row");
+        }
+        // The local-only rows (no host text) do not match on the hostname.
+        let local = SessionSearchText {
+            name: "worker".to_string(),
+            id: "l1".to_string(),
+            cwd: "/local".to_string(),
+            host: String::new(),
+        };
+        let parsed = parse_search_query("milk.tailnet.ts.net");
+        assert!(score_search(&local, &parsed).is_none());
     }
 }

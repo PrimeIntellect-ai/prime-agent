@@ -62,6 +62,25 @@ impl TransportListener for tokio::net::UnixListener {
     }
 }
 
+/// TCP streams carry the same JSONL daemon protocol as `AF_UNIX` sockets
+/// (the tailnet mesh listener, TS #2517): one stream per accepted mesh
+/// peer, authenticated per line by the supervisor's TCP arm.
+impl TransportStream for tokio::net::TcpStream {
+    fn split(self: Box<Self>) -> (Box<dyn AsyncReadHalf>, Box<dyn AsyncWriteHalf>) {
+        let (reader, writer) = tokio::net::TcpStream::into_split(*self);
+        (Box::new(reader), Box::new(writer))
+    }
+}
+
+impl TransportListener for tokio::net::TcpListener {
+    fn accept(&self) -> AcceptFuture<'_> {
+        Box::pin(async move {
+            let (stream, _address) = self.accept().await?;
+            Ok(Box::new(stream) as Box<dyn TransportStream>)
+        })
+    }
+}
+
 /// `AF_UNIX` `sun_path` capacity: 108 bytes including the terminating NUL.
 #[cfg(unix)]
 const MAX_SUN_PATH: usize = 107;
@@ -161,6 +180,24 @@ impl UnixSocketAddress {
 pub async fn bind_transport(path: &Path) -> Result<Box<dyn TransportListener>> {
     let address = UnixSocketAddress::new(path)?;
     let listener = tokio::net::UnixListener::bind(address.effective())?;
+    Ok(Box::new(listener))
+}
+
+/// Bind a TCP listening endpoint at `address` (the tailnet mesh listener).
+///
+/// The caller resolves and validates the bind host first (the daemon's
+/// TCP arm resolves flag > env > settings > the machine's Tailscale
+/// address and refuses wildcard defaults), so this bind never widens past
+/// what the resolution policy allowed.
+///
+/// # Errors
+///
+/// Returns an error when binding the listener fails (a busy port, an
+/// unusable interface, missing permissions).
+pub async fn bind_tcp_transport(
+    address: std::net::SocketAddr,
+) -> Result<Box<dyn TransportListener>> {
+    let listener = tokio::net::TcpListener::bind(address).await?;
     Ok(Box::new(listener))
 }
 
