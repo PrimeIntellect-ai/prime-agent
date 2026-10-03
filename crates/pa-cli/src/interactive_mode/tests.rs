@@ -942,8 +942,20 @@ impl pa_telemetry::TelemetrySink for GatedSink {
         Box::pin(async move {
             self.entered
                 .store(true, std::sync::atomic::Ordering::SeqCst);
-            while !self.released.load(std::sync::atomic::Ordering::SeqCst) {
-                self.notify.notified().await;
+            // Race-free wait, tokio's documented pattern: the waiter
+            // registers (or consumes a permit) BEFORE the flag check, so
+            // a release that fires between the check and the await is
+            // never lost — a naive `while !flag { notified().await }` can
+            // miss `notify_waiters` and hang.
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            loop {
+                notified.as_mut().enable();
+                if self.released.load(std::sync::atomic::Ordering::SeqCst) {
+                    break;
+                }
+                notified.as_mut().await;
+                notified.set(self.notify.notified());
             }
             let mut delivered = self.delivered.lock().expect("gate lock");
             for event in &events {
@@ -992,41 +1004,58 @@ async fn startup_flush_never_blocks_the_first_frame() {
     }
     .track(&client);
 
-    // The paint path's hand-off: while the sink still hangs, it must
-    // already be done — the first frame paints with delivery pending.
-    // The hand-off runs as its own task so a regression back to a
-    // blocking flush reds the timeout instead of wedging the suite.
+    // The paint path's contract, run as its own task so a regression
+    // back to a blocking flush reds the timeout instead of wedging the
+    // suite (an inner assert failure reds through the join error).
     let hand_off = tokio::time::timeout(
         std::time::Duration::from_secs(2),
-        tokio::spawn(async move { flush_startup_telemetry(client) }),
+        tokio::spawn(async move {
+            // The hand-off: while the sink still hangs, it must already
+            // be done — the first frame paints with delivery pending.
+            let flush = flush_startup_telemetry(client);
+            assert!(
+                sink.delivered_names().is_empty(),
+                "delivery was still pending when the paint path proceeded"
+            );
+
+            // The released drain still delivers the tracked startup
+            // events.
+            sink.release();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while sink.delivered_names().is_empty() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the released drain delivered the tracked startup events"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            let names = sink.delivered_names();
+            assert!(
+                names.contains(&"startup".to_string()),
+                "the startup event delivered: {names:?}"
+            );
+            assert!(
+                names.contains(&"agent startup stage".to_string()),
+                "the ui_ready stage delivered: {names:?}"
+            );
+
+            // The quick-exit seam: the composition root joins this
+            // handle under the shared exit bound when a run ends inside
+            // the delivery window — the join settles with the drain, so
+            // the events never die with the runtime teardown.
+            let joined = tokio::time::timeout(std::time::Duration::from_secs(2), flush).await;
+            assert!(
+                matches!(joined, Ok(Ok(()))),
+                "the exit join settled once the drain delivered"
+            );
+        }),
     )
     .await;
-    assert!(
-        hand_off.is_ok(),
-        "the flush hand-off completed while the sink still hung (the paint path never waits out delivery)"
-    );
-    assert!(
-        sink.delivered_names().is_empty(),
-        "delivery was still pending when the paint path proceeded"
-    );
-
-    // The released drain still delivers the tracked startup events.
-    sink.release();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    while sink.delivered_names().is_empty() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the released drain delivered the tracked startup events"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    match hand_off {
+        Ok(Ok(())) => {}
+        Ok(Err(joined)) => panic!("the first-paint contract task panicked: {joined}"),
+        Err(elapsed) => panic!(
+            "the flush hand-off completed while the sink still hung (the paint path never waits out delivery): {elapsed}"
+        ),
     }
-    let names = sink.delivered_names();
-    assert!(
-        names.contains(&"startup".to_string()),
-        "the startup event delivered: {names:?}"
-    );
-    assert!(
-        names.contains(&"agent startup stage".to_string()),
-        "the ui_ready stage delivered: {names:?}"
-    );
 }
