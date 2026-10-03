@@ -1569,17 +1569,48 @@ async fn tui_dispatches_slash_commands_menu_and_suggestions() {
             pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
             // Unknown command: the exact TS suggestion error.
             pa_tui::interactive::HeadlessStep::Submit("/modle".to_string()),
-            // The autocomplete menu: typed input like a user keystroke by
-            // keystroke, completed with Enter, then submitted.
+            // Probe pass over the autocomplete menu (typed keystroke by
+            // keystroke, completed with Enter). The attach-time
+            // slash-command catalog refresh is still in flight here: its
+            // background `get_commands` response swaps the provider and
+            // closes an open dropdown when it lands (TS
+            // `setAutocompleteProvider` parity), so this pass may lose its
+            // menu to the swap. Two cases keep the asserted passes below
+            // behind the landing: with the menu still open, the
+            // `skill:goal` row renders in a post-landing frame and the
+            // barrier pops at the landing; a landing that closes the menu
+            // without re-parking never renders the needle, and the 15s
+            // bound — past the 10s fetch deadline — is what waits out
+            // that case.
             pa_tui::interactive::HeadlessStep::Type("/".to_string()),
-            // A real user pauses between keystrokes: the parked suggestion
-            // request materializes (the dropdown opens) before Enter, the
-            // state the terminal loop reaches after one input-idle tick.
             pa_tui::interactive::HeadlessStep::SettleIdle,
             pa_tui::interactive::HeadlessStep::Type("goa".to_string()),
             pa_tui::interactive::HeadlessStep::SettleIdle,
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: "skill:goal".to_string(),
+                timeout_ms: 15_000,
+            },
             // With the dropdown open, Enter completes the selected
             // suggestion (`/goal `); the second Enter submits it.
+            pa_tui::interactive::HeadlessStep::Type("\n".to_string()),
+            pa_tui::interactive::HeadlessStep::Type("\n".to_string()),
+            pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
+            // The menu assertions run against the landed catalog: the first
+            // registry entry selected at `/`, `/goa` fuzzy-matching goal —
+            // no in-flight swap can close these dropdowns between
+            // materialize and render.
+            pa_tui::interactive::HeadlessStep::Type("/".to_string()),
+            pa_tui::interactive::HeadlessStep::SettleIdle,
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: "\u{203a} settings".to_string(),
+                timeout_ms: 30_000,
+            },
+            pa_tui::interactive::HeadlessStep::Type("goa".to_string()),
+            pa_tui::interactive::HeadlessStep::SettleIdle,
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: "\u{203a} goal".to_string(),
+                timeout_ms: 30_000,
+            },
             pa_tui::interactive::HeadlessStep::Type("\n".to_string()),
             pa_tui::interactive::HeadlessStep::Type("\n".to_string()),
             pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
