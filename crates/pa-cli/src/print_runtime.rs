@@ -221,7 +221,7 @@ fn daemon_acp_create(
         no_session: options.session.no_session.then_some(true),
         name: None,
         config: Some(create_config),
-        telemetry_disabled: config.telemetry_disabled.then_some(true),
+        telemetry_disabled: crate::mode::create_telemetry_disabled(config),
         runtime_metadata: None,
         lifecycle: Some(lifecycle),
         env: None,
