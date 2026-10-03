@@ -1781,11 +1781,23 @@ class FactoryExecutor:
                 self._state_report(run.states[state_id], include_answer=not compact)
                 for state_id in run.order
             ],
+            # Activity is children-shaped, not entry-shaped alone: a
+            # foreach entry that failed permanently (failure_policy
+            # continue) is terminal at the entry layer while its
+            # admitted siblings still run -- the quiescence contract
+            # (_run_complete) counts those instances, and the node report
+            # carries them as the stage's occupancy, so a stage with
+            # live children stays in the overlay exactly while its
+            # occupancy label can be nonzero.
             "active_nodes": [
                 state_id
                 for state_id in run.order
                 if any(
                     entry.status in ("pending", "running")
+                    or any(
+                        instance.status in ("pending", "running")
+                        for instance in entry.instances
+                    )
                     for entry in run.states[state_id].entries
                 )
             ],

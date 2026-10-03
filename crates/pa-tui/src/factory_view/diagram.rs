@@ -220,9 +220,13 @@ impl FactoryNodeState {
     }
 
     /// Whether the node is in flight: an entry pending (awaiting its
-    /// inputs) or running, or — for snapshots without entry rows — the
-    /// derived `running` status. A never-entered node (no entries) is not
-    /// active: the diagram paints it dim, not bright.
+    /// inputs) or running, an instance still running or queued, or — for
+    /// snapshots without entry rows — the derived `running` status. The
+    /// instance arm is the occupancy contract: a foreach entry that failed
+    /// permanently is terminal at the entry layer while its admitted
+    /// siblings still run, so the row stays bright exactly while its
+    /// occupancy label can be nonzero. A never-entered node (no entries)
+    /// is not active: the diagram paints it dim, not bright.
     pub fn is_active(&self) -> bool {
         if self.entries.is_empty() {
             return self.status == "running";
@@ -231,6 +235,8 @@ impl FactoryNodeState {
             .iter()
             .any(|status| status == "pending" || status == "running")
             || self.status == "running"
+            || self.running_agents() > 0
+            || self.queued_agents() > 0
     }
 
     /// Agents at this stage in flight (admitted children still

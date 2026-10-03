@@ -6002,6 +6002,62 @@ class FactoryGraphWatchTest(_ExecutorTestCase):
         self.assertIn("collect", listing["runs"][1]["active_nodes"])
 
     @async_test
+    async def test_graph_keeps_a_failed_foreach_entrys_stage_active_while_siblings_run(self) -> None:
+        # Macroscope review finding: active_nodes keyed on the aggregate
+        # entry status, so a foreach entry that failed permanently
+        # (failure_policy continue) while sibling instances still run
+        # dropped the stage from the overlay -- the snapshot claimed no
+        # node was active while its own node report carried the in-flight
+        # sibling (the occupancy keys) and the run stayed live to collect
+        # it. Activity rides the INSTANCE layer too, exactly like the
+        # occupancy counts, so a stage with a terminal entry but live
+        # children stays active.
+        self.host.outcomes["src"] = {"status": "done", "answer": '{"items": ["a", "b", "c", "d", "e"]}'}
+        self.store_machine(
+            {
+                "run": {"failure_policy": "continue", "max_parallel": 2},
+                "states": [
+                    {
+                        "id": "src",
+                        "entry": True,
+                        "subagent": "worker",
+                        "outputs": [{"name": "items", "type": "json"}],
+                    },
+                    {
+                        "id": "fan",
+                        "subagent": "worker",
+                        "inputs": [{"name": "items", "type": "json", "from": "src.items"}],
+                        "foreach": {"over": "items", "max": 5},
+                    },
+                ],
+                "transitions": [{"from": "src", "to": "fan"}],
+            },
+            spec_id="fan",
+        )
+        result = await self.start("fan")
+        run = self.executor._runs[result["run_id"]]
+        # src is child-1; the two parallel slots admit fan's child-2 (fails
+        # permanently) and child-3 (stays running), leaving three queued
+        # behind the cap.
+        self.host.child_outcomes["child-2"] = {"status": "error", "error": "boom"}
+        self.host.child_outcomes["child-3"] = {"status": "running"}
+        for _ in range(50_000):
+            if any(entry.status == "error" for entry in run.states["fan"].entries):
+                break
+            await yield_loop_turn()
+        else:
+            self.fail("the fan entry never failed")
+        graph = await rlm_module.rlm.factory.graph(result["run_id"])
+        fan = next(node for node in graph["nodes"] if node["id"] == "fan")
+        self.assertEqual([entry["status"] for entry in fan["entries"]], ["error"])
+        self.assertEqual(fan["running"], 1, "the sibling instance is still in flight")
+        self.assertEqual(fan["queued"], 0)
+        self.assertEqual(graph["state"], "running")
+        self.assertEqual(graph["usage"]["running"], 1)
+        # the stage with only a terminal entry but live children is active
+        self.assertIn("fan", graph["active_nodes"])
+
+    @async_test
     async def test_graph_of_a_stored_spec_returns_the_static_structure(self) -> None:
         graph = await rlm_module.rlm.factory.graph("sw")
         self.assertIsNone(graph["run_id"])

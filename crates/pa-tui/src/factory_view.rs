@@ -96,7 +96,8 @@ impl FactoryRunSnapshot {
         parts.join("|")
     }
 
-    /// The states with an in-flight entry (the diagram's bright rows).
+    /// The states with an in-flight entry or live instances (the
+    /// diagram's bright rows).
     #[must_use]
     pub fn active_state_ids(&self) -> Vec<String> {
         self.states

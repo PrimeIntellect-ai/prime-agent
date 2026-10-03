@@ -389,6 +389,47 @@ fn active_nodes_paint_bright_and_pending_paints_dim() {
     assert!(fired_marked, "the fired marker must paint success");
 }
 
+/// The instance layer paints the row too: a foreach entry that failed
+/// permanently is terminal at the entry layer while its admitted
+/// siblings still run (the continue policy), so the occupancy label
+/// keeps showing agents at the stage and the row stays bright (the
+/// mutation check: keying on the entry rows alone paints a stage with
+/// live children settled).
+#[test]
+fn a_terminal_entry_with_running_instances_stays_bright() {
+    let mut snapshot = scripted_snapshot();
+    // `reviewing`'s single foreach entry failed permanently; its second
+    // instance is still in flight, so the occupancy keeps one agent.
+    snapshot["nodes"][1]["status"] = json!("error");
+    snapshot["nodes"][1]["entries"] = json!([
+        { "index": 0, "status": "error", "error": "boom" },
+    ]);
+    snapshot["nodes"][1]["instances"] = json!([
+        { "index": 0, "entry": 0, "status": "error", "attempt": 1, "child": "child-2", "durationMs": 5, "error": "boom" },
+        { "index": 1, "entry": 0, "status": "running", "attempt": 1, "child": "child-3", "durationMs": 0, "error": null }
+    ]);
+    snapshot["nodes"][1]["running"] = json!(1);
+    snapshot["nodes"][1]["queued"] = json!(0);
+    snapshot["usage"]["running"] = json!(1);
+    snapshot["activeNodes"] = json!(["reviewing"]);
+    let mut view = FactoryView::new(parse_factory_runs(&runs_response(&snapshot)), 40);
+    let rows = frame_spans(&mut view);
+    let accent = theme().fg_style(ThemeColor::Accent);
+    let bright = rows.iter().any(|row| {
+        row.iter()
+            .any(|span| span.content.contains("reviewing") && span.style == accent)
+    });
+    assert!(
+        bright,
+        "the running sibling keeps the failed entry's row bright"
+    );
+    let text = frame_text(&mut view);
+    assert!(
+        text.join("\n").contains("reviewing (1 run · 0 queued)"),
+        "the occupancy label still shows the in-flight sibling"
+    );
+}
+
 /// The node's live activity paints the row, not the aggregate status: a
 /// multi-entry state whose latest entry settled while an earlier one
 /// still runs stays bright in the terminal diagram (the mutation check:
