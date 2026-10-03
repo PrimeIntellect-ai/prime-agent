@@ -24,7 +24,7 @@ use serde_json::{json, Value};
 use crate::backpressure::RouteAdmission;
 use crate::protocol::{response_failure, response_line, response_success, DaemonResponse};
 use crate::supervisor::{
-    client_command_payload, Supervisor, LONG_ROUTE_TIMEOUT_MS, ROUTE_TIMEOUT_MS,
+    client_command_payload, client_route_timeout, Supervisor, ROUTE_TIMEOUT_MS,
 };
 use crate::worker::Worker;
 
@@ -238,20 +238,9 @@ impl Supervisor {
                 "Prompt admission was cancelled.",
             );
         }
-        let Some((worker_admission_id, timeout)) =
-            connection.prompt_admissions.with(&key, |admission| {
-                (
-                    admission.worker_admission_id.clone(),
-                    if matches!(
-                        command,
-                        pa_types::daemon::DaemonCommand::PromptAndWait { .. }
-                    ) {
-                        LONG_ROUTE_TIMEOUT_MS
-                    } else {
-                        ROUTE_TIMEOUT_MS
-                    },
-                )
-            })
+        let Some(worker_admission_id) = connection
+            .prompt_admissions
+            .with(&key, |admission| admission.worker_admission_id.clone())
         else {
             // An admission that vanished before the route: the prompt
             // routes through the generic path (TS `admission undefined`).
@@ -259,6 +248,7 @@ impl Supervisor {
                 .route_client_command(command, client_id, attached, command_id, type_name, None)
                 .await;
         };
+        let timeout = client_route_timeout(command);
         // Resolve the session (the generic route's wake-aware resolution).
         let mut rebound_to: Option<String> = None;
         let resident = if let Ok(resident) = self.registry.resolve(active_session_id).await {
