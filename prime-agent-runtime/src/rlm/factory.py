@@ -2941,7 +2941,11 @@ def machine_name_errors(name: Any) -> list[str]:
 
 
 def machine_description_errors(description: Any) -> list[str]:
-    """Description rules mirrored from the skill library (validate_description)."""
+    """Description rules mirrored from the skill library (validate_description).
+
+    One rule is the library's own: the description is one listing row, so
+    embedded line breaks are a format error.
+    """
     if not isinstance(description, str) or not description.strip():
         return ["frontmatter description is required"]
     if len(description) > MACHINE_DESCRIPTION_MAX_LENGTH:
@@ -2949,6 +2953,8 @@ def machine_description_errors(description: Any) -> list[str]:
             "frontmatter description exceeds "
             f"{MACHINE_DESCRIPTION_MAX_LENGTH} characters ({len(description)})"
         ]
+    if "\n" in description or "\r" in description:
+        return ["frontmatter description must be a single line"]
     return []
 
 
@@ -3496,8 +3502,6 @@ def export_factory_spec(
     errors = validate_factory_spec(spec)
     errors.extend(machine_name_errors(name))
     errors.extend(machine_description_errors(description))
-    if isinstance(description, str) and "\n" in description:
-        errors.append("machine description must be a single line")
     if errors:
         raise ValueError("; ".join(errors))
     machine = MachineFile(

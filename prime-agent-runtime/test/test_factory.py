@@ -84,6 +84,7 @@ from rlm.factory import (
     export_machine,
     import_machine,
     list_machines,
+    machine_description_errors,
     machine_name_errors,
     parse_machine_file,
     render_machine_file,
@@ -5691,6 +5692,25 @@ class MachineFileParseTest(unittest.TestCase):
         self.assertTrue(any("machine name must be a non-empty string" in error for error in errors), errors)
         self.assertTrue(any("frontmatter description is required" in error for error in errors), errors)
 
+    def test_multiline_descriptions_are_rejected(self) -> None:
+        # The description is one listing row by contract, so a quoted
+        # frontmatter value that decodes an embedded line break is a format
+        # error with its own sentence — not a machine whose listing renders
+        # across several terminal lines.
+        for description in ('"A machine that\\nsweeps."', '"A machine that\\rsweeps."'):
+            machine, errors = self.parse(machine_file_text(frontmatter=(
+                "---\nname: sweep\n"
+                f"description: {description}\n"
+                "version: 1\nauthor: Tester\n---"
+            )))
+            self.assertIsNone(machine, description)
+            self.assertEqual(
+                errors, ["frontmatter description must be a single line"]
+            )
+        self.assertEqual(
+            machine_description_errors("One line, as the format requires."), []
+        )
+
     def test_name_rules_mirror_the_skill_library(self) -> None:
         for bad in ("Sweep", "sweep x", "-sweep", "sweep-", "a" * 65):
             machine, errors = self.parse(machine_file_text(name=bad))
@@ -5959,6 +5979,21 @@ class ImportGateTest(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             import_machine(path, target_dir=self.library)
         self.assertIn("must start with a `---` frontmatter block", str(ctx.exception))
+        self.assertFalse(self.library.exists())
+
+    def test_import_rejects_multiline_descriptions_and_persists_nothing(self) -> None:
+        # A quoted description decoding an embedded newline renders the
+        # machine across several listing rows: the import gate refuses it
+        # with the format's own sentence, exactly like any other parse
+        # failure.
+        path = self.write_source(machine_file_text(frontmatter=(
+            "---\nname: multiline\n"
+            'description: "A machine that\\nsweeps the branch."\n'
+            "version: 1\nauthor: Tester\n---"
+        )))
+        with self.assertRaises(ValueError) as ctx:
+            import_machine(path, target_dir=self.library)
+        self.assertIn("frontmatter description must be a single line", str(ctx.exception))
         self.assertFalse(self.library.exists())
 
     def test_import_rejects_missing_files_and_overwrites_renamed(self) -> None:
@@ -6427,6 +6462,21 @@ class ExportMachineTest(unittest.TestCase):
         self.assertEqual(out.read_text(encoding="utf-8"), "keep me")
         export_factory_spec(valid_machine(), out, name="sweep", description="Overwrite.", overwrite=True)
         self.assertIn("Overwrite.", out.read_text(encoding="utf-8"))
+
+    def test_spec_export_multiline_description_is_one_sentence(self) -> None:
+        # The single-line rule lives in machine_description_errors alone:
+        # one defect, one sentence, whether the description arrives as a
+        # parsed frontmatter value or an export argument.
+        with self.assertRaises(ValueError) as raised:
+            export_factory_spec(
+                valid_machine(),
+                self.out_dir / "x.MACHINE.md",
+                name="sweep",
+                description="A machine that\nsweeps.",
+            )
+        self.assertEqual(
+            str(raised.exception), "frontmatter description must be a single line"
+        )
 
     def test_exports_a_stored_entry_spec_byte_pretty(self) -> None:
         self.harness.create_factory("Sweep", "A machine that sweeps.", id="sweep", dag=valid_dag())
