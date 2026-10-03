@@ -964,7 +964,17 @@ impl SessionEngine {
                 .spec_id
                 .as_deref()
                 .ok_or_else(|| anyhow::anyhow!("factory activity run requires specId"))?;
-            self.factory_host.preflight_run(spec_id)?;
+            // The preflight reads the harness states, the model catalog,
+            // and the auth caches from disk — blocking work off the
+            // executor (the daemon's established settings-read posture:
+            // `spawn_blocking`, never the async lane), so a stalled
+            // filesystem can never stall the worker's other activity.
+            let host = self.factory_host.clone();
+            let spec_id = spec_id.to_string();
+            let preflight = tokio::task::spawn_blocking(move || host.preflight_run(&spec_id))
+                .await
+                .map_err(|join| anyhow::anyhow!("factory run preflight join failed: {join}"))?;
+            preflight?;
         }
         let manager = self
             .provisioner

@@ -645,10 +645,12 @@ fn factory_off_refuses_on_a_client_whose_hello_predates_the_gate() {
     );
 }
 
-/// The None path never blocks off: a daemon that cannot report runs (an
-/// older daemon answers the unknown command with a failure, a session
-/// without a kernel refuses) carries no live runs, so the write proceeds
-/// — the guard refuses only on a readable, nonzero count.
+/// The None path never blocks the client whose hello predates the lane
+/// (the fail-open half of the unreadable-count rule): a daemon that
+/// cannot report runs — an older daemon answers the unknown command with
+/// a failure, a session without a kernel refuses — carries no live runs,
+/// so the write proceeds; only the lane-advertised client fails closed
+/// (the pin below).
 #[test]
 fn factory_off_proceeds_when_the_lane_cannot_report() {
     let steps = vec![
@@ -667,5 +669,35 @@ fn factory_off_proceeds_when_the_lane_cannot_report() {
     assert!(
         !all.contains("Cannot disable the factory"),
         "no refusal without a readable count:\n{all}"
+    );
+}
+
+/// The advertised lane fails closed on an unreadable count: a timed-out
+/// or malformed graph reply cannot prove zero live runs, so the off write
+/// refuses (an unknown liveness never opens the gate) and names the
+/// unreadable count; the gate stays enabled for the retry.
+#[test]
+fn factory_off_refuses_when_the_advertised_lane_cannot_count() {
+    let steps = vec![
+        HeadlessStep::Submit("/factory on".to_string()),
+        HeadlessStep::WaitMs(200),
+        HeadlessStep::Submit("/factory off".to_string()),
+        HeadlessStep::WaitMs(400),
+        HeadlessStep::Submit("/factory status".to_string()),
+        HeadlessStep::WaitMs(200),
+    ];
+    // The lane is advertised; the mock answers every factory action with
+    // empty data (a malformed reply the guard reads as an unreadable count).
+    let frames = run_plan_config(vec!["factory_activity".to_string()], None, steps);
+    let all = flat_text(&frames);
+    assert!(
+        all.contains(
+            "Cannot disable the factory: the live-run count could not be read from the factory lane — try /factory off again once it answers."
+        ),
+        "the unreadable count refused the off:\n{all}"
+    );
+    assert!(
+        all.contains("The factory is enabled. Run /factory off to disable it."),
+        "the gate stayed enabled after the refused off:\n{all}"
     );
 }

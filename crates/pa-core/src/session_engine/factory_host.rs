@@ -57,6 +57,7 @@ pub struct FactoryHostConfig {
 
 /// The factory host bridge built from [`FactoryHostConfig`]; held by the
 /// session engine, reached through [`SessionEngine::factory_activity`].
+#[derive(Clone)]
 pub struct FactoryHost {
     config: FactoryHostConfig,
 }

@@ -450,18 +450,39 @@ impl SessionUi {
                         // The write refuses while the session's kernel
                         // reports live runs, naming the count the dock
                         // shows; the runs stop first (the page's stop
-                        // action or `rlm.factory.stop`).
-                        if let Some(live) = self.live_factory_runs().await.filter(|live| *live > 0)
-                        {
-                            let runs = if live == 1 { "run is" } else { "runs are" };
-                            let them = if live == 1 { "it" } else { "them" };
-                            self.error_row(
-                                &format!(
-                                    "Cannot disable the factory while {live} {runs} still live — stop {them} first (the factory page's stop action or rlm.factory.stop), then /factory off."
-                                ),
-                                view,
-                            );
-                            return Ok(());
+                        // action or `rlm.factory.stop`). An unreadable
+                        // count fails closed on the lane-advertised client
+                        // (the only state where the guard matters): the
+                        // count's own failure classes — a timed-out or
+                        // malformed lane reply — cannot prove zero live
+                        // runs, and an unknown liveness must not open the
+                        // gate; the client retries once the lane answers.
+                        // A client whose hello never advertised the lane
+                        // keeps the fail-open read: an older daemon has no
+                        // executor to protect, and a client started before
+                        // `/factory on` already sees the frozen hello the
+                        // settled surfaces rule describes.
+                        let lane_advertised = self.factory_activity_supported();
+                        match self.live_factory_runs().await {
+                            Some(live) if live > 0 => {
+                                let runs = if live == 1 { "run is" } else { "runs are" };
+                                let them = if live == 1 { "it" } else { "them" };
+                                self.error_row(
+                                    &format!(
+                                        "Cannot disable the factory while {live} {runs} still live — stop {them} first (the factory page's stop action or rlm.factory.stop), then /factory off."
+                                    ),
+                                    view,
+                                );
+                                return Ok(());
+                            }
+                            None if lane_advertised => {
+                                self.error_row(
+                                    "Cannot disable the factory: the live-run count could not be read from the factory lane — try /factory off again once it answers.",
+                                    view,
+                                );
+                                return Ok(());
+                            }
+                            Some(_) | None => {}
                         }
                         let Some(settings) = &self.client_settings else {
                             self.note("/factory is not available in this client yet", view);

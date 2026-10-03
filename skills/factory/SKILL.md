@@ -32,9 +32,10 @@ The factory ships disabled. `rlm.factory.help()` answers while it is off
 `rlm.factory` call and every factory harness write refuses with one
 message: `the factory is disabled; run /factory on to enable it`. The
 user turns it on with `/factory on` in the client (`/factory off`
-disables it again — refused while the session still has live runs, so an
-active factory never loses its stop path, `/factory status` reports it),
-which persists the
+disables it again — refused while the session still has live runs, and
+on a lane-advertising client while the live-run count cannot be read, so
+an active factory never loses its stop path, `/factory status` reports
+it), which persists the
 `factory.enabled` setting in the agent dir's settings.json — the same
 setting the daemon's `factory_activity` lane advertisement reads, so the
 TUI's factory dock group and page surface only on a client started while
