@@ -95,8 +95,9 @@ def binary_name_for_target(target: str) -> str:
 # The runtime sidecar ships only what the kernel consumes. The venv
 # bootstrap installs it with `uv pip install <payload>/prime-agent-runtime`
 # (uv's pip interface builds the hatchling wheel, whose target packages
-# only `src/rlm`), and the venv cache identity hashes `src/rlm/*.py` +
-# `pyproject.toml` — so the pytest suite (`test/`) and the development
+# only `src/rlm`), and the venv cache identity hashes `src/rlm/*.py` + the
+# packaged machine library under `src/rlm/machines` + `pyproject.toml` — so
+# the pytest suite (`test/`) and the development
 # `uv.lock` (the pip interface never reads the project lockfile) are dead
 # weight in every installed tree, and dropping them changes neither the
 # built wheel nor the bootstrap-version identity. The cache names and
