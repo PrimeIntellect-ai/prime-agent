@@ -92,6 +92,11 @@ pub struct CompactOptions<'a> {
     /// one-shot completion — the summarizer call itself is identical
     /// either way; only the stream consumption differs.
     pub summary_delta: Option<SummaryDeltaSink>,
+    /// The session's semantic-edge recorder (TS `semanticCompaction` in
+    /// `_performCompaction`): each summary wire call carries its own
+    /// request id, and the compaction's terminal event lands before the
+    /// compaction entry persists. `None` records nothing.
+    pub semantic_edges: Option<std::sync::Arc<super::semantic_edges::SemanticEdgeRecorder>>,
 }
 
 /// The model-visible message produced by a session entry (summarizer input).
@@ -183,6 +188,12 @@ pub async fn execute_compaction(
         Ok(preparation) => preparation,
         Err(skip) => return Ok(CompactOutcome::Skipped(skip.user_message())),
     };
+    // TS `beginCompaction` after the preparation resolved: a skipped
+    // compaction makes no events (the begin comes after the skip throw).
+    let mut semantic_compaction = options
+        .semantic_edges
+        .as_ref()
+        .map(|recorder| recorder.begin_compaction(options.abort));
     let cut = preparation.cut;
     let previous_summary = preparation.previous_summary;
     let recent_state_anchor = preparation.recent_state_anchor;
@@ -337,14 +348,23 @@ pub async fn execute_compaction(
             recent_state_anchor.as_deref(),
             options.settings.reserve_tokens,
         );
-        complete_summary_call(
-            &model,
-            api_key.clone(),
+        // Each summary wire call carries its own request id under the
+        // compaction's guard (TS `summaryCall`): the id's headers merge
+        // over the routed model's.
+        super::semantic_edges::summary_slice_call(
+            semantic_compaction.as_ref(),
             summary_headers.clone(),
-            history_max_tokens,
-            request,
-            options.summary_delta.clone(),
-            "Summarization failed",
+            |headers| {
+                complete_summary_call(
+                    &model,
+                    api_key.clone(),
+                    headers,
+                    history_max_tokens,
+                    request,
+                    options.summary_delta.clone(),
+                    "Summarization failed",
+                )
+            },
         )
         .await
     };
@@ -353,21 +373,27 @@ pub async fn execute_compaction(
             return Ok::<Option<SummarySlice>, anyhow::Error>(None);
         }
         let request = build_turn_prefix_request(&turn_prefix_messages);
-        let slice = complete_summary_call(
-            &model,
-            api_key.clone(),
+        let slice = super::semantic_edges::summary_slice_call(
+            semantic_compaction.as_ref(),
             summary_headers.clone(),
-            turn_prefix_max_tokens,
-            request,
-            // The turn-prefix call never streams live: the split join
-            // runs it concurrently with the history call, and its chunks
-            // interleaved into the live sink would land out of the
-            // final order (the committed summary is history, split
-            // marker, prefix). The completed prefix flushes through the
-            // sink after the join, so the live block converges to the
-            // exact committed summary.
-            None,
-            "Turn prefix summarization failed",
+            |headers| {
+                complete_summary_call(
+                    &model,
+                    api_key.clone(),
+                    headers,
+                    turn_prefix_max_tokens,
+                    request,
+                    // The turn-prefix call never streams live: the split join
+                    // runs it concurrently with the history call, and its chunks
+                    // interleaved into the live sink would land out of the
+                    // final order (the committed summary is history, split
+                    // marker, prefix). The completed prefix flushes through the
+                    // sink after the join, so the live block converges to the
+                    // exact committed summary.
+                    None,
+                    "Turn prefix summarization failed",
+                )
+            },
         )
         .await?;
         Ok(Some(slice))
@@ -465,6 +491,12 @@ pub async fn execute_compaction(
         harness_digest,
         harness_state_fingerprint,
     );
+    // Ledger before effect (TS: `compactionRecorded` and the terminal
+    // event land before `appendCompaction`): a failed persist still
+    // leaves a completed compaction on the ledger, exactly like TS.
+    if let Some(compaction) = semantic_compaction.as_mut() {
+        compaction.commit();
+    }
     // TS `appendCompaction` persists the full record: `details`,
     // `fromHook`, `customInstructions`, `usage`, and the `harnessDigest`
     // snapshot ride on the durable row alongside the summary, boundary,

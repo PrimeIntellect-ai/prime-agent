@@ -64,6 +64,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+use pa_core::session_engine::semantic_edges::SemanticEdgeLedgerEvent as LedgerEvent;
+
 use serde_json::{json, Value};
 
 struct Daemon {
@@ -289,12 +291,15 @@ fn run_turn(client: &mut Client, session_id: &str, message: &str, id: &str) {
     assert_eq!(idle["success"], true, "wait_for_idle failed: {idle}");
 }
 
-/// Poll for a kernel cell's receipt content (the cell writes its verdict).
+/// Poll for a kernel cell's receipt content (the cell writes its verdict;
+/// an empty read is the create-before-write window, not a verdict yet).
 fn await_receipt(receipt: &Path) -> String {
     let deadline = Instant::now() + Duration::from_mins(1);
     loop {
         if let Ok(content) = std::fs::read_to_string(receipt) {
-            return content;
+            if !content.is_empty() {
+                return content;
+            }
         }
         assert!(
             Instant::now() < deadline,
@@ -664,4 +669,226 @@ fn sigkill_keeps_a_created_root_session_running() {
             .find(|summary| summary["activeSessionId"] == json!(root_active_session_id))
     });
     assert_eq!(survivor["sessionName"], "rootkid");
+}
+
+/// The kernel cell of the spawn turn for the semantic-edge e2e: spawn one
+/// RLM child through the product surface and record its id + session dir.
+fn semantic_spawn_cell(receipt: &Path, error_receipt: &Path) -> String {
+    format!(
+        "import json, traceback\ntry:\n    handle = await rlm.spawn(\"child task text\", name=\"kid\")\n    open({receipt:?}, \"w\").write(json.dumps({{\"rlm_child_id\": handle.rlm_child_id, \"session_dir\": str(handle.session_dir)}}))\n    print(handle.rlm_child_id)\nexcept Exception:\n    open({error_receipt:?}, \"w\").write(traceback.format_exc())\n    raise",
+        receipt = receipt.display().to_string(),
+        error_receipt = error_receipt.display().to_string(),
+    )
+}
+
+/// Parse one semantic-edge ledger file into its events. A file that does
+/// not exist yet reads as empty: the settle poll runs ahead of the
+/// parent's return recording.
+fn semantic_ledger(path: &Path) -> Vec<LedgerEvent> {
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    contents
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_str(line).expect("ledger line"))
+        .collect()
+}
+
+/// A spawned child's ledger names the spawning request, and the parent
+/// records the child's return before its next request starts (TS
+/// `semanticParentSessionId`/`spawnedByRequestId` +
+/// `recordChildReturned`; the spawn runs mid-turn through the product
+/// `rlm.spawn` surface, and both engines are real over the faux
+/// provider).
+#[test]
+fn a_spawned_child_ledger_names_its_spawning_request_and_the_parent_records_the_return() {
+    let Some(kernel_python) = kernel_python() else {
+        return;
+    };
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    let socket = dir.path().join("supervisor.sock");
+    let receipts = dir.path().join("receipts");
+    std::fs::create_dir_all(&receipts).expect("receipts dir");
+    let spawn_receipt = receipts.join("spawn.json");
+    let spawn_error = receipts.join("spawn.error");
+
+    // A real-engine child over the faux provider (the same engine choice
+    // as the parent): it builds a session, records its own ledger, and
+    // settles with its scripted reply.
+    let child_script = dir.path().join("child.json");
+    std::fs::write(
+        &child_script,
+        json!({
+            "engine": "faux",
+            "responses": [ { "text": "child reply", "delayMs": 30 } ],
+        })
+        .to_string(),
+    )
+    .expect("write child script");
+    let parent_script = write_parent_script(
+        dir.path(),
+        &semantic_spawn_cell(&spawn_receipt, &spawn_error),
+    );
+    let _daemon = spawn_supervisor(&socket, &agent_dir, &kernel_python);
+    wait_socket_ready(&socket);
+    let (mut client, hello) = Client::connect(&socket);
+    assert_eq!(hello["type"], "daemon_hello");
+    let parent = create_parent(&mut client, dir.path(), &parent_script, &child_script, "c1");
+    let parent_id = parent["activeSessionId"]
+        .as_str()
+        .or_else(|| parent["id"].as_str())
+        .expect("parent active session id")
+        .to_string();
+    let parent_session_id = parent["sessionId"]
+        .as_str()
+        .expect("parent session id")
+        .to_string();
+    let parent_session_file = parent["sessionFile"]
+        .as_str()
+        .expect("parent session file")
+        .to_string();
+
+    // Turn 1: the kernel cell spawns the child mid-turn through the
+    // product `rlm.spawn` surface.
+    run_turn(&mut client, &parent_id, "spawn the kid", "t1");
+    let spawned: Value =
+        serde_json::from_str(&await_receipt(&spawn_receipt)).expect("spawn receipt json");
+    assert!(
+        !spawn_error.exists(),
+        "the spawn cell failed: {}",
+        std::fs::read_to_string(&spawn_error).unwrap_or_default()
+    );
+    let child_id = spawned["rlm_child_id"]
+        .as_str()
+        .expect("child id")
+        .to_string();
+    let child_session_dir = spawned["session_dir"]
+        .as_str()
+        .expect("child session dir")
+        .to_string();
+
+    // The child settles (its scripted reply ends its run), then its
+    // no-reply notice rides the parent's follow-up route.
+    // The registry row carries the RAW run status (`done`, not the
+    // kernel roster's `completed`).
+    let settle_deadline = Instant::now() + Duration::from_mins(2);
+    loop {
+        if rlm_children_rows(&mut client, "g1", &parent_id)
+            .into_iter()
+            .any(|row| row["id"] == json!(child_id) && row["status"] == "done")
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < settle_deadline,
+            "the child never settled: rows {:?}; agent dir {}",
+            rlm_children_rows(&mut client, "g1", &parent_id),
+            agent_dir.display()
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    // The ledger paths are spelled independently of the product's
+    // derivation on purpose: byte-compatible LOCATIONS are part of the TS
+    // parity contract this e2e pins.
+    let parent_ledger_path = std::path::Path::new(&parent_session_file)
+        .parent()
+        .and_then(Path::parent)
+        .map(|sessions| sessions.join("session-artifacts").join(&parent_session_id))
+        .map(|artifacts| artifacts.join("semantic-edges.jsonl"))
+        .expect("parent ledger path");
+    let child_ledger_path = Path::new(&child_session_dir).join("semantic-edges.jsonl");
+    // The registry marks `done` before the parent records the return, and
+    // the notice's follow-up turn starts later still: poll until the
+    // parent ledger holds the return AND a later request (the same
+    // deadline; the terminal shape, not a fixed delay).
+    let (parent_ledger, child_ledger) = loop {
+        let parent_ledger = semantic_ledger(&parent_ledger_path);
+        let child_ledger = semantic_ledger(&child_ledger_path);
+        let returned_at = parent_ledger
+            .iter()
+            .position(|event| matches!(event, LedgerEvent::ChildReturned { .. }));
+        let next_turn_started = returned_at.is_some_and(|at| {
+            parent_ledger[at + 1..]
+                .iter()
+                .any(|event| matches!(event, LedgerEvent::RequestStarted { .. }))
+        });
+        if next_turn_started {
+            break (parent_ledger, child_ledger);
+        }
+        assert!(
+            Instant::now() < settle_deadline,
+            "the parent never recorded the return and its notice turn: parent {parent_ledger:?}; child {child_ledger:?}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    };
+
+    // The parent's first turn is the spawning request (the cell runs
+    // inside it, so the anchor names it).
+    let spawning_request = parent_ledger
+        .iter()
+        .find_map(|event| match event {
+            LedgerEvent::RequestStarted {
+                request_id,
+                compaction_id: None,
+                ..
+            } => Some(request_id.clone()),
+            _ => None,
+        })
+        .expect("the parent's first request_started");
+    let child_session_id = child_ledger_session_id(&child_ledger);
+    assert_eq!(
+        child_ledger.first(),
+        Some(&LedgerEvent::SessionRegistered {
+            session_id: child_session_id.clone(),
+            parent_session_id: Some(parent_session_id),
+            spawned_by_request_id: Some(spawning_request.clone()),
+        })
+    );
+    let child_last_committed = child_ledger
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            LedgerEvent::RequestFinished { request_id } => Some(request_id.clone()),
+            _ => None,
+        })
+        .expect("the child committed its reply turn");
+    // The parent recorded the child's return with the child's last
+    // committed request, after the spawning turn committed and BEFORE the
+    // notice's follow-up turn minted the parent's next request (the
+    // pending edge must exist before that turn's request_started).
+    let returned_at = parent_ledger
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                LedgerEvent::ChildReturned {
+                    session_id: _,
+                    child_session_id: returned_child,
+                    request_id,
+                } if returned_child == &child_session_id && request_id == &child_last_committed
+            )
+        })
+        .unwrap_or_else(|| panic!("the parent recorded the child's return: {parent_ledger:?}"));
+    assert!(
+        parent_ledger[..returned_at]
+            .iter()
+            .any(|event| matches!(event, LedgerEvent::RequestFinished { request_id } if request_id == &spawning_request)),
+        "the spawning turn committed before the return: {parent_ledger:?}"
+    );
+}
+
+/// The durable session id the child's `session_registered` names (the
+/// parent-side `child_returned` assertions pin the same id across both
+/// ledgers).
+fn child_ledger_session_id(ledger: &[LedgerEvent]) -> String {
+    ledger
+        .iter()
+        .find_map(|event| match event {
+            LedgerEvent::SessionRegistered { session_id, .. } => Some(session_id.clone()),
+            _ => None,
+        })
+        .expect("the child registered")
 }

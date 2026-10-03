@@ -338,6 +338,7 @@ async fn drive_onboarding_pane(
                 // (the headless harness replays them against the session
                 // screen once the pane releases).
                 UiInput::Submit(_)
+                | UiInput::SubmitAndSettle { .. }
                 | UiInput::SettleIdle
                 | UiInput::Mouse(_)
                 | UiInput::WaitIdle { .. }

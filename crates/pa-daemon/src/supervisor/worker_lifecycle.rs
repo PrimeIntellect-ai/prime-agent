@@ -254,6 +254,10 @@ impl Supervisor {
             // The scripted-parent verification seam: a dropped key leaves
             // spawned children scriptless.
             "childScript",
+            // The semantic-edge spawn anchor rides the durable create so a
+            // respawned child keeps its provenance (its ledger
+            // re-registers idempotently either way).
+            "spawnedByRequestId",
             "systemPrompt",
             "appendSystemPrompt",
             "skills",

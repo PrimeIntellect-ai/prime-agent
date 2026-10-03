@@ -139,6 +139,9 @@ pub struct RlmSpawnRequest {
     pub model: Option<String>,
     /// Validated thinking level; the host checks model support.
     pub thinking: Option<String>,
+    /// The parent's in-flight turn request the spawn anchors to (TS
+    /// `spawnedByRequestId`): `None` for a spawn outside an active run.
+    pub spawned_by_request_id: Option<String>,
     pub cell_source_code: Option<String>,
 }
 
@@ -289,6 +292,15 @@ pub fn utf16_length(message: &str) -> usize {
 // Handler registration
 // ---------------------------------------------------------------------------
 
+/// The parent-side spawn anchor (TS `_startRlmChildRun`'s
+/// `spawnedByRequestId` snapshot): the in-flight turn's request id a
+/// mid-turn `rlm.spawn` names. The bridge is built before the session's
+/// agent exists, so the engine sets this once the agent is built.
+pub(crate) struct SemanticSpawnAnchor {
+    pub(crate) agent: std::sync::Weak<pa_agent::agent::Agent>,
+    pub(crate) recorder: Arc<super::semantic_edges::SemanticEdgeRecorder>,
+}
+
 /// Session-scoped RLM state the handlers share.
 pub struct RlmHostBridge {
     registry: Arc<ModelRegistry>,
@@ -297,6 +309,9 @@ pub struct RlmHostBridge {
     /// The child-usage attribution producer `rlm.spawn` registers into
     /// and the daemon's child observation drives.
     pub usage: Arc<super::rlm_usage::RlmChildUsageAttributions>,
+    /// The spawn anchor [`register_run`] reads the in-flight turn from
+    /// (`None` until the engine built the session's agent).
+    pub(crate) semantic_spawn: std::sync::OnceLock<SemanticSpawnAnchor>,
 }
 
 impl RlmHostBridge {
@@ -311,6 +326,7 @@ impl RlmHostBridge {
             notes: Arc::new(RlmProgressNotes::default()),
             host: host.unwrap_or_else(|| Arc::new(NoRlmChildren)),
             usage,
+            semantic_spawn: std::sync::OnceLock::new(),
         }
     }
 }
@@ -405,13 +421,11 @@ fn register_progress_note(handlers: &mut HostRequestHandlers, bridge: &Arc<RlmHo
 }
 
 fn register_run(handlers: &mut HostRequestHandlers, bridge: &Arc<RlmHostBridge>) {
-    let host = Arc::clone(&bridge.host);
-    let usage = Arc::clone(&bridge.usage);
+    let bridge = Arc::clone(bridge);
     handlers.register(
         "rlm.run",
         host_handler(move |payload| {
-            let host = Arc::clone(&host);
-            let usage = Arc::clone(&usage);
+            let bridge = Arc::clone(&bridge);
             Box::pin(async move {
                 let data = &payload.data;
                 let Some(prompt) = data.get("prompt").and_then(Value::as_str) else {
@@ -419,12 +433,29 @@ fn register_run(handlers: &mut HostRequestHandlers, bridge: &Arc<RlmHostBridge>)
                 };
                 let mut request = spawn_request_from_payload(prompt, data)?;
                 request.cell_source_code = payload.cell_source_code.clone();
-                let handle = host.spawn(request).await?;
+                // TS `_startRlmChildRun`: the spawning request is the turn
+                // whose tool call is executing now (the anchor is computed
+                // before the spawn admission's first await); a spawn
+                // outside an active run has no such turn, and an absent
+                // edge beats a wrong one.
+                request.spawned_by_request_id = match bridge.semantic_spawn.get() {
+                    Some(anchor) => {
+                        let agent = anchor.agent.upgrade();
+                        match agent {
+                            Some(agent) if agent.state().await.is_streaming => {
+                                anchor.recorder.last_turn_request_id()
+                            }
+                            _ => None,
+                        }
+                    }
+                    None => None,
+                };
+                let handle = bridge.host.spawn(request).await?;
                 // TS `_findLastAssistantMessage` at spawn: the spawning
                 // assistant row (persisted at `message_end` before tool
                 // execution) is the target every child-usage attribution
                 // folds into.
-                usage.register_spawn(&handle.rlm_child_id).await;
+                bridge.usage.register_spawn(&handle.rlm_child_id).await;
                 serde_json::to_value(&handle).map_err(anyhow::Error::new)
             })
         }),
@@ -453,6 +484,7 @@ fn spawn_request_from_payload(prompt: &str, data: &Value) -> anyhow::Result<RlmS
         name,
         model,
         thinking,
+        spawned_by_request_id: None,
         cell_source_code: None,
     })
 }

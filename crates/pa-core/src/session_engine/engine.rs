@@ -117,6 +117,12 @@ pub struct SessionEngineConfig {
     /// the daemon worker stays `None` because its turn dispatch owns
     /// routing (its queued lanes re-dispatch every batch).
     pub image_model_router: Option<super::image_model_routing::ImageModelRouter>,
+    /// The session's semantic-edge identity (TS
+    /// `semanticEdgeLedgerPath` + `semanticParentSessionId` +
+    /// `semanticSpawnedByRequestId`): the recorder's ledger location and
+    /// spawn provenance. `None` keeps the session off the ledger (no
+    /// request ids on the wire).
+    pub semantic_edges: Option<super::semantic_edges::SemanticEdgeIdentity>,
 }
 
 /// An assembled, running session.
@@ -630,6 +636,25 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
             &config.agent_dir,
         )),
     );
+    // Semantic edges (TS `semantic-edges.ts`): the recorder opens this
+    // session's request-id ledger, and its stream wrapper goes OUTERMOST
+    // over the timing-instrumented fn (TS `sdk.ts` instruments first, the
+    // `AgentSession` constructor wraps semantic edges over it). The side
+    // question keeps the pre-semantic fn, so its calls carry no id.
+    let timing_stream_fn = super::request_timing::instrument_stream_fn(
+        std::sync::Arc::clone(&request_timing_wiring),
+        stream_fn,
+    );
+    let side_question_stream_fn = std::sync::Arc::clone(&timing_stream_fn);
+    let semantic_recorder = config.semantic_edges.take().map(|identity| {
+        std::sync::Arc::new(super::semantic_edges::SemanticEdgeRecorder::open(identity))
+    });
+    let agent_stream_fn = match &semantic_recorder {
+        Some(recorder) => {
+            super::semantic_edges::wrap_stream_fn(std::sync::Arc::clone(recorder), timing_stream_fn)
+        }
+        None => timing_stream_fn,
+    };
     let agent = Agent::new(AgentOptions {
         initial_state: AgentInitialState {
             system_prompt: Some(system_prompt.clone()),
@@ -638,10 +663,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
             tools: Some(tools),
             messages: initial_messages,
         },
-        stream_fn: Some(super::request_timing::instrument_stream_fn(
-            std::sync::Arc::clone(&request_timing_wiring),
-            stream_fn,
-        )),
+        stream_fn: Some(agent_stream_fn),
         // The session conversion rules apply at the loop's LLM boundary
         // (TS `convertToLlm`): bookkeeping custom rows drop, everything
         // else (the harness digest included) becomes a user turn.
@@ -680,6 +702,19 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     });
 
     let agent = Arc::new(agent);
+    // TS `_startRlmChildRun`'s spawn anchor: the `rlm.spawn` host handler
+    // names the parent's in-flight turn through this weak seam (the
+    // bridge is built before the agent exists, and a strong edge would
+    // cycle the bridge -> agent -> kernel -> bridge graph).
+    if let Some(recorder) = &semantic_recorder {
+        let _ = wiring
+            .rlm
+            .semantic_spawn
+            .set(super::rlm_host::SemanticSpawnAnchor {
+                agent: Arc::downgrade(&agent),
+                recorder: std::sync::Arc::clone(recorder),
+            });
+    }
     let telemetry_agent = std::sync::Arc::clone(&agent);
     let mut session = AgentSession::from_session_arc(
         agent.clone(),
@@ -735,6 +770,11 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     // The embedding's image-model routing seam (the headless surfaces
     // install theirs; the daemon worker's turn dispatch owns routing).
     session.set_image_model_router(config.image_model_router.clone());
+    // The semantic-edge handoff: the daemon's child registry and retry
+    // park read the recorder; the side question keeps the pre-semantic
+    // fn so its calls carry no id.
+    session.set_semantic_edges(semantic_recorder);
+    session.set_side_question_stream_fn(side_question_stream_fn);
     // The armed image route never outlives the run that armed it (TS
     // `_clearModelOverrideWhenIdle`: the override drops once the turn is
     // idle, so a picker switch between turns is live immediately — the

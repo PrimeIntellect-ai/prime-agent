@@ -453,4 +453,12 @@ pub struct AgentSessionEngine {
     /// this worker emits through one lazily-built client.
     pub(crate) model_refusal_telemetry:
         std::sync::Arc<crate::model_allowlist::ModelRefusalTelemetry>,
+    /// This session's semantic-edge identity (TS
+    /// `semanticEdgeLedgerPath`/`semanticParentSessionId`/
+    /// `semanticSpawnedByRequestId`): stamped by `configure_rlm_identity`
+    /// from the create's semantic spawn origin and read once per session
+    /// build, so every build's recorder reopens the same ledger and
+    /// re-registration stays idempotent.
+    pub(crate) semantic_identity:
+        std::sync::Mutex<Option<pa_core::session_engine::semantic_edges::SemanticEdgeIdentity>>,
 }
