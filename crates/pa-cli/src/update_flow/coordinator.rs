@@ -30,6 +30,11 @@ use super::swap;
 /// coordinator's environment.
 pub const UPDATE_CANDIDATE_DIR_ENV: &str = "PRIME_AGENT_UPDATE_CANDIDATE_DIR";
 
+/// The coordinator's own fence-wait budget (TS
+/// `UPDATE_RESTART_PREDECESSOR_FENCE_TIMEOUT_MS`: 60 s, ten times the
+/// supervisor's own 10 s default).
+const UPDATE_RESTART_PREDECESSOR_FENCE_TIMEOUT_MS: u64 = 60_000;
+
 /// One coordinator run's fixed inputs.
 pub struct CoordinatorOptions {
     pub agent_dir: PathBuf,
@@ -119,6 +124,14 @@ async fn drive(
     socket_dir: &Path,
 ) -> std::result::Result<(), PhaseFailure> {
     let budget = &options.budget;
+    // The stop window opens here (TS package-manager-cli.ts
+    // `runDaemonUpdateRestartCoordinator`: `acquireDaemonShutdownAdmission`
+    // before the probe; 5000 ms lease renewed every 1000 ms). While it is
+    // held, a third-party successor refuses its own boot ("Daemon shutdown
+    // is in progress"); the handle releases on drop, and a crashed holder
+    // stops renewing, so the window self-heals inside the lease.
+    let mut admission = pa_daemon::supervisor_ownership::ShutdownAdmission::acquire()
+        .map_err(PhaseFailure::before_stop)?;
     // `Preparing`: connect the old supervisor. An unreachable daemon is a
     // daemon-less update: an empty prepare is trivially durable and the
     // successor boots without a roster (the workers are already gone).
@@ -135,7 +148,7 @@ async fn drive(
             .await
             .set_predecessor(identity.clone())
             .map_err(PhaseFailure::before_stop)?;
-        predecessor = Some(identity);
+        predecessor = Some(identity.clone());
         writer
             .lock()
             .await
@@ -146,6 +159,24 @@ async fn drive(
             .map_err(PhaseFailure::before_stop)?;
         let prepared_dir = update_prepared_dir(socket_dir, update_id);
         check_marker_fresh(&prepared_dir).map_err(PhaseFailure::before_stop)?;
+        // Pin the dying predecessor from its verified hello (TS
+        // `prepareConnectedDaemonUpdateRestart` ->
+        // `persistPreparedRestartFence`): the fence is what a third-party
+        // successor bows out against once this listener drops. A hello
+        // without a fixed identity leaves the window unfenced, exactly
+        // like TS's old-build daemons.
+        let hello_socket_path = client
+            .hello()
+            .get("supervisorSocketPath")
+            .and_then(serde_json::Value::as_str);
+        if let Some(fence) = pa_daemon::supervisor_ownership::FenceIdentity::from_verified_hello(
+            &identity,
+            &options.socket_path,
+            hello_socket_path,
+        ) {
+            pa_daemon::supervisor_ownership::persist_startup_fence(&options.socket_path, &fence)
+                .map_err(PhaseFailure::before_stop)?;
+        }
         // The roster artifact is the successor's input (consumed from the
         // env at its boot, spec §6 step 2); the coordinator never parses it.
         roster_path = Some(update_roster_path(&prepared_dir));
@@ -155,7 +186,12 @@ async fn drive(
             .set_state(UpdateState::Prepared)
             .map_err(PhaseFailure::before_stop)?;
         // `Stopping`: the only consumption of the prepared artifact (spec
-        // §5) - the slice-3 dispatch stops the workers in budget.
+        // §5) - the slice-3 dispatch stops the workers in budget. The
+        // admission must still be ours at the stop (TS `assertOrRenew`
+        // before `shutdownConnectedDaemonAndWait`).
+        admission
+            .assert_or_renew()
+            .map_err(PhaseFailure::before_stop)?;
         writer
             .lock()
             .await
@@ -185,6 +221,18 @@ async fn drive(
             ));
         }
     }
+    // Wait the persisted fence out before anything takes the socket again
+    // (TS package-manager-cli.ts:1440, `UPDATE_RESTART_PREDECESSOR_FENCE_TIMEOUT_MS`):
+    // the record clears only when the pinned predecessor process is gone -
+    // either this wait's own dead-pin clear or the predecessor's exit.
+    // Bounded like TS (60 s), so a pinned survivor can never wedge the
+    // update.
+    pa_daemon::supervisor_ownership::wait_for_startup_fence(
+        &options.socket_path,
+        UPDATE_RESTART_PREDECESSOR_FENCE_TIMEOUT_MS,
+    )
+    .await
+    .map_err(PhaseFailure::after_stop)?;
     writer
         .lock()
         .await
@@ -214,6 +262,14 @@ async fn drive(
         update_id.as_ref(),
     )
     .map_err(PhaseFailure::after_stop)?;
+    // Close the stop window right before the successor spawns (TS:
+    // `assertOrRenew` + `release` immediately before the spawn): the fence
+    // has confirmed the predecessor is gone, so from here the successor
+    // races only the ordinary cold-boot arbitration.
+    admission
+        .assert_or_renew()
+        .map_err(PhaseFailure::after_stop)?;
+    admission.release();
     // `Booting`: spawn the successor from the candidate release dir, roster
     // via env (spec §6), hello within `T_boot`.
     writer

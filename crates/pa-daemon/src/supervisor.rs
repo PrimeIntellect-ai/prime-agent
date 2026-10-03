@@ -118,7 +118,7 @@ use crate::update_roster::{
     build_update_roster, supervisor_identity, UpdateRosterInputs, WorkerSnapshot,
 };
 use crate::update_stop::{stop_workers_gracefully, WorkerStopVerdict, WORKER_REQUEST_TIMEOUT_MS};
-use crate::{socket, util};
+use crate::{socket, supervisor_ownership, util};
 
 pub struct Supervisor {
     pub(crate) options: SupervisorOptions,
@@ -353,6 +353,21 @@ impl Supervisor {
     /// Panics when the telemetry mutex is poisoned (a holder panicked
     /// while holding the lock).
     pub async fn run(self: Arc<Self>) -> Result<()> {
+        // The admission contract (TS daemon-supervisor.ts start():855-857,
+        // the choreography slot before prepare/listen and before any
+        // service work): a startup fence pins a dying predecessor until
+        // its process identity is gone, and an active shutdown admission
+        // means a stop window owns this socket. A third-party successor
+        // waits the fence out and refuses under the admission - never a
+        // mid-window takeover of the path. Both checks are no-ops on a
+        // healthy boot (one record read each; no fence, no admission), and
+        // a registry failure fails the boot before anything else runs.
+        supervisor_ownership::wait_for_startup_fence(
+            &self.options.socket_path,
+            supervisor_ownership::STARTUP_FENCE_TIMEOUT_MS,
+        )
+        .await?;
+        supervisor_ownership::refuse_while_shutdown_admission_active()?;
         // Before any socket or worker exists: workers and their kernels
         // inherit the raised limit.
         let open_file_limit = pa_core::platform::process::raise_open_file_limit();

@@ -74,12 +74,17 @@ pub(super) fn remove_socket_file(socket_path: &Path) -> bool {
 pub(super) fn force_stop_tracked_workers(
     supervisor_socket_path: &Path,
     agent_dir: &Path,
-) -> Vec<String> {
+    assert: &dyn Fn() -> anyhow::Result<()>,
+) -> anyhow::Result<Vec<String>> {
     let mut failures = Vec::new();
     for worker in super::find_all_tracked_workers(agent_dir) {
         if worker.supervisor_socket_path != supervisor_socket_path {
             continue;
         }
+        // The stop window must still be ours at every worker stop (TS
+        // `forceStopTrackedWorkers` threads `assertAdmission` through the
+        // same loop).
+        assert()?;
         if !stop_tracked_process(worker.pid, worker.process_start_id.as_deref()) {
             failures.push(format!("could not safely stop worker (pid {})", worker.pid));
             continue;
@@ -88,7 +93,7 @@ pub(super) fn force_stop_tracked_workers(
         let _ = std::fs::remove_file(&worker.descriptor_path);
         let _ = std::fs::remove_file(&worker.recovery_journal_path);
     }
-    failures
+    Ok(failures)
 }
 
 /// Identity-gated stop: SIGTERM the worker (it exits keeping its resume
@@ -134,7 +139,8 @@ pub(super) fn terminate_verified_residuals(
     stopped: &mut Vec<(String, String)>,
     failed: &mut Vec<(String, String)>,
     handled_pids: &std::collections::HashSet<u32>,
-) {
+    assert: &dyn Fn() -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
     let started = std::time::Instant::now();
     let mut previous_signature: Option<String> = None;
     let mut quiet_since: Option<u128> = None;
@@ -147,7 +153,7 @@ pub(super) fn terminate_verified_residuals(
             previous_signature = None;
             quiet_since = quiet_since.or(Some(now));
             if evaluate_shutdown_quiet_period(now, quiet_since) {
-                return;
+                return Ok(());
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
             continue;
@@ -156,11 +162,11 @@ pub(super) fn terminate_verified_residuals(
         let signature = listener_signature(&listeners);
         if started.elapsed().as_millis() >= SHUTDOWN_CONVERGENCE_TIMEOUT_MS {
             record_residuals(&listeners, failed, "kept respawning during shutdown");
-            return;
+            return Ok(());
         }
         if previous_signature.as_deref() == Some(signature.as_str()) {
             record_residuals(&listeners, failed, "remained after shutdown");
-            return;
+            return Ok(());
         }
         previous_signature = Some(signature);
         let mut seen_pids: std::collections::HashSet<u32> = std::collections::HashSet::new();
@@ -168,6 +174,10 @@ pub(super) fn terminate_verified_residuals(
             if !seen_pids.insert(listener.pid) {
                 continue;
             }
+            // The stop window must still be ours at every residual kill
+            // (TS `terminateVerifiedResiduals` threads `assertAdmission`
+            // into the listener termination).
+            assert()?;
             let already_reported = handled_pids.contains(&listener.pid);
             if terminate_verified_listener(listener) && !already_reported {
                 stopped.push((
@@ -264,11 +274,13 @@ mod tests {
     fn residual_sweep_over_an_empty_fixture_root_reports_nothing() {
         // No product daemon is spawned here: the sweep over an empty listener
         // set completes after the quiet period and reports nothing.
+        let assert = || Ok(());
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = fixture_root(tmp.path());
         let mut stopped: Vec<(String, String)> = Vec::new();
         let mut failed: Vec<(String, String)> = Vec::new();
-        terminate_verified_residuals(&root, &mut stopped, &mut failed, &HashSet::new());
+        terminate_verified_residuals(&root, &mut stopped, &mut failed, &HashSet::new(), &assert)
+            .expect("the sweep over an empty root completes");
         assert!(stopped.is_empty());
         assert!(failed.is_empty());
     }
@@ -283,9 +295,17 @@ mod tests {
                 socket_dir: PathBuf::from(dir),
                 default_socket_path: PathBuf::from(dir).join("daemon.sock"),
             };
+            let assert = || Ok(());
             let mut stopped: Vec<(String, String)> = Vec::new();
             let mut failed: Vec<(String, String)> = Vec::new();
-            terminate_verified_residuals(&root, &mut stopped, &mut failed, &HashSet::new());
+            terminate_verified_residuals(
+                &root,
+                &mut stopped,
+                &mut failed,
+                &HashSet::new(),
+                &assert,
+            )
+            .expect("the sweep never fails on the never-touch dirs");
             assert!(
                 stopped.is_empty(),
                 "sweep rooted at {dir} must stop nothing"

@@ -117,6 +117,7 @@ pub(crate) mod streaming;
 pub mod supervisor;
 pub mod supervisor_link;
 pub(crate) mod supervisor_lost;
+pub mod supervisor_ownership;
 pub(crate) mod supervisor_parent_death;
 pub(crate) mod supervisor_roster;
 pub(crate) mod supervisor_roster_seed;

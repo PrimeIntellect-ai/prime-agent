@@ -66,8 +66,11 @@ impl Drop for Daemon {
 }
 
 /// Spawn the real supervisor on a fixture socket the way production does
-/// (`prime-agent --mode daemon --daemon-socket`), with agent dir and TMPDIR
-/// pinned inside the fixture root so every socket it ever makes stays there.
+/// (`prime-agent --mode daemon --daemon-socket`), with agent dir, TMPDIR,
+/// and the supervisor-ownership registry pinned inside the fixture root so
+/// every socket it ever makes stays there - and no shutdown test's
+/// admission window can make a concurrent boot refuse (the registry is
+/// shared state; an unpinned boot would read a sibling test's stop window).
 #[allow(clippy::zombie_processes)]
 fn spawn_daemon(socket: &Path, agent_dir: &Path, tmp_dir: &Path) -> Daemon {
     std::fs::create_dir_all(agent_dir).expect("agent dir");
@@ -78,6 +81,10 @@ fn spawn_daemon(socket: &Path, agent_dir: &Path, tmp_dir: &Path) -> Daemon {
         .arg(socket)
         .env("PRIME_AGENT_CODING_AGENT_DIR", agent_dir)
         .env("TMPDIR", tmp_dir)
+        .env(
+            pa_daemon::supervisor_ownership::REGISTRY_DIR_ENV,
+            tmp_dir.join("registry"),
+        )
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -114,6 +121,10 @@ fn run_cli(root: &Path, args: &[&str]) -> Output {
         .args(args)
         .env("PRIME_AGENT_CODING_AGENT_DIR", &agent_dir)
         .env("TMPDIR", root)
+        .env(
+            pa_daemon::supervisor_ownership::REGISTRY_DIR_ENV,
+            root.join("registry"),
+        )
         .stdin(Stdio::null());
     for key in SCRUB_ENV {
         command.env_remove(key);

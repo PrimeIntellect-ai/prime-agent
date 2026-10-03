@@ -205,7 +205,22 @@ impl LockDir {
     /// another process, and any underlying I/O error (missing parent,
     /// permissions, stale-reclaim failures) as-is.
     pub fn acquire(file: &Path, stale_after: Duration) -> io::Result<Self> {
-        let path = Self::path_for(file);
+        Self::acquire_at(&Self::path_for(file), stale_after)
+    }
+
+    /// [`LockDir::acquire`] at an explicit lock-directory path - for
+    /// protocols that name the lock directory itself (the TS supervisor
+    /// registry guard locks its directory at `<registryDir>/.guard`, not
+    /// at `<file>.lock`), so a rust process and a TS process serialize on
+    /// the SAME on-disk lock.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`io::ErrorKind::WouldBlock`] when a fresh lock is held by
+    /// another process, and any underlying I/O error (missing parent,
+    /// permissions, stale-reclaim failures) as-is.
+    pub fn acquire_at(path: &Path, stale_after: Duration) -> io::Result<Self> {
+        let path = path.to_path_buf();
         let stale_after = stale_after.max(MIN_STALE);
         match Self::create(&path) {
             Ok(()) => Ok(LockDir { path }),
@@ -372,6 +387,43 @@ mod tests {
             assert!(std::fs::read_dir(&path).unwrap().next().is_none());
         }
         assert!(!lock_of(&file).exists(), "release removes the directory");
+    }
+
+    #[test]
+    fn acquire_at_locks_the_exact_named_path() {
+        // The TS supervisor registry guards its directory with a lock
+        // directory named exactly `<registryDir>/.guard` (proper-lockfile's
+        // lockfilePath), so a rust visitor must be able to take the same
+        // on-disk lock - not the `{file}.lock` convention - with the same
+        // empty-directory body and the same off-second mtime probe a TS
+        // holder writes (byte-compatibility both directions).
+        let dir = tempfile::tempdir().unwrap();
+        let guard = dir.path().join(".guard");
+        {
+            let _held = LockDir::acquire_at(&guard, MIN_STALE).unwrap();
+            assert!(guard.is_dir(), "the named path itself is the lock");
+            assert!(
+                std::fs::read_dir(&guard).unwrap().next().is_none(),
+                "the lock body is the empty directory proper-lockfile writes"
+            );
+            assert!(!lock_of(&guard).exists(), "no .lock twin is created");
+            let modified = std::fs::metadata(&guard)
+                .unwrap()
+                .modified()
+                .unwrap()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap();
+            assert_eq!(
+                modified.as_millis() % 1000,
+                5,
+                "the same ceil-plus-5ms probe a TS holder's lock carries"
+            );
+            assert!(
+                LockDir::acquire_at(&guard, MIN_STALE).is_err(),
+                "a fresh named lock is contention"
+            );
+        }
+        assert!(!guard.exists(), "release removes the named lock");
     }
 
     #[test]
