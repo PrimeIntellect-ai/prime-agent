@@ -1,10 +1,13 @@
 //! Host request handling: execute-side requests answered by the host
 //! (harness/goal/etc.) and their settle/exit waits.
 
+use futures::FutureExt as _;
+
 use super::{
     anyhow, json, lock, Arc, Duration, HostRequestPayload, Inner, Value,
     MAX_HANDLED_HOST_REQUEST_IDS,
 };
+use crate::kernel::shared::HostHandlerFuture;
 
 /// The cell source attached to a host request is capped at this many
 /// characters (TS #2475: `MAX_CELL_SOURCE_CHARS`, repl-manager.ts:81-82):
@@ -33,7 +36,7 @@ fn cap_cell_source(code: &str) -> String {
 impl Inner {
     /// Dispatch one typed request from kernel code to the registered handler
     /// and reply over the protocol. Unhandled requests answer with an error.
-    pub(crate) fn start_host_request(self: &Arc<Self>, request_id: &str, data: Value) {
+    pub(crate) fn start_host_request(self: &Arc<Self>, request_id: &str, data: &Value) {
         {
             let mut g = lock(&self.guarded);
             let (seen, order) = &mut g.handled_host_request_ids;
@@ -50,10 +53,24 @@ impl Inner {
                 }
             }
         }
+        let mut request = self.host_request_future(data);
+        // Run the handler's synchronous prefix in line, before the reader
+        // takes the next frame (TS `repl-manager.ts` dispatches through an
+        // async IIFE, whose body runs up to its first await immediately).
+        // The kernel orders frames on purpose: `bash.consumed` leaves ahead
+        // of the reading cell's `done` so its notice is withdrawn before the
+        // turn boundary probes the steering lane. Spawning the whole handler
+        // let `done` overtake the withdrawal, the probe saw the stale notice
+        // and ended the run, and the withdrawal then left the session idle
+        // with nothing queued to resume it.
+        let ready = (&mut request).now_or_never();
         let inner = Arc::clone(self);
         let request_id = request_id.to_string();
         let task = tokio::spawn(async move {
-            let result = inner.handle_host_request(&data).await;
+            let result = match ready {
+                Some(result) => result,
+                None => request.await,
+            };
             let reply = match result {
                 Ok(result) => json!({ "status": "ok", "result": result }),
                 Err(error) => {
@@ -76,23 +93,26 @@ impl Inner {
         g.host_inflight.push(task);
     }
 
-    async fn handle_host_request(&self, data: &Value) -> anyhow::Result<Value> {
+    /// Resolve the handler for one request and start it: the returned future
+    /// owns everything it needs, so the caller can poll it in line first.
+    fn host_request_future(&self, data: &Value) -> HostHandlerFuture {
         let Some(obj) = data.as_object() else {
-            return Err(anyhow!("host request payload must be an object"));
+            return Box::pin(async { Err(anyhow!("host request payload must be an object")) });
         };
-        let request_type = obj
+        let Some(request_type) = obj
             .get("type")
             .and_then(Value::as_str)
             .filter(|t| !t.is_empty())
-            .ok_or_else(|| anyhow!("host request payload must have a string type"))?;
-        let handler = self
-            .options
-            .host_handlers
-            .get(request_type)
-            .ok_or_else(|| {
-                anyhow!("host request type \"{request_type}\" is not available in this session")
-            })?
-            .clone();
+        else {
+            return Box::pin(async {
+                Err(anyhow!("host request payload must have a string type"))
+            });
+        };
+        let Some(handler) = self.options.host_handlers.get(request_type).cloned() else {
+            let error =
+                anyhow!("host request type \"{request_type}\" is not available in this session");
+            return Box::pin(async move { Err(error) });
+        };
         // Tag the request with the cell that triggered it. A blocking call is
         // still the in-flight execution; detached spawns fire after the
         // scheduling cell goes idle, so fall back to that last cell's source.
@@ -111,7 +131,6 @@ impl Inner {
             data: Value::Object(payload),
             cell_source_code: None,
         })
-        .await
     }
 
     /// Wait (bounded) for the in-flight host request tasks to settle.
@@ -189,5 +208,44 @@ mod tests {
         let capped = cap_cell_source(&code);
         assert!(capped.starts_with(&"é".repeat(MAX_CELL_SOURCE_CHARS)));
         assert!(capped.ends_with(&marker()));
+    }
+
+    /// The kernel ships `bash.consumed` ahead of the reading cell's `done`
+    /// so the stale completion notice is withdrawn before the turn boundary
+    /// probes the steering lane. The handler's synchronous body must
+    /// therefore have run by the time the reader takes the next frame, not
+    /// whenever a spawned task gets scheduled.
+    #[tokio::test]
+    async fn a_host_handler_runs_its_synchronous_body_before_the_next_frame() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        use crate::kernel::manager::ReplKernelManager;
+        use crate::kernel::protocol::Event;
+        use crate::kernel::shared::{host_handler, HostRequestHandlers, KernelManagerOptions};
+
+        let withdrawn = Arc::new(AtomicBool::new(false));
+        let mut host_handlers = HostRequestHandlers::new();
+        let flag = Arc::clone(&withdrawn);
+        host_handlers.register(
+            "bash.consumed",
+            host_handler(move |_payload| {
+                let flag = Arc::clone(&flag);
+                async move {
+                    flag.store(true, Ordering::SeqCst);
+                    Ok(json!({}))
+                }
+            }),
+        );
+        let manager = ReplKernelManager::new(KernelManagerOptions {
+            host_handlers,
+            ..KernelManagerOptions::default()
+        });
+
+        manager.inner.handle_event(Event::HostRequest {
+            id: "consumed-1".to_string(),
+            data: json!({ "type": "bash.consumed", "pid": 42, "command": "ls" }),
+        });
+
+        assert!(withdrawn.load(Ordering::SeqCst));
     }
 }
