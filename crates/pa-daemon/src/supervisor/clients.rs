@@ -5,11 +5,15 @@ use super::{
     default_server_capabilities, input_admission_id, json, parse_supervisor_command_line,
     response_failure, response_line, response_success, salvage_command_type, salvage_id,
     subscribers, update_gate_refuses, util, Arc, AsyncBufReadExt, AsyncWriteExt, BufReader,
-    ClientRouting, DaemonCommand, DaemonOutbound, DaemonRuntimeIdentity, EnvelopeParseError, Map,
-    Ordering, Outbound, Result, RouteAdmission, Supervisor, TransportStream, TypedCreateRejection,
-    Value, DAEMON_APP_VERSION, DAEMON_SCHEMA_ID, DAEMON_SCHEMA_REVISION, ROUTE_TIMEOUT_MS,
-    UPDATE_PREPARING_MESSAGE,
+    ClientRouting, DaemonCommand, DaemonOutbound, DaemonRuntimeIdentity, Duration,
+    EnvelopeParseError, Map, Ordering, Outbound, ResidentWorker, Result, RouteAdmission,
+    Supervisor, TransportStream, TypedCreateRejection, Value, DAEMON_APP_VERSION, DAEMON_SCHEMA_ID,
+    DAEMON_SCHEMA_REVISION, ROUTE_TIMEOUT_MS, UPDATE_PREPARING_MESSAGE,
 };
+
+/// TS `OWNED_WORKER_DISCONNECT_GRACE_MS`: how long a client-owned worker
+/// keeps running after its owner's last connection closes.
+const OWNED_WORKER_DISCONNECT_GRACE: Duration = Duration::from_secs(30);
 
 async fn write_line<W: AsyncWriteExt + Unpin>(writer: &mut W, value: &Value) -> Result<usize> {
     let mut line = serde_json::to_string(value)?;
@@ -72,12 +76,41 @@ pub(crate) fn client_command_payload(
 }
 
 impl Supervisor {
+    /// Register the connection, serve it, then deregister and arm the
+    /// owner-disconnect cleanup (TS socket `cleanup`) on every exit path.
     pub(super) async fn handle_client(
         self: Arc<Self>,
         stream: Box<dyn TransportStream>,
     ) -> Result<()> {
+        let connection_id = util::new_display_id();
+        let effective_client_id = Arc::new(std::sync::Mutex::new(connection_id.clone()));
+        self.client_connections
+            .lock()
+            .unwrap()
+            .insert(connection_id.clone(), Arc::clone(&effective_client_id));
+        let served = Arc::clone(&self)
+            .serve_client(
+                stream,
+                connection_id.clone(),
+                Arc::clone(&effective_client_id),
+            )
+            .await;
+        self.client_connections
+            .lock()
+            .unwrap()
+            .remove(&connection_id);
+        let owner = effective_client_id.lock().unwrap().clone();
+        self.schedule_owned_worker_cleanup_for_client(&owner).await;
+        served
+    }
+
+    async fn serve_client(
+        self: Arc<Self>,
+        stream: Box<dyn TransportStream>,
+        connection_id: String,
+        effective_client_id: Arc<std::sync::Mutex<String>>,
+    ) -> Result<()> {
         let (reader, mut writer) = stream.split();
-        let client_id = util::new_display_id();
         let hello = DaemonOutbound::DaemonHello {
             socket_path: self.options.socket_path.to_string_lossy().to_string(),
             protocol: current_protocol_info(),
@@ -98,7 +131,7 @@ impl Supervisor {
             supervisor_process_start_id: crate::protocol::process_start_id(std::process::id()),
             supervisor_socket_path: Some(self.options.socket_path.to_string_lossy().to_string()),
             update_resume: Some(self.restore.hello_resume()),
-            client_id: client_id.clone(),
+            client_id: connection_id.clone(),
             server_capabilities: default_server_capabilities(),
             rest: Map::default(),
         };
@@ -107,7 +140,6 @@ impl Supervisor {
         let mut reader = BufReader::new(reader);
         let mut line = String::new();
         let mut events = self.events.subscribe();
-        let connection_id = client_id.clone();
         // Session events ride this per-connection queue (the subscriber
         // registry resolves delivery at publish time, TS `handleWorkerFrame`
         // parity); broadcast-class events keep the ring above.
@@ -119,8 +151,6 @@ impl Supervisor {
         // (attach/detach keep the registry and the session list consistent;
         // the registry insertion is the delivery boundary).
         let attached = subscribers::ClientSubscriptions::new(connection_id.clone(), targeted_tx);
-        let effective_client_id: Arc<std::sync::Mutex<String>> =
-            Arc::new(std::sync::Mutex::new(client_id.clone()));
         // Roster subscription flag shared with the per-command dispatch
         // tasks (`roster_subscribe` flips it; the event arm filters pushes).
         let roster_subscribed: Arc<std::sync::atomic::AtomicBool> =
@@ -381,6 +411,104 @@ impl Supervisor {
         connection.prompt_admissions.cancel_all_waiting();
         Ok(())
     }
+
+    /// Whether any live connection still speaks for `client_id` (one
+    /// process may hold several connections).
+    fn client_connected(&self, client_id: &str) -> bool {
+        self.client_connections
+            .lock()
+            .unwrap()
+            .values()
+            .any(|effective| *effective.lock().unwrap() == client_id)
+    }
+
+    /// TS `scheduleOwnedWorkerCleanupForClient`.
+    async fn schedule_owned_worker_cleanup_for_client(self: &Arc<Self>, client_id: &str) {
+        for resident in self.registry.list().await {
+            let owner = resident.descriptor.lock().await.owner_client_id.clone();
+            if owner.as_deref() == Some(client_id) {
+                self.schedule_owned_worker_cleanup(&resident).await;
+            }
+        }
+    }
+
+    /// Stop a client-owned worker [`OWNED_WORKER_DISCONNECT_GRACE`] after
+    /// its owner's last connection closed (TS `scheduleOwnedWorkerCleanup`).
+    /// A later arm replaces a pending timer; an owner connected at expiry
+    /// keeps the worker.
+    pub(super) async fn schedule_owned_worker_cleanup(
+        self: &Arc<Self>,
+        resident: &Arc<ResidentWorker>,
+    ) {
+        let owner = resident.descriptor.lock().await.owner_client_id.clone();
+        let Some(owner) = owner else { return };
+        if self.client_connected(&owner) {
+            return;
+        }
+        let supervisor = Arc::clone(self);
+        let timer_resident = Arc::clone(resident);
+        let deadline = tokio::time::Instant::now() + OWNED_WORKER_DISCONNECT_GRACE;
+        let task = tokio::spawn(async move {
+            tokio::time::sleep_until(deadline).await;
+            // Clear this timer's own handle first, so a later arm can only
+            // abort a sleeping timer, never a stop in progress. A newer arm's
+            // handle in the slot means this timer was replaced (and aborted).
+            {
+                let mut slot = timer_resident.owner_cleanup.lock().unwrap();
+                if slot.as_ref().map(tokio::task::AbortHandle::id) != Some(tokio::task::id()) {
+                    return;
+                }
+                slot.take();
+            }
+            if supervisor.shutting_down.load(Ordering::SeqCst) {
+                return;
+            }
+            if supervisor.client_connected(&owner) {
+                return;
+            }
+            if timer_resident
+                .descriptor
+                .lock()
+                .await
+                .owner_client_id
+                .as_deref()
+                != Some(owner.as_str())
+            {
+                return;
+            }
+            // Skip if the worker was stopped or replaced since the arm.
+            let Some(current) = supervisor.registry.get(&timer_resident.worker_id).await else {
+                return;
+            };
+            if !Arc::ptr_eq(&current, &timer_resident) {
+                return;
+            }
+            // Descriptor and registry reads can yield while the owner
+            // reconnects. Recheck immediately before claiming the stop.
+            if supervisor.client_connected(&owner) {
+                return;
+            }
+            match supervisor.stop_worker(&timer_resident).await {
+                Ok(()) => supervisor.log_line(&format!(
+                    "stopped client-owned worker {} after its owner {owner} disconnected",
+                    timer_resident.worker_id
+                )),
+                Err(error) => supervisor.log_line(&format!(
+                    "could not clean up client-owned worker {}: {error:#}",
+                    timer_resident.worker_id
+                )),
+            }
+        });
+        let previous = resident
+            .owner_cleanup
+            .lock()
+            .unwrap()
+            .replace(task.abort_handle());
+        if let Some(previous) = previous {
+            previous.abort();
+        }
+    }
+
     /// Handle one client command line: returns outbound lines in order and
     /// whether this client connection should stop.
     // One more dispatch-context input than the lint's budget: the
@@ -1094,6 +1222,8 @@ mod tests {
     #[cfg(unix)]
     use crate::supervisor::SupervisorOptions;
     #[cfg(unix)]
+    use pa_types::daemon::DaemonWorkerDescriptor;
+    #[cfg(unix)]
     use pa_types::platform::transport::TransportStream;
     #[cfg(unix)]
     use serde_json::json;
@@ -1260,5 +1390,208 @@ mod tests {
             "the log names the dropped count: {line}"
         );
         connection.abort();
+    }
+
+    // One real connection speaking for `client_id`, driven through its
+    // first response so the envelope id is the connection's effective
+    // id before it closes. "Closed" = drop the write half (EOF) and
+    // await the connection task, which runs the disconnect cleanup.
+    async fn connect_as(
+        supervisor: &Arc<Supervisor>,
+        client_id: &str,
+    ) -> (
+        tokio::task::JoinHandle<Result<()>>,
+        tokio::net::unix::OwnedWriteHalf,
+    ) {
+        let (server_side, client_side) = tokio::net::UnixStream::pair().expect("socket pair");
+        let connection = {
+            let supervisor = Arc::clone(supervisor);
+            let stream: Box<dyn TransportStream> = Box::new(server_side);
+            tokio::spawn(async move { supervisor.handle_client(stream).await })
+        };
+        let (client_read, mut client_write) = client_side.into_split();
+        let mut client = BufReader::new(client_read);
+        let mut hello = String::new();
+        client.read_line(&mut hello).await.expect("hello line");
+        let envelope = json!({
+            "type": "command",
+            "id": format!("{client_id}-command"),
+            "protocol": {"name": "prime-agent.daemon", "version": 7},
+            "clientId": client_id,
+            "command": {"type": "roster_unsubscribe", "id": format!("{client_id}-command")},
+        });
+        client_write
+            .write_all((serde_json::to_string(&envelope).unwrap() + "\n").as_bytes())
+            .await
+            .expect("send the id envelope");
+        let mut response = String::new();
+        client.read_line(&mut response).await.expect("the response");
+        assert!(
+            response.contains("\"success\":true"),
+            "the roster_unsubscribe response: {response}"
+        );
+        (connection, client_write)
+    }
+
+    /// Reconnecting while an expired timer waits on the descriptor must
+    /// prevent a stop. The first connectivity check already happened when
+    /// the slot clears, but the descriptor read can yield to a new client.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reconnect_during_expired_cleanup_keeps_owned_worker() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let supervisor = Arc::new(
+            Supervisor::new(SupervisorOptions {
+                socket_path: dir.path().join("daemon.sock"),
+                agent_dir: dir.path().join("agent"),
+            })
+            .expect("supervisor"),
+        );
+        let descriptor: DaemonWorkerDescriptor = serde_json::from_value(json!({
+            "version": 2,
+            "workerId": "w-reconnect",
+            "pid": 0,
+            "socketPath": "/tmp/none.sock",
+            "recoveryJournalPath": "/tmp/none.jsonl",
+            "supervisorSocketPath": "/tmp/none.sock",
+            "authenticationToken": "token",
+            "rootActiveSessionId": "w-reconnect",
+            "ownerClientId": "acp:reconnect",
+            "createdAt": "t",
+            "updatedAt": "t",
+            "lifecycle": "ready",
+            "createCommand": {},
+            "consecutiveFailures": 0,
+        }))
+        .expect("descriptor");
+        let resident = ResidentWorker::new(
+            "w-reconnect".to_string(),
+            descriptor,
+            dir.path().join("w-reconnect.json"),
+        );
+        supervisor.registry.insert(Arc::clone(&resident)).await;
+        let (first, first_write) = connect_as(&supervisor, "acp:reconnect").await;
+        drop(first_write);
+        first.await.expect("first connection").unwrap();
+        assert!(resident.owner_cleanup.lock().unwrap().is_some());
+
+        // Hold the descriptor AFTER arming, while the expired timer passes
+        // its first client_connected check and waits to read ownership.
+        let guard = resident.descriptor.lock().await;
+        tokio::time::pause();
+        tokio::time::advance(OWNED_WORKER_DISCONNECT_GRACE + Duration::from_secs(1)).await;
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            resident.owner_cleanup.lock().unwrap().is_none(),
+            "timer expired"
+        );
+        let (reconnected, reconnected_write) = connect_as(&supervisor, "acp:reconnect").await;
+        drop(guard);
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            supervisor.registry.get("w-reconnect").await.is_some(),
+            "reconnected owner keeps worker even when old timer expired"
+        );
+        assert!(
+            resident.descriptor.lock().await.stop_requested_at.is_none(),
+            "reconnect must veto the stop tombstone"
+        );
+        drop(reconnected_write);
+        reconnected.await.expect("reconnected connection").unwrap();
+    }
+
+    /// A client-owned worker stops 30 seconds after its owner's LAST
+    /// connection closes (the TS `scheduleOwnedWorkerCleanup` port): a
+    /// second connection of the same client id (one process, several
+    /// connections) keeps the worker, an owner that reconnects inside
+    /// the grace keeps it, and the stop waits out the full grace instead
+    /// of firing at the disconnect.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_client_owned_worker_stops_after_its_owner_s_last_connection_closes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let supervisor = Arc::new(
+            Supervisor::new(SupervisorOptions {
+                socket_path: dir.path().join("daemon.sock"),
+                agent_dir: dir.path().join("agent"),
+            })
+            .expect("supervisor"),
+        );
+        let descriptor: DaemonWorkerDescriptor = serde_json::from_value(json!({
+            "version": 2,
+            "workerId": "w-owned",
+            "pid": 0,
+            "socketPath": "/tmp/none.sock",
+            "recoveryJournalPath": "/tmp/none.jsonl",
+            "supervisorSocketPath": "/tmp/none.sock",
+            "authenticationToken": "token",
+            "rootActiveSessionId": "w-owned",
+            "ownerClientId": "acp:1",
+            "createdAt": "t",
+            "updatedAt": "t",
+            "lifecycle": "ready",
+            "createCommand": {},
+            "consecutiveFailures": 0,
+        }))
+        .expect("descriptor");
+        let resident = ResidentWorker::new(
+            "w-owned".to_string(),
+            descriptor,
+            dir.path().join("w-owned.json"),
+        );
+        supervisor.registry.insert(Arc::clone(&resident)).await;
+
+        // Phase 1: two connections speak for acp:1; closing one must leave
+        // the worker alone while the other still holds the id.
+        let (a, a_write) = connect_as(&supervisor, "acp:1").await;
+        let (b, b_write) = connect_as(&supervisor, "acp:1").await;
+        drop(a_write);
+        a.await.expect("connection a's task").unwrap();
+        // Phase 2: the last connection closes -> the grace timer is armed.
+        drop(b_write);
+        b.await.expect("connection b's task").unwrap();
+        // Phase 3: the owner reconnects well inside the grace.
+        let (c, c_write) = connect_as(&supervisor, "acp:1").await;
+        // Phase 4: the timer expires with the reconnected owner live, so
+        // it must leave the worker alone.
+        tokio::time::pause();
+        tokio::time::advance(OWNED_WORKER_DISCONNECT_GRACE + Duration::from_secs(1)).await;
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            resident.owner_cleanup.lock().unwrap().is_none(),
+            "the expiry ran"
+        );
+        assert!(
+            supervisor.registry.get("w-owned").await.is_some(),
+            "the reconnecting owner keeps its worker"
+        );
+        // Phase 5: the last connection closes with no timer pending, so a
+        // fresh grace runs: the worker keeps running a grace-minus-a-
+        // second past the disconnect, then stops.
+        drop(c_write);
+        c.await.expect("connection c's task").unwrap();
+        tokio::time::advance(OWNED_WORKER_DISCONNECT_GRACE.saturating_sub(Duration::from_secs(1)))
+            .await;
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            supervisor.registry.get("w-owned").await.is_some(),
+            "the worker keeps running inside the grace"
+        );
+        tokio::time::advance(Duration::from_secs(2)).await;
+        let stopped = tokio::time::timeout(Duration::from_secs(5), async {
+            while supervisor.registry.get("w-owned").await.is_some() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(stopped.is_ok(), "the owned worker was never stopped");
     }
 }
