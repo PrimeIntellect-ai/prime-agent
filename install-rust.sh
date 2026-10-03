@@ -136,6 +136,10 @@
 # channel's current version; the script is idempotent (a re-run replaces
 # the payload, keeps one .old rollback generation, and re-runs the
 # takeover steps as no-ops when there is nothing left to take over).
+# install-rust.sh --rollback republishes that kept generation, and
+# install-rust.sh --archive <path> publishes a local release archive
+# instead of a channel download (`prime-agent update --rollback` and
+# `--archive` run the copy of this script bundled into the binary).
 #
 # PREREQUISITES: curl + sh (+ the network for the download). The installer
 # needs a Python for its own scripting steps (the store guard's realpath,
@@ -185,6 +189,12 @@ Options:
               Never applies to the daemon this install runs under.
               (from a pipe: curl -fsSL <url>/install.sh | sh -s -- --force)
   --verbose   the detail also goes to stdout, not just fd 3 (no animation)
+  --rollback  restore the previous version the last install kept
+              (share/prime-agent.old.*); the replaced version is kept in
+              its place, so a second --rollback undoes the first
+  --archive <path>
+              install a local prime-agent-<version>-<platform>.tar.gz
+              release archive instead of downloading from the channel
 Output:
   stderr      the title, one line per step, warnings with the command that
               fixes them, and the ending; on a terminal an animated banner,
@@ -202,6 +212,14 @@ Environment:
                                  checks still run)
   PRIME_AGENT_RUST_PREFIX        install prefix (~/.local by default)
   PRIME_AGENT_RUST_VERBOSE       1 = the --verbose output mode
+  PRIME_AGENT_ROLLBACK_CHECK     1 = with --rollback, print the resolved
+                                 rollback source and exit without touching
+                                 the payload (the update command's
+                                 synchronous pre-flight)
+  PRIME_AGENT_ARCHIVE_CHECK      1 = with --archive, validate the archive
+                                 (its name, tar, payload, and version) and
+                                 exit without publishing (the same
+                                 pre-flight for the archive route)
 USAGE
 }
 
@@ -210,18 +228,32 @@ USAGE
 # points (`prime-agent update`, the TUI /update) exec — identical to the default
 # run because the flow is idempotent by construction. --verbose folds the fd-3
 # progress detail onto stdout (PRIME_AGENT_RUST_VERBOSE=1 does the same).
+# --rollback and --archive pick the payload source (MODE); the default is the
+# channel download.
 VERBOSE="${PRIME_AGENT_RUST_VERBOSE:-0}"
 FORCE=0
+MODE="channel"
+ARCHIVE=""
 # Every argument is scanned (no positionals exist): the flags compose, so
 # `--update --verbose` sets both effects instead of silently dropping one.
-for arg in "$@"; do
-  case "$arg" in
+while [ $# -gt 0 ]; do
+  case "$1" in
     --update) ;;
+    --rollback)
+      [ "$MODE" = archive ] && die "--rollback and --archive are exclusive"
+      MODE="rollback" ;;
+    --archive)
+      [ "$MODE" = rollback ] && die "--rollback and --archive are exclusive"
+      [ $# -ge 2 ] || { usage >&2; die "--archive needs the path of a release archive"; }
+      MODE="archive"
+      ARCHIVE="$2"
+      shift ;;
     --verbose|-v) VERBOSE=1 ;;
     --force) FORCE=1 ;;
     -h|--help) usage; exit 0 ;;
-    *) usage >&2; die "unknown argument: ${arg}" ;;
+    *) usage >&2; die "unknown argument: $1" ;;
   esac
+  shift
 done
 
 # --- the output contract ------------------------------------------------------
@@ -595,9 +627,34 @@ ts_takeover_undo=""
 migrated_note=""
 # The renderer always restores the cursor and line wrap when it stops; the
 # trap stops it on every exit path (an INT/TERM exits through it too).
-trap 'ui_stop; rm -rf "$dl"' EXIT
+# The pre-flights' exits sit far from the run's own success-path sweep
+# below, and a refused check dies before the full trap is armed — so with
+# either check knob set this run's every exit also cleans the staging.
+if [ "${PRIME_AGENT_ROLLBACK_CHECK:-}" = "1" ] || [ "${PRIME_AGENT_ARCHIVE_CHECK:-}" = "1" ]; then
+  # The stage rides too (an abort during the archive check's extraction
+  # must leave no staged tree under the prefix); `stage` is initialized
+  # before the traps, so the sweep targets only what THIS script assigns.
+  trap 'ui_stop; rm -rf "${dl:-}" "${stage:-}"' EXIT
+else
+  trap 'ui_stop; rm -rf "$dl"' EXIT
+fi
+stage=""
 ui_interrupted() {
+  # The failed-step line prints FIRST: it writes the renderer's files
+  # under the download staging, and removing that mid-write would fail
+  # the UI's own teardown. Then the interrupted install leaves nothing
+  # behind it would not own — the download staging always, and the
+  # extraction stage when THIS run created it (a rollback's stage is the
+  # KEPT generation itself, never this run's trash to delete; the guard
+  # matches the cleanup trap's). `stage` is INITIALIZED to empty above —
+  # before any trap can fire — so a caller-exported `stage` in this run's
+  # environment is never the removal's target.
   if [ -n "$ui_step" ]; then step_fail "$ui_step" "interrupted"; fi
+  ui_stop
+  rm -rf "$dl"
+  if [ -z "${rollback_from:-}" ] && [ -n "${stage:-}" ]; then
+    rm -rf "$stage"
+  fi
 }
 trap 'ui_interrupted; exit 130' INT
 trap 'ui_interrupted; exit 143' HUP TERM
@@ -725,6 +782,9 @@ esac
 # swap the payload the checksum then "verifies" into place. The one escape
 # hatch is the explicitly-named knob for a local channel or e2e run
 # (install.ps1 carries the same rule + knob); it warns when it is active.
+# The local modes (--rollback, --archive) download nothing, so the rule
+# guards the channel install only.
+if [ "$MODE" = channel ]; then
 case "$BASE_URL" in
   https://*) ;;
   *)
@@ -736,6 +796,7 @@ case "$BASE_URL" in
     fi
     ;;
 esac
+fi
 BASE_URL="${BASE_URL%/}"
 
 # The channel pointer's one-line body (empty when the read fails).
@@ -744,6 +805,12 @@ read_channel_version() {
     tr -d '[:space:]' < "$dl/channel-pointer"
   fi
 }
+# The local modes (--rollback, --archive) already have their payload: the
+# channel resolution here and the manifest, download, and checksum steps
+# below run only for the channel install (the blocks are not re-indented).
+# A rollback reads its version from the kept generation once the prefix is
+# resolved (below the Python bootstrap).
+if [ "$MODE" = channel ]; then
 VERSION_PINNED="no"
 if [ -n "${PRIME_AGENT_VERSION:-}" ]; then
   VERSION="${PRIME_AGENT_VERSION#v}"
@@ -776,6 +843,34 @@ esac
 step_clear
 say "installing prime-agent ${VERSION} from the ${CHANNEL} channel (${CHANNEL_PLATFORM})"
 title "${VERSION} (${CHANNEL})"
+elif [ "$MODE" = archive ]; then
+# --- --archive: a local release archive ------------------------------------------
+# The archive must carry the channel naming for this platform; the version
+# comes from the name. The channel download and its checksum checks are
+# skipped: the operator named the payload (the tarball must still contain an
+# executable payload binary, checked at extraction). On Windows a drive-letter
+# path (the C:\... form `prime-agent update --archive` passes) goes to the
+# POSIX form first: the name below splits on /, and tar reads C: as a host.
+  if [ "$WINDOWS" = "yes" ] && command -v cygpath >/dev/null 2>&1; then
+    archive_posix="$(cygpath -u "$ARCHIVE")" || die "could not resolve the archive path ${ARCHIVE}"
+    ARCHIVE="$archive_posix"
+  fi
+  [ -f "$ARCHIVE" ] || die "the release archive ${ARCHIVE} does not exist"
+  archive_name="${ARCHIVE##*/}"
+  case "$archive_name" in
+    prime-agent-?*-"${CHANNEL_PLATFORM}".tar.gz) ;;
+    *) die "${archive_name} is not a ${CHANNEL_PLATFORM} release archive (expected prime-agent-<version>-${CHANNEL_PLATFORM}.tar.gz)" ;;
+  esac
+  VERSION="${archive_name#prime-agent-}"
+  VERSION="${VERSION%-"${CHANNEL_PLATFORM}".tar.gz}"
+  case "$VERSION" in
+    *[!0-9A-Za-z.-]*) die "invalid version in the archive name ${archive_name}: ${VERSION}" ;;
+  esac
+  asset="$ARCHIVE"
+  say "installing prime-agent ${VERSION} from the local archive ${ARCHIVE}"
+  title "${VERSION} (local archive)"
+  step_ok "Using the local archive" "$(tilde "$ARCHIVE")"
+fi
 
 # --- the Python bootstrap: the installer must not depend on system python3 ----
 # Every scripting step below (the store guard's realpath, the artifact's
@@ -1032,8 +1127,52 @@ old_layout_dir="${PREFIX}/share/prime-agent-rust"
 legacy_dir="${PREFIX}/share/prime-agent-legacy"
 lock_link="${PREFIX}/share/.prime-agent-install.lock"
 legacy_lock="${PREFIX}/share/.prime-agent-rust-install.lock"
+generations_record="${PREFIX}/share/.prime-agent-install-generations"
 guard_preserved "$share_dir" "$launcher" "$old_layout_dir" "$legacy_dir" "$lock_link"
 
+# --- --rollback: the newest kept generation ------------------------------------
+# The rollback source is the newest generation in the generations record (the
+# record is append-only, so the last usable line is the newest) that still
+# exists, carries this installer's marker, and holds a payload binary. Its
+# marker supplies the channel and version; the publish below moves it back
+# into place and keeps the replaced payload as the new generation.
+rollback_from=""
+if [ "$MODE" = rollback ]; then
+  if [ -f "$generations_record" ]; then
+    while IFS= read -r recorded; do
+      case "$recorded" in
+        "${PREFIX}/share/prime-agent.old."*) ;;
+        *) continue ;;
+      esac
+      [ -d "$recorded" ] && [ -x "${recorded}/${BINARY_NAME}" ] || continue
+      head -n 1 "${recorded}/.prime-agent-install" 2>/dev/null \
+        | grep -q '^install-rust.sh channel ' || continue
+      rollback_from="$recorded"
+    done < "$generations_record"
+  fi
+  [ -n "$rollback_from" ] || die "nothing to roll back: no previous version is kept under ${PREFIX}/share
+(each update keeps the version it replaced; a fresh install has none)"
+  # THE ROLLBACK PRE-FLIGHT: with the knob set the resolved source is the
+  # whole answer — printed on stdout and the run stops here (no channel
+  # read, no staging, no lock, no payload touch; the install prologue's
+  # own temp staging still ran, so its sweep rides the exit too — the
+  # trap is not armed yet at this point), so a caller can ask
+  # synchronously whether a rollback CAN run before handing the real
+  # run off (the Windows update command's handoff: this process must
+  # exit for the publish to happen, so its exit code can only report the
+  # pre-flight's answer honestly).
+  if [ "${PRIME_AGENT_ROLLBACK_CHECK:-}" = "1" ]; then
+    printf '%s\n' "$rollback_from"
+    exit 0
+  fi
+  CHANNEL="$(sed -n '1s/^install-rust.sh channel //p' "${rollback_from}/.prime-agent-install")"
+  VERSION="$(sed -n '2s/^version //p' "${rollback_from}/.prime-agent-install")"
+  say "rolling back to prime-agent ${VERSION} (${rollback_from})"
+  title "${VERSION} (rollback)"
+  step_ok "Found the previous version" "${VERSION}"
+fi
+
+if [ "$MODE" = channel ]; then
 # --- the channel manifest: this platform's artifact row ---------------------
 # The manifest carries the version plus the per-platform rows; the row's
 # file must be the exact channel naming and its sha256 the 64-hex shape —
@@ -1137,6 +1276,7 @@ else
 fi
 say "checksum verified: ${asset_name} (${VERSION}, the ${CHANNEL} channel)"
 step_ok "Verified"
+fi
 
 # --- the TypeScript takeover, step 1: stop BOTH daemons ALWAYS ----------------
 # THE ALWAYS-STOP CONTRACT (PR1's field ruling, hardened + the second
@@ -1861,12 +2001,163 @@ fi
 # new stage is in place, so the live tree is never rm'd while the launcher
 # still points into it. The renamed-aside tree is KEPT as a one-generation
 # rollback (prime-agent.old.<pid>); the next successful install sweeps it.
+# A rollback publishes the kept generation itself as the stage: it already
+# carries its payload and its marker.
+if [ -n "$rollback_from" ]; then
+  step_start "Restoring the previous version"
+  stage="$rollback_from"
+else
 step_start "Installing"
 stage="$(mktemp -d "${PREFIX}/share/prime-agent.stage.XXXXXX")"
 guard_preserved "$stage"
-tar -xzf "$asset" -C "$stage"
-[ -x "${stage}/${BINARY_NAME}" ] \
-  || die "the tarball did not contain an executable ${BINARY_NAME} payload"
+# A bad tarball (a malformed --archive is the realistic one) leaves no
+# stage behind: the cleanup trap is not armed yet.
+if ! tar -xzf "$asset" -C "$stage"; then
+  rm -rf "$stage"
+  die "could not extract ${asset}"
+fi
+if [ ! -x "${stage}/${BINARY_NAME}" ]; then
+  rm -rf "$stage"
+  die "the tarball did not contain an executable ${BINARY_NAME} payload"
+fi
+# --ARCHIVE ONLY: the archive's name is the version contract (the marker
+# records it and the rollback later reports it), so the payload's own
+# --version must agree — a mis-named archive would publish a marker that
+# lies about its payload. The CHANNEL install is out of scope by design:
+# its tarball already passed the manifest's sha256 gate (the row's exact
+# checksum for this exact version), so the channel's integrity needs no
+# second opinion — and a probe there would add a new failure mode (a
+# cold-start binary slower than the bound) the pre-existing flow never
+# had. The probe is BOUNDED by a portable watchdog — NOT the `timeout`
+# command: on Windows `timeout` on PATH is timeout.exe, which waits
+# instead of running a command and would refuse every probe, and macOS
+# ships no GNU timeout at all. A payload whose --version blocks is
+# killed at the bound and reports nothing (the refusal below, not a
+# hang).
+# The probe's files ride the run's OWN download staging, never the
+# payload-writable stage: an extracted archive could forge a done marker
+# where the loop looks and hang past the bound (the trailing wait would
+# block on the hanging payload forever).
+if [ "$MODE" != "archive" ]; then
+  # The channel install publishes without the name probe (see the block
+  # comment above); the stage continues to the marker write.
+  :
+else
+probe_out="$dl/.version-probe.out"
+probe_done="$dl/.version-probe.done"
+probe_pid_file="$dl/.version-probe.pid"
+probe_status="$dl/.version-probe.status"
+rm -f "$probe_out" "$probe_done" "$probe_pid_file"
+# The runner: the payload is ITS child (a sibling's `wait` cannot reap
+# another shell's child), and `kill -0` keeps succeeding on a ZOMBIE, so
+# the pid alone cannot tell a finished probe from a hanging one — the
+# runner publishes the payload's pid, reaps it, and writes the done
+# marker; the loop below polls the MARKER (a fast probe costs one tick,
+# not the whole bound).
+(
+  # The probe must read the STAGED tree's own package.json: a caller's
+  # PI_PACKAGE_DIR would point the packaged-version lookup at another
+  # tree and the probe would then refuse a good archive or pass a
+  # mismatched one.
+  unset PI_PACKAGE_DIR || true
+  # The probe's redirected output is bounded (64 blocks = 32 KB, ample
+  # for a version line): a payload that continuously emits would
+  # otherwise fill the filesystem for the whole watchdog window, and the
+  # limit kills it — the invocation-status verdict refuses the probe
+  # then. The ulimit itself is GUARDED: under set -e a platform refusing
+  # the limit would take the runner down before the done marker and
+  # every --archive install would then fail at the bound.
+  ulimit -f 64 2>/dev/null || true
+  "${stage}/${BINARY_NAME}" --version >"$probe_out" 2>/dev/null &
+  printf '%s\n' "$!" >"$probe_pid_file"
+  # The probe's OWN status rides a file (set -e would take the wait's
+  # nonzero as an abort): the version line AND a successful exit are the
+  # answer — a payload that prints the right version then fails its own
+  # --version invocation is not a working launcher.
+  probe_status_val=0
+  wait "$!" || probe_status_val=$?
+  printf '%s\n' "$probe_status_val" >"$probe_status"
+  printf 'done\n' >"$probe_done"
+) &
+probe_runner=$!
+probe_waited=0
+probe_timed_out=""
+while [ ! -f "$probe_done" ]; do
+  probe_waited=$((probe_waited + 1))
+  if [ "$probe_waited" -gt 10 ]; then
+    # The bound: SIGTERM, then SIGKILL — a payload that ignores the
+    # first still dies, its runner then exits (its own wait returns),
+    # and nothing of the probe outlives this install. The timeout flag
+    # decides the verdict: a payload that printed its version BEFORE
+    # hanging was still unresponsive, and the captured stdout must not
+    # pass for an answer.
+    probe_timed_out="yes"
+    probe_pid="$(cat "$probe_pid_file" 2>/dev/null || true)"
+    if [ -n "$probe_pid" ]; then
+      kill "$probe_pid" 2>/dev/null || true
+      sleep 1
+      kill -9 "$probe_pid" 2>/dev/null || true
+    else
+      kill -9 "$probe_runner" 2>/dev/null || true
+    fi
+    break
+  fi
+  sleep 1
+done
+# A nonzero-exiting payload still answers --version (its first line is
+# already captured): the runner's reap happens inside it, and neither
+# wait's status aborts the installer under set -e.
+wait "$probe_runner" 2>/dev/null || true
+if [ -n "$probe_timed_out" ]; then
+  rm -f "$probe_out" "$probe_done" "$probe_pid_file" "$probe_status"
+  # The stage goes too: this die predates the full cleanup trap's arming
+  # (the mismatch refusal below sweeps its own stage the same way), so a
+  # hung payload on a normal install leaves no staging tree behind.
+  rm -rf "$stage"
+  die "the archive names ${VERSION} but its payload did not answer --version within 10s; refusing an unresponsive payload"
+fi
+reported_version="$(head -n 1 "$probe_out" 2>/dev/null)"
+probe_exit_status="$(cat "$probe_status" 2>/dev/null || true)"
+rm -f "$probe_out" "$probe_done" "$probe_pid_file" "$probe_status"
+if [ "$probe_exit_status" != "0" ]; then
+  rm -rf "$stage"
+  die "the archive names ${VERSION} but its payload's --version invocation failed (exit ${probe_exit_status}); refusing an unusable launcher"
+fi
+# The continuous-build stamp rides the reported version, not the name
+# (assemble_artifacts.py stages a package.json reporting
+# <version>-continuous.<sha> while the archive name keeps the bare
+# <version> so rolling releases overwrite assets): the exact name or its
+# documented continuous stamp both publish honestly.
+case "$reported_version" in
+  "$VERSION") ;;
+  "$VERSION-continuous."*)
+    # The stamp is exactly a 40-hex commit SHA (assemble_artifacts.py's
+    # --sha contract): a wrong-length or non-hex tail is a malformed
+    # stamp, not the built commit.
+    stamp="${reported_version#"$VERSION"-continuous.}"
+    if ! printf '%s\n' "$stamp" | grep -qE '^[0-9a-f]{40}$'; then
+      rm -rf "$stage"
+      die "the archive names ${VERSION} but its payload reports ${reported_version}; rename the archive or publish it under its real version"
+    fi
+    ;;
+  *)
+    rm -rf "$stage"
+    die "the archive names ${VERSION} but its payload reports ${reported_version:-nothing}; rename the archive or publish it under its real version"
+    ;;
+esac
+fi
+# THE ARCHIVE PRE-FLIGHT (the rollback pre-flight's sibling): with the knob
+# set, the validated stage is the whole answer — every extraction check
+# (the tar, the payload, the version) passed — so the run stops here, the
+# stage never becomes anything the caller owns, and a caller can ask
+# synchronously whether an archive CAN install before handing the real run
+# off (the Windows update handoff: this process must exit for the publish
+# to happen, so its exit code can only report the pre-flight's answer
+# honestly).
+if [ "${PRIME_AGENT_ARCHIVE_CHECK:-}" = "1" ]; then
+  rm -rf "$stage"
+  exit 0
+fi
 # The ownership marker: the share tree this script publishes carries it, so
 # later installs recognize the tree as theirs BY MARKER, not by shape — an
 # unrelated directory that happens to contain a `prime-agent` entry is never
@@ -1874,6 +2165,7 @@ tar -xzf "$asset" -C "$stage"
 # user instead).
 printf 'install-rust.sh channel %s\nversion %s\n' "$CHANNEL" "$VERSION" \
   > "${stage}/.prime-agent-install"
+fi
 
 # A lock left by the pre-takeover installer (name .prime-agent-rust-install.lock):
 # a live holder still owns the publish, a dead one can never publish again —
@@ -1884,7 +2176,11 @@ printf 'install-rust.sh channel %s\nversion %s\n' "$CHANNEL" "$VERSION" \
 if [ -e "$legacy_lock" ] || [ -L "$legacy_lock" ]; then
   held_by="$(readlink "$legacy_lock" 2>/dev/null || true)"
   if [ -n "$held_by" ] && kill -0 "$held_by" 2>/dev/null; then
-    die "an older prime-agent-rust installer (pid ${held_by}) is publishing to ${PREFIX}; retry when it finishes"
+    # The lock refusals below die with the stage already built, before the EXIT
+    # trap that would sweep it: a fresh install's stage is this run's own scratch,
+    # so it never outlives the refused install — a rollback's stage is the kept
+    # generation itself, never this run's trash to delete.
+    { [ -z "${rollback_from:-}" ] && rm -rf "$stage"; die "an older prime-agent-rust installer (pid ${held_by}) is publishing to ${PREFIX}; retry when it finishes"; }
   fi
   rm -f "$legacy_lock"
 fi
@@ -1913,20 +2209,20 @@ if [ "$WINDOWS" = "yes" ]; then
     if [ -n "$held_by" ] \
        && MSYS2_ARG_CONV_EXCL='*' tasklist.exe /FI "PID eq ${held_by}" /NH 2>/dev/null \
           | grep -qw "$held_by"; then
-      die "another prime-agent installer (Windows pid ${held_by}) is publishing to ${PREFIX}; retry when it finishes"
+      { [ -z "${rollback_from:-}" ] && rm -rf "$stage"; die "another prime-agent installer (Windows pid ${held_by}) is publishing to ${PREFIX}; retry when it finishes"; }
     fi
-    die "a publication lock (Windows pid ${held_by:-unknown}) is held at ${lock_dir}. If no prime-agent installer (install-rust.sh or install.ps1) is running, it is stale (a crashed install); remove it and retry:
-  rm -rf \"${lock_dir}\""
+    { [ -z "${rollback_from:-}" ] && rm -rf "$stage"; die "a publication lock (Windows pid ${held_by:-unknown}) is held at ${lock_dir}. If no prime-agent installer (install-rust.sh or install.ps1) is running, it is stale (a crashed install); remove it and retry:
+  rm -rf \"${lock_dir}\""; }
   done
   printf '%s\n' "$(cat "/proc/$$/winpid" 2>/dev/null || echo $$)" > "$lock_dir/pid"
 else
   until ln -s $$ "$lock_link" 2>/dev/null; do
     held_by="$(readlink "$lock_link" 2>/dev/null || true)"
     if [ -n "$held_by" ] && kill -0 "$held_by" 2>/dev/null; then
-      die "another install-rust.sh (pid ${held_by}) is publishing to ${PREFIX}; retry when it finishes"
+      { [ -z "${rollback_from:-}" ] && rm -rf "$stage"; die "another install-rust.sh (pid ${held_by}) is publishing to ${PREFIX}; retry when it finishes"; }
     fi
-    die "a previous install-rust.sh (pid ${held_by:-unknown}) left a stale publication lock (a crashed install; its cleanup trap cannot have run). Remove it and retry:
-  rm -f \"${lock_link}\""
+    { [ -z "${rollback_from:-}" ] && rm -rf "$stage"; die "a previous install-rust.sh (pid ${held_by:-unknown}) left a stale publication lock (a crashed install; its cleanup trap cannot have run). Remove it and retry:
+  rm -f \"${lock_link}\""; }
   done
 fi
 
@@ -1968,6 +2264,22 @@ displaced_ts_root=""
 preserved_launcher=""
 migrated_old_layout=""
 migrated_old_layout=""
+# Defined before the EXIT trap is armed: on_exit calls it.
+restore_ts_root() {
+  if [ -n "$displaced_ts_root" ]; then
+    if [ -d "$share_dir" ]; then
+      # The half-installed Rust payload occupies the TS root's old path: it
+      # is disposable (a re-download restores it); the TS tree is not.
+      rm -rf "$share_dir"
+    fi
+    if mv "$displaced_ts_root" "$share_dir" 2>/dev/null; then
+      echo "note: the TypeScript install was restored to ${share_dir} — the install did not complete" >&2
+    else
+      echo "warning: could not restore the TypeScript install from ${displaced_ts_root}; restore it with: mv '${displaced_ts_root}' '${share_dir}'" >&2
+    fi
+    displaced_ts_root=""
+  fi
+}
 on_exit() {
   # The renderer stops first, so the restore notes print below its frame.
   ui_stop
@@ -1976,6 +2288,14 @@ on_exit() {
   # restore would delete that fresh payload (cross-installer data loss).
   [ -n "$launcher_tmp" ] && rm -f "$launcher_tmp" 2>/dev/null || true
   [ -n "${cmd_tmp:-}" ] && rm -f "$cmd_tmp" 2>/dev/null || true
+  # The extraction stage is disposable on every failed path: a successful
+  # publish renamed the stage into ${share_dir}, so the stale path no longer
+  # exists and the removal is a no-op there; a rollback publishes the kept
+  # generation itself (stage == rollback_from), which is never this run's
+  # trash to delete.
+  if [ -z "${rollback_from:-}" ] && [ -n "${stage:-}" ]; then
+    rm -rf "$stage" 2>/dev/null || true
+  fi
   # The user's unowned command file goes home if the Rust launcher never
   # went live (the same restore discipline as the displaced TS tree): a
   # failed launcher write must not leave the machine without ANY
@@ -2025,6 +2345,13 @@ on_exit() {
 }
 trap on_exit EXIT
 
+# The rollback source was chosen before the lock: another installer may have
+# swept it since. Re-check under the lock, before the sweep and before
+# anything moves.
+if [ -n "$rollback_from" ] && [ ! -x "${rollback_from}/${BINARY_NAME}" ]; then
+  die "the kept previous version ${rollback_from} was removed by another install while this one ran; nothing was changed"
+fi
+
 # Sweep rollback generations from PREVIOUS installs (both name eras) before
 # this run creates its own — exactly one .old generation survives each install.
 # A generation is swept only when BOTH hold: it carries this installer's
@@ -2034,10 +2361,11 @@ trap on_exit EXIT
 # payload, not that the SLOT is a rollback generation: a user who COPIES the
 # payload into the namespace (marker and all) keeps their copy. Pre-takeover-era
 # crash leftovers (prime-agent-rust.old.*, never stamped) are left in place —
-# harmless, and the user's to remove.
-generations_record="${PREFIX}/share/.prime-agent-install-generations"
+# harmless, and the user's to remove. A rollback's source generation is the
+# payload being published, never swept.
 for sweep_dir in "${PREFIX}"/share/prime-agent.old.* "${PREFIX}"/share/prime-agent-rust.old.*; do
   [ -d "$sweep_dir" ] || continue
+  [ "$sweep_dir" != "$rollback_from" ] || continue
   [ -f "${sweep_dir}/.prime-agent-install" ] || continue
   grep -qxF -- "$sweep_dir" "$generations_record" 2>/dev/null || continue
   # Best-effort: an un-sweepable generation (a mounted dir, a permission
@@ -2058,21 +2386,6 @@ done
 # the EXIT trap), so a half-finished install never leaves the machine with
 # no working prime-agent — the TS public symlink keeps resolving the whole
 # time and the TS tree returns to its original path if this install dies.
-restore_ts_root() {
-  if [ -n "$displaced_ts_root" ]; then
-    if [ -d "$share_dir" ]; then
-      # The half-installed Rust payload occupies the TS root's old path: it
-      # is disposable (a re-download restores it); the TS tree is not.
-      rm -rf "$share_dir"
-    fi
-    if mv "$displaced_ts_root" "$share_dir" 2>/dev/null; then
-      echo "note: the TypeScript install was restored to ${share_dir} — the install did not complete" >&2
-    else
-      echo "warning: could not restore the TypeScript install from ${displaced_ts_root}; restore it with: mv '${displaced_ts_root}' '${share_dir}'" >&2
-    fi
-    displaced_ts_root=""
-  fi
-}
 if [ -d "$share_dir" ] && ts_managed "$share_dir"; then
   preserved_to="$legacy_dir"
   if [ -e "$preserved_to" ]; then preserved_to="$(fresh_slot "$legacy_dir")"; fi
@@ -2278,7 +2591,11 @@ if [ -f "$old_launcher" ] && grep -q 'launcher written by install-rust.sh' "$old
   rm -f "$old_launcher"
   say "removed the old ${old_launcher} launcher (the keyword is prime-agent now)"
 fi
-step_ok "Installed"
+if [ -n "$rollback_from" ]; then
+  step_ok "Restored the previous version" "${VERSION}"
+else
+  step_ok "Installed"
+fi
 
 # --- the TypeScript takeover completes AFTER the publish ----------------------
 # The TS-side steps that RETIRE the old command — the always-stop daemon
@@ -2476,11 +2793,17 @@ say "launcher:  ${launcher}"
 say "payload:   ${share_dir}"
 if [ -d "$old" ] && grep -qxF -- "$old" "$generations_record" 2>/dev/null; then
   say "rollback:  ${old} (the previous payload, one generation; swept on the next install)"
+  say "           restore it with: prime-agent update --rollback (the live"
+  say "            build must carry the update rollback; an older payload may not)"
 elif [ -d "$old" ]; then
   say "rollback:  ${old} (the migrated pre-takeover tree; kept — remove it by hand"
   say "            once you no longer need the rollback)"
 fi
-say "source:    the ${CHANNEL} channel at ${BASE_URL} (prime-agent ${VERSION})"
+case "$MODE" in
+  rollback) say "source:    the kept previous version (prime-agent ${VERSION}, the ${CHANNEL} channel)" ;;
+  archive) say "source:    the local archive ${ARCHIVE} (prime-agent ${VERSION})" ;;
+  *) say "source:    the ${CHANNEL} channel at ${BASE_URL} (prime-agent ${VERSION})" ;;
+esac
 if [ "$WINDOWS" = "yes" ]; then
   # The Windows stop ran before the publish (a Windows process holds its
   # binary open); its summary rides here. A fresh install prints nothing:
