@@ -276,6 +276,10 @@ pub struct RefinementTranscript<'a> {
 /// session, when the refinement plan (LLM or rollback) fails, when applying
 /// or persisting the refined harness state fails, or when appending the
 /// audit, outcome, or notice entries fails.
+// One refine funnel: the transcript, the store dirs, the model seam, the
+// options, the source, and the resolved gates ride the same call
+// (same style as the daemon's too_many_arguments seams).
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_refinement(
     session: &mut SessionManager,
     transcript: RefinementTranscript<'_>,
@@ -284,6 +288,7 @@ pub async fn execute_refinement(
     options: &RefineOptions,
     source: RefinementSource,
     refine_call: crate::refinement::executor::RefinerFn,
+    factory_enabled: bool,
 ) -> anyhow::Result<RefinementResult> {
     Ok(execute_refinement_with_rows(
         session,
@@ -293,6 +298,7 @@ pub async fn execute_refinement(
         options,
         source,
         refine_call,
+        factory_enabled,
     )
     .await?
     .0)
@@ -306,6 +312,13 @@ pub async fn execute_refinement(
 /// # Errors
 ///
 /// Returns the same errors as [`execute_refinement`].
+///
+/// `factory_enabled` is the resolved `factory.enabled` opt-in (default
+/// off): while it is off, factory create/update edits refuse with the one
+/// disabled message — the same gate the kernel-side factory writers raise
+/// (`rlm.factory.require_factory_enabled`), so a refinement cannot
+/// author factories the user has not opted into.
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_refinement_with_rows(
     session: &mut SessionManager,
     transcript: RefinementTranscript<'_>,
@@ -314,6 +327,7 @@ pub async fn execute_refinement_with_rows(
     options: &RefineOptions,
     source: RefinementSource,
     refine_call: crate::refinement::executor::RefinerFn,
+    factory_enabled: bool,
 ) -> anyhow::Result<(RefinementResult, Vec<String>)> {
     let RefinementTranscript {
         messages,
@@ -386,7 +400,13 @@ pub async fn execute_refinement_with_rows(
         HarnessScope::Local => local_harness_dir.clone(),
     };
     let mut state = load_harness_state(&target_dir, target_scope);
-    let mut result = apply_refinement_plan(&mut state, plan, &core_options, Some(baseline_state));
+    let mut result = apply_refinement_plan(
+        &mut state,
+        plan,
+        &core_options,
+        Some(baseline_state),
+        factory_enabled,
+    );
     result.harness_state_path = save_harness_state(&target_dir, &state)?
         .to_string_lossy()
         .to_string();
@@ -787,6 +807,62 @@ Reviewer instructions: record it"
     }
 
     #[tokio::test]
+    async fn factory_edits_in_a_refinement_respect_the_opt_in_gate() {
+        // The host /refine flow funnels factory create edits through the
+        // same opt-in gate as the kernel writers: while `factory.enabled`
+        // is off, the edit refuses with the one exact disabled message
+        // and nothing persists; enabled, the same proposal applies.
+        let dir = TempDir::new().unwrap();
+        let mut session = persisted_session(&dir);
+        let global_dir = dir.path().join("harness");
+        let reply = r#"{"summary":"sweep","edits":[{"action":"create","kind":"factory","id":"sweep","title":"Factory","content":"Sweep review.","arguments":{"machine":{"states":[{"id":"collect","entry":true,"subagent":"worker"}],"transitions":[]}}}]}"#;
+        let disabled = execute_refinement(
+            &mut session,
+            RefinementTranscript {
+                messages: &[user_message("do a thing twice")],
+                refinement_history: &[],
+            },
+            &global_dir,
+            &test_model(),
+            &RefineOptions::default(),
+            RefinementSource::User,
+            seam(reply),
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(!disabled.applied_edits[0].applied);
+        assert_eq!(
+            disabled.applied_edits[0].error.as_deref(),
+            Some(crate::refinement::FACTORY_DISABLED_MESSAGE)
+        );
+        let harness_dir =
+            crate::refinement::get_local_harness_state_dir(Some(session.get_session_dir()))
+                .unwrap();
+        let state = load_harness_state(&harness_dir, HarnessScope::Local);
+        assert!(state.entries[&crate::refinement::RefinementKind::Factory].is_empty());
+        let enabled = execute_refinement(
+            &mut session,
+            RefinementTranscript {
+                messages: &[user_message("do a thing twice")],
+                refinement_history: &[],
+            },
+            &global_dir,
+            &test_model(),
+            &RefineOptions::default(),
+            RefinementSource::User,
+            seam(reply),
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(enabled.applied_edits[0].applied);
+        assert!(enabled.applied_edits[0].error.is_none());
+        let state = load_harness_state(&harness_dir, HarnessScope::Local);
+        assert!(state.entries[&crate::refinement::RefinementKind::Factory].contains_key("sweep"));
+    }
+
+    #[tokio::test]
     async fn execute_refinement_persists_state_and_entries() {
         let dir = TempDir::new().unwrap();
         let mut session = persisted_session(&dir);
@@ -806,6 +882,7 @@ Reviewer instructions: record it"
             &RefineOptions::default(),
             RefinementSource::User,
             seam(reply),
+            false,
         )
         .await
         .unwrap();
@@ -866,6 +943,7 @@ Reviewer instructions: record it"
             &RefineOptions::default(),
             RefinementSource::User,
             seam(reply),
+            false,
         )
         .await
         .unwrap_err();
@@ -982,6 +1060,7 @@ Reviewer instructions: record it"
                     let reply = reply;
                     Box::pin(async move { Ok(text_assistant(&reply)) })
                 }),
+                false,
             )
             .await
             .unwrap_or_else(|error| panic!("'{leg}' leg failed: {error:#}"));
@@ -1059,6 +1138,7 @@ Reviewer instructions: record it"
             },
             RefinementSource::SelfRefine,
             seam(reply),
+            false,
         )
         .await
         .unwrap();
@@ -1087,6 +1167,7 @@ Reviewer instructions: record it"
             },
             RefinementSource::User,
             seam("unused"),
+            false,
         )
         .await
         .unwrap();

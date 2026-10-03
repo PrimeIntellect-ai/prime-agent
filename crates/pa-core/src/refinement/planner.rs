@@ -301,6 +301,11 @@ pub struct ApplyOptions {
     /// Target-scope state captured before planning; edits whose entry changed
     /// since the baseline are rejected.
     pub baseline_state: Option<HarnessState>,
+    /// The resolved `factory.enabled` opt-in (default off). While it is off,
+    /// factory create/update edits refuse with the one disabled message, the
+    /// same gate the kernel-side factory writers raise
+    /// (`rlm.factory.require_factory_enabled`).
+    pub factory_enabled: bool,
 }
 
 /// Apply a proposal to the state (mutating entries and recording the event).
@@ -370,6 +375,23 @@ pub fn apply_refinement_proposal(
             let mut row = AppliedRefinementEdit::planned(edit, action, kind, id.clone());
             row.before = before;
             row.error = Some("entry changed during refinement planning".to_string());
+            applied_edits.push(row);
+            continue;
+        }
+        // The opt-in gate, the host-side mirror of the kernel writers'
+        // one refusal (`require_factory_enabled`): while `factory.enabled`
+        // is off, a refinement cannot author or re-author factory entries,
+        // exactly like every kernel factory write. The refusal precedes
+        // the create/update existence checks, so the disabled message is
+        // unconditional while off. A delete is not authoring: cleanup
+        // stays available, the gate's documented split.
+        if kind == RefinementKind::Factory
+            && action != RefinementAction::Delete
+            && !options.factory_enabled
+        {
+            let mut row = AppliedRefinementEdit::planned(edit, action, kind, id.clone());
+            row.before = before;
+            row.error = Some(super::FACTORY_DISABLED_MESSAGE.to_string());
             applied_edits.push(row);
             continue;
         }
@@ -802,6 +824,7 @@ mod tests {
                 rollback_of: None,
                 scope: Some(HarnessScope::Local),
                 baseline_state: None,
+                factory_enabled: false,
             },
         );
         assert_eq!(result.applied_edits.len(), 1);
@@ -824,6 +847,7 @@ mod tests {
                 rollback_of: None,
                 scope: None,
                 baseline_state: None,
+                factory_enabled: false,
             },
         );
         assert!(!duplicate.applied_edits[0].applied);
@@ -847,6 +871,7 @@ mod tests {
                 rollback_of: None,
                 scope: None,
                 baseline_state: None,
+                factory_enabled: false,
             },
         );
         assert_eq!(state.entries[&RefinementKind::Memory]["m1"].version, 2);
@@ -860,10 +885,155 @@ mod tests {
                 rollback_of: Some("r1".to_string()),
                 scope: None,
                 baseline_state: None,
+                factory_enabled: false,
             },
         );
         assert!(rolled.applied_edits[0].applied);
         // r1 created m1 with no before snapshot, so the rollback deletes it.
         assert!(!state.entries[&RefinementKind::Memory].contains_key("m1"));
+    }
+
+    #[test]
+    fn factory_edits_refuse_while_the_opt_in_is_disabled() {
+        // The opt-in gate on the apply path: while `factory.enabled` is
+        // off, a refinement cannot author or re-author factory entries —
+        // the same refusal, byte for byte, the kernel-side factory
+        // writers raise (`rlm.factory.require_factory_enabled`).
+        let machine = serde_json::json!({
+            "states": [{ "id": "collect", "entry": true, "subagent": "worker" }],
+            "transitions": []
+        });
+        let factory_edit = |action: RefinementAction, id: &str| RefinementEdit {
+            action: Some(action),
+            kind: Some(RefinementKind::Factory),
+            id: Some(id.to_string()),
+            title: Some("Factory".into()),
+            content: Some("Sweep review across changed files.".into()),
+            arguments: Some(
+                serde_json::from_value(serde_json::json!({ "machine": machine })).unwrap(),
+            ),
+            ..Default::default()
+        };
+        let mut state = empty_harness_state();
+        let proposal = |edits: Vec<RefinementEdit>| RefinementProposal {
+            summary: "sweep".to_string(),
+            rationale: String::new(),
+            expected_outcome: String::new(),
+            edits,
+        };
+        let disabled = apply_refinement_proposal(
+            &mut state,
+            &proposal(vec![factory_edit(RefinementAction::Create, "sweep")]),
+            ApplyOptions {
+                id: "r1".to_string(),
+                rollback_of: None,
+                scope: Some(HarnessScope::Local),
+                baseline_state: None,
+                factory_enabled: false,
+            },
+        );
+        assert!(!disabled.applied_edits[0].applied);
+        assert_eq!(
+            disabled.applied_edits[0].error.as_deref(),
+            Some(super::super::FACTORY_DISABLED_MESSAGE)
+        );
+        assert!(state.entries[&RefinementKind::Factory].is_empty());
+        // An update of a stored entry refuses too: cleanup is not
+        // authoring, but re-authoring while disabled is.
+        state
+            .entries
+            .get_mut(&RefinementKind::Factory)
+            .unwrap()
+            .insert(
+                "sweep".to_string(),
+                HarnessEntry {
+                    id: "sweep".to_string(),
+                    kind: RefinementKind::Factory,
+                    title: "Factory".to_string(),
+                    content: "Sweep.".to_string(),
+                    path: "general".to_string(),
+                    scope: Some(HarnessScope::Local),
+                    reference: serde_json::Map::default(),
+                    arguments: serde_json::Map::default(),
+                    metadata: serde_json::Map::default(),
+                    source: "refine".to_string(),
+                    created_at: String::new(),
+                    updated_at: String::new(),
+                    version: 1,
+                },
+            );
+        let refused_update = apply_refinement_proposal(
+            &mut state,
+            &proposal(vec![factory_edit(RefinementAction::Update, "sweep")]),
+            ApplyOptions {
+                id: "r2".to_string(),
+                rollback_of: None,
+                scope: None,
+                baseline_state: None,
+                factory_enabled: false,
+            },
+        );
+        assert!(!refused_update.applied_edits[0].applied);
+        assert_eq!(
+            refused_update.applied_edits[0].error.as_deref(),
+            Some(super::super::FACTORY_DISABLED_MESSAGE)
+        );
+        // A delete is not authoring: cleanup stays available while
+        // disabled (the gate's documented split).
+        let cleanup = apply_refinement_proposal(
+            &mut state,
+            &proposal(vec![{
+                let mut edit = factory_edit(RefinementAction::Delete, "sweep");
+                edit.arguments = None;
+                edit
+            }]),
+            ApplyOptions {
+                id: "r3".to_string(),
+                rollback_of: None,
+                scope: None,
+                baseline_state: None,
+                factory_enabled: false,
+            },
+        );
+        assert!(cleanup.applied_edits[0].applied);
+        assert!(state.entries[&RefinementKind::Factory].is_empty());
+    }
+
+    #[test]
+    fn factory_edits_apply_when_the_opt_in_is_enabled() {
+        let machine = serde_json::json!({
+            "states": [{ "id": "collect", "entry": true, "subagent": "worker" }],
+            "transitions": []
+        });
+        let mut state = empty_harness_state();
+        let result = apply_refinement_proposal(
+            &mut state,
+            &RefinementProposal {
+                summary: "sweep".to_string(),
+                rationale: String::new(),
+                expected_outcome: String::new(),
+                edits: vec![RefinementEdit {
+                    action: Some(RefinementAction::Create),
+                    kind: Some(RefinementKind::Factory),
+                    id: Some("sweep".to_string()),
+                    title: Some("Factory".into()),
+                    content: Some("Sweep review across changed files.".into()),
+                    arguments: Some(
+                        serde_json::from_value(serde_json::json!({ "machine": machine })).unwrap(),
+                    ),
+                    ..Default::default()
+                }],
+            },
+            ApplyOptions {
+                id: "r1".to_string(),
+                rollback_of: None,
+                scope: Some(HarnessScope::Local),
+                baseline_state: None,
+                factory_enabled: true,
+            },
+        );
+        assert!(result.applied_edits[0].applied);
+        assert!(result.applied_edits[0].error.is_none());
+        assert!(state.entries[&RefinementKind::Factory].contains_key("sweep"));
     }
 }

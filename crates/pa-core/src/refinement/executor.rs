@@ -289,12 +289,16 @@ fn assistant_text(reply: &AssistantMessage) -> String {
         .join("\n")
 }
 
-/// Apply a plan to the (re-read) harness state.
+/// Apply a plan to the (re-read) harness state. `factory_enabled` is the
+/// resolved `factory.enabled` opt-in (default off): while it is off,
+/// factory create/update edits refuse with the one disabled message, the
+/// same gate the kernel-side factory writers raise.
 pub fn apply_refinement_plan(
     state: &mut HarnessState,
     plan: RefinementPlan,
     options: &RefineOptions,
     baseline_state: Option<HarnessState>,
+    factory_enabled: bool,
 ) -> RefinementResult {
     let scope = plan.rollback_scope.unwrap_or(if options.global {
         HarnessScope::Global
@@ -309,6 +313,7 @@ pub fn apply_refinement_plan(
             rollback_of: plan.rollback_of,
             scope: Some(scope),
             baseline_state,
+            factory_enabled,
         },
     )
 }
@@ -558,6 +563,7 @@ mod tests {
                 rollback_of: None,
                 scope: Some(HarnessScope::Local),
                 baseline_state: None,
+                factory_enabled: false,
             },
         );
         let rollback = plan_refinement(

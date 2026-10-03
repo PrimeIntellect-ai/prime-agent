@@ -397,6 +397,17 @@ impl AgentSession {
         } = parts.await?;
         let (result, context_row_ids) = {
             let mut session = self.session.lock().await;
+            // The factory opt-in, read live from the session's agent dir on
+            // every run (the same settings.json the kernel-side factory gate
+            // reads): while `factory.enabled` is off, the refinement's
+            // factory create/update edits refuse with the one disabled
+            // message instead of persisting factories the user has not
+            // opted into. A session without a wired agent dir keeps the
+            // fail-closed disabled default.
+            let factory_enabled = self
+                .agent_dir
+                .as_deref()
+                .is_some_and(crate::refinement::factory_enabled);
             refine::execute_refinement_with_rows(
                 &mut session,
                 refine::RefinementTranscript {
@@ -408,6 +419,7 @@ impl AgentSession {
                 options,
                 source,
                 refine_call,
+                factory_enabled,
             )
             .await?
         };
