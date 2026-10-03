@@ -145,6 +145,14 @@ fn live_feed_runner(engine: Arc<dyn SessionEngine>, socket: std::path::PathBuf) 
         active_session_id: "feed-session".to_string(),
         roster_pushes,
         user_bash: std::sync::Arc::new(crate::user_bash::UserBash::new()),
+        agent_digest: Arc::new(crate::worker::AgentMessageDigest::new(
+            Arc::new(Mutex::new(super::SessionCore::test_core(
+                None,
+                String::new(),
+            ))),
+            Arc::new(Mutex::new(None)),
+            Arc::new(Notify::new()),
+        )),
         passivation: crate::worker::turn::PassivationContext {
             agent_dir: std::path::PathBuf::from("/tmp"),
             link: Arc::new(crate::supervisor_link::SupervisorLink::new(

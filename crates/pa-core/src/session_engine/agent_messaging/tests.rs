@@ -259,6 +259,7 @@ impl AgentMessageController for RecordingMessageController {
             receiver_role: input.receiver_role,
             delivered_at: Some("2024-01-01T00:00:00.000Z".to_string()),
             queued_at: None,
+            digest_at: None,
         }))
     }
 }

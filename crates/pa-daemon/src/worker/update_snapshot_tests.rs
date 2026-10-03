@@ -610,6 +610,7 @@ async fn restored_lane_rows_keep_the_child_status_provenance() {
                 queue_key: None,
                 queue_visible: true,
                 policy: "queued".to_string(),
+                agent_message: None,
             }],
             follow_up: Vec::new(),
         },

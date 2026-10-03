@@ -412,6 +412,19 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(text.endswith("b" * 1000))
         self.assertIn("a" * 1000 + "b" * 1000, text)
 
+    def test_stream_bytes_grow_past_the_buffer_caps(self):
+        # The quiet job watcher reports ranges over the stream offset, so
+        # the count must keep growing once the bounded buffer trims: the
+        # rendered text flattens (the drop marker), `size()` stays capped,
+        # and `stream_bytes()` keeps the true total.
+        buffer = bash_module._BoundedBuffer()
+        total = bash_module._HEAD_CAP + bash_module._TAIL_CAP + 100_000
+        buffer.write(b"x" * total)
+        self.assertEqual(buffer.stream_bytes(), total)
+        self.assertLess(buffer.size(), total)
+        buffer.write(b"y" * 5_000)
+        self.assertEqual(buffer.stream_bytes(), total + 5_000)
+
     async def test_running_reflects_group_liveness(self):
         handle = bash("echo fg; sleep 30 &")
         result = await asyncio.wait_for(handle, timeout=5)

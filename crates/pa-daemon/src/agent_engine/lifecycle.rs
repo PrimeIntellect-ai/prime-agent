@@ -170,6 +170,11 @@ impl AgentSessionEngine {
             goal_input_probe: std::sync::Mutex::new(None),
             goal_admission_sink: std::sync::Mutex::new(None),
             bash_completion_sink: std::sync::Mutex::new(None),
+            digest_inbox_seams: std::sync::Mutex::new(None),
+            watch_notice_sink: std::sync::Mutex::new(None),
+            agent_watches: std::sync::Mutex::new(
+                crate::agent_inbox_host::AgentWatchHostState::default(),
+            ),
             bash_consumed_sink: std::sync::Mutex::new(None),
             goal_queue_purge: std::sync::Mutex::new(None),
             goal_backoff_wake_job_id: std::sync::Mutex::new(None),
@@ -960,6 +965,10 @@ impl AgentSessionEngine {
         register_agent_message_host_handlers(sender, &mut handlers);
         register_agent_observe_host_handlers(observer, &mut handlers);
         self.register_bash_notice_host_handlers(&mut handlers);
+        // The swarm digest lanes (PRs C/D/E): the inbox reads and the
+        // watches ride the same engine seams the bash notices hold.
+        self.register_digest_inbox_host_handlers(&mut handlers);
+        self.register_watch_host_handlers(&mut handlers);
         Some(handlers)
     }
 

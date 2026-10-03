@@ -626,6 +626,14 @@ impl Worker {
             core.child_script.clone_from(&child_script);
             (self.summary_locked(&core), rlm_depth)
         };
+        // A worker reload over a crashed predecessor's session file: a
+        // digested message whose row reached the durable inbox but whose
+        // notice never queued (the crash landed between the durable append
+        // and the notice's enqueue + checkpoint) would sit unread with no
+        // later trigger to wake the session — the reload reconciles the
+        // durable inbox and re-arms the one-per-batch notice (a no-op on a
+        // clean or fully-read inbox).
+        self.agent_digest.ensure_digest_notice();
         // TS `sdk.ts` seeds the Agent's queue modes from the settings
         // manager at session create (`steeringMode`/`followUpMode`): the
         // engine's agent-level queues drain per the same modes the worker

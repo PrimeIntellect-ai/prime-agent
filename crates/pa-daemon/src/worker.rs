@@ -23,6 +23,12 @@ mod connection;
 
 pub(crate) use connection::{AuthOutcome, ConnectionSink, EventPump, OutboundFrame};
 
+mod digest;
+
+pub(crate) use digest::AgentMessageDigest;
+#[cfg(test)]
+pub(crate) use digest::AGENT_MESSAGE_INBOX_ENTRY_CUSTOM_TYPE;
+
 mod queue;
 
 pub use queue::Lane;
@@ -181,6 +187,10 @@ pub struct Worker {
     /// Agent-message ingestion state (`agent_messages_*` arms): the pause
     /// flag the delivery gate checks.
     pub(crate) agent_messages: crate::agent_message_ingest::AgentMessageIngest,
+    /// The digest inbox lane (swarm PRs C/D/E): the durable inbox, the
+    /// daemon-side lane controller with its counters, and the notice
+    /// routing through this worker's queue lanes.
+    pub(crate) agent_digest: Arc<AgentMessageDigest>,
     /// Session input-pause leases (`acquire`/`release_session_input_pause`):
     /// the admission gate the turn runner consults.
     pub(crate) input_pauses: crate::session_input_pause::InputPauseTable,
@@ -353,6 +363,8 @@ impl Worker {
             retry_abort_requested: false,
             queued_input_suspended: false,
             pending_next_turn: Vec::new(),
+            agent_message_digest_mode: false,
+            agent_message_digest_pin: digest::DigestLanePin::default(),
             active_action: None,
             running_tool_calls: std::collections::HashSet::new(),
             running_admission_ids: std::collections::HashSet::new(),
@@ -421,6 +433,14 @@ impl Worker {
             std::sync::Arc::clone(&user_bash),
             Arc::clone(&events),
             Arc::clone(&recovery),
+        ));
+        // The digest inbox lane (swarm PRs C/D/E): the receiving worker owns
+        // the lane — the durable inbox, the controller with its counters, and
+        // the notice admission/withdrawal through the queue lanes.
+        let agent_digest = Arc::new(AgentMessageDigest::new(
+            Arc::clone(&core),
+            Arc::clone(&recovery),
+            Arc::clone(&work_notify),
         ));
         // The turn runner runs for the whole process lifetime. The command
         // dispatcher keeps the engine handle too (model metadata for the
@@ -708,6 +728,40 @@ impl Worker {
                     withdraw_bash_completion_notice(&withdraw_recovery, &withdraw_core, &notice);
                 });
                 concrete.set_bash_notice_sinks(completion, consumed);
+                // The swarm digest-lane seams (PRs C/D/E): the receiving
+                // worker owns the inbox (its store), the lane pin, and the
+                // digest-aware notice routing; the engine's kernel handlers
+                // call through these closures. The watch sink carries the
+                // same closed-session gate the completion sink holds.
+                let inbox_digest = Arc::clone(&agent_digest);
+                let list: crate::agent_inbox_host::InboxListFn =
+                    Arc::new(move || inbox_digest.inbox_snapshot());
+                let inbox_digest = Arc::clone(&agent_digest);
+                let read: crate::agent_inbox_host::InboxReadFn =
+                    Arc::new(move |ids| inbox_digest.read_inbox(ids));
+                let inbox_digest = Arc::clone(&agent_digest);
+                let configure: crate::agent_inbox_host::InboxConfigureFn =
+                    Arc::new(move |mode| inbox_digest.configure_pin(mode));
+                concrete.set_digest_inbox_seams(crate::agent_inbox_host::DigestInboxSeams {
+                    list,
+                    read,
+                    configure,
+                });
+                let watch_engine = std::sync::Arc::downgrade(concrete);
+                let watch_digest = Arc::clone(&agent_digest);
+                let watch_sink: crate::agent_inbox_host::WatchNoticeSink =
+                    std::sync::Arc::new(move |watch, content| {
+                        // A closed session never admits notices; the
+                        // digest-aware routing itself lives worker-side.
+                        if watch_engine
+                            .upgrade()
+                            .is_some_and(|engine| engine.session_is_closed())
+                        {
+                            return;
+                        }
+                        watch_digest.emit_watch_notice(watch, content);
+                    });
+                concrete.set_watch_notice_sink(watch_sink);
             }
             // The live roster activity feed (TS `observeRosterEvent` +
             // `scheduleRosterFlush`): the busy flips and every trigger
@@ -749,6 +803,7 @@ impl Worker {
                 active_session_id,
                 roster_pushes: roster_pushes.clone(),
                 user_bash: std::sync::Arc::clone(&user_bash),
+                agent_digest: Arc::clone(&agent_digest),
                 passivation: crate::worker::turn::PassivationContext {
                     agent_dir: config.agent_dir.clone(),
                     link: Arc::clone(&roster_link),
@@ -799,6 +854,7 @@ impl Worker {
         let navigation = crate::session_navigation::SessionNavigation::new(
             std::sync::Arc::clone(&engine),
             Arc::clone(&core),
+            Arc::clone(&agent_digest),
         );
         Worker {
             config,
@@ -828,6 +884,7 @@ impl Worker {
             user_bash,
             roster_pushes,
             agent_messages: crate::agent_message_ingest::AgentMessageIngest::new(),
+            agent_digest,
             input_pauses,
             navigation,
             prompt_admissions,
@@ -1040,6 +1097,9 @@ mod worker_resume_settings_tests;
 
 #[cfg(test)]
 mod agent_message_tests;
+
+#[cfg(test)]
+mod digest_tests;
 
 #[cfg(test)]
 mod prompt_image_tests;

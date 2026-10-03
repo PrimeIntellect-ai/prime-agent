@@ -203,6 +203,20 @@ pub struct AgentSessionEngine {
     /// `None` outside a daemon worker (no queue to admit into).
     pub(crate) bash_completion_sink: std::sync::Mutex<Option<crate::engine::BashCompletionSink>>,
     pub(crate) bash_consumed_sink: std::sync::Mutex<Option<crate::engine::BashConsumedSink>>,
+    /// The worker-installed digest inbox seams (swarm PR C): the inbox
+    /// reads and the pin live on the receiving worker; the kernel host
+    /// handlers call through these. Set by the worker at construction;
+    /// `None` outside a daemon worker.
+    pub(crate) digest_inbox_seams:
+        std::sync::Mutex<Option<crate::agent_inbox_host::DigestInboxSeams>>,
+    /// The worker-installed watch notice routing (swarm PR E): one watch
+    /// event routed through the digest-aware notice pipeline. Set by the
+    /// worker at construction; `None` outside a daemon worker.
+    pub(crate) watch_notice_sink:
+        std::sync::Mutex<Option<crate::agent_inbox_host::WatchNoticeSink>>,
+    /// The agent-watch registration state (swarm PR E): the subscription
+    /// registry plus the one-shared-poll arming flag.
+    pub(crate) agent_watches: std::sync::Mutex<crate::agent_inbox_host::AgentWatchHostState>,
     /// The session's live agent handle (TS `AgentSession.agent`): the eager
     /// turn-abort funnel's target. Mirrored from the core session at build
     /// time for the same reason as the goal runtime handles — a running
@@ -335,7 +349,7 @@ pub struct AgentSessionEngine {
     /// and supervisor-backed RLM children multiplex the same connection
     /// (the TS worker's single `SupervisorLink` socket). Unconnected until
     /// the first request; standalone workers never use it.
-    link: Arc<crate::supervisor_link::SupervisorLink>,
+    pub(crate) link: Arc<crate::supervisor_link::SupervisorLink>,
     /// Supervisor-backed RLM children; `None` for standalone workers.
     pub(crate) children: Option<Arc<SupervisorChildSessions>>,
     /// The live compaction summary-delta sink the worker installs (the

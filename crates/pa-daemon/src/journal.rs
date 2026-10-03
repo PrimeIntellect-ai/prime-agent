@@ -357,10 +357,12 @@ fn parse_worker_records(path: &Path) -> Result<HashMap<String, WorkerRecoveryRec
 
 /// One parked queue row in a worker queue snapshot: the delivery payload a
 /// respawned worker needs — the message text, the labeled preview, the
-/// injected custom row, the queue key, and the visibility flag — so a
-/// restored queued heartbeat still delivers as the `heartbeat_prompt`
-/// component (and keeps its `Heartbeat prompt:` row) instead of
-/// collapsing into a plain user message.
+/// injected custom row, the queue key, the visibility flag, and the
+/// agent-message marker — so a restored queued heartbeat still delivers as
+/// the `heartbeat_prompt` component (and keeps its `Heartbeat prompt:`
+/// row) instead of collapsing into a plain user message, and a restored
+/// queued agent message still counts as an ingestion turn (and stays
+/// removable by `agent_messages_clear`/`agent_messages_pause`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WorkerQueueItemRecord {
     pub message: String,
@@ -380,6 +382,15 @@ pub struct WorkerQueueItemRecord {
     /// dominant lane class, and the only one a fresh snapshot can batch.
     #[serde(default = "queue_policy_default")]
     pub policy: String,
+    /// The original agent-message text when the row came from an
+    /// `agent_message` delivery (`worker::QueuedItem::agent_message`):
+    /// the marker `agent_messages_clear`/`agent_messages_pause` remove
+    /// queued rows by, and the turn's ingestion-turn classification reads
+    /// (`first.agent_message` before `note_model_turn`). `None` for rows
+    /// a client queued directly; a record written before the field
+    /// existed restores as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_message: Option<String>,
 }
 
 fn queue_visible_default() -> bool {
@@ -771,6 +782,7 @@ fn parse_snapshot_lane(value: Option<&Value>) -> Vec<WorkerQueueItemRecord> {
                         queue_key: None,
                         queue_visible: true,
                         policy: queue_policy_default(),
+                        agent_message: None,
                     }),
                     Value::Object(_) => serde_json::from_value(entry.clone()).ok(),
                     _ => None,
@@ -870,6 +882,7 @@ mod tests {
             queue_key: None,
             queue_visible: true,
             policy: queue_policy_default(),
+            agent_message: None,
         };
         // Admitted (snapshot + busy verdict), settle (snapshot + idle
         // verdict + compaction), then an unchanged-verdict checkpoint whose
@@ -1025,6 +1038,7 @@ mod tests {
             queue_key: None,
             queue_visible: true,
             policy: queue_policy_default(),
+            agent_message: None,
         };
         let mut journal = WorkerRecoveryJournal::open(&path).unwrap();
         // Two turns: each admission batch grows the file; each settle

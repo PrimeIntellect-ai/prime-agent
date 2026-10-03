@@ -12,6 +12,13 @@ use super::{
 };
 
 impl SessionEngine for AgentSessionEngine {
+    /// Swarm PR E's "watchers die with the session" at a session
+    /// replacement (the registry is the engine's; the reused runtime must
+    /// not carry the replaced session's subscriptions into the new one).
+    fn clear_agent_watches(&self) {
+        AgentSessionEngine::clear_agent_watches(self);
+    }
+
     /// TS `_clearQueuedGoalContexts`: the worker-installed purge withdraws
     /// the queued minted goal-context turns (pause/clear/start must not
     /// leave a stale continuation to run after the state change).

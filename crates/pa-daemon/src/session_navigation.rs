@@ -65,11 +65,23 @@ pub(crate) struct PreparedReplacement {
 pub(crate) struct SessionNavigation {
     engine: Arc<dyn SessionEngine>,
     core: Arc<Mutex<SessionCore>>,
+    /// The digest lane (swarm PRs C/D): a replacement session resets the
+    /// lane to its default push state and fresh counters, exactly like the
+    /// TS per-session `AgentSession` a replacement rebuilt.
+    agent_digest: Arc<crate::worker::AgentMessageDigest>,
 }
 
 impl SessionNavigation {
-    pub(crate) fn new(engine: Arc<dyn SessionEngine>, core: Arc<Mutex<SessionCore>>) -> Self {
-        SessionNavigation { engine, core }
+    pub(crate) fn new(
+        engine: Arc<dyn SessionEngine>,
+        core: Arc<Mutex<SessionCore>>,
+        agent_digest: Arc<crate::worker::AgentMessageDigest>,
+    ) -> Self {
+        SessionNavigation {
+            engine,
+            core,
+            agent_digest,
+        }
     }
 
     /// Swap the worker's live session onto `file`: the store, the engine's
@@ -91,10 +103,22 @@ impl SessionNavigation {
         let _ =
             tokio::task::spawn_blocking(move || crate::session_store::read_session_info(&primed))
                 .await;
-        let previous = {
-            let mut core = self.core.lock().unwrap();
-            core.store.replace(file)
-        };
+        // The store swap, the lane reset, and the counters reset ride ONE
+        // `[counters -> core]` hold on the digest (the delivery path
+        // evaluates under the same order; the turn runner accounts under
+        // the core lock): a delivery acquiring the locks after the swap
+        // sees the replacement store already push-pinned with fresh
+        // counters — never the replacement store with the retired
+        // session's pin/mode, never the retired session's in-flight
+        // traffic in the replacement's counters, and never the
+        // replacement's early traffic erased by the reset.
+        let previous = self
+            .agent_digest
+            .reset_for_replacement(|core| core.store.replace(file));
+        // And its watches die with the replaced session (TS #2356: the
+        // registry is cleared on dispose; stale subscriptions must not
+        // bleed into the new session's notices).
+        self.engine.clear_agent_watches();
         // The old store's lease release flushes the window and info
         // sidecars (megabytes for a large session): off the core lock
         // and the runtime.
@@ -961,5 +985,159 @@ mod tests {
             }
             other => panic!("expected the typed missing-cwd error info, got {other:?}"),
         }
+    }
+
+    /// The replacement reset wiring through `replace_session` itself (the
+    /// direct-flow counterpart of the digest module's logic tests): the
+    /// lane state dies with the replaced session and the engine's agent
+    /// watches die with it. Mutating either call out silently carries the
+    /// retired session's digest lane and watch subscriptions into the
+    /// fresh session — the exact drift a wholesale conflict resolution
+    /// would reintroduce.
+    #[tokio::test]
+    async fn a_replacement_resets_the_digest_lane_and_clears_the_watches() {
+        let dir = std::env::temp_dir().join(format!("pa-nav-replace-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let live = dir.join("live-session.jsonl");
+        let mut live_file = SessionFile::create("/tmp", None, 0);
+        live_file.set_path(live.clone());
+        live_file.rewrite().unwrap();
+        let core = Arc::new(std::sync::Mutex::new(SessionCore::test_core(
+            Some(live_file),
+            "/tmp".to_string(),
+        )));
+        let digest = Arc::new(crate::worker::AgentMessageDigest::new(
+            Arc::clone(&core),
+            Arc::new(std::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Notify::new()),
+        ));
+        // The retired session's state: a digest pin, crossed counters, and
+        // an ingestion turn (the lane is live).
+        digest.configure_pin("digest").unwrap();
+        digest.record_arrival(crate::util::now_ms());
+        digest.note_model_turn(true);
+        let engine = Arc::new(crate::engine::ScriptedEngine::default());
+        let navigation = SessionNavigation::new(
+            Arc::clone(&engine) as Arc<dyn SessionEngine>,
+            Arc::clone(&core),
+            Arc::clone(&digest),
+        );
+        let mut fresh = SessionFile::create("/tmp", None, 0);
+        fresh.set_path(dir.join(session_file_name(fresh.session_id())));
+        fresh.rewrite().unwrap();
+        navigation.replace_session(fresh).await.unwrap();
+        // The replacement session starts on the default push lane with
+        // fresh counters: neither the retired session's pin nor its mode
+        // survived the swap.
+        {
+            let locked = core.lock().unwrap();
+            assert!(
+                !locked.agent_message_digest_mode,
+                "the replacement reset the lane mode"
+            );
+        }
+        assert_eq!(
+            digest.configure_pin("auto").unwrap()["digest"],
+            json!(false),
+            "the controller reads the reset lane"
+        );
+        // And its watches died with the replaced session (the scripted
+        // engine counts the clear; the real engine empties its registry).
+        assert_eq!(
+            engine.cleared_agent_watches_count(),
+            1,
+            "the replacement cleared the agent watches"
+        );
+    }
+
+    /// One iteration's replacement file name (the concurrent-replacement
+    /// test's fresh stores).
+    fn session_file_name_of(dir: &std::path::Path, index: usize) -> std::path::PathBuf {
+        dir.join(format!("fresh-session-{index}.jsonl"))
+    }
+
+    /// The store swap and the digest-lane reset are ONE core-lock section
+    /// (the thread's seam): with the reset in a separate section, a delivery
+    /// squeezing between the two reads the swapped-in store while the
+    /// retired session's digest pin still stands, and persists its inbox
+    /// entry into the replacement — violating the push-pinned start. A
+    /// hammering delivery loops the route across a run of replacements; no
+    /// replaced-in store may ever receive a digested entry (the append's own
+    /// lane re-validation also refuses a decision the replacement straddled).
+    #[tokio::test]
+    async fn a_concurrent_delivery_never_digests_into_a_replacement_store() {
+        let dir =
+            std::env::temp_dir().join(format!("pa-nav-replace-race-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut live_file = SessionFile::create("/tmp", None, 0);
+        live_file.set_path(dir.join("live-session.jsonl"));
+        live_file.rewrite().unwrap();
+        let core = Arc::new(std::sync::Mutex::new(SessionCore::test_core(
+            Some(live_file),
+            "/tmp".to_string(),
+        )));
+        let digest = Arc::new(crate::worker::AgentMessageDigest::new(
+            Arc::clone(&core),
+            Arc::new(std::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Notify::new()),
+        ));
+        digest.configure_pin("digest").unwrap();
+        let engine = Arc::new(crate::engine::ScriptedEngine::default());
+        let navigation = SessionNavigation::new(
+            Arc::clone(&engine) as Arc<dyn SessionEngine>,
+            Arc::clone(&core),
+            Arc::clone(&digest),
+        );
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hammer = {
+            let digest = Arc::clone(&digest);
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                let sender = json!({ "activeSessionId": "sender", "sessionName": "sender" });
+                let mut index = 0usize;
+                while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    let _ = digest.route_inbound_message(
+                        &format!("agentmsg_hammer_{index}"),
+                        "hammer",
+                        &sender,
+                        Some("sibling"),
+                    );
+                    index += 1;
+                }
+            })
+        };
+        for index in 0..12 {
+            // Re-pin so the hammer runs a live digest lane into this
+            // iteration (the previous replacement reset the pin).
+            digest.configure_pin("digest").unwrap();
+            let fresh_path = dir.join(session_file_name_of(&dir, index));
+            let mut fresh = SessionFile::create("/tmp", None, 0);
+            fresh.set_path(fresh_path.clone());
+            fresh.rewrite().unwrap();
+            navigation.replace_session(fresh).await.unwrap();
+            // The replaced-in store: after the swap every route pushes (the
+            // pin reset rode the swap's hold), so a digested row in THIS file
+            // means a delivery read the swapped store with the retired pin.
+            let content = std::fs::read_to_string(&fresh_path).unwrap();
+            let digested = crate::session_store::parse_session_entries(&content)
+                .iter()
+                .filter(|entry| {
+                    entry.get("type").and_then(|value| value.as_str()) == Some("custom")
+                        && entry.get("customType").and_then(|value| value.as_str())
+                            == Some(crate::worker::AGENT_MESSAGE_INBOX_ENTRY_CUSTOM_TYPE)
+                })
+                .count();
+            assert_eq!(
+                digested, 0,
+                "iteration {index}: a delivery digested into the replacement store"
+            );
+        }
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        hammer.join().unwrap();
+        assert_eq!(
+            digest.configure_pin("auto").unwrap()["digest"],
+            json!(false),
+            "the final replacement left the lane push-pinned"
+        );
     }
 }

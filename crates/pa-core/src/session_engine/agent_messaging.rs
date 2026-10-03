@@ -69,6 +69,9 @@ impl AgentFamilyRelationship {
 pub enum AgentMessageDeliveryStatus {
     Delivered,
     Queued,
+    /// The digest-lane receipt (swarm PR C): the message landed in the
+    /// target session's inbox instead of prompting.
+    Digest,
 }
 
 impl AgentMessageDeliveryStatus {
@@ -77,6 +80,7 @@ impl AgentMessageDeliveryStatus {
         match self {
             AgentMessageDeliveryStatus::Delivered => "delivered",
             AgentMessageDeliveryStatus::Queued => "queued",
+            AgentMessageDeliveryStatus::Digest => "digest",
         }
     }
 }
@@ -105,6 +109,9 @@ pub struct AgentMessageReceipt {
     pub receiver_role: Option<AgentFamilyRelationship>,
     pub delivered_at: Option<String>,
     pub queued_at: Option<String>,
+    /// Present only for digest-lane messages: when it was placed in the
+    /// target inbox (swarm PR C, TS `digestAt`).
+    pub digest_at: Option<String>,
 }
 
 /// One addressable family member (TS `AgentFamilyMember`): a parent,
@@ -392,6 +399,7 @@ fn receipt_value(receipt: &AgentMessageReceipt) -> Value {
         "deliveryStatus": receipt.delivery_status.as_str(),
         "deliveredAt": receipt.delivered_at,
         "queuedAt": receipt.queued_at,
+        "digestAt": receipt.digest_at,
         "deliveryMode": receipt.delivery_mode,
         "receiverRole": receipt.receiver_role.map(|role| role.as_str()),
     })

@@ -154,6 +154,26 @@ impl SessionFile {
         self.persist_entry_at(entry_type, fields, &crate::util::now_iso())
     }
 
+    /// Adopt into the in-memory index a row that is durable in the session
+    /// file but was never indexed (a post-write append failure: the lease
+    /// append's fsync errored after the bytes reached the file, so the
+    /// normal index-after-success step never ran). Without the adoption a
+    /// later reload from the index would drop the row, and a rewrite —
+    /// which serializes the index — would erase it from the file.
+    ///
+    /// # Errors
+    ///
+    /// Returns the parse error when `row` is not a session entry line.
+    pub(crate) fn index_durable_row(&mut self, row: &serde_json::Value) -> anyhow::Result<()> {
+        let entry: SessionEntry =
+            serde_json::from_value(row.clone()).context("adopt a durable session row")?;
+        if self.by_id.contains_key(&entry.id) {
+            return Ok(());
+        }
+        self.push_index(entry);
+        Ok(())
+    }
+
     /// Durably mark that this session has drawn the Anthropic subscription
     /// ban-risk warning (the once-per-session-lifecycle gate, operator
     /// directive 2026-09-29): append the

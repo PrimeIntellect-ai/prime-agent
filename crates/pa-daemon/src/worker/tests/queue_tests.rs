@@ -336,6 +336,7 @@ fn queue_snapshot_round_trips_through_the_recovery_journal() {
         queue_key: Some("heartbeat:hb-1".to_string()),
         queue_visible: true,
         policy: "injected".to_string(),
+        agent_message: None,
     };
     let plain = crate::journal::WorkerQueueItemRecord {
         message: "follow-me".to_string(),
@@ -345,6 +346,7 @@ fn queue_snapshot_round_trips_through_the_recovery_journal() {
         queue_key: None,
         queue_visible: true,
         policy: "queued".to_string(),
+        agent_message: None,
     };
     journal
         .record_queue_snapshot(
@@ -502,4 +504,47 @@ async fn forced_batch_arming_classifies_the_visible_plain_rows() {
             "no item carries the armed flag"
         );
     }
+}
+
+/// The recovery snapshot carries the agent-message marker both ways: a
+/// queued `agent_message` delivery records its marker, and the restore
+/// rebuilds it — so a respawned worker's restored delivery still counts
+/// as an ingestion turn (`first.agent_message` at `note_model_turn`) and
+/// stays removable by `agent_messages_clear`/`agent_messages_pause`
+/// instead of collapsing into a plain client-queued prompt.
+#[test]
+fn queue_snapshots_round_trip_the_agent_message_marker() {
+    // The writer: a parked agent-message delivery serializes its marker.
+    let mut core = SessionCore::test_core(None, "/tmp".to_string());
+    let mut item = priority_test_item(
+        "[agent-message from source-agent]\n\nREPORT 481",
+        TurnPolicy::Injected,
+    );
+    item.agent_message = Some("REPORT 481".to_string());
+    core.steering.push_back(item);
+    let lanes = queue_lanes(&core);
+    assert_eq!(
+        lanes.steering[0].agent_message.as_deref(),
+        Some("REPORT 481"),
+        "the queue snapshot dropped the agent-message marker"
+    );
+
+    // The journal round-trip: the restore rebuilds the marker.
+    let dir = std::env::temp_dir().join(format!("pa-worker-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let journal_path = dir.join("recovery.jsonl");
+    let mut journal = WorkerRecoveryJournal::open(&journal_path).unwrap();
+    journal
+        .record_queue_snapshot("session-marker", &lanes.steering, &[])
+        .unwrap();
+    let reloaded = WorkerRecoveryJournal::open(&journal_path).unwrap();
+    let (steering, follow_up) = restore_queue_snapshot(&reloaded, "session-marker");
+    assert_eq!(steering.len(), 1);
+    assert_eq!(
+        steering[0].agent_message.as_deref(),
+        Some("REPORT 481"),
+        "the restored row lost its agent-message marker"
+    );
+    assert!(follow_up.is_empty());
+    std::fs::remove_dir_all(dir).unwrap();
 }

@@ -94,7 +94,11 @@ fn recording_worker(dir: &Path, events: std::sync::Arc<std::sync::Mutex<Vec<Stri
     let engine: std::sync::Arc<dyn SessionEngine> = std::sync::Arc::new(RecordingEngine { events });
     let core = std::sync::Arc::clone(&worker.core);
     worker.engine = std::sync::Arc::clone(&engine);
-    worker.navigation = crate::session_navigation::SessionNavigation::new(engine, core);
+    worker.navigation = crate::session_navigation::SessionNavigation::new(
+        engine,
+        core,
+        std::sync::Arc::clone(&worker.agent_digest),
+    );
     worker
 }
 

@@ -32,10 +32,12 @@
 )]
 pub mod acp;
 pub mod agent_engine;
+pub(crate) mod agent_inbox_host;
 pub mod agent_message_broadcast;
 pub mod agent_message_ingest;
 pub mod agent_messaging;
 pub(crate) mod agent_roster;
+pub(crate) mod agent_watch;
 mod async_safe_runtime;
 mod auto_compaction;
 mod autonomous_continuation;

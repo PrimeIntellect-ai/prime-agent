@@ -92,6 +92,7 @@ pub fn sent_agent_message_json(
     let delivery = match delivery_status {
         SentDeliveryStatus::Delivered => "delivered",
         SentDeliveryStatus::Queued => "queued",
+        SentDeliveryStatus::Digest => "digest",
     };
     let mut value = json!({
         "id": id,

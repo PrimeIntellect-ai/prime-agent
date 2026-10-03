@@ -325,6 +325,44 @@ impl Worker {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             sender_is_child_of(&sender, &core).then_some(AgentFamilyRelationship::Child)
         };
+        // The digest inbox lane (swarm PR C/D): the receiving worker owns
+        // the lane. The daemon-side controller (hysteresis over per-session
+        // counters) decides before each delivery; senders never choose. On
+        // the digest lane the payload lands in the durable inbox and one
+        // coalesced notice per batch wakes the recipient — the receipt
+        // answers `digest`. Parent-to-child instructions always stay push.
+        let message_id =
+            pa_core::session_engine::agent_messaging::create_agent_session_message_id();
+        let routed = self.agent_digest.route_inbound_message(
+            &message_id,
+            message,
+            &sender,
+            from_relationship.map(|relationship| relationship.as_str()),
+        );
+        match routed {
+            Ok(Some(digest)) => {
+                let mut receipt = json!({
+                    "id": message_id,
+                    "source": AGENT_MESSAGE_SOURCE,
+                    "target": digest.get("target").cloned().unwrap_or(Value::Null),
+                    "message": message,
+                    "deliveryMode": "steer",
+                    "deliveryStatus": "digest",
+                    "digestAt": digest.get("digestAt").cloned().unwrap_or(Value::Null),
+                });
+                if !sender.is_null() {
+                    receipt["from"] = json!(sender);
+                }
+                return response_success(None, "worker_deliver_message", Some(receipt));
+            }
+            // A failed durable append answers the delivery failure (TS
+            // `appendCustomEntryWithRollback` throws): the message was NOT
+            // digested and must not vanish on restart.
+            Err(error) => {
+                return response_failure(None, "worker_deliver_message", &error.to_string(), None)
+            }
+            Ok(None) => {}
+        }
         let prompt = pa_core::session_engine::agent_messaging::create_agent_session_message_prompt(
             &AgentMessagePromptPayload {
                 message: message.to_string(),
@@ -346,10 +384,14 @@ impl Worker {
                     DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION,
                 )
             {
+                // A rejected delivery records no arrival: the queue-cap
+                // retries must not pin the controller's pending-pressure
+                // EMA above the recovery half-threshold (an auto session
+                // would stay flipped to digest while every send fails).
                 drop(core);
                 return response_failure(None, "worker_deliver_message", &error.to_string(), None);
             }
-            let id = pa_core::session_engine::agent_messaging::create_agent_session_message_id();
+            let id = message_id;
             let queued = core.busy;
             let summary = self.summary_locked(&core);
             // The receiving session's endpoint (TS
@@ -415,6 +457,12 @@ impl Worker {
             let snapshot = Self::snapshot_locked(&core);
             (id, queued, snapshot, target)
         };
+        // The push lane's ACCEPTED arrival records here — after the
+        // queue-cap admission above — and outside the core lock (the
+        // controller's evaluate takes counters-then-core; taking the
+        // counters mutex while holding the core lock would invert that
+        // order).
+        self.agent_digest.record_arrival(crate::util::now_ms());
         // The delivery checkpoint (busy=true): the queued agent message is
         // admitted live work — a restart must revive the worker to
         // deliver it (agent-to-agent messages have no client that

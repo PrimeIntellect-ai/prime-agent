@@ -251,7 +251,7 @@ impl AgentMessageController for LinkAgentMessageController {
             children.observe_child_usage(&input.target).await;
         }
         let receipt = match self.deliver_direct(&input).await {
-            DirectDelivery::Delivered(receipt) => receipt,
+            DirectDelivery::Delivered(receipt) => *receipt,
             DirectDelivery::Unavailable => self.deliver_via_supervisor(input.clone()).await?,
             DirectDelivery::Failed(error) => return Err(anyhow::anyhow!(error)),
         };
@@ -262,7 +262,7 @@ impl AgentMessageController for LinkAgentMessageController {
 /// The outcome of the direct-delivery attempt.
 enum DirectDelivery {
     /// The target answered with a receipt.
-    Delivered(AgentMessageReceipt),
+    Delivered(Box<AgentMessageReceipt>),
     /// No direct link could be established; the supervisor route may take
     /// over.
     Unavailable,
@@ -325,7 +325,7 @@ impl LinkAgentMessageController {
                     .as_ref()
                     .and_then(|data| receipt_from_wire(data, input.clone()))
                 {
-                    Some(receipt) => DirectDelivery::Delivered(receipt),
+                    Some(receipt) => DirectDelivery::Delivered(Box::new(receipt)),
                     None => DirectDelivery::Failed(
                         "Target session returned an invalid agent-message receipt".to_string(),
                     ),
@@ -453,11 +453,10 @@ fn child_member(
 fn receipt_from_wire(data: &Value, input: AgentMessageSendInput) -> Option<AgentMessageReceipt> {
     let target = data.get("target")?;
     let id = data.get("id")?.as_str()?.to_string();
-    let delivery_status = if data.get("deliveryStatus").and_then(Value::as_str) == Some("delivered")
-    {
-        AgentMessageDeliveryStatus::Delivered
-    } else {
-        AgentMessageDeliveryStatus::Queued
+    let delivery_status = match data.get("deliveryStatus").and_then(Value::as_str) {
+        Some("delivered") => AgentMessageDeliveryStatus::Delivered,
+        Some("digest") => AgentMessageDeliveryStatus::Digest,
+        _ => AgentMessageDeliveryStatus::Queued,
     };
     let delivery_mode = match data.get("deliveryMode").and_then(Value::as_str) {
         Some("follow_up") => "follow_up",
@@ -493,6 +492,10 @@ fn receipt_from_wire(data: &Value, input: AgentMessageSendInput) -> Option<Agent
             .map(str::to_string),
         queued_at: data
             .get("queuedAt")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        digest_at: data
+            .get("digestAt")
             .and_then(Value::as_str)
             .map(str::to_string),
     })
