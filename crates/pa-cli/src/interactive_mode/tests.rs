@@ -981,13 +981,10 @@ impl pa_telemetry::TelemetrySink for GatedSink {
 
 /// The interactive startup flush is fire-and-forget from the paint
 /// path's perspective: the first frame must never await the tracked
-/// `startup` events' delivery (the #3288 regression — the inline
-/// `shutdown().await` held the first paint behind the analytics POST's
-/// ~150ms network round-trip; the bench never saw it because the
-/// offline test env installs no analytics sink). The gated sink
-/// stands in for the POST: the flush hand-off must complete while
-/// delivery still hangs, and the released drain must still deliver the
-/// tracked events.
+/// `startup` events' delivery. The gated sink stands in for the
+/// analytics POST's network round-trip: the flush hand-off must
+/// complete while delivery still hangs, and the released drain must
+/// still deliver the tracked events.
 #[test]
 fn the_startup_flush_never_blocks_the_first_frame() {
     tokio::runtime::Runtime::new()

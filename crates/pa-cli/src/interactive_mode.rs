@@ -236,17 +236,14 @@ pub fn run_interactive_mode(options: &RunOptions) -> Result<i32> {
 /// fire-and-forget from the paint path's perspective — the tracked
 /// `startup` events' delivery belongs to the background worker (the
 /// sink's bounded request timeout; a re-sent batch keeps its event ids,
-/// so the backend dedupes), never to the first frame. Awaiting this
-/// flush inline was the #3288 regression: the drain held the first paint
-/// behind the analytics POST's network round-trip to the platform
-/// endpoint, invisible to the offline test env (no analytics sink in
-/// debug builds). The returned handle is the quick-exit seam: the
-/// composition root joins it under the shared exit bound when the run
-/// ends inside the delivery window, so a fast quit delivers (or drops,
-/// bounded) instead of the runtime teardown cutting the worker mid-POST.
+/// so the backend dedupes), never to the first frame. The returned
+/// handle is the quick-exit seam: the composition root joins it under
+/// the shared exit bound when the run ends inside the delivery window,
+/// so a fast quit delivers (or drops, bounded) instead of the runtime
+/// teardown cutting the worker mid-POST.
 /// `the_startup_flush_never_blocks_the_first_frame` guards the boundary
-/// with a hanging sink: a regression back to an inline await fails that
-/// test instead of delaying the paint.
+/// with a hanging sink: the flush hand-off must complete while delivery
+/// is still blocked.
 pub(super) fn flush_startup_telemetry(
     client: pa_telemetry::TelemetryClient,
 ) -> tokio::task::JoinHandle<()> {
