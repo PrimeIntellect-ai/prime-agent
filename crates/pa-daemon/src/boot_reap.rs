@@ -666,7 +666,9 @@ pub(crate) fn supervisor_argv_names_socket(argv: &[String], socket: &str) -> boo
 /// removes endpoints only - a regular file at a matching name is never
 /// touched). UNIX-wide on purpose (the caller is unconditional): the
 /// std `os::unix` socket-file probe compiles on every unix - darwin
-/// included.
+/// included. No unix socket files exist on the other targets, so the
+/// probe answers false there and the unlink never fires (the not(unix)
+/// reaping stubs already collect zero targets).
 #[cfg(unix)]
 fn is_unix_socket_file(path: &Path) -> bool {
     use std::os::unix::fs::FileTypeExt;
@@ -764,8 +766,8 @@ fn protected_worker_pids(agent_dir: &Path, socket_path: &Path) -> HashSet<u32> {
 /// (`/a/b/../c/daemon.sock` vs `/a/c/daemon.sock`, a symlinked tmpdir)
 /// is still a same-socket predecessor - its lease is held either way.
 /// Pure `std` (canonicalize + components): it compiles on every unix -
-/// darwin included, which the unconditional `supervisor_argv_names_socket`
-/// (the argv-only view the supervisor census normalizes with) requires.
+/// darwin included, which `supervisor_argv_names_socket` (the argv-only
+/// view the supervisor census normalizes with) requires.
 #[cfg(unix)]
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn normalize_socket_spelling(path: &Path) -> String {

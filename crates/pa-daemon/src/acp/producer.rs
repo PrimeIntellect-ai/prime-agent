@@ -91,16 +91,15 @@ impl UpdateProducer {
     }
 
     /// Open admission: the `session/new` response has been queued on the
-    /// sink, so held updates may now flow behind it.
+    /// sink, so held updates may now flow behind it. The flush holds the
+    /// lock so a concurrent publish cannot interleave.
     pub async fn commit_session_new_response(&self) {
-        let held = {
-            let mut state = self.state.lock().await;
-            if state.admission.mode != AdmissionMode::Buffering {
-                return;
-            }
-            state.admission.mode = AdmissionMode::Open;
-            std::mem::take(&mut state.admission.held)
-        };
+        let mut state = self.state.lock().await;
+        if state.admission.mode != AdmissionMode::Buffering {
+            return;
+        }
+        state.admission.mode = AdmissionMode::Open;
+        let held = std::mem::take(&mut state.admission.held);
         for frame in held {
             self.send(frame);
         }
@@ -124,8 +123,11 @@ impl UpdateProducer {
         phase: PrimeAgentEventPhase,
         outcome: Option<PrimeAgentOutcome>,
     ) -> bool {
-        let frame = self.correlate(update, turn_id, phase, outcome).await;
+        // Stamp and send under one lock hold so `eventSequence` order is
+        // delivery order.
         let mut state = self.state.lock().await;
+        state.event_sequence += 1;
+        let frame = self.correlate(update, turn_id, phase, outcome, state.event_sequence);
         match state.admission.mode {
             AdmissionMode::Buffering => {
                 state.admission.held.push(frame);
@@ -140,24 +142,21 @@ impl UpdateProducer {
     }
 
     /// Stamp the update with its `eventSequence` and namespace payload.
-    async fn correlate(
+    fn correlate(
         &self,
         update: &AcpSessionUpdate,
         turn_id: u64,
         phase: PrimeAgentEventPhase,
         outcome: Option<PrimeAgentOutcome>,
+        event_sequence: u64,
     ) -> Value {
         let mut value = update.to_bare_value();
-        let correlation = {
-            let mut state = self.state.lock().await;
-            state.event_sequence += 1;
-            PrimeAgentSessionMeta {
-                prompt_turn_id: Some(turn_id),
-                event_sequence: Some(state.event_sequence),
-                phase: Some(phase),
-                outcome,
-                ..Default::default()
-            }
+        let correlation = PrimeAgentSessionMeta {
+            prompt_turn_id: Some(turn_id),
+            event_sequence: Some(event_sequence),
+            phase: Some(phase),
+            outcome,
+            ..Default::default()
         };
         // Merge with any namespace payload the update already carries
         // (e.g. ipython rich output): correlation fields are stamped onto

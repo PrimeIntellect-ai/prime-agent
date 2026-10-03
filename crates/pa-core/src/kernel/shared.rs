@@ -59,6 +59,8 @@ pub const ATTACHMENT_DISPLAY_MIME: &str = "application/vnd.prime-agent.attachmen
 pub const AGENT_MESSAGE_DISPLAY_MIME: &str = "application/vnd.prime-agent.agent-message+json";
 /// Internal lifetime notices, consumed before user display rendering.
 pub const BASH_ACTIVITY_DISPLAY_MIME: &str = "application/vnd.prime-agent.bash-activity+json";
+/// One `bash()` call's command text (capped) and non-blank line count.
+pub const BASH_COMMAND_DISPLAY_MIME: &str = "application/vnd.prime-agent.bash-command+json";
 
 pub const EXECUTE_STATUS_OK: &str = "ok";
 pub const EXECUTE_STATUS_ERROR: &str = "error";
@@ -163,6 +165,14 @@ pub struct SentAgentMessageTarget {
     pub session_name: Option<String>,
 }
 
+/// The `bash()` commands one cell started, summarized for display.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KernelBashCommands {
+    pub first: String,
+    pub count: usize,
+    pub lines: usize,
+}
+
 /// A kernel error reported by a failed cell.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KernelError {
@@ -184,6 +194,8 @@ pub struct ExecuteResult {
     pub attachments: Option<Vec<KernelAttachment>>,
     /// Agent messages sent from this cell, in order.
     pub sent_agent_messages: Option<Vec<KernelSentAgentMessage>>,
+    /// The `bash()` commands this cell started, summarized for display.
+    pub bash_commands: Option<KernelBashCommands>,
     /// Output that arrived without this cell's id (user threads, other cells' leftovers, raw fd writes).
     pub background_output: Option<String>,
     pub status: ExecuteStatus,

@@ -119,7 +119,7 @@ impl ModelRefusalTelemetry {
 
     /// Emit the refusal's `model refused` event (best-effort; no-op when
     /// opted out). The client binds to `cwd` — the settings posture is
-    /// scoped (the `PostHog` endpoint and local mirror read the project
+    /// scoped (the enabled switch and local mirror read the project
     /// scope), so a session that moved directories rebinds instead of
     /// reporting through the old project.
     ///
@@ -136,11 +136,7 @@ impl ModelRefusalTelemetry {
         let settings = pa_core::settings::SettingsManager::create(cwd, &self.agent_dir);
         // The same gating as the supervisor's `daemon event`: the env
         // override wins, else the merged settings' telemetry switch.
-        let enabled = match pa_telemetry::env_telemetry_override() {
-            Some(enabled) => enabled,
-            None => settings.get_telemetry_enabled(),
-        };
-        if !enabled {
+        if !pa_core::session_engine::telemetry::telemetry_switch(&settings).enabled() {
             return;
         }
         // Once per distinct (surface, selector): repeated resolutions of the
@@ -334,7 +330,12 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(
+        not(debug_assertions),
+        ignore = "release builds send to the real endpoint"
+    )]
     async fn refusal_telemetry_honors_both_opt_outs() {
+        let _telemetry = crate::agent_engine::tests::telemetry_opt_in();
         let dir = tempfile::tempdir().expect("tempdir");
         // The create-command opt-out: no client ever.
         let disabled = ModelRefusalTelemetry::new(dir.path().to_path_buf(), true);
@@ -365,7 +366,12 @@ mod tests {
     /// getter re-resolving the same refused model stays silent after the
     /// first event.
     #[tokio::test]
+    #[cfg_attr(
+        not(debug_assertions),
+        ignore = "release builds send to the real endpoint"
+    )]
     async fn refusal_telemetry_dedupes_repeated_resolves() {
+        let _telemetry = crate::agent_engine::tests::telemetry_opt_in();
         let dir = tempfile::tempdir().expect("tempdir");
         let telemetry = ModelRefusalTelemetry::new(dir.path().to_path_buf(), false);
         telemetry.note_refused("session_start", "zai/glm-5.3", dir.path());
@@ -384,7 +390,12 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(
+        not(debug_assertions),
+        ignore = "release builds send to the real endpoint"
+    )]
     async fn refusal_telemetry_rebinds_when_the_cwd_moves() {
+        let _telemetry = crate::agent_engine::tests::telemetry_opt_in();
         let dir = tempfile::tempdir().expect("tempdir");
         let telemetry = ModelRefusalTelemetry::new(dir.path().join("agent"), false);
         let first = dir.path().join("project-a");

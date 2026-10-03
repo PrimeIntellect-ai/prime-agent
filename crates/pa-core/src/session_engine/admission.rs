@@ -112,28 +112,17 @@ impl AgentSession {
 
         let state = self.agent.state().await;
         let busy = state.is_streaming;
-        // The `skill used` adoption event reports from the admission seam:
-        // an admitted user turn whose text IS a skill block reports once,
-        // with how the invocation arrived (a fresh admission, or a queued
-        // steering/follow-up submission). A pre-expanded block (the daemon
-        // emits the accepted row before admission) reports here too — the
-        // block parse carries the skill identity.
-        if let Some(skill) = used_skill.or_else(|| {
-            pa_types::skill_blocks::parse_skill_block(&normalized)
-                .and_then(|block| self.skills.iter().find(|skill| skill.name == block.name))
-        }) {
+        // The `skill_use_count` session counter counts at the admission
+        // seam: an admitted user turn whose text IS a skill block counts
+        // once. A pre-expanded block (the daemon emits the accepted row
+        // before admission) counts here too — the block parse carries the
+        // skill identity.
+        let skill_used = used_skill.is_some()
+            || pa_types::skill_blocks::parse_skill_block(&normalized)
+                .is_some_and(|block| self.skills.iter().any(|skill| skill.name == block.name));
+        if skill_used {
             if let Some(telemetry) = &self.skill_telemetry {
-                let source = if busy {
-                    match options.streaming_behavior {
-                        Some(StreamingBehavior::Steer) => "steer",
-                        // The busy-without-behavior case errors below; the
-                        // queued label is the honest fallback.
-                        Some(StreamingBehavior::FollowUp) | None => "follow_up",
-                    }
-                } else {
-                    "prompt"
-                };
-                telemetry.note_skill_used(&skill.name, skill.kind_label(), source);
+                telemetry.note_skill_used();
             }
         }
         if busy && options.streaming_behavior.is_none() {

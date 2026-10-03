@@ -358,6 +358,12 @@ impl pa_tui::client_settings::ClientSettings for StubSettings {
     fn set_update_channel(&self, _channel: &str) -> Result<()> {
         Ok(())
     }
+    fn telemetry_status(&self) -> String {
+        String::new()
+    }
+    fn set_telemetry_enabled(&self, _enabled: bool) -> Result<String> {
+        Ok(String::new())
+    }
     fn effective_update_channel(&self, version: &str) -> String {
         if version.contains("-beta") {
             "nightly".to_string()

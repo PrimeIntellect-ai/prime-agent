@@ -62,7 +62,7 @@ use pa_agent::types::{AgentEvent, AgentMessage, ThinkingLevel};
 use pa_types::session::AgentMessage as SessionAgentMessage;
 use pa_types::session::FileEntry;
 
-use crate::session::manager::SessionManager;
+use crate::session::manager::{capture_git_context, SessionManager};
 use crate::skills::PromptTemplate;
 use slash_commands::{SessionSlashCommand, SlashCommandRegistry};
 
@@ -186,8 +186,8 @@ pub struct AgentSession {
     /// reads `resourceLoader.getSkills()` at expansion time; the engine
     /// wiring installs the loaded list once the session is assembled).
     skills: Vec<crate::skills::Skill>,
-    /// The telemetry handle for the `skill used` adoption event the
-    /// prompt path owns (`None` in sessions without telemetry).
+    /// The telemetry handle for the `skill_use_count` counter the prompt
+    /// path owns (`None` in sessions without telemetry).
     skill_telemetry: Option<std::sync::Arc<telemetry::SessionTelemetry>>,
     /// The image-model routing host seam (`None` keeps the session model on
     /// image turns: verification harnesses, and the daemon worker whose
@@ -205,6 +205,14 @@ pub struct AgentSession {
     /// summarizer completion — no deltas, no broadcast, no behavior
     /// change.
     compaction_summary_sink: std::sync::Mutex<Option<compaction_exec::SummaryDeltaSink>>,
+    /// The session's agent dir (the settings root): the refine flow
+    /// resolves the `factory.enabled` opt-in from its settings.json on
+    /// every run, immediately before the plan applies, mirroring the
+    /// kernel-side factory gate that reads the same file through
+    /// `PRIME_AGENT_CODING_AGENT_DIR`. `None` until the engine wiring
+    /// resolves it (verification harnesses building the session directly
+    /// keep `None`, which reads as the fail-closed disabled default).
+    agent_dir: Option<std::path::PathBuf>,
 }
 
 impl AgentSession {
@@ -270,6 +278,7 @@ impl AgentSession {
             skill_telemetry: None,
             image_model_router: None,
             compaction_summary_sink: std::sync::Mutex::new(None),
+            agent_dir: None,
         };
         this.ensure_harness_digest_context().await?;
         Ok(this)
@@ -436,10 +445,22 @@ async fn persist_event(
         // Git state is captured at both run boundaries, exactly like the
         // TS run-boundary event path: a commit or branch switch made during the run
         // (e.g. via the bash tool) lands in the session file at `agent_end`.
-        // The persist check lives inside `record_git_state_if_changed`.
+        // The git probes block, so they run on the blocking pool with the
+        // session lock released. A session's captures are sequential (the loop
+        // awaits every listener), the cwd never changes, and no other lock
+        // holder appends `git_state`, so re-taking the lock cannot race.
         AgentEvent::AgentStart | AgentEvent::AgentEnd { .. } => {
-            let mut session = session.lock().await;
-            session.record_git_state_if_changed();
+            let cwd = {
+                let session = session.lock().await;
+                session
+                    .is_persisted()
+                    .then(|| session.get_cwd().to_path_buf())
+            };
+            let Some(cwd) = cwd else { return Ok(()) };
+            let git = tokio::task::spawn_blocking(move || capture_git_context(&cwd)).await?;
+            if let Some(git) = git {
+                session.lock().await.record_git_state_if_changed(git);
+            }
         }
         _ => {}
     }

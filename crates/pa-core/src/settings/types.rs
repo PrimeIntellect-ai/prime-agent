@@ -243,20 +243,9 @@ pub struct FactorySettings {
 pub struct TelemetrySettings {
     pub enabled: Option<bool>,
     pub notice_shown: Option<bool>,
-    /// Self-hosted `PostHog` capture configuration. Nothing is compiled in;
-    /// an empty configuration resolves to the no-op sink.
-    pub posthog: Option<PostHogSettings>,
     /// Local JSONL mirror at `<agentDir>/telemetry.jsonl` (default on:
     /// user-observable transparency).
     pub local_mirror: Option<bool>,
-}
-
-/// Settings `telemetry.posthog`: endpoint + project capture key.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PostHogSettings {
-    pub endpoint: Option<String>,
-    pub api_key: Option<String>,
 }
 
 /// User-declared MCP server (settings `mcpServers` entry).

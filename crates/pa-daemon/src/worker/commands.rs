@@ -424,7 +424,8 @@ impl Worker {
                         kept.push_back(item);
                     } else {
                         if let Some(id) = &item.admission_id {
-                            let _ = self.prompt_admissions.cancel(id);
+                            // A withdrawn prompt clears its admission (TS clearAdmission).
+                            self.prompt_admissions.clear(id);
                         }
                         if let Some(done) = item.done {
                             let _ = done.send(TurnSettle::Withdrawn(
@@ -566,8 +567,18 @@ impl Worker {
             return response;
         }
         let mut core = self.core.lock().unwrap();
-        let steering: Vec<String> = core.steering.drain(..).map(|item| item.message).collect();
-        let follow_up: Vec<String> = core.follow_up.drain(..).map(|item| item.message).collect();
+        let drain_lane = |lane: &mut VecDeque<QueuedItem>| -> Vec<String> {
+            lane.drain(..)
+                .map(|item| {
+                    if let Some(id) = item.admission_id.as_deref() {
+                        self.prompt_admissions.clear(id);
+                    }
+                    item.message
+                })
+                .collect()
+        };
+        let steering: Vec<String> = drain_lane(&mut core.steering);
+        let follow_up: Vec<String> = drain_lane(&mut core.follow_up);
         let snapshot = Self::snapshot_locked(&core);
         drop(core);
         // The cleared lanes are idle again: the verdict refresh rides the

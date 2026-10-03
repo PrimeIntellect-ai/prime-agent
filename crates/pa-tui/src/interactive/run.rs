@@ -535,6 +535,11 @@ async fn run_interactive_surface(
             )
             .await;
     }
+    // The once-per-installation telemetry disclosure (TS
+    // agent-session-services): rendered as an info row here — the alt
+    // screen hides any pre-TUI stderr print, so the row is the only
+    // shape the user actually sees.
+    session.maybe_show_telemetry_notice(&mut view);
     // TS `restorePromptStashOnOpen`: a draft stashed on the way out (a
     // previous chat view of this session left via the agents view or a
     // switch) returns to the editor when its chat reopens.

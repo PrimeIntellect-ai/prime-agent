@@ -270,7 +270,44 @@ fn write_file_atomic_at(path: &Path, content: &str, sync: TempSync) -> Result<()
     let _ = pa_core::platform::perms::restrict_file(&temp);
     pa_core::platform::rename_onto(&temp, path)
         .with_context(|| format!("persist {}", path.display()))?;
+    #[cfg(test)]
+    atomic_write_probe::record(path, sync);
     Ok(())
+}
+
+/// Test-only served-path witness for the atomic writes: the durability
+/// class of a write is not observable in the persisted bytes (the
+/// temp-file sync differs, not the content), so the supervision oracles
+/// take the recorded classes here and assert the intended writer
+/// actually served a launch.
+#[cfg(test)]
+pub(crate) mod atomic_write_probe {
+    use super::{PathBuf, TempSync};
+    use std::sync::Mutex;
+
+    static RECORDED: Mutex<Vec<(PathBuf, TempSync)>> = Mutex::new(Vec::new());
+
+    /// Record one successful atomic write's path and durability class.
+    pub(crate) fn record(path: &std::path::Path, sync: TempSync) {
+        RECORDED
+            .lock()
+            .expect("atomic write probe")
+            .push((path.to_path_buf(), sync));
+    }
+
+    /// Drain the recorded writes under one root (an oracle's descriptor
+    /// path or its directory), leaving every other record in place:
+    /// cargo runs tests in parallel, so a process-wide drain would
+    /// steal a parallel oracle's records and fail its durability
+    /// assertions.
+    pub(crate) fn take_under(root: &std::path::Path) -> Vec<(PathBuf, TempSync)> {
+        let mut recorded = RECORDED.lock().expect("atomic write probe");
+        let (under, rest): (Vec<_>, Vec<_>) = recorded
+            .drain(..)
+            .partition(|(path, _)| path.starts_with(root));
+        *recorded = rest;
+        under
+    }
 }
 
 /// Persist the worker descriptor atomically with a fresh `updated_at`
@@ -281,10 +318,27 @@ fn write_file_atomic_at(path: &Path, content: &str, sync: TempSync) -> Result<()
 /// Returns an error when the descriptor cannot be serialized or the
 /// atomic write to `path` fails.
 pub fn persist_worker(path: &Path, descriptor: &WorkerDescriptor) -> Result<()> {
+    persist_worker_at(path, descriptor, TempSync::Synced)
+}
+
+/// The one persist body behind both durability classes: the same fresh
+/// `updated_at` stamp and atomic rename, differing only in the
+/// temp-file sync — `TempSync`, the single optional-fsync source of
+/// truth the write family already dispatches on.
+///
+/// # Errors
+///
+/// Returns an error when the descriptor cannot be serialized or the
+/// atomic write to `path` fails.
+pub(crate) fn persist_worker_at(
+    path: &Path,
+    descriptor: &WorkerDescriptor,
+    sync: TempSync,
+) -> Result<()> {
     let mut descriptor = descriptor.clone();
     descriptor.updated_at = crate::util::now_iso();
     let content = serde_json::to_string_pretty(&descriptor)?;
-    write_file_atomic(path, &content)
+    write_file_atomic_at(path, &content, sync)
 }
 
 /// The identity-pending side record (the descriptor store's own
@@ -446,6 +500,44 @@ mod tests {
         assert!(
             std::fs::read_dir(dir.path()).unwrap().count() == 1,
             "the temp file must not survive the unsynced rename"
+        );
+    }
+
+    #[test]
+    fn persist_worker_at_unsynced_stamps_and_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("w.json");
+        let descriptor: WorkerDescriptor = serde_json::from_value(json!({
+            "version": 2,
+            "workerId": "wspawn",
+            "pid": 4242,
+            "socketPath": "/tmp/w.sock",
+            "recoveryJournalPath": "/tmp/w.recovery.jsonl",
+            "supervisorSocketPath": "/tmp/d.sock",
+            "authenticationToken": "tok",
+            "rootActiveSessionId": "wspawn",
+            "createdAt": "2026-10-01T00:00:00Z",
+            "updatedAt": "2026-10-01T00:00:00Z",
+            "lifecycle": "starting",
+            "createCommand": {},
+            "consecutiveFailures": 0,
+        }))
+        .expect("descriptor");
+        persist_worker_at(&path, &descriptor, TempSync::Unsynced).expect("persist");
+        let persisted: WorkerDescriptor =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).expect("parse");
+        // The spawn record carries the same content the durable persist
+        // would (the stamp included) — only the pre-rename fsync differs.
+        assert_eq!(persisted.worker_id, "wspawn");
+        assert_eq!(persisted.pid, 4242);
+        assert_eq!(persisted.lifecycle, WorkerLifecycle::Starting);
+        assert_ne!(
+            persisted.updated_at, descriptor.updated_at,
+            "the fresh updated_at stamp rides the spawn record"
+        );
+        assert!(
+            std::fs::read_dir(dir.path()).unwrap().count() == 1,
+            "the temp file must not survive the rename"
         );
     }
 

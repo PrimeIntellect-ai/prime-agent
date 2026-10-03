@@ -352,3 +352,61 @@ fn no_output_placeholder() {
         "got: {flat:?}"
     );
 }
+
+#[test]
+fn bash_dominated_cell_renders_as_bash() {
+    let code =
+        "r = await sh(\"\"\"\ncd crates/pa-tui\ncargo test -p pa-tui\n\"\"\")\nprint(r.output)";
+    let card = cell_card(
+        code,
+        json!({
+            "status": "ok",
+            "durationMs": 2,
+            "stdout": "ok\n",
+            "bashCommands": {
+                "first": "\ncd crates/pa-tui\ncargo test -p pa-tui\n",
+                "count": 3,
+                "lines": 4,
+            },
+        }),
+        false,
+        false,
+    );
+    let lines = render(&card, 0, Detail::Overview, &theme(), 100, true);
+    assert_eq!(lines.len(), 1);
+    assert_eq!(
+        text_of(&lines[0]),
+        " \u{2713} bash \u{00b7} cargo test -p pa-tui \u{00b7} +2 more \u{00b7} \u{2191} 5 \u{2193} 1 lines \u{00b7} 2ms"
+    );
+    assert_eq!(
+        bash_dominated_stats(&card),
+        Some(BashCellStats {
+            bash_lines: 4,
+            cell_lines: 5,
+            count: 3,
+        })
+    );
+}
+
+#[test]
+fn bash_minority_cell_stays_python() {
+    let code = "async def sh(cmd):\n    return await bash(cmd)\nr = await sh(\"ls\")\nprint(r.pid)";
+    let card = cell_card(
+        code,
+        json!({
+            "status": "ok",
+            "durationMs": 5,
+            "stdout": "0\n",
+            "bashCommands": { "first": "ls", "count": 1, "lines": 1 },
+        }),
+        false,
+        false,
+    );
+    let lines = render(&card, 0, Detail::Overview, &theme(), 100, true);
+    assert_eq!(lines.len(), 1);
+    assert_eq!(
+        text_of(&lines[0]),
+        " \u{2713} python \u{00b7} r = await sh(\"ls\") \u{00b7} \u{2191} 4 \u{2193} 1 lines \u{00b7} 5ms"
+    );
+    assert_eq!(bash_dominated_stats(&card), None);
+}
