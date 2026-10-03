@@ -911,8 +911,9 @@ fn a_fork_launch_never_opens_the_agents_view() {
 /// timeout — the point is that delivery takes longer than the paint).
 #[derive(Default)]
 struct GatedSink {
-    /// The batch attempt reached the sink (delivery started).
-    entered: std::sync::atomic::AtomicBool,
+    /// Send entry: `notify_one` when a batch reaches the sink; a
+    /// stored permit keeps the entry wait race-free in both orders.
+    entered_notify: tokio::sync::Notify,
     /// The delivered batches' event names (delivery finished).
     delivered: std::sync::Mutex<Vec<String>>,
     /// The release flag the hanging send waits on.
@@ -938,6 +939,11 @@ impl GatedSink {
         self.delivered.lock().expect("gate lock").clone()
     }
 
+    /// The first send's entry future.
+    fn wait_until_entered(&self) -> impl std::future::Future<Output = ()> + '_ {
+        self.entered_notify.notified()
+    }
+
     /// The first delivery's completion future.
     fn wait_until_delivered(&self) -> impl std::future::Future<Output = ()> + '_ {
         self.delivered_notify.notified()
@@ -952,8 +958,7 @@ impl pa_telemetry::TelemetrySink for GatedSink {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = pa_telemetry::SinkOutcome> + Send + 'a>>
     {
         Box::pin(async move {
-            self.entered
-                .store(true, std::sync::atomic::Ordering::SeqCst);
+            self.entered_notify.notify_one();
             // Race-free wait, tokio's documented pattern: the waiter
             // registers (or consumes a permit) BEFORE the flag check, so
             // a release that fires between the check and the await is
@@ -1027,9 +1032,13 @@ async fn startup_flush_never_blocks_the_first_frame() {
             // is meaningful: a release that beats the send's entry
             // drains without ever hanging, and the hand-off below would
             // pass vacuously.
-            while !sink.entered.load(std::sync::atomic::Ordering::SeqCst) {
-                tokio::task::yield_now().await;
-            }
+            let entered =
+                tokio::time::timeout(std::time::Duration::from_secs(2), sink.wait_until_entered())
+                    .await;
+            assert!(
+                entered.is_ok(),
+                "the tracked startup batch entered the gated sink"
+            );
             assert!(
                 sink.delivered_names().is_empty(),
                 "delivery was still pending when the paint path proceeded"
