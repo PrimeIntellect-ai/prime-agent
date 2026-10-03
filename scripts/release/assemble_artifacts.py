@@ -407,11 +407,28 @@ def pack_tarball(staging: Path, out_path: Path, entries: list[str]) -> None:
         fail(str(error))
 
 
-def debug_sections(binary: Path) -> list[str]:
+# GNU binutils tool name per Rust target triple: the cross-compile leg
+# (aarch64-unknown-linux-gnu on the x86_64 sandbox runner,
+# docs/sandbox-runners.md) splits and inspects a foreign-arch ELF, which the
+# host's plain objcopy/objdump/readelf cannot read; the target-prefixed
+# binutils can. Native builds (the host-arch linux and darwin targets) keep
+# the plain tool names.
+BINUTILS_PREFIXES = {
+    "aarch64-unknown-linux-gnu": "aarch64-linux-gnu-",
+}
+
+
+def binutils_tool(target: str, tool: str) -> str:
+    """The binutils binary able to read the given target's ELF."""
+    return f"{BINUTILS_PREFIXES.get(target, '')}{tool}"
+
+
+def debug_sections(binary: Path, target: str) -> list[str]:
     """ELF .debug_* section names, so the split asserts on real evidence."""
-    result = subprocess.run(["objdump", "-h", str(binary)], capture_output=True, text=True)
+    result = subprocess.run([binutils_tool(target, "objdump"), "-h", str(binary)],
+                            capture_output=True, text=True)
     if result.returncode != 0:
-        fail(f"objdump -h failed on {binary}: {result.stderr.strip()}")
+        fail(f"{binutils_tool(target, 'objdump')} -h failed on {binary}: {result.stderr.strip()}")
     return [
         line.split()[1]
         for line in result.stdout.splitlines()
@@ -419,8 +436,8 @@ def debug_sections(binary: Path) -> list[str]:
     ]
 
 
-def gnu_build_id(path: Path) -> str:
-    result = subprocess.run(["readelf", "-n", str(path)],
+def gnu_build_id(path: Path, target: str) -> str:
+    result = subprocess.run([binutils_tool(target, "readelf"), "-n", str(path)],
                             capture_output=True, text=True)
     match = re.search(r"Build ID: ([0-9a-f]+)", result.stdout) if result.returncode == 0 else None
     if match is None:
@@ -433,7 +450,7 @@ def decoder_facts(args: argparse.Namespace) -> dict | None:
         if args.binary is None or args.decoder is None:
             fail("Linux release requires explicit --binary shipped ELF and "
                  "--decoder from split_debug.py")
-        if debug_sections(resolve_binary(args)):
+        if debug_sections(resolve_binary(args), args.target):
             fail(f"Linux shipped ELF still has DWARF: {args.binary}")
         expected = f"prime-agent-{args.version}-{TARGET_ALIASES[args.target]}.debug.gz"
         decoder = args.decoder
@@ -447,8 +464,8 @@ def decoder_facts(args: argparse.Namespace) -> dict | None:
                     shutil.copyfileobj(src, dst)
             except (OSError, EOFError) as error:
                 fail(f"cannot decompress decoder {decoder}: {error}")
-            build_id = gnu_build_id(binary)
-            if gnu_build_id(uncompressed) != build_id:
+            build_id = gnu_build_id(binary, args.target)
+            if gnu_build_id(uncompressed, args.target) != build_id:
                 fail(f"decoder build ID does not match shipped ELF {binary}")
         return {"target": args.target, "file": expected,
                 "sha256": sha256_file(decoder), "buildId": build_id,

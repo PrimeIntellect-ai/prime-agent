@@ -47,7 +47,7 @@ actionlint:
 # GLIBC baseline gate (the continuous.yml/release.yml build-gnu jobs): a
 # GNU/Linux artifact must not require symbols above GLIBC_2.35, the Ubuntu
 # 22.04 release baseline. No-op on non-GNU hosts; the authoritative gate runs
-# in CI inside the ubuntu:22.04 build container. POSIX sh throughout: make
+# in CI on the Ubuntu 22.04 sandbox runners. POSIX sh throughout: make
 # runs recipes with /bin/sh, which is dash on Ubuntu (no [[ ]], no ==).
 glibc-gate:
 	@case "$(TARGET)" in *-linux-gnu) \
@@ -187,4 +187,12 @@ shard-gates:
 	python3 scripts/test_ci_test_shard.py
 	python3 scripts/test_ci_pr_crates.py
 
-.PHONY: check deny windows-cross actionlint glibc-gate release-dry-run continuous-dry-run audit-build package catalog-assets catalog-assets-fixture catalog-assets-gates fold-gates restamp-gates shard-gates
+# The sandbox-runner provisioning contract battery (scripts/ci/
+# register_runner.sh): the security case is first - the registration values
+# reach config.sh as argv and the supervisor script path reaches su as
+# argv, never as interpolated shell source, and the -- on both su
+# invocations keeps a leading-dash value from becoming su's own option.
+runner-gates:
+	python3 scripts/ci/test_register_runner.py
+
+.PHONY: check deny windows-cross actionlint glibc-gate release-dry-run continuous-dry-run audit-build package catalog-assets catalog-assets-fixture catalog-assets-gates fold-gates restamp-gates shard-gates runner-gates

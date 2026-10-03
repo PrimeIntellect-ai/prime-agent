@@ -17,6 +17,11 @@ VERIFIER = HERE / "verify_decoders.py"
 CATALOG = HERE / "bundle_catalog.py"
 TARGETS = (("x86_64-unknown-linux-gnu", "linux-x64"),
            ("aarch64-unknown-linux-gnu", "linux-arm64"))
+# The fixture ELF must match the declared target: split_debug picks the
+# binutils tool by target, and the target-prefixed objcopy refuses a
+# foreign-arch image, so each target needs its own compiler.
+COMPILERS = {"x86_64-unknown-linux-gnu": "gcc",
+             "aarch64-unknown-linux-gnu": "aarch64-linux-gnu-gcc"}
 
 
 def run(*args: str, success: bool = True) -> subprocess.CompletedProcess:
@@ -28,6 +33,9 @@ def run(*args: str, success: bool = True) -> subprocess.CompletedProcess:
 
 class DecoderManifest(unittest.TestCase):
     def test_two_targets_reassemble_and_promote(self) -> None:
+        missing = [c for c in COMPILERS.values() if shutil.which(c) is None]
+        if missing:
+            self.skipTest(f"needs {', '.join(missing)} to build per-target fixtures")
         with tempfile.TemporaryDirectory(prefix="decoder-manifest-") as tmp:
             root = Path(tmp)
             repo = root / "repo"
@@ -42,9 +50,10 @@ class DecoderManifest(unittest.TestCase):
             dist = root / "dist"
             binary = root / "unstripped"
             for target, alias in TARGETS:
+                compiler = COMPILERS[target]
                 source = root / f"{alias}.c"
                 source.write_text(f"int main(void) {{ return {len(alias)}; }}\n")
-                run("gcc", "-g", "-Wl,--build-id", "-o", str(binary), str(source))
+                run(compiler, "-g", "-Wl,--build-id", "-o", str(binary), str(source))
                 shipped = root / alias / "prime-agent"
                 decoder = dist / f"prime-agent-0.1.0-{alias}.debug.gz"
                 run(sys.executable, str(SPLITTER), "--binary", str(binary),

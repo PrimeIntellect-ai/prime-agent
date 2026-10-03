@@ -92,20 +92,16 @@ jobs:
     needs: [deny, staleness]
     if: needs.staleness.outputs.superseded != 'true'
     name: build-${{ matrix.target }}
+    # Self-hosted Linux legs (docs/sandbox-runners.md): the prime-linux-*
+    # labels resolve on Prime sandbox microVMs whose rootfs IS the same
+    # digest-pinned Ubuntu 22.04 image (the reviewed GLIBC 2.35 build
+    # baseline), so the baseline moves with the runner provision, not with
+    # the job. The sandbox host only supplies
+    # CPU. The sandbox fleet is x86_64-only today, so the arm64 target
+    # cross-links on the x64 host and its livechecks run under qemu-user
+    # binfmt; the host image stays the reviewed baseline either way.
     runs-on: ${{ matrix.runs-on }}
-    # GLIBC 2.35 build baseline: artifacts built on the ubuntu-24.04 runner
-    # image required GLIBC_2.39 and did not start on Ubuntu 22.04 (verified
-    # 2026-09-24 on a deploy box). The host runner only supplies CPU; this
-    # container pins the build glibc. The image is multi-arch, so aarch64
-    # stays a native build on the arm runner.
-    container:
-      # Pinned by digest (review finding: the mutable tag could drift the
-      # release baseline under promote). Pin the multi-arch index so both
-      # matrix arches resolve from one reviewed image; update the digest
-      # only through reviewed changes.
-      image: ubuntu:22.04@sha256:b8b6ee6aa931ecd9d0d952abc34dc0e5f7c6a30c6bb71b079fe399fde0329c02
-    # Container jobs run `run:` steps with the image's /bin/sh (dash on
-    # ubuntu:22.04), which rejects `set -o pipefail`; pin the steps to bash.
+    # The runner rootfs is Ubuntu 22.04 (dash as /bin/sh); the steps pin bash.
     defaults:
       run:
         shell: bash
@@ -117,41 +113,64 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            runs-on: ubuntu-24.04
+            runs-on: prime-linux-x64
           - target: aarch64-unknown-linux-gnu
-            runs-on: ubuntu-24.04-arm
+            # Cross-compile leg: the GNU aarch64 toolchain (Ubuntu 22.04
+            # sysroot, the same GLIBC 2.35 baseline) plus qemu-user so the
+            # livechecks run the produced arm64 binary on the x64 host.
+            runs-on: prime-linux-arm64
     env:
       # AppleDouble resource forks must not leak into the archive; the
       # assembler additionally enforces plain-file payloads.
       COPYFILE_DISABLE: "1"
+      # Cross-compile leg (aarch64 target on the x86_64 host): cargo links
+      # with the GNU cross toolchain, and the livecheck gates run the
+      # produced arm64 binary under qemu-user binfmt with the cross sysroot
+      # as the guest interpreter prefix. Harmless on the native x64 leg.
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+      QEMU_LD_PREFIX: /usr/aarch64-linux-gnu
     steps:
-      # The base image is minimal: the checkout/toolchain/cache actions and
-      # the build need these (git before checkout so clones do not fall
-      # back to the REST-API download path).
-      - name: Install build prerequisites (Ubuntu 22.04 container)
+      # Job steps run as the sudo-less runner user, so the build packages,
+      # the aarch64 cross toolchain, and the qemu binfmt handler are set up
+      # as root by scripts/ci/register_runner.sh at provision time. This
+      # step only fails fast when a runner was provisioned without them.
+      - name: Check the runner provision
         run: |
           set -euo pipefail
-          apt-get update
-          apt-get install -y --no-install-recommends \
-            build-essential curl ca-certificates python3 git binutils
+          tools=(gcc curl python3 git objcopy)
+          if [[ "${{ matrix.target }}" == aarch64-unknown-linux-gnu ]]; then
+            tools+=(aarch64-linux-gnu-gcc aarch64-linux-gnu-objcopy aarch64-linux-gnu-objdump)
+            [[ -e /proc/sys/fs/binfmt_misc/qemu-aarch64 ]] \
+              || { echo "::error::qemu-aarch64 binfmt is not enabled; re-provision with scripts/ci/register_runner.sh"; exit 1; }
+          fi
+          for tool in "${tools[@]}"; do
+            command -v "${tool}" >/dev/null \
+              || { echo "::error::${tool} is missing; re-provision with scripts/ci/register_runner.sh"; exit 1; }
+          done
+      # clean: false keeps target/ (the warm cache) across builds; the next
+      # step does the clean checkout would do, minus target/, and drops the
+      # previous run's outputs so stale artifacts cannot be merged or uploaded.
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+          clean: false
+      - name: Clean the workspace (keep the target/ cache)
+        run: |
+          set -euo pipefail
+          git clean -ffdx -e /target/
+          rm -rf "target/${{ matrix.target }}/dist" "target/${{ matrix.target }}/catalog-assets"
       # The pinned SHA is the toolchain pin: this action version has no
       # `toolchain` input, and its parse step hard-codes 1.98.1. Change the
       # compiler by changing the SHA; a `toolchain:` input is ignored.
       - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          # The glibc235 marker scopes the cache to the Ubuntu 22.04 build
-          # baseline: cargo fingerprints do not encode the host libc, so a
-          # key without it could restore a target/ tree linked on the old
-          # ubuntu-24.04 host and reuse a GLIBC_2.39 binary. First run on
-          # the new key builds cold; the marker moves only with reviewed
-          # baseline changes (same protocol as the image digest below).
-          key: ${{ matrix.target }}-glibc235
+      # No rust-cache on the self-hosted legs: the runner VM persists
+      # target/ across builds (the warm-build contract in
+      # docs/sandbox-runners.md), so the disk is the cache and restoring a
+      # stale tarball over a warm target dir would only regress
+      # fingerprints. A freshly provisioned runner pays one cold build,
+      # then stays warm for the life of the sandbox.
       # Only the shipped binary links here: the job packages `prime-agent`
       # alone, so pa-daemon's [[bin]] would be a second thin-LTO link with
       # no consumer (~26% of the build step, measured).
@@ -172,9 +191,13 @@ jobs:
         run: |
           set -euo pipefail
           bin="target/${{ matrix.target }}/dist/prime-agent"
-          syms="$(objdump -T "${bin}" | grep -o 'GLIBC_[0-9.]*' || true)"
+          # The cross leg reads its aarch64 ELF with the matching cross
+          # binutils, like the split/assemble steps do.
+          objdump=objdump
+          [[ "${{ matrix.target }}" == aarch64-unknown-linux-gnu ]] && objdump=aarch64-linux-gnu-objdump
+          syms="$("${objdump}" -T "${bin}" | grep -o 'GLIBC_[0-9.]*' || true)"
           if [ -z "${syms}" ]; then
-            echo "::error::could not inspect ${bin} with objdump (no GLIBC symbols found) - refusing to pass the gate without evidence"
+            echo "::error::could not inspect ${bin} with ${objdump} (no GLIBC symbols found) - refusing to pass the gate without evidence"
             exit 1
           fi
           max_glibc="$(printf '%s\n' "${syms}" | sort -Vu | tail -1)"
@@ -204,7 +227,10 @@ jobs:
             --catalog-assets "target/${{ matrix.target }}/catalog-assets" \
             --out-dir "target/${{ matrix.target }}/dist"
           cat "target/${{ matrix.target }}/dist/manifest.json"
-      - name: Livecheck the assembled continuous artifact on its native runner
+      # The assembled artifact's livecheck runs on the build host: natively
+      # on the x64 leg, under qemu-user binfmt on the cross arm64 leg
+      # (QEMU_LD_PREFIX is set at the job level).
+      - name: Livecheck the assembled continuous artifact on the build host
         run: |
           set -euo pipefail
           version="$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -1)"

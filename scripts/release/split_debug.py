@@ -45,7 +45,7 @@ from pathlib import Path
 
 # Same platform alias map the assembler uses, so the decoder file name
 # matches the release naming convention exactly.
-from assemble_artifacts import TARGET_ALIASES, debug_sections
+from assemble_artifacts import TARGET_ALIASES, binutils_tool, debug_sections
 
 
 def fail(message: str) -> None:
@@ -85,7 +85,7 @@ def main() -> int:
     binary = args.binary
     if not binary.is_file() or not os.access(binary, os.X_OK):
         fail(f"no executable binary at {binary}")
-    before = debug_sections(binary)
+    before = debug_sections(binary, args.target)
     if not before:
         fail(f"{binary} carries no .debug_* sections - build it with the "
              "line-tables profile before splitting (a stripped-at-link build "
@@ -102,7 +102,7 @@ def main() -> int:
         # only-keep-debug keeps section headers and every DWARF section and
         # drops the loaded contents — the decoder file, symbolization-wise
         # equivalent to the original for addr2line/llvm-symbolizer.
-        run(["objcopy", "--only-keep-debug", str(binary), str(keep)])
+        run([binutils_tool(args.target, "objcopy"), "--only-keep-debug", str(binary), str(keep)])
         if not keep.is_file() or keep.stat().st_size == 0:
             fail("objcopy --only-keep-debug produced no decoder file")
         # gzip -n: no timestamp, deterministic asset bytes
@@ -116,9 +116,9 @@ def main() -> int:
     # binutils-emitted .debug_gdb_scripts auto-load marker (34 bytes); it
     # is removed explicitly so the shipped image carries NO .debug_*
     # section at all (--remove-section is a no-op when absent).
-    run(["objcopy", "--strip-debug",
+    run([binutils_tool(args.target, "objcopy"), "--strip-debug",
          "--remove-section=.debug_gdb_scripts", str(binary), str(stripped_tmp)])
-    after = debug_sections(stripped_tmp)
+    after = debug_sections(stripped_tmp, args.target)
     if after:
         fail(f"--strip-debug left .debug_* sections behind: {after}")
     shipped_sha = sha256_file(stripped_tmp)

@@ -367,10 +367,10 @@ def main(argv=None):
                    "linux-arm64": "aarch64-unknown-linux-gnu"}
         if tag not in targets:
             raise SystemExit(f"error: unsupported Linux platform: {tag}")
+        target = targets[tag]
         if not args.binary:
             shipped_dir = root / "target" / "release" / "dist"
             shipped = shipped_dir / "prime-agent"
-            target = targets[tag]
             subprocess.run([sys.executable, str(ROOT / "scripts/release/split_debug.py"),
                             "--binary", str(binary), "--shipped", str(shipped),
                             "--out", str(shipped_dir), "--version", version,
@@ -379,7 +379,7 @@ def main(argv=None):
             args.decoder = shipped_dir / f"prime-agent-{version}-{tag}.debug.gz"
         if args.decoder is None:
             raise SystemExit("error: Linux --binary requires --decoder from split_debug.py")
-        if debug_sections(binary):
+        if debug_sections(binary, target):
             raise SystemExit(f"error: Linux shipped binary still has DWARF: {binary}")
         decoder_facts(argparse.Namespace(target=targets[tag], version=version,
                                         decoder=args.decoder, binary=binary))
