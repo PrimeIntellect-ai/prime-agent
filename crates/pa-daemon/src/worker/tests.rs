@@ -47,6 +47,7 @@ fn session_events_since(
 }
 
 mod abort_boundary_tests;
+mod connection_state_tests;
 mod goal_tests;
 mod kill_broadcast_tests;
 mod queue_tests;

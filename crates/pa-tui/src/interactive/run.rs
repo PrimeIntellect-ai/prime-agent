@@ -472,7 +472,14 @@ async fn run_interactive_surface(
     if headless {
         session.osc_sink = crate::clipboard::OscSink::Buffer(Vec::new());
     }
-    session.refresh_stats().await;
+    // The tray's context usage came in with the attach snapshot (TS
+    // `createAgentConnectionState` carries `contextUsage`; TS never
+    // blocks the first frame on a `getSessionStats` fetch — its stats
+    // refreshes run only after a turn or compaction settles, which the
+    // loop's settle arms below keep doing). A blocking
+    // `refresh_stats()` here cost a full daemon round-trip on the
+    // first-frame path (the open and every agents-view switch
+    // re-entry) for data the snapshot already carried.
     // The startup catalog fetch (TS `updateAvailableProviderCount` →
     // `getConnectionAvailableModels`): failures stay silent and the
     // composition-root snapshot keeps serving the picker.

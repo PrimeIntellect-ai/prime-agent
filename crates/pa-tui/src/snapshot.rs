@@ -54,6 +54,13 @@ pub struct Reconstructed {
     /// The tray effort suffix for that model (TS `getModelContextLabel`),
     /// when the state's model carries its reasoning level.
     pub thinking_suffix: Option<String>,
+    /// The tray's context usage (`state.contextUsage`, the TS
+    /// `createAgentConnectionState` `contextUsage` field): the snapshot
+    /// feeds the first frame's tray row — the open path does not block
+    /// on a `get_session_stats` round-trip (TS fetches stats only after
+    /// a turn or compaction settles). `None` clears the tray display
+    /// (unknown usage).
+    pub context_usage: Option<crate::chrome::ContextUsage>,
     /// Session display name.
     pub session_name: Option<String>,
     /// Session id of the persisted session file.
@@ -360,6 +367,9 @@ pub fn reconstruct(attach: &AttachData) -> Reconstructed {
         .and_then(model_identity_value)
         .map_or((None, None), |(id, provider)| (Some(id), provider));
     let thinking_suffix = state.and_then(crate::chrome::tray_thinking_suffix);
+    let context_usage = state
+        .and_then(|state| state.get("contextUsage"))
+        .and_then(crate::chrome::ContextUsage::from_wire);
     let session_name = state
         .and_then(|state| state.get("sessionName"))
         .and_then(Value::as_str)
@@ -440,6 +450,7 @@ pub fn reconstruct(attach: &AttachData) -> Reconstructed {
         model_id,
         model_provider,
         thinking_suffix,
+        context_usage,
         session_name,
         session_id,
         event_generation,

@@ -2170,6 +2170,43 @@ fn attach_snapshot_carries_the_goal_state() {
     assert_eq!(goal.objective.as_deref(), Some("keep shipping"));
 }
 
+/// The tray's context usage rides the attach snapshot's state (TS
+/// `createAgentConnectionState`'s `contextUsage`): the reconstruct hands
+/// it to the rebuild that follows every attach, so the first frame's tray
+/// row comes off the snapshot — the three wire shapes the stats response
+/// serves (known tokens, unknown tokens right after a compaction, and
+/// the model-less session that omits the field entirely).
+#[test]
+fn attach_snapshot_carries_the_tray_context_usage() {
+    let mut attach = slim_attach();
+    attach
+        .get_mut("snapshot")
+        .expect("snapshot")
+        .get_mut("state")
+        .expect("state")["contextUsage"] =
+        json!({ "tokens": 9_400, "contextWindow": 128_000, "percent": 7.34 });
+    let data = attach_data_from_response(attach).unwrap();
+    let reconstructed = reconstruct(&data);
+    let usage = reconstructed.context_usage.expect("snapshot context usage");
+    assert_eq!(usage.tokens, 9_400);
+    assert_eq!(usage.context_window, 128_000);
+
+    // Unknown tokens (a fresh compaction) clear the tray display.
+    let mut attach = slim_attach();
+    attach
+        .get_mut("snapshot")
+        .expect("snapshot")
+        .get_mut("state")
+        .expect("state")["contextUsage"] =
+        json!({ "tokens": null, "contextWindow": 128_000, "percent": null });
+    let data = attach_data_from_response(attach).unwrap();
+    assert_eq!(reconstruct(&data).context_usage, None);
+
+    // A state without the field (a model-less session) stays `None`.
+    let data = attach_data_from_response(slim_attach()).unwrap();
+    assert_eq!(reconstruct(&data).context_usage, None);
+}
+
 /// The synthetic image-heavy tool-result row: a `role: "toolResult"`
 /// message with one 500KB image payload block (the `attach_image` emit's
 /// stored shape).

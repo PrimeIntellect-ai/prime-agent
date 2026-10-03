@@ -123,11 +123,10 @@ impl SessionUi {
     pub(super) async fn start_new_session(&mut self, view: &mut AgentView) -> Result<()> {
         let id = create_session(&self.client, &self.create_options(), None).await?;
         self.attach_session(&id, DockFold::Fresh).await?;
-        // The title's pair is session-scoped: fetch the new session's
-        // stats before the rebuild copies them into the chrome, or the
-        // rebind would ride the session being left's own cost and
-        // subagent aggregate.
-        self.refresh_stats().await;
+        // The tray's context usage rode the attach snapshot (the
+        // session-scoped pair with the title's spend, which the roster
+        // keeps live): the rebuild below copies it into the chrome
+        // without a blocking stats round-trip on the rebind path.
         self.rebuild_view(view, &RebuildKind::Rebind);
         // TS `resetCurrentSessionRenderState`: a new session starts with
         // no draft and no prompt history (the submitted `/new` drains the

@@ -116,7 +116,18 @@ impl Worker {
             goal: self.engine.goal_state_value(),
             scoped_models: core.scoped_models.clone(),
             active_tool_names: Vec::new(),
-            context_usage: None,
+            // TS `createAgentConnectionState` carries `contextUsage:
+            // session.getContextUsage()` in every attach snapshot, so
+            // the client's first frame reads the tray's context usage
+            // off the snapshot instead of blocking on a
+            // `get_session_stats` round-trip (TS fetches stats only
+            // after a turn or compaction settles). The same store walk
+            // `get_session_stats` serves, under the same core lock the
+            // attach already holds: `None` without a model context
+            // window, exactly like the stats response.
+            context_usage: store.and_then(|store| {
+                crate::session_stats::store_context_usage(store, self.engine.model_context_window())
+            }),
         }
     }
 

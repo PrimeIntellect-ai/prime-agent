@@ -524,6 +524,13 @@ impl SessionUi {
         self.pending_model = reconstructed.model_id;
         self.pending_model_provider = reconstructed.model_provider;
         self.pending_thinking_suffix = reconstructed.thinking_suffix;
+        // The tray's context usage follows the attach snapshot (TS
+        // `createAgentConnectionState` carries `contextUsage`, and TS's
+        // open path never blocks its first frame on a `getSessionStats`
+        // fetch — `refreshConnectionContextUsage` runs only after a turn
+        // or compaction settles): the rebuild below re-syncs it into the
+        // chrome exactly like the other reconstructed session fields.
+        self.context = reconstructed.context_usage;
         self.last_assistant_text = reconstructed
             .chat
             .iter()
@@ -812,14 +819,9 @@ impl SessionUi {
         // unknown usage (tokens null right after a compaction, or a
         // response without the field) clears the tray display instead of
         // keeping the stale one.
-        self.context = data.get("contextUsage").and_then(|usage| {
-            let tokens = usage.get("tokens").and_then(Value::as_u64)?;
-            let window = usage.get("contextWindow").and_then(Value::as_u64)?;
-            Some(crate::chrome::ContextUsage {
-                tokens,
-                context_window: window,
-            })
-        });
+        self.context = data
+            .get("contextUsage")
+            .and_then(crate::chrome::ContextUsage::from_wire);
         self.dirty = true;
     }
 
