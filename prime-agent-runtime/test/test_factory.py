@@ -6134,6 +6134,24 @@ class MachineLibraryResolutionTest(unittest.TestCase):
         listed = list_machines(repo_dir=self.repo, user_dir=self.user)
         self.assertEqual([entry["name"] for entry in listed], ["good"])
 
+    def test_list_machines_excludes_spec_invalid_files_with_their_errors(self) -> None:
+        # The listing reports only machines resolve/run can use: a repo
+        # file whose spec fails the write-time validator never wins the
+        # name, a valid user machine shows instead, and the exact
+        # validator sentences ride the scan warnings (the CLI list
+        # surface) naming the broken file.
+        invalid = self.store(self.repo, "sweep", "The broken repo machine.", spec={"states": []})
+        self.store(self.user, "sweep", "The user machine.")
+        listed, warnings = _scan_machine_library(repo_dir=self.repo, user_dir=self.user)
+        self.assertEqual([entry["name"] for entry in listed], ["sweep"])
+        self.assertEqual(listed[0]["source"], "user")
+        self.assertEqual(listed[0]["description"], "The user machine.")
+        self.assertEqual(
+            warnings,
+            [f"{invalid}: factory machine must declare between 1 and 1024 states, got 0"],
+        )
+        self.assertEqual(list_machines(repo_dir=self.repo, user_dir=self.user)[0]["source"], "user")
+
     def test_resolve_machine_raises_exact_parse_errors_for_broken_files(self) -> None:
         broken = self.user / "broken" / "MACHINE.md"
         broken.parent.mkdir(parents=True, exist_ok=True)
@@ -6156,6 +6174,37 @@ class MachineLibraryResolutionTest(unittest.TestCase):
         self.assertTrue(ctx.exception.broken)
         self.assertIn("is not valid UTF-8", str(ctx.exception))
         self.assertIn(str(corrupt), str(ctx.exception))
+
+    def test_resolve_machine_reports_spec_invalid_files_as_broken(self) -> None:
+        # A file that parses but carries a spec the write-time validator
+        # rejects is the exists-but-broken case at resolve time — the
+        # exact broken frame naming the file, never a usable machine the
+        # run rejects late. The fast path raises for a spec-invalid file
+        # at the requested name even when a valid user machine carries
+        # the same name (repo files keep repo-first precedence, exactly
+        # like parse-broken ones), and the scan path below skips one in a
+        # differently-named directory, so an unknown name keeps the
+        # missing frame instead of resolving a spec-invalid file.
+        invalid = self.store(self.repo, "sweep", "The broken repo machine.", spec={"states": []})
+        self.store(self.user, "sweep", "The user machine.")
+        with self.assertRaises(MachineResolutionError) as ctx:
+            resolve_machine("sweep", repo_dir=self.repo, user_dir=self.user)
+        self.assertTrue(ctx.exception.broken)
+        message = str(ctx.exception)
+        self.assertIn(str(invalid), message)
+        self.assertIn("factory machine must declare between 1 and 1024 states, got 0", message)
+        renamed = self.repo / "renamed-dir"
+        renamed.mkdir(parents=True)
+        (renamed / "MACHINE.md").write_text(
+            machine_file_text(
+                name="ghost", description="Ghost.", spec_json=json.dumps({"states": []})
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaises(MachineResolutionError) as scan_ctx:
+            resolve_machine("ghost", repo_dir=self.repo, user_dir=self.user)
+        self.assertFalse(scan_ctx.exception.broken)
+        self.assertIn("unknown machine 'ghost'", str(scan_ctx.exception))
 
     def test_one_non_utf8_file_never_poisons_the_listing_scan(self) -> None:
         # The shared scan skips a non-decodable file like any other broken
@@ -6667,6 +6716,52 @@ class FactoryRunFromLibraryTest(unittest.TestCase):
         self.assertIn("exists but is broken", str(raised.exception))
         self.assertIn("frontmatter description is required", str(raised.exception))
         self.assertNotIn("no library machine with that name", str(raised.exception))
+        self.assertEqual(self.host.calls, [])
+
+    @async_test
+    async def test_a_spec_invalid_library_file_is_broken_not_a_late_rejection(self) -> None:
+        # A file that parses but carries a spec the write-time validator
+        # rejects is the exists-but-broken case at resolve time: the run
+        # refuses with the exact validator sentences naming the file,
+        # never a late canonicalize error after resolution, and nothing
+        # spawns.
+        path = self.store_machine_file("sweep", {"states": []})
+        with self.assertRaises(ValueError) as raised:
+            await rlm_module.rlm.factory.run("sweep")
+        message = str(raised.exception)
+        self.assertIn("exists but is broken", message)
+        self.assertIn("factory machine must declare between 1 and 1024 states, got 0", message)
+        self.assertIn(str(path), message)
+        self.assertNotIn("no library machine with that name", message)
+        self.assertEqual(self.host.calls, [])
+
+    @async_test
+    async def test_an_invalid_repo_machine_never_shadows_a_valid_user_machine_as_usable(self) -> None:
+        # The finding's case: repo sweep/ holds a file that parses but
+        # fails the spec validator while a valid user sweep exists. The
+        # invalid repo file never masquerades as usable (the run would
+        # reject its spec late) and never silently falls through to the
+        # user machine: the exists-but-broken frame names the repo file,
+        # exactly like a parse-broken repo file.
+        self.store_machine_file("sweep", {"states": []})
+        agent_home = Path(os.environ["PRIME_AGENT_CODING_AGENT_DIR"])
+        user_file = agent_home / "machines" / "sweep" / "MACHINE.md"
+        user_file.parent.mkdir(parents=True)
+        user_file.write_text(
+            machine_file_text(
+                name="sweep",
+                description="The user machine.",
+                spec_json=json.dumps({"nodes": [{"id": "a", "subagent": "worker"}]}),
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaises(ValueError) as raised:
+            await rlm_module.rlm.factory.run("sweep")
+        message = str(raised.exception)
+        self.assertIn("exists but is broken", message)
+        self.assertIn(str(self.library / "sweep" / "MACHINE.md"), message)
+        self.assertIn("factory machine must declare between 1 and 1024 states, got 0", message)
+        self.assertNotIn("no library machine with that name", message)
         self.assertEqual(self.host.calls, [])
 
     @async_test

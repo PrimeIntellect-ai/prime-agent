@@ -2857,8 +2857,8 @@ async def run_factory(spec_id: str, *, name: str | None = None) -> dict[str, Any
             # never resolve from the library either; the unknown-spec frame
             # must not lose the lookup to the name-rule sentence. Only the
             # name-rule error can arrive here: every library-file failure
-            # (unreadable, non-UTF-8, unparseable) is a MachineResolutionError
-            # in the first except arm.
+            # (unreadable, non-UTF-8, unparseable, spec-invalid) is a
+            # MachineResolutionError in the first except arm.
             raise ValueError(
                 f"unknown factory spec {spec_id!r}: no stored factory entry, and "
                 f"the id is not a valid machine name either ({error})"
@@ -3305,10 +3305,10 @@ def _scan_machine_library(
 
     The shared scan behind ``list_machines`` and the CLI's ``factory list``:
     both levels resolve identically, repo wins on name conflicts, and the
-    parse gate is the file format's strict parser — a machine the listing
-    shows always parses and validates for resolve/run/import, while the
-    files it skips surface as warnings here and with their exact errors
-    when a run or import touches them.
+    gates are the file format's strict parser plus the write-time spec
+    validator — a machine the listing shows always parses and validates
+    for resolve/run/import, while the files it skips surface as warnings
+    here and with their exact errors when a run or import touches them.
     """
     machines: dict[str, dict[str, Any]] = {}
     warnings: list[str] = []
@@ -3327,6 +3327,10 @@ def _scan_machine_library(
             machine, errors = parse_machine_file(text, source=str(path))
             if machine is None or errors:
                 warnings.append(f"{path}: {'; '.join(errors)}")
+                continue
+            spec_errors = validate_factory_spec(machine.spec)
+            if spec_errors:
+                warnings.append(f"{path}: {'; '.join(spec_errors)}")
                 continue
             if machine.name in machines:
                 continue  # repo first: the earlier level keeps the name
@@ -3357,8 +3361,8 @@ class MachineResolutionError(ValueError):
     """One library lookup failure, with its kind.
 
     ``broken`` distinguishes the two outcomes a caller must not blur: a
-    machine file exists for the name but failed to parse (its errors say
-    why) versus no machine carrying the name at all.
+    machine file exists for the name but failed to parse or validate (its
+    errors say why) versus no machine carrying the name at all.
     """
 
     def __init__(self, message: str, *, broken: bool) -> None:
@@ -3379,9 +3383,10 @@ def resolve_machine(
     holding ``name: y`` is not the machine ``x`` (the declared name is the
     machine's name); such a file resolves only through the scan below,
     under its declared name like it does in the skill library. A file that
-    exists but fails to parse raises ``MachineResolutionError`` with
-    ``broken=True`` and the exact errors; a name no machine carries raises
-    it with ``broken=False``.
+    exists but fails to parse, or carries a spec the write-time validator
+    rejects, raises ``MachineResolutionError`` with ``broken=True`` and
+    the exact errors; a name no machine carries raises it with
+    ``broken=False``.
     """
     errors = machine_name_errors(name)
     if errors:
@@ -3403,6 +3408,11 @@ def resolve_machine(
             if machine is None or parse_errors:
                 raise MachineResolutionError("; ".join(parse_errors), broken=True)
             if machine.name == name:
+                spec_errors = validate_factory_spec(machine.spec)
+                if spec_errors:
+                    raise MachineResolutionError(
+                        f"{path}: {'; '.join(spec_errors)}", broken=True
+                    )
                 return machine, path
     listed = list_machines(repo_dir=repo_dir, user_dir=user_dir)
     for entry in listed:
