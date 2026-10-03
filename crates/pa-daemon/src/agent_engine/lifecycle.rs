@@ -910,7 +910,7 @@ impl AgentSessionEngine {
             .lock()
             .await
             .clone()
-            .ok_or_else(|| anyhow::anyhow!("Kernel is not running"))?;
+            .ok_or_else(|| anyhow::anyhow!(pa_types::daemon::KERNEL_NOT_RUNNING_MESSAGE))?;
         engine
             .factory_activity(action, run_id, spec_id, timeout_ms)
             .await

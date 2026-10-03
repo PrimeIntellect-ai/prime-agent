@@ -6442,8 +6442,10 @@ class FactoryGraphWatchTest(_ExecutorTestCase):
 
 
 class FactoryFrameCapTest(unittest.TestCase):
-    """The reply frame's wire cap: the events tail trims first, the all-runs
-    reply drops its oldest runs, and a frame that cannot fit fails loudly."""
+    """The reply frame's wire cap: event tails trim from the oldest end
+    first (one reply's tail, or each run row's), the all-runs drop takes
+    the oldest DROPPABLE row — never a live one — and a frame that cannot
+    fit fails loudly."""
 
     def test_a_non_finite_frame_fails_loudly(self) -> None:
         # The belt: validation blocks non-finite guard values at the
@@ -6504,7 +6506,10 @@ class FactoryFrameCapTest(unittest.TestCase):
         factory_module._cap_factory_frame(frame)
         self.assertEqual(frame["status"], "error")
         self.assertIn("wire cap", frame["reason"])
-        # the all-runs reply drops its oldest runs before failing
+        # the all-runs reply sheds its own ladder: every row's event tail
+        # floors from the oldest end BEFORE any whole row drops (the
+        # by-ref trim rule applied per row), so this frame keeps all 40
+        # rows with their newest event instead of losing the oldest runs
         run = {"run_id": "r1", "events": [{"big": "y" * 4000}] * 20, "machine": {}}
         frame = {
             "event": "done",
@@ -6513,8 +6518,80 @@ class FactoryFrameCapTest(unittest.TestCase):
             "result": {"runs": [dict(run, run_id=f"r{i}") for i in range(40)]},
         }
         factory_module._cap_factory_frame(frame)
-        self.assertEqual(frame["result"]["runs"][-1]["run_id"], "r39")
-        self.assertLess(len(frame["result"]["runs"]), 40)
+        self.assertEqual(frame["status"], "ok")
+        rows = frame["result"]["runs"]
+        self.assertEqual(len(rows), 40)
+        self.assertEqual(rows[-1]["run_id"], "r39")
+        self.assertTrue(all(len(row["events"]) == 1 for row in rows))
+
+    def test_the_cap_drops_terminal_rows_before_live_ones(self) -> None:
+        # The live-exactness contract under the wire cap: the oldest row
+        # is LIVE (a resident run with children in flight, started before
+        # the terminal history), and the bulk is structural (the machine
+        # payload, not the event tail), so the tail lever cannot save the
+        # frame — the drop must take terminal rows oldest-first and keep
+        # the live row, never the blind oldest-first drop that would
+        # strand the live run's dock count, panel, and off-guard read.
+        live = {
+            "runId": "r-live",
+            "state": "running",
+            "usage": {"running": 1},
+            "events": [{"kind": "settled"}],
+            "machine": {},
+        }
+        terminal = {
+            "runId": "t1",
+            "state": "done",
+            "usage": {"running": 0},
+            "events": [{"kind": "settled"}],
+            "machine": {"states": [{"id": "s" * 2000}] * 8},
+        }
+        frame = {
+            "event": "done",
+            "id": "r",
+            "status": "ok",
+            "result": {
+                "runs": [live] + [
+                    dict(terminal, runId=f"t{i}") for i in range(1, 31)
+                ]
+            },
+        }
+        factory_module._cap_factory_frame(frame)
+        self.assertEqual(frame["status"], "ok")
+        rows = frame["result"]["runs"]
+        self.assertEqual(rows[0]["runId"], "r-live", "the live row survived the cap")
+        self.assertEqual(rows[-1]["runId"], "t30", "the newest terminal row survived")
+        self.assertLess(len(rows), 31, "terminal rows dropped oldest-first to fit")
+
+    def test_a_live_row_never_silently_drops(self) -> None:
+        # The endgame: only live rows remain and the frame still cannot
+        # fit — the cap fails loudly instead of silently dropping a live
+        # row (a trimmed success would undercount the dock and lie to the
+        # `/factory off` guard; the honest answer is the loud failure).
+        live_big = {
+            "runId": "r-big",
+            "state": "running",
+            "usage": {"running": 2},
+            "events": [{"big": "y" * 300_000}],
+            "machine": {},
+        }
+        live_small = {
+            "runId": "r-small",
+            "state": "paused",
+            "usage": {"running": 1},
+            "events": [{"kind": "settled"}],
+            "machine": {},
+        }
+        frame = {
+            "event": "done",
+            "id": "r",
+            "status": "ok",
+            "result": {"runs": [live_big, live_small]},
+        }
+        factory_module._cap_factory_frame(frame)
+        self.assertEqual(frame["status"], "error")
+        self.assertIn("wire cap", frame["reason"])
+        self.assertNotIn("result", frame)
 
 
 

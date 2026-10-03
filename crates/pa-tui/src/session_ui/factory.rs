@@ -173,12 +173,17 @@ impl super::SessionUi {
     /// started before `/factory on` keeps its unadvertised hello, but the
     /// kernel gate reads the settings live, so runs started after the
     /// toggle are live in that same client — the guard must see them.
-    /// `None` when the count cannot be read: the request failed (an older
-    /// daemon answers the unknown command with a failure; the no-kernel
-    /// classes cannot carry live runs), or the reply is not the runs list
-    /// — classes with no readable runs, so the off write proceeds.
+    /// `Some(0)` also answers the kernel-not-running refusal: the lane
+    /// never builds a kernel, and the kernel owns its run registry in
+    /// memory, so a session without a kernel cannot host live runs — a
+    /// definitive zero, never an unreadable count (the lane answers the
+    /// same refusal until some other action boots the kernel, so leaving
+    /// it unreadable would pin the lane-advertised client's off behind a
+    /// retry that never resolves). `None` when the count cannot be read:
+    /// the request failed (an older daemon answers the unknown command
+    /// with a failure), or the reply is not the runs list.
     pub(crate) async fn live_factory_runs(&mut self) -> Option<usize> {
-        let reply = self
+        let reply = match self
             .bounded_request(
                 Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
                 DaemonCommand::FactoryActivity {
@@ -192,7 +197,18 @@ impl super::SessionUi {
                 },
             )
             .await
-            .ok()?;
+        {
+            Ok(reply) => reply,
+            // The no-kernel class: the count is exactly zero (nothing
+            // can host live runs), so the guard proceeds.
+            Err(error) if crate::daemon_client::is_kernel_not_running(&error) => {
+                return Some(0);
+            }
+            // Every other failure class stays unreadable: a timed-out or
+            // malformed lane reply cannot prove zero live runs, and the
+            // lane-advertised client fails closed on it.
+            Err(_) => return None,
+        };
         if !factory_reply_lists_runs(&reply) {
             return None;
         }

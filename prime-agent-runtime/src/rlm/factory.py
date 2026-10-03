@@ -3503,20 +3503,64 @@ async def _run_activity(request: dict[str, Any]) -> None:
     _send(frame)
 
 
+_WIRE_LIVE_RUN_STATES = ("running", "stopping", "paused")
+
+
+def _wire_run_row_is_live(row: Any) -> bool:
+    """Whether a wire run row is LIVE in the dock/page sense — the same
+    rule the TUI's ``is_live`` reads and the unscoped list builds (a live
+    state, or children still in flight): the wire cap's eviction must
+    never silently drop a row the dock counts and the ``/factory off``
+    guard trusts (every live run reports — the live-exactness contract)."""
+    if not isinstance(row, dict):
+        return False
+    if row.get("state") in _WIRE_LIVE_RUN_STATES:
+        return True
+    usage = row.get("usage")
+    return isinstance(usage, dict) and usage.get("running", 0) > 0
+
+
+def _shed_runs_frame(runs: list[Any]) -> bool:
+    """One shed step for an all-runs reply under the wire cap, newest data
+    kept longest: a run row's event tail trims from its oldest end first
+    (the by-ref reply's own trim rule, applied per row, oldest row first),
+    then the oldest DROPPABLE row drops — a live row never silently drops
+    (the count and panels read it; the honest answer for a frame only
+    live rows cannot fit is the loud failure). At least one row always
+    stays, so a reply never claims a registry it did not read. Returns
+    whether one step shed; ``False`` means only unsheddable rows remain."""
+    for row in runs:
+        if not isinstance(row, dict):
+            continue
+        tail = row.get("events")
+        if isinstance(tail, list) and len(tail) > 1:
+            tail.pop(0)
+            return True
+    if len(runs) > 1:
+        for index, row in enumerate(runs):
+            if not _wire_run_row_is_live(row):
+                runs.pop(index)
+                return True
+    return False
+
+
 def _cap_factory_frame(frame: dict[str, Any]) -> None:
     """Keep one reply under the ``FACTORY_FRAME_CAP`` wire cap. Compacted
     snapshots already shed answer payloads, so the events tail trims from
-    the oldest end first and an all-runs reply drops its oldest runs; a
-    frame that still cannot fit fails loudly (a graph must never truncate
-    silently)."""
+    the oldest end first; an all-runs reply sheds the same way — each
+    row's event tail floors before any whole row drops, and the drop
+    takes the oldest DROPPABLE row (a live row never silently drops: the
+    dock's count, the page's panels, and the ``/factory off`` guard read
+    this list, and every live run reports). A frame that still cannot fit
+    fails loudly (a graph must never truncate silently)."""
     while len(json.dumps(frame)) > FACTORY_FRAME_CAP:
-        events = frame.get("result", {}).get("events") if isinstance(frame.get("result"), dict) else None
+        result = frame.get("result")
+        events = result.get("events") if isinstance(result, dict) else None
         if isinstance(events, list) and len(events) > 1:
             events.pop(0)
             continue
-        runs = frame.get("result", {}).get("runs") if isinstance(frame.get("result"), dict) else None
-        if isinstance(runs, list) and len(runs) > 1:
-            runs.pop(0)
+        runs = result.get("runs") if isinstance(result, dict) else None
+        if isinstance(runs, list) and _shed_runs_frame(runs):
             continue
         frame.pop("result", None)
         frame["status"] = "error"

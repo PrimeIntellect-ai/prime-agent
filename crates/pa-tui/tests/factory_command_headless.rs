@@ -50,6 +50,10 @@ struct MockSupervisor {
     /// The `factory_activity` graph reply the mock answers while the
     /// lane is advertised: `None` answers every action with empty data.
     factory_graph: Option<Value>,
+    /// The daemon refusal the mock answers the `graph` action with
+    /// (`None` keeps the success path): the worker arm's exact wire
+    /// shape for a session whose kernel is not built.
+    factory_graph_error: Option<String>,
 }
 
 impl MockSupervisor {
@@ -57,11 +61,13 @@ impl MockSupervisor {
         socket: &std::path::Path,
         server_capabilities: Vec<String>,
         factory_graph: Option<Value>,
+        factory_graph_error: Option<String>,
     ) -> Self {
         MockSupervisor {
             listener: UnixListener::bind(socket).expect("bind mock socket"),
             server_capabilities,
             factory_graph,
+            factory_graph_error,
         }
     }
 
@@ -72,6 +78,7 @@ impl MockSupervisor {
             listener,
             server_capabilities,
             factory_graph,
+            factory_graph_error,
         } = self;
         let (stream, _) = listener.accept().expect("accept");
         let write_stream = stream.try_clone().expect("clone mock socket");
@@ -152,8 +159,25 @@ impl MockSupervisor {
                 }
                 "factory_activity" => {
                     // The lane's mock: a graph action answers the
-                    // configured runs reply; every other action answers
-                    // empty data (the guard reads the graph list only).
+                    // configured refusal (the worker arm's exact
+                    // kernel-not-running wire shape) or the configured
+                    // runs reply; every other action answers empty data
+                    // (the guard reads the graph list only).
+                    if command.get("action").and_then(Value::as_str) == Some("graph") {
+                        if let Some(error) = factory_graph_error.as_ref() {
+                            write_json(
+                                &mut writer,
+                                &json!({
+                                    "type": "response",
+                                    "id": id,
+                                    "command": "factory_activity",
+                                    "success": false,
+                                    "error": error,
+                                }),
+                            );
+                            continue;
+                        }
+                    }
                     let data = match (
                         factory_graph.as_ref(),
                         command.get("action").and_then(Value::as_str),
@@ -424,10 +448,26 @@ fn run_plan_config(
     factory_graph: Option<Value>,
     steps: Vec<HeadlessStep>,
 ) -> Vec<String> {
+    run_plan_config_with_graph_error(server_capabilities, factory_graph, None, steps)
+}
+
+/// The full mock configuration: the graph action can also answer a daemon
+/// refusal (the kernel-not-running wire shape) instead of a runs reply.
+fn run_plan_config_with_graph_error(
+    server_capabilities: Vec<String>,
+    factory_graph: Option<Value>,
+    factory_graph_error: Option<String>,
+    steps: Vec<HeadlessStep>,
+) -> Vec<String> {
     std::env::remove_var("TMUX");
     let dir = tempfile::TempDir::new().expect("temp dir");
     let socket = dir.path().join("tui.sock");
-    let supervisor = MockSupervisor::bind_with(&socket, server_capabilities, factory_graph);
+    let supervisor = MockSupervisor::bind_with(
+        &socket,
+        server_capabilities,
+        factory_graph,
+        factory_graph_error,
+    );
     let handle = std::thread::spawn(move || supervisor.serve());
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -699,5 +739,45 @@ fn factory_off_refuses_when_the_advertised_lane_cannot_count() {
     assert!(
         all.contains("The factory is enabled. Run /factory off to disable it."),
         "the gate stayed enabled after the refused off:\n{all}"
+    );
+}
+
+/// The kernel-not-running class never fails closed: the lane never
+/// builds a kernel, and the kernel owns its run registry in memory, so a
+/// session without a kernel cannot host live runs — the count reads as a
+/// definitive zero even on the lane-advertised client (the refusal's
+/// "try again once it answers" would never resolve otherwise: the lane
+/// answers the same refusal until some other action boots the kernel,
+/// so the advertised client could never disable an idle factory).
+#[test]
+fn factory_off_proceeds_when_the_kernel_is_not_running() {
+    let steps = vec![
+        HeadlessStep::Submit("/factory on".to_string()),
+        HeadlessStep::WaitMs(200),
+        HeadlessStep::Submit("/factory off".to_string()),
+        HeadlessStep::WaitMs(400),
+        HeadlessStep::Submit("/factory status".to_string()),
+        HeadlessStep::WaitMs(200),
+    ];
+    // The lane is advertised; the mock answers the graph read with the
+    // worker arm's exact kernel-not-running refusal.
+    let frames = run_plan_config_with_graph_error(
+        vec!["factory_activity".to_string()],
+        None,
+        Some("Kernel is not running".to_string()),
+        steps,
+    );
+    let all = flat_text(&frames);
+    assert!(
+        all.contains("The factory is disabled. The factory group and page disappear on the next client start."),
+        "the no-kernel count never blocked off:\n{all}"
+    );
+    assert!(
+        all.contains("The factory is disabled (off by default). Run /factory on to enable it (takes effect on the next client start)."),
+        "the disabled status read back:\n{all}"
+    );
+    assert!(
+        !all.contains("Cannot disable the factory"),
+        "no refusal without a kernel to host live runs:\n{all}"
     );
 }

@@ -67,7 +67,12 @@ impl Worker {
             .map(str::to_string);
         let timeout_ms = payload.get("timeoutMs").and_then(Value::as_u64);
         let Some(engine) = &self.agent_engine else {
-            return response_failure(None, "factory_activity", "Kernel is not running", None);
+            return response_failure(
+                None,
+                "factory_activity",
+                pa_types::daemon::KERNEL_NOT_RUNNING_MESSAGE,
+                None,
+            );
         };
         match engine
             .factory_activity(&action, run_id.as_deref(), spec_id.as_deref(), timeout_ms)

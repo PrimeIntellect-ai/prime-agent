@@ -457,6 +457,12 @@ impl SessionUi {
                         // malformed lane reply — cannot prove zero live
                         // runs, and an unknown liveness must not open the
                         // gate; the client retries once the lane answers.
+                        // The kernel-not-running refusal never reaches the
+                        // unreadable arm: the lane never builds a kernel
+                        // and the kernel owns its run registry in memory,
+                        // so that class reads as a definitive zero
+                        // (`live_factory_runs`), not an unknown liveness —
+                        // the off proceeds for a session with no kernel.
                         // A client whose hello never advertised the lane
                         // keeps the fail-open read: an older daemon has no
                         // executor to protect, and a client started before
