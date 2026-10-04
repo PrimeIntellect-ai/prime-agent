@@ -41,6 +41,7 @@ use std::time::Duration;
 
 use pa_core::kernel::provisioner::{IpythonKernelProvisioner, IpythonKernelProvisionerOptions};
 use pa_core::kernel::shared::{ExecuteOptions, ExecuteStatus};
+use pa_core::kernel::state_snapshot::snapshot_path_in;
 use std::os::unix::fs::PermissionsExt;
 
 /// The kernel Python with prime-agent-runtime installed (see
@@ -69,21 +70,25 @@ fn kernel_python() -> Option<PathBuf> {
     None
 }
 
-/// A kernel interpreter wrapper that counts spawns into `count` before
-/// exec'ing the real kernel Python, so a test can pin exactly how many
-/// kernels were armed. Lives in the session dir, which outlives the
-/// kernel spawns the test observes.
-fn counting_kernel(
+/// A kernel interpreter wrapper that counts spawns into `count` AND holds
+/// the n-th interpreter (0-based, from the count file) until the fixture
+/// creates `gates/gate<n>`, so a test controls exactly when each boot's
+/// handshake may complete - a file barrier, never a timing assumption.
+fn counting_gated_kernel(
     dir: &std::path::Path,
     python: &std::path::Path,
     count: &std::path::Path,
+    gates: &std::path::Path,
 ) -> PathBuf {
-    let wrapper = dir.join("counting-python");
+    let wrapper = dir.join("counting-gated-python");
     std::fs::write(
         &wrapper,
         format!(
-            "#!/bin/sh\nprintf x >> '{}'\nexec '{}' \"$@\"\n",
+            "#!/bin/sh\nn=$(wc -c < '{}')\nprintf x >> '{}'\nwhile [ ! -f '{}'/gate$n ] && [ -d '{}' ]; do sleep 0.05; done\nexec '{}' \"$@\"\n",
             count.display(),
+            count.display(),
+            gates.display(),
+            gates.display(),
             python.display()
         ),
     )
@@ -98,11 +103,11 @@ fn starts(count: &std::path::Path) -> u64 {
 }
 
 /// A settled boot's publisher clears only the memo generation it installed
-/// (TS `ensure()`'s `managerPromise === startup` guard). `kill()` clears the
-/// memo mid-boot (the generation invalidation), a NEWER memo is armed before
-/// the doomed boot settles, and the doomed settle's clear must leave that
-/// newer memo alone: the late joiner below must land on the newer boot, and
-/// exactly two interpreters may spawn.
+/// (TS `ensure()`'s `managerPromise === startup` guard). `kill()` removes
+/// the memo mid-boot (the generation invalidation), a NEWER memo is armed
+/// before the doomed boot settles, and the doomed settle's clear must
+/// leave that newer memo alone: the late joiner below must land on the
+/// newer boot, and exactly two interpreters may spawn.
 #[tokio::test]
 async fn stale_publisher_cannot_clear_a_newer_startup_memo() {
     let Some(python) = kernel_python() else {
@@ -110,7 +115,12 @@ async fn stale_publisher_cannot_clear_a_newer_startup_memo() {
     };
     let dir = tempfile::TempDir::new().unwrap();
     let count = dir.path().join("starts");
-    let wrapped = counting_kernel(dir.path(), &python, &count);
+    // The wrapper reads its ordinal from the count file BEFORE appending,
+    // so the file must exist (empty) before the first spawn.
+    std::fs::write(&count, "").unwrap();
+    let gates = dir.path().join("gates");
+    std::fs::create_dir_all(&gates).unwrap();
+    let wrapped = counting_gated_kernel(dir.path(), &python, &count, &gates);
     let provisioner = IpythonKernelProvisioner::new(
         dir.path(),
         IpythonKernelProvisionerOptions {
@@ -118,12 +128,13 @@ async fn stale_publisher_cannot_clear_a_newer_startup_memo() {
             ..Default::default()
         },
     );
-    // Boot one, doomed by a kill before publication.
+    // Boot one, doomed by a kill before publication. Its interpreter is
+    // held at gate0 (its handshake cannot complete until the fixture opens
+    // the gate), so the kill lands mid-boot by construction.
     let doomed = tokio::spawn({
         let provisioner = provisioner.clone();
         async move { provisioner.ensure(None, None).await }
     });
-    // The interpreter has spawned; the boot is still mid-handshake.
     tokio::time::timeout(Duration::from_secs(30), async {
         while starts(&count) == 0 {
             tokio::task::yield_now().await;
@@ -137,7 +148,9 @@ async fn stale_publisher_cannot_clear_a_newer_startup_memo() {
         let provisioner = provisioner.clone();
         async move { provisioner.ensure(None, None).await }
     });
-    // The doomed boot's settle (its memo clear) runs before this resolves.
+    // Release the doomed boot: its settle (its memo clear) runs before
+    // this resolves, and it must leave the newer memo alone.
+    std::fs::write(gates.join("gate0"), "").unwrap();
     let settled = tokio::time::timeout(Duration::from_secs(30), doomed)
         .await
         .expect("the doomed boot settled")
@@ -146,7 +159,9 @@ async fn stale_publisher_cannot_clear_a_newer_startup_memo() {
         settled.is_err(),
         "a kill before publication must not deliver a kernel"
     );
-    // The newer boot survived the doomed settle; the late ask joins it.
+    // The newer boot survived the doomed settle; the late ask joins it
+    // while it is still in flight.
+    std::fs::write(gates.join("gate1"), "").unwrap();
     let late = tokio::time::timeout(Duration::from_secs(30), provisioner.ensure(None, None))
         .await
         .expect("the late ask settled")
@@ -171,7 +186,7 @@ async fn stale_publisher_cannot_clear_a_newer_startup_memo() {
 }
 
 /// `kill()` before publication must not leave a resident kernel: the kill
-/// clears the startup memo (TS `kill()` clears `managerPromise`), so the
+/// removes the startup memo (TS `kill()` clears `managerPromise`), so the
 /// doomed boot's own settle kills its kernel instead of parking it, and
 /// the next `ensure()` boots fresh.
 #[tokio::test]
@@ -181,7 +196,12 @@ async fn kill_during_boot_leaves_no_resident_kernel() {
     };
     let dir = tempfile::TempDir::new().unwrap();
     let count = dir.path().join("starts");
-    let wrapped = counting_kernel(dir.path(), &python, &count);
+    // The wrapper reads its ordinal from the count file BEFORE appending,
+    // so the file must exist (empty) before the first spawn.
+    std::fs::write(&count, "").unwrap();
+    let gates = dir.path().join("gates");
+    std::fs::create_dir_all(&gates).unwrap();
+    let wrapped = counting_gated_kernel(dir.path(), &python, &count, &gates);
     let provisioner = IpythonKernelProvisioner::new(
         dir.path(),
         IpythonKernelProvisionerOptions {
@@ -189,11 +209,12 @@ async fn kill_during_boot_leaves_no_resident_kernel() {
             ..Default::default()
         },
     );
+    // The interpreter is held at gate0: the boot cannot publish before the
+    // kill lands, so the kill is mid-boot by construction.
     let boot = tokio::spawn({
         let provisioner = provisioner.clone();
         async move { provisioner.ensure(None, None).await }
     });
-    // The interpreter has spawned but the boot has not published yet.
     tokio::time::timeout(Duration::from_secs(30), async {
         while starts(&count) == 0 {
             tokio::task::yield_now().await;
@@ -202,6 +223,7 @@ async fn kill_during_boot_leaves_no_resident_kernel() {
     .await
     .expect("the fixture interpreter spawned");
     provisioner.kill();
+    std::fs::write(gates.join("gate0"), "").unwrap();
     let settled = tokio::time::timeout(Duration::from_secs(30), boot)
         .await
         .expect("the doomed boot settled")
@@ -216,6 +238,8 @@ async fn kill_during_boot_leaves_no_resident_kernel() {
     );
     assert!(!provisioner.has_running_kernel());
     // TS kill() clears the memo: the next ensure() starts a fresh boot.
+    // The fresh boot has nothing racing it, so its gate opens up front.
+    std::fs::write(gates.join("gate1"), "").unwrap();
     let fresh = tokio::time::timeout(Duration::from_secs(30), provisioner.ensure(None, None))
         .await
         .expect("the next ensure booted fresh")
@@ -244,7 +268,12 @@ async fn dispose_during_boot_settles_it_without_parking() {
     };
     let dir = tempfile::TempDir::new().unwrap();
     let count = dir.path().join("starts");
-    let wrapped = counting_kernel(dir.path(), &python, &count);
+    // The wrapper reads its ordinal from the count file BEFORE appending,
+    // so the file must exist (empty) before the first spawn.
+    std::fs::write(&count, "").unwrap();
+    let gates = dir.path().join("gates");
+    std::fs::create_dir_all(&gates).unwrap();
+    let wrapped = counting_gated_kernel(dir.path(), &python, &count, &gates);
     let provisioner = IpythonKernelProvisioner::new(
         dir.path(),
         IpythonKernelProvisionerOptions {
@@ -252,11 +281,13 @@ async fn dispose_during_boot_settles_it_without_parking() {
             ..Default::default()
         },
     );
+    // The interpreter is held at gate0, so the dispose below lands
+    // mid-boot by construction - the boot cannot settle before the
+    // fixture lets it.
     let boot = tokio::spawn({
         let provisioner = provisioner.clone();
         async move { provisioner.ensure(None, None).await }
     });
-    // The interpreter has spawned; the boot is still mid-handshake.
     tokio::time::timeout(Duration::from_secs(30), async {
         while starts(&count) == 0 {
             tokio::task::yield_now().await;
@@ -264,7 +295,17 @@ async fn dispose_during_boot_settles_it_without_parking() {
     })
     .await
     .expect("the fixture interpreter spawned");
-    provisioner.dispose(None).await;
+    // dispose() waits the held boot's settle, so it runs as its own task;
+    // the drain below lets it arm (disposed, abort signal) before the
+    // boot's handshake can complete.
+    let dispose = tokio::spawn({
+        let provisioner = provisioner.clone();
+        async move { provisioner.dispose(None).await }
+    });
+    for _ in 0..5 {
+        tokio::task::yield_now().await;
+    }
+    std::fs::write(gates.join("gate0"), "").unwrap();
     let settled = tokio::time::timeout(Duration::from_secs(30), boot)
         .await
         .expect("the disposed boot settled")
@@ -273,6 +314,10 @@ async fn dispose_during_boot_settles_it_without_parking() {
         settled.is_err(),
         "the disposed provisioner must reject the boot"
     );
+    tokio::time::timeout(Duration::from_secs(30), dispose)
+        .await
+        .expect("dispose waited the boot it owned")
+        .unwrap();
     assert!(
         provisioner.manager().is_none(),
         "no kernel may park into a disposed provisioner"
@@ -303,7 +348,12 @@ async fn kill_during_the_re_armed_boot_leaves_no_resident_kernel() {
     };
     let dir = tempfile::TempDir::new().unwrap();
     let count = dir.path().join("starts");
-    let wrapped = counting_kernel(dir.path(), &python, &count);
+    // The wrapper reads its ordinal from the count file BEFORE appending,
+    // so the file must exist (empty) before the first spawn.
+    std::fs::write(&count, "").unwrap();
+    let gates = dir.path().join("gates");
+    std::fs::create_dir_all(&gates).unwrap();
+    let wrapped = counting_gated_kernel(dir.path(), &python, &count, &gates);
     let provisioner = IpythonKernelProvisioner::new(
         dir.path(),
         IpythonKernelProvisionerOptions {
@@ -329,7 +379,8 @@ async fn kill_during_the_re_armed_boot_leaves_no_resident_kernel() {
         0,
         "the panicked boot spawned no interpreter"
     );
-    // The re-armed boot (a fresh generation): kill it before publication.
+    // The re-armed boot (a fresh generation) spawns interpreter #0,
+    // held at gate0: the kill lands mid-boot by construction.
     let re_armed = tokio::spawn({
         let provisioner = provisioner.clone();
         async move { provisioner.ensure(None, None).await }
@@ -342,6 +393,7 @@ async fn kill_during_the_re_armed_boot_leaves_no_resident_kernel() {
     .await
     .expect("the re-armed interpreter spawned");
     provisioner.kill();
+    std::fs::write(gates.join("gate0"), "").unwrap();
     let settled = tokio::time::timeout(Duration::from_secs(30), re_armed)
         .await
         .expect("the doomed re-armed boot settled")
@@ -353,6 +405,8 @@ async fn kill_during_the_re_armed_boot_leaves_no_resident_kernel() {
     assert!(provisioner.manager().is_none());
     assert!(!provisioner.has_running_kernel());
     // The provisioner stays consistent: the next ensure boots fresh.
+    // The fresh boot has nothing racing it, so its gate opens up front.
+    std::fs::write(gates.join("gate1"), "").unwrap();
     let fresh = tokio::time::timeout(Duration::from_secs(30), provisioner.ensure(None, None))
         .await
         .expect("the next ensure booted fresh")
@@ -367,44 +421,6 @@ async fn kill_during_the_re_armed_boot_leaves_no_resident_kernel() {
         2,
         "the doomed re-armed boot and the fresh boot, nothing else"
     );
-}
-
-/// A kernel interpreter wrapper that counts spawns into `count` AND holds
-/// the n-th interpreter (0-based, from the count file) until the fixture
-/// creates `gates/gate<n>`, so a test controls exactly when each boot's
-/// handshake may complete - a file barrier, never a timing assumption.
-fn counting_gated_kernel(
-    dir: &std::path::Path,
-    python: &std::path::Path,
-    count: &std::path::Path,
-    gates: &std::path::Path,
-) -> PathBuf {
-    let wrapper = dir.join("counting-gated-python");
-    std::fs::write(
-        &wrapper,
-        format!(
-            "#!/bin/sh\nn=$(wc -c < '{}')\nprintf x >> '{}'\nwhile [ ! -f '{}'/gate$n ]; do sleep 0.05; done\nexec '{}' \"$@\"\n",
-            count.display(),
-            count.display(),
-            gates.display(),
-            python.display()
-        ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
-    wrapper
-}
-
-/// Opens the fixture's gate0/gate1 files on any drop (a failing assert
-/// included): a counting wrapper still polling its gate when the test
-/// ends must not outlive the test as an orphan - released, it execs the
-/// interpreter, whose stdin pipe is gone, and exits.
-struct ReleaseGates(std::path::PathBuf);
-impl Drop for ReleaseGates {
-    fn drop(&mut self) {
-        let _ = std::fs::write(self.0.join("gate0"), "");
-        let _ = std::fs::write(self.0.join("gate1"), "");
-    }
 }
 
 /// A doomed boot settling against a NEWER memo generation must not wipe
@@ -425,7 +441,6 @@ async fn doomed_settle_keeps_the_newer_boot_listener_state() {
     std::fs::write(&count, "").unwrap();
     let gates = dir.path().join("gates");
     std::fs::create_dir_all(&gates).unwrap();
-    let _release_gates = ReleaseGates(gates.clone());
     let wrapped = counting_gated_kernel(dir.path(), &python, &count, &gates);
     let provisioner = IpythonKernelProvisioner::new(
         dir.path(),
@@ -580,27 +595,28 @@ async fn doomed_settle_keeps_the_newer_boot_listener_state() {
 }
 
 /// A kernel interpreter wrapper whose FIRST invocation records the spawn
-/// and fails fast (exit 1 before any handshake), while every later
-/// invocation records the spawn and execs the real kernel Python: a
-/// boot's first attempt fails retryably, and only a live generation's
-/// retry may consume the second.
+/// and then holds before failing (until the fixture writes the fail
+/// gate), while every later invocation records the spawn and execs the
+/// real kernel Python: a boot's first attempt fails retryably on the
+/// fixture's schedule, and only a live generation's retry may consume
+/// the second.
 fn flaky_first_kernel(
     dir: &std::path::Path,
     python: &std::path::Path,
     count: &std::path::Path,
     flip: &std::path::Path,
-    marker: &std::path::Path,
+    fail_gate: &std::path::Path,
 ) -> PathBuf {
     let wrapper = dir.join("flaky-first-python");
     std::fs::write(
         &wrapper,
         format!(
-            "#!/bin/sh\nprintf x >> '{}'\nif [ -f '{}' ]; then exec '{}' \"$@\"; fi\ntouch '{}' '{}'\nexit 1\n",
+            "#!/bin/sh\nprintf x >> '{}'\nif [ -f '{}' ]; then exec '{}' \"$@\"; fi\nwhile [ ! -f '{}' ] && [ -d '{}' ]; do sleep 0.05; done\nexit 1\n",
             count.display(),
             flip.display(),
             python.display(),
-            flip.display(),
-            marker.display(),
+            fail_gate.display(),
+            dir.display(),
         ),
     )
     .unwrap();
@@ -621,8 +637,8 @@ async fn kill_during_the_retry_backoff_pins_the_spawn_count() {
     let count = dir.path().join("starts");
     std::fs::write(&count, "").unwrap();
     let flip = dir.path().join("flipped");
-    let marker = dir.path().join("first-failed");
-    let wrapped = flaky_first_kernel(dir.path(), &python, &count, &flip, &marker);
+    let fail_gate = dir.path().join("fail-gate");
+    let wrapped = flaky_first_kernel(dir.path(), &python, &count, &flip, &fail_gate);
     let provisioner = IpythonKernelProvisioner::new(
         dir.path(),
         IpythonKernelProvisionerOptions {
@@ -630,22 +646,27 @@ async fn kill_during_the_retry_backoff_pins_the_spawn_count() {
             ..Default::default()
         },
     );
-    // Boot A's first attempt records its spawn and fails retryably.
+    // Boot A's first attempt spawns and holds BEFORE its failure: the
+    // fixture owns the failure timing through the gate, never the
+    // backoff window.
     let doomed = tokio::spawn({
         let provisioner = provisioner.clone();
         async move { provisioner.ensure(None, None).await }
     });
     tokio::time::timeout(Duration::from_secs(30), async {
-        while !marker.exists() {
+        while starts(&count) == 0 {
             tokio::task::yield_now().await;
         }
     })
     .await
-    .expect("the first attempt failed fast");
-    // The kill invalidates A's generation while A is still inside its
-    // retry decision (the backoff window) - before it could retry.
+    .expect("the first attempt spawned");
+    // The kill invalidates A's generation while A's first attempt is
+    // still in flight; only then does the failure land.
     provisioner.kill();
-    // Boot B (the newer generation) boots on the stable arm.
+    std::fs::write(&fail_gate, "").unwrap();
+    // Boot B (the newer generation) boots on the stable arm. The flip is
+    // the TEST's to write - A's own invocation must not race B's to it.
+    std::fs::write(&flip, "").unwrap();
     let newer = tokio::spawn({
         let provisioner = provisioner.clone();
         async move { provisioner.ensure(None, None).await }
@@ -688,7 +709,6 @@ async fn doomed_boot_does_not_report_unavailable_skills() {
     std::fs::write(&count, "").unwrap();
     let gates = dir.path().join("gates");
     std::fs::create_dir_all(&gates).unwrap();
-    let _release_gates = ReleaseGates(gates.clone());
     let wrapped = counting_gated_kernel(dir.path(), &python, &count, &gates);
     let reported: Arc<Mutex<Vec<pa_core::kernel::bootstrap::UnavailablePythonSkills>>> =
         Arc::new(Mutex::new(Vec::new()));
@@ -774,4 +794,133 @@ async fn doomed_boot_does_not_report_unavailable_skills() {
         )],
         "the live boot's broken-import report"
     );
+}
+
+/// A kill followed by a dispose must not let the doomed boot flush a
+/// snapshot: the settle checks the generation BEFORE the disposed flag, so
+/// a killed boot tears down with `kill()` semantics (no flush) even when a
+/// dispose raced in after the kill - the dispose's own policy cannot
+/// resurrect a generation `kill()` doomed. The sentinel snapshot stays
+/// byte-identical.
+#[tokio::test]
+async fn a_killed_then_disposed_boot_never_flushes_the_snapshot() {
+    let Some(python) = kernel_python() else {
+        return;
+    };
+    let dir = tempfile::TempDir::new().unwrap();
+    let count = dir.path().join("starts");
+    std::fs::write(&count, "").unwrap();
+    let gates = dir.path().join("gates");
+    std::fs::create_dir_all(&gates).unwrap();
+    let wrapped = counting_gated_kernel(dir.path(), &python, &count, &gates);
+    let snapshot = snapshot_path_in(dir.path());
+    std::fs::write(&snapshot, "SENTINEL").unwrap();
+    let provisioner = IpythonKernelProvisioner::new(
+        dir.path(),
+        IpythonKernelProvisionerOptions {
+            python: Some(wrapped),
+            snapshot_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        },
+    );
+    // Boot A spawns its interpreter held at gate0.
+    let doomed = tokio::spawn({
+        let provisioner = provisioner.clone();
+        async move { provisioner.ensure(None, None).await }
+    });
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while starts(&count) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the fixture interpreter spawned");
+    // The kill dooms A; the dispose races in behind it and must wait A's
+    // settle (no worker-exit orphan).
+    provisioner.kill();
+    let dispose = tokio::spawn({
+        let provisioner = provisioner.clone();
+        async move { provisioner.dispose(None).await }
+    });
+    // Drain so the dispose has armed (disposed, abort signal, parked on
+    // the doomed memo) before the boot's failure can settle.
+    for _ in 0..5 {
+        tokio::task::yield_now().await;
+    }
+    // Release A: it fails its aborted bootstrap and settles against a
+    // dead generation - with kill() semantics, never a flush.
+    std::fs::write(gates.join("gate0"), "").unwrap();
+    let settled = tokio::time::timeout(Duration::from_secs(30), doomed)
+        .await
+        .expect("the doomed boot settled")
+        .unwrap();
+    assert!(settled.is_err(), "a killed boot settles as a failure");
+    tokio::time::timeout(Duration::from_secs(30), dispose)
+        .await
+        .expect("dispose waits the doomed boot's settle")
+        .unwrap();
+    let content = std::fs::read_to_string(&snapshot).unwrap_or_default();
+    assert_eq!(
+        content, "SENTINEL",
+        "a killed-then-disposed boot must not flush over the snapshot"
+    );
+}
+
+/// A dispose after a kill waits the doomed boot's settle: without the
+/// parked memo, `dispose()` would skip the doomed boot entirely and could
+/// orphan its kernel at worker exit. The observable is the dispose's own
+/// completion - it cannot return while the doomed boot's interpreter is
+/// still held.
+#[tokio::test]
+async fn dispose_after_a_kill_waits_the_doomed_boot() {
+    let Some(python) = kernel_python() else {
+        return;
+    };
+    let dir = tempfile::TempDir::new().unwrap();
+    let count = dir.path().join("starts");
+    std::fs::write(&count, "").unwrap();
+    let gates = dir.path().join("gates");
+    std::fs::create_dir_all(&gates).unwrap();
+    let wrapped = counting_gated_kernel(dir.path(), &python, &count, &gates);
+    let provisioner = IpythonKernelProvisioner::new(
+        dir.path(),
+        IpythonKernelProvisionerOptions {
+            python: Some(wrapped),
+            ..Default::default()
+        },
+    );
+    // Boot A spawns its interpreter held at gate0.
+    let doomed = tokio::spawn({
+        let provisioner = provisioner.clone();
+        async move { provisioner.ensure(None, None).await }
+    });
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while starts(&count) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the fixture interpreter spawned");
+    provisioner.kill();
+    let mut dispose = std::pin::pin!(tokio::spawn({
+        let provisioner = provisioner.clone();
+        async move { provisioner.dispose(None).await }
+    }));
+    // While the doomed boot is still held, the dispose cannot return.
+    let jumped = tokio::time::timeout(Duration::from_secs(2), dispose.as_mut()).await;
+    assert!(
+        jumped.is_err(),
+        "dispose must wait the killed boot's settle, not skip it"
+    );
+    // Release the boot: its settle unblocks the dispose.
+    std::fs::write(gates.join("gate0"), "").unwrap();
+    let settled = tokio::time::timeout(Duration::from_secs(30), doomed)
+        .await
+        .expect("the doomed boot settled")
+        .unwrap();
+    assert!(settled.is_err(), "a killed boot settles as a failure");
+    tokio::time::timeout(Duration::from_secs(30), dispose.as_mut())
+        .await
+        .expect("dispose completes after the doomed boot settles")
+        .unwrap();
 }
