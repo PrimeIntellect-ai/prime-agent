@@ -134,6 +134,9 @@ async fn wait_for_kernel_boot(
 /// the eager boot is still in flight waits for THAT boot and succeeds: the
 /// join memo serves one boot, never a second build, and the cell runs.
 #[tokio::test]
+// The std Mutex guard for LIVE_KERNEL_LOCK rides the awaits on purpose
+// (the lock's own doc above): the kernel-python env is process-global, so
+// the tests serialize their whole kernel lifetimes, not just their setup.
 #[allow(clippy::await_holding_lock)]
 async fn a_kernel_needing_op_mid_boot_joins_the_in_flight_build_and_succeeds() {
     let Some(kernel_python) = kernel_python() else {
@@ -271,6 +274,9 @@ server.run()
 /// open and succeeds instead of erroring (the registry's per-server lock
 /// joins both callers onto one open).
 #[tokio::test]
+// LIVE_KERNEL_LOCK held across the awaits on purpose (the lock's own doc
+// above): the kernel-python env is process-global, so the tests serialize
+// their whole kernel lifetimes.
 #[allow(clippy::await_holding_lock)]
 async fn generic_mcp_servers_settle_in_the_background_and_first_use_joins_the_open() {
     let Some(kernel_python) = kernel_python() else {
@@ -391,6 +397,9 @@ async fn generic_mcp_servers_settle_in_the_background_and_first_use_joins_the_op
 /// Red on a runtime without the lane (the cell queues behind the
 /// listing); green with it.
 #[tokio::test]
+// LIVE_KERNEL_LOCK held across the awaits on purpose (the lock's own doc
+// above): the kernel-python env is process-global, so the tests serialize
+// their whole kernel lifetimes.
 #[allow(clippy::await_holding_lock)]
 async fn the_first_python_cell_never_waits_behind_the_eager_mcp_status() {
     let Some(kernel_python) = kernel_python() else {

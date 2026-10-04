@@ -260,6 +260,22 @@ impl Supervisor {
         });
     }
 
+    /// The boot warmup's adopt-pass ordering (serve's watch dance,
+    /// lifted here for the pin below): the warmup only starts once the
+    /// boot's adopt pass has settled the registry (or its signal sender
+    /// is gone — the fail-open path: a degraded boot keeps the
+    /// pre-warmup cold-read behavior, never a colder one).
+    pub(crate) async fn wait_for_adoption_signal(signal: &mut tokio::sync::watch::Receiver<bool>) {
+        loop {
+            if *signal.borrow() {
+                return;
+            }
+            if signal.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+
     /// Invalidate the passive snapshot (TS #2487
     /// `invalidatePassiveScheduledJobs`): claim the publish epoch so an
     /// in-flight scan can no longer store, then drop the snapshot — every
@@ -984,5 +1000,56 @@ mod tests {
         );
         assert_eq!(rows[0].job.id, "hb-1");
         assert_eq!(rows[0].job.session_file, session_file.display().to_string());
+    }
+
+    /// The boot warmup's adopt-pass ordering (the pre-bar review's race
+    /// finding): the warmup's scan consults the registry's live-worker
+    /// filter, so it must wait out the boot's adopt pass — a scan that
+    /// raced adoption would cache the just-adopted worker's artifacts as
+    /// a passive row and serve the stale row for the snapshot's refresh
+    /// window (adoption never invalidates the catalog). The pin: with the
+    /// adopt signal unfired the snapshot never lands; once the signal
+    /// fires, it does.
+    #[tokio::test]
+    async fn the_boot_warmup_waits_out_the_adopt_pass_before_scanning() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(agent_dir.join("sessions")).expect("sessions dir");
+        let supervisor = Arc::new(
+            Supervisor::new(crate::supervisor::SupervisorOptions {
+                socket_path: dir.path().join("daemon.sock"),
+                agent_dir: agent_dir.clone(),
+            })
+            .expect("supervisor"),
+        );
+
+        let (adoption_tx, adoption_rx) = tokio::sync::watch::channel(false);
+        let warmer = {
+            let supervisor = Arc::clone(&supervisor);
+            let mut adoption_rx = adoption_rx;
+            tokio::spawn(async move {
+                Supervisor::wait_for_adoption_signal(&mut adoption_rx).await;
+                supervisor.spawn_passive_catalog_warmup();
+            })
+        };
+
+        // The adopt pass has not signaled: the snapshot must not land.
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert!(
+            supervisor.passive_catalog.lock().unwrap().is_none(),
+            "the warmup scanned before the adopt pass signaled"
+        );
+
+        // The adopt pass settles: the scan lands.
+        adoption_tx.send(true).expect("signal adoption");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while supervisor.passive_catalog.lock().unwrap().is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the warmup never scanned after the adopt pass signaled"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        warmer.await.expect("the warmup task");
     }
 }
