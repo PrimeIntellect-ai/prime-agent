@@ -1024,7 +1024,14 @@ mod tests {
         );
 
         let (adoption_tx, adoption_rx) = tokio::sync::watch::channel(false);
-        let warmer = {
+
+        // The negative pin is on the WAITER itself, not on the scan's
+        // downstream effect: with the signal unfired the helper must stay
+        // pending for the whole window (a helper that returned early
+        // would finish in microseconds — the window catches it
+        // deterministically; a correct helper can only return on the
+        // signal or the sender's death, neither of which happens here).
+        let mut waiter = {
             let supervisor = Arc::clone(&supervisor);
             let mut adoption_rx = adoption_rx;
             tokio::spawn(async move {
@@ -1032,15 +1039,16 @@ mod tests {
                 supervisor.spawn_passive_catalog_warmup();
             })
         };
-
-        // The adopt pass has not signaled: the snapshot must not land.
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let still_waiting =
+            tokio::time::timeout(std::time::Duration::from_millis(150), &mut waiter).await;
         assert!(
-            supervisor.passive_catalog.lock().unwrap().is_none(),
-            "the warmup scanned before the adopt pass signaled"
+            still_waiting.is_err(),
+            "the warmup helper returned before the adopt pass signaled"
         );
 
-        // The adopt pass settles: the scan lands.
+        // The adopt pass settles: the waiter completes and the scan
+        // lands (the positive pin is a poll with a real deadline — a
+        // failure names the missing snapshot).
         adoption_tx.send(true).expect("signal adoption");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while supervisor.passive_catalog.lock().unwrap().is_none() {
@@ -1050,6 +1058,9 @@ mod tests {
             );
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        warmer.await.expect("the warmup task");
+        tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
+            .await
+            .expect("the warmup waiter never completed")
+            .expect("the warmup task");
     }
 }
