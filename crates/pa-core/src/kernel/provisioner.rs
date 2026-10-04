@@ -913,8 +913,9 @@ fn resolve_startup_budget_ms() -> u64 {
 /// bootstrap) never auto-retry — each needs either user action or a fresh
 /// attempt initiated by the caller.
 fn startup_failure_is_retryable(error: &anyhow::Error) -> bool {
-    const FATAL_MARKERS: [&str; 8] = [
+    const FATAL_MARKERS: [&str; 9] = [
         "provisioner disposed",
+        "provisioner killed",
         "aborted",
         "Failed to set up the Python kernel runtime",
         "PRIME_AGENT_KERNEL_PYTHON points to a Python",
@@ -1102,11 +1103,20 @@ async fn start_kernel_impl(
         signal: None,
         on_bootstrap_progress: on_progress.cloned(),
     });
+    let permit_inner = Arc::clone(inner);
+    let permit_memo = memo.clone();
     let boot = async {
         with_kernel_boot_permit(move || async move {
-            // Disposed while queued for the permit — don't spawn a kernel nobody wants.
+            // Disposed, or its memo generation kill() invalidated, while
+            // queued for the permit — don't spawn a kernel nobody wants.
+            // The permit frees after the stop/ready gates below, so a boot
+            // that waited those gates rechecks liveness here, the last
+            // point before the interpreter spawn.
             if permit_dispose_signal.is_aborted() {
                 return Err(anyhow!("Kernel provisioner disposed before start"));
+            }
+            if !boot_generation_is_live(&permit_inner, &permit_memo) {
+                return Err(anyhow!("Kernel provisioner killed before start"));
             }
             start.await
         })
@@ -1540,6 +1550,9 @@ mod tests {
         )));
         assert!(!startup_failure_is_retryable(&anyhow!(
             "Kernel provisioner disposed before start"
+        )));
+        assert!(!startup_failure_is_retryable(&anyhow!(
+            "Kernel provisioner killed before start"
         )));
         assert!(!startup_failure_is_retryable(&anyhow!(
             "Python execution aborted"

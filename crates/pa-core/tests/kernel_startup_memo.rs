@@ -924,3 +924,92 @@ async fn dispose_after_a_kill_waits_the_doomed_boot() {
         .expect("dispose completes after the doomed boot settles")
         .unwrap();
 }
+
+/// A `kill()` landing while a fresh boot is still WAITING — here queued
+/// behind an in-flight stop's gate, before the boot permit and the spawn -
+/// must not let that doomed generation spawn an interpreter at all: the
+/// permit gate rechecks the memo generation is still live, not just the
+/// dispose signal. The observable is the spawn count: only the first
+/// boot's interpreter ever spawns.
+#[tokio::test]
+async fn a_kill_while_the_boot_waits_the_stop_gate_spawns_no_interpreter() {
+    let Some(python) = kernel_python() else {
+        return;
+    };
+    let dir = tempfile::TempDir::new().unwrap();
+    let count = dir.path().join("starts");
+    std::fs::write(&count, "").unwrap();
+    let gates = dir.path().join("gates");
+    std::fs::create_dir_all(&gates).unwrap();
+    let wrapped = counting_gated_kernel(dir.path(), &python, &count, &gates);
+    let provisioner = IpythonKernelProvisioner::new(
+        dir.path(),
+        IpythonKernelProvisionerOptions {
+            python: Some(wrapped),
+            ..Default::default()
+        },
+    );
+    // Boot A spawns its interpreter and holds mid-handshake at gate0.
+    let boot_a = tokio::spawn({
+        let provisioner = provisioner.clone();
+        async move { provisioner.ensure(None, None).await }
+    });
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while starts(&count) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the fixture interpreter spawned");
+    // The stop arms its gate in the synchronous prefix of its first poll,
+    // and every later boot waits that gate before the permit and the
+    // spawn. Poll it once on the test thread so the arm is guaranteed -
+    // no scheduling assumption - and assert the wait state instead of
+    // discarding it.
+    let mut stop = Box::pin(provisioner.stop_kernel(None));
+    assert!(
+        futures::future::poll_immediate(stop.as_mut())
+            .await
+            .is_none(),
+        "the stop armed and is waiting for the boot it targets"
+    );
+    // kill() invalidates A's generation; a fresh ensure arms a NEWER memo
+    // in the synchronous prefix of ITS first poll (guaranteed the same
+    // way), and a second kill() then invalidates that newer generation
+    // while its boot still waits.
+    provisioner.kill();
+    let mut boot_b = Box::pin(provisioner.ensure(None, None));
+    assert!(
+        futures::future::poll_immediate(boot_b.as_mut())
+            .await
+            .is_none(),
+        "the fresh boot armed its memo and is waiting"
+    );
+    provisioner.kill();
+    // Release A: its handshake completes, its settle tears it down, the
+    // stop's gate opens, and B's wait ends. The liveness check fails B
+    // before the interpreter spawn, so the count stays at one.
+    std::fs::write(gates.join("gate0"), "").unwrap();
+    std::fs::write(gates.join("gate1"), "").unwrap();
+    let settled_a = tokio::time::timeout(Duration::from_secs(30), boot_a)
+        .await
+        .expect("the first boot settled")
+        .unwrap();
+    assert!(settled_a.is_err(), "a killed boot settles as a failure");
+    tokio::time::timeout(Duration::from_secs(30), stop.as_mut())
+        .await
+        .expect("the stop settled");
+    let settled_b = tokio::time::timeout(Duration::from_secs(30), boot_b.as_mut())
+        .await
+        .expect("the queued boot settled");
+    let error = format!("{:#}", settled_b.unwrap_err());
+    assert!(
+        error.contains("killed before start"),
+        "the queued boot fails the liveness gate before spawning: {error}"
+    );
+    assert_eq!(
+        starts(&count),
+        1,
+        "only the first boot's interpreter ever spawns"
+    );
+}
