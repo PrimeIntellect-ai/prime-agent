@@ -685,6 +685,25 @@ pub fn build_layout(rows: &[crate::agents_view_forest::AgentsViewRow], width: us
         .max(3);
     let details_width = cost_width + 2 + age_width;
     let available = width.saturating_sub(details_width + 4);
+    // The host column appears only when a remote mesh row is present (TS
+    // #2516's conditional host column: a purely local table keeps its
+    // long-standing column layout byte-for-byte), and it is sized to its
+    // content so the machine label is never truncated away (the TS
+    // review round: the 28-cell name column cannot hold a MagicDNS
+    // hostname). The content width is bounded by the row budget so a
+    // label longer than the whole name/model span cannot itself push
+    // the cost/age details off-screen — the same contract the name cell
+    // obeys — and the column (with its separator) is charged to the
+    // budget below instead of appending past it.
+    let host_width = rows
+        .iter()
+        .filter_map(|row| row.host_label.as_deref())
+        .map(str_width)
+        .max()
+        .unwrap_or(0)
+        .min(available.saturating_sub(2));
+    let host_charge = if host_width > 0 { host_width + 2 } else { 0 };
+    let available = available.saturating_sub(host_charge);
     let desired_model = rows
         .iter()
         .map(|row| str_width(&row.model))
@@ -693,18 +712,6 @@ pub fn build_layout(rows: &[crate::agents_view_forest::AgentsViewRow], width: us
         .max(12);
     let model_width = desired_model.min(32).min(available.saturating_sub(12));
     let name_width = (available.saturating_sub(model_width)).min(SESSION_NAME_COLUMN_MAX_CELLS);
-    // The host column appears only when a remote mesh row is present (TS
-    // #2516's conditional host column: a purely local table keeps its
-    // long-standing column layout byte-for-byte), and it is sized to its
-    // content so the machine label is never truncated away (the TS
-    // review round: the 28-cell name column cannot hold a MagicDNS
-    // hostname).
-    let host_width = rows
-        .iter()
-        .filter_map(|row| row.host_label.as_deref())
-        .map(str_width)
-        .max()
-        .unwrap_or(0);
     let detail_line = |cost: &str, age: &str| {
         format!(
             "{}  {}",
@@ -1515,5 +1522,116 @@ mod tests {
                 .any(|row| row.host_label.as_deref() == Some("on milk.tailnet.ts.net (offline)")),
             "the offline row carries its machine label"
         );
+    }
+
+    /// The host column is charged to the row budget: its width (plus its
+    /// separator) comes off the same `available` span the name/model
+    /// columns split, so a content-sized `MagicDNS` label can never push
+    /// the cost/age details off-screen — the layout contract the name
+    /// cell already obeys ("a long session name can never push the
+    /// model and cost/age columns off-screen").
+    #[test]
+    fn layout_charges_the_host_column_to_the_row_budget() {
+        let remote_summary = json!({
+            "id": "r1",
+            "sessionId": "r1",
+            "lifecycle": "live",
+            "cwd": "/remote",
+            "remoteHost": "milk.tailnet.ts.net",
+            "remoteOffline": true,
+            "messageCount": 1,
+        });
+        let remote_roster = vec![roster_entry(
+            "remote:milk.tailnet.ts.net#r1",
+            "inactive",
+            &remote_summary,
+        )];
+        let records = reconcile_unified_sessions(&remote_roster, &[]);
+        let rows = crate::agents_view_forest::build_rows::<std::collections::hash_map::RandomState>(
+            &records,
+            None,
+            &std::collections::HashSet::default(),
+            &std::collections::HashSet::default(),
+            &std::collections::HashMap::default(),
+            None,
+        );
+        // A typical 80-cell terminal: the 32-cell label plus the 10-cell
+        // details must share the row with the session and model columns.
+        let layout = build_layout(&rows, 80);
+        let details_width = layout
+            .details
+            .values()
+            .next()
+            .map_or(0, |detail| str_width(detail));
+        let row_width =
+            layout.name_width + 2 + layout.model_width + 2 + layout.host_width + 2 + details_width;
+        assert_eq!(
+            row_width, 80,
+            "the row exactly fits the terminal: name {} + model {} + host {} + details {details_width}",
+            layout.name_width, layout.model_width, layout.host_width
+        );
+        // The budget comes out of the name/model columns, not the label
+        // (the TS review round: the machine label is never truncated
+        // away) and not the cost/age details.
+        assert_eq!(
+            layout.host_width,
+            str_width("on milk.tailnet.ts.net (offline)")
+        );
+        assert_eq!(layout.name_width, 20);
+        assert_eq!(layout.model_width, 12);
+        assert!(layout.legend.contains("Cost"), "{}", layout.legend);
+    }
+
+    /// A label longer than the whole name/model span is itself bounded by
+    /// the row budget: the cost/age details stay on-screen (the row can
+    /// never exceed the terminal), with the label keeping as much of the
+    /// span as fits.
+    #[test]
+    fn layout_bounds_an_oversized_host_label_to_the_row_budget() {
+        let host = "machine-0123456789abcdef.tailnet-name-0123456789abcdef.ts.net";
+        let remote_summary = json!({
+            "id": "r1",
+            "sessionId": "r1",
+            "lifecycle": "live",
+            "cwd": "/remote",
+            "remoteHost": host,
+            "remoteOffline": true,
+            "messageCount": 1,
+        });
+        let remote_roster = vec![roster_entry(
+            "remote:milk.tailnet.ts.net#r1",
+            "inactive",
+            &remote_summary,
+        )];
+        let records = reconcile_unified_sessions(&remote_roster, &[]);
+        let rows = crate::agents_view_forest::build_rows::<std::collections::hash_map::RandomState>(
+            &records,
+            None,
+            &std::collections::HashSet::default(),
+            &std::collections::HashSet::default(),
+            &std::collections::HashMap::default(),
+            None,
+        );
+        let layout = build_layout(&rows, 80);
+        let details_width = layout
+            .details
+            .values()
+            .next()
+            .map_or(0, |detail| str_width(detail));
+        let row_width =
+            layout.name_width + 2 + layout.model_width + 2 + layout.host_width + 2 + details_width;
+        assert!(
+            row_width <= 80,
+            "the row fits the terminal: {row_width} (host {}, details {details_width})",
+            layout.host_width
+        );
+        let label_width = str_width(&format!("on {host} (offline)"));
+        assert!(
+            layout.host_width < label_width,
+            "the oversized label is bounded: {} of {label_width}",
+            layout.host_width
+        );
+        assert_eq!(layout.host_width, 64, "the label takes the whole span");
+        assert!(layout.legend.contains("Cost"), "{}", layout.legend);
     }
 }
