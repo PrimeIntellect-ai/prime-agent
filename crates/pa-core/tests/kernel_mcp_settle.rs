@@ -228,13 +228,25 @@ async fn a_kernel_needing_op_mid_boot_joins_the_in_flight_build_and_succeeds() {
 /// test's first use arrives.
 const SETTLE_SERVER_OPEN_DELAY_MS: u64 = 1_500;
 
-fn slow_echo_server_code() -> String {
+/// The queue-contention fixture's handshake delay: long enough that a
+/// python cell queued behind the listing can never meet the test's
+/// bound (the listing holds the kernel's execution queue for the whole
+/// handshake on a runtime without the dedicated MCP lane).
+const HANGING_SERVER_OPEN_DELAY_MS: u64 = 8_000;
+
+/// The cell's completion bound: half the hanging server's handshake, so
+/// a queued shape (the cell waiting out the handshake) fails by seconds
+/// while the dedicated-lane shape (the cell never touching the MCP
+/// work) passes with margin.
+const CELL_COMPLETION_BOUND_MS: u64 = 4_000;
+
+fn slow_echo_server_code(handshake_delay_ms: u64) -> String {
     r#"import sys
 import time
 from pathlib import Path
 
 Path(sys.argv[1]).write_text("started", encoding="utf-8")
-time.sleep({SETTLE_SERVER_OPEN_DELAY_MS} / 1000)
+time.sleep({HANDSHAKE_DELAY_MS} / 1000)
 
 from mcp.server.mcpserver import MCPServer
 
@@ -249,10 +261,7 @@ def echo(text: str) -> str:
 
 server.run()
 "#
-    .replace(
-        "{SETTLE_SERVER_OPEN_DELAY_MS}",
-        &SETTLE_SERVER_OPEN_DELAY_MS.to_string(),
-    )
+    .replace("{HANDSHAKE_DELAY_MS}", &handshake_delay_ms.to_string())
 }
 
 /// The configured generic MCP servers settle in the background once the
@@ -277,7 +286,11 @@ async fn generic_mcp_servers_settle_in_the_background_and_first_use_joins_the_op
     std::fs::create_dir_all(&cwd).expect("cwd");
     let marker = dir.path().join("settle-server-started");
     let server_script = dir.path().join("slow_echo_server.py");
-    std::fs::write(&server_script, slow_echo_server_code()).expect("server script");
+    std::fs::write(
+        &server_script,
+        slow_echo_server_code(SETTLE_SERVER_OPEN_DELAY_MS),
+    )
+    .expect("server script");
 
     // The user-declared stdio server the kernel's generic MCP surface
     // resolves through the `mcp.config` host request.
@@ -362,5 +375,134 @@ async fn generic_mcp_servers_settle_in_the_background_and_first_use_joins_the_op
         echoed.contains("probe"),
         "the echo tool's answer must come back; got {echoed:?} (stdout {})",
         result.stdout
+    );
+}
+
+/// The eager MCP settle must never contend with the user's first-turn
+/// path (the pre-bar review's finding: the eager `mcp_status` used to
+/// ride the kernel's single execution queue, so a hanging server's
+/// handshake parked the first `ipython` cell behind it for up to the
+/// per-server timeout). The kernel runtime's dedicated MCP lane keeps
+/// status/open work off the cell queue: with the settle's listing
+/// provably in flight (the fixture server spawned, its handshake still
+/// holding the listing), the user's first python cell must complete
+/// without waiting out the handshake.
+///
+/// Red on a runtime without the lane (the cell queues behind the
+/// listing); green with it.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn the_first_python_cell_never_waits_behind_the_eager_mcp_status() {
+    let Some(kernel_python) = kernel_python() else {
+        return;
+    };
+    let _lock = LIVE_KERNEL_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = tempfile::tempdir().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let cwd = dir.path().join("project");
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    std::fs::create_dir_all(&cwd).expect("cwd");
+    let marker = dir.path().join("hanging-server-started");
+    let server_script = dir.path().join("hanging_echo_server.py");
+    std::fs::write(
+        &server_script,
+        slow_echo_server_code(HANGING_SERVER_OPEN_DELAY_MS),
+    )
+    .expect("server script");
+
+    std::fs::write(
+        agent_dir.join("settings.json"),
+        json!({
+            "mcpServers": {
+                "hanging-fixture": {
+                    "type": "stdio",
+                    "command": kernel_python.display().to_string(),
+                    "args": [
+                        server_script.display().to_string(),
+                        marker.display().to_string(),
+                    ],
+                },
+            },
+        })
+        .to_string(),
+    )
+    .expect("settings");
+
+    let _env = EnvOverride::apply(&[
+        (
+            "PRIME_AGENT_KERNEL_PYTHON",
+            Some(kernel_python.display().to_string()),
+        ),
+        ("PRIME_AGENT_CODING_AGENT_DIR", None),
+        ("PRIME_API_KEY", None),
+    ]);
+
+    let model = scripted_model();
+    let provider = Arc::new(ScriptedProvider::new(model.clone()));
+    // One turn: the model runs a python cell, then the turn settles.
+    provider.push_turn(ScriptedTurn::Events(tool_call_turn_steps(
+        &model,
+        Some("running the cell"),
+        vec![("cell-1", "ipython", json!({ "code": "print('CELL_OK')" }))],
+    )));
+    provider.push_text_turn("the turn settles");
+
+    let engine = create_session(SessionEngineConfig {
+        cwd,
+        agent_dir,
+        model: Some(model),
+        stream_fn: Some(provider.stream_fn()),
+        tools: Vec::new(),
+        prewarm_ipython_kernel: Some(true),
+        ..Default::default()
+    })
+    .await
+    .expect("create the session");
+
+    let provisioner = engine
+        .kernel_provisioner_weak()
+        .upgrade()
+        .expect("the session carries its kernel provisioner");
+    wait_for_kernel_boot(&provisioner).await;
+
+    // The settle is provably in flight: the fixture server spawned (its
+    // process marker landed), and its handshake still holds the listing.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !marker.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the eager MCP settle never reached the hanging server"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    // The user's first python cell, issued with the listing in flight:
+    // it must complete inside the bound — a cell queued behind the
+    // handshake cannot.
+    let cell_started = Instant::now();
+    let outcome = engine
+        .prompt(
+            "run the cell",
+            pa_core::session_engine::PromptOptions::default(),
+        )
+        .await
+        .expect("prompt");
+    assert_eq!(outcome, PromptOutcome::Prompt);
+    engine.session.agent().wait_for_idle().await;
+    let cell_elapsed = cell_started.elapsed();
+    assert!(
+        cell_elapsed < Duration::from_millis(CELL_COMPLETION_BOUND_MS),
+        "the first python cell waited {cell_elapsed:?} behind the eager          MCP status — the settle must never contend with the user's          first-turn path"
+    );
+
+    let serialized = {
+        let entries = engine.session.entries().await;
+        serde_json::to_string(&entries).expect("entries json")
+    };
+    assert!(
+        serialized.contains("CELL_OK"),
+        "the cell never ran: {serialized}"
     );
 }

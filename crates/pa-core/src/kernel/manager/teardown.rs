@@ -156,6 +156,7 @@ impl Inner {
             g.pending_done_waiters.clear();
             g.bash_activity_waiters.clear();
             g.factory_activity_waiters.clear();
+            g.mcp_status_waiters.clear();
             let had_background_work = !g.background_bash_handles.is_empty();
             g.background_bash_handles.clear();
             // Stale pre-teardown background output must not surface after a restart.

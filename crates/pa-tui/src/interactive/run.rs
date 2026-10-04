@@ -482,7 +482,21 @@ async fn run_interactive_surface(
     // behind it, so a typed `H` can never land in the editor ahead of a
     // queued `ctrl+home` the user pressed first.
     let mut pending: VecDeque<UiInput> = VecDeque::new();
-    let mut echoing = true;
+    // Base parity for the stash restore (finding #3): a session-reopen
+    // launch (Resume/Attach — the shape that can carry a stashed draft)
+    // never accepts typed-ahead into the editor during the open. The
+    // fold's `restore_prompt_stash_on_open` gates on the editor being
+    // EMPTY, so echoing into it pre-restore would silently consume the
+    // restore (the draft stays stashed while the typed-ahead sits in its
+    // place). A reopen's typed-ahead queues instead and dispatches
+    // through the editor AFTER the fold's restore — base ordering
+    // exactly. A NEW session owns no stash, so its launches keep the
+    // echo path (headless new-session plans included: no stash exists to
+    // protect).
+    let mut echoing = matches!(
+        &options.session,
+        SessionSelection::New | SessionSelection::NewChild { .. }
+    );
     let mut ui_input_closed = false;
     let mut last_render_at: Option<Instant> = None;
     let mut render_deadline: Option<Instant> = None;
@@ -549,18 +563,35 @@ async fn run_interactive_surface(
                                         ..Default::default()
                                     });
                                 }
-                                // Pure typing keys echo now (the TS
+                                // Pure editor keys echo now (the TS
                                 // editor path) while the stream is still a
-                                // clean prefix; every other key keeps its
-                                // main-loop dispatch, queued behind the
-                                // open — and the first queue parks the
-                                // echo path so later keys cannot jump it.
-                                let echoes =
-                                    matches!(
-                                        id.as_str(),
-                                        "backspace" | "delete" | "left" | "right" | "space"
-                                    ) || id.chars().count() == 1;
-                                if echoing && echoes {
+                                // clean prefix — but only when the
+                                // effective keymap leaves the key to the
+                                // editor fallback (finding #1): a key the
+                                // post-open dispatch would claim for an
+                                // app/session action keeps its normal
+                                // route, queued behind the open and
+                                // dispatched through the full
+                                // keymap-aware ladder at the fold, instead
+                                // of becoming a stray editor motion (the
+                                // misroute: default `left` on the empty
+                                // editor is `app.agents.back`, and a
+                                // user-bound space or single char runs its
+                                // bound action). The first queue parks
+                                // the echo path so later keys cannot jump
+                                // it.
+                                let editor_motion = matches!(
+                                    id.as_str(),
+                                    "backspace" | "delete" | "left" | "right" | "space"
+                                ) || id.chars().count() == 1;
+                                if echoing
+                                    && editor_motion
+                                    && !crate::session_ui::opening_echo_key_claimed(
+                                        view.editor.keybindings(),
+                                        &id,
+                                        &view.editor,
+                                    )
+                                {
                                     view.editor.handle_input(&id);
                                     opening_dirty = true;
                                 } else {
