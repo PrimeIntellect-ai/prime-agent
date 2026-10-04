@@ -31,6 +31,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from . import factory as factory_module
 from .bash import _kill_live_handles
 
 PROTOCOL_VERSION = 3
@@ -1383,6 +1384,7 @@ _REQUIRED_FIELDS = {
     # string-required field; the handler validates the list itself.
     "mcp_status": ("id",),
     "bash_activity": ("id", "action"),
+    "factory_activity": ("id", "action"),
     "shutdown": (),
 }
 
@@ -1435,6 +1437,34 @@ def _handle_request_line(raw: bytes, queue: asyncio.Queue[dict[str, Any]]) -> No
         # Like host_reply, this bypasses the cell FIFO. Handles remain owned
         # by the runtime, not by an arbitrary PID supplied by the client.
         _handle_bash_activity(req)
+        return
+    if rtype == "factory_activity":
+        from .factory import ACTIVITY_ACTIONS, ACTIVITY_TIMEOUT_MS_CAP
+
+        if req["action"] not in ACTIVITY_ACTIONS:
+            _protocol_error(f"unknown factory activity action: {req['action']!r}")
+            return
+        for field in ("runId", "specId"):
+            value = req.get(field)
+            if value is not None and not isinstance(value, str):
+                _protocol_error(f"factory activity {field} must be a string when provided")
+                return
+        timeout_ms = req.get("timeoutMs")
+        if timeout_ms is not None and (
+            not isinstance(timeout_ms, int) or isinstance(timeout_ms, bool)
+            or not 0 <= timeout_ms <= ACTIVITY_TIMEOUT_MS_CAP
+        ):
+            _protocol_error(
+                f"factory activity timeoutMs must be an integer between 0 and {ACTIVITY_TIMEOUT_MS_CAP}"
+            )
+            return
+        if len(req["id"]) > 256:
+            _protocol_error("factory activity ids must stay under 256 characters")
+            return
+        # Like bash_activity, this bypasses the cell FIFO: the factory view
+        # must answer while a cell runs. The handler schedules the async
+        # activity on this loop and replies when it settles.
+        _loop.call_soon_threadsafe(factory_module.schedule_activity, req)
         return
     if rtype in ("execute", "snapshot", "restore"):
         with _interrupt_lock:

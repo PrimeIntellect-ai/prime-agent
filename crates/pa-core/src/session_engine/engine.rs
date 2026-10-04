@@ -117,6 +117,12 @@ pub struct SessionEngineConfig {
     /// the daemon worker stays `None` because its turn dispatch owns
     /// routing (its queued lanes re-dispatch every batch).
     pub image_model_router: Option<super::image_model_routing::ImageModelRouter>,
+    /// The session's semantic-edge identity (TS
+    /// `semanticEdgeLedgerPath` + `semanticParentSessionId` +
+    /// `semanticSpawnedByRequestId`): the recorder's ledger location and
+    /// spawn provenance. `None` keeps the session off the ledger (no
+    /// request ids on the wire).
+    pub semantic_edges: Option<super::semantic_edges::SemanticEdgeIdentity>,
 }
 
 /// An assembled, running session.
@@ -157,6 +163,11 @@ pub struct SessionEngine {
     /// the child-observation sink (the daemon children registry) onto it
     /// after the build.
     pub rlm_usage: std::sync::Arc<super::rlm_usage::RlmChildUsageAttributions>,
+    /// The factory host bridge (`/factory` view lane): the daemon/TUI
+    /// request surface over the kernel's factory runs, built from the
+    /// session facts captured in `create_session` (the #3184 capture
+    /// pattern) and reached through [`SessionEngine::factory_activity`].
+    pub factory_host: super::factory_host::FactoryHost,
     /// The session's kernel provisioner. The engine is the STRONG owner on
     /// purpose: the `ipython` tool on the agent and the compaction
     /// kernel-state probe on the session hold weak references, because the
@@ -259,6 +270,10 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     // snapshot is fixed for the session anyway — while the `PI_REQUEST_TIMING`
     // env half stays live inside the wrappers' per-request check.
     let request_timing_settings = settings.get_request_timing();
+    // Captured before `settings` moves into the resource loader: the
+    // factory host bridge's preflight facts (the daemon `allowedModels`
+    // pin), like the request-timing snapshot above.
+    let factory_allowed_models = settings.get_allowed_models();
     let (mcp_skill_overrides, mcp_generic_servers, built_manager) =
         mcp_gating(&settings, config.agent_dir.clone()).await?;
     let mcp_manager = config
@@ -541,6 +556,11 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         },
     );
 
+    // Captured before the digest context moves the local harness dir and
+    // the loop wiring moves the session model: the factory host bridge's
+    // config (the #3184 capture pattern).
+    let factory_local_harness_dir = local_harness_dir.clone();
+    let factory_session_model = Some(model.clone());
     // Harness digest inputs: global state from the agent dir, local state
     // from the session artifacts (or the daemon-owned conversation log), and
     // the interfaces the digest may reference.
@@ -616,6 +636,25 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
             &config.agent_dir,
         )),
     );
+    // Semantic edges (TS `semantic-edges.ts`): the recorder opens this
+    // session's request-id ledger, and its stream wrapper goes OUTERMOST
+    // over the timing-instrumented fn (TS `sdk.ts` instruments first, the
+    // `AgentSession` constructor wraps semantic edges over it). The side
+    // question keeps the pre-semantic fn, so its calls carry no id.
+    let timing_stream_fn = super::request_timing::instrument_stream_fn(
+        std::sync::Arc::clone(&request_timing_wiring),
+        stream_fn,
+    );
+    let side_question_stream_fn = std::sync::Arc::clone(&timing_stream_fn);
+    let semantic_recorder = config.semantic_edges.take().map(|identity| {
+        std::sync::Arc::new(super::semantic_edges::SemanticEdgeRecorder::open(identity))
+    });
+    let agent_stream_fn = match &semantic_recorder {
+        Some(recorder) => {
+            super::semantic_edges::wrap_stream_fn(std::sync::Arc::clone(recorder), timing_stream_fn)
+        }
+        None => timing_stream_fn,
+    };
     let agent = Agent::new(AgentOptions {
         initial_state: AgentInitialState {
             system_prompt: Some(system_prompt.clone()),
@@ -624,10 +663,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
             tools: Some(tools),
             messages: initial_messages,
         },
-        stream_fn: Some(super::request_timing::instrument_stream_fn(
-            std::sync::Arc::clone(&request_timing_wiring),
-            stream_fn,
-        )),
+        stream_fn: Some(agent_stream_fn),
         // The session conversion rules apply at the loop's LLM boundary
         // (TS `convertToLlm`): bookkeeping custom rows drop, everything
         // else (the harness digest included) becomes a user turn.
@@ -666,6 +702,19 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     });
 
     let agent = Arc::new(agent);
+    // TS `_startRlmChildRun`'s spawn anchor: the `rlm.spawn` host handler
+    // names the parent's in-flight turn through this weak seam (the
+    // bridge is built before the agent exists, and a strong edge would
+    // cycle the bridge -> agent -> kernel -> bridge graph).
+    if let Some(recorder) = &semantic_recorder {
+        let _ = wiring
+            .rlm
+            .semantic_spawn
+            .set(super::rlm_host::SemanticSpawnAnchor {
+                agent: Arc::downgrade(&agent),
+                recorder: std::sync::Arc::clone(recorder),
+            });
+    }
     let telemetry_agent = std::sync::Arc::clone(&agent);
     let mut session = AgentSession::from_session_arc(
         agent.clone(),
@@ -675,6 +724,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     )
     .await?;
     session.set_auto_refine(auto_refine_allowed, auto_refine_gates);
+    session.set_agent_dir(config.agent_dir.clone());
     // Every compaction path reads the session's resolved compaction
     // settings (TS `getCompactionSettings`): `/compact` matches the
     // `compact.*` turn-boundary tool's `keepRecentTokens`/`reserveTokens`.
@@ -720,6 +770,11 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     // The embedding's image-model routing seam (the headless surfaces
     // install theirs; the daemon worker's turn dispatch owns routing).
     session.set_image_model_router(config.image_model_router.clone());
+    // The semantic-edge handoff: the daemon's child registry and retry
+    // park read the recorder; the side question keeps the pre-semantic
+    // fn so its calls carry no id.
+    session.set_semantic_edges(semantic_recorder);
+    session.set_side_question_stream_fn(side_question_stream_fn);
     // The armed image route never outlives the run that armed it (TS
     // `_clearModelOverrideWhenIdle`: the override drops once the turn is
     // idle, so a picker switch between turns is live immediately — the
@@ -800,6 +855,20 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         wiring.rlm_usage.set_telemetry(telemetry.clone());
     }
     let goal_driver = wiring.runtime.goal_driver().clone();
+    // The factory host bridge: registered from `create_session` (the #3184
+    // pattern), so the daemon/TUI factory surface resolves against this
+    // session's harness dirs, model registry, and the allowlist pin. The
+    // kernel owns the runs; the bridge prefights and tunnels. Captured
+    // before the loop wiring moves the session model and the digest moves
+    // the local harness dir.
+    let factory_host =
+        super::factory_host::FactoryHost::new(super::factory_host::FactoryHostConfig {
+            agent_dir: config.agent_dir.clone(),
+            global_harness_dir: crate::refinement::get_global_harness_state_dir(&config.agent_dir),
+            local_harness_dir: factory_local_harness_dir,
+            session_model: factory_session_model,
+            allowed_models: factory_allowed_models,
+        });
     Ok(SessionEngine {
         session,
         skills: resources.skills,
@@ -813,6 +882,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         turn_boundary,
         telemetry,
         rlm_usage: wiring.rlm_usage,
+        factory_host,
         provisioner,
     })
 }
@@ -905,6 +975,59 @@ impl SessionEngine {
                 drain_host_requests: true,
             }))
             .await;
+    }
+
+    /// One factory activity over this session's live kernel: the `/factory`
+    /// view's bridge lane (graph/status/watch/run/stop/resume). A `run`
+    /// prefights the spec's declared models first (allowlist pin, request
+    /// auth) so a doomed run fails before any child spawns; then the
+    /// out-of-band frame carries the request into the kernel's executor,
+    /// which owns the run registry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the arguments are invalid, the preflight
+    /// fails, the session has no running kernel, or the kernel request
+    /// fails or does not settle.
+    pub async fn factory_activity(
+        &self,
+        action: &str,
+        run_id: Option<&str>,
+        spec_id: Option<&str>,
+        timeout_ms: Option<u64>,
+    ) -> anyhow::Result<serde_json::Value> {
+        let request = super::factory_host::FactoryActivityRequest::parse(
+            action, run_id, spec_id, timeout_ms,
+        )?;
+        if request.action == "run" {
+            let spec_id = request
+                .spec_id
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("factory activity run requires specId"))?;
+            // The preflight reads the harness states, the model catalog,
+            // and the auth caches from disk — blocking work off the
+            // executor (the daemon's established settings-read posture:
+            // `spawn_blocking`, never the async lane), so a stalled
+            // filesystem can never stall the worker's other activity.
+            let host = self.factory_host.clone();
+            let spec_id = spec_id.to_string();
+            let preflight = tokio::task::spawn_blocking(move || host.preflight_run(&spec_id))
+                .await
+                .map_err(|join| anyhow::anyhow!("factory run preflight join failed: {join}"))?;
+            preflight?;
+        }
+        let manager = self
+            .provisioner
+            .manager()
+            .ok_or_else(|| anyhow::anyhow!("Kernel is not running"))?;
+        manager
+            .factory_activity(
+                request.action,
+                request.run_id.as_deref(),
+                request.spec_id.as_deref(),
+                request.timeout_ms,
+            )
+            .await
     }
 
     /// Out-of-band kernel bash activity, scoped to this session's live kernel.

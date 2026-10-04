@@ -62,6 +62,7 @@ async fn compaction_auxiliary_selector_equal_to_the_session_model_runs_on_the_se
             abort: None,
             harness_digest: None,
             auxiliary: Some(&aux),
+            semantic_edges: None,
             summary_delta: None,
         },
     )
@@ -110,6 +111,7 @@ async fn compaction_auxiliary_selector_unusable_falls_back_to_the_session_model(
             abort: None,
             harness_digest: None,
             auxiliary: Some(&aux),
+            semantic_edges: None,
             summary_delta: None,
         },
     )

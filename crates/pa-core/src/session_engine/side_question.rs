@@ -111,11 +111,15 @@ fn assistant_text(message: &AssistantMessage) -> String {
 
 /// Run one side question against a clone of the parent conversation.
 ///
-/// The run streams partial answers to `sink` (returning `false` aborts the
-/// run), honors `signal` for external aborts, and retries provider failures
-/// per `retry_policy`. It never mutates the parent agent or its history.
+/// The side calls run on `stream_fn` (TS `unwrapSemanticEdgeStreamFn`: the
+/// parent's pre-semantic fn, so a side call carries no request id and its
+/// ledger stays untouched). The run streams partial answers to `sink`
+/// (returning `false` aborts the run), honors `signal` for external
+/// aborts, and retries provider failures per `retry_policy`. It never
+/// mutates the parent agent or its history.
 pub async fn run_side_question(
     parent: &Arc<Agent>,
+    stream_fn: pa_agent::stream::StreamFn,
     question: &str,
     previous_turns: &[SideQuestionTurn],
     retry_policy: &ProviderRetryPolicy,
@@ -129,12 +133,6 @@ pub async fn run_side_question(
             "Select a model before asking a side question".to_string(),
         );
     }
-    let Some(stream_fn) = parent.stream_fn().cloned() else {
-        return SideQuestionResult::failed(
-            String::new(),
-            "Select a model before asking a side question".to_string(),
-        );
-    };
 
     // Each turn re-clones the live main conversation, so follow-ups always see
     // the newest main-thread context; earlier side turns replay after it.
@@ -570,8 +568,13 @@ mod tests {
         signal: &AbortSignal,
         sink: &SideQuestionSink,
     ) -> SideQuestionResult {
+        let stream_fn = parent
+            .stream_fn()
+            .cloned()
+            .expect("the parent agent has a stream fn");
         run_side_question(
             parent,
+            stream_fn,
             question,
             previous_turns,
             &fast_retry_policy(),

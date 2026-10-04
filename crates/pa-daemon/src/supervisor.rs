@@ -60,7 +60,7 @@ pub(crate) use clients::client_command_payload;
 
 // The routing consts and refusal string keep their crate::supervisor::* paths stable
 // (external callers: supervisor_parent_death, create_reuse, prompt_admission, update_restore).
-pub(crate) use routing::{LONG_ROUTE_TIMEOUT_MS, ROUTE_TIMEOUT_MS, WORKER_NOT_CONNECTED};
+pub(crate) use routing::{client_route_timeout, ROUTE_TIMEOUT_MS, WORKER_NOT_CONNECTED};
 
 // probe_worker_socket/worker_connect_deadline are called only by the supervision sibling
 // module and this facade's in-file tests (through the module's pub(super) fns); the
@@ -97,9 +97,9 @@ use crate::paths;
 use crate::prompt_admission::input_admission_id;
 use crate::protocol::{
     command_active_session_id, command_type_name, current_protocol_info,
-    default_server_capabilities, parse_supervisor_command_line, response_failure, response_line,
-    response_success, DaemonResponse, DaemonRuntimeIdentity, EnvelopeParseError,
-    TypedCreateRejection, DAEMON_APP_VERSION, DAEMON_SCHEMA_ID, DAEMON_SCHEMA_REVISION,
+    parse_supervisor_command_line, response_failure, response_line, response_success,
+    DaemonResponse, DaemonRuntimeIdentity, EnvelopeParseError, TypedCreateRejection,
+    DAEMON_APP_VERSION, DAEMON_SCHEMA_ID, DAEMON_SCHEMA_REVISION,
 };
 use crate::registry::{
     ResidentWorker, SessionRegistry, WorkerRegistration, WorkerReply, WorkerRequest,

@@ -19,6 +19,7 @@ pub mod compaction_trace;
 pub mod compaction_utils;
 pub mod engine;
 pub mod error_classify;
+pub mod factory_host;
 pub mod goal_boundary;
 pub mod goal_driver;
 pub mod harness_digest;
@@ -38,6 +39,7 @@ pub mod rlm_notices;
 pub mod rlm_usage;
 pub mod runtime;
 pub mod runtime_wiring;
+pub mod semantic_edges;
 pub mod session_commands;
 pub mod session_events;
 pub mod side_question;
@@ -204,6 +206,25 @@ pub struct AgentSession {
     /// summarizer completion — no deltas, no broadcast, no behavior
     /// change.
     compaction_summary_sink: std::sync::Mutex<Option<compaction_exec::SummaryDeltaSink>>,
+    /// The session's semantic-edge recorder (TS
+    /// `AgentSession._semanticEdges`): `None` in sessions the engine
+    /// built without a semantic identity (verification harnesses
+    /// building the loop directly).
+    semantic_edges: std::sync::Mutex<Option<std::sync::Arc<semantic_edges::SemanticEdgeRecorder>>>,
+    /// TS `unwrapSemanticEdgeStreamFn(streamFn)`: the timing-instrumented,
+    /// pre-semantic stream fn calls outside session history run on (a side
+    /// question carries no request id). `None` until the engine wires it;
+    /// a side question on an unwired session fails with the model-selection
+    /// error (no fallback to the agent's id-carrying fn).
+    side_question_stream_fn: std::sync::Mutex<Option<pa_agent::stream::StreamFn>>,
+    /// The session's agent dir (the settings root): the refine flow
+    /// resolves the `factory.enabled` opt-in from its settings.json on
+    /// every run, immediately before the plan applies, mirroring the
+    /// kernel-side factory gate that reads the same file through
+    /// `PRIME_AGENT_CODING_AGENT_DIR`. `None` until the engine wiring
+    /// resolves it (verification harnesses building the session directly
+    /// keep `None`, which reads as the fail-closed disabled default).
+    agent_dir: Option<std::path::PathBuf>,
 }
 
 impl AgentSession {
@@ -269,6 +290,9 @@ impl AgentSession {
             skill_telemetry: None,
             image_model_router: None,
             compaction_summary_sink: std::sync::Mutex::new(None),
+            semantic_edges: std::sync::Mutex::new(None),
+            side_question_stream_fn: std::sync::Mutex::new(None),
+            agent_dir: None,
         };
         this.ensure_harness_digest_context().await?;
         Ok(this)

@@ -37,6 +37,7 @@ use std::time::{Duration, Instant};
 mod attach;
 mod compaction;
 mod create;
+mod event_order;
 mod lifecycle;
 mod read_goldens;
 mod shutdown;

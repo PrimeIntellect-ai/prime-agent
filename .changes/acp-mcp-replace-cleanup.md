@@ -1,0 +1,1 @@
+- ACP `session/new` now clears the connection's MCP servers when admitting them fails or times out, so servers the worker applied before a lost acknowledgement no longer stay admitted, matching the TypeScript behavior.
