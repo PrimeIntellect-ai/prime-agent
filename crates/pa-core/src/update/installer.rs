@@ -11,6 +11,7 @@
 //! stays in the script the installer-takeover lane owns, so the two
 //! surfaces can never drift from it.
 
+use std::io::{Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -226,10 +227,12 @@ pub async fn run_installer_from(
     current_target().map_err(|error| UpdateFailure {
         message: format!("{error:#}"),
     })?;
-    let script = fetch_script(url).await.map_err(|error| UpdateFailure {
+    let (script, handle) = fetch_script(url).await.map_err(|error| UpdateFailure {
         message: format!("could not download the installer from {url}: {error:#}"),
     })?;
-    execute_script(&script, &[], prefix, channel, output).await?;
+    let result = execute_script(&handle, &[], prefix, channel, output).await;
+    let _ = std::fs::remove_file(&script);
+    result?;
     let version = launcher_version(prefix).await;
     Ok(Installed { version })
 }
@@ -248,9 +251,13 @@ pub async fn run_bundled_installer(
     prefix: &Path,
     args: &[&std::ffi::OsStr],
 ) -> std::result::Result<Installed, UpdateFailure> {
-    let script = write_script(BUNDLED_INSTALLER.as_bytes()).map_err(|error| UpdateFailure {
-        message: format!("could not write the bundled installer: {error:#}"),
-    })?;
+    // `mut` serves the Windows handoff's post-pre-flight rewind; the
+    // unix path only ever borrows the handle.
+    #[cfg_attr(not(windows), allow(unused_mut))]
+    let (script, mut handle) =
+        write_script(BUNDLED_INSTALLER.as_bytes()).map_err(|error| UpdateFailure {
+            message: format!("could not write the bundled installer: {error:#}"),
+        })?;
     #[cfg(windows)]
     if caller_owns_payload(prefix) {
         // THE HANDOFF (Windows rename rule): this process's image sits inside
@@ -280,11 +287,14 @@ pub async fn run_bundled_installer(
         // would die with — the caller exits with the real status, and
         // only the publication itself stays async (the platform-
         // inherent residue).
-        if let Err(error) = local_mode_preflight(&script, prefix, args).await {
+        if let Err(error) = local_mode_preflight(&handle, prefix, args).await {
             let _ = std::fs::remove_file(&script);
             return Err(error);
         }
-        let file = std::fs::File::open(&script).map_err(|error| {
+        // The pre-flight child read the script to EOF through its own
+        // descriptor — a clone shares this handle's file position, so the
+        // real child must start from the first byte again.
+        handle.seek(SeekFrom::Start(0)).map_err(|error| {
             let _ = std::fs::remove_file(&script);
             UpdateFailure {
                 message: format!("could not run the installer: {error}"),
@@ -298,7 +308,7 @@ pub async fn run_bundled_installer(
             .arg("-s")
             .arg("--")
             .args(args)
-            .stdin(std::process::Stdio::from(file));
+            .stdin(std::process::Stdio::from(handle));
         // THE PROCESS-CONTROL WALL (the in-house detached-spawn wrapper:
         // CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS | CREATE_NO_WINDOW,
         // the product's own detached-survives-parent mapping): a console-
@@ -325,7 +335,7 @@ pub async fn run_bundled_installer(
         })?;
         return Ok(Installed { version: None });
     }
-    let result = execute_script(&script, args, prefix, None, InstallerOutput::Inherit).await;
+    let result = execute_script(&handle, args, prefix, None, InstallerOutput::Inherit).await;
     let _ = std::fs::remove_file(&script);
     result?;
     Ok(Installed {
@@ -397,16 +407,21 @@ pub fn caller_owns_payload(prefix: &Path) -> bool {
 /// Returns the pre-flight's captured refusal tail or the spawn failure.
 #[cfg(windows)]
 async fn local_mode_preflight(
-    script: &Path,
+    script: &std::fs::File,
     prefix: &Path,
     args: &[&std::ffi::OsStr],
 ) -> std::result::Result<(), UpdateFailure> {
     let shell = trusted_shell()?;
     let mut command = installer_child(&shell, prefix, None);
     command
-        .arg(script)
+        .arg("-s")
+        .arg("--")
         .args(args)
-        .stdin(std::process::Stdio::null());
+        .stdin(std::process::Stdio::from(script.try_clone().map_err(
+            |error| UpdateFailure {
+                message: format!("could not run the installer: {error}"),
+            },
+        )?));
     if args.first().copied() == Some(std::ffi::OsStr::new("--rollback")) {
         command.env("PRIME_AGENT_ROLLBACK_CHECK", "1");
     } else {
@@ -493,13 +508,14 @@ pub fn installed_channel(prefix: &Path) -> Option<&'static str> {
     }
 }
 
-/// Fetch the installer script to a per-run temp file (the small-file
-/// budget; the file is the exact bytes the branch serves).
+/// Fetch the installer script into a per-run temp file (the small-file
+/// budget; the file is the exact bytes the branch serves) — the path with
+/// the held handle [`write_script`] created it through.
 ///
 /// # Errors
 /// Returns an error when the request fails, answers a non-success status,
 /// or the body cannot be read or written.
-async fn fetch_script(url: &str) -> Result<PathBuf> {
+async fn fetch_script(url: &str) -> Result<(PathBuf, std::fs::File)> {
     let response = reqwest::Client::new()
         .get(url)
         .header("User-Agent", update_user_agent(env!("CARGO_PKG_VERSION")))
@@ -521,14 +537,45 @@ async fn fetch_script(url: &str) -> Result<PathBuf> {
     write_script(&bytes)
 }
 
-/// Write installer script bytes to a per-run temp file.
-fn write_script(bytes: &[u8]) -> Result<PathBuf> {
+/// Write installer script bytes to a per-run temp file, created fresh
+/// under an unguessable name and returned together with the OPEN HANDLE
+/// the bytes were written through. The temp directory is writable by
+/// every process of this user (and, under a permissive umask, by every
+/// local user), so a script the child later re-opens BY NAME could be
+/// swapped between this write and the run — executing the swap with the
+/// credentials this funnel is hardened to guard. The handle is therefore
+/// the only thing every consumer hands to the child (as its stdin, the
+/// `curl|sh` one-liner's own invocation form): the bytes that run are
+/// the bytes written here, and the name only serves the post-run
+/// cleanup.
+fn write_script(bytes: &[u8]) -> Result<(PathBuf, std::fs::File)> {
     let script = std::env::temp_dir().join(format!(
         "prime-agent-update-{}.sh",
         uuid::Uuid::now_v7().simple()
     ));
-    std::fs::write(&script, bytes).with_context(|| format!("write {}", script.display()))?;
-    Ok(script)
+    let mut options = std::fs::OpenOptions::new();
+    options.create_new(true).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        // Owner-only: the default umask would leave the shared temp
+        // directory's other users a write window into the file the
+        // child is about to run.
+        options.mode(0o600);
+    }
+    let mut script_file = options
+        .open(&script)
+        .with_context(|| format!("create {}", script.display()))?;
+    script_file
+        .write_all(bytes)
+        .with_context(|| format!("write {}", script.display()))?;
+    // Every consumer hands a clone of this handle to the child as its
+    // stdin, and a clone shares the file position: start them all from
+    // the first byte.
+    script_file
+        .seek(SeekFrom::Start(0))
+        .with_context(|| format!("rewind {}", script.display()))?;
+    Ok((script, script_file))
 }
 
 /// The trusted interpreter for the installer child (the `curl|sh`
@@ -567,14 +614,14 @@ fn trusted_shell() -> std::result::Result<std::path::PathBuf, UpdateFailure> {
 }
 
 /// Build the installer's child command: [`trusted_shell`]'s interpreter
-/// with the installer's env knobs (the script and its args are the
-/// caller's — [`execute_script`] passes them as the child's arguments,
-/// and the Windows handoff rides the script over the child's stdin), so
-/// both wait modes ([`execute_script`]) and the handoff spawn this same
-/// command: the install prefix riding the child's environment as the
-/// installer's own knob, so the script publishes exactly where the probe
-/// looks — every other `PRIME_AGENT_RUST_*` knob passes through
-/// untouched.
+/// with the installer's env knobs (the caller completes it with the
+/// `-s --` form — the `curl|sh` one-liner's own — where the script rides
+/// the child's stdin from the handle [`write_script`] returned and
+/// `args` stay the child's positional parameters), so both wait modes
+/// ([`execute_script`]) and the Windows handoff spawn this same command:
+/// the install prefix riding the child's environment as the installer's
+/// own knob, so the script publishes exactly where the probe looks —
+/// every other `PRIME_AGENT_RUST_*` knob passes through untouched.
 fn installer_child(
     shell: &Path,
     prefix: &Path,
@@ -598,8 +645,11 @@ fn installer_child(
 }
 
 /// Exec the script and wait for it: [`trusted_shell`]'s interpreter
-/// under [`installer_child`]'s env wiring, plus the script and its args
-/// as the child's arguments. The script's own
+/// under [`installer_child`]'s env wiring, the `-s --` form with the
+/// script riding the child's stdin from the handle [`write_script`]
+/// returned (the shared temp directory can never swap the bytes under a
+/// name — the handle IS what runs) and `args` as the child's positional
+/// parameters. The script's own
 /// die messages already streamed with [`InstallerOutput::Inherit`];
 /// with [`InstallerOutput::Capture`] the tail becomes the failure
 /// message.
@@ -607,7 +657,7 @@ fn installer_child(
 /// # Errors
 /// Returns the failure when the script cannot start or exits nonzero.
 async fn execute_script(
-    script: &Path,
+    script: &std::fs::File,
     args: &[&std::ffi::OsStr],
     prefix: &Path,
     channel: Option<&'static str>,
@@ -617,8 +667,11 @@ async fn execute_script(
     let shell = trusted_shell()?;
     #[cfg(not(windows))]
     let shell = trusted_shell();
+    let stdin = std::process::Stdio::from(script.try_clone().map_err(|error| UpdateFailure {
+        message: format!("could not run the installer: {error}"),
+    })?);
     let mut command = installer_child(&shell, prefix, channel);
-    command.arg(script).args(args);
+    command.arg("-s").arg("--").args(args).stdin(stdin);
     match output {
         InstallerOutput::Inherit => {
             let status = command.status().await.map_err(|error| UpdateFailure {
@@ -640,9 +693,9 @@ async fn execute_script(
             })
         }
         InstallerOutput::Capture => {
-            // The TUI owns the terminal: no inherited stdin and no
-            // controlling tty, so the script cannot open /dev/tty to prompt.
-            command.stdin(std::process::Stdio::null());
+            // The TUI owns the terminal: no controlling tty, and the
+            // child's stdin is the script itself — so the script cannot
+            // open /dev/tty to prompt and never reads a terminal.
             #[cfg(unix)]
             crate::platform::process::set_new_session(command.as_std_mut());
             let captured = command.output().await.map_err(|error| UpdateFailure {

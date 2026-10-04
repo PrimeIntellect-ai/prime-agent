@@ -234,6 +234,23 @@ VERBOSE="${PRIME_AGENT_RUST_VERBOSE:-0}"
 FORCE=0
 MODE="channel"
 ARCHIVE=""
+# THE TRUSTED TASKLIST: the liveness question goes to Windows's own
+# tasklist, never through the inherited PATH — this script runs with the
+# updater's environment (the funnel's own shell is trusted-rooted for
+# exactly that reason), and a repo- or user-planted lookup would run
+# BEFORE the publish with the credentials that hardening guards.
+# System32 alone answers: the machine's own SystemRoot spelling first,
+# the MSYS C: mount second. A machine offering neither (every unix; a
+# stripped Windows env) simply has no answerable liveness question, and
+# both callers treat the empty TASKLIST as "cannot ask" — the parent wait
+# proceeds, the publication lock refuses with its manual-recovery
+# message instead of trusting a miss.
+TASKLIST=""
+if [ -n "${SystemRoot:-}" ] && [ -x "${SystemRoot}/System32/tasklist.exe" ]; then
+  TASKLIST="${SystemRoot}/System32/tasklist.exe"
+elif [ -x /c/Windows/System32/tasklist.exe ]; then
+  TASKLIST=/c/Windows/System32/tasklist.exe
+fi
 # THE HANDOFF PARENT WAIT: the Windows update command spawns THIS script
 # and exits precisely so its own payload image stops locking
 # <prefix>/share/prime-agent for the publish below — but a fast child
@@ -243,9 +260,9 @@ ARCHIVE=""
 # the release-before-publish ordering explicit instead of incidental.
 # tasklist carries the liveness question to Windows the same way the
 # publication lock does (the MSYS kill cannot see a native pid).
-if [ -n "${PRIME_AGENT_INSTALLER_PARENT_PID:-}" ]; then
+if [ -n "${PRIME_AGENT_INSTALLER_PARENT_PID:-}" ] && [ -n "$TASKLIST" ]; then
   parent_waits=0
-  while MSYS2_ARG_CONV_EXCL='*' tasklist.exe \
+  while MSYS2_ARG_CONV_EXCL='*' "$TASKLIST" \
           /FI "PID eq ${PRIME_AGENT_INSTALLER_PARENT_PID}" 2>/dev/null \
         | grep -qw "${PRIME_AGENT_INSTALLER_PARENT_PID}"; do
     parent_waits=$((parent_waits + 1))
@@ -2306,8 +2323,8 @@ if [ "$WINDOWS" = "yes" ]; then
       sleep 1
       continue
     fi
-    if [ -n "$held_by" ] \
-       && MSYS2_ARG_CONV_EXCL='*' tasklist.exe /FI "PID eq ${held_by}" /NH 2>/dev/null \
+    if [ -n "$held_by" ] && [ -n "$TASKLIST" ] \
+       && MSYS2_ARG_CONV_EXCL='*' "$TASKLIST" /FI "PID eq ${held_by}" /NH 2>/dev/null \
           | grep -qw "$held_by"; then
       { [ -z "${rollback_from:-}" ] && rm -rf "$stage"; die "another prime-agent installer (Windows pid ${held_by}) is publishing to ${PREFIX}; retry when it finishes"; }
     fi
