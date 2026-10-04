@@ -497,6 +497,15 @@ impl Supervisor {
             });
         }
 
+        // Warm the passive scheduled-jobs snapshot (the input-latency
+        // lane): the first selector-less `heartbeats_list`/`cron_list`
+        // after boot would otherwise scan the whole session-artifacts tree
+        // inline while the interactive client's open waits on it. The scan
+        // starts now, beside the other boot passes, so the snapshot is warm
+        // by the first read; every invalidation and refresh rule is
+        // unchanged.
+        self.spawn_passive_catalog_warmup();
+
         // Session-archive sweep (roadmap: the sessions directory must not
         // grow forever): boot sweep, then the periodic re-sweep at the TS
         // idle-eviction cadence. Housekeeping only — it never gates serving.
