@@ -123,11 +123,6 @@ pub struct Worker {
     /// The accept loop's confirmation that it dropped the bound
     /// listener; see [`Worker::listener_close_requested`].
     pub(crate) listener_closed: tokio::sync::Notify,
-    /// Whether the accept loop holds the bound listener: `false` until
-    /// `serve` binds and arms the loop, so an exit that races a booting
-    /// `serve` skips the handshake instead of waiting on a listener that
-    /// will never arrive.
-    pub(crate) listener_bound: std::sync::atomic::AtomicBool,
     /// Supervisor self-registration handle; `None` for standalone workers.
     registration: Option<RegistrationHandle>,
     /// Live connections authenticated as the supervisor role. A non-zero
@@ -821,7 +816,6 @@ impl Worker {
             bound_socket_identity: std::sync::Mutex::new(None),
             listener_close_requested: tokio::sync::Notify::new(),
             listener_closed: tokio::sync::Notify::new(),
-            listener_bound: std::sync::atomic::AtomicBool::new(false),
             registration,
             supervisor_claims,
             core,
@@ -883,14 +877,27 @@ impl Worker {
     /// unchanged: the worker's own closed file passes the probe dead and
     /// the identity gate unlinks exactly what it captured, so a respawn
     /// does not wait out the stale-socket path.
+    ///
+    /// The close confirmation is awaited UNCONDITIONALLY: a bound-flag
+    /// check cannot close the check-then-act window between `serve`'s
+    /// bind and the flag store (an exit landing exactly there would
+    /// skip the wait and leave this worker's own dead socket behind -
+    /// the refusal-exit variant of the stale-file bug). `serve` instead
+    /// confirms exactly once on every path: after the accept loop drops
+    /// the listener, or - with no listener - on the prepare/bind error
+    /// returns. An exit that fires before the bind therefore waits out
+    /// the whole setup and then unlinks only what the identity gate
+    /// still owns, and a booting `serve` never strands a waiting exit
+    /// path on a handshake that will not come. The parked confirmation
+    /// also orders the identity read for the exits that fire inside
+    /// `serve`'s setup (the registration-refusal exit racing the
+    /// bind->capture gap): the capture precedes the accept loop's arm,
+    /// which precedes this confirmation, so a bound listener's own
+    /// cleanup always reads a captured identity, never the gap's
+    /// `None`.
     pub(crate) async fn close_listener_then_cleanup_socket(&self) {
         self.listener_close_requested.notify_one();
-        if self
-            .listener_bound
-            .load(std::sync::atomic::Ordering::SeqCst)
-        {
-            self.listener_closed.notified().await;
-        }
+        self.listener_closed.notified().await;
         let expected_identity = self.bound_socket_identity.lock().unwrap().clone();
         crate::socket::cleanup_socket_path_after_close(&self.config.socket_path, expected_identity);
     }

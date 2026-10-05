@@ -249,20 +249,36 @@ impl Worker {
         if !self.config.supervisor_socket_path.as_os_str().is_empty() {
             crate::supervisor_lost::start(self.clone());
         }
-        crate::socket::prepare_socket_path(&self.config.socket_path).await?;
-        let listener = bind_transport(&self.config.socket_path)
-            .await
-            .with_context(|| format!("bind worker socket {}", self.config.socket_path.display()))?;
-        // Mark the listener bound the moment the bind exists: a
-        // registration-refusal exit landing anywhere in the setup below
-        // (the capture gap, the identity capture, the restriction) must
-        // still run the graceful close-then-cleanup - with the flag held
-        // back, the exit path skips the close wait and the live-listener
-        // probe preserves the just-bound file, leaving a stale socket
-        // behind. The close-request permit is stored while the loop has
-        // not armed yet, so the loop consumes it as its first event.
-        self.listener_bound
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Err(error) = crate::socket::prepare_socket_path(&self.config.socket_path).await {
+            // The no-listener confirmation of the close handshake: an
+            // exit path already parked on the confirmation proceeds (its
+            // `None` identity makes the cleanup a no-op) instead of
+            // waiting on a listener that will never exist.
+            self.listener_closed.notify_one();
+            return Err(error);
+        }
+        let listener = match bind_transport(&self.config.socket_path).await {
+            Ok(listener) => listener,
+            Err(error) => {
+                let error = error.context(format!(
+                    "bind worker socket {}",
+                    self.config.socket_path.display()
+                ));
+                self.listener_closed.notify_one();
+                return Err(error);
+            }
+        };
+        // From the bind on, the close handshake is fully asynchronous:
+        // an exit path firing anywhere in the setup below (a
+        // registration refusal parked in the capture gap, the orphan
+        // monitor, a routed shutdown) parks on the confirmation, which
+        // only this task emits - after the accept loop has consumed the
+        // stored close request and dropped the listener. The close
+        // request's permit stays stored while the loop has not armed
+        // yet, so the loop consumes it as its first event, and the
+        // confirmation always orders an exit path's identity read
+        // behind the capture below: a bound listener's own cleanup
+        // never reads the gap's `None` identity.
         crate::socket::bind_capture_gap().await;
         // Capture the bound file's identity before anything can replace
         // it (TS daemon-mode.ts:718, the listen callback, between the

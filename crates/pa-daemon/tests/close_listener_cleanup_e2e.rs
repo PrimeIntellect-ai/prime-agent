@@ -164,7 +164,7 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path) -> ProcessGuard {
 /// Spawn the real `pa-daemon worker` binary on its own socket, monitoring
 /// a supervisor socket that never answers, with the bind-capture gap armed
 /// so the oracle can poison the worker's capture.
-fn spawn_worker(dir: &Path, socket: &Path, token: &str) -> ProcessGuard {
+fn spawn_worker(dir: &Path, socket: &Path, supervisor_socket: &Path, token: &str) -> ProcessGuard {
     std::fs::create_dir_all(dir.join("agent")).expect("agent dir");
     let child = Command::new(env!("CARGO_BIN_EXE_pa-daemon"))
         .arg("worker")
@@ -177,7 +177,7 @@ fn spawn_worker(dir: &Path, socket: &Path, token: &str) -> ProcessGuard {
         .env(pa_daemon::worker::WORKER_SOCKET_ENV, socket)
         .env(
             pa_daemon::worker::WORKER_SUPERVISOR_SOCKET_ENV,
-            dir.join("absent-supervisor.sock"),
+            supervisor_socket,
         )
         .env(
             pa_daemon::worker::WORKER_RECOVERY_JOURNAL_ENV,
@@ -191,6 +191,44 @@ fn spawn_worker(dir: &Path, socket: &Path, token: &str) -> ProcessGuard {
         .spawn()
         .expect("spawn pa-daemon worker");
     ProcessGuard { child }
+}
+
+/// A supervisor stand-in that definitively rejects the worker's one
+/// registration (the `Unknown session worker` verdict, TS
+/// `adopt_registered_worker`'s unknown-worker error): the registration
+/// loop treats it as terminal, the refused-registration self-heal
+/// retires the worker, and the retirement exit runs the real
+/// close-then-cleanup choreography under test. The socket must exist
+/// before the worker spawns; the exchange runs on its own thread. The
+/// registration protocol is hello first, register second, reply last
+/// (`connect_and_register` reads the hello before it writes).
+fn spawn_rejecting_supervisor(socket: &Path) {
+    let listener = UnixListener::bind(socket).expect("bind the rejecting supervisor");
+    std::thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("accept the registration");
+        let mut write_half = stream.try_clone().expect("clone the registration");
+        let _ = write_half.write_all(br#"{"type":"daemon_hello"}"#);
+        let _ = write_half.write_all(b"\n");
+        let _ = write_half.flush();
+        let mut line = String::new();
+        let mut reader = BufReader::new(stream);
+        reader
+            .read_line(&mut line)
+            .expect("read the worker registration");
+        let request_id = serde_json::from_str::<Value>(&line)
+            .expect("registration envelope")
+            .get("id")
+            .and_then(Value::as_str)
+            .expect("registration id")
+            .to_string();
+        let rejection = json!({
+            "id": request_id,
+            "success": false,
+            "error": "Unknown session worker: the supervisor holds no descriptor for this identity",
+        });
+        let _ = write_half.write_all(format!("{rejection}\n").as_bytes());
+        let _ = write_half.flush();
+    });
 }
 
 /// Read one JSONL line from the supervisor's aside socket within the
@@ -321,7 +359,12 @@ fn read_exact_timeout(stream: &mut UnixStream, buffer: &mut [u8], deadline: Inst
 fn a_poisoned_workers_shutdown_exit_spares_the_successors_live_socket() {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let socket = dir.path().join("worker.sock");
-    let mut worker = spawn_worker(dir.path(), &socket, "poisoned-shutdown-token");
+    let mut worker = spawn_worker(
+        dir.path(),
+        &socket,
+        &dir.path().join("absent-supervisor.sock"),
+        "poisoned-shutdown-token",
+    );
     // The socket file exists: the bind succeeded and the worker is
     // parked in the bind-capture gap. Poison the capture with the
     // successor bound at the original path, then drive the worker
@@ -363,5 +406,65 @@ fn a_poisoned_supervisors_drain_spares_the_successors_live_socket() {
         .status()
         .expect("SIGTERM the supervisor");
     wait_clean_exit(&mut daemon.child, Duration::from_secs(10));
+    assert_successor_serves(&socket, successor_identity);
+}
+
+/// The refused-registration retirement inside the bind->capture gap (the
+/// registration rejection lands while the worker is parked in the
+/// fault-injection seam, so the exit path's identity is still `None`
+/// when it fires): the exit must WAIT for the serve handshake to resume,
+/// capture, arm, and drop the listener - and then remove the worker's
+/// OWN now-dead socket file (the registration-refusal arm of the
+/// close-then-cleanup choreography; a flag-gated wait that skips the
+/// handshake in that window preserves the live file and strands a stale
+/// socket). The refusal is driven through the real
+/// `exit_refused_registration` path by a supervisor stand-in that
+/// definitively rejects the registration.
+#[test]
+fn a_refused_registrations_exit_removes_the_workers_own_dead_socket() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let socket = dir.path().join("worker.sock");
+    let supervisor_socket = dir.path().join("rejecting-supervisor.sock");
+    spawn_rejecting_supervisor(&supervisor_socket);
+    let mut worker = spawn_worker(
+        dir.path(),
+        &socket,
+        &supervisor_socket,
+        "refused-registration-token",
+    );
+    wait_socket_file(&socket);
+    // The rejection retires the worker while it is parked in the gap;
+    // the exit parks on the close confirmation until the serve task
+    // resumes, then unlinks the worker's own dead file.
+    wait_clean_exit(&mut worker.child, Duration::from_secs(10));
+    assert!(
+        !socket.exists(),
+        "the refused worker's own dead socket file is removed, not left stale"
+    );
+}
+
+/// The same refusal exit under a poisoned capture: a successor bound at
+/// the path inside the bind->capture gap poisons the worker's captured
+/// identity (it names the successor's live inode), and the retirement
+/// exit must still spare that successor - the liveness probe refuses the
+/// unlink even though the poisoned identity gate would match. This pins
+/// the refusal exit to the same successor-protection contract the
+/// routed-shutdown exit carries.
+#[test]
+fn a_refused_registrations_exit_spares_the_poisoning_successor() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let socket = dir.path().join("worker.sock");
+    let supervisor_socket = dir.path().join("rejecting-supervisor.sock");
+    spawn_rejecting_supervisor(&supervisor_socket);
+    let mut worker = spawn_worker(
+        dir.path(),
+        &socket,
+        &supervisor_socket,
+        "refused-poisoned-token",
+    );
+    wait_socket_file(&socket);
+    let _aside = rename_bound_socket_aside(&socket);
+    let (_successor, successor_identity) = bind_poisoning_successor(&socket);
+    wait_clean_exit(&mut worker.child, Duration::from_secs(10));
     assert_successor_serves(&socket, successor_identity);
 }

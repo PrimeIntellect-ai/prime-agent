@@ -226,9 +226,12 @@ pub fn cleanup_socket_path(path: &Path, expected_identity: Option<SocketIdentity
 /// A caller without a captured identity never unlinks: `None` skips
 /// `cleanup_socket_path`'s inode gate, so a replacement that binds the
 /// path between this probe and that remove would lose its live file to
-/// an identity-less unlink. An exit before the capture (a registration
-/// refusal inside the bind->capture window) fails closed and leaves the
-/// file to the next bind's stale-socket prepare.
+/// an identity-less unlink. The worker's exit paths wait for the serve
+/// handshake's confirmation - which always follows the identity capture -
+/// so a registration-refusal exit inside the bind->capture window still
+/// reads its own captured identity; `None` reaches here only from exits
+/// before the bind (no listener, no file) or from platforms without a
+/// file identity (named pipes), and the cleanup stays a no-op.
 #[cfg(unix)]
 pub fn cleanup_socket_path_after_close(path: &Path, expected_identity: Option<SocketIdentity>) {
     if expected_identity.is_none()
