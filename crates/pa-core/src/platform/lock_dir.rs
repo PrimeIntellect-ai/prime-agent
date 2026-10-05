@@ -661,16 +661,16 @@ impl LockDir {
         // flock), so the park below captures exactly the directory the
         // claim verified.
         #[cfg(unix)]
-        let _claim = match Self::claim_fd(path) {
+        let _claim = match Self::claim_occupant(path, stale_after) {
             Ok(claim) => claim,
+            // A live occupant under the claim: contention.
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                 return Err(io::Error::new(
                     io::ErrorKind::WouldBlock,
                     format!("Lock file is already being held: {}", path.display()),
                 ));
             }
-            // The incumbent vanished (a racing release or takeover):
-            // retry the create.
+            // The occupant vanished mid-claim: retry the create.
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
             Err(error) => return Err(error),
         };
@@ -806,29 +806,73 @@ impl LockDir {
         }
     }
 
-    /// The occupant claim for a stale takeover (unix): an exclusive
-    /// non-blocking `flock` on the incumbent directory, taken on the
-    /// path's CURRENT occupant and held (the returned fd) through the
-    /// capture. `WouldBlock` means a live witness-holder owns the
-    /// occupant (or another reclaim's claim is already on it) - plain
-    /// contention; `NotFound` means the occupant vanished. The fd is
-    /// the claim's lifetime: dropped when the reclaim returns.
+    /// The occupant claim for a stale takeover (unix): a LOOP of open,
+    /// flock, and re-validate, ending in an exclusive non-blocking `flock`
+    /// on an incumbent that is BOTH still the path's occupant AND stale -
+    /// held (the returned fd) through the capture. The loop closes the
+    /// open-to-flock TOCTOU (open a stale X, pause, a rival reclaims and
+    /// witnesses a fresh occupant: an unvalidated flock would land on the
+    /// OLD unlinked fd while the park grabs the fresh live one): after the
+    /// flock, the fd's own identity is re-checked against the path (a
+    /// changed occupant restarts the loop on the NEW one) and the fd's
+    /// own fstat re-judges staleness (a fresh occupant is plain
+    /// contention). `NotFound` (the occupant vanished between the
+    /// steps) restarts the loop too - it exits with the vanished
+    /// occupant's retry. The fd is the claim's lifetime: dropped when
+    /// the reclaim returns.
     #[cfg(unix)]
-    fn claim_fd(path: &Path) -> io::Result<Option<std::os::fd::OwnedFd>> {
+    fn claim_occupant(path: &Path, stale_after: Duration) -> io::Result<std::os::fd::OwnedFd> {
         use std::os::fd::AsRawFd;
-        let dir = fs::File::open(path)?;
-        let held = unsafe { libc::flock(dir.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        if held != 0 {
-            let error = io::Error::last_os_error();
-            return Err(match error.kind() {
-                io::ErrorKind::WouldBlock => io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    format!("Lock file is already being held: {}", path.display()),
-                ),
-                _ => error,
-            });
+        use std::os::unix::fs::MetadataExt;
+        loop {
+            // The open resolves the path's CURRENT occupant atomically.
+            let dir = match fs::File::open(path) {
+                Ok(dir) => dir,
+                // Vanished: surfaced for the caller to treat as the
+                // reclaimed-remnant retry (its create can take the empty
+                // path directly).
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Err(error),
+                Err(error) => return Err(error),
+            };
+            // The flock on the opened inode: a live witness-holder on
+            // this occupant (or another reclaim's claim) is contention.
+            let held = unsafe { libc::flock(dir.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            if held != 0 {
+                let error = io::Error::last_os_error();
+                return Err(match error.kind() {
+                    io::ErrorKind::WouldBlock => io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        format!("Lock file is already being held: {}", path.display()),
+                    ),
+                    _ => error,
+                });
+            }
+            let claimed = fs::metadata(path).map(|metadata| metadata.ino());
+            let fd_metadata = dir.metadata();
+            match (claimed, fd_metadata) {
+                (Ok(claimed), Ok(fd_metadata)) if Some(claimed) == Some(fd_metadata.ino()) => {
+                    // The flocked fd is still the occupant. Re-judge the
+                    // staleness on the fd's OWN metadata (immune to path
+                    // swaps): a fresh occupant is a live lock - never a
+                    // capture candidate.
+                    let modified = fd_metadata.modified()?;
+                    let age = std::time::SystemTime::now()
+                        .duration_since(modified)
+                        .unwrap_or_default();
+                    if age <= stale_after {
+                        return Err(io::Error::new(
+                            io::ErrorKind::WouldBlock,
+                            format!("Lock file is already being held: {}", path.display()),
+                        ));
+                    }
+                    return Ok(dir.into());
+                }
+                // The occupant changed under the claim (or vanished, or
+                // the stat failed): the fd's flock released with this
+                // iteration's drop - loop to claim the NEW occupant.
+                _ => {}
+            }
         }
-        Ok(Some(dir.into()))
     }
 
     /// True while another process holds the live-holder `flock` witness on
