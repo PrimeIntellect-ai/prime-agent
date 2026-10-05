@@ -24,8 +24,8 @@ use tokio::sync::Mutex;
 
 use super::status::{StatusHeartbeat, StatusWriter};
 use super::successor::{
-    identity_from_hello, spawn_supervisor, validate_replacement_daemon, wait_for_exit,
-    wait_for_hello,
+    capture_spawned_successor, identity_from_hello, spawn_supervisor, validate_replacement_daemon,
+    wait_for_exit, wait_for_hello,
 };
 use super::swap;
 
@@ -271,9 +271,11 @@ async fn drive(
     // the spawn - the successor's own boot refuses while a shutdown
     // admission is active ("Daemon shutdown is in progress"), so holding
     // it through the spawn would refuse the very successor it guards. The
-    // residual release-to-hello race is adjudicated by the successor hello
-    // validation below (TS `validateReplacementDaemon`): a competing
-    // daemon that wins the socket fails the update.
+    // residual release-to-hello race is adjudicated by the spawn pin
+    // below (the hello wait and the validation bind the answerer to the
+    // process this coordinator spawns): a competing daemon that wins the
+    // socket is skipped and refused, never adopted, and the update fails
+    // closed into the rollback.
     admission
         .assert_or_renew()
         .map_err(PhaseFailure::after_stop)?;
@@ -286,14 +288,20 @@ async fn drive(
         .set_state(UpdateState::Booting)
         .map_err(PhaseFailure::after_stop)?;
     let spawn_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
-    spawn_supervisor(
-        &candidate.executable,
-        &options.socket_path,
-        roster_path.as_deref(),
-        &spawn_cwd,
-    )
-    .map_err(PhaseFailure::after_stop)?;
-    let successor_hello = wait_for_hello(&options.socket_path, budget.boot_ms)
+    // Pin the spawned child to its process identity right after the
+    // spawn: the hello the coordinator waits for and adopts must come
+    // from THIS child, never from a third-party daemon that won the
+    // release-to-spawn bind race.
+    let spawned = capture_spawned_successor(
+        spawn_supervisor(
+            &candidate.executable,
+            &options.socket_path,
+            roster_path.as_deref(),
+            &spawn_cwd,
+        )
+        .map_err(PhaseFailure::after_stop)?,
+    );
+    let successor_hello = wait_for_hello(&options.socket_path, budget.boot_ms, &spawned)
         .await
         .ok_or_else(|| {
             PhaseFailure::after_stop(
@@ -303,14 +311,16 @@ async fn drive(
     // The daemon that answered must be the activated candidate, not
     // whatever else won the release-to-spawn race (TS
     // `validateReplacementDaemon`): version, socket identity, identity
-    // fence, and not-the-predecessor - a surviving predecessor or a
-    // stale third-party daemon fails the update and the rollback takes
-    // over.
+    // fence, not-the-predecessor - and the spawned child's own pid +
+    // start id (the spawn pin): a surviving predecessor, a stale
+    // third-party daemon, or the bind race's winner fails the update and
+    // the rollback takes over.
     let successor = validate_replacement_daemon(
         &options.socket_path,
         &successor_hello,
         &candidate.version,
         predecessor.as_ref(),
+        &spawned,
     )
     .map_err(PhaseFailure::after_stop)?;
     writer
@@ -429,32 +439,41 @@ async fn finish_failure(
     }
     writer.lock().await.set_state(UpdateState::Booting)?;
     let spawn_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
-    if let Err(error) = spawn_supervisor(
+    // The rollback spawn is pinned exactly like the main flow's: the
+    // adopted hello must come from the rollback child this coordinator
+    // spawned, never from a third-party daemon that won the bind race.
+    let spawned = match spawn_supervisor(
         previous.executable(),
         &options.socket_path,
         None,
         &spawn_cwd,
     ) {
-        writer.lock().await.set_state(UpdateState::Failed)?;
-        writer.lock().await.set_message(Some(format!(
-            "The rollback supervisor could not spawn ({error}); the update failed ({reason}). Sessions persist on disk - prime-agent attach recovers them."
-        )))?;
-        return Ok(());
-    }
+        Ok(pid) => capture_spawned_successor(pid),
+        Err(error) => {
+            writer.lock().await.set_state(UpdateState::Failed)?;
+            writer.lock().await.set_message(Some(format!(
+                "The rollback supervisor could not spawn ({error}); the update failed ({reason}). Sessions persist on disk - prime-agent attach recovers them."
+            )))?;
+            return Ok(());
+        }
+    };
     // The rollback boot greets under the same successor contract as the
     // main flow (TS `validateReplacementDaemon`, applied to the Rust
     // rollback path too - the TS coordinator has no rollback spawn): the
-    // expected version is the rollback installation's, and the
+    // expected version is the rollback installation's, the
     // not-the-predecessor check reads the status record's predecessor
     // (`drive` pinned it there from the verified predecessor hello before
-    // the stop).
+    // the stop), and the spawn pin binds the hello to the rollback child.
     let predecessor = writer.lock().await.current().predecessor.clone();
-    if let Some(hello) = wait_for_hello(&options.socket_path, options.budget.boot_ms).await {
+    if let Some(hello) =
+        wait_for_hello(&options.socket_path, options.budget.boot_ms, &spawned).await
+    {
         match validate_replacement_daemon(
             &options.socket_path,
             &hello,
             previous.version(),
             predecessor.as_ref(),
+            &spawned,
         ) {
             Ok(identity) => {
                 writer.lock().await.set_successor(identity)?;

@@ -3,7 +3,11 @@
 //! env the boot sweep reads, wait for the `daemon_hello` that carries the
 //! successor identity, and validate it (TS `validateReplacementDaemon`: a
 //! wrong daemon answering the socket fails the update, never passes as
-//! the successor).
+//! the successor). The adopted successor is pinned to the process this
+//! coordinator spawned (pid + process start id, [`SpawnedSuccessor`]): a
+//! third-party daemon that wins the release-to-spawn bind race is
+//! skipped by the hello wait and refused by the validation, so it can
+//! never be adopted - the update fails closed into its rollback instead.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -40,6 +44,35 @@ pub fn identity_from_hello(hello: &Value) -> UpdateProcessIdentity {
     }
 }
 
+/// The spawned successor's pinned process identity: the pid
+/// `spawn_supervisor` returned plus the process start id captured off the
+/// process table right after the spawn - the same pid-reuse identity the
+/// successor's own hello reports as `supervisorProcessStartId`, so a
+/// hello can be bound to the one process this update spawned. A `None`
+/// start id is the honest fallback: the platform exposes no identity, or
+/// the child exited before the capture could read it - the pin then
+/// matches the pid alone, and a Linux pid cannot recycle within a boot
+/// budget (the kernel allocates pids sequentially and must lap the whole
+/// pid space to reuse one), while a dead child never greets at all.
+pub struct SpawnedSuccessor {
+    /// The spawned child's pid.
+    pub pid: u64,
+    /// The spawned child's process start id, when captured.
+    pub process_start_id: Option<String>,
+}
+
+/// Pin the freshly spawned successor to its process identity (call right
+/// after [`spawn_supervisor`] returns): the start id is read off the
+/// process table while the child is still the process this coordinator
+/// created, so every hello later adopted is bound to that one child.
+#[must_use]
+pub fn capture_spawned_successor(pid: u64) -> SpawnedSuccessor {
+    SpawnedSuccessor {
+        pid,
+        process_start_id: pa_types::platform::process::process_start_id(pid as u32),
+    }
+}
+
 /// Validate the successor's `daemon_hello` (TS package-manager-cli.ts
 /// `validateReplacementDaemon`): the daemon that answers the socket after
 /// the stop-window release must be the activated successor - a surviving
@@ -58,15 +91,25 @@ pub fn identity_from_hello(hello: &Value) -> UpdateProcessIdentity {
 /// `DAEMON_PROTOCOL_VERSION`/`DAEMON_SCHEMA_ID` would refuse every
 /// protocol-advancing successor.
 ///
+/// A third divergence, hardening in the same spirit as kill.rs's
+/// `forceKillDaemon`, hardened verdict: TS's coordinator never spawns the
+/// successor itself (`ensureInteractiveDaemonRunning` adopts whatever
+/// current-version daemon already answers the socket), so TS's validation
+/// can only read the hello's own fields; the Rust port spawns the child,
+/// so [`SpawnedSuccessor`] pins the winner to it - the hello's pid (and
+/// start id, when captured) must be the spawned child's, never just any
+/// daemon with the right version, socket, and fence.
+///
 /// # Errors
 /// Returns an error when the hello fails the version identity, names
-/// another socket, carries no supervisor identity fence, or still wears
-/// the predecessor's identity.
+/// another socket, carries no supervisor identity fence, still wears the
+/// predecessor's identity, or did not come from the update's spawn.
 pub fn validate_replacement_daemon(
     socket_path: &Path,
     hello: &Value,
     expected_app_version: &str,
     predecessor: Option<&UpdateProcessIdentity>,
+    spawned: &SpawnedSuccessor,
 ) -> Result<UpdateProcessIdentity> {
     let app_version = hello.get("appVersion").and_then(Value::as_str);
     let schema_id = hello.get("schemaId").and_then(Value::as_str);
@@ -132,6 +175,24 @@ pub fn validate_replacement_daemon(
             );
         }
     }
+    // The spawn pin (the port's hardening divergence, documented above):
+    // the answering daemon must be the process this coordinator spawned,
+    // so a same-version third-party daemon that won the bind race is
+    // refused even when its hello is otherwise indistinguishable from the
+    // intended successor's. When the child's start id was captured, the
+    // hello's must match it too - a claim on a recycled pid, or a hello
+    // stripped of the start id, cannot pass as the child.
+    if successor.pid != spawned.pid
+        || spawned
+            .process_start_id
+            .as_ref()
+            .is_some_and(|expected| successor.process_start_id.as_ref() != Some(expected))
+    {
+        bail!(
+            "Replacement daemon on {} did not come from the update's spawn",
+            socket_path.display()
+        );
+    }
     Ok(successor)
 }
 
@@ -178,11 +239,26 @@ pub fn spawn_supervisor(
 }
 
 /// Connect and complete the `daemon_hello` handshake, bounded by `budget_ms`
-/// (spec §9 `Booting`): the raw `daemon_hello` frame on hello, `None` on
-/// budget expiry. The frame is the caller's to validate
-/// ([`validate_replacement_daemon`]): whatever answers the socket must
-/// prove itself the intended successor before it is adopted.
-pub async fn wait_for_hello(socket_path: &Path, budget_ms: u64) -> Option<Value> {
+/// (spec §9 `Booting`): the raw `daemon_hello` frame of the spawned child
+/// (`spawned`), `None` on budget expiry. The frame is the caller's to
+/// validate ([`validate_replacement_daemon`]): whatever answers the
+/// socket must prove itself the intended successor before it is adopted.
+///
+/// The wait is pinned to the spawned child (the same hardening
+/// divergence as [`validate_replacement_daemon`]'s spawn pin: TS's
+/// `waitForHello` returns whichever daemon answers because TS's
+/// coordinator never spawns the successor): a hello whose
+/// `supervisorPid` is not the spawned child's is skipped, never adopted -
+/// it is a third-party daemon that won the release-to-spawn bind race,
+/// and the wait goes on to the budget. A non-matching daemon that holds
+/// the socket means OUR child could not bind and will never greet, so the
+/// budget expires and the update fails honestly into its rollback path -
+/// the intended fail-closed semantics of the release-to-spawn seam.
+pub async fn wait_for_hello(
+    socket_path: &Path,
+    budget_ms: u64,
+    spawned: &SpawnedSuccessor,
+) -> Option<Value> {
     let deadline = Instant::now() + Duration::from_millis(budget_ms.max(1));
     loop {
         if let Ok((client, _events)) =
@@ -190,7 +266,12 @@ pub async fn wait_for_hello(socket_path: &Path, budget_ms: u64) -> Option<Value>
         {
             let hello = client.hello().clone();
             client.close();
-            return Some(hello);
+            // The spawned child's pid decides adoption: a foreign pid is
+            // skipped so the wait goes on (the child greets if it won the
+            // bind; nothing else ever gets adopted).
+            if identity_from_hello(&hello).pid == spawned.pid {
+                return Some(hello);
+            }
         }
         let now = Instant::now();
         if now >= deadline {
@@ -271,9 +352,63 @@ mod tests {
         // The budget spans at least one poll: the loop gives up when the
         // next poll would overshoot the deadline, so the elapsed time is
         // poll-granular - never shorter than one poll, never past two.
-        let hello = wait_for_hello(&socket, (BOOT_POLL * 2).as_millis() as u64).await;
+        let hello = wait_for_hello(
+            &socket,
+            (BOOT_POLL * 2).as_millis() as u64,
+            &spawned_successor(),
+        )
+        .await;
         assert!(hello.is_none());
         assert!(started.elapsed() >= BOOT_POLL);
+    }
+
+    /// A stub daemon answering every connection with a `daemon_hello`
+    /// whose supervisor pid follows the scripted sequence - first the
+    /// third-party daemon that won the bind race, then the spawned child -
+    /// the handshake shape `DaemonClient::connect` negotiates with the
+    /// real supervisor (supervisor/clients.rs `DaemonHello`).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hello_wait_skips_a_foreign_daemon_and_returns_the_spawned_child() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("stub.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let pids = [80_080u64, 42_42];
+        let served = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&served);
+        let stub = tokio::spawn(async move {
+            let mut served = 0usize;
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let pid = pids.get(served).copied().unwrap_or(pids[1]);
+                let hello = json!({
+                    "type": "daemon_hello",
+                    "protocol": { "name": "prime-agent.daemon", "version": 7 },
+                    "supervisorPid": pid,
+                });
+                let mut line = serde_json::to_string(&hello).unwrap();
+                line.push('\n');
+                let _ = stream.write_all(line.as_bytes()).await;
+                served += 1;
+                counter.store(served, Ordering::SeqCst);
+            }
+        });
+        let hello = wait_for_hello(&socket, 5_000, &spawned_successor())
+            .await
+            .expect("the spawned child greets within the budget");
+        assert_eq!(
+            hello.get("supervisorPid").and_then(Value::as_u64),
+            Some(42_42)
+        );
+        // The foreign daemon greeted first and was skipped, never
+        // adopted: the matching hello is at least the second one served.
+        assert!(served.load(Ordering::SeqCst) >= 2);
+        stub.abort();
     }
 
     /// A successor hello in the daemon's own shape (supervisor/clients.rs
@@ -302,6 +437,16 @@ mod tests {
         }
     }
 
+    /// The child the coordinator spawned and pinned right after the spawn:
+    /// the fixture hello's own 4242/7 identity, so the accepted-hello
+    /// tests pass the spawn pin and the refusal tests mutate it.
+    fn spawned_successor() -> SpawnedSuccessor {
+        SpawnedSuccessor {
+            pid: 4242,
+            process_start_id: Some("4242/7".to_string()),
+        }
+    }
+
     #[test]
     fn a_candidate_hello_with_a_fresh_identity_is_accepted() {
         let identity = validate_replacement_daemon(
@@ -309,6 +454,7 @@ mod tests {
             &successor_hello(),
             "9.9.9",
             Some(&predecessor_identity()),
+            &spawned_successor(),
         )
         .unwrap();
         assert_eq!(identity.pid, 4242);
@@ -335,6 +481,7 @@ mod tests {
             &hello,
             "9.9.9",
             Some(&predecessor_identity()),
+            &spawned_successor(),
         )
         .unwrap_err();
         assert!(error
@@ -358,6 +505,7 @@ mod tests {
             &hello,
             "9.9.9",
             Some(&predecessor_identity()),
+            &spawned_successor(),
         )
         .unwrap_err();
         assert!(error
@@ -374,6 +522,7 @@ mod tests {
             &hello,
             "9.9.9",
             Some(&predecessor_identity()),
+            &spawned_successor(),
         )
         .unwrap_err();
         assert!(error.to_string().contains("identity does not match"));
@@ -388,10 +537,89 @@ mod tests {
             &hello,
             "9.9.9",
             Some(&predecessor_identity()),
+            &spawned_successor(),
         )
         .unwrap_err();
         let message = error.to_string();
         assert!(message.contains("Replacement daemon is v9.9.8"));
         assert!(message.contains("expected v9.9.9"));
+    }
+
+    #[test]
+    fn a_hello_from_a_foreign_daemon_is_rejected() {
+        // The bind race's winner: right version, right socket, right fence -
+        // but a pid that is not the child this coordinator spawned.
+        let error = validate_replacement_daemon(
+            Path::new("/tmp/prime.sock"),
+            &successor_hello(),
+            "9.9.9",
+            Some(&predecessor_identity()),
+            &SpawnedSuccessor {
+                pid: 5150,
+                process_start_id: Some("5150/3".to_string()),
+            },
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("did not come from the update's spawn"));
+    }
+
+    #[test]
+    fn a_hello_with_the_spawned_pid_but_a_recycled_start_id_is_rejected() {
+        // The pid axis alone does not pass the pin once the start id was
+        // captured: a recycled pid wears a different start id.
+        let mut hello = successor_hello();
+        hello["supervisorProcessStartId"] = json!("4242/8");
+        let error = validate_replacement_daemon(
+            Path::new("/tmp/prime.sock"),
+            &hello,
+            "9.9.9",
+            Some(&predecessor_identity()),
+            &spawned_successor(),
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("did not come from the update's spawn"));
+    }
+
+    #[test]
+    fn an_uncaptured_start_id_pins_the_pid_alone() {
+        // The child exited before the capture could read its start id (or
+        // the platform has none): the pin trusts the pid alone - the
+        // disclosed pid-recycling call.
+        let identity = validate_replacement_daemon(
+            Path::new("/tmp/prime.sock"),
+            &successor_hello(),
+            "9.9.9",
+            Some(&predecessor_identity()),
+            &SpawnedSuccessor {
+                pid: 4242,
+                process_start_id: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(identity.pid, 4242);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn the_spawn_capture_pins_a_live_childs_start_id() {
+        // The coordinator's own pid is a live process: the capture pins
+        // pid plus start id - the exact identity the child's own hello
+        // reports (the same platform helper both read).
+        let spawned = capture_spawned_successor(u64::from(std::process::id()));
+        assert_eq!(spawned.pid, u64::from(std::process::id()));
+        assert!(spawned.process_start_id.is_some());
+    }
+
+    #[test]
+    fn the_spawn_capture_of_an_exited_child_falls_back_to_the_pid() {
+        // A pid nothing owns (the dead-identity fixture's 4,000,000): the
+        // capture reads no start id and the pin trusts the pid alone.
+        let spawned = capture_spawned_successor(4_000_000);
+        assert_eq!(spawned.pid, 4_000_000);
+        assert!(spawned.process_start_id.is_none());
     }
 }
