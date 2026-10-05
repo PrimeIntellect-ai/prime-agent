@@ -35,6 +35,10 @@ pub const HEARTBEAT_PROMPT_CUSTOM_TYPE: &str = "heartbeat_prompt";
 /// TS `ASYNC_BASH_COMPLETION_CUSTOM_TYPE`: the durable row a detached
 /// kernel bash completion admits as the woken turn's injected prompt.
 pub const ASYNC_BASH_COMPLETION_CUSTOM_TYPE: &str = "async_bash_completion";
+/// TS `SESSION_RENAMED_CUSTOM_TYPE` (#2529): the displayed notice a
+/// rename that changed an existing name leaves in the renamed session's
+/// transcript.
+pub const SESSION_RENAMED_CUSTOM_TYPE: &str = "session_renamed";
 /// TS `ASYNC_BASH_COMPLETION_PREVIEW_LABEL`: the queue-strip label the
 /// notice's queued row carries (the TUI renders it with its own label,
 /// no lane prefix).
