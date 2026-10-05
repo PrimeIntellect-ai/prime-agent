@@ -321,6 +321,10 @@ impl SessionUi {
                             "The daemon replaced this agent session with another session. Reopen the current session from Agents View.",
                             view,
                         ),
+                        "killed" => self.error_row(
+                            "The daemon stopped this agent session. Its transcript remains saved and can be reopened from Agents View.",
+                            view,
+                        ),
                         _ => self.note(&format!("session closed ({reason})"), view),
                     }
                 }
