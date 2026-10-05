@@ -630,6 +630,27 @@ impl LockDir {
                 format!("Lock file is already being held: {}", path.display()),
             ));
         }
+        // The live-holder witness gate, ON THE PATH and BEFORE the park:
+        // a stale mtime never reclaims a directory a live rust holder
+        // still flocks - the takeover waits for the holder's process to
+        // die, the way the stale heuristic always wanted. Gate before park
+        // matters: parking a LIVE incumbent would vacate the public path
+        // under its holder's feet (a contender could take the path while
+        // the holder's action still runs) - only a flock-FREE incumbent,
+        // one whose holder is dead (its fd closed, the witness released),
+        // may be captured and vacated, exactly like the plain rmdir this
+        // replaces. The gate's flock attempt resolves the path's CURRENT
+        // occupant, and a flock-free incumbent cannot GAIN a live holder
+        // in the gate-to-park window (its holder is dead - permanently).
+        #[cfg(unix)]
+        {
+            if Self::dir_flock_held(path) {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    format!("Lock file is already being held: {}", path.display()),
+                ));
+            }
+        }
         // The stale candidate: the atomic capture - whatever the path
         // holds goes to the park, and every check runs ON THE PARKED NAME,
         // where no other process can swap the directory between a check
@@ -640,20 +661,6 @@ impl LockDir {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
             Err(error) => return Err(error),
             Ok(()) => {}
-        }
-        // The live-holder witness gate, on the parked name: a stale mtime
-        // never reclaims a directory a live rust holder still flocks - the
-        // takeover waits for the holder's process to die, the way the
-        // stale heuristic always wanted.
-        #[cfg(unix)]
-        {
-            if Self::dir_flock_held(&parked) {
-                Self::restore_parked(&parked, path)?;
-                return Err(io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    format!("Lock file is already being held: {}", path.display()),
-                ));
-            }
         }
         // The staleness re-judge, on the parked name: the directory the
         // capture took may be a replacement that arrived after the first
@@ -940,60 +947,47 @@ impl LockDir {
             .lock()
             .unwrap()
             .is_none_or(|probe| Self::observed_mtime(&self.path) == Some(probe));
-        // The atomic capture: whatever the path holds goes to the park, so
-        // the verification below runs on a name no other process can swap.
-        let parked = Self::park_name_of(&self.path);
-        if fs::rename(&self.path, &parked).is_err() {
-            // Nothing at the path to guard (a stale takeover or a racing
-            // release already took it): never remove anything.
-            self.abandon_witness();
-            std::mem::forget(self);
-            return;
-        }
-        // The kernel-truth verification on the parked name: a witnessed
-        // guard's own flock must be ON the parked directory (the attempt
-        // on it blocks - a replacement that collides on inode number and
-        // probe mtime is still a different kernel object, so its attempt
-        // succeeds and it is recognized as foreign); the identity pair
-        // and the recorded probe stay the portable witnesses alongside.
-        let still_ours = mtime_ours && !Self::is_stolen_at(&parked, self.owned);
+        // The kernel-truth verification, ON THE PATH: a witnessed guard's
+        // own flock attempt on the occupant must BLOCK (the occupant is
+        // this guard's inode - a replacement that collides on inode
+        // number and probe mtime is still a different kernel object, and
+        // the attempt on it succeeds, recognizing it as foreign); the
+        // identity pair and the recorded probe stay the portable
+        // witnesses alongside. No park: a release vacates the path by
+        // definition, and the check-to-remove window has no legal actor -
+        // a rust successor's takeover is flock-gated by this guard's own
+        // held witness, and a flock-blind taker needs the staleness this
+        // guard just refreshed away (proper-lockfile's unlock runs the
+        // same check-then-remove against the same window).
+        let still_ours = mtime_ours && !self.is_stolen();
         #[cfg(unix)]
         let still_ours = match self.witness.as_ref() {
-            Some(_) => still_ours && Self::was_witness_held(&parked),
+            Some(_) => still_ours && Self::was_witness_held(&self.path),
             // An unwitnessed guard has no kernel truth to consult - the
             // identity pair alone decides, as before.
             None => still_ours,
         };
         if still_ours {
-            let _ = fs::remove_dir(&parked);
+            self.release();
         } else {
-            // The parked directory is a successor's: put it back, never
-            // removed (the path is free - our rename just vacated it - so
-            // the restore is the ordinary case).
-            let _ = Self::restore_parked(&parked, &self.path);
+            // The occupant is a successor's: never removed (that would
+            // delete the successor's lock) - the artifact leaks for its
+            // own staleness sweep, exactly like the stolen case.
         }
         self.abandon_witness();
         std::mem::forget(self);
     }
 
-    /// [`LockDir::is_stolen`] against an explicit park path (the parked
-    /// name is the only path a check must trust during a guarded removal).
-    fn is_stolen_at(parked: &Path, owned: Option<u64>) -> bool {
-        let Some(owned) = owned else {
-            return false;
-        };
-        Self::ownership_id(parked) != Some(owned)
-    }
-
-    /// Whether a parked directory carries this guard's own `flock` witness
-    /// (unix): the `flock` attempt on the parked name blocks exactly when
-    /// this guard's witness fd still holds the parked directory's inode -
-    /// the kernel-object identity the stat pair cannot forge (a replacement
+    /// Whether a lock path's occupant carries this guard's own `flock`
+    /// witness (unix): the `flock` attempt on the path blocks exactly when
+    /// this guard's witness fd still holds the occupant's inode - the
+    /// kernel-object identity the stat pair cannot forge (a replacement
     /// that reuses the inode number and repeats the same-second probe is
-    /// still a different kernel object, and the attempt on it succeeds).
+    /// still a different kernel object, and the attempt on it succeeds,
+    /// briefly taking and releasing the foreign flock it acquired).
     #[cfg(unix)]
-    fn was_witness_held(parked: &Path) -> bool {
-        Self::dir_flock_held(parked)
+    fn was_witness_held(path: &Path) -> bool {
+        Self::dir_flock_held(path)
     }
 
     /// Abandon the guard artifact without removing anything at the path: a
