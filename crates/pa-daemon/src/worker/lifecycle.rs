@@ -642,6 +642,10 @@ impl Worker {
                     Ok(None) => {}
                     Err(error) => {
                         eprintln!("pa-daemon: auto-refinement after compaction failed: {error:#}");
+                        self.emit_worker_event(json!({
+                            "type": "refine_failed",
+                            "error": format!("{error:#}"),
+                        }));
                     }
                 }
                 response_success(None, "compact", Some(run.result))

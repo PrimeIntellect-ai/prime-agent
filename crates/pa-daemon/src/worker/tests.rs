@@ -52,3 +52,47 @@ mod kill_broadcast_tests;
 mod queue_tests;
 mod summary_tests;
 mod warning_marker_tests;
+#[test]
+fn background_refinement_event_is_fenced_to_its_review_session() {
+    let dir = std::env::temp_dir().join(format!("pa-refine-event-{}", uuid::Uuid::new_v4()));
+    let worker = Worker::new(
+        WorkerConfig {
+            socket_path: dir.join("worker.sock"),
+            supervisor_socket_path: std::path::PathBuf::new(),
+            token: "token".to_string(),
+            worker_instance_id: String::new(),
+            active_session_id: "refinement-session".to_string(),
+            agent_dir: dir.join("agent"),
+            recovery_journal_path: dir.join("recovery.jsonl"),
+            telemetry_disabled: None,
+            script: Some(json!({ "responses": [] })),
+        },
+        None,
+    );
+    let mut subscription = worker.events.subscribe();
+    let original = SessionFile::create("/tmp", None, 0);
+    let original_id = original.session_id().to_string();
+    worker.core.lock().unwrap().store = Some(original);
+    assert!(emit_refinement_event_for_session(
+        &worker.core,
+        &worker.events,
+        &original_id,
+        json!({ "type": "refine_complete" }),
+    ));
+    assert_eq!(session_events_since(&mut subscription).len(), 1);
+
+    worker.core.lock().unwrap().store = Some(SessionFile::create("/tmp", None, 0));
+    assert!(!emit_refinement_event_for_session(
+        &worker.core,
+        &worker.events,
+        &original_id,
+        json!({ "type": "refine_complete" }),
+    ));
+    assert!(!emit_refinement_event_for_session(
+        &worker.core,
+        &worker.events,
+        &original_id,
+        json!({ "type": "refine_failed", "error": "old session" }),
+    ));
+    assert!(session_events_since(&mut subscription).is_empty());
+}

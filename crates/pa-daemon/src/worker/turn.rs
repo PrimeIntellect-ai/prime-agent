@@ -1,11 +1,12 @@
 //! One agent turn: the runner that admits queued input, drives the
 //! engine, and settles the result.
 use super::{
-    checkpoint_queue_recovery, compact_action_label, create_daemon_event_meta, emit_refinement_row,
-    gather_delivery_batch, json, oneshot, session_snapshot, AssistantSnapshot, DaemonOutbound,
-    EngineEvent, EventPump, Lane, Map, Notify, OutboundFrame, PromptRequest, QueueCheckpoint,
-    QueuedItem, Result, SessionActionSnapshot, SessionCore, SessionEngine, TurnSettle, Value,
-    WorkerRecoveryJournal, ABORTED_TURN_SETTLE_ERROR,
+    checkpoint_queue_recovery, compact_action_label, create_daemon_event_meta,
+    emit_refinement_event_for_session, emit_refinement_row, gather_delivery_batch, json, oneshot,
+    session_snapshot, AssistantSnapshot, DaemonOutbound, EngineEvent, EventPump, Lane, Map, Notify,
+    OutboundFrame, PromptRequest, QueueCheckpoint, QueuedItem, Result, SessionActionSnapshot,
+    SessionCore, SessionEngine, TurnSettle, Value, WorkerRecoveryJournal,
+    ABORTED_TURN_SETTLE_ERROR,
 };
 
 use std::sync::{Arc, Mutex};
@@ -1404,15 +1405,22 @@ impl TurnRunner {
                                 emit_refinement_row(&core, &events, &review_session_id, &value);
                             }
                         }
-                        crate::user_bash::emit_session_event_frame(
+                        emit_refinement_event_for_session(
                             &core,
                             &events,
+                            &review_session_id,
                             crate::worker::refine_complete_event(&result),
                         );
                     }
                     Ok(None) => {}
                     Err(error) => {
                         eprintln!("pa-daemon: auto-refinement after compaction failed: {error:#}");
+                        emit_refinement_event_for_session(
+                            &core,
+                            &events,
+                            &review_session_id,
+                            json!({ "type": "refine_failed", "error": format!("{error:#}") }),
+                        );
                     }
                 }
             });
