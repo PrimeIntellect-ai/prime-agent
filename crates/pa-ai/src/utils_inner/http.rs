@@ -208,6 +208,24 @@ pub async fn send(request: RequestOptions) -> Result<HttpResponse, ProviderError
     for (name, value) in &request.headers {
         builder = builder.header(name, value);
     }
+    // The TS SDK clients the reference shipped with label every JSON
+    // request body `content-type: application/json` (the openai/
+    // anthropic/google SDKs set the header in their fetch shapes; bedrock
+    // signs its own). The shared reqwest transport dropped the label
+    // with the SDKs, and strict OpenAI-compatible frontends answer a
+    // label-less body with a 400 "Unsupported Media Type" (self-hosted
+    // vLLM validates the media type of every request). Restore the SDK
+    // label here: stamp it on any body whose caller headers (bedrock's
+    // SigV4 set, mistral's, a user's `model.headers`/options override)
+    // do not already carry one.
+    if request.body.is_some()
+        && !request
+            .headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+    {
+        builder = builder.header("content-type", "application/json");
+    }
     if let Some(body) = &request.body {
         builder = builder.body(body.clone());
     }
