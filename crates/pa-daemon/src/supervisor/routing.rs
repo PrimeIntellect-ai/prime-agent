@@ -21,6 +21,8 @@ pub(crate) const ROUTE_TIMEOUT_MS: u64 = 30_000;
 /// not leave the supervisor, so the replacement-aware route may retry it
 /// against the next connection without risking a duplicate landing.
 pub(crate) const WORKER_NOT_CONNECTED: &str = "Session worker is not connected";
+/// TS daemon-worker-client.ts:98 reports this when the worker socket closes.
+pub(crate) const WORKER_SOCKET_CLOSED: &str = "Daemon worker socket closed";
 
 /// Resolve a pending request whose frame provably never reached the worker
 /// (a failed frame write, or a request still queued when the writer pump
@@ -204,7 +206,7 @@ impl Supervisor {
                 Err(anyhow!(WORKER_NOT_CONNECTED))
             }
             Ok(Ok(reply)) => Ok(reply),
-            Ok(Err(_)) => Err(anyhow!("Session worker dropped the request")),
+            Ok(Err(_)) => Err(anyhow!(WORKER_SOCKET_CLOSED)),
             Err(_) => {
                 // A timed-out request's reply slot must not sit in the
                 // pending map forever (a wedged worker never answers, and
@@ -448,7 +450,10 @@ impl Supervisor {
                         // wakes it (reuse a resident host, otherwise launch
                         // a fresh worker over the file — TS's tier-2
                         // relaunch); a delete's kill marker resolves the
-                        // ledger edge and tombstones without a worker.
+                        // ledger edge and tombstones without a worker. A
+                        // parent-directed rename must hydrate its target
+                        // the same way (TS `renameAgentFamilySession`
+                        // resolves through the hydrated target).
                         if matches!(
                             command,
                             DaemonCommand::Prompt { .. }
@@ -457,6 +462,7 @@ impl Supervisor {
                                 | DaemonCommand::FollowUp { .. }
                                 | DaemonCommand::Attach { .. }
                                 | DaemonCommand::Reattach { .. }
+                                | DaemonCommand::Rename { .. }
                                 | DaemonCommand::WaitForIdle { .. }
                         ) {
                             match self.wake_saved_session(&selector).await {
@@ -708,9 +714,34 @@ impl Supervisor {
             DaemonCommand::Kill { .. } => RouteAdmission::SupervisorInternal,
             _ => RouteAdmission::ClientRequest,
         };
-        let response = self
-            .route_command_ready(&resident, worker_command, payload, timeout, admission)
-            .await;
+        // TS daemon-supervisor's `routeClientCommand` wraps the live
+        // `rename`/`set_session_name` forward in the name-reservation
+        // ladder: name uniqueness is daemon-owned, so a session worker's
+        // own rename can never mint a duplicate sibling name.
+        let response = match command {
+            DaemonCommand::Rename { name, .. } | DaemonCommand::SetSessionName { name, .. } => {
+                match self.live_session_name_scope(&resident.worker_id, name.trim().to_string()) {
+                    Ok(scope) => self
+                        .with_session_name_reservation(
+                            &scope,
+                            self.route_command_ready(
+                                &resident,
+                                worker_command,
+                                payload,
+                                timeout,
+                                admission,
+                            ),
+                        )
+                        .await
+                        .unwrap_or_else(|error| Err(anyhow!(error))),
+                    Err(error) => Err(anyhow!(error)),
+                }
+            }
+            _ => {
+                self.route_command_ready(&resident, worker_command, payload, timeout, admission)
+                    .await
+            }
+        };
         // The byte relay: a routed response the supervisor neither edits nor
         // inspects goes to the client as the worker's own payload bytes with
         // the client's command id spliced in front. The worker serializes
@@ -721,9 +752,10 @@ impl Supervisor {
         // The typed path stays for every response this arm edits or reads
         // beyond the frame header's hints: the chunked-snapshot attach
         // clients, a rebound reattach (command echo rewrite), and the
-        // small-payload bookkeeping commands (detach, kill, rename, the
-        // promote-owned catalog forms). An attach-family relay also needs
-        // the frame header's success/activeSessionId hints for the
+        // small-payload bookkeeping commands (detach, kill, rename,
+        // set_session_name, the promote-owned catalog forms). An
+        // attach-family relay also needs the frame header's
+        // success/activeSessionId hints for the
         // supervisor's own bookkeeping; a hint-less one falls back to the
         // typed parse so the bookkeeping never silently changes shape.
         let client_wants_chunked = match command {
@@ -744,6 +776,7 @@ impl Supervisor {
                 DaemonCommand::Detach { .. }
                     | DaemonCommand::Kill { .. }
                     | DaemonCommand::Rename { .. }
+                    | DaemonCommand::SetSessionName { .. }
                     | DaemonCommand::CronAdd {
                         promote_owned_session: Some(true),
                         ..
@@ -924,9 +957,14 @@ impl Supervisor {
                         }
                     }
                 }
-                if let DaemonCommand::Rename { name, .. } = command {
+                if let DaemonCommand::Rename { name, .. }
+                | DaemonCommand::SetSessionName { name, .. } = command
+                {
                     // A subagent rename is durable in the ledger, so the
                     // passive roster keeps the new name after passivation.
+                    // The TS worker appends it in `applyStateSessionName`
+                    // for both commands; the Rust port keeps the one
+                    // supervisor-side block.
                     if response.success {
                         let descriptor = resident.descriptor.lock().await;
                         let is_child = descriptor

@@ -92,17 +92,29 @@ pub async fn login_anthropic(
     }
     let (verifier, challenge) = generate_pkce();
     let server = AnthropicCallbackServer::start(&verifier)?;
+    login_with_server(http, ui, &server, &verifier, &challenge).await
+}
+
+/// The flow after the bind: present the URL, race the callback against
+/// the paste, exchange the code. `server` listens with `verifier` as
+/// its state.
+async fn login_with_server(
+    http: &dyn ProviderHttp,
+    ui: &dyn OAuthLoginUi,
+    server: &AnthropicCallbackServer,
+    verifier: &str,
+    challenge: &str,
+) -> Result<AnthropicCredentials, String> {
     ui.on_auth(
-        &authorization_url(&challenge, &verifier),
+        &authorization_url(challenge, verifier),
         Some(AUTH_INSTRUCTIONS),
     );
-
-    let code = wait_for_code(&server, ui, &verifier).await?;
+    let code = wait_for_code(server, ui, verifier).await?;
     if ui.is_cancelled() {
         return Err(LOGIN_CANCELLED.to_string());
     }
     ui.on_progress("Exchanging authorization code for tokens...");
-    exchange_authorization_code(http, &code, &verifier).await
+    exchange_authorization_code(http, &code, verifier).await
 }
 
 /// Refresh an expired credential (TS `refreshAnthropicToken`).
@@ -441,15 +453,12 @@ async fn post_json(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::oauth::anthropic_callback::CALLBACK_PORT;
     use std::collections::HashMap;
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use tokio::io::AsyncWriteExt as _;
-
-    use super::super::anthropic_callback::{registered_port_stages, CALLBACK_PORT_LOCK};
 
     /// A scripted transport: url -> response, recording every posted
     /// body. Unknown urls fail the request (the TS suite throws on
@@ -629,6 +638,18 @@ mod tests {
         )])
     }
 
+    /// The flow on a free loopback port (the registered port is `start`'s
+    /// production bind; `a_bound_port_fails_the_start_clearly` pins it).
+    async fn login_on_a_free_port(
+        http: &ScriptedHttp,
+        ui: &ScriptedUi,
+    ) -> Result<AnthropicCredentials, String> {
+        let (verifier, challenge) = generate_pkce();
+        let server = AnthropicCallbackServer::bind("127.0.0.1", 0, &verifier)
+            .expect("a free loopback port binds");
+        login_with_server(http, ui, &server, &verifier, &challenge).await
+    }
+
     #[tokio::test]
     async fn the_authorization_url_carries_the_ts_parameters() {
         let url = authorization_url("the-challenge", "the-verifier");
@@ -655,13 +676,9 @@ mod tests {
 
     #[tokio::test]
     async fn the_exchange_body_matches_the_ts_grant() {
-        let _port = CALLBACK_PORT_LOCK.lock().await;
-        if !registered_port_stages() {
-            return; // the registered port is busy: this run cannot stage it.
-        }
         let http = token_http();
         let ui = ScriptedUi::new(Some(ScriptedAnswer::value("the-code")), None);
-        let credentials = login_anthropic(&http, &ui).await.unwrap();
+        let credentials = login_on_a_free_port(&http, &ui).await.unwrap();
         assert_eq!(credentials.access, "the-access");
         assert_eq!(credentials.refresh, "the-refresh");
         // TS: expires = now + expires_in * 1000 - 5 minutes.
@@ -693,13 +710,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_exchange_surfaces_the_ts_message() {
-        let _port = CALLBACK_PORT_LOCK.lock().await;
-        if !registered_port_stages() {
-            return; // the registered port is busy: this run cannot stage it.
-        }
         let http = ScriptedHttp::new(vec![(TOKEN_URL, 400, "no grant")]);
         let ui = ScriptedUi::new(Some(ScriptedAnswer::value("the-code")), None);
-        let error = login_anthropic(&http, &ui).await.unwrap_err();
+        let error = login_on_a_free_port(&http, &ui).await.unwrap_err();
         assert_eq!(
             error,
             format!(
@@ -710,13 +723,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_missing_field_exchange_names_the_response() {
-        let _port = CALLBACK_PORT_LOCK.lock().await;
-        if !registered_port_stages() {
-            return; // the registered port is busy: this run cannot stage it.
-        }
         let http = ScriptedHttp::new(vec![(TOKEN_URL, 200, r#"{"access_token":"a"}"#)]);
         let ui = ScriptedUi::new(Some(ScriptedAnswer::value("the-code")), None);
-        let error = login_anthropic(&http, &ui).await.unwrap_err();
+        let error = login_on_a_free_port(&http, &ui).await.unwrap_err();
         assert!(
             error.starts_with("Token exchange response missing fields"),
             "{error}"
@@ -748,10 +757,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_state_mismatch_fails_the_paste() {
-        let _port = CALLBACK_PORT_LOCK.lock().await;
-        if !registered_port_stages() {
-            return; // the registered port is busy: this run cannot stage it.
-        }
         let http = token_http();
         let ui = ScriptedUi::new(
             Some(ScriptedAnswer::value(
@@ -759,23 +764,19 @@ mod tests {
             )),
             None,
         );
-        let error = login_anthropic(&http, &ui).await.unwrap_err();
+        let error = login_on_a_free_port(&http, &ui).await.unwrap_err();
         assert_eq!(error, "OAuth state mismatch");
         assert!(http.requests.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
     async fn a_paste_without_a_code_falls_back_to_the_prompt() {
-        let _port = CALLBACK_PORT_LOCK.lock().await;
-        if !registered_port_stages() {
-            return; // the registered port is busy: this run cannot stage it.
-        }
         let http = token_http();
         let ui = ScriptedUi::new(
             Some(ScriptedAnswer::value("   ")),
             Some(ScriptedAnswer::value("the-prompted-code")),
         );
-        login_anthropic(&http, &ui).await.unwrap();
+        login_on_a_free_port(&http, &ui).await.unwrap();
         let body = http.first_body(TOKEN_URL);
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(json["code"], "the-prompted-code");
@@ -783,43 +784,31 @@ mod tests {
 
     #[tokio::test]
     async fn a_cancelled_paste_ends_the_login() {
-        let _port = CALLBACK_PORT_LOCK.lock().await;
-        if !registered_port_stages() {
-            return; // the registered port is busy: this run cannot stage it.
-        }
         let http = token_http();
         let ui = ScriptedUi::new(Some(ScriptedAnswer::ready()), None);
-        let error = login_anthropic(&http, &ui).await.unwrap_err();
+        let error = login_on_a_free_port(&http, &ui).await.unwrap_err();
         assert_eq!(error, LOGIN_CANCELLED);
     }
 
     #[tokio::test]
     async fn a_cancelled_prompt_ends_the_login() {
-        let _port = CALLBACK_PORT_LOCK.lock().await;
-        if !registered_port_stages() {
-            return; // the registered port is busy: this run cannot stage it.
-        }
         let http = token_http();
         let ui = ScriptedUi::new(
             Some(ScriptedAnswer::value("   ")),
             Some(ScriptedAnswer::ready()),
         );
-        let error = login_anthropic(&http, &ui).await.unwrap_err();
+        let error = login_on_a_free_port(&http, &ui).await.unwrap_err();
         assert_eq!(error, LOGIN_CANCELLED);
     }
 
     #[tokio::test]
     async fn a_cancelled_surface_ends_the_login_between_polls() {
-        let _port = CALLBACK_PORT_LOCK.lock().await;
-        if !registered_port_stages() {
-            return; // the registered port is busy: this run cannot stage it.
-        }
         // The flag flips when the url lands: the race loop's first
         // poll-step check ends the flow before any code arrives.
         let http = token_http();
         let mut ui = ScriptedUi::new(Some(ScriptedAnswer::Pending), None);
         ui.cancel_on_auth = true;
-        let error = login_anthropic(&http, &ui).await.unwrap_err();
+        let error = login_on_a_free_port(&http, &ui).await.unwrap_err();
         assert_eq!(error, LOGIN_CANCELLED);
         // No token request ever posted.
         assert!(http.requests.lock().unwrap().is_empty());
@@ -827,20 +816,25 @@ mod tests {
 
     #[tokio::test]
     async fn the_browser_callback_wins_the_race() {
-        let _port = CALLBACK_PORT_LOCK.lock().await;
-        // The real registered port: the flow binds its callback server
-        // and the browser redirect settles the code. Skip when another
-        // process holds the port — the bind-failure path is its own
-        // invariant.
-        if !registered_port_stages() {
-            return; // the registered port is busy: this run cannot stage it.
-        }
         let http = Arc::new(token_http());
         let ui = Arc::new(ScriptedUi::new(Some(ScriptedAnswer::Pending), None));
+        let (verifier, challenge) = generate_pkce();
+        let server = AnthropicCallbackServer::bind("127.0.0.1", 0, &verifier)
+            .expect("a free loopback port binds");
+        let port = server.port();
         let flow_ui = Arc::clone(&ui);
         let flow = {
             let flow_http = Arc::clone(&http);
-            tokio::spawn(async move { login_anthropic(flow_http.as_ref(), flow_ui.as_ref()).await })
+            tokio::spawn(async move {
+                login_with_server(
+                    flow_http.as_ref(),
+                    flow_ui.as_ref(),
+                    &server,
+                    &verifier,
+                    &challenge,
+                )
+                .await
+            })
         };
         let url = ui.captured_url().await;
         let state = url::Url::parse(&url)
@@ -849,7 +843,7 @@ mod tests {
             .find(|(key, _)| key == "state")
             .map(|(_, value)| value.to_string())
             .expect("the authorization url carries the state");
-        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", CALLBACK_PORT))
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
             .await
             .expect("the flow's callback server accepts the redirect");
         stream
