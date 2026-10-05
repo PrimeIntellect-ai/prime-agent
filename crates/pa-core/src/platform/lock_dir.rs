@@ -10,8 +10,10 @@
 //! startup with ENOTDIR).
 //!
 //! Held locks are expected to be short (read-modify-write of one small JSON
-//! document); long holds rely on the caller re-checking, as in the TS
-//! product, whose sync lock keeps its mtime fresh via an unref'd timer.
+//! document); a long hold keeps the lock fresh via [`LockDir::refresh`] -
+//! the port of the TS sync lock's unref'd update timer - and never removes
+//! a lock whose inode changed hands ([`LockDir::release_when_owned`]; the
+//! successor's own staleness sweep reclaims the abandoned artifact).
 
 use std::fs;
 use std::io;
@@ -178,10 +180,15 @@ mod win32 {
 }
 
 /// An exclusive cross-process lock on `{path}.lock`, released on drop by
-/// removing the directory.
+/// removing the directory. The directory's ownership identity is captured
+/// at acquisition, so a long hold can re-check whose lock it still is
+/// (the TS sync lock's compromise rules).
 #[derive(Debug)]
 pub struct LockDir {
     path: PathBuf,
+    /// The lock directory's identity captured at acquisition (the inode;
+    /// TS `guardIno`), `None` where the platform cannot observe it.
+    owned: Option<u64>,
 }
 
 impl LockDir {
@@ -223,7 +230,7 @@ impl LockDir {
         let path = path.to_path_buf();
         let stale_after = stale_after.max(MIN_STALE);
         match Self::create(&path) {
-            Ok(()) => Ok(LockDir { path }),
+            Ok(()) => Ok(Self::acquired(path)),
             // Only an existing path is a lock collision; any other failure
             // (missing parent, permissions) is a real error, like the TS
             // protocol's non-EEXIST path - never masked as contention.
@@ -232,7 +239,7 @@ impl LockDir {
                 // The judge path removed (or raced away) the incumbent: one
                 // fresh attempt; a reappearing rival is contention.
                 match Self::create(&path) {
-                    Ok(()) => Ok(LockDir { path }),
+                    Ok(()) => Ok(Self::acquired(path)),
                     Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                         Err(io::Error::new(
                             io::ErrorKind::WouldBlock,
@@ -244,6 +251,38 @@ impl LockDir {
             }
             Err(error) => Err(error),
         }
+    }
+
+    /// The guard bound to the lock directory it just created: the
+    /// ownership identity captured right after the mkdir is the one a
+    /// refresh or a guarded release re-checks (TS captures `guardIno` the
+    /// same way, right after acquisition).
+    fn acquired(path: PathBuf) -> Self {
+        LockDir {
+            owned: Self::ownership_id(&path),
+            path,
+        }
+    }
+
+    /// The lock directory's ownership identity (TS `guardIno`): the inode
+    /// where std can observe it (TS `statSync(guardPath, { bigint: true })
+    /// .ino`), `None` otherwise - an unstat'able directory is what the TS
+    /// catch leaves `guardIno` at. Captured at acquisition, re-run by
+    /// [`LockDir::is_stolen`].
+    #[cfg(unix)]
+    fn ownership_id(path: &Path) -> Option<u64> {
+        use std::os::unix::fs::MetadataExt;
+        fs::symlink_metadata(path)
+            .ok()
+            .as_ref()
+            .map(fs::Metadata::ino)
+    }
+
+    /// std cannot observe a directory's identity on this platform (TS
+    /// `guardIno === undefined`): only timer-driven detection applies.
+    #[cfg(not(unix))]
+    fn ownership_id(_path: &Path) -> Option<u64> {
+        None
     }
 
     /// The mkdir is the acquisition signal: EEXIST is the only collision.
@@ -357,6 +396,76 @@ impl LockDir {
                 tracing::warn!("failed to release lock {}: {error}", self.path.display());
             }
         }
+    }
+
+    /// Whether the directory at the lock path is still the one this guard
+    /// acquired (TS `guardStolen`): a steal is rmdir+mkdir (a successor's
+    /// stale takeover of the same path), which swaps the inode. An
+    /// unobservable identity (`None`) is never stolen - there only the
+    /// refresher's timer-driven detection applies (TS
+    /// `guardIno === undefined`) - and a directory that cannot be stat'ed
+    /// is (TS's `guardStolen` catch). Synchronous by design: the check TS
+    /// runs where its timer cannot (`assertGuardHeld`).
+    #[must_use]
+    pub fn is_stolen(&self) -> bool {
+        let Some(owned) = self.owned else {
+            return false;
+        };
+        Self::ownership_id(&self.path) != Some(owned)
+    }
+
+    /// The long-hold safety valve the TS sync lock runs as an unref'd timer
+    /// (proper-lockfile's `update` option): re-probe the mtime, so a stall
+    /// in the holder cannot age the lock past the staleness threshold a
+    /// successor reclaims on. The ownership check runs first - the probe
+    /// must land on the lock directory this guard acquired, not a
+    /// successor's - and a lost identity or a failed probe write is the
+    /// error proper-lockfile reports to `onCompromised` (which also stops
+    /// the updater; the caller treats the hold as over).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the lock directory changed hands (or cannot
+    /// be stat'ed) and when the mtime probe write fails.
+    pub fn refresh(&self) -> io::Result<()> {
+        if self.is_stolen() {
+            return Err(io::Error::other("the lock directory changed hands"));
+        }
+        Self::reprobe_mtime(&self.path)
+    }
+
+    /// The acquisition probe re-run - the same ceil-plus-5 ms shape, so
+    /// the staleness judgment keeps its meaning (see `create`'s platform
+    /// split).
+    #[cfg(any(unix, windows))]
+    fn reprobe_mtime(path: &Path) -> io::Result<()> {
+        let (sec, nanos) = probe_mtime();
+        set_mtime(path, sec, nanos)
+    }
+
+    /// No mtime probe on this platform (see `create`): staleness rides the
+    /// directory's own mtime.
+    #[cfg(not(any(unix, windows)))]
+    fn reprobe_mtime(_path: &Path) -> io::Result<()> {
+        Ok(())
+    }
+
+    /// Release only when the lock directory is still the one this guard
+    /// acquired: removing a stolen lock would delete the successor's lock
+    /// (TS: a stolen-but-undetected guard is never released - "the
+    /// abandoned updater notices the foreign mtime on its next tick and
+    /// cleans itself up"). An unobservable identity releases like the plain
+    /// drop (TS's `guardStolen()` is false for `guardIno === undefined`).
+    ///
+    /// Consuming: [`Drop`] would run the plain release afterwards, and a
+    /// successor may already hold a fresh lock at the path the guarded
+    /// removal vacated - the double release could delete it - so the guard
+    /// is forgotten once its guarded removal ran.
+    pub fn release_when_owned(self) {
+        if !self.is_stolen() {
+            self.release();
+        }
+        std::mem::forget(self);
     }
 }
 
@@ -489,5 +598,73 @@ mod tests {
         assert!(std::fs::metadata(lock_of(&file)).unwrap().is_dir());
         drop(guard);
         assert!(!lock_of(&file).exists());
+    }
+
+    #[test]
+    fn refresh_keeps_the_lock_fresh() {
+        // The long-hold valve: a refresh tick re-probes the mtime, so an
+        // aged lock stops being stale and a visitor sees contention, not a
+        // reclaim (proper-lockfile's update timer's whole job).
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("auth.json");
+        std::fs::write(&file, "{}").unwrap();
+        let guard = LockDir::acquire(&file, MIN_STALE).unwrap();
+        set_mtime(&lock_of(&file), 1, 0).unwrap();
+        guard.refresh().unwrap();
+        let error = LockDir::acquire(&file, MIN_STALE).unwrap_err();
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock,
+            "a refreshed lock is live, not stale"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn refresh_reports_a_stolen_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("auth.json");
+        std::fs::write(&file, "{}").unwrap();
+        let guard = LockDir::acquire(&file, MIN_STALE).unwrap();
+        let path = lock_of(&file);
+        // The thief's rmdir+mkdir re-creates the lock directory; a fresh
+        // mkdir in between pins the recreator to a different inode, the
+        // way a real successor's mkdir is one allocation among others.
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::create_dir(dir.path().join("thief-bumper")).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(
+            guard.is_stolen(),
+            "the recreated lock is not the acquired one"
+        );
+        let error = guard
+            .refresh()
+            .expect_err("the refresh probe must not land on the successor's lock");
+        assert_eq!(error.to_string(), "the lock directory changed hands");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn release_when_owned_leaves_a_stolen_lock_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("auth.json");
+        std::fs::write(&file, "{}").unwrap();
+        let path = lock_of(&file);
+        // While owned, the guarded release removes like the plain one.
+        LockDir::acquire(&file, MIN_STALE)
+            .unwrap()
+            .release_when_owned();
+        assert!(!path.exists(), "an owned guard releases normally");
+        // After the steal (rmdir+mkdir, a fresh allocation in between),
+        // the successor's lock directory survives.
+        let guard = LockDir::acquire(&file, MIN_STALE).unwrap();
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::create_dir(dir.path().join("thief-bumper")).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        guard.release_when_owned();
+        assert!(
+            path.is_dir(),
+            "the guarded release never deletes the successor's lock"
+        );
     }
 }
