@@ -1178,6 +1178,16 @@ async fn handle_session_new(
     // The ACP MCP servers ride the wire command, not a local manager.
     let replace_skipped = resolved.is_empty() && state.lock().await.mcp_server_names.is_empty();
     if !replace_skipped {
+        // A failed response does not prove the worker rejected this list.
+        // Keep the names until a clear is acknowledged, even if the
+        // best-effort clear below also loses its acknowledgement.
+        if !resolved.is_empty() {
+            state.lock().await.mcp_server_names = resolved
+                .iter()
+                .map(pa_core::mcp::AcpMcpServerConfig::name)
+                .map(str::to_string)
+                .collect();
+        }
         if let Err(error) = replace_connection_servers(
             link,
             &binding.active_session_id,
@@ -1199,12 +1209,9 @@ async fn handle_session_new(
             let _ = tx.send(super::internal_error(&id, &error.to_string()));
             return;
         }
-        let names = resolved
-            .iter()
-            .map(pa_core::mcp::AcpMcpServerConfig::name)
-            .map(str::to_string)
-            .collect();
-        state.lock().await.mcp_server_names = names;
+        if resolved.is_empty() {
+            state.lock().await.mcp_server_names.clear();
+        }
     }
 
     // The admission response is queued below, after the session takes its
@@ -1962,6 +1969,108 @@ mod tests {
             session,
             ..DaemonAcpState::default()
         }
+    }
+
+    #[tokio::test]
+    async fn lost_replace_and_clear_ack_retries_clear_before_an_empty_session() {
+        let (writer, mut commands) = mpsc::unbounded_channel::<String>();
+        let (_frames_tx, frames) = mpsc::unbounded_channel();
+        let pending = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let link = Arc::new(DaemonLink {
+            writer,
+            pending: Arc::clone(&pending),
+            closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            frames: Mutex::new(frames),
+            protocol_version: DAEMON_PROTOCOL_VERSION,
+            next_request_id: std::sync::atomic::AtomicU64::new(0),
+        });
+        let worker = tokio::spawn(async move {
+            let mut replacements = Vec::new();
+            let mut installed = Vec::<String>::new();
+            while let Some(line) = commands.recv().await {
+                let envelope: DaemonCommandEnvelope = serde_json::from_str(&line).unwrap();
+                let id = envelope.id;
+                let (command, data, lose_ack) = match envelope.command {
+                    DaemonCommand::GetConnectionState { .. } => {
+                        ("get_connection_state", None, false)
+                    }
+                    DaemonCommand::GetAvailableModels { .. } => {
+                        ("get_available_models", Some(json!({ "models": [] })), false)
+                    }
+                    DaemonCommand::GetRlmChildren { .. } => {
+                        ("get_rlm_children", Some(json!({ "children": [] })), false)
+                    }
+                    DaemonCommand::ReplaceAcpMcpServers { servers, .. } => {
+                        installed = servers
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|server| server.get("name").unwrap().as_str().unwrap().to_string())
+                            .collect();
+                        replacements.push(installed.clone());
+                        ("replace_acp_mcp_servers", None, replacements.len() <= 2)
+                    }
+                    other => panic!("unexpected command: {other:?}"),
+                };
+                let reply = pending.lock().unwrap().remove(&id).unwrap();
+                if !lose_ack {
+                    reply
+                        .send(DaemonResponse {
+                            id: Some(id),
+                            command: command.to_string(),
+                            success: true,
+                            data,
+                            error: None,
+                            error_info: None,
+                        })
+                        .unwrap();
+                }
+                // Dropping the reply simulates an applied command whose
+                // acknowledgement never reaches the ACP connection.
+            }
+            (replacements, installed)
+        });
+        let state = Arc::new(Mutex::new(state(None)));
+        let binding = DaemonBinding {
+            active_session_id: "daemon-1".to_string(),
+            client_owned: false,
+            mcp_owner_id: "owner-1".to_string(),
+        };
+        let options = DaemonAcpOptions {
+            socket_path: PathBuf::new(),
+            actual_cwd: PathBuf::from("/tmp"),
+            product_version: "test".to_string(),
+            create: DaemonCommand::GetConnectionState {
+                id: None,
+                active_session_id: "daemon-1".to_string(),
+                rest: Map::default(),
+            },
+        };
+        let (tx, mut responses) = mpsc::unbounded_channel();
+        handle_session_new(
+            json!(1),
+            json!({ "mcpServers": [{ "name": "example", "command": "echo", "args": [], "env": [] }] }),
+            &link, &state, &options, &binding, tx.clone(),
+        ).await;
+        assert!(responses.recv().await.unwrap().get("error").is_some());
+        assert_eq!(state.lock().await.mcp_server_names, vec!["example"]);
+
+        handle_session_new(
+            json!(2),
+            json!({ "mcpServers": [] }),
+            &link,
+            &state,
+            &options,
+            &binding,
+            tx,
+        )
+        .await;
+        assert!(responses.recv().await.unwrap().get("result").is_some());
+        assert!(state.lock().await.mcp_server_names.is_empty());
+        drop(link);
+        let (replacements, installed) = worker.await.unwrap();
+        assert_eq!(replacements, vec![vec!["example"], vec![], vec![]]);
+        assert!(installed.is_empty());
     }
 
     #[tokio::test]
