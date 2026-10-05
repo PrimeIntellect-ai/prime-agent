@@ -208,6 +208,19 @@ pub async fn send(request: RequestOptions) -> Result<HttpResponse, ProviderError
     for (name, value) in &request.headers {
         builder = builder.header(name, value);
     }
+    // A JSON request body carries `content-type: application/json` —
+    // strict OpenAI-compatible frontends (self-hosted vLLM) validate the
+    // media type and 400 a label-less body. A caller-supplied label
+    // (bedrock's signed set, mistral's, a user's `model.headers`/
+    // options override) always wins.
+    if request.body.is_some()
+        && !request
+            .headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+    {
+        builder = builder.header("content-type", "application/json");
+    }
     if let Some(body) = &request.body {
         builder = builder.body(body.clone());
     }

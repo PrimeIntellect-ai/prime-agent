@@ -468,6 +468,7 @@ const BROWSER_DEFAULT_INSTRUCTIONS: &str = "Complete the sign-in in your browser
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CopyStatus {
     Copied,
+    Requested,
     Failed,
 }
 
@@ -823,7 +824,8 @@ impl AuthPanel {
         };
         let url = scrub_controls(&url).replace('\n', "");
         self.copy_status = match crate::clipboard::copy_to_clipboard(&url, sink) {
-            Ok(()) => Some(CopyStatus::Copied),
+            Ok(crate::clipboard::CopyOutcome::Confirmed) => Some(CopyStatus::Copied),
+            Ok(crate::clipboard::CopyOutcome::Requested) => Some(CopyStatus::Requested),
             Err(_) => Some(CopyStatus::Failed),
         };
     }
