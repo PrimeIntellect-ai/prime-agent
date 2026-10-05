@@ -320,6 +320,10 @@ mod tests {
     /// close, and the listener's own fd is closed while the in-flight
     /// stream's fd stays open - no fd is leaked on the bound socket
     /// across the exit sequence.
+    /// The fd-leak oracle reads `/proc/self/fd`, so it runs where that
+    /// exists: the neighbors' `target_os = "linux"` gate, not bare `unix`
+    /// (macOS has no `/proc` and the fd probes would always read false).
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn dropping_the_listener_is_the_graceful_exit_close() {
         use std::io::Write;
