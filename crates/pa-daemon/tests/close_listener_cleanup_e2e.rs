@@ -420,6 +420,12 @@ fn a_poisoned_supervisors_drain_spares_the_successors_live_socket() {
 /// socket). The refusal is driven through the real
 /// `exit_refused_registration` path by a supervisor stand-in that
 /// definitively rejects the registration.
+///
+/// Linux-only: `unix_listener_definitely_closed` rules `ECONNREFUSED`
+/// definitive there alone (the unit-test platform split mirrors this),
+/// so the refusal exit unlinks its own dead file on Linux and
+/// conservatively preserves it everywhere else.
+#[cfg(target_os = "linux")]
 #[test]
 fn a_refused_registrations_exit_removes_the_workers_own_dead_socket() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -440,6 +446,32 @@ fn a_refused_registrations_exit_removes_the_workers_own_dead_socket() {
     assert!(
         !socket.exists(),
         "the refused worker's own dead socket file is removed, not left stale"
+    );
+}
+
+/// Off Linux the refused worker's dead file is CONSERVATIVELY
+/// PRESERVED (a saturated BSD/macOS backlog also refuses the probe
+/// connect, so `ECONNREFUSED` never proves closure there): the refusal
+/// exit must leave the file alone rather than guess - the next bind's
+/// stale-socket prepare is what clears it.
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn a_refused_registrations_exit_preserves_its_dead_file_off_linux() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let socket = dir.path().join("worker.sock");
+    let supervisor_socket = dir.path().join("rejecting-supervisor.sock");
+    spawn_rejecting_supervisor(&supervisor_socket);
+    let mut worker = spawn_worker(
+        dir.path(),
+        &socket,
+        &supervisor_socket,
+        "refused-registration-token",
+    );
+    wait_socket_file(&socket);
+    wait_clean_exit(&mut worker.child, Duration::from_secs(10));
+    assert!(
+        socket.exists(),
+        "off Linux the refusal exit never claims the dead file from the probe alone"
     );
 }
 
