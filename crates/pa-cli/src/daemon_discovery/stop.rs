@@ -332,15 +332,19 @@ fn run_shutdown_converging(
                 } else if let Some(pid) = pid.filter(|pid| {
                     is_daemon_process_listening(*pid, &action.daemon.socket_path, root)
                 }) {
-                    // TS asserts on both sides of the verified kill.
+                    // TS asserts before the kill here; the post-kill
+                    // assert before the socket removal runs inside the
+                    // helper, so a window lost to the kill's bounded
+                    // polling aborts the pass without unlinking.
                     assert().map_err(|error| error.to_string())?;
                     let outcome = verified_force_kill(
                         pid,
                         &action.daemon.socket_path,
                         format!("killed unreachable background service (pid {pid})"),
                         &mut handled_pids,
-                    );
-                    assert().map_err(|error| error.to_string())?;
+                        assert,
+                    )
+                    .map_err(|error| error.to_string())?;
                     apply_stop(outcome, &socket_path, &mut stopped, &mut failed);
                 } else {
                     assert().map_err(|error| error.to_string())?;
@@ -406,7 +410,9 @@ fn apply_stop(
 
 /// Stop one daemon gracefully, escalating only with `force` (TS
 /// `stopBackgroundService`, whose `assertAdmission` runs before any stop
-/// action; a lost stop window aborts the pass).
+/// action and is re-checked between the force kill and the socket
+/// removal inside `verified_force_kill`; a lost stop window aborts the
+/// pass).
 fn stop_background_service(
     socket_path: &Path,
     pid: Option<u32>,
@@ -446,15 +452,16 @@ fn stop_background_service(
     }
     // The last action before the kill: the window must still be ours after
     // the wait (TS asserts between the graceful attempt and the force
-    // kill, and again before the socket removal rides the kill's
-    // confirmed-death path inside the helper).
+    // kill); the re-assert after the kill - immediately before the socket
+    // removal - runs inside `verified_force_kill`.
     assert()?;
-    Ok(verified_force_kill(
+    verified_force_kill(
         pid,
         socket_path,
         format!("force-killed unresponsive background service (pid {pid})"),
         handled_pids,
-    ))
+        assert,
+    )
 }
 
 /// Verified force-kill for one daemon (the supervisor-side contract the
@@ -462,21 +469,33 @@ fn stop_background_service(
 /// `handled_pids` and the socket file is removed only on confirmed death —
 /// a daemon that survives SIGKILL is reported as failed, with its socket
 /// file deliberately kept so the invisible listener stays discoverable
-/// for the `--force` residual sweep and the doctor's re-probe.
+/// for the `--force` residual sweep and the doctor's re-probe. The stop
+/// window is re-asserted after the kill's bounded polling and immediately
+/// before the unlink (TS asserts between `forceKillDaemon` and
+/// `removeSocketFile`): the poll can outlast the lease, and the socket
+/// file may by then belong to a successor daemon bound while we polled,
+/// so a lost window aborts with the file kept on disk.
 fn verified_force_kill(
     pid: u32,
     socket_path: &Path,
     success_action: String,
     handled_pids: &mut std::collections::HashSet<u32>,
-) -> StopOutcome {
+    assert: &dyn Fn() -> anyhow::Result<()>,
+) -> anyhow::Result<StopOutcome> {
     if !force_kill_daemon(pid) {
-        return StopOutcome::Skipped(format!(
+        return Ok(StopOutcome::Skipped(format!(
             "could not safely stop daemon (pid {pid}); it survived SIGKILL"
-        ));
+        )));
     }
+    // TS kills, marks the pid handled, then re-asserts before the unlink:
+    // a window lost to the kill's bounded polling keeps the socket file
+    // on disk - a successor daemon bound while we polled stays
+    // discoverable, the same containment as the survived-SIGKILL arm -
+    // and the lost window aborts the pass.
     handled_pids.insert(pid);
+    assert()?;
     remove_socket_file(socket_path);
-    StopOutcome::Reaped(success_action)
+    Ok(StopOutcome::Reaped(success_action))
 }
 
 /// Ask the daemon to stop and confirm it actually stopped listening: the ack
@@ -601,15 +620,17 @@ mod tests {
             .expect("spawn a sleep child");
         let pid = child.id();
         let mut handled_pids = std::collections::HashSet::new();
+        let assert = || Ok(());
 
         let outcome = verified_force_kill(
             pid,
             &socket_path,
             "killed unreachable background service".to_string(),
             &mut handled_pids,
+            &assert,
         );
 
-        match outcome {
+        match outcome.expect("a held stop window never aborts the kill") {
             StopOutcome::Reaped(action) => {
                 assert_eq!(action, "killed unreachable background service");
             }
@@ -623,6 +644,73 @@ mod tests {
             "a confirmed death removes the socket file"
         );
         let _ = child.wait();
+    }
+
+    /// The kill's bounded polling (the 1 s grace, SIGKILL, the death
+    /// verify) can outlast the stop window, so TS re-asserts the
+    /// admission after the kill and immediately before the socket
+    /// removal (daemon-ps.ts :950, the `stopBackgroundService` force
+    /// arm). The stub daemon accepts connections but never greets or
+    /// shuts down (mod.rs's probe stub), so the pass escalates to the
+    /// force kill; the admission counter hands the window away on the
+    /// third assert - the post-kill re-assert inside the helper - the
+    /// way a coordinator taking the lease during the kill's poll does.
+    #[cfg(unix)]
+    #[test]
+    fn stop_background_service_keeps_the_socket_when_the_window_is_lost_mid_kill() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let socket_path = tmp.path().join("daemon.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket_path).expect("bind");
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                drop(stream);
+            }
+        });
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn a sleep child");
+        let pid = child.id();
+        let mut handled_pids = std::collections::HashSet::new();
+
+        // The window holds through the entry assert and the pre-kill
+        // assert (TS :929/:947); the post-kill re-assert (TS :950) finds
+        // it lost.
+        let calls = std::cell::Cell::new(0);
+        let lost_window = || {
+            calls.set(calls.get() + 1);
+            if calls.get() >= 3 {
+                Err(anyhow::anyhow!("shutdown admission expired"))
+            } else {
+                Ok(())
+            }
+        };
+        let outcome = stop_background_service(
+            &socket_path,
+            Some(pid),
+            &mut handled_pids,
+            true,
+            &lost_window,
+        );
+
+        // A lost stop window aborts the pass (the converging pass maps
+        // the error to exit code 1) ...
+        assert!(outcome.is_err(), "a lost stop window must abort the pass");
+        // ... but only after the kill itself ran (TS kills before the
+        // re-assert, so the child is dead) ...
+        assert!(
+            child.try_wait().expect("try wait").is_some(),
+            "the force kill must run before the lost window surfaces"
+        );
+        // ... and the socket file stays on disk (the same containment as
+        // the survived-SIGKILL arm): a successor daemon bound while we
+        // polled keeps its discoverable socket.
+        assert!(
+            socket_path.exists(),
+            "a lost stop window must not unlink the socket file"
+        );
     }
 
     #[test]
