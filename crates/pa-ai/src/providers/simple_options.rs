@@ -15,11 +15,10 @@ pub const REQUEST_MAX_TOKENS_CAP: u64 = 32_000;
 /// `adjustMaxTokensForThinking`: `minOutputTokens`).
 pub const MIN_OUTPUT_TOKENS: u64 = 1_024;
 
-/// The default per-request output budget for a model (TS `resolveMaxTokens`,
-/// the #755 fix): an explicitly configured `maxTokens` passes through
-/// unchanged; a catalog value is capped at [`REQUEST_MAX_TOKENS_CAP`];
-/// `None` when the model declares no max output (providers that default
-/// server-side).
+/// The default per-request output budget for a model (TS `resolveMaxTokens`):
+/// an explicitly configured `maxTokens` passes through unchanged; a catalog
+/// value is capped at [`REQUEST_MAX_TOKENS_CAP`]; `None` when the model
+/// declares no max output (providers that default server-side).
 #[must_use]
 pub fn default_request_max_tokens(model: &Model) -> Option<u64> {
     if model.max_tokens == 0 {
@@ -112,7 +111,12 @@ pub fn adjust_max_tokens_for_thinking(
     }
     .unwrap_or(min_thinking_tokens);
     let mut thinking_budget = level_budget.max(min_thinking_tokens);
-    let max_tokens = (base_max_tokens + thinking_budget).min(model_max_tokens);
+    // Saturating: an explicitly configured `maxTokens` may be any nonzero
+    // u64, so the base + budget sum can reach the integer ceiling before
+    // the model-max clamp ever runs.
+    let max_tokens = base_max_tokens
+        .saturating_add(thinking_budget)
+        .min(model_max_tokens);
     if max_tokens <= min_thinking_tokens {
         return Err(
             "Budget-based thinking requires at least 1024 thinking tokens plus room for the response"
@@ -255,6 +259,29 @@ mod tests {
             effective_request_max_tokens(&roomy, ModelThinkingLevel::Medium),
             96_000
         );
+    }
+
+    #[test]
+    fn an_explicit_budget_at_the_integer_ceiling_never_overflows_the_fold() {
+        // An explicitly configured maxTokens may be any nonzero u64, so the
+        // thinking fold's base + budget addition must saturate before the
+        // model-max clamp: checked builds panicked on the plain `+` and
+        // release wrapped the budget.
+        let huge = explicit_model("anthropic", "claude-sonnet-4-5", u64::MAX);
+        assert_eq!(
+            effective_request_max_tokens(&huge, ModelThinkingLevel::High),
+            u64::MAX
+        );
+        // The fold itself stays bounded at the model's declared max: the
+        // wrapped sum (a few thousand) must never stand in for a huge one.
+        let (max_tokens, _) = adjust_max_tokens_for_thinking(
+            u64::MAX - 100,
+            u64::MAX - 100,
+            ModelThinkingLevel::High,
+            None,
+        )
+        .unwrap();
+        assert_eq!(max_tokens, u64::MAX - 100);
     }
 
     #[test]

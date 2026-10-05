@@ -341,9 +341,8 @@ pub fn apply_model_override(model: &Model, over: &ModelOverride) -> Model {
     }
     if let Some(max_tokens) = over.max_tokens {
         result.max_tokens = max_tokens;
-        // TS `applyModelOverride` (the #755 fix): an override-supplied
-        // `maxTokens` came from configuration, so it bypasses the 32000
-        // default ceiling.
+        // An override-supplied `maxTokens` is configuration: it bypasses
+        // the default output ceiling.
         result.max_tokens_explicit = true;
     }
     if let Some(cost) = &over.cost {
@@ -457,10 +456,8 @@ pub fn load_custom_models(
                 ),
                 context_window: model_def.context_window.unwrap_or(128_000),
                 max_tokens: model_def.max_tokens.unwrap_or(16_384),
-                // TS `parseModels` (the #755 fix): `maxTokensExplicit:
-                // modelDef.maxTokens !== undefined`. The field is optional
-                // here, so a defaulted 16_384 stays catalog-like (capped)
-                // while a configured value is explicit.
+                // A configured `maxTokens` is explicit; the 16_384
+                // default is not, so a defaulted model stays capped.
                 max_tokens_explicit: model_def.max_tokens.is_some(),
                 featured: None,
                 headers: None,

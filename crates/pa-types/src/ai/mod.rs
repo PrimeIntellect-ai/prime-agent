@@ -781,8 +781,7 @@ pub struct Model {
     /// Set when `maxTokens` came from explicit configuration rather than the
     /// model catalog (a models.json entry, a per-model override). An explicit
     /// value bypasses the 32 000 default output ceiling so a configured cap
-    /// reaches the provider unchanged; catalog values stay capped (TS
-    /// `maxTokensExplicit`, the #755 fix).
+    /// reaches the provider unchanged; catalog values stay capped.
     #[serde(default, skip_serializing_if = "is_false")]
     pub max_tokens_explicit: bool,
     /// Flagship model surfaced above non-featured models of the same provider.

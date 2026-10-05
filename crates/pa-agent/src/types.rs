@@ -430,10 +430,9 @@ pub struct Model {
     pub context_window: u64,
     #[serde(rename = "maxTokens", default)]
     pub max_tokens: u64,
-    /// Set when `maxTokens` came from explicit configuration (TS
-    /// `maxTokensExplicit`, the #755 fix): rides the wire-shape round-trips
-    /// with the pa-ai model so the explicit flag survives the crate
-    /// boundary and the persisted session state.
+    /// Set when `maxTokens` came from explicit configuration: rides the
+    /// wire-shape round-trips with the pa-ai model so the flag survives
+    /// the crate boundary and the persisted session state.
     #[serde(
         rename = "maxTokensExplicit",
         default,
