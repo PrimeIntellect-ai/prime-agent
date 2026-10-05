@@ -413,6 +413,116 @@ impl SessionUi {
                     view,
                 );
             }
+            // `/factory [on|off|status]`: the factory's opt-in gate (the
+            // operator's directive: the factory is disabled until the
+            // user turns it on). The toggle persists `factory.enabled` —
+            // the shared settings key the daemon's `factory_activity`
+            // advertisement and the kernel's factory gate read — so the
+            // factory surfaces on the next client start (the running
+            // connection keeps the advertisement its hello was built
+            // with).
+            "factory" => {
+                let arg = resolved.args.trim().to_lowercase();
+                match arg.as_str() {
+                    "on" => {
+                        let Some(settings) = &self.client_settings else {
+                            self.note("/factory is not available in this client yet", view);
+                            return Ok(());
+                        };
+                        if let Err(error) = settings.set_factory_enabled(true) {
+                            self.error_row(&format!("{error:#}"), view);
+                            return Ok(());
+                        }
+                        self.note(
+                            "The factory is enabled. Restart the client to surface the factory group (the factory page and the agent-side factory API follow the same gate).",
+                            view,
+                        );
+                    }
+                    "off" => {
+                        // The lifecycle guard (the review round's finding):
+                        // the kernel's control loop is not gated by the
+                        // setting, so `off` while runs are live would keep
+                        // admitting and collecting children while every
+                        // factory surface — the namespace, the activity
+                        // lane, and the page after the next client start —
+                        // refuses: a running factory loses its stop and
+                        // visibility path until the gate is enabled again.
+                        // The write refuses while the session's kernel
+                        // reports live runs, naming the count the dock
+                        // shows; the runs stop first (the page's stop
+                        // action or `rlm.factory.stop`). An unreadable
+                        // count fails closed on the lane-advertised client
+                        // (the only state where the guard matters): the
+                        // count's own failure classes — a timed-out or
+                        // malformed lane reply — cannot prove zero live
+                        // runs, and an unknown liveness must not open the
+                        // gate; the client retries once the lane answers.
+                        // The kernel-not-running refusal never reaches the
+                        // unreadable arm: the lane never builds a kernel
+                        // and the kernel owns its run registry in memory,
+                        // so that class reads as a definitive zero
+                        // (`live_factory_runs`), not an unknown liveness —
+                        // the off proceeds for a session with no kernel.
+                        // A client whose hello never advertised the lane
+                        // keeps the fail-open read: an older daemon has no
+                        // executor to protect, and a client started before
+                        // `/factory on` already sees the frozen hello the
+                        // settled surfaces rule describes.
+                        let lane_advertised = self.factory_activity_supported();
+                        match self.live_factory_runs().await {
+                            Some(live) if live > 0 => {
+                                let runs = if live == 1 { "run is" } else { "runs are" };
+                                let them = if live == 1 { "it" } else { "them" };
+                                self.error_row(
+                                    &format!(
+                                        "Cannot disable the factory while {live} {runs} still live — stop {them} first (the factory page's stop action or rlm.factory.stop), then /factory off."
+                                    ),
+                                    view,
+                                );
+                                return Ok(());
+                            }
+                            None if lane_advertised => {
+                                self.error_row(
+                                    "Cannot disable the factory: the live-run count could not be read from the factory lane — try /factory off again once it answers.",
+                                    view,
+                                );
+                                return Ok(());
+                            }
+                            Some(_) | None => {}
+                        }
+                        let Some(settings) = &self.client_settings else {
+                            self.note("/factory is not available in this client yet", view);
+                            return Ok(());
+                        };
+                        if let Err(error) = settings.set_factory_enabled(false) {
+                            self.error_row(&format!("{error:#}"), view);
+                            return Ok(());
+                        }
+                        self.note(
+                            "The factory is disabled. The factory group and page disappear on the next client start.",
+                            view,
+                        );
+                    }
+                    "" | "status" => {
+                        let Some(settings) = &self.client_settings else {
+                            self.note("/factory is not available in this client yet", view);
+                            return Ok(());
+                        };
+                        if settings.factory_enabled() {
+                            self.note(
+                                "The factory is enabled. Run /factory off to disable it.",
+                                view,
+                            );
+                        } else {
+                            self.note(
+                                "The factory is disabled (off by default). Run /factory on to enable it (takes effect on the next client start).",
+                                view,
+                            );
+                        }
+                    }
+                    _ => self.error_row("Usage: /factory [on|off|status]", view),
+                }
+            }
             // `/telemetry [status|on|off]`: the report (on/off and why, the
             // endpoint, the installation id), or the persisted switch the
             // running telemetry clients re-read at their next send.

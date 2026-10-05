@@ -2,13 +2,12 @@
 //! and the parsed-command execution surface.
 use super::{
     broadcast, command_type_name, current_protocol_info, daemon_closing_shutdown_event,
-    default_server_capabilities, input_admission_id, json, parse_supervisor_command_line,
-    response_failure, response_line, response_success, salvage_command_type, salvage_id,
-    subscribers, update_gate_refuses, util, Arc, AsyncBufReadExt, AsyncWriteExt, BufReader,
-    ClientRouting, DaemonCommand, DaemonOutbound, DaemonRuntimeIdentity, EnvelopeParseError, Map,
-    Ordering, Outbound, Result, RouteAdmission, Supervisor, TransportStream, TypedCreateRejection,
-    Value, DAEMON_APP_VERSION, DAEMON_SCHEMA_ID, DAEMON_SCHEMA_REVISION, ROUTE_TIMEOUT_MS,
-    UPDATE_PREPARING_MESSAGE,
+    input_admission_id, json, parse_supervisor_command_line, response_failure, response_line,
+    response_success, salvage_command_type, salvage_id, subscribers, update_gate_refuses, util,
+    Arc, AsyncBufReadExt, AsyncWriteExt, BufReader, ClientRouting, DaemonCommand, DaemonOutbound,
+    DaemonRuntimeIdentity, EnvelopeParseError, Map, Ordering, Outbound, Result, RouteAdmission,
+    Supervisor, TransportStream, TypedCreateRejection, Value, DAEMON_APP_VERSION, DAEMON_SCHEMA_ID,
+    DAEMON_SCHEMA_REVISION, ROUTE_TIMEOUT_MS, UPDATE_PREPARING_MESSAGE,
 };
 
 async fn write_line<W: AsyncWriteExt + Unpin>(writer: &mut W, value: &Value) -> Result<usize> {
@@ -78,6 +77,17 @@ impl Supervisor {
     ) -> Result<()> {
         let (reader, mut writer) = stream.split();
         let client_id = util::new_display_id();
+        // The factory lane's advertisement gate reads the settings file
+        // (metadata plus a locked read on a cache miss) — off the
+        // executor thread, the same spawn_blocking posture as the daemon's
+        // other settings reads. The read stays fresh per connection, so a
+        // `/factory on` toggle surfaces on the next client start.
+        let agent_dir = self.options.agent_dir.clone();
+        let factory_capabilities = tokio::task::spawn_blocking(move || {
+            crate::factory_activity::advertised_server_capabilities(&agent_dir)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("the factory settings read failed: {error:#}"))?;
         let hello = DaemonOutbound::DaemonHello {
             socket_path: self.options.socket_path.to_string_lossy().to_string(),
             protocol: current_protocol_info(),
@@ -99,7 +109,7 @@ impl Supervisor {
             supervisor_socket_path: Some(self.options.socket_path.to_string_lossy().to_string()),
             update_resume: Some(self.restore.hello_resume()),
             client_id: client_id.clone(),
-            server_capabilities: default_server_capabilities(),
+            server_capabilities: factory_capabilities,
             rest: Map::default(),
         };
         write_line(&mut writer, &serde_json::to_value(&hello)?).await?;
@@ -154,6 +164,7 @@ impl Supervisor {
         loop {
             line.clear();
             tokio::select! {
+                biased;
                 read = reader.read_line(&mut line), if dispatch_slots.available_permits() > 0 => {
                     let Ok(read) = read else { break };
                     if read == 0 {
@@ -218,6 +229,37 @@ impl Supervisor {
                         drop(dispatch_slot);
                     });
                 }
+                targeted = targeted_rx.recv() => {
+                    // A session event routed by the subscriber registry at
+                    // publish time: the delivery decision already ran, the
+                    // frame only writes (the queue preserves per-session
+                    // publish order). The arm polls ahead of the response
+                    // arm, so an event published before a response bundle
+                    // is queued is written first - the worker's own
+                    // event-before-response socket order survives the hop.
+                    if let Some(payload) = targeted {
+                        if let Err(error) = write_line(&mut writer, &payload).await {
+                            // An event-write failure must not strand an
+                            // accepted shutdown: if this connection owns
+                            // the stop, it still starts the pass.
+                            let is_shutdown_owner = self
+                                .shutdown_owner
+                                .lock()
+                                .unwrap()
+                                .as_deref()
+                                == Some(connection_id.as_str());
+                            if is_shutdown_owner
+                                && self.shutting_down.load(Ordering::SeqCst)
+                                && !self.accept_exit.load(Ordering::SeqCst)
+                            {
+                                self.ensure_shutdown_started().await;
+                            }
+                            return Err(error);
+                        }
+                    } else {
+                        break;
+                    }
+                }
                 dispatched = dispatch_rx.recv() => {
                     let Some((lines, stop)) = dispatched else { break };
                     for outbound in lines {
@@ -256,34 +298,6 @@ impl Supervisor {
                         // begin_shutdown sets accept_exit, so worker stops
                         // cannot be cut short by another inbound connection.
                         self.ensure_shutdown_started().await;
-                        break;
-                    }
-                }
-                targeted = targeted_rx.recv() => {
-                    // A session event routed by the subscriber registry at
-                    // publish time: the delivery decision already ran, the
-                    // frame only writes (the queue preserves per-session
-                    // publish order).
-                    if let Some(payload) = targeted {
-                        if let Err(error) = write_line(&mut writer, &payload).await {
-                            // An event-write failure must not strand an
-                            // accepted shutdown: if this connection owns
-                            // the stop, it still starts the pass.
-                            let is_shutdown_owner = self
-                                .shutdown_owner
-                                .lock()
-                                .unwrap()
-                                .as_deref()
-                                == Some(connection_id.as_str());
-                            if is_shutdown_owner
-                                && self.shutting_down.load(Ordering::SeqCst)
-                                && !self.accept_exit.load(Ordering::SeqCst)
-                            {
-                                self.ensure_shutdown_started().await;
-                            }
-                            return Err(error);
-                        }
-                    } else {
                         break;
                     }
                 }

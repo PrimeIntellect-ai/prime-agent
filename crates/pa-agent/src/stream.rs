@@ -154,10 +154,10 @@ pub type OnResponseHook = std::sync::Arc<dyn Fn(ProviderResponse, &Model) + Send
 /// Stream request options (subset of the TS `SimpleStreamOptions` the loop
 /// uses, plus the request hooks the TS options carry). Every option is
 /// either serialized into the proxy request (`temperature`, `max_tokens`,
-/// `reasoning`, `session_id`, `service_tier` — see [`crate::proxy`]) or
-/// client-local (`api_key`, `signal`); TS `PROXY_SERIALIZED_OPTIONS` marks
-/// the same classification so a new shared option cannot be silently
-/// dropped by the proxy transport.
+/// `reasoning`, `session_id`, `service_tier`, `headers` — see
+/// [`crate::proxy`]) or client-local (`api_key`, `signal`); TS
+/// `PROXY_SERIALIZED_OPTIONS` marks the same classification so a new
+/// shared option cannot be silently dropped by the proxy transport.
 #[derive(Clone)]
 pub struct StreamRequestOptions {
     pub temperature: Option<f64>,
@@ -177,6 +177,9 @@ pub struct StreamRequestOptions {
     /// Response-headers hook (TS `SimpleStreamOptions.onResponse`). Invoked
     /// once per request after the response headers arrive.
     pub on_response: Option<OnResponseHook>,
+    /// Extra request headers (TS `SimpleStreamOptions.headers`), merged
+    /// over the provider's auth-resolved headers at the adapter seam.
+    pub headers: Option<std::collections::BTreeMap<String, String>>,
 }
 
 impl std::fmt::Debug for StreamRequestOptions {
@@ -191,6 +194,7 @@ impl std::fmt::Debug for StreamRequestOptions {
             .field("signal", &self.signal)
             .field("on_payload", &self.on_payload.is_some())
             .field("on_response", &self.on_response.is_some())
+            .field("headers", &self.headers)
             .finish()
     }
 }
@@ -207,6 +211,7 @@ impl Default for StreamRequestOptions {
             signal: crate::abort::AbortSignal::never(),
             on_payload: None,
             on_response: None,
+            headers: None,
         }
     }
 }

@@ -179,7 +179,7 @@ pub struct PrimeAgentAutonomousMeta {
 
 /// The `_meta.autonomous` accounting for a completion update: per-run usage
 /// plus the latest gate attempt and failure (TS `autonomousMeta` in
-/// acp-mode.ts). Shared by the in-process and daemon-attached settlements.
+/// acp-mode.ts). The daemon-attached settlement's accounting.
 pub fn autonomous_meta(
     status: &pa_core::autonomous::AgentAutonomousStatus,
 ) -> PrimeAgentAutonomousMeta {

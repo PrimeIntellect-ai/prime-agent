@@ -246,7 +246,7 @@ impl Supervisor {
             // child selector falls back to its live edges (child id,
             // session id, or name) and wakes the child's own file.
             Ok(None) => {
-                return match self.wake_ledger_child(selector, &sessions_dir).await {
+                return match self.wake_ledger_child(selector).await {
                     Some(outcome) => outcome,
                     None => WakeOutcome::Unknown,
                 }
@@ -331,18 +331,13 @@ impl Supervisor {
     /// a selector the saved-session catalog missed against the spawn
     /// ledger's live child edges (the child id, the child's session-id
     /// file stem, or the child's name), then wake one worker over the
-    /// child's session file. `None` keeps the caller's unknown-session
-    /// error; `Some(Failed)` carries the wake's own error (an ambiguous
-    /// selector outranks the miss, like the catalog's).
-    async fn wake_ledger_child(
-        self: &Arc<Self>,
-        selector: &str,
-        sessions_dir: &std::path::Path,
-    ) -> Option<WakeOutcome> {
-        let ledger = match self
-            .rlm_spawn_ledger_for(Some(&sessions_dir.to_string_lossy()))
-            .await
-        {
+    /// child's session file - the daemon-default ledger the spawn
+    /// admission appends to (TS `rlmSpawnLedger()`). `None` keeps the
+    /// caller's unknown-session error; `Some(Failed)` carries the wake's
+    /// own error (an ambiguous selector outranks the miss, like the
+    /// catalog's).
+    async fn wake_ledger_child(self: &Arc<Self>, selector: &str) -> Option<WakeOutcome> {
+        let ledger = match self.rlm_spawn_ledger_for(None).await {
             Ok(ledger) => ledger,
             Err(error) => return Some(WakeOutcome::Failed(error.to_string())),
         };
@@ -409,7 +404,7 @@ impl Supervisor {
             // fence sees a root and never re-passivates.
             config: Some(json!({ "cwd": cwd, "rlmDepth": depth })),
             telemetry_disabled: None,
-            runtime_metadata: Some(json!({ "rlmChildId": child_id })),
+            runtime_metadata: Some(json!({ "kind": "subagent", "rlmChildId": child_id })),
             lifecycle: None,
             env: None,
             launch_env: None,

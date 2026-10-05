@@ -27,8 +27,8 @@ pub use wire::{
     BashCompletionSink, BashConsumedNotice, BashConsumedSink, BranchSummaryOutcome,
     BranchSummaryRequest, BranchSummaryRun, CompactionOutcome, CompactionRequest, CompactionRun,
     EngineEvent, EngineModelSelection, GoalAdmissionSink, GoalContinuation, GoalTurnEndWork,
-    PromptBatchRow, PromptRequest, RlmSessionIdentity, SavedSessionContext, SessionInputProbe,
-    SideQuestionOutcome, SideQuestionRequest, SIDE_QUESTION_STATUS_CANCELLED,
+    PromptBatchRow, PromptRequest, RlmSessionIdentity, SavedSessionContext, SemanticSpawnOrigin,
+    SessionInputProbe, SideQuestionOutcome, SideQuestionRequest, SIDE_QUESTION_STATUS_CANCELLED,
     SIDE_QUESTION_STATUS_COMPLETE, SIDE_QUESTION_STATUS_ERROR, SIDE_QUESTION_STATUS_RUNNING,
 };
 
@@ -86,12 +86,13 @@ pub trait SessionEngine: Send + Sync {
     /// `idleEvictionMinutes` consumer re-checks them before asking the
     /// supervisor for the graceful stop): the engine's settled gates
     /// plus an empty RLM child registry. The registry rule holds
-    /// because the port does not rebuild a revived session's subagent
-    /// registry from the spawn ledger (TS `listPassiveRlmSubagents`
-    /// does), so the stop would discard state the revival cannot
-    /// restore. The default `false` keeps scripted harness engines and
-    /// kernel-less embeddings resident — the same conservative arm as
-    /// the release default.
+    /// because a revival rebuilds the registry from the spawn ledger as
+    /// settled rows only — live run state (answer previews, collect
+    /// envelopes, in-flight watchers) does not come back, so the stop
+    /// would still discard state the revival cannot restore. The
+    /// default `false` keeps scripted harness engines and kernel-less
+    /// embeddings resident — the same conservative arm as the release
+    /// default.
     fn can_passivate_worker(
         &self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>> {

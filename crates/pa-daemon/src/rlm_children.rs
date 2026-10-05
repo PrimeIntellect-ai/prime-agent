@@ -205,8 +205,10 @@ struct ChildRecord {
     session_file: Option<String>,
     /// Rows of [`ChildRecord::session_file`] already folded into the
     /// parent's attribution rows. The walk resumes here, so repeated
-    /// observation never double-bills a child.
-    attributed_rows: usize,
+    /// observation never double-bills a child. `None` on a reseeded row:
+    /// nothing has been observed since the reseed, and the first delivery
+    /// primes the cursor at the file's tail.
+    attributed_rows: Option<usize>,
     /// A follow-up usage watcher is live for this retained child
     /// (delayed agent messaging after the task run settled).
     usage_watch_live: bool,
@@ -377,6 +379,13 @@ struct SupervisorChildSessionsInner {
     /// `/context` children immediately, not ride out the next background
     /// refresh.
     delete_notifier: std::sync::Mutex<Option<DeleteNotifier>>,
+    /// The parent session's semantic-edge recorder (wired once the session
+    /// engine is built; the settle watcher records a returned child's last
+    /// committed request into it). `None` until the build or for sessions
+    /// without a semantic identity.
+    semantic_edges: std::sync::Mutex<
+        Option<std::sync::Arc<pa_core::session_engine::semantic_edges::SemanticEdgeRecorder>>,
+    >,
 }
 
 impl Clone for SupervisorChildSessions {
@@ -411,6 +420,7 @@ impl SupervisorChildSessions {
                 model_refusal_telemetry,
                 usage_sink: std::sync::Mutex::new(None),
                 delete_notifier: std::sync::Mutex::new(None),
+                semantic_edges: std::sync::Mutex::new(None),
             }),
         }
     }
@@ -463,6 +473,26 @@ impl SupervisorChildSessions {
     /// while holding the lock).
     pub fn set_usage_sink(&self, sink: Arc<dyn RlmChildUsageSink>) {
         *self.inner.usage_sink.lock().expect("usage sink lock") = Some(sink);
+    }
+
+    /// Wire the parent session's semantic-edge recorder (the per-build
+    /// handoff beside the usage sink): the settle watcher records a
+    /// returned child's last committed request into it.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the semantic-edges mutex is poisoned.
+    pub fn set_semantic_edges(
+        &self,
+        recorder: Option<
+            std::sync::Arc<pa_core::session_engine::semantic_edges::SemanticEdgeRecorder>,
+        >,
+    ) {
+        *self
+            .inner
+            .semantic_edges
+            .lock()
+            .expect("semantic edges lock") = recorder;
     }
 
     /// Whether a spawn-name reservation currently holds `name` (the TS
@@ -535,6 +565,12 @@ impl SupervisorChildSessions {
     /// while holding the lock).
     pub fn set_identity(&self, identity: ParentIdentity) {
         *self.inner.identity.lock().expect("identity lock") = identity;
+    }
+
+    /// Rebuild the children registry from the spawn ledger (a restarted
+    /// parent lists its ledger children again).
+    pub async fn reseed_from_ledger(&self) {
+        self.inner.reseed_from_ledger().await;
     }
 
     /// The inherited RLM depth bound (TS `getRlmMaxDepthStatus().maxDepth`
@@ -701,7 +737,7 @@ impl SupervisorChildSessions {
                 error: None,
                 closed_by_parent: false,
                 session_file: None,
-                attributed_rows: 0,
+                attributed_rows: Some(0),
                 usage_watch_live: false,
                 usage_rearm: false,
                 emit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),

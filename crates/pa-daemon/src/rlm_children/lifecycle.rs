@@ -68,6 +68,10 @@ impl SupervisorChildSessionsInner {
         thinking: Option<&str>,
         cwd: &str,
         session_dir: &Path,
+        // The parent's in-flight turn request the child anchors to (TS
+        // `spawnedByRequestId` rides the child's session options, never
+        // the runtime metadata).
+        spawned_by_request_id: Option<&str>,
         runtime_metadata: Option<Value>,
         identity: &ParentIdentity,
     ) -> Result<CreatedChild> {
@@ -88,6 +92,9 @@ impl SupervisorChildSessionsInner {
         }
         if let Some(parent_file) = &identity.session_file {
             config["parentSessionPath"] = json!(parent_file);
+        }
+        if let Some(request_id) = spawned_by_request_id {
+            config["spawnedByRequestId"] = json!(request_id);
         }
         if let Some(script) = &identity.child_script {
             config["script"] = json!(script);
@@ -168,6 +175,7 @@ impl SupervisorChildSessionsInner {
                 thinking,
                 cwd,
                 session_dir,
+                /*spawned_by_request_id*/ None,
                 runtime_metadata,
                 identity,
             )
@@ -436,6 +444,37 @@ impl SupervisorChildSessionsInner {
                 // notice rides the parent's follow-up route (TS: the run
                 // task's `finally` flushes pending usage at settlement).
                 self.emit_child_usage(record).await;
+                // TS records the return before delivering the notice: the
+                // pending edge must be on the parent's ledger before the
+                // notice's follow-up turn mints its own request.
+                self.record_child_return(record).await;
+                // Only a successful run completes the display (TS
+                // `completeRlmSubagentRuntime`); a cancelled or failed run
+                // stays `running`, which a restart relists as `error`.
+                let completed = {
+                    let record = record.lock().await;
+                    (record.settled_status == Some("done"))
+                        .then(|| (record.session_dir.clone(), record.rlm_child_id.clone()))
+                };
+                if let Some((session_dir, child_id)) = completed {
+                    if let Err(error) = tokio::task::spawn_blocking(move || {
+                        let Some(mut display) =
+                            crate::rlm_ledger::read_rlm_subagent_display(Path::new(&session_dir))
+                        else {
+                            return Ok(());
+                        };
+                        if display.child_id != child_id || display.status != "running" {
+                            return Ok(());
+                        }
+                        display.status = "completed".to_string();
+                        crate::rlm_ledger::write_rlm_subagent_display(&display).map(|_| ())
+                    })
+                    .await
+                    .unwrap_or_else(|error| Err(anyhow!(error)))
+                    {
+                        eprintln!("pa-daemon: RLM child display completion failed: {error:#}");
+                    }
+                }
                 self.deliver_settle_notice(record).await;
                 // A settled child releases an owed goal continuation (TS
                 // `_maybeResumeGoalContinuationAfterRlmWork` at the child
@@ -479,6 +518,51 @@ impl SupervisorChildSessionsInner {
             }
             tokio::time::sleep(Duration::from_millis(WATCH_POLL_INTERVAL_MS)).await;
         }
+    }
+
+    /// Record a settled child's return in the parent's semantic-edge ledger
+    /// (TS `recordChildReturned` at the run-settle sites): the child's last
+    /// committed request, read from the child's own ledger file (the
+    /// cross-process form of TS's in-process
+    /// `child.semanticEdges.lastCommittedRequestId`). Only a `done` or
+    /// `error` settle returns — TS never records a cancelled run (its done
+    /// arm throws on `run.error` and the record gates on `status ===
+    /// "error"`). A child without a durable session id, or a parent
+    /// without a recorder, records nothing.
+    async fn record_child_return(&self, record: &Arc<Mutex<ChildRecord>>) {
+        let recorder = self
+            .semantic_edges
+            .lock()
+            .expect("semantic edges lock")
+            .clone();
+        let Some(recorder) = recorder else {
+            return;
+        };
+        let (child_session_id, child_dir) = {
+            let record = record.lock().await;
+            if !matches!(record.settled_status, Some("done" | "error")) {
+                return;
+            }
+            (record.session_id.clone(), record.session_dir.clone())
+        };
+        let Some(child_session_id) = child_session_id else {
+            return;
+        };
+        let ledger_path = pa_core::session_engine::semantic_edges::semantic_edge_ledger_path(
+            Some(Path::new(&child_dir)),
+            None,
+        );
+        // The file read stays off the async workers (the usage walk's
+        // discipline).
+        let last_committed = tokio::task::spawn_blocking(move || {
+            ledger_path
+                .as_deref()
+                .and_then(pa_core::session_engine::semantic_edges::last_committed_request_id)
+        })
+        .await
+        .ok()
+        .flatten();
+        recorder.record_child_returned(&child_session_id, last_committed);
     }
 
     /// Deliver the no-reply terminal notice for a settled child that never
@@ -549,6 +633,10 @@ impl SupervisorChildSessionsInner {
             record.error = Some(error);
             message
         };
+        // TS records a failed child's return too (`recordChildReturned` in
+        // the thrown-run arm): a child that committed requests before
+        // failing still returns them; a zero-commit child records nothing.
+        self.record_child_return(record).await;
         self.deliver_terminal_notice(message).await;
         self.fire_settle_hook(record).await;
         true

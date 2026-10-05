@@ -476,6 +476,7 @@ fn socket_spelling_of(pid: u32, value: &str) -> String {
 /// tool server) never qualifies, whatever it inherited.
 /// Unix only: the same linux/unix callers as [`is_worker_argv`].
 #[cfg(unix)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn is_product_binary(exe: &str) -> bool {
     matches!(
         Path::new(exe).file_name().and_then(|name| name.to_str()),
@@ -491,6 +492,7 @@ pub(crate) fn is_product_binary(exe: &str) -> bool {
 /// same-socket command that happens to carry a `worker` argument.
 /// Unix only: the linux census and the unix tests are its users.
 #[cfg(unix)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn is_worker_argv(argv: &[String]) -> bool {
     argv.first().is_some_and(|exe| is_product_binary(exe))
         && argv.get(1).map(String::as_str) == Some("worker")
@@ -537,7 +539,12 @@ fn proc_environ_names_active_session(pid: u32, active_session: &str) -> bool {
     })
 }
 
+/// The non-linux unix stub: the only caller is the linux worker census,
+/// so it stays compiled for the signature's parity and is inert
+/// everywhere else (`allow(dead_code)` is the honest parity mark — the
+/// linux side owns the real read).
 #[cfg(all(unix, not(target_os = "linux")))]
+#[allow(dead_code)]
 fn proc_environ_names_active_session(_pid: u32, _active_session: &str) -> bool {
     false
 }
@@ -620,6 +627,7 @@ fn resolve_relative_socket_tokens(pid: u32, argv: &mut [String]) {
 /// compares against is the unix socket spelling, and every caller (the
 /// linux supervisor census, the unix tests) sits behind a unix gate.
 #[cfg(unix)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn supervisor_argv_names_socket(argv: &[String], socket: &str) -> bool {
     let Some(exe) = argv.first() else {
         return false;
@@ -761,6 +769,7 @@ fn protected_worker_pids(agent_dir: &Path, socket_path: &Path) -> HashSet<u32> {
 /// darwin included, which `supervisor_argv_names_socket` (the argv-only
 /// view the supervisor census normalizes with) requires.
 #[cfg(unix)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn normalize_socket_spelling(path: &Path) -> String {
     if let Ok(canonical) = path.canonicalize() {
         return canonical.to_string_lossy().to_string();
@@ -848,9 +857,12 @@ mod tests {
 
     /// Kills and reaps the child on any exit path (a failed assertion in
     /// between would otherwise leak the `sleep` into the test machine: the
-    /// std child kills nothing on drop).
+    /// std child kills nothing on drop). Linux only: the guard exists for
+    /// the /proc census tests, which never compile elsewhere.
+    #[cfg(target_os = "linux")]
     struct ReapOnDrop(Option<std::process::Child>);
 
+    #[cfg(target_os = "linux")]
     impl Drop for ReapOnDrop {
         fn drop(&mut self) {
             if let Some(mut child) = self.0.take() {

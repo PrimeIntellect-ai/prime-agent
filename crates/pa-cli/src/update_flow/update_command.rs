@@ -211,7 +211,10 @@ pub async fn run_update_command(options: &UpdateCommandOptions) -> Result<i32> {
         .env_remove(pa_daemon::worker::WORKER_SOCKET_ENV)
         .env_remove(pa_daemon::worker::WORKER_INSTANCE_ID_ENV)
         .env_remove(pa_daemon::worker::WORKER_SCRIPT_ENV);
-    // Detached: own process group, reaped by init, survives this CLI.
+    // The coordinator must survive the CLI and its terminal closing.
+    #[cfg(unix)]
+    pa_core::platform::process::set_new_session(&mut command);
+    #[cfg(not(unix))]
     pa_core::platform::process::set_new_process_group(&mut command);
     let child = command.spawn().with_context(|| {
         format!(

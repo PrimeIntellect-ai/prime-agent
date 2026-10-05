@@ -1,13 +1,13 @@
 //! Worker supervision: the watch loop, the restart backoff, and
 //! the spawn/connect plumbing.
-use super::routing::fail_unsent_request;
+use super::routing::{fail_unsent_request, WORKER_REQUEST_TIMEOUT_MS};
 use super::{
     anyhow, connect_transport, create_command_payload, json, mpsc, persist_worker,
     persist_worker_at, probe_worker_socket, util, write_frame, Arc, Child, ClientRouting, Command,
     Context, DaemonWorkerLifecycle, Duration, Ordering, PathBuf, PrivateFrameReader,
     ResidentWorker, Result, RouteAdmission, Supervisor, TempSync, TypedCreateRejection, Value,
-    WorkerReply, WorkerRequest, DEFAULT_PRIVATE_FRAME_LIMITS, LONG_ROUTE_TIMEOUT_MS,
-    ROUTE_TIMEOUT_MS, WORKER_AUTH_FLOOR_MS,
+    WorkerReply, WorkerRequest, DEFAULT_PRIVATE_FRAME_LIMITS, ROUTE_TIMEOUT_MS,
+    WORKER_AUTH_FLOOR_MS,
 };
 use crate::lease::is_process_alive;
 use crate::registry::WorkerRelay;
@@ -303,7 +303,7 @@ impl Supervisor {
                 resident,
                 "create",
                 payload,
-                LONG_ROUTE_TIMEOUT_MS,
+                WORKER_REQUEST_TIMEOUT_MS,
                 RouteAdmission::SupervisorInternal,
             )
             .await
@@ -784,6 +784,17 @@ impl Supervisor {
                             events.send((ClientRouting::Broadcast, std::sync::Arc::new(payload)));
                     }
                 }
+                // The connection is gone: no reply can arrive on it any
+                // more (TS `notifyClosed` -> `rejectAll`); each waiting
+                // route fails with the dropped-request error. A stale
+                // reader drops nothing - the newer connection's handshake
+                // inserts only after its epoch bump.
+                {
+                    let mut pending = reader_resident.pending.lock().await;
+                    if reader_resident.connection_is_current(connection_epoch) {
+                        pending.clear();
+                    }
+                }
                 reader_resident.note_connection_lost(connection_epoch);
                 // The connection ended (EOF or frame error): a run without
                 // an abort request dies with the worker and rides the
@@ -850,25 +861,22 @@ impl Supervisor {
             )
             .await
             .map_err(|error| {
-                // The handshake route's timeout is the connect budget
-                // running out, not a session command timing out: report the
-                // launch-budget failure so a loaded-box launch failure says
-                // what actually happened (never the generic route timeout
-                // text, which pointed triage at the wrong seam).
-                if error.to_string() == "Session worker timed out" {
-                    // The worker answered nothing inside the launch budget:
-                    // its captured stderr tail rides the failure (the same
-                    // evidence the probe arm carries).
-                    crate::worker_stderr::not_ready_with_tail(
-                        anyhow!("session worker {} did not come up in time", resident.worker_id),
-                        &crate::worker_stderr::log_path(
-                            &self.options.agent_dir,
-                            &resident.worker_id,
-                        ),
-                    )
-                } else {
-                    error
-                }
+                // A handshake that never finishes is a launch failure, not a
+                // route timeout: report it with the worker's stderr tail.
+                let message = match error.to_string().as_str() {
+                    "Session worker timed out" => {
+                        format!("session worker {} did not come up in time", resident.worker_id)
+                    }
+                    "Session worker dropped the request" => format!(
+                        "session worker {} exited before its handshake finished",
+                        resident.worker_id
+                    ),
+                    _ => return error,
+                };
+                crate::worker_stderr::not_ready_with_tail(
+                    anyhow!(message),
+                    &crate::worker_stderr::log_path(&self.options.agent_dir, &resident.worker_id),
+                )
             })?;
         if !response.success {
             return Err(anyhow!(

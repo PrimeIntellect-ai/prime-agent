@@ -300,6 +300,20 @@ pub struct ImageBlock {
     pub mime_type: String,
 }
 
+/// The prompt content admitted into a turn.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AdmittedPrompt {
+    pub text: String,
+    pub images: Vec<ImageBlock>,
+}
+
+impl AdmittedPrompt {
+    pub fn parse(prompt: &[Value]) -> Result<AdmittedPrompt, PromptBlockError> {
+        let (text, images) = parse_prompt_blocks(prompt)?;
+        Ok(AdmittedPrompt { text, images })
+    }
+}
+
 /// The `session/new` request params.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewSessionParams {
@@ -373,15 +387,6 @@ impl SetConfigOptionParams {
             value: params.get("value").cloned().unwrap_or(Value::Null),
         }
     }
-}
-
-/// A bare `{ "sessionId": ... }` params reader shared by close and cancel.
-pub fn session_id_params(params: &Value) -> String {
-    params
-        .get("sessionId")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string()
 }
 
 /// The initialize result with the served capability set.

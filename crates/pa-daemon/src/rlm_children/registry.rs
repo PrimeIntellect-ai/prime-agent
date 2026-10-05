@@ -1,11 +1,14 @@
 //! The registry-mutation concern: run cancellation, inactive-child
-//! deletes with their tombstone receipts, the close walk, and the
-//! target lookup/resolution; the close-failure no-op marker is
-//! registry-only.
+//! deletes with their tombstone receipts, the close walk, the target
+//! lookup/resolution, and the ledger reseed; the close-failure no-op
+//! marker is registry-only.
+use std::path::{Path, PathBuf};
+
 use super::{
-    bail, json, Arc, ChildCloseReason, ChildRecord, Context, DaemonCommand, DeletedChild, Map,
-    Mutex, Result, SupervisorChildSessionsInner, KILL_TIMEOUT_MS,
+    bail, json, rlm_child_label, Arc, ChildCloseReason, ChildRecord, Context, DaemonCommand,
+    DeletedChild, Map, Mutex, Result, SupervisorChildSessionsInner, KILL_TIMEOUT_MS,
 };
+use crate::lease::canonical_session_path;
 
 /// The already-gone marker inside a close failure (the supervisor's
 /// `Unknown active session` route failure): TS `closeSessionOnce` treats a
@@ -274,4 +277,138 @@ impl SupervisorChildSessionsInner {
             ),
         }
     }
+
+    /// Rebuild the children registry from the spawn ledger (TS
+    /// `listPassiveRlmSubagents`): a restarted parent worker lists its
+    /// non-deleted ledger children again, addressed by their durable
+    /// session ids. Every reseeded row is settled (nothing is owed), and
+    /// its usage cursor starts lazy: the first delivery primes it at the
+    /// file's tail.
+    pub(super) async fn reseed_from_ledger(&self) {
+        let Some(parent_file) = self
+            .identity
+            .lock()
+            .expect("identity lock")
+            .session_file
+            .clone()
+        else {
+            return;
+        };
+        let agent_dir = self.agent_dir.clone();
+        let supervisor_socket = self.link.socket_path().clone();
+        let parent_file_read = parent_file.clone();
+        let records = tokio::task::spawn_blocking(move || {
+            ledger_child_records(&agent_dir, &supervisor_socket, Path::new(&parent_file_read))
+        })
+        .await
+        .unwrap_or_default();
+        let mut children = self.children.lock().await;
+        // A swap rebound the identity mid-read: its own reseed lists the new session's children.
+        if self
+            .identity
+            .lock()
+            .expect("identity lock")
+            .session_file
+            .as_deref()
+            != Some(parent_file.as_str())
+        {
+            return;
+        }
+        children.extend(
+            records
+                .into_iter()
+                .map(|record| Arc::new(Mutex::new(record))),
+        );
+    }
+}
+
+/// One parent file's non-deleted ledger edges as settled registry rows
+/// (TS `listPassiveRlmSubagents`), read from the ledger the supervisor
+/// writes (its persisted default sessions dir): the child file's stem
+/// addresses each row both ways - resolve for a resident child, wake
+/// for a passive one; an unreadable ledger reads as empty.
+fn ledger_child_records(
+    agent_dir: &Path,
+    supervisor_socket: &Path,
+    parent_file: &Path,
+) -> Vec<ChildRecord> {
+    let Some(sessions_dir) = crate::descriptor::load_supervisor_config(
+        &crate::descriptor::descriptor_dir(agent_dir, supervisor_socket)
+            .join(crate::descriptor::SUPERVISOR_CONFIG_FILE_NAME),
+        supervisor_socket,
+    )
+    .and_then(|config| config.default_session_dir) else {
+        return Vec::new();
+    };
+    let ledger =
+        crate::rlm_ledger::RlmSpawnLedger::new(agent_dir, Path::new(&sessions_dir), |_| {});
+    let edges = ledger.live_edges().unwrap_or_else(|error| {
+        eprintln!("pa-daemon: RLM ledger reseed skipped: {error:#}");
+        Vec::new()
+    });
+    let parent_file = canonical_session_path(parent_file);
+    let mut records = Vec::new();
+    for edge in edges {
+        if canonical_session_path(Path::new(&edge.parent)) != parent_file {
+            continue;
+        }
+        let child = PathBuf::from(&edge.child);
+        let session_id = child
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned());
+        let display = child
+            .parent()
+            .and_then(crate::rlm_ledger::read_rlm_subagent_display)
+            .filter(|display| display.child_id == edge.child_id);
+        records.push(ChildRecord {
+            rlm_child_id: edge.child_id,
+            session_name: edge.name,
+            active_session_id: session_id.clone().unwrap_or_default(),
+            session_id,
+            session_dir: child
+                .parent()
+                .map(|dir| dir.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            label: rlm_child_label(
+                display
+                    .as_ref()
+                    .and_then(|display| display.prompt.as_deref())
+                    .unwrap_or_default(),
+            ),
+            started_at_ms: display.as_ref().map_or_else(
+                || {
+                    std::fs::metadata(&child)
+                        .ok()
+                        .and_then(|metadata| metadata.created().ok())
+                        .and_then(|created| created.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map_or(0, |duration| duration.as_millis() as u64)
+                },
+                |display| display.created_at,
+            ),
+            settled_status: Some(
+                if display
+                    .as_ref()
+                    .is_some_and(|display| display.status == "running")
+                {
+                    "error"
+                } else {
+                    "done"
+                },
+            ),
+            settled: true,
+            answer_preview: None,
+            answer_captured: false,
+            replied_since_task: false,
+            notice_delivered: true,
+            prompt_admitted: true,
+            error: None,
+            closed_by_parent: false,
+            session_file: Some(edge.child),
+            attributed_rows: None,
+            usage_watch_live: false,
+            usage_rearm: false,
+            emit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        });
+    }
+    records
 }
