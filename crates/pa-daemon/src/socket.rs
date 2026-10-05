@@ -357,10 +357,18 @@ mod tests {
         let listener_fd = listener.as_raw_fd();
         let accepted_fd = accepted.as_raw_fd();
         assert!(fd_exists(listener_fd));
+        // The leak check compares the fd's /proc TARGET (the socket's
+        // anon inode), never the bare fd number: parallel tests recycle
+        // fd numbers the moment a close lands, so a bare-number probe
+        // misreads another test's fresh fd as a leak. The exact socket
+        // object is what a leak would still reference.
+        let listener_target = std::fs::read_link(format!("/proc/self/fd/{listener_fd}"))
+            .expect("the bound listener's fd target before the drop");
         drop(listener);
+        let leaked_at_fd = std::fs::read_link(format!("/proc/self/fd/{listener_fd}"));
         assert!(
-            !fd_exists(listener_fd),
-            "the listener's fd closed at the drop: no fd leaked on the bound socket"
+            !matches!(&leaked_at_fd, Ok(target) if *target == listener_target),
+            "the listener's socket object is no longer referenced at the dropped fd: no fd leaked on the bound socket"
         );
         assert!(
             fd_exists(accepted_fd),
