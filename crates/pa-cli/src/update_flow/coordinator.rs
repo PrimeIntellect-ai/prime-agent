@@ -23,7 +23,10 @@ use pa_types::daemon::update_flow::{
 use tokio::sync::Mutex;
 
 use super::status::{StatusHeartbeat, StatusWriter};
-use super::successor::{identity_from_hello, spawn_supervisor, wait_for_exit, wait_for_hello};
+use super::successor::{
+    identity_from_hello, spawn_supervisor, validate_replacement_daemon, wait_for_exit,
+    wait_for_hello,
+};
 use super::swap;
 
 /// The staged release directory, passed by the invoking CLI through the
@@ -264,8 +267,13 @@ async fn drive(
     .map_err(PhaseFailure::after_stop)?;
     // Close the stop window right before the successor spawns (TS:
     // `assertOrRenew` + `release` immediately before the spawn): the fence
-    // has confirmed the predecessor is gone, so from here the successor
-    // races only the ordinary cold-boot arbitration.
+    // has confirmed the predecessor is gone, and the release must precede
+    // the spawn - the successor's own boot refuses while a shutdown
+    // admission is active ("Daemon shutdown is in progress"), so holding
+    // it through the spawn would refuse the very successor it guards. The
+    // residual release-to-hello race is adjudicated by the successor hello
+    // validation below (TS `validateReplacementDaemon`): a competing
+    // daemon that wins the socket fails the update.
     admission
         .assert_or_renew()
         .map_err(PhaseFailure::after_stop)?;
@@ -285,13 +293,26 @@ async fn drive(
         &spawn_cwd,
     )
     .map_err(PhaseFailure::after_stop)?;
-    let successor = wait_for_hello(&options.socket_path, budget.boot_ms)
+    let successor_hello = wait_for_hello(&options.socket_path, budget.boot_ms)
         .await
         .ok_or_else(|| {
             PhaseFailure::after_stop(
                 "the successor supervisor did not greet within its boot budget",
             )
         })?;
+    // The daemon that answered must be the activated candidate, not
+    // whatever else won the release-to-spawn race (TS
+    // `validateReplacementDaemon`): version, socket identity, identity
+    // fence, and not-the-predecessor - a surviving predecessor or a
+    // stale third-party daemon fails the update and the rollback takes
+    // over.
+    let successor = validate_replacement_daemon(
+        &options.socket_path,
+        &successor_hello,
+        &candidate.version,
+        predecessor.as_ref(),
+    )
+    .map_err(PhaseFailure::after_stop)?;
     writer
         .lock()
         .await
@@ -420,16 +441,41 @@ async fn finish_failure(
         )))?;
         return Ok(());
     }
-    if let Some(identity) = wait_for_hello(&options.socket_path, options.budget.boot_ms).await {
-        writer.lock().await.set_successor(identity)?;
-        writer.lock().await.set_state(UpdateState::Restoring)?;
-        let (counts, _failures) = restore_report(&options.socket_path, &options.budget).await;
-        writer.lock().await.set_counts(counts)?;
-        writer.lock().await.set_state(UpdateState::Complete)?;
-        writer.lock().await.set_message(Some(format!(
-            "Rolled back to the previous Prime Agent version ({reason})"
-        )))?;
-        Ok(())
+    // The rollback boot greets under the same successor contract as the
+    // main flow (TS `validateReplacementDaemon`, applied to the Rust
+    // rollback path too - the TS coordinator has no rollback spawn): the
+    // expected version is the rollback installation's, and the
+    // not-the-predecessor check reads the status record's predecessor
+    // (`drive` pinned it there from the verified predecessor hello before
+    // the stop).
+    let predecessor = writer.lock().await.current().predecessor.clone();
+    if let Some(hello) = wait_for_hello(&options.socket_path, options.budget.boot_ms).await {
+        match validate_replacement_daemon(
+            &options.socket_path,
+            &hello,
+            previous.version(),
+            predecessor.as_ref(),
+        ) {
+            Ok(identity) => {
+                writer.lock().await.set_successor(identity)?;
+                writer.lock().await.set_state(UpdateState::Restoring)?;
+                let (counts, _failures) =
+                    restore_report(&options.socket_path, &options.budget).await;
+                writer.lock().await.set_counts(counts)?;
+                writer.lock().await.set_state(UpdateState::Complete)?;
+                writer.lock().await.set_message(Some(format!(
+                    "Rolled back to the previous Prime Agent version ({reason})"
+                )))?;
+                Ok(())
+            }
+            Err(error) => {
+                writer.lock().await.set_state(UpdateState::Failed)?;
+                writer.lock().await.set_message(Some(format!(
+                    "The rollback supervisor failed validation ({error}); the update failed ({reason}). Sessions persist on disk - prime-agent attach recovers them."
+                )))?;
+                Ok(())
+            }
+        }
     } else {
         writer.lock().await.set_state(UpdateState::Failed)?;
         writer.lock().await.set_message(Some(format!(
