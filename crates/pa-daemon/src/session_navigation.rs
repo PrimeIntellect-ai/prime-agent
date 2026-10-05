@@ -112,13 +112,20 @@ impl SessionNavigation {
         // session's pin/mode, never the retired session's in-flight
         // traffic in the replacement's counters, and never the
         // replacement's early traffic erased by the reset.
-        let previous = self
-            .agent_digest
-            .reset_for_replacement(|core| core.store.replace(file));
         // And its watches die with the replaced session (TS #2356: the
         // registry is cleared on dispose; stale subscriptions must not
-        // bleed into the new session's notices).
-        self.engine.clear_agent_watches();
+        // bleed into the new session's notices). The lane reset runs
+        // INSIDE the watch retirement's hold — the same hold a poll
+        // pass's validation and delivery ride — so a replacement can
+        // never complete between a pass's validation and its delivery:
+        // the retired pass's notices cannot land in the replacement's
+        // inbox or steering queue.
+        let mut previous: Option<SessionFile> = None;
+        self.engine.clear_agent_watches(Box::new(|| {
+            previous = self
+                .agent_digest
+                .reset_for_replacement(|core| core.store.replace(file));
+        }));
         // The old store's lease release flushes the window and info
         // sidecars (megabytes for a large session): off the core lock
         // and the runtime.

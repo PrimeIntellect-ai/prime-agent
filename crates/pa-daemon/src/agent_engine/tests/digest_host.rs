@@ -250,8 +250,9 @@ fn an_in_flight_poll_pass_dies_with_the_replaced_session() {
     // generation) before the child snapshot queries run.
     let generation = engine.watch_host_state().generation;
     let subscriptions = engine.watch_host_state().registry.list();
-    // ...the session replacement clears the watches mid-poll...
-    engine.clear_agent_watches();
+    // ...the session replacement clears the watches mid-poll (the
+    // test's replacement carries no lane reset)...
+    engine.clear_agent_watches(Box::new(|| {}));
     // ...and the replacement session registers a fresh watch for the
     // SAME child.
     {
@@ -415,8 +416,9 @@ fn a_registration_from_the_retired_session_never_lands_in_the_replacement() {
     // The handler's capture, before its awaits.
     let generation = engine.watch_host_state().generation;
     // ...the child resolution and the child snapshot awaits run, and a
-    // session replacement clears the watches mid-flight...
-    engine.clear_agent_watches();
+    // session replacement clears the watches mid-flight (the test's
+    // replacement carries no lane reset)...
+    engine.clear_agent_watches(Box::new(|| {}));
     // ...so the post-await registration must refuse.
     let error = engine
         .register_agent_watch(generation, "watch-agent-c1", "active-1", "c1", idle.clone())
@@ -436,4 +438,155 @@ fn a_registration_from_the_retired_session_never_lands_in_the_replacement() {
         .register_agent_watch(generation, "watch-agent-c2", "active-2", "c2", idle)
         .unwrap();
     assert_eq!(engine.watch_host_state().registry.list().len(), 1);
+}
+
+/// A poll pass's generation validation, its registry poll, and its
+/// delivery ride ONE watch-state hold: with the delivery outside the
+/// hold, a session replacement can complete its lane reset and its watch
+/// retirement between the pass's validation and its sink, and the retired
+/// pass injects its notices into the replacement's inbox or steering
+/// queue (the "watchers die with the session" rule). The probed sink
+/// pins the hold: the watch state must be UNAVAILABLE while the pass
+/// delivers (the pass's own thread holds it — std mutexes do not
+/// reenter, so the probe runs on another thread).
+#[test]
+fn a_watch_pass_delivers_under_the_same_hold_it_validated_under() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let engine = std::sync::Arc::new(bare_engine(dir.path()));
+    let initial = crate::agent_watch::AgentWatchSnapshot {
+        message_count: 5,
+        status: "idle".to_string(),
+    };
+    {
+        let mut state = engine.watch_host_state();
+        state
+            .registry
+            .register("watch-agent-c1", "active-1", "c1", initial)
+            .unwrap();
+    }
+    // A pass's inputs: the subscription snapshot (and its generation)
+    // plus the child snapshots the poller gathered.
+    let generation = engine.watch_host_state().generation;
+    let subscriptions = engine.watch_host_state().registry.list();
+    let mut snapshots = std::collections::HashMap::new();
+    snapshots.insert(
+        "active-1".to_string(),
+        crate::agent_watch::AgentWatchSnapshot {
+            message_count: 8,
+            status: "idle".to_string(),
+        },
+    );
+    // The prober thread rendezvous with the sink AT DELIVERY.
+    let (probe_tx, probe_rx) = std::sync::mpsc::channel::<()>();
+    let (verdict_tx, verdict_rx) = std::sync::mpsc::channel::<bool>();
+    let probing_engine = std::sync::Arc::clone(&engine);
+    let prober = std::thread::spawn(move || {
+        probe_rx.recv().expect("the probe signal");
+        let held = probing_engine.agent_watches.try_lock().is_err();
+        verdict_tx.send(held).expect("the verdict channel");
+    });
+    let delivered = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
+    let recorded = std::sync::Arc::clone(&delivered);
+    let probe_tx = std::sync::Mutex::new(probe_tx);
+    let verdict_rx = std::sync::Mutex::new(verdict_rx);
+    let sink: crate::agent_inbox_host::WatchNoticeSink = std::sync::Arc::new(
+        move |watch, content| {
+            probe_tx.lock().unwrap().send(()).expect("the probe signal");
+            let held = verdict_rx.lock().unwrap().recv().expect("the verdict");
+            assert!(
+                held,
+                "the pass delivered outside the watch hold: a replacement could retire the session mid-delivery"
+            );
+            recorded
+                .lock()
+                .unwrap()
+                .push((watch.to_string(), content.to_string()));
+        },
+    );
+    engine.deliver_watch_pass(generation, &subscriptions, &snapshots, &sink);
+    {
+        let delivered = delivered.lock().unwrap();
+        assert_eq!(delivered.len(), 1, "{delivered:?}");
+        assert_eq!(delivered[0].0, "agent");
+        assert_eq!(
+            delivered[0].1, "[watch-agent child:c1] messages 5..8 (+3)",
+            "the range event"
+        );
+    }
+    prober.join().expect("the prober");
+    // The delivery consumed the growth: the baseline advanced to 8.
+    let baseline = engine
+        .watch_host_state()
+        .registry
+        .list()
+        .into_iter()
+        .find(|watch| watch.id == "watch-agent-c1")
+        .expect("the watch");
+    assert_eq!(baseline.last_seen_messages, 8);
+}
+
+/// The session replacement's lane reset (the store swap and the digest
+/// reset) runs INSIDE the watch retirement's hold — the same hold a
+/// poll pass's validation and delivery ride: a pass that validated under
+/// the current generation delivers into the retiring session's pipeline
+/// or not at all. With the reset outside the hold, the replacement's
+/// store swap never takes the watch lock, so a pass holding its
+/// validated events can sink them into the ALREADY-swapped core (the
+/// retired session's notices land in the replacement). The probing reset
+/// pins the hold: the watch state must be UNAVAILABLE while the reset
+/// runs, and the retirement must complete (the registry empties and the
+/// generation bumps) once the hold ends.
+#[test]
+fn a_replacement_runs_its_lane_reset_inside_the_watch_hold() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let engine = std::sync::Arc::new(bare_engine(dir.path()));
+    let idle = crate::agent_watch::AgentWatchSnapshot {
+        message_count: 0,
+        status: "idle".to_string(),
+    };
+    // The retired session's watch (the registry is non-empty so the
+    // retirement is observable).
+    {
+        let mut state = engine.watch_host_state();
+        state
+            .registry
+            .register("watch-agent-old", "active-1", "c1", idle)
+            .unwrap();
+    }
+    let generation = engine.watch_host_state().generation;
+    let (probe_tx, probe_rx) = std::sync::mpsc::channel::<()>();
+    let (verdict_tx, verdict_rx) = std::sync::mpsc::channel::<bool>();
+    let probing_engine = std::sync::Arc::clone(&engine);
+    let prober = std::thread::spawn(move || {
+        probe_rx.recv().expect("the probe signal");
+        let held = probing_engine.agent_watches.try_lock().is_err();
+        verdict_tx.send(held).expect("the verdict channel");
+    });
+    let probe_tx = std::sync::Mutex::new(probe_tx);
+    let verdict_rx = std::sync::Mutex::new(verdict_rx);
+    let mut reset_ran = false;
+    let reset = || {
+        reset_ran = true;
+        probe_tx.lock().unwrap().send(()).expect("the probe signal");
+        let held = verdict_rx.lock().unwrap().recv().expect("the verdict");
+        assert!(
+            held,
+            "the replacement's lane reset ran outside the watch retirement's hold"
+        );
+    };
+    engine.clear_agent_watches(Box::new(reset));
+    assert!(reset_ran, "the retirement never ran its lane reset");
+    prober.join().expect("the prober");
+    // The retirement completed under the hold: the registry is empty and
+    // the generation bumped, so a pass that snapshotted the retired
+    // session is stale.
+    assert!(
+        engine.watch_host_state().registry.list().is_empty(),
+        "the replacement inherited the retired session's watches"
+    );
+    assert_ne!(
+        engine.watch_host_state().generation,
+        generation,
+        "the retirement did not bump the watch generation"
+    );
 }

@@ -73,7 +73,9 @@ impl AgentWatchHostState {
     /// generation between the poller's subscription snapshot and this
     /// step — the child snapshot queries in between are the race
     /// window). A stale pass answers `false` and its caller drops the
-    /// events.
+    /// events. The caller delivers under the same hold
+    /// ([`AgentSessionEngine::deliver_watch_pass`]), so a replacement
+    /// cannot complete between this validation and the delivery.
     pub(crate) fn poll_if_current(
         &mut self,
         generation: u64,
@@ -378,8 +380,18 @@ impl AgentSessionEngine {
     /// subscription snapshot belongs to the retired session, so it must
     /// not poll the replacement's registry or deliver its notices into
     /// the replacement's inbox.
-    pub fn clear_agent_watches(&self) {
+    ///
+    /// The replacement's lane reset (the store swap and the digest reset)
+    /// runs INSIDE this hold: a poll pass's validation, registry poll,
+    /// and delivery ride ONE watch-state hold
+    /// ([`Self::deliver_watch_pass`]), so a replacement can never
+    /// complete between a pass's validation and its delivery — the
+    /// retired pass delivers into the retiring session's pipeline (its
+    /// notices die with the retirement) or validates against the bumped
+    /// generation and drops its events.
+    pub fn clear_agent_watches(&self, reset: Box<dyn FnOnce() + '_>) {
         let mut state = self.watch_host_state();
+        reset();
         state.registry = AgentWatchRegistry::default();
         state.generation += 1;
     }
@@ -469,6 +481,39 @@ impl AgentSessionEngine {
             .map(|_| ())
     }
 
+    /// One poll pass's completion (the shared poller's registry step):
+    /// validate the pass's generation, poll the registry into range
+    /// events, and DELIVER them — ONE watch-state hold covers all three.
+    /// The delivery rides the same hold as the validation because a
+    /// session replacement's watch retirement
+    /// ([`Self::clear_agent_watches`]) runs its lane reset inside the
+    /// same hold: whichever side wins the lock, a pass delivers into the
+    /// retiring session's pipeline (its notices die with the retirement)
+    /// or validates against the bumped generation and drops its events —
+    /// a retired pass's notices can never land in the replacement's
+    /// inbox or steering queue. A stale pass (a replacement already
+    /// completed) drops its events here.
+    pub(crate) fn deliver_watch_pass(
+        &self,
+        generation: u64,
+        subscriptions: &[crate::agent_watch::AgentWatchSubscription],
+        snapshots: &HashMap<String, AgentWatchSnapshot>,
+        sink: &WatchNoticeSink,
+    ) {
+        let mut events: Vec<String> = Vec::new();
+        let mut state = self.watch_host_state();
+        if !state.poll_if_current(generation, subscriptions, snapshots, &mut events) {
+            // The pass snapshotted the retired session's registry:
+            // drop its results instead of polling the replacement's
+            // registry with the stale child snapshots. The next tick
+            // re-snapshots fresh.
+            return;
+        }
+        for content in &events {
+            sink("agent", content);
+        }
+    }
+
     /// Arm the one-shared watch poller (swarm PR E): a single background
     /// task while any subscription is active, exiting when the registry
     /// empties or the session closes — watchers never hold the process
@@ -506,7 +551,11 @@ impl AgentSessionEngine {
                 // one registry pass turns the deltas into range events. The
                 // generation rides the snapshot: a session replacement's
                 // clear (between this snapshot and the registry pass)
-                // invalidates the pass.
+                // invalidates the pass, and the pass's validation, poll,
+                // and delivery ride ONE watch-state hold
+                // (`deliver_watch_pass`) so a replacement can never
+                // complete between the pass's validation and its
+                // delivery.
                 let (subscriptions, generation) = {
                     let state = engine.watch_host_state();
                     if state.registry.is_empty() {
@@ -541,20 +590,7 @@ impl AgentSessionEngine {
                     }
                 }
                 let sink = Arc::clone(&sink);
-                let mut events: Vec<String> = Vec::new();
-                {
-                    let mut state = engine.watch_host_state();
-                    if !state.poll_if_current(generation, &subscriptions, &snapshots, &mut events) {
-                        // The pass snapshotted the retired session's
-                        // registry: drop its results instead of polling
-                        // the replacement's registry with the stale child
-                        // snapshots. The next tick re-snapshots fresh.
-                        continue;
-                    }
-                }
-                for content in events {
-                    sink("agent", &content);
-                }
+                engine.deliver_watch_pass(generation, &subscriptions, &snapshots, &sink);
             }
         });
     }

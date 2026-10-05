@@ -261,8 +261,10 @@ impl SessionEngine for ScriptedEngine {
     }
 
     /// Count `clear_agent_watches` calls for the replacement-flow tests
-    /// (the real engine empties its watch registry instead).
-    fn clear_agent_watches(&self) {
+    /// (the real engine empties its watch registry instead); the
+    /// replacement's lane reset still runs (the trait default's contract).
+    fn clear_agent_watches(&self, reset: Box<dyn FnOnce() + '_>) {
+        reset();
         self.cleared_agent_watches
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }

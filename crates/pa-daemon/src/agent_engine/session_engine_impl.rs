@@ -15,8 +15,8 @@ impl SessionEngine for AgentSessionEngine {
     /// Swarm PR E's "watchers die with the session" at a session
     /// replacement (the registry is the engine's; the reused runtime must
     /// not carry the replaced session's subscriptions into the new one).
-    fn clear_agent_watches(&self) {
-        AgentSessionEngine::clear_agent_watches(self);
+    fn clear_agent_watches(&self, reset: Box<dyn FnOnce() + '_>) {
+        AgentSessionEngine::clear_agent_watches(self, reset);
     }
 
     /// TS `_clearQueuedGoalContexts`: the worker-installed purge withdraws

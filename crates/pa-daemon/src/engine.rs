@@ -71,8 +71,14 @@ pub trait SessionEngine: Send + Sync {
     /// not carry the replaced session's subscriptions into the new one,
     /// and a poll pass already in flight dies with the replaced session
     /// (implementations invalidate stale passes, not just the registry).
-    /// Engines without a watch registry do nothing.
-    fn clear_agent_watches(&self) {}
+    /// The caller's lane reset (the store swap and the digest reset) runs
+    /// INSIDE the retirement's watch hold — the same hold a poll pass's
+    /// validation and delivery ride — so a replacement can never complete
+    /// between a pass's validation and its delivery. Engines without a
+    /// watch registry still run the reset.
+    fn clear_agent_watches(&self, reset: Box<dyn FnOnce() + '_>) {
+        reset();
+    }
 
     /// Release the session's kernel at a parent-owned child's idle settle
     /// (TS #2483's `_passivateSettledRlmChildRuntime` inline arm,
