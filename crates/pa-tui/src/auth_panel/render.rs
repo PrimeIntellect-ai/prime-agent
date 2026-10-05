@@ -303,10 +303,12 @@ pub(crate) fn auth_actions_row(
     if let Some(state) = copy_state {
         let tone = match state {
             CopyStatus::Copied => ThemeColor::Success,
+            CopyStatus::Requested => ThemeColor::Warning,
             CopyStatus::Failed => ThemeColor::Error,
         };
         let text = match state {
             CopyStatus::Copied => "Copied sign-in link",
+            CopyStatus::Requested => "Sign-in link sent to terminal clipboard (unconfirmed)",
             CopyStatus::Failed => "Failed to copy sign-in link",
         };
         parts.push(vec![theme.fg_span(tone, text.to_string())]);

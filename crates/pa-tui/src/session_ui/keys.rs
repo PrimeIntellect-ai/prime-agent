@@ -259,17 +259,11 @@ impl SessionUi {
         }
     }
 
-    /// Copy a finished selection out (TS `copySelection` +
-    /// `copyFullscreenSelection`): OSC 52 works locally, over SSH, and
-    /// through tmux (`set-clipboard`), so the write goes straight to the
-    /// terminal; a headless run has no terminal and records the text for
-    /// its verifier instead. A successful copy surfaces the
-    /// "Copied selection to clipboard" action toast (the ephemeral
-    /// overlay, not the TS `showStatus` chat row — sanctioned divergence),
-    /// a failed write the failure row (TS `showError`).
+    /// Copy a finished selection through the shared platform/tmux/OSC 52
+    /// chain. A headless run records the text for its verifier instead.
+    /// Only a local platform-tool write confirms delivery; a terminal
+    /// request is reported as unconfirmed.
     fn copy_selection(&mut self, text: &str, view: &mut AgentView) {
-        use base64::Engine;
-        use std::io::Write;
         let lines = text.lines().count().max(1);
         self.copies.push(text.to_string());
         self.track_selection(lines);
@@ -277,16 +271,14 @@ impl SessionUi {
             self.toast("Copied selection to clipboard", view);
             return;
         }
-        let encoded = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
-        let mut out = std::io::stdout();
-        match out.write_all(format!("\x1b]52;c;{encoded}\x07").as_bytes()) {
-            Ok(()) => {
-                let _ = out.flush();
+        match crate::clipboard::copy_to_clipboard(text, &mut self.osc_sink) {
+            Ok(crate::clipboard::CopyOutcome::Confirmed) => {
                 self.toast("Copied selection to clipboard", view);
             }
-            Err(error) => {
-                self.error_row(&format!("Failed to copy selection: {error}"), view);
+            Ok(crate::clipboard::CopyOutcome::Requested) => {
+                self.toast(crate::clipboard::CLIPBOARD_REQUESTED, view);
             }
+            Err(error) => self.error_row(&error, view),
         }
     }
 
@@ -1123,54 +1115,20 @@ impl SessionUi {
                     }
                 }
                 crate::editor::EditorEvent::ClipboardWrite(text) => {
-                    // A selection cut/copy. On a live terminal it takes
-                    // TS `copySelection`'s shape exactly: the OSC 52
-                    // sequence goes straight to the terminal (it works
-                    // locally, over SSH, and through tmux
-                    // `set-clipboard`), the same write the mouse
-                    // selection's `copy_selection` below performs. The
-                    // platform-tool chain (child processes whose
-                    // `wait()` has no timeout) never runs on this path:
-                    // a stalled xclip/wl-copy/pbcopy can neither freeze
-                    // the prompt nor leak an unkillable blocking task,
-                    // and no background task accumulates. The toast is
-                    // success-only; a failed write shows the error row.
-                    // A headless run has no terminal to write to and no
-                    // stalling children (the tools fail to spawn
-                    // instantly), so it keeps the synchronous platform
-                    // chain and its captured OSC sink stays verifiable.
+                    // An editor cut/copy follows the same clipboard path as
+                    // mouse selection. Headless tests retain the selection.
                     if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
-                        use std::io::Write;
-                        // The sequence goes through `osc52::sequence`, so
-                        // the encoded-payload cap applies to this path
-                        // like every other OSC 52 write: an oversized
-                        // sequence desynchronizes the terminal, so the
-                        // copy reports failure instead of writing it.
-                        match crate::osc52::sequence(&text) {
-                            Some(sequence) => {
-                                let mut out = std::io::stdout();
-                                match out.write_all(sequence.as_bytes()) {
-                                    Ok(()) => {
-                                        let _ = out.flush();
-                                        self.toast("Copied selection to clipboard", view);
-                                    }
-                                    Err(error) => {
-                                        self.error_row(
-                                            &format!("Failed to copy selection: {error}"),
-                                            view,
-                                        );
-                                    }
-                                }
-                            }
-                            None => {
-                                self.error_row("Failed to copy selection to clipboard", view);
-                            }
-                        }
-                    } else {
                         match crate::clipboard::copy_to_clipboard(&text, &mut self.osc_sink) {
-                            Ok(()) => self.toast("Copied selection to clipboard", view),
+                            Ok(crate::clipboard::CopyOutcome::Confirmed) => {
+                                self.toast("Copied selection to clipboard", view);
+                            }
+                            Ok(crate::clipboard::CopyOutcome::Requested) => {
+                                self.toast(crate::clipboard::CLIPBOARD_REQUESTED, view);
+                            }
                             Err(message) => self.error_row(&message, view),
                         }
+                    } else {
+                        self.toast("Copied selection to clipboard", view);
                     }
                 }
                 _ => {}

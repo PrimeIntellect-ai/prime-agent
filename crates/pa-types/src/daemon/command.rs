@@ -329,6 +329,12 @@ pub enum DaemonCommand {
         id: Option<String>,
         active_session_id: String,
         name: String,
+        /// Who directed the rename (`renamedBy` on the wire, TS
+        /// `AgentFamilyRelationship` — only `"parent"` is sent): set when a
+        /// parent session renames one of its direct children, so the
+        /// renamed session's transcript notice can name it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        renamed_by: Option<String>,
         #[serde(flatten)]
         rest: JsonMap,
     },
