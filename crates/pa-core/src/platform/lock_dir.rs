@@ -264,13 +264,26 @@ mod win32 {
 /// at acquisition - the inode (TS `guardIno`) and the mtime probe the
 /// acquisition itself wrote (proper-lockfile's remembered `lock.mtime`) -
 /// so a long hold can re-check whose lock it still is (the TS sync lock's
-/// compromise rules).
+/// compromise rules). On unix the acquisition also holds an `flock` on
+/// the directory itself ([`LockDir::witness_fd`]): a kernel-witnessed
+/// live-holder claim the mtime/inode pair cannot forge, so one rust
+/// process never reclaims another live rust holder's lock however long
+/// the holder stalls (the stale mtime stays the DEAD-holder heuristic it
+/// was always meant to be; proper-lockfile itself takes no flock, so a
+/// TS successor is untouched by it - the divergence is disclosed at
+/// [`LockDir::witness_fd`]).
 #[derive(Debug)]
 pub struct LockDir {
     path: PathBuf,
     /// The lock directory's identity captured at acquisition (the inode;
     /// TS `guardIno`), `None` where the platform cannot observe it.
     owned: Option<u64>,
+    /// The `flock`-witnessed handle on the acquired directory (unix; see
+    /// [`LockDir::witness_fd`]). `None` where the platform has no
+    /// directory `flock`. The fd pins this guard's inode for its whole
+    /// lifetime and closes with it, so a crashed holder's witness
+    /// vanishes with its process - the crash-oracle contract.
+    witness: Option<std::os::fd::OwnedFd>,
     /// The (sec, nsec) mtime probe this guard last wrote (proper-lockfile's
     /// `lock.mtime`: the updater records the exact value its `utimes` call
     /// wrote, and its `isMtimeOurs` equality - a lock whose observed mtime
@@ -381,11 +394,75 @@ impl LockDir {
                 format!("Lock file is already being held: {}", path.display()),
             ));
         }
+        // The live-holder witness: an flock on the directory just created,
+        // taken while the identity pair is still verifiably ours. A WouldBlock
+        // here means the directory changed hands between the probe check and
+        // the flock - the same contention, never an adoption.
+        let witness = Self::witness_fd(&path)?;
         Ok(LockDir {
             owned,
             owned_mtime: Mutex::new(probe),
+            witness,
             path,
         })
+    }
+
+    /// The `flock`-witnessed directory handle: a kernel truth the stat-based
+    /// identity pair cannot forge. On unix the acquisition opens the created
+    /// directory and holds an exclusive non-blocking `flock` on it for the
+    /// lock's whole lifetime; [`LockDir::judge_and_reclaim`]'s takeover gate
+    /// then refuses a stale mtime while a live holder's fd still flocks the
+    /// directory (the takeover waits, the way it should, for the holder's
+    /// process to die), so the inode/mtime pair can never collide in a
+    /// rust-to-rust takeover - the pair stays the protection against
+    /// flock-blind takers (TS proper-lockfile) alone. This is a deliberate
+    /// hardening divergence from proper-lockfile 4.1.2, which takes no
+    /// flock: the lock directory's bytes, mtime shape, and staleness
+    /// protocol are untouched (a TS process reads the lock exactly as
+    /// before; an `flock` is invisible to it), and on the crash-oracle
+    /// nothing changes - a dead holder's fd is closed by the kernel with
+    /// its process, freeing the witness exactly when the stale heuristic
+    /// wants it. The `{file}.lock` convention (`acquire`) never takes the
+    /// witness, so its incumbents always pass the takeover gate instantly.
+    /// `Ok(None)` where the platform has no directory `flock` (non-unix):
+    /// the identity checks remain the whole protection there.
+    fn witness_fd(path: &Path) -> io::Result<Option<std::os::fd::OwnedFd>> {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            let fd = match fs::File::open(path) {
+                Ok(dir) => dir,
+                // The directory vanished (a racing release): the caller's
+                // retry ladder owns it - plain contention, like the TS
+                // protocol's ELOCKED family.
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        format!("Lock file is already being held: {}", path.display()),
+                    ));
+                }
+                Err(error) => return Err(error),
+            };
+            // An open directory fd carries no write state (O_RDONLY), so the
+            // flock is only the witness; it closes with the handle.
+            let held = unsafe { libc::flock(fd.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            if held != 0 {
+                let error = io::Error::last_os_error();
+                return Err(match error.kind() {
+                    io::ErrorKind::WouldBlock => io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        format!("Lock file is already being held: {}", path.display()),
+                    ),
+                    _ => error,
+                });
+            }
+            Ok(Some(fd.into()))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+            Ok(None)
+        }
     }
 
     /// The lock directory's ownership identity (TS `guardIno`): the inode
@@ -506,6 +583,23 @@ impl LockDir {
             }
         }
         if metadata.is_dir() {
+            // The live-holder witness gate: a directory whose mtime says
+            // stale but whose flock is still held belongs to a LIVE rust
+            // holder (a stalled-but-alive process, exactly the case the
+            // stale heuristic was never a safe answer to) - the takeover
+            // must wait for the holder's process to die, not for its mtime
+            // to age. Incumbents without the witness (`acquire`'s
+            // `{file}.lock` convention, TS proper-lockfile locks) always
+            // pass the gate instantly, their reclaim path unchanged.
+            #[cfg(unix)]
+            {
+                if Self::dir_flock_held(path) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        format!("Lock file is already being held: {}", path.display()),
+                    ));
+                }
+            }
             let modified = metadata.modified()?;
             let age = std::time::SystemTime::now()
                 .duration_since(modified)
@@ -525,6 +619,20 @@ impl LockDir {
             io::ErrorKind::WouldBlock,
             format!("Lock file is already being held: {}", path.display()),
         ))
+    }
+
+    /// True while another process holds the live-holder `flock` witness on
+    /// the lock DIRECTORY (the probe `flock` [`LockDir::witness_fd`] takes
+    /// at acquisition). An unopenable path means no witness holder: the
+    /// stale judgment alone decides.
+    #[cfg(unix)]
+    fn dir_flock_held(path: &Path) -> bool {
+        use std::os::unix::io::AsRawFd;
+        let Ok(dir) = fs::File::open(path) else {
+            return false;
+        };
+        (unsafe { libc::flock(dir.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0
+            && io::Error::last_os_error().kind() == io::ErrorKind::WouldBlock)
     }
 
     /// True while another process holds the pre-compat flock on a legacy
@@ -671,15 +779,31 @@ impl LockDir {
     ///
     /// Panics only on a poisoned `owned_mtime` mutex - a sibling already
     /// panicked while holding the lock's record.
-    pub fn release_when_owned(self) {
+    pub fn release_when_owned(mut self) {
         let mtime_ours = self
             .owned_mtime
             .lock()
             .unwrap()
             .is_none_or(|probe| Self::observed_mtime(&self.path) == Some(probe));
+        // The witness fd is taken out first: the forget below must never
+        // leak it, whichever way the removal decides.
+        let witness = std::mem::take(&mut self.witness);
         if !self.is_stolen() && mtime_ours {
             self.release();
         }
+        drop(witness);
+        std::mem::forget(self);
+    }
+
+    /// Abandon the guard artifact without removing anything at the path: a
+    /// stolen or foreign-mtime lock must never be released (that would
+    /// delete the successor's lock), but the witness fd must not leak
+    /// either - it is closed here, the kernel reclaims the pinned inode,
+    /// and the abandoned artifact at the path goes stale for the
+    /// successor's own sweep (TS: "A stolen-but-undetected guard is never
+    /// released: that would delete the successor's lock.").
+    pub fn disarm(mut self) {
+        drop(std::mem::take(&mut self.witness));
         std::mem::forget(self);
     }
 }
@@ -881,6 +1005,42 @@ mod tests {
             path.is_dir(),
             "the guarded release never deletes the successor's lock"
         );
+    }
+
+    /// The live-holder witness gate: a stale mtime alone never reclaims a
+    /// lock whose holder still lives. The holder's flock pins the takeover
+    /// for its whole lifetime (the review bot's collision experiment -
+    /// rmdir+mkdir reusing the inode and the same-second probe - cannot
+    /// even begin), and the crash-oracle stays intact: the dropped
+    /// holder's fd closes, the witness vanishes, and the stale takeover
+    /// proceeds.
+    #[test]
+    #[cfg(unix)]
+    fn a_stale_mtime_never_reclaims_a_live_witness_holder() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("auth.json");
+        std::fs::write(&file, "{}").unwrap();
+        let holder = LockDir::acquire(&file, MIN_STALE).unwrap();
+        let path = lock_of(&file);
+        // Age the lock far past the staleness threshold while the holder
+        // lives: the takeover gate must still answer contention.
+        set_mtime(&path, 1, 0).unwrap();
+        let error = LockDir::acquire(&file, MIN_STALE).unwrap_err();
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock,
+            "a live holder's stale mtime is not a reclaim signal"
+        );
+        // The crash-oracle: the holder's fd closes with it (the kernel's
+        // side of the witness), and the stale takeover proceeds.
+        drop(holder);
+        let successor = LockDir::acquire(&file, MIN_STALE)
+            .expect("a dead holder's stale lock reclaims the moment the witness closes");
+        assert!(
+            std::fs::metadata(&path).unwrap().is_dir(),
+            "the successor holds a fresh lock directory at the path"
+        );
+        drop(successor);
     }
 
     #[test]

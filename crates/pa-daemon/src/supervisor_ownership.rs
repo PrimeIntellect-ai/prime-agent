@@ -275,8 +275,11 @@ fn with_held_guard<T>(
         }
         Err(error) => {
             // Compromise or steal: NEVER remove the guard - that would
-            // delete the successor's lock.
-            std::mem::forget(lock);
+            // delete the successor's lock - but the witness fd is not
+            // leaked with it.
+            Arc::try_unwrap(lock)
+                .expect("the joined refresher dropped its guard clone")
+                .disarm();
             Err(error)
         }
     }
