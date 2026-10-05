@@ -561,6 +561,9 @@ pub async fn run_daemon_attached_acp_mode(options: DaemonAcpOptions) -> anyhow::
     }
 
     handlers.shutdown().await;
+    // A close frame is reserved synchronously but its stop runs detached.
+    // Let it finish before EOF teardown takes the hosted session away.
+    wait_for_session_close(&state).await;
     teardown(&link, &state, &binding).await;
     drop(tx);
     let _ = writer.await;
@@ -799,7 +802,7 @@ fn arm_cancel_locked(session_id: &str, guard: &mut DaemonAcpState) -> CancelOrde
 async fn wait_for_session_close(state: &Arc<Mutex<DaemonAcpState>>) {
     let close_done = { state.lock().await.session_close_done.clone() };
     if let Some(mut done) = close_done {
-        let _ = done.changed().await;
+        let _ = done.wait_for(|finished| *finished).await;
     }
 }
 
@@ -1969,6 +1972,52 @@ mod tests {
             session,
             ..DaemonAcpState::default()
         }
+    }
+
+    #[tokio::test]
+    async fn eof_waits_for_a_reserved_close_before_taking_the_session() {
+        let state = Arc::new(Mutex::new(state(Some(hosted_session()))));
+        let order = frame_order_prefix(
+            &Incoming::Request {
+                id: json!(1),
+                method: "session/close".to_string(),
+                params: json!({ "sessionId": "acp-1" }),
+            },
+            &state,
+        )
+        .await;
+        let FrameOrder::Close { done, .. } = order else {
+            panic!("the close should reserve its stop");
+        };
+        let eof = tokio::spawn({
+            let state = Arc::clone(&state);
+            async move {
+                wait_for_session_close(&state).await;
+                state.lock().await.session.take().is_some()
+            }
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !eof.is_finished(),
+            "EOF must not take the session before close finishes"
+        );
+        assert!(state.lock().await.session.is_some());
+        done.send(true).unwrap();
+        state.lock().await.session_close_done = None;
+        assert!(eof.await.unwrap());
+
+        // A close can settle before EOF checks the state. No stale watch
+        // should be awaited, and the hosted session is still available.
+        let (done, done_rx) = tokio::sync::watch::channel(false);
+        let settled = Arc::new(Mutex::new(self::state(Some(hosted_session()))));
+        settled.lock().await.session_close_done = Some(done_rx);
+        done.send(true).unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            wait_for_session_close(&settled),
+        )
+        .await
+        .expect("an already completed close must not strand EOF");
     }
 
     #[tokio::test]

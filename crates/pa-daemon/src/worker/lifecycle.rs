@@ -666,9 +666,11 @@ impl Worker {
     /// register the permit before the flag check, or a turn that settles
     /// between the check and the await loses its wake
     /// (`notify_waiters` only reaches registered futures).
-    async fn wait_until_idle(&self) {
+    pub(crate) async fn wait_until_idle(&self) {
         loop {
             let idle = self.idle_notify.notified();
+            tokio::pin!(idle);
+            idle.as_mut().enable();
             {
                 let core = self.core.lock().unwrap();
                 if !core.busy

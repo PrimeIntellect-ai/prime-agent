@@ -131,7 +131,7 @@ pub struct Worker {
     /// carries the counter's value for the supervisor's stale-delta gate.
     roster_delta_sequence: std::sync::Arc<std::sync::atomic::AtomicU64>,
     pub(crate) work_notify: Arc<Notify>,
-    idle_notify: Arc<Notify>,
+    pub(crate) idle_notify: Arc<Notify>,
     /// The per-connection session-attach registry (the fresh bots'
     /// release findings): connection tokens -> the client ids their
     /// `attach` retained. The release is connection-scoped on EVERY
