@@ -1149,6 +1149,10 @@ async fn prompt_turn(
         let failure = response
             .error
             .unwrap_or_else(|| "unknown error".to_string());
+        // The failure text rides the internal_error reply, where a test
+        // asserting only the stop reason loses it: echo it to stderr so
+        // every harness's child-stderr dump shows WHY the turn failed.
+        eprintln!("pa-daemon: acp turn failed: {failure}");
         publish_error_boundary(&producer, turn_id).await;
         producer.finish_prompt(turn_id).await;
         return super::internal_error(&id, &format!("prime-agent turn failed: {failure}"));

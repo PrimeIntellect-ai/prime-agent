@@ -773,6 +773,11 @@ mod tests {
     #[path = "stream_pins.rs"]
     mod stream_pins;
 
+    // The wire-level pins (the request head on the wire) live in their
+    // own child module with this file's test harness.
+    #[path = "stream_wire.rs"]
+    mod stream_wire;
+
     /// Serve one SSE response body for the provider's POST and return the
     /// bound address.
     async fn serve_sse(body: String) -> SocketAddr {
