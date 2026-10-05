@@ -154,6 +154,8 @@ impl SessionUi {
             factory_refresh_queued: false,
             factory_list_epoch: 0,
             factory_updates: activity_updates.factory,
+            library_updates: activity_updates.library,
+            library_list_epoch: 0,
             factory_selected_run: None,
             subagents_focused: false,
             activity_group: crate::chrome::ActivityGroup::Subagents,
@@ -682,6 +684,11 @@ impl SessionUi {
             // previous session's fetched document, and a stale panel
             // would keep consuming keys over the new session.
             view.info_panel = None;
+            // The machine library page dies the same death: its open
+            // fetch is session-addressed (the lane rides the attached
+            // session's kernel), so the page reopens on the new session
+            // instead of keeping the old one's list.
+            view.library_view = None;
             self.speed_stats = None;
             view.chrome.speed_text = None;
         }

@@ -116,6 +116,12 @@ pub enum ActivityGroup {
     /// opens the factory page over the lane — the same navigation family
     /// as the subagents, heartbeats, and shells pages.
     Factory,
+    /// The machine library page: every library machine listed, one drill-in
+    /// per machine. Its group rides the factory group's exact gate (the
+    /// same `factory_activity` advertisement — the library is the
+    /// factory's own surface, so the opt-in contract covers both) and
+    /// opens the library page over the same lane.
+    Library,
     /// The active goal: its group is mounted while a goal is being
     /// pursued and opens the read-only goal panel (the objective and
     /// its facts); a goal that ended unmounts the row with it.
@@ -159,11 +165,11 @@ pub struct ActivityDock {
     /// registry only): fully terminal runs never inflate the indicator,
     /// exactly like the bash group's running-only count.
     pub factory_runs: usize,
-    /// Whether the factory group renders at all: the daemon's
+    /// Whether the factory groups render at all: the daemon's
     /// `factory_activity` advertisement (the factory's opt-in gate —
     /// `factory.enabled`, off by default). A daemon without the lane
-    /// mounts no factory group anywhere: no row, no traversal, no
-    /// click, no page.
+    /// mounts no factory group anywhere: no row (the run page's or the
+    /// machine library's), no traversal, no click, no page.
     pub factory_group: bool,
     /// The active goal's dock label — `Pursuing goal (12m 05s)`-style,
     /// the elapsed-time form (the operator's 2026-09-24 directive: the
@@ -179,9 +185,10 @@ impl ActivityDock {
     /// The groups this dock renders, left to right — the arrow
     /// traversal order. The subagents, heartbeats, and shells groups
     /// always render (an empty one reads its zero count and stays
-    /// traversable); the factory group renders exactly while the daemon
-    /// advertises the `factory_activity` lane (the opt-in gate), and the
-    /// goal group exactly while a live goal keeps its row mounted.
+    /// traversable); the factory and machine-library groups render
+    /// exactly while the daemon advertises the `factory_activity` lane
+    /// (the opt-in gate), and the goal group exactly while a live goal
+    /// keeps its row mounted.
     #[must_use]
     pub fn groups(&self) -> Vec<ActivityGroup> {
         let mut groups = vec![
@@ -189,8 +196,13 @@ impl ActivityDock {
             ActivityGroup::Heartbeats,
             ActivityGroup::Bash,
         ];
+        // The library page rides the factory group's exact gate: the same
+        // lane advertisement mounts both factory surfaces (the run page and
+        // the machine library page), so the opt-in contract covers the
+        // pair — no lane, no rows, no pages.
         if self.factory_group {
             groups.push(ActivityGroup::Factory);
+            groups.push(ActivityGroup::Library);
         }
         if self.goal_label.is_some() {
             groups.push(ActivityGroup::Goal);
@@ -826,6 +838,14 @@ pub fn render_activity_dock_segments(
                 running_color(dock.factory_runs),
                 format!("⚙ {} factory", dock.factory_runs),
             )],
+            // The machine library page's row carries no count: the
+            // library is a static list (it changes only through
+            // `prime-agent factory import | export`), so there is no
+            // live number to poll for it — the row reads like the goal
+            // group's label-only row, and the page lists the machines.
+            ActivityGroup::Library => {
+                vec![theme.fg_span(ThemeColor::Muted, "☰ machines".to_string())]
+            }
             // The goal row carries the dock's activity convention: an
             // actively pursued goal reads green, and the paused and
             // budget-limited states read amber (the paused heartbeat

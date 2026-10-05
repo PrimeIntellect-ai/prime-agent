@@ -13,6 +13,7 @@ pub(crate) struct ActivityUpdates {
     pub heartbeats: mpsc::UnboundedSender<HeartbeatsUpdate>,
     pub bash: mpsc::UnboundedSender<BashActivityUpdate>,
     pub factory: mpsc::UnboundedSender<FactoryUpdate>,
+    pub library: mpsc::UnboundedSender<crate::session_ui::LibraryUpdate>,
     pub commands: mpsc::UnboundedSender<CommandCatalogUpdate>,
 }
 
@@ -296,6 +297,10 @@ impl SessionUi {
             crate::chrome::ActivityGroup::Factory => {
                 self.emit_activity_opened("factory");
                 self.open_factory_page(view);
+            }
+            crate::chrome::ActivityGroup::Library => {
+                self.emit_activity_opened("library");
+                self.open_library_page(view);
             }
             crate::chrome::ActivityGroup::Goal => {
                 self.emit_activity_opened("goal");

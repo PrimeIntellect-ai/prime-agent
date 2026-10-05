@@ -120,6 +120,10 @@ pub struct AgentView {
     /// inline pickers (one panel per live factory run) — the activity
     /// dock's factory group's destination.
     pub factory_view: Option<crate::factory_view::FactoryView>,
+    /// The machine library page: while set, it owns the editor dock the
+    /// same way (every library machine listed, one drill-in per machine)
+    /// — the activity dock's machine-library group's destination.
+    pub library_view: Option<crate::factory_view::LibraryView>,
     /// The `/heartbeats` inline management view (TS
     /// `HeartbeatManagerComponent`, inline-picker style): while set, it
     /// owns the editor dock like the `/model` and `/effort` pickers.
@@ -413,6 +417,7 @@ impl AgentView {
             effort_picker: None,
             mcp_view: None,
             factory_view: None,
+            library_view: None,
             heartbeats_picker: None,
             goal_panel: None,
             bash_view: None,

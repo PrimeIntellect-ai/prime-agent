@@ -86,6 +86,7 @@ from rlm.factory import (
     export_library_machine,
     export_machine,
     import_machine,
+    library_graph,
     list_machines,
     machine_description_errors,
     machine_name_errors,
@@ -93,6 +94,7 @@ from rlm.factory import (
     render_machine_file,
     repo_machines_dir,
     resolve_machine,
+    spec_to_mermaid,
     topological_order,
     user_machines_dir,
     validate_factory_machine,
@@ -6493,6 +6495,165 @@ class FactoryGraphWatchTest(_ExecutorTestCase):
 
 
 # ---------------------------------------------------------------------------
+# The library lane: the machine list and one machine's graph payload.
+# ---------------------------------------------------------------------------
+
+
+class FactoryLibraryLaneTest(_ExecutorTestCase):
+    """The activity lane's library actions: the machine list and one
+    machine's graph payload — the TUI library view's lane, riding the same
+    opt-in gate as every activity action."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        # Isolate the repo library level from this checkout's bundled
+        # seeds; the user level is the isolated agent dir's own machines
+        # directory (the shared executor setUp already points the agent dir
+        # at a temp dir with the enabled settings file).
+        temp = TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.repo = Path(temp.name).resolve() / "repo-machines"
+        self.user = self.settings_path.parent / "machines"
+        env = patch.dict(os.environ, {"PRIME_AGENT_MACHINES_DIR": str(self.repo)})
+        env.start()
+        self.addCleanup(env.stop)
+        self.store_library(
+            "sweep",
+            "The repo machine.",
+            {
+                "states": [
+                    {
+                        "id": "source",
+                        "entry": True,
+                        "subagent": {"prompt": "P."},
+                        "outputs": [{"name": "o", "type": "json"}],
+                    },
+                    {"id": "sink", "subagent": {"prompt": "P."}},
+                ],
+                "transitions": [
+                    {"from": "source", "to": "sink", "when": {"output": "o", "op": "eq", "value": True}},
+                ],
+            },
+        )
+
+    def store_library(self, name: str, description: str, spec: dict[str, Any]) -> Path:
+        directory = self.repo / name
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / "MACHINE.md"
+        path.write_text(
+            machine_file_text(name=name, description=description, spec_json=json.dumps(spec)),
+            encoding="utf-8",
+        )
+        return path
+
+    @async_test
+    async def test_activity_library_lists_the_machines(self) -> None:
+        listed = await factory_module.default_factory_executor().activity(
+            {"action": "library"}
+        )
+        self.assertEqual(
+            listed["machines"],
+            [{"name": "sweep", "description": "The repo machine.", "source": "repo"}],
+        )
+        # A user-level machine rides the same list with its own source;
+        # repo wins on a name conflict.
+        self.store_library("shared", "The repo machine.", {
+            "states": [{"id": "a", "entry": True, "subagent": {"prompt": "P."}}]
+        })
+        (self.user / "mine").mkdir(parents=True, exist_ok=True)
+        (self.user / "mine" / "MACHINE.md").write_text(
+            machine_file_text(
+                name="mine",
+                description="The user machine.",
+                spec_json=json.dumps({"states": [{"id": "a", "entry": True, "subagent": {"prompt": "P."}}]}),
+            ),
+            encoding="utf-8",
+        )
+        (self.user / "shared").mkdir(parents=True, exist_ok=True)
+        (self.user / "shared" / "MACHINE.md").write_text(
+            machine_file_text(
+                name="shared",
+                description="The user machine.",
+                spec_json=json.dumps({"states": [{"id": "a", "entry": True, "subagent": {"prompt": "P."}}]}),
+            ),
+            encoding="utf-8",
+        )
+        listed = await factory_module.default_factory_executor().activity(
+            {"action": "library"}
+        )
+        self.assertEqual(
+            listed["machines"],
+            [
+                {"name": "mine", "description": "The user machine.", "source": "user"},
+                {"name": "shared", "description": "The repo machine.", "source": "repo"},
+                {"name": "sweep", "description": "The repo machine.", "source": "repo"},
+            ],
+        )
+
+    @async_test
+    async def test_activity_library_serves_one_machines_graph_payload(self) -> None:
+        graph = await factory_module.default_factory_executor().activity(
+            {"action": "library", "specId": "sweep"}
+        )
+        # The same snapshot shape a stored spec's graph answers (camelCase
+        # on the wire), plus the machine file's fields and the mermaid.
+        self.assertIsNone(graph["runId"])
+        self.assertEqual(graph["specId"], "sweep")
+        self.assertIsNone(graph["state"])
+        self.assertEqual(graph["description"], "The repo machine.")
+        self.assertEqual(graph["version"], "1")
+        self.assertEqual(graph["author"], "Tester")
+        self.assertEqual(
+            [state["id"] for state in graph["machine"]["states"]], ["source", "sink"]
+        )
+        guarded = graph["machine"]["transitions"][0]
+        self.assertEqual(guarded["from"], "source")
+        # the guard rides verbatim (the wire never re-keys it)
+        self.assertEqual(guarded["when"], {"output": "o", "op": "eq", "value": True})
+        self.assertEqual(graph["nodes"], [])
+        self.assertEqual(graph["lastFired"], [])
+        self.assertEqual(
+            graph["mermaid"],
+            """stateDiagram-v2
+    state "source" as source
+    state "sink" as sink
+    [*] --> source
+    source --> sink: o eq true
+""",
+        )
+
+    @async_test
+    async def test_activity_library_refuses_while_disabled(self) -> None:
+        self.disable_factory()
+        with self.assertRaises(ValueError) as raised:
+            await factory_module.default_factory_executor().activity({"action": "library"})
+        self.assertEqual(str(raised.exception), factory_module.FACTORY_DISABLED_MESSAGE)
+        with self.assertRaises(ValueError) as raised:
+            await factory_module.default_factory_executor().activity(
+                {"action": "library", "specId": "sweep"}
+            )
+        self.assertEqual(str(raised.exception), factory_module.FACTORY_DISABLED_MESSAGE)
+
+    @async_test
+    async def test_activity_library_names_unknown_and_broken_machines(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unknown machine 'missing'"):
+            await factory_module.default_factory_executor().activity(
+                {"action": "library", "specId": "missing"}
+            )
+        broken = self.repo / "broken" / "MACHINE.md"
+        broken.parent.mkdir(parents=True, exist_ok=True)
+        broken.write_text(
+            "---\nname: broken\n---\n\n```machine-spec\n{}\n```\n", encoding="utf-8"
+        )
+        with self.assertRaises(ValueError) as raised:
+            await factory_module.default_factory_executor().activity(
+                {"action": "library", "specId": "broken"}
+            )
+        self.assertIn("frontmatter description is required", str(raised.exception))
+
+
+
+# ---------------------------------------------------------------------------
 # Out-of-band frame plumbing
 # ---------------------------------------------------------------------------
 
@@ -7521,6 +7682,223 @@ class MachineCliDispatchTest(unittest.TestCase):
         self.assertFalse(unknown_op["ok"])
         self.assertIn("unknown factory cli op", unknown_op["errors"][0])
         self.assertIn("'list'", unknown_op["errors"][0])
+
+
+# ---------------------------------------------------------------------------
+# The mermaid renderer and the library graph seam (the TUI library view's
+# kernel surface).
+# ---------------------------------------------------------------------------
+
+
+class SpecToMermaidTest(unittest.TestCase):
+    """One spec as diagram text: pure, form-driven, deterministic."""
+
+    def test_the_shipped_pr_manager_seed_renders_its_guarded_transitions(self) -> None:
+        machine, _path = resolve_machine("pr-manager")
+        self.assertEqual(
+            spec_to_mermaid(machine.spec),
+            """stateDiagram-v2
+    state "entry" as entry
+    state "reviewing" as reviewing
+    state "fixing" as fixing
+    state "monitoring" as monitoring
+    [*] --> entry
+    entry --> reviewing
+    reviewing --> fixing: verdict.approved eq false
+    reviewing --> monitoring: verdict.approved eq true
+    fixing --> reviewing
+""",
+        )
+
+    def test_the_shipped_review_sweep_seed_renders_the_foreach_annotation(self) -> None:
+        machine, _path = resolve_machine("review-sweep")
+        self.assertEqual(
+            spec_to_mermaid(machine.spec),
+            """flowchart TB
+    files
+    review["review<br/>foreach: over files (max 256)"]
+    report
+    files --> review
+    files --> report
+    review --> report
+""",
+        )
+
+    def test_every_guard_shape_renders_its_own_label(self) -> None:
+        rendered = spec_to_mermaid(valid_machine())
+        self.assertIn("collect --> reviewing\n", rendered)
+        # the valued guard with a path, the valueless exists guard
+        self.assertIn("reviewing --> fixing: verdict.approved eq false\n", rendered)
+        self.assertIn("reviewing --> reviewing: verdict exists\n", rendered)
+        self.assertIn("fixing --> reviewing\n", rendered)
+        self.assertIn("[*] --> collect\n", rendered)
+
+    def test_hyphenated_state_ids_alias_without_merging_nodes(self) -> None:
+        # stateDiagram-v2 ids cannot carry hyphens, so a hyphenated id
+        # aliases to its underscored form — and two ids aliasing to the
+        # same spelling (`a-b` and `a_b`) disambiguate, never merge.
+        machine = {
+            "states": [
+                {"id": "a-b", "entry": True, "subagent": {"prompt": "P."}},
+                {"id": "a_b", "subagent": {"prompt": "P."}},
+                {"id": "c", "subagent": {"prompt": "P."}},
+            ],
+            "transitions": [
+                {"from": "a-b", "to": "c"},
+                {"from": "a_b", "to": "c", "when": {"output": "o", "op": "exists"}},
+            ],
+        }
+        rendered = spec_to_mermaid(machine)
+        self.assertIn('    state "a-b" as a_b\n', rendered)
+        self.assertIn('    state "a_b" as a_b_2\n', rendered)
+        self.assertIn("    a_b --> c\n", rendered)
+        self.assertIn("    a_b_2 --> c: o exists\n", rendered)
+
+    def test_a_join_renders_one_edge_per_source(self) -> None:
+        # stateDiagram-v2 has no multi-source edge: a join renders its
+        # connectivity, one edge per source state.
+        machine = {
+            "states": [
+                {"id": "a", "entry": True, "subagent": {"prompt": "P."}},
+                {"id": "b", "entry": True, "subagent": {"prompt": "P."}},
+                {"id": "c", "subagent": {"prompt": "P."}},
+            ],
+            "transitions": [{"from": ["a", "b"], "to": "c"}],
+        }
+        rendered = spec_to_mermaid(machine)
+        self.assertIn("    a --> c\n", rendered)
+        self.assertIn("    b --> c\n", rendered)
+
+    def test_every_entry_state_is_marked_and_edgeless_states_stay_nodes(self) -> None:
+        machine = {
+            "states": [
+                {"id": "one", "entry": True, "subagent": {"prompt": "P."}},
+                {"id": "two", "entry": True, "subagent": {"prompt": "P."}},
+                # No transitions at all: the edge-less states still render
+                # as declared nodes.
+                {"id": "orphan", "subagent": {"prompt": "P."}},
+            ],
+        }
+        rendered = spec_to_mermaid(machine)
+        self.assertIn("    [*] --> one\n", rendered)
+        self.assertIn("    [*] --> two\n", rendered)
+        self.assertIn('    state "orphan" as orphan\n', rendered)
+
+    def test_dag_effective_edges_include_every_input_source(self) -> None:
+        dag = valid_dag()
+        rendered = spec_to_mermaid(dag)
+        self.assertTrue(rendered.startswith("flowchart TB\n"), rendered)
+        self.assertIn("    collect --> fan-out\n", rendered)
+        self.assertIn("    collect --> review\n", rendered)
+        self.assertIn("    fan-out --> review\n", rendered)
+
+    def test_neither_form_renders_the_machine_header_alone(self) -> None:
+        # The pure renderer renders the shape it is given (the seams feed
+        # it validated specs only): an unrecognized spec renders the
+        # machine header with nothing after it, never a crash.
+        self.assertEqual(spec_to_mermaid(None), "stateDiagram-v2\n")
+        self.assertEqual(spec_to_mermaid({"run": {}}), "stateDiagram-v2\n")
+
+
+class MachineLibraryGraphTest(unittest.TestCase):
+    """The library graph seam: one machine's fields plus its rendering."""
+
+    def setUp(self) -> None:
+        temp = TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name).resolve()
+        self.repo = root / "repo-machines"
+        self.user = root / "user-machines"
+
+    def store(self, root: Path, name: str, description: str, spec: dict[str, Any]) -> Path:
+        directory = root / name
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / "MACHINE.md"
+        path.write_text(
+            machine_file_text(
+                name=name,
+                description=description,
+                spec_json=json.dumps(spec),
+            ),
+            encoding="utf-8",
+        )
+        return path
+
+    def test_library_graph_returns_the_machine_fields_and_its_mermaid(self) -> None:
+        machine = {
+            "run": {"max_parallel": 2},
+            "states": [
+                {
+                    "id": "source",
+                    "entry": True,
+                    "subagent": {"prompt": "P."},
+                    "outputs": [{"name": "o", "type": "json"}],
+                },
+                {"id": "sink", "subagent": {"prompt": "P."}},
+            ],
+            "transitions": [
+                {"from": "source", "to": "sink", "when": {"output": "o", "op": "eq", "value": 1}},
+            ],
+        }
+        self.store(self.repo, "sweep", "The repo machine.", machine)
+        graph = library_graph("sweep", repo_dir=self.repo, user_dir=self.user)
+        self.assertEqual(
+            graph["name"], "sweep",
+        )
+        self.assertEqual(graph["description"], "The repo machine.")
+        self.assertEqual(graph["version"], "1")
+        self.assertEqual(graph["author"], "Tester")
+        # the spec is the file's own payload, and the mermaid renders it
+        self.assertEqual(graph["spec"], machine)
+        self.assertEqual(
+            graph["mermaid"],
+            """stateDiagram-v2
+    state "source" as source
+    state "sink" as sink
+    [*] --> source
+    source --> sink: o eq 1
+""",
+        )
+
+    def test_library_graph_resolves_repo_machines_first(self) -> None:
+        machine = {"states": [{"id": "a", "entry": True, "subagent": {"prompt": "P."}}]}
+        self.store(self.repo, "sweep", "The repo machine.", machine)
+        self.store(self.user, "sweep", "The user machine.", machine)
+        graph = library_graph("sweep", repo_dir=self.repo, user_dir=self.user)
+        self.assertEqual(graph["description"], "The repo machine.")
+        graph = library_graph("sweep", repo_dir=self.repo, user_dir=self.user)
+        self.assertEqual(graph["mermaid"], spec_to_mermaid(machine))
+
+    def test_library_graph_serves_user_machines_the_repo_lacks(self) -> None:
+        machine = {"nodes": [{"id": "a", "subagent": {"prompt": "P."}}]}
+        self.store(self.user, "mine", "The user machine.", machine)
+        graph = library_graph("mine", repo_dir=self.repo, user_dir=self.user)
+        self.assertEqual(graph["description"], "The user machine.")
+        self.assertTrue(graph["mermaid"].startswith("flowchart TB\n"))
+
+    def test_library_graph_names_the_library_for_an_unknown_machine(self) -> None:
+        with self.assertRaises(MachineResolutionError) as raised:
+            library_graph("missing", repo_dir=self.repo, user_dir=self.user)
+        self.assertFalse(raised.exception.broken)
+        self.assertIn("unknown machine 'missing'", str(raised.exception))
+        self.assertIn("machines: none", str(raised.exception))
+
+    def test_library_graph_reports_a_broken_machine_as_broken(self) -> None:
+        broken = self.user / "broken" / "MACHINE.md"
+        broken.parent.mkdir(parents=True, exist_ok=True)
+        broken.write_text(
+            "---\nname: broken\n---\n\n```machine-spec\n{}\n```\n", encoding="utf-8"
+        )
+        with self.assertRaises(MachineResolutionError) as raised:
+            library_graph("broken", repo_dir=self.repo, user_dir=self.user)
+        self.assertTrue(raised.exception.broken)
+        self.assertIn("frontmatter description is required", str(raised.exception))
+
+    def test_library_graph_rejects_an_invalid_name_before_scanning(self) -> None:
+        with self.assertRaises(ValueError) as raised:
+            library_graph("Not A Name", repo_dir=self.repo, user_dir=self.user)
+        self.assertIn("machine name contains invalid characters", str(raised.exception))
+
 
 
 class ExportMachineTest(unittest.TestCase):
