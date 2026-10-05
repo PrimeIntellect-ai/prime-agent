@@ -19,8 +19,9 @@ use std::path::Path;
 use std::pin::Pin;
 
 use pa_ai::oauth::{
-    login_anthropic, login_github_copilot, login_xai, OAuthLoginUi, OAuthPrompt, ProviderHttp,
-    ANTHROPIC_LOGIN_CANCELLED, COPILOT_LOGIN_CANCELLED, XAI_LOGIN_CANCELLED,
+    login_anthropic, login_github_copilot, login_xai, AnthropicCredentials, OAuthLoginUi,
+    OAuthPrompt, ProviderHttp, ANTHROPIC_LOGIN_CANCELLED, COPILOT_LOGIN_CANCELLED,
+    XAI_LOGIN_CANCELLED,
 };
 use pa_core::auth::{
     AuthCredential, AuthStorage, ANTHROPIC_PROVIDER_ID, GITHUB_COPILOT_PROVIDER_ID, XAI_PROVIDER_ID,
@@ -147,6 +148,16 @@ pub(crate) async fn run_anthropic_login(
     if ui.is_cancelled() {
         return ProviderAuthOutcome::Cancelled;
     }
+    store_anthropic_login(agent_dir, provider_name, credentials)
+}
+
+/// TS `completeProviderAuthentication` for Anthropic: store the
+/// credential under the provider id and report the TS status.
+fn store_anthropic_login(
+    agent_dir: &Path,
+    provider_name: &str,
+    credentials: AnthropicCredentials,
+) -> ProviderAuthOutcome {
     let mut auth = AuthStorage::create(agent_dir);
     auth.set(
         ANTHROPIC_PROVIDER_ID,
@@ -329,37 +340,22 @@ mod tests {
         }
     }
 
-    /// One scripted prompt answer: a value (blank included — TS
-    /// `allowEmpty`'s blank entry) or a cancel.
-    enum Answer {
-        Value(String),
-        Cancel,
-    }
-
-    /// A scripted surface: the prompt answer, the manual paste, and a
-    /// shared cancel flag.
+    /// A scripted surface: the prompt answer and a shared cancel flag.
     struct ScriptedUi {
-        prompt: Answer,
-        manual: Option<String>,
+        prompt: String,
         cancelled: Arc<AtomicBool>,
     }
 
     impl ScriptedUi {
         fn new() -> Self {
             ScriptedUi {
-                prompt: Answer::Value(String::new()),
-                manual: None,
+                prompt: String::new(),
                 cancelled: Arc::new(AtomicBool::new(false)),
             }
         }
 
         fn prompt(mut self, answer: &str) -> Self {
-            self.prompt = Answer::Value(answer.to_string());
-            self
-        }
-
-        fn cancelled_prompt(mut self) -> Self {
-            self.prompt = Answer::Cancel;
+            self.prompt = answer.to_string();
             self
         }
 
@@ -375,11 +371,7 @@ mod tests {
             &self,
             _prompt: &OAuthPrompt,
         ) -> Pin<Box<dyn Future<Output = Option<String>> + Send + '_>> {
-            let answer = match &self.prompt {
-                Answer::Value(value) => Some(value.clone()),
-                Answer::Cancel => None,
-            };
-            Box::pin(std::future::ready(answer))
+            Box::pin(std::future::ready(Some(self.prompt.clone())))
         }
 
         fn on_progress(&self, _message: &str) {}
@@ -387,9 +379,7 @@ mod tests {
         fn on_manual_code_input(
             &self,
         ) -> Option<Pin<Box<dyn Future<Output = Option<String>> + Send + '_>>> {
-            self.manual
-                .as_ref()
-                .map(|answer| Box::pin(std::future::ready(Some(answer.clone()))) as _)
+            None
         }
 
         fn is_cancelled(&self) -> bool {
@@ -524,27 +514,18 @@ mod tests {
         assert_eq!(auth.get_api_key("xai"), Some("grok-access".to_string()));
     }
 
-    /// The Anthropic login's run: the flow binds its registered callback
-    /// port. Skip when another process holds the port — the flow-level
-    /// tests cover the race; this test covers the store's wire shape.
-    #[tokio::test]
-    async fn the_anthropic_login_stores_the_credential_and_reports_the_ts_status() {
-        let Ok(probe) = std::net::TcpListener::bind(("127.0.0.1", 53_692)) else {
-            return; // the registered port is busy: this run cannot stage it.
-        };
-        drop(probe);
+    /// The Anthropic login's store step: the credential's wire shape
+    /// under the provider id (the flow is covered in pa-ai).
+    #[test]
+    fn the_anthropic_login_stores_the_credential_and_reports_the_ts_status() {
         let dir = tempfile::tempdir().expect("temp dir");
         let agent = agent_dir(&dir);
-        let http = ScriptedHttp::new().queue(
-            "https://platform.claude.com/v1/oauth/token",
-            vec![ScriptedHttp::entry(
-                200,
-                r#"{"access_token":"anthropic-access","refresh_token":"anthropic-refresh","expires_in":3600}"#,
-            )],
-        );
-        let mut ui = ScriptedUi::new().cancelled_prompt();
-        ui.manual = Some("http://localhost:53692/callback?code=anthropic-code".to_string());
-        match run_anthropic_login(&agent, "Anthropic (Claude Pro/Max)", &http, &ui).await {
+        let credentials = AnthropicCredentials {
+            access: "anthropic-access".to_string(),
+            refresh: "anthropic-refresh".to_string(),
+            expires: 4_000_000_000_000,
+        };
+        match store_anthropic_login(&agent, "Anthropic (Claude Pro/Max)", credentials) {
             ProviderAuthOutcome::Status(message) => {
                 assert_eq!(
                     message,
