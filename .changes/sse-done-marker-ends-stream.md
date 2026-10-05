@@ -1,0 +1,1 @@
+- openai-completions streams no longer hang forever when a server keeps the response body open past the `data: [DONE]` marker (a persistent SSE channel with no content length, chunked terminator, or half-close): the stream now ends at the marker like the TypeScript SDK, so the turn runs its tool call instead of waiting silently for an EOF that never comes.
