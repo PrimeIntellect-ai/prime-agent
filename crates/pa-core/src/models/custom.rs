@@ -285,7 +285,9 @@ fn compat_from_value(value: Option<&serde_json::Value>) -> Option<ModelCompat> {
 /// Compat merge: override fields win; nested routing objects merge.
 #[must_use]
 pub fn merge_compat(base: Option<&ModelCompat>, over: Option<ModelCompat>) -> Option<ModelCompat> {
-    let over = over?;
+    let Some(over) = over else {
+        return base.cloned();
+    };
     let mut merged = base.map(|compat| compat.raw.clone()).unwrap_or_default();
     for (key, value) in over.raw {
         // Routing sub-objects merge instead of replacing.
@@ -426,7 +428,10 @@ pub fn load_custom_models(
                 .or_else(|| provider_config.base_url.clone())
                 .or_else(|| defaults.as_ref().map(|(_, url)| url.clone()));
             let Some(base_url) = base_url else { continue };
-            let compat = merge_compat(None, compat_from_value(provider_config.compat.as_ref()));
+            let compat = merge_compat(
+                compat_from_value(provider_config.compat.as_ref()).as_ref(),
+                compat_from_value(model_def.compat.as_ref()),
+            );
             result.models.push(Model {
                 id: model_def.id.clone(),
                 name: model_def
@@ -540,6 +545,58 @@ mod tests {
         assert_eq!(
             map.get(&pa_types::ai::ModelThinkingLevel::Xhigh),
             Some(&Some("xhigh".to_string()))
+        );
+    }
+
+    /// TS `mergeCompat(providerConfig.compat, modelDef.compat)`: a custom
+    /// model's own compat (e.g. `cacheControlFormat`) layers over the
+    /// provider's; dropping it silently disabled Anthropic prompt caching
+    /// on OpenAI-compatible proxies.
+    #[test]
+    fn custom_model_compat_merges_over_provider_compat() {
+        let config = |provider_compat: &str| {
+            format!(
+                r#"{{ "providers": {{ "proxy": {{
+                    "baseUrl": "http://127.0.0.1:9",
+                    "apiKey": "sk-local",
+                    "api": "openai-completions",
+                    {provider_compat}
+                    "models": [
+                        {{ "id": "claude", "compat": {{ "cacheControlFormat": "anthropic" }} }},
+                        {{ "id": "plain" }}
+                    ]
+                }} }} }}"#
+            )
+        };
+        let compat_of = |content: &str| {
+            let result = load_custom_models(content, &|_| false, &|_| None);
+            assert!(result.error.is_none());
+            result
+                .models
+                .into_iter()
+                .map(|model| {
+                    model
+                        .compat
+                        .map(|compat| serde_json::Value::Object(compat.raw))
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            compat_of(&config("")),
+            vec![
+                Some(serde_json::json!({ "cacheControlFormat": "anthropic" })),
+                None
+            ]
+        );
+        assert_eq!(
+            compat_of(&config(r#""compat": { "supportsStore": false },"#)),
+            vec![
+                Some(serde_json::json!({
+                    "supportsStore": false,
+                    "cacheControlFormat": "anthropic"
+                })),
+                Some(serde_json::json!({ "supportsStore": false })),
+            ]
         );
     }
 
