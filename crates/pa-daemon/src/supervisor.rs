@@ -472,6 +472,10 @@ impl Supervisor {
         // awaits this task (spec §6 step 2's create-or-adopt order: kept
         // workers relaunch from their descriptors first, the roster covers
         // the rest).
+        // The adopt pass's completion signal: the passive-catalog warmup
+        // waits on it (see below) while the restore pass keeps awaiting
+        // the task handle itself.
+        let (adoption_tx, adoption_signal) = tokio::sync::watch::channel(false);
         let adoption = {
             let supervisor = Arc::clone(&self);
             let boot = match roster.as_ref() {
@@ -488,12 +492,37 @@ impl Supervisor {
             };
             tokio::spawn(async move {
                 supervisor.adopt_persisted_workers(boot).await;
+                let _ = adoption_tx.send(true);
             })
         };
         {
             let supervisor = Arc::clone(&self);
             tokio::spawn(async move {
                 crate::update_restore::restore_pass(&supervisor, adoption, roster).await;
+            });
+        }
+
+        // Warm the passive scheduled-jobs snapshot (the input-latency
+        // lane): the first selector-less `heartbeats_list`/`cron_list`
+        // after boot would otherwise scan the whole session-artifacts tree
+        // inline while the interactive client's open waits on it. The scan
+        // waits out the boot's adopt pass first (the pre-bar review's
+        // race finding): the scan's live-worker filter consults the
+        // registry, so a scan that raced the adopt pass would cache the
+        // just-adopted worker's artifacts as a passive row and serve the
+        // stale row for the snapshot's whole refresh window — adoption
+        // never invalidates the catalog. After the signal (a plain
+        // startup's adopt pass is ms-scale) the scan still lands well
+        // before the first client read; every invalidation and refresh
+        // rule is unchanged. The signal is fail-open: an adopt pass that
+        // died without signaling still warms (a degraded boot keeps the
+        // pre-warmup cold-read behavior, never a colder one).
+        {
+            let supervisor = Arc::clone(&self);
+            let mut adopted = adoption_signal;
+            tokio::spawn(async move {
+                Supervisor::wait_for_adoption_signal(&mut adopted).await;
+                supervisor.spawn_passive_catalog_warmup();
             });
         }
 
