@@ -18,6 +18,7 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::Duration;
 
 /// Minimum staleness threshold, like proper-lockfile's floor.
@@ -260,14 +261,25 @@ mod win32 {
 
 /// An exclusive cross-process lock on `{path}.lock`, released on drop by
 /// removing the directory. The directory's ownership identity is captured
-/// at acquisition, so a long hold can re-check whose lock it still is
-/// (the TS sync lock's compromise rules).
+/// at acquisition - the inode (TS `guardIno`) and the mtime probe the
+/// acquisition itself wrote (proper-lockfile's remembered `lock.mtime`) -
+/// so a long hold can re-check whose lock it still is (the TS sync lock's
+/// compromise rules).
 #[derive(Debug)]
 pub struct LockDir {
     path: PathBuf,
     /// The lock directory's identity captured at acquisition (the inode;
     /// TS `guardIno`), `None` where the platform cannot observe it.
     owned: Option<u64>,
+    /// The (sec, nsec) mtime probe this guard last wrote (proper-lockfile's
+    /// `lock.mtime`: the updater records the exact value its `utimes` call
+    /// wrote, and its `isMtimeOurs` equality - a lock whose observed mtime
+    /// is not that value carries someone else's touch - is the mtime half
+    /// of ownership this port had dropped; the inode is the other half).
+    /// `None` where the platform has no probe. Behind a mutex because the
+    /// refresher thread (the TS update timer) records each tick while the
+    /// guarded release reads the record.
+    owned_mtime: Mutex<Option<(i64, i64)>>,
 }
 
 impl LockDir {
@@ -309,7 +321,7 @@ impl LockDir {
         let path = path.to_path_buf();
         let stale_after = stale_after.max(MIN_STALE);
         match Self::create(&path) {
-            Ok(()) => Ok(Self::acquired(path)),
+            Ok(probe) => Self::acquired(path, probe),
             // Only an existing path is a lock collision; any other failure
             // (missing parent, permissions) is a real error, like the TS
             // protocol's non-EEXIST path - never masked as contention.
@@ -318,7 +330,7 @@ impl LockDir {
                 // The judge path removed (or raced away) the incumbent: one
                 // fresh attempt; a reappearing rival is contention.
                 match Self::create(&path) {
-                    Ok(()) => Ok(Self::acquired(path)),
+                    Ok(probe) => Self::acquired(path, probe),
                     Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                         Err(io::Error::new(
                             io::ErrorKind::WouldBlock,
@@ -335,12 +347,45 @@ impl LockDir {
     /// The guard bound to the lock directory it just created: the
     /// ownership identity captured right after the mkdir is the one a
     /// refresh or a guarded release re-checks (TS captures `guardIno` the
-    /// same way, right after acquisition).
-    fn acquired(path: PathBuf) -> Self {
-        LockDir {
-            owned: Self::ownership_id(&path),
-            path,
+    /// same way, right after acquisition). The freshly stat'ed mtime must
+    /// be the probe `create` just wrote: a suspension between the mkdir
+    /// and this stat lets the fresh lock age past the staleness
+    /// threshold, and a successor's rmdir+mkdir swaps in a replacement
+    /// carrying the successor's OWN probe - adopting that directory would
+    /// make this guard refresh and release the successor's lock. A
+    /// mismatch is the same WOULDBLOCK-style contention `judge_and_reclaim`
+    /// reports for a fresh rival (the caller ladders retry on it), never a
+    /// silent success on a foreign directory.
+    ///
+    /// The comparison is exact equality on the (sec, nsec) pair, no
+    /// tolerance: the probe writes the pair verbatim through
+    /// `utimensat`/`SetFileTime`, the stat round trip preserves it
+    /// (`mtime_matches_the_proper_lockfile_probe_shape` pins the shape),
+    /// and proper-lockfile's `isMtimeOurs` is the same exact `getTime()`
+    /// compare. Verified only where the inode is observable: an
+    /// unstat'able directory keeps the TS `guardIno === undefined`
+    /// convention (timer-driven detection only), and a platform without a
+    /// probe has no value to compare.
+    fn acquired(path: PathBuf, probe: Option<(i64, i64)>) -> io::Result<Self> {
+        let owned = Self::ownership_id(&path);
+        let adopted = match (owned, probe) {
+            // Both identity halves observable: the directory at the path
+            // must carry the probe this process just wrote.
+            (Some(_), Some(probe)) => Self::observed_mtime(&path) == Some(probe),
+            // No identity half to verify: adoption as before.
+            (None, _) | (_, None) => true,
+        };
+        if !adopted {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                format!("Lock file is already being held: {}", path.display()),
+            ));
         }
+        Ok(LockDir {
+            owned,
+            owned_mtime: Mutex::new(probe),
+            path,
+        })
     }
 
     /// The lock directory's ownership identity (TS `guardIno`): the inode
@@ -376,9 +421,26 @@ impl LockDir {
         None
     }
 
+    /// The lock directory's observed mtime as the (sec, nsec) pair the
+    /// probe writes - the half of the ownership identity proper-lockfile's
+    /// updater runs its `isMtimeOurs` equality against (the value a
+    /// successor's own probe overwrites). `None` when the directory cannot
+    /// be stat'ed - the TS `catch` arm.
+    fn observed_mtime(path: &Path) -> Option<(i64, i64)> {
+        let modified = fs::symlink_metadata(path).ok()?.modified().ok()?;
+        let since_epoch = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
+        Some((
+            since_epoch.as_secs() as i64,
+            i64::from(since_epoch.subsec_nanos()),
+        ))
+    }
+
     /// The mkdir is the acquisition signal: EEXIST is the only collision.
+    /// Returns the probe the write stamped - the mtime half of the
+    /// acquisition identity (proper-lockfile's probe hands its `stat.mtime`
+    /// back to the lock object the same way).
     #[cfg(unix)]
-    fn create(path: &Path) -> io::Result<()> {
+    fn create(path: &Path) -> io::Result<Option<(i64, i64)>> {
         fs::create_dir(path)?;
         let (sec, nanos) = probe_mtime();
         if let Err(error) = set_mtime(path, sec, nanos) {
@@ -386,14 +448,14 @@ impl LockDir {
             let _ = fs::remove_dir(path);
             return Err(error);
         }
-        Ok(())
+        Ok(Some((sec, nanos)))
     }
 
     /// The mkdir is the acquisition signal; the mtime probe makes the
     /// staleness judgment meaningful on NTFS too (directory mtimes would
     /// otherwise sit on the second, and stale takeovers would misjudge).
     #[cfg(windows)]
-    fn create(path: &Path) -> io::Result<()> {
+    fn create(path: &Path) -> io::Result<Option<(i64, i64)>> {
         fs::create_dir(path)?;
         let (sec, nanos) = probe_mtime();
         if let Err(error) = set_mtime(path, sec, nanos) {
@@ -401,14 +463,15 @@ impl LockDir {
             let _ = fs::remove_dir(path);
             return Err(error);
         }
-        Ok(())
+        Ok(Some((sec, nanos)))
     }
 
     #[cfg(not(any(unix, windows)))]
-    fn create(path: &Path) -> io::Result<()> {
+    fn create(path: &Path) -> io::Result<Option<(i64, i64)>> {
         // No mtime probe on this platform: staleness is judged from the
         // filesystem's own directory mtime.
-        fs::create_dir(path)
+        fs::create_dir(path)?;
+        Ok(None)
     }
 
     /// Decide the fate of an incumbent at `path`. Returns only when the
@@ -514,31 +577,71 @@ impl LockDir {
     /// error proper-lockfile reports to `onCompromised` (which also stops
     /// the updater; the caller treats the hold as over).
     ///
+    /// The check and the write are two steps, so the tick closes on a
+    /// re-stat: the probe is recorded (proper-lockfile's `lock.mtime =
+    /// mtime`, the exact value the `utimes` call wrote) and then BOTH
+    /// identity halves must show it - the inode still the acquired one,
+    /// the observed mtime exactly the recorded probe (the `isMtimeOurs`
+    /// equality, exact, no tolerance). A takeover between the check and
+    /// the write redirects the write onto the successor's fresh
+    /// directory, and the post-write re-stat is what catches that before
+    /// a success is reported.
+    ///
     /// # Errors
     ///
     /// Returns an error when the lock directory changed hands (or cannot
-    /// be stat'ed) and when the mtime probe write fails.
+    /// be stat'ed), when the lock no longer carries the probe this guard
+    /// wrote, and when the mtime probe write fails.
+    ///
+    /// # Panics
+    ///
+    /// Panics only on a poisoned `owned_mtime` mutex - a sibling already
+    /// panicked while holding the lock's record.
     pub fn refresh(&self) -> io::Result<()> {
         if self.is_stolen() {
             return Err(io::Error::other("the lock directory changed hands"));
         }
-        Self::reprobe_mtime(&self.path)
+        let probe = Self::reprobe_mtime(&self.path)?;
+        *self.owned_mtime.lock().unwrap() = probe;
+        self.assert_probe_landed(probe)
+    }
+
+    /// The post-write half of a tick: the probe write must have landed on
+    /// the lock directory this guard acquired and left the mtime this
+    /// guard wrote. proper-lockfile reports its updater failures to
+    /// `onCompromised` and stops the timer; the successor's replacement -
+    /// a rmdir+mkdir between the ownership check and the probe write -
+    /// carries a foreign inode and its own probe, and either half
+    /// reporting foreign is the compromise (the caller latches it).
+    fn assert_probe_landed(&self, probe: Option<(i64, i64)>) -> io::Result<()> {
+        if self.is_stolen() {
+            return Err(io::Error::other("the lock directory changed hands"));
+        }
+        if probe.is_some_and(|probe| Self::observed_mtime(&self.path) != Some(probe)) {
+            return Err(io::Error::other(
+                "the lock's mtime is not the one this guard wrote",
+            ));
+        }
+        Ok(())
     }
 
     /// The acquisition probe re-run - the same ceil-plus-5 ms shape, so
     /// the staleness judgment keeps its meaning (see `create`'s platform
-    /// split).
+    /// split). Returns the probe the write stamped, the value the tick
+    /// records and re-stats against (proper-lockfile's updater remembers
+    /// the exact `utimes` mtime the same way).
     #[cfg(any(unix, windows))]
-    fn reprobe_mtime(path: &Path) -> io::Result<()> {
+    fn reprobe_mtime(path: &Path) -> io::Result<Option<(i64, i64)>> {
         let (sec, nanos) = probe_mtime();
-        set_mtime(path, sec, nanos)
+        set_mtime(path, sec, nanos)?;
+        Ok(Some((sec, nanos)))
     }
 
     /// No mtime probe on this platform (see `create`): staleness rides the
     /// directory's own mtime.
     #[cfg(not(any(unix, windows)))]
-    fn reprobe_mtime(_path: &Path) -> io::Result<()> {
-        Ok(())
+    fn reprobe_mtime(_path: &Path) -> io::Result<Option<(i64, i64)>> {
+        Ok(None)
     }
 
     /// Release only when the lock directory is still the one this guard
@@ -548,12 +651,33 @@ impl LockDir {
     /// cleans itself up"). An unobservable identity releases like the plain
     /// drop (TS's `guardStolen()` is false for `guardIno === undefined`).
     ///
+    /// The inode check and the rmdir are two steps, so the removal is
+    /// bound to BOTH identity halves: the lock's observed mtime must also
+    /// be the last probe this guard wrote (the `isMtimeOurs` rule that a
+    /// lock is ours only while it carries the mtime we wrote, applied at
+    /// the removal; a platform without a probe has no mtime half to
+    /// verify, the same unobservable-identity fallback). A successor that
+    /// reclaims the stale lock between the check and the rmdir leaves a
+    /// fresh directory whose mtime is its OWN probe - foreign to the
+    /// record - so the removal is refused and the successor's lock leaks
+    /// like the stolen case, for its staleness sweep to reclaim.
+    ///
     /// Consuming: [`Drop`] would run the plain release afterwards, and a
     /// successor may already hold a fresh lock at the path the guarded
     /// removal vacated - the double release could delete it - so the guard
     /// is forgotten once its guarded removal ran.
+    ///
+    /// # Panics
+    ///
+    /// Panics only on a poisoned `owned_mtime` mutex - a sibling already
+    /// panicked while holding the lock's record.
     pub fn release_when_owned(self) {
-        if !self.is_stolen() {
+        let mtime_ours = self
+            .owned_mtime
+            .lock()
+            .unwrap()
+            .is_none_or(|probe| Self::observed_mtime(&self.path) == Some(probe));
+        if !self.is_stolen() && mtime_ours {
             self.release();
         }
         std::mem::forget(self);
@@ -756,6 +880,126 @@ mod tests {
         assert!(
             path.is_dir(),
             "the guarded release never deletes the successor's lock"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn adoption_refuses_a_directory_with_a_foreign_probe() {
+        // The review bot's suspension window at the acquisition (the probe
+        // write and the ownership stat are two steps; a suspended holder
+        // resumes looking at a successor's replacement), forced at its
+        // aftermath: `create` wrote our probe, and the directory the
+        // adoption then stats is the successor's - rmdir+mkdir with a
+        // fresh allocation, carrying the successor's OWN probe. The
+        // adoption must refuse it as contention (the ladders' retry
+        // signal), never record the successor's inode as owned.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json.lock");
+        let probe = LockDir::create(&path).unwrap().expect("the unix probe");
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::create_dir(dir.path().join("successor-bumper")).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        // The successor's own probe: a fresh ceil-second value, foreign to
+        // ours by the exact-equality compare.
+        set_mtime(&path, 123, 456).unwrap();
+        let error = LockDir::acquired(path.clone(), Some(probe))
+            .expect_err("a directory with a foreign probe is never adopted");
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock,
+            "the refusal is the contention every acquire ladder retries on"
+        );
+        assert!(
+            std::fs::metadata(&path).unwrap().is_dir(),
+            "the successor's lock survives the refused adoption"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn refresh_catches_a_takeover_between_the_check_and_the_write() {
+        // The review bot's refresh window: the ownership check and the
+        // probe write are two steps, so a takeover between them lands the
+        // write on the successor's fresh directory - the tick's post-write
+        // re-stat is what must report it, not the pre-write check. The
+        // first tick pins the happy path; the window is then forced with
+        // the tick's own steps (write, record) before the takeover.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("auth.json");
+        std::fs::write(&file, "{}").unwrap();
+        let guard = LockDir::acquire(&file, MIN_STALE).unwrap();
+        guard
+            .refresh()
+            .expect("the first tick lands on the owned lock");
+        let path = lock_of(&file);
+        let probe = LockDir::reprobe_mtime(&path)
+            .unwrap()
+            .expect("the unix probe");
+        *guard.owned_mtime.lock().unwrap() = Some(probe);
+        // The takeover between the tick's write and its re-stat:
+        // rmdir+mkdir (the bumper pins the thief to a fresh inode).
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::create_dir(dir.path().join("thief-bumper")).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let error = guard
+            .assert_probe_landed(Some(probe))
+            .expect_err("the re-stat catches the successor's directory");
+        assert_eq!(error.to_string(), "the lock directory changed hands");
+        // End to end: once stolen, no tick ever reports a fresh hold.
+        let error = guard
+            .refresh()
+            .expect_err("a stolen lock is never refreshed");
+        assert_eq!(error.to_string(), "the lock directory changed hands");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn refresh_reports_a_rival_touch_between_the_write_and_the_restat() {
+        // The same window's other landing: the probe write stayed on our
+        // own directory, but a rival's touch overwrote the mtime before
+        // the re-stat - the inode still ours, the mtime no longer the one
+        // this guard just wrote (the `isMtimeOurs` failure proper-lockfile
+        // reports to `onCompromised`).
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        std::fs::write(&file, "{}").unwrap();
+        let guard = LockDir::acquire(&file, MIN_STALE).unwrap();
+        let path = lock_of(&file);
+        let probe = LockDir::reprobe_mtime(&path)
+            .unwrap()
+            .expect("the unix probe");
+        set_mtime(&path, 123, 456).unwrap();
+        let error = guard
+            .assert_probe_landed(Some(probe))
+            .expect_err("a foreign mtime is never a fresh hold");
+        assert_eq!(
+            error.to_string(),
+            "the lock's mtime is not the one this guard wrote"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn release_when_owned_refuses_a_foreign_mtime() {
+        // The review bot's release TOCTOU forced at its observable: a
+        // successor that reclaims between the inode check and the rmdir
+        // leaves a fresh lock whose mtime is its own probe - foreign to
+        // the record this guard keeps. The removal is bound to the last
+        // probe this guard wrote, so it refuses and the artifact leaks
+        // for the successor's staleness sweep, exactly like the stolen
+        // case.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("auth.json");
+        std::fs::write(&file, "{}").unwrap();
+        let guard = LockDir::acquire(&file, MIN_STALE).unwrap();
+        // The rival's touch on our very directory: the inode still ours,
+        // the mtime not the one this guard wrote.
+        set_mtime(&lock_of(&file), 123, 456).unwrap();
+        guard.release_when_owned();
+        assert!(
+            lock_of(&file).is_dir(),
+            "a foreign mtime is never ours to remove"
         );
     }
 }
