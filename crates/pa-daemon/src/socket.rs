@@ -222,9 +222,19 @@ pub fn cleanup_socket_path(path: &Path, expected_identity: Option<SocketIdentity
 /// after definite refusal may the existing cleanup lock and identity gate
 /// unlink the stale, still-ours socket. TS cleanup checks identity alone,
 /// so the poisoned-capture case remains a disclosed TS difference.
+///
+/// A caller without a captured identity never unlinks: `None` skips
+/// `cleanup_socket_path`'s inode gate, so a replacement that binds the
+/// path between this probe and that remove would lose its live file to
+/// an identity-less unlink. An exit before the capture (a registration
+/// refusal inside the bind->capture window) fails closed and leaves the
+/// file to the next bind's stale-socket prepare.
 #[cfg(unix)]
 pub fn cleanup_socket_path_after_close(path: &Path, expected_identity: Option<SocketIdentity>) {
-    if !path.exists() || !pa_types::platform::transport::unix_listener_definitely_closed(path) {
+    if expected_identity.is_none()
+        || !path.exists()
+        || !pa_types::platform::transport::unix_listener_definitely_closed(path)
+    {
         return;
     }
     cleanup_socket_path(path, expected_identity);
@@ -395,11 +405,47 @@ mod tests {
         );
         assert!(can_connect(&socket, Duration::from_millis(250)).await);
         drop(successor);
-        // The same matching identity now describes a dead file: the
-        // probe passes it through and the gate unlinks it.
-        cleanup_socket_path_after_close(&socket, Some(poisoned));
-        assert!(!socket.exists(), "the dead still-ours file is unlinked");
         std::fs::remove_file(&aside).unwrap();
+    }
+
+    /// The still-ours direction of the close cleanup: the matching
+    /// identity now describes a dead file the probe passed as definitely
+    /// closed. Linux-only because `unix_listener_definitely_closed` only
+    /// rules `ECONNREFUSED` definitive there (a saturated BSD/macOS
+    /// backlog also refuses, so those platforms never reach this arm).
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn exit_cleanup_after_close_unlinks_the_dead_still_ours_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let socket = dir.path().join("daemon.sock");
+        let owner = bind_transport(&socket).await.unwrap();
+        let identity = socket_identity(&socket).unwrap();
+        drop(owner);
+        cleanup_socket_path_after_close(&socket, Some(identity));
+        assert!(!socket.exists(), "the dead still-ours file is unlinked");
+    }
+
+    /// Off Linux the refused probe is ambiguous (a saturated backlog
+    /// also refuses), so the close cleanup preserves the dead still-ours
+    /// file; the next bind's stale-socket prepare clears it instead.
+    #[cfg(not(target_os = "linux"))]
+    #[tokio::test]
+    async fn exit_cleanup_off_linux_preserves_the_dead_file_until_the_next_bind() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let socket = dir.path().join("daemon.sock");
+        let owner = bind_transport(&socket).await.unwrap();
+        let identity = socket_identity(&socket).unwrap();
+        drop(owner);
+        cleanup_socket_path_after_close(&socket, Some(identity));
+        assert!(
+            socket.exists(),
+            "off Linux the close cleanup never claims a dead file from the probe alone"
+        );
+        prepare_socket_path(&socket).await.unwrap();
+        assert!(
+            !socket.exists(),
+            "the next bind's stale-socket prepare clears the preserved dead file"
+        );
     }
 
     /// A full accept queue is not proof of a dead listener: the successor's
