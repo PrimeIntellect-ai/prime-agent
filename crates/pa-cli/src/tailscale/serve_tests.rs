@@ -5,6 +5,8 @@ use super::super::serve::run_serve_to;
 use super::super::*;
 use super::*;
 
+use pa_tui::ansi::strip_ansi;
+
 #[tokio::test]
 async fn serve_refuses_ports_outside_the_valid_range_before_anything_else() {
     let shim = Shim::write(ONLINE, &serve_status_for(3000));
@@ -234,9 +236,17 @@ async fn serve_uses_a_real_suffix_instead_of_advertising_a_trailing_dot_host() {
     // 1 through one of the failure branches, and the printed branch is the
     // diagnosis the CI log needs (the exit code alone says nothing).
     assert_eq!(code, 0, "serve must succeed: {text}");
+    // `green()` follows chalk's auto-detection of the real process stdout,
+    // not this buffer: a `cargo test -- --nocapture` run in a terminal (any
+    // harness whose stdout is a live TTY during the test body) wraps the
+    // reachability line in ANSI, and the reset code then sits between the
+    // host and the newline. Pin the advertised host on the de-ANSI'd copy
+    // so both checks hold piped and on a TTY; the raw text keeps riding the
+    // diagnostics above.
+    let plain = strip_ansi(&text);
     assert!(
-        text.contains("Now reachable on your tailnet as milk.tailnet.ts.net\n"),
+        plain.contains("Now reachable on your tailnet as milk.tailnet.ts.net\n"),
         "{text}"
     );
-    assert!(!text.contains("milk.\n"), "{text}");
+    assert!(!plain.contains("milk.\n"), "{text}");
 }
