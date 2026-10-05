@@ -651,6 +651,29 @@ impl LockDir {
                 ));
             }
         }
+        // The occupant CLAIM, held through the capture (the `_claim`
+        // binding keeps its fd open until this reclaim returns): an
+        // exclusive flock on the incumbent itself, taken on the path's
+        // CURRENT directory. A live rust holder that raced onto the path
+        // since the gate blocks the claim (contention - the capture never
+        // touches a live lock), and while the claim is held no rust actor
+        // can replace the incumbent (every rust takeover gates on this
+        // flock), so the park below captures exactly the directory the
+        // claim verified.
+        #[cfg(unix)]
+        let _claim = match Self::claim_fd(path) {
+            Ok(claim) => claim,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    format!("Lock file is already being held: {}", path.display()),
+                ));
+            }
+            // The incumbent vanished (a racing release or takeover):
+            // retry the create.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
         // The stale candidate: the atomic capture - whatever the path
         // holds goes to the park, and every check runs ON THE PARKED NAME,
         // where no other process can swap the directory between a check
@@ -781,6 +804,31 @@ impl LockDir {
                 Err(error) => Err(error),
             }
         }
+    }
+
+    /// The occupant claim for a stale takeover (unix): an exclusive
+    /// non-blocking `flock` on the incumbent directory, taken on the
+    /// path's CURRENT occupant and held (the returned fd) through the
+    /// capture. `WouldBlock` means a live witness-holder owns the
+    /// occupant (or another reclaim's claim is already on it) - plain
+    /// contention; `NotFound` means the occupant vanished. The fd is
+    /// the claim's lifetime: dropped when the reclaim returns.
+    #[cfg(unix)]
+    fn claim_fd(path: &Path) -> io::Result<Option<std::os::fd::OwnedFd>> {
+        use std::os::fd::AsRawFd;
+        let dir = fs::File::open(path)?;
+        let held = unsafe { libc::flock(dir.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if held != 0 {
+            let error = io::Error::last_os_error();
+            return Err(match error.kind() {
+                io::ErrorKind::WouldBlock => io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    format!("Lock file is already being held: {}", path.display()),
+                ),
+                _ => error,
+            });
+        }
+        Ok(Some(dir.into()))
     }
 
     /// True while another process holds the live-holder `flock` witness on
