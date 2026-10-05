@@ -1,14 +1,16 @@
 # install.ps1 — the Windows-native installer for Prime Agent (Rust build).
 #
-# THE ONE-LINER (the served copy carries the official domain + the stable
-# channel rendered in by the release pipeline's publish step):
-#
-#   irm https://app.primeintellect.ai/prime-agent/install.ps1 | iex
-#
-# The repo copy's defaults are the same bucket-root base, so the raw form
-# works out of the box too (the README's Windows command):
+# THE ONE-LINER (the repo copy's defaults are the channel's own bucket-root
+# base + the stable channel, so the raw form works out of the box — the
+# README's Windows command):
 #
 #   irm https://raw.githubusercontent.com/PrimeIntellect-ai/prime-agent/main/install.ps1 | iex
+#
+# The release pipeline's publish step renders this file to <base>/install.ps1
+# (the stable channel) and <base>/install-beta.ps1 (the beta channel), the
+# build's download base + channel stamped in; the official domain
+# (https://app.primeintellect.ai/prime-agent/install.ps1) serves it once its
+# prefix carries the channel objects.
 #
 # The Git Bash route is the same channel through install-rust.sh (the sh
 # one-liner `curl -fsSL .../install.sh | sh` under Git Bash/MSYS2/Cygwin);

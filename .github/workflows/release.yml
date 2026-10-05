@@ -998,10 +998,24 @@ jobs:
                   --endpoint-url "$R2_ENDPOINT_URL" \
                   --content-type text/plain \
                   --cache-control no-cache
-                # The stable installers (install.sh / install.ps1) move ONLY
-                # on a stable release — a beta cut never touches the stable
-                # channel's surface (the TS version serves installs until the
-                # first Rust stable release replaces it).
+                # The Windows entry point (install.ps1, the stable render)
+                # publishes on the beta route too: the README's `irm | iex`
+                # one-liner is the Windows install's front door, and no Rust
+                # stable has been cut yet — a stable-only upload would leave
+                # the documented route a 404 through the entire beta era.
+                # The stable render is the honest channel default: the
+                # installer's Windows channel fallback resolves the stable
+                # channel's missing win32-x64 row to beta with a printed
+                # notice. install.sh alone stays stable-only: the bucket-root
+                # object the TS 0.9.8 funnel bootstraps through is the
+                # TypeScript product's own surface until the first Rust
+                # stable replaces it (and no TypeScript client ever shipped
+                # a Windows install).
+                render_installer_ps1 stable
+                aws s3 cp /tmp/install-stable.ps1 "s3://${R2_BUCKET}/install.ps1" \
+                  --endpoint-url "$R2_ENDPOINT_URL" \
+                  --content-type text/plain \
+                  --cache-control no-cache
                 echo "beta channel advanced to ${RELEASE_VERSION} at ${INSTALL_BASE_URL}"
               fi
             fi

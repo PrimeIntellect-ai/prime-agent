@@ -246,6 +246,19 @@ fn write_artifact(dir: &Path, target: &str) -> serde_json::Value {
     write_artifact_with(dir, target, &[])
 }
 
+/// Run one workflow step script in `cwd` with extra environment variables
+/// (the promote steps read the workflow's `env`; the emission step reads
+/// `RELEASE_VERSION`, the tag the release cut runs under).
+fn run_step_with_env(cwd: &Path, step: &Step, env: &[(&str, &str)]) -> Output {
+    let script = step.run.as_deref().expect("the step carries a run script");
+    let mut command = Command::new("bash");
+    command.arg("-c").arg(script).current_dir(cwd);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    command.output().expect("bash executes the step script")
+}
+
 fn write_artifact_with(dir: &Path, target: &str, extra_members: &[&str]) -> serde_json::Value {
     fs::create_dir_all(dir).expect("create the artifact directory");
     // The archive name the channel contract requires: the PLATFORM ALIAS,
@@ -270,6 +283,41 @@ fn write_artifact_with(dir: &Path, target: &str, extra_members: &[&str]) -> serd
         dir.join("manifest.json"),
         serde_json::to_string_pretty(&serde_json::json!({
             "version": format!("v{VERSION}"),
+            "binaries": [row],
+        }))
+        .expect("serialize the fixture manifest"),
+    )
+    .expect("write the fixture manifest");
+    row
+}
+
+/// One build-job artifact in `dir`, pinned to `version` (the consume route
+/// restamps the continuous artifacts to the beta tag's version, so a
+/// fixture tree must be able to carry any tag-shaped version).
+fn write_artifact_version(dir: &Path, target: &str, version: &str) -> serde_json::Value {
+    fs::create_dir_all(dir).expect("create the artifact directory");
+    // The archive name the channel contract requires: the PLATFORM ALIAS,
+    // never the target triple (the update reader drops a triple-named row).
+    let archive_name = format!("prime-agent-{version}-{}.tar.gz", platform_alias(target));
+    write_fixture_tarball(&dir.join(&archive_name), binary_name(target), &[]);
+    let sha256 = sha256_file(&dir.join(&archive_name));
+    fs::write(
+        dir.join("SHA256SUMS"),
+        format!("{sha256}  {archive_name}\n"),
+    )
+    .expect("write the checksum line");
+    let row = serde_json::json!({
+        "version": format!("v{version}"),
+        "platform": platform_alias(target),
+        "target": target,
+        "file": archive_name,
+        "sha256": sha256,
+        "executableSha256": "0".repeat(64),
+    });
+    fs::write(
+        dir.join("manifest.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "version": format!("v{version}"),
             "binaries": [row],
         }))
         .expect("serialize the fixture manifest"),
@@ -646,5 +694,253 @@ fn zero_artifacts_fail_loudly_instead_of_verifying_nothing() {
     assert!(
         output.contains("no build artifacts downloaded"),
         "the normalize gate must name the missing artifacts"
+    );
+}
+
+/// The Windows entry point (`install.ps1`, the stable render) must publish on
+/// the BETA route too, not only on stable cuts: the README's `irm | iex`
+/// one-liner is the Windows install's front door, and no Rust stable has
+/// been cut yet — a stable-only upload would leave the documented route a
+/// 404 through the entire beta era. The stable render is the honest channel
+/// default (the installer's Windows channel fallback resolves the stable
+/// channel's missing win32-x64 row to beta with a printed notice).
+/// `install.sh` alone stays the stable-only exception: the bucket-root object
+/// the TS 0.9.8 funnel bootstraps through is the TypeScript product's own
+/// surface until the first Rust stable replaces it, and no TypeScript client
+/// ever shipped a Windows install.
+#[test]
+fn the_beta_route_publishes_the_windows_entry_point() {
+    let text = fs::read_to_string(repo_root().join(".github/workflows/release.yml"))
+        .expect("read release.yml");
+    let workflow: Workflow = serde_yaml::from_str(&text).expect("release.yml parses as YAML");
+    let publish = workflow
+        .jobs
+        .get("promote")
+        .expect("the promote job exists")
+        .steps
+        .iter()
+        .find(|step| {
+            step.name.as_deref()
+                == Some("Publish the R2 channel (the user path never touches GitHub)")
+        })
+        .expect("the R2 publish step exists")
+        .run
+        .as_deref()
+        .expect("the publish runs a script");
+    // The route halves are delimited by their channel markers; each marker
+    // names its block exactly once in the publish script.
+    let beta_marker = "# THE BETA CHANNEL";
+    let stable_marker = "# THE STABLE CHANNEL";
+    let beta_start = publish
+        .find(beta_marker)
+        .expect("the publish names the beta channel block");
+    let stable_start = publish
+        .find(stable_marker)
+        .expect("the publish names the stable channel block");
+    let beta_block = &publish[beta_start..stable_start];
+    let stable_block = &publish[stable_start..];
+    assert!(
+        beta_block.contains("render_installer_ps1 stable"),
+        "the beta route must render the stable-channel Windows installer"
+    );
+    assert!(
+        beta_block.contains(r#"aws s3 cp /tmp/install-stable.ps1 "s3://${R2_BUCKET}/install.ps1""#),
+        "the beta route must upload install.ps1 to the bucket root"
+    );
+    assert!(
+        beta_block.contains("render_installer beta")
+            && beta_block.contains("aws s3 cp /tmp/install-beta.ps1")
+            && beta_block.contains("aws s3 cp /tmp/install-beta.sh"),
+        "the beta route keeps its own installer pair"
+    );
+    assert!(
+        !beta_block.contains("aws s3 cp /tmp/install-stable.sh"),
+        "a beta cut must never overwrite install.sh - the TS 0.9.8 funnel bootstraps through it"
+    );
+    assert!(
+        stable_block
+            .contains(r#"aws s3 cp /tmp/install-stable.ps1 "s3://${R2_BUCKET}/install.ps1""#),
+        "the stable route keeps its install.ps1 upload"
+    );
+}
+
+/// The channel-manifest emission, executed against a real merged fixture
+/// tree (the python-in-workflow step): the win32-x64 row the build-windows
+/// job contributed rides `binaries_v2` on BOTH channels, while the v1
+/// `binaries` list keeps the TS-parity four (the platforms the TS
+/// installer served). The live stable channel stays TS-only until the
+/// first Rust stable cut re-publishes latest.json; this pins the
+/// emission's half of that contract — when that cut lands, the stable
+/// manifest carries the Windows row under `binaries_v2`.
+#[test]
+fn the_channel_manifest_carries_the_windows_row_on_both_channels() {
+    let Some(_python3) = python3_binary((3, 12)) else {
+        return;
+    };
+    let steps = promote_steps();
+    let emit = &steps[step_position(
+        &steps,
+        "Emit the channel manifest (latest.json stable / beta.json nightly)",
+    )];
+
+    // The beta cut (the consume route's restamped shape: the artifacts
+    // carry the beta tag's version): beta.json carries the Windows row.
+    let beta_tag = "v0.9.9-beta.7";
+    let cwd = tempfile::tempdir().expect("scratch dir");
+    let incoming = cwd.path().join("incoming");
+    fs::create_dir_all(&incoming).expect("create incoming");
+    let rows: Vec<serde_json::Value> = TARGETS
+        .iter()
+        .map(|target| {
+            write_artifact_version(
+                &incoming.join(format!("artifacts-{target}")),
+                target,
+                beta_tag.trim_start_matches('v'),
+            )
+        })
+        .collect();
+    let (.., merged) = run_promote_gates(cwd.path(), &steps);
+    let mut expected: Vec<serde_json::Value> = rows.clone();
+    expected.sort_by(|a, b| a["file"].as_str().cmp(&b["file"].as_str()));
+    assert_eq!(
+        merged["binaries"],
+        serde_json::json!(expected),
+        "the merged manifest must carry all five targets' binaries"
+    );
+    let stdout = assert_success(
+        &run_step_with_env(cwd.path(), emit, &[("RELEASE_VERSION", beta_tag)]),
+        "emit the channel manifest",
+    );
+    assert!(
+        stdout.contains("channel manifest beta.json: v0.9.9-beta.7, 5 artifacts"),
+        "the emission must report all five artifacts\n{stdout}"
+    );
+    let document: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(cwd.path().join("release-out/beta.json"))
+            .expect("read the emitted beta.json"),
+    )
+    .expect("parse the emitted beta.json");
+    assert_eq!(document["version"], "v0.9.9-beta.7");
+    let v2 = document["binaries_v2"]
+        .as_array()
+        .expect("binaries_v2 rows");
+    assert_eq!(v2.len(), 5, "binaries_v2 carries every platform row");
+    let win_row = v2
+        .iter()
+        .find(|row| row["platform"] == "win32-x64")
+        .expect("the beta manifest carries the win32-x64 row");
+    assert_eq!(
+        win_row["file"], "prime-agent-0.9.9-beta.7-win32-x64.tar.gz",
+        "the Windows row must use the channel naming contract"
+    );
+    let windows_row = rows
+        .iter()
+        .find(|row| row["platform"] == "win32-x64")
+        .expect("the fixture carries the windows row");
+    assert_eq!(
+        win_row["sha256"], windows_row["sha256"],
+        "the Windows row must carry the artifact's own checksum"
+    );
+    let v1 = document["binaries"].as_array().expect("v1 binaries rows");
+    assert_eq!(
+        v1.len(),
+        4,
+        "the v1 binaries list keeps the TS-parity platforms"
+    );
+    assert!(
+        v1.iter().all(|row| row["platform"] != "win32-x64"),
+        "the v1 binaries list never carries the Windows row"
+    );
+
+    // The stable cut (the build route's shape: the artifacts carry the
+    // stable tag's version): latest.json carries the Windows row too.
+    let stable_tag = format!("v{VERSION}");
+    let cwd = tempfile::tempdir().expect("scratch dir");
+    let incoming = cwd.path().join("incoming");
+    fs::create_dir_all(&incoming).expect("create incoming");
+    let rows: Vec<serde_json::Value> = TARGETS
+        .iter()
+        .map(|target| {
+            write_artifact_version(
+                &incoming.join(format!("artifacts-{target}")),
+                target,
+                VERSION,
+            )
+        })
+        .collect();
+    let (.., merged) = run_promote_gates(cwd.path(), &steps);
+    let mut expected: Vec<serde_json::Value> = rows;
+    expected.sort_by(|a, b| a["file"].as_str().cmp(&b["file"].as_str()));
+    assert_eq!(
+        merged["binaries"],
+        serde_json::json!(expected),
+        "the merged manifest must carry all five targets' binaries"
+    );
+    assert_success(
+        &run_step_with_env(
+            cwd.path(),
+            emit,
+            &[("RELEASE_VERSION", stable_tag.as_str())],
+        ),
+        "emit the channel manifest",
+    );
+    let document: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(cwd.path().join("release-out/latest.json"))
+            .expect("read the emitted latest.json"),
+    )
+    .expect("parse the emitted latest.json");
+    assert_eq!(document["version"], stable_tag.as_str());
+    assert!(
+        document["binaries_v2"]
+            .as_array()
+            .expect("binaries_v2 rows")
+            .iter()
+            .any(|row| row["platform"] == "win32-x64"),
+        "the stable manifest carries the win32-x64 row in binaries_v2"
+    );
+    assert!(
+        document["binaries"]
+            .as_array()
+            .expect("v1 binaries rows")
+            .iter()
+            .all(|row| row["platform"] != "win32-x64"),
+        "the v1 binaries list keeps the TS-parity platforms on stable too"
+    );
+}
+
+/// A tree that dropped the windows artifact (a skipped build-windows leg, a
+/// build-job regression) must never publish a shrunken channel manifest:
+/// the completeness gate refuses the release and names the missing
+/// platform — a Windows install stranded on the old channel version is
+/// worse than a failed cut.
+#[test]
+fn the_channel_manifest_refuses_a_release_missing_the_windows_row() {
+    let Some(_python3) = python3_binary((3, 12)) else {
+        return;
+    };
+    let steps = promote_steps();
+    let emit = &steps[step_position(
+        &steps,
+        "Emit the channel manifest (latest.json stable / beta.json nightly)",
+    )];
+    let cwd = tempfile::tempdir().expect("scratch dir");
+    let incoming = cwd.path().join("incoming");
+    fs::create_dir_all(&incoming).expect("create incoming");
+    // Four targets: the windows leg never uploaded its artifact.
+    for target in TARGETS.iter().take(4) {
+        write_artifact(&incoming.join(format!("artifacts-{target}")), target);
+    }
+    run_promote_gates(cwd.path(), &steps);
+    let output = assert_failure(
+        &run_step_with_env(
+            cwd.path(),
+            emit,
+            &[("RELEASE_VERSION", format!("v{VERSION}").as_str())],
+        ),
+        "emit the channel manifest",
+    );
+    assert!(
+        output.contains("the release is missing artifact rows for ['win32-x64']"),
+        "the refusal must name the missing win32-x64 row\n{output}"
     );
 }
