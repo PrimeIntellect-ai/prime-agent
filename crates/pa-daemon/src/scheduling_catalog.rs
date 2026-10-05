@@ -243,6 +243,39 @@ impl Supervisor {
         });
     }
 
+    /// Warm the passive scheduled-jobs snapshot at daemon boot (the
+    /// input-latency lane): the first selector-less catalog read after boot
+    /// would otherwise run the whole session-artifacts scan inline — the
+    /// operator's 289-partition tree measured ~835ms inside the client's
+    /// open, past the interactive surface's dock fold — while the boot
+    /// itself has idle time before the first client arrives. The warmup is
+    /// the same shared scan a cold read runs (one scan, generation-stamped,
+    /// stored by the identical rules); every later invalidation, mutation,
+    /// and stale-while-revalidate refresh keeps its semantics. A client
+    /// that connects before the scan lands joins it exactly as today.
+    pub(crate) fn spawn_passive_catalog_warmup(self: &Arc<Self>) {
+        let supervisor = Arc::clone(self);
+        tokio::spawn(async move {
+            let _ = supervisor.shared_passive_scan().await;
+        });
+    }
+
+    /// The boot warmup's adopt-pass ordering (serve's watch dance,
+    /// lifted here for the pin below): the warmup only starts once the
+    /// boot's adopt pass has settled the registry (or its signal sender
+    /// is gone — the fail-open path: a degraded boot keeps the
+    /// pre-warmup cold-read behavior, never a colder one).
+    pub(crate) async fn wait_for_adoption_signal(signal: &mut tokio::sync::watch::Receiver<bool>) {
+        loop {
+            if *signal.borrow() {
+                return;
+            }
+            if signal.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+
     /// Invalidate the passive snapshot (TS #2487
     /// `invalidatePassiveScheduledJobs`): claim the publish epoch so an
     /// in-flight scan can no longer store, then drop the snapshot — every
@@ -856,5 +889,178 @@ impl Supervisor {
             ))],
             false,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The passive-catalog warmup (the input-latency lane): the boot's
+    /// warm scan stores the snapshot with NO read anywhere, and the first
+    /// catalog read serves that stored snapshot instead of scanning the
+    /// artifacts tree inline. The second half is the discriminating
+    /// observable: after the warm snapshot lands, the fixture's
+    /// `scheduled-jobs.json` is deleted behind the daemon's back, and the
+    /// first read STILL answers the warm row — a read that scanned inline
+    /// at that moment would see the deleted fixture and answer nothing.
+    #[tokio::test]
+    async fn the_passive_catalog_warms_at_boot_and_the_first_read_serves_the_snapshot() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let agent_dir = dir.path().join("agent");
+        let sessions_dir = agent_dir.join("sessions");
+        std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
+        let session_file = sessions_dir.join("warm-1.jsonl");
+        let session_lines = [
+            json!({
+                "type": "session", "version": 3, "id": "warm-1",
+                "timestamp": "2026-10-04T00:00:00.000Z", "cwd": "/c",
+            }),
+            json!({
+                "type": "session_state", "id": "warm-1",
+                "timestamp": "2026-10-04T00:00:01.000Z",
+                "state": { "status": "active" },
+            }),
+        ];
+        std::fs::write(
+            &session_file,
+            session_lines
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n",
+        )
+        .expect("session file");
+        let artifacts = agent_dir.join("session-artifacts").join("warm-1");
+        std::fs::create_dir_all(&artifacts).expect("artifacts partition");
+        std::fs::write(
+            artifacts.join("scheduled-jobs.json"),
+            json!({
+                "jobs": [{
+                    "id": "hb-1",
+                    "status": "active",
+                    "activeSessionId": "warm-1",
+                    "sessionId": "warm-1",
+                    "sessionFile": session_file.display().to_string(),
+                    "cwd": dir.path().display().to_string(),
+                    "prompt": "the warm heartbeat",
+                    "schedule": { "kind": "interval", "expression": "", "intervalMs": 60000 },
+                    "createdAt": "2026-10-04T00:00:02.000Z",
+                    "updatedAt": "2026-10-04T00:00:02.000Z",
+                    "nextRunAt": "2026-10-04T00:01:02.000Z",
+                }],
+            })
+            .to_string(),
+        )
+        .expect("scheduled jobs");
+
+        let supervisor = Arc::new(
+            Supervisor::new(crate::supervisor::SupervisorOptions {
+                socket_path: dir.path().join("daemon.sock"),
+                agent_dir: agent_dir.clone(),
+            })
+            .expect("supervisor"),
+        );
+
+        // The boot warmup (what `serve` spawns beside its other boot
+        // passes): the scan runs with no catalog read anywhere.
+        supervisor.spawn_passive_catalog_warmup();
+
+        // The warm snapshot lands on its own: one row, the fixture's
+        // heartbeat. No `heartbeats_list`/`cron_list` was issued.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let warm_rows = supervisor
+                .passive_catalog
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|snapshot| snapshot.rows.len());
+            if warm_rows == Some(1) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the boot warmup never stored the passive snapshot"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        // The first read must serve the stored snapshot, not a fresh
+        // scan: the fixture's artifact vanishes behind the daemon's back
+        // (no mutation was issued, so no invalidation owes a re-scan),
+        // and the read still answers the warm row.
+        std::fs::remove_file(artifacts.join("scheduled-jobs.json")).expect("delete fixture");
+        let rows = supervisor.passive_catalog_rows(false).await;
+        assert_eq!(
+            rows.len(),
+            1,
+            "the first read must serve the warm snapshot instead of rescanning"
+        );
+        assert_eq!(rows[0].job.id, "hb-1");
+        assert_eq!(rows[0].job.session_file, session_file.display().to_string());
+    }
+
+    /// The boot warmup's adopt-pass ordering (the pre-bar review's race
+    /// finding): the warmup's scan consults the registry's live-worker
+    /// filter, so it must wait out the boot's adopt pass — a scan that
+    /// raced adoption would cache the just-adopted worker's artifacts as
+    /// a passive row and serve the stale row for the snapshot's refresh
+    /// window (adoption never invalidates the catalog). The pin: with the
+    /// adopt signal unfired the snapshot never lands; once the signal
+    /// fires, it does.
+    #[tokio::test]
+    async fn the_boot_warmup_waits_out_the_adopt_pass_before_scanning() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(agent_dir.join("sessions")).expect("sessions dir");
+        let supervisor = Arc::new(
+            Supervisor::new(crate::supervisor::SupervisorOptions {
+                socket_path: dir.path().join("daemon.sock"),
+                agent_dir: agent_dir.clone(),
+            })
+            .expect("supervisor"),
+        );
+
+        let (adoption_tx, adoption_rx) = tokio::sync::watch::channel(false);
+
+        // The negative pin is on the WAITER itself, not on the scan's
+        // downstream effect: with the signal unfired the helper must stay
+        // pending for the whole window (a helper that returned early
+        // would finish in microseconds — the window catches it
+        // deterministically; a correct helper can only return on the
+        // signal or the sender's death, neither of which happens here).
+        let mut waiter = {
+            let supervisor = Arc::clone(&supervisor);
+            let mut adoption_rx = adoption_rx;
+            tokio::spawn(async move {
+                Supervisor::wait_for_adoption_signal(&mut adoption_rx).await;
+                supervisor.spawn_passive_catalog_warmup();
+            })
+        };
+        let still_waiting =
+            tokio::time::timeout(std::time::Duration::from_millis(150), &mut waiter).await;
+        assert!(
+            still_waiting.is_err(),
+            "the warmup helper returned before the adopt pass signaled"
+        );
+
+        // The adopt pass settles: the waiter completes and the scan
+        // lands (the positive pin is a poll with a real deadline — a
+        // failure names the missing snapshot).
+        adoption_tx.send(true).expect("signal adoption");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while supervisor.passive_catalog.lock().unwrap().is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the warmup never scanned after the adopt pass signaled"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
+            .await
+            .expect("the warmup waiter never completed")
+            .expect("the warmup task");
     }
 }
