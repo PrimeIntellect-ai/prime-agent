@@ -520,13 +520,13 @@ impl SupervisorChildSessionsInner {
 
     /// The watcher's settle tail: the run-settle effects in TS order —
     /// the final usage flush, the child's return on the parent's
-    /// semantic-edge ledger, the notice claim, the display completion,
-    /// and the settle funnel. The claim is the funnel's commit AND the
-    /// verdict's commit: every effect that marks the run durably
-    /// complete lands only after it. Returns whether the watcher may
-    /// retire (`false`: a collect's grace re-cleared the verdict while
-    /// this tail ran its round trips; the watcher keeps watching the
-    /// follow-up turn).
+    /// semantic-edge ledger, the notice claim, the child-update feed
+    /// row, the display completion, and the settle funnel. The claim is
+    /// the funnel's commit AND the verdict's commit: every effect that
+    /// marks the run durably complete lands only after it. Returns
+    /// whether the watcher may retire (`false`: a collect's grace
+    /// re-cleared the verdict while this tail ran its round trips; the
+    /// watcher keeps watching the follow-up turn).
     pub(super) async fn run_settle_tail(&self, record: &Arc<Mutex<ChildRecord>>) -> bool {
         // The run's final rows are attributed before the terminal notice
         // rides the parent's follow-up route (TS: the run task's
@@ -542,6 +542,12 @@ impl SupervisorChildSessionsInner {
         if !self.deliver_settle_notice(record).await {
             return false;
         }
+        // The settled row rides the child-update feed here (main's
+        // settle-site emission, after the claim like the display write:
+        // a pre-claim `done` row could outlive a re-cleared verdict, and
+        // the feed's own status dedup would then swallow the genuine
+        // settle's row when the follow-up turn finishes).
+        self.emit_child_update(record).await;
         // Only a successful run completes the display (TS
         // `completeRlmSubagentRuntime`); a cancelled or failed run stays
         // `running`, which a restart relists as `error`. The write sits
@@ -705,6 +711,7 @@ impl SupervisorChildSessionsInner {
             record.error = Some(error);
             message
         };
+        self.emit_child_update(record).await;
         // TS records a failed child's return too (`recordChildReturned` in
         // the thrown-run arm): a child that committed requests before
         // failing still returns them; a zero-commit child records nothing.

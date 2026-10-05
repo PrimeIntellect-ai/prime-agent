@@ -169,6 +169,7 @@ struct ChildRecord {
     active_session_id: String,
     session_id: Option<String>,
     session_dir: String,
+    model: String,
     label: String,
     started_at_ms: u64,
     /// Terminal state (`done` | `error` | `cancelled`); running while
@@ -229,6 +230,7 @@ struct ChildRecord {
     /// Serializes usage emissions for this child (read, cursor advance,
     /// and sink delivery) without holding the record lock across them.
     emit_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
+    last_emitted_status: Option<&'static str>,
     /// Serializes parent-directed rename and delete for this child.
     rename_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
@@ -237,6 +239,28 @@ impl ChildRecord {
     /// Raw run status: `running` | `done` | `error` | `cancelled`.
     fn status(&self) -> &'static str {
         self.settled_status.unwrap_or("running")
+    }
+
+    fn snapshot_value(&self) -> Value {
+        let mut snapshot = json!({
+            "id": self.rlm_child_id,
+            "activeSessionId": self.active_session_id,
+            "sessionName": self.session_name,
+            "label": self.label,
+            "status": self.status(),
+            "durationMs": now_ms().saturating_sub(self.started_at_ms),
+            "sessionDir": self.session_dir,
+        });
+        if !self.model.is_empty() {
+            snapshot["model"] = json!(self.model);
+        }
+        if let Some(answer) = &self.answer_preview {
+            snapshot["answerPreview"] = json!(answer);
+        }
+        if let Some(error) = &self.error {
+            snapshot["error"] = json!(error);
+        }
+        snapshot
     }
 
     /// Kernel-roster status: `running` | `completed` | `error` |
@@ -336,6 +360,8 @@ pub struct SupervisorChildSessions {
 /// with the deleted child's id.
 pub type DeleteNotifier = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
 
+pub(crate) type ChildUpdateSink = std::sync::Arc<dyn Fn(Value) + Send + Sync>;
+
 struct SupervisorChildSessionsInner {
     link: Arc<SupervisorLink>,
     agent_dir: PathBuf,
@@ -396,6 +422,7 @@ struct SupervisorChildSessionsInner {
     /// `/context` children immediately, not ride out the next background
     /// refresh.
     delete_notifier: std::sync::Mutex<Option<DeleteNotifier>>,
+    child_update_sink: std::sync::Mutex<Option<ChildUpdateSink>>,
     /// The parent session's semantic-edge recorder (wired once the session
     /// engine is built; the settle watcher records a returned child's last
     /// committed request into it). `None` until the build or for sessions
@@ -437,6 +464,7 @@ impl SupervisorChildSessions {
                 model_refusal_telemetry,
                 usage_sink: std::sync::Mutex::new(None),
                 delete_notifier: std::sync::Mutex::new(None),
+                child_update_sink: std::sync::Mutex::new(None),
                 semantic_edges: std::sync::Mutex::new(None),
             }),
         }
@@ -456,6 +484,14 @@ impl SupervisorChildSessions {
             .delete_notifier
             .lock()
             .expect("delete notifier lock") = Some(notifier);
+    }
+
+    pub(crate) fn set_child_update_sink(&self, sink: ChildUpdateSink) {
+        *self
+            .inner
+            .child_update_sink
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sink);
     }
 
     /// The worker saw the parent's turn end: release prompt tasks waiting
@@ -628,39 +664,12 @@ impl SupervisorChildSessions {
     /// run status, elapsed duration, answer preview, and session dir.
     /// `parent_id` (the parent's own RLM node id) is overlaid by the
     /// worker, which owns that identity.
-    ///
-    /// # Panics
-    ///
-    /// Panics when the identity mutex is poisoned (a holder panicked
-    /// while holding the lock).
     pub async fn child_snapshots(&self) -> Vec<Value> {
-        let model = self
-            .inner
-            .identity
-            .lock()
-            .expect("identity lock")
-            .model
-            .clone();
         let children = self.inner.children.lock().await;
         let mut snapshots = Vec::new();
         for record in children.iter() {
             let record = record.lock().await;
-            let mut snapshot = json!({
-                "id": record.rlm_child_id,
-                "activeSessionId": record.active_session_id,
-                "sessionName": record.session_name,
-                "label": record.label,
-                "status": record.status(),
-                "durationMs": now_ms().saturating_sub(record.started_at_ms),
-                "sessionDir": record.session_dir,
-            });
-            if let Some(model) = &model {
-                snapshot["model"] = json!(model);
-            }
-            if let Some(answer) = &record.answer_preview {
-                snapshot["answerPreview"] = json!(answer);
-            }
-            snapshots.push(snapshot);
+            snapshots.push(record.snapshot_value());
         }
         snapshots
     }
@@ -749,6 +758,7 @@ impl SupervisorChildSessions {
                 active_session_id: identity.active_session_id,
                 session_id: identity.session_id.clone(),
                 session_dir: String::new(),
+                model: String::new(),
                 label: String::new(),
                 started_at_ms: 0,
                 settled_status,
@@ -769,6 +779,7 @@ impl SupervisorChildSessions {
                 usage_watch_live: false,
                 usage_rearm: false,
                 emit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+                last_emitted_status: None,
                 rename_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             })));
     }
@@ -787,6 +798,7 @@ impl SupervisorChildSessions {
                 active_session_id: identity.active_session_id,
                 session_id: identity.session_id,
                 session_dir: String::new(),
+                model: String::new(),
                 label: String::new(),
                 started_at_ms: 0,
                 settled_status: None,
@@ -804,6 +816,7 @@ impl SupervisorChildSessions {
                 usage_watch_live: false,
                 usage_rearm: false,
                 emit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+                last_emitted_status: None,
                 rename_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             })));
     }
@@ -960,6 +973,51 @@ impl SupervisorChildSessionsInner {
             *current = running;
             changed
         });
+    }
+
+    pub(crate) async fn emit_child_update(&self, record: &Arc<Mutex<ChildRecord>>) {
+        let sink = self
+            .child_update_sink
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let Some(sink) = sink else {
+            return;
+        };
+        let row = {
+            let mut record = record.lock().await;
+            let status = record.status();
+            if record.last_emitted_status == Some(status) {
+                return;
+            }
+            record.last_emitted_status = Some(status);
+            record.snapshot_value()
+        };
+        sink(row);
+    }
+
+    pub(crate) async fn emit_child_removal(&self, record: &Arc<Mutex<ChildRecord>>) {
+        let sink = self
+            .child_update_sink
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let Some(sink) = sink else {
+            return;
+        };
+        let row = {
+            let record = record.lock().await;
+            json!({
+                "id": record.rlm_child_id,
+                "activeSessionId": record.active_session_id,
+                "sessionName": record.session_name,
+                "label": record.session_name,
+                "status": "cancelled",
+                "sessionDir": record.session_dir,
+                "error": "Deleted by parent orchestrator",
+            })
+        };
+        sink(row);
     }
 
     /// Wait for the parent turn that spawned a task to complete (generation

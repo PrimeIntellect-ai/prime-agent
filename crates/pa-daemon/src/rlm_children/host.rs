@@ -150,6 +150,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     active_session_id: created.active_session_id.clone(),
                     session_id: created.session_id.clone(),
                     session_dir: created.session_dir.clone(),
+                    model: model.clone(),
                     label: rlm_child_label(&request.prompt),
                     started_at_ms: now_ms(),
                     settled_status: None,
@@ -167,11 +168,13 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     usage_watch_live: false,
                     usage_rearm: false,
                     emit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+                    last_emitted_status: None,
                     rename_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
                 };
                 let record = Arc::new(Mutex::new(record));
                 this.children.lock().await.push(Arc::clone(&record));
                 this.refresh_running().await;
+                this.emit_child_update(&record).await;
                 anyhow::Ok((record, created, model))
             }
             .await;
@@ -387,7 +390,14 @@ impl RlmSubagentHost for SupervisorChildSessions {
             this.forget_child_usage(&record).await;
             // The watcher owns an Arc to this record; deleting the roster
             // row alone cannot stop its polling loop.
-            record.lock().await.closed_by_parent = true;
+            {
+                let mut record = record.lock().await;
+                record.closed_by_parent = true;
+                if was_running {
+                    record.settled_status = Some("cancelled");
+                    record.error = Some("Deleted by parent orchestrator".to_string());
+                }
+            }
             let entry = {
                 let record = record.lock().await;
                 SupervisorChildSessions::entry(&record)
@@ -400,6 +410,11 @@ impl RlmSubagentHost for SupervisorChildSessions {
             {
                 let record = record.lock().await;
                 this.remember_deleted_child(&record);
+            }
+            if was_running {
+                this.emit_child_update(&record).await;
+            } else {
+                this.emit_child_removal(&record).await;
             }
             // The deletion commits BEFORE the best-effort terminal
             // notice: the notice's supervisor delivery can ride its full
