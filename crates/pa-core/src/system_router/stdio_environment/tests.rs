@@ -217,6 +217,52 @@ async fn an_oversized_unterminated_line_is_a_protocol_violation() {
     .await;
 }
 
+/// A well-formed reply that shares its read with a later invalid-UTF-8
+/// line still lands: a line-level violation is terminal, but the reply
+/// lines the adapter already wrote are dispatched before the failure
+/// handling runs - the same guarantee the EOF drain gives a fully
+/// written final reply (cursor: UTF-8 error drops sibling replies).
+#[tokio::test]
+async fn a_sibling_reply_before_an_invalid_utf8_line_lands() {
+    let (_dir, command) = adapter(
+        r#"
+import json
+import sys
+import time
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    request = json.loads(line)
+    if request.get("type") == "close":
+        break
+    reply = json.dumps({"id": request.get("id"), "ok": True, "environment": {"pid": 1}})
+    # One write: the valid reply and the garbage share the read.
+    sys.stdout.buffer.write(reply.encode() + b"\n\xff\n")
+    sys.stdout.flush()
+    time.sleep(30)
+"#,
+    );
+    let env = StdioRouterEnvironment::new(command, None, 5_000, None);
+    let info = env.init().await.unwrap().expect("init environment info");
+    assert!(info.get("pid").is_some());
+    // The violation is still terminal: later requests fail with it.
+    let error = env
+        .reset("reach the overworld")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("not valid UTF-8"),
+        "unexpected post-violation error: {error}"
+    );
+    env.close(RouterCloseOptions {
+        budget_ms: Some(300),
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn an_invalid_utf8_line_is_a_protocol_violation() {
     let env = StdioRouterEnvironment::new(

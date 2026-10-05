@@ -27,7 +27,12 @@
 //! kill (cursor: close write can hang forever). The reader completes the
 //! buffered tail as a final line at end of stream, where the TS data
 //! handler can drop a reply the adapter wrote without its trailing
-//! newline (cursor: EOF drops last adapter reply).
+//! newline (cursor: EOF drops last adapter reply). A line-level
+//! violation (invalid UTF-8) is terminal but not retroactive: the
+//! completed valid lines that shared its chunk are dispatched before the
+//! failure is handled, the drain order the TS close event already
+//! guarantees for every reply line (cursor: UTF-8 error drops sibling
+//! replies).
 
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
@@ -539,7 +544,13 @@ struct LineBuffer {
 }
 
 impl LineBuffer {
-    fn feed(&mut self, chunk: &[u8]) -> Result<Vec<String>, LineError> {
+    /// Feed one chunk, returning the completed reply lines and the
+    /// terminal violation if the chunk completed one. The lines travel
+    /// with the error: a well-formed reply that shares its read with
+    /// later garbage must still reach its pending request before the
+    /// failure handling runs, the same guarantee the EOF drain gives a
+    /// fully written final reply.
+    fn feed(&mut self, chunk: &[u8]) -> (Vec<String>, Option<LineError>) {
         let mut scan_from = self.buffer.len();
         self.buffer.extend_from_slice(chunk);
         let mut lines = Vec::new();
@@ -560,14 +571,14 @@ impl LineBuffer {
                 lines.push(line.to_owned());
             } else {
                 self.buffer.drain(..consumed);
-                return Err(LineError::Utf8);
+                return (lines, Some(LineError::Utf8));
             }
         }
         self.buffer.drain(..consumed);
         if self.buffer.len() > MAX_REPLY_LINE_CHARS {
-            return Err(LineError::Overflow);
+            return (lines, Some(LineError::Overflow));
         }
-        Ok(lines)
+        (lines, None)
     }
 }
 
@@ -586,23 +597,27 @@ async fn read_loop(mut stdout: ChildStdout, shared: Arc<Shared>) {
             Ok(0) | Err(_) => (b"\n".as_slice(), true),
             Ok(read) => (&buffer[..read], false),
         };
-        match decoder.feed(chunk) {
-            Ok(lines) => {
-                for line in lines {
-                    if line.len() > MAX_REPLY_LINE_CHARS {
-                        // A terminated oversized line is the same protocol
-                        // violation as an unterminated one.
-                        let overflow = format!(
-                            "environment adapter wrote a reply line over {MAX_REPLY_LINE_CHARS} chars"
-                        );
-                        shared.append_tail(&format!("\n{overflow}"));
-                        shared.fail_all(&overflow);
-                        return;
-                    }
-                    dispatch_line(&line, &shared);
-                }
+        // The completed lines are dispatched before any terminal violation
+        // is handled: a reply the adapter already wrote is not collateral
+        // damage of the garbage after it (cursor: UTF-8 error drops
+        // sibling replies), the same drain order the terminated-oversized
+        // line and the EOF completion already give.
+        let (lines, error) = decoder.feed(chunk);
+        for line in lines {
+            if line.len() > MAX_REPLY_LINE_CHARS {
+                // A terminated oversized line is the same protocol
+                // violation as an unterminated one.
+                let overflow = format!(
+                    "environment adapter wrote a reply line over {MAX_REPLY_LINE_CHARS} chars"
+                );
+                shared.append_tail(&format!("\n{overflow}"));
+                shared.fail_all(&overflow);
+                return;
             }
-            Err(LineError::Overflow) => {
+            dispatch_line(&line, &shared);
+        }
+        match error {
+            Some(LineError::Overflow) => {
                 let overflow = format!(
                     "environment adapter wrote an unterminated reply line over {MAX_REPLY_LINE_CHARS} chars"
                 );
@@ -610,13 +625,14 @@ async fn read_loop(mut stdout: ChildStdout, shared: Arc<Shared>) {
                 shared.fail_all(&overflow);
                 return;
             }
-            Err(LineError::Utf8) => {
+            Some(LineError::Utf8) => {
                 let invalid =
                     "environment adapter wrote a reply line that is not valid UTF-8".to_string();
                 shared.append_tail(&format!("\n{invalid}"));
                 shared.fail_all(&invalid);
                 return;
             }
+            None => {}
         }
         if at_end {
             break;
