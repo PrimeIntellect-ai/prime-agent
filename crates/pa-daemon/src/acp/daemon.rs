@@ -2012,10 +2012,11 @@ mod tests {
 
         // A close can settle before EOF checks the state. No stale watch
         // should be awaited, and the hosted session is still available.
-        let (done, done_rx) = tokio::sync::watch::channel(false);
+        let (done, mut done_rx) = tokio::sync::watch::channel(false);
         let settled = Arc::new(Mutex::new(self::state(Some(hosted_session()))));
-        settled.lock().await.session_close_done = Some(done_rx);
         done.send(true).unwrap();
+        assert!(*done_rx.borrow_and_update());
+        settled.lock().await.session_close_done = Some(done_rx);
         tokio::time::timeout(
             std::time::Duration::from_secs(2),
             wait_for_session_close(&settled),

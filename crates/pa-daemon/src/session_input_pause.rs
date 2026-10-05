@@ -270,6 +270,9 @@ mod tests {
                 forced_batch: false,
             });
         }
+        // Clear a create-time permit so acquisition must wake this waiter.
+        worker.idle_notify.notify_one();
+        worker.idle_notify.notified().await;
         let waiting = tokio::spawn({
             let worker = Arc::clone(&worker);
             async move { worker.wait_until_idle().await }
