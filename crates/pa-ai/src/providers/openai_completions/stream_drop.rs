@@ -211,13 +211,8 @@ async fn a_done_marker_without_finish_reason_completes() {
     assert_eq!(message.error_message, None);
 }
 
-/// Serve the SSE body and then hold the connection open: no
-/// `Content-Length`, no chunked terminator, no connection close — the
-/// response ends at the `[DONE]` marker alone and body EOF never
-/// arrives. This is the persistent-SSE-channel server class (a gateway
-/// that keeps the response open past `[DONE]`); the stream must end at
-/// the marker, exactly like the `OpenAI` SDK's iterator does, or the turn
-/// waits for an EOF that never comes — the silent mid-stream hang.
+/// Serve the SSE body and hold the connection open: no `Content-Length`,
+/// no terminator, no close — body EOF never arrives.
 async fn serve_sse_hold_open(body: String) -> SocketAddr {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

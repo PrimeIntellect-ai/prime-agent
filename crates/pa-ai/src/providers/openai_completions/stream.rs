@@ -658,11 +658,8 @@ async fn run_stream(
         let events = decoder.push_text(&chunk);
         for event in &events {
             if mark_done_marker(event, &mut state) {
-                // The SSE terminal marker ends the stream: an
-                // OpenAI-compatible server may keep the response body
-                // open past `[DONE]` (a persistent SSE channel), so body
-                // EOF never follows — the TS SDK stops at the marker, and
-                // so must the port.
+                // A held-open body past [DONE] never EOFs; the marker
+                // ends the stream.
                 break;
             }
             if let Some(chunk) = parse_sse_event_data(event) {
