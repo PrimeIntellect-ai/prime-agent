@@ -362,6 +362,43 @@ fn update_restarting_rejection_round_trips_the_wire() {
     assert!(!is_update_restarting_rejection(&error));
 }
 
+/// The session-addressed lanes' kernel-not-running refusal (the
+/// `/factory off` guard's definitive-zero class): the exact wire string
+/// classifies through the plain-message predicate, and no other refusal
+/// does — the guard's zero read must not fire on an unknown-command or
+/// initializing refusal, which stay unreadable and fail closed.
+#[test]
+fn kernel_not_running_refusal_round_trips_the_wire() {
+    let line = serde_json::from_str::<DaemonResponse>(
+        r#"{"type":"response","command":"factory_activity","success":false,"error":"Kernel is not running"}"#,
+    )
+    .expect("refusal parses");
+    let error = response_data_or_error("factory_activity", line).unwrap_err();
+    assert!(is_kernel_not_running(&error));
+    // A refusal that merely embeds the phrase is not the class.
+    let wrapped = serde_json::from_str::<DaemonResponse>(
+        r#"{"type":"response","command":"factory_activity","success":false,"error":"the session reports: Kernel is not running for this lane"}"#,
+    )
+    .expect("unrelated refusal parses");
+    let error = response_data_or_error("factory_activity", wrapped).unwrap_err();
+    assert!(!is_kernel_not_running(&error));
+    // The adjacent unreadable classes never classify as the zero read.
+    for message in [
+        "Session is still initializing",
+        "Unknown worker command: factory_activity",
+    ] {
+        let unrelated = serde_json::from_str::<DaemonResponse>(&format!(
+            r#"{{"type":"response","command":"factory_activity","success":false,"error":"{message}"}}"#
+        ))
+        .expect("unrelated refusal parses");
+        let error = response_data_or_error("factory_activity", unrelated).unwrap_err();
+        assert!(!is_kernel_not_running(&error), "{message}");
+    }
+    // A transport failure is not a refusal at all.
+    let plain = anyhow!("the daemon connection is closed");
+    assert!(!is_kernel_not_running(&plain));
+}
+
 #[test]
 fn fail_pending_resolves_a_transport_failure_not_a_refusal() {
     // The reader task's dead-connection failure must stay on the

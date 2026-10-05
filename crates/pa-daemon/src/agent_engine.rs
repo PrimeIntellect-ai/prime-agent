@@ -44,7 +44,7 @@ use crate::rlm_children::{ParentIdentity, SupervisorChildSessions, DEFAULT_RLM_M
 // the child module at the same tree position (agent_engine::tests); the
 // FAUX_TEST_LOCK re-export keeps the facade's FAUX_TEST_LOCK paths stable
 // for the sibling test modules (overflow_compaction, compact_autorefine,
-// session_navigation, acp/{autorefine,compaction_arms,goal_continuation}).
+// session_navigation).
 #[cfg(test)]
 pub(crate) mod tests;
 
@@ -453,4 +453,12 @@ pub struct AgentSessionEngine {
     /// this worker emits through one lazily-built client.
     pub(crate) model_refusal_telemetry:
         std::sync::Arc<crate::model_allowlist::ModelRefusalTelemetry>,
+    /// This session's semantic-edge identity (TS
+    /// `semanticEdgeLedgerPath`/`semanticParentSessionId`/
+    /// `semanticSpawnedByRequestId`): stamped by `configure_rlm_identity`
+    /// from the create's semantic spawn origin and read once per session
+    /// build, so every build's recorder reopens the same ledger and
+    /// re-registration stays idempotent.
+    pub(crate) semantic_identity:
+        std::sync::Mutex<Option<pa_core::session_engine::semantic_edges::SemanticEdgeIdentity>>,
 }

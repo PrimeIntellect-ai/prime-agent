@@ -407,7 +407,7 @@ impl Worker {
         }
         match self.navigation.replace_session(target.file).await {
             Ok(()) => {
-                self.refresh_replaced_session_state();
+                self.refresh_replaced_session_state().await;
                 self.reseed_service_tier_for_replacement();
                 self.bind_scheduled_jobs().await;
                 self.prewarm_replacement_session();

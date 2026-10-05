@@ -5,7 +5,7 @@
 //! Transport-level contract: validation failures are ACP `invalid params`
 //! errors with a `reason` payload; admission failures (tool-name
 //! conflicts, ownership fencing) are internal errors carrying the raw
-//! message, exactly like the TS in-process connection.
+//! message, like the TS connection.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -314,80 +314,6 @@ pub fn acp_mcp_tool_names(servers: &[AcpMcpServerConfig]) -> Result<Vec<String>,
         names.push(format!("mcp_call_{}", server.name()));
     }
     Ok(names)
-}
-
-/// Admit one session's `mcpServers` through the full TS pipeline:
-/// zod entry dropping, `resolveAcpMcpServers` validation, tool-name
-/// derivation, owner-scoped replace with cleanup on failure. Returns the
-/// queued JSON-RPC error response on rejection.
-pub async fn admit_session_servers(
-    servers: &[Value],
-    mode: &super::AcpModeState,
-) -> std::result::Result<(), Value> {
-    let resolved = match resolve_acp_mcp_servers(servers, &mode.actual_cwd) {
-        Ok(resolved) => resolved,
-        Err(reason) => {
-            return Err(jsonrpc_invalid_params(&reason));
-        }
-    };
-    if let Err(details) = acp_mcp_tool_names(&resolved) {
-        return Err(super::internal_error_value(&details));
-    }
-    // A second admission first clears the previous session's servers, even
-    // when the new list is empty.
-    let previous_names = std::mem::take(&mut *mode.mcp_server_names.lock().await);
-    if previous_names.is_empty() && resolved.is_empty() {
-        return Ok(());
-    }
-    // The manager guard must not cross an await: scope it tightly.
-    let failure = {
-        let manager = mode.mcp.lock().unwrap();
-        manager
-            .replace_acp_servers(&resolved, &mode.mcp_owner_id)
-            .err()
-            .map(|error| {
-                // The daemon may have applied the configuration before its
-                // acknowledgement was lost: always attempt owner-scoped
-                // cleanup before rejecting admission.
-                if manager.can_release_acp_servers(&mode.mcp_owner_id) {
-                    let _ = manager.replace_acp_servers(&[], &mode.mcp_owner_id);
-                }
-                error.to_string()
-            })
-    };
-    if let Some(failure) = failure {
-        return Err(super::internal_error_value(&failure));
-    }
-    if !resolved.is_empty() {
-        *mode.mcp_server_names.lock().await = resolved
-            .iter()
-            .map(AcpMcpServerConfig::name)
-            .map(str::to_string)
-            .collect();
-    }
-    Ok(())
-}
-
-/// Release the admitted servers on `session/close` or a failed admission
-/// tail (TS `clearAcpMcpServers`): owner-fenced replace-with-empty.
-pub async fn release_session_servers(mode: &super::AcpModeState) {
-    let names = std::mem::take(&mut *mode.mcp_server_names.lock().await);
-    if names.is_empty() {
-        return;
-    }
-    let manager = mode.mcp.lock().unwrap();
-    if manager.can_release_acp_servers(&mode.mcp_owner_id) {
-        let _ = manager.replace_acp_servers(&[], &mode.mcp_owner_id);
-    }
-}
-
-fn jsonrpc_invalid_params(reason: &str) -> Value {
-    super::jsonrpc::error_response(
-        &Value::Null,
-        super::jsonrpc::INVALID_PARAMS,
-        "Invalid params",
-        Some(&serde_json::json!({ "reason": reason })),
-    )
 }
 
 #[cfg(test)]

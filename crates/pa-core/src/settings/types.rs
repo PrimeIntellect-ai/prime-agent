@@ -228,6 +228,16 @@ pub struct AgentTracesSettings {
     pub enabled: Option<bool>,
 }
 
+/// `factory` (the agent factory's opt-in gate): `factory.enabled` is
+/// unset/false by default, and the `/factory on` client command persists
+/// it. Both the daemon's `factory_activity` lane advertisement and the
+/// kernel's factory gate read the same shared settings key.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FactorySettings {
+    pub enabled: Option<bool>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TelemetrySettings {
@@ -315,6 +325,7 @@ pub struct Settings {
     pub compaction: Option<CompactionSettings>,
     pub auto_refine: Option<AutoRefineSettings>,
     pub agent_traces: Option<AgentTracesSettings>,
+    pub factory: Option<FactorySettings>,
     pub telemetry: Option<TelemetrySettings>,
     pub branch_summary: Option<BranchSummarySettings>,
     pub retry: Option<RetrySettings>,

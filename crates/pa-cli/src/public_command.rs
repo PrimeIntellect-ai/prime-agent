@@ -180,6 +180,7 @@ pub fn handle_public_command(args: &[String]) -> PublicCommandResult {
         "model" => rewrite_nested_command("model", "list", "--list-models", &rest),
         "session" => rewrite_nested_command("session", "export", "--export", &rest),
         "prompt" => handled_with_exit(crate::prompt_command::run_prompt_command(&rest)),
+        "factory" => handled_with_exit(crate::factory_command::run_factory_command(&rest)),
         "config" => {
             if !rest.is_empty() {
                 return fail(format!("Usage: {APP_NAME} config"), None);
