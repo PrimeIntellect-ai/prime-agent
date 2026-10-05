@@ -658,19 +658,26 @@ async fn run_stream(
         let events = decoder.push_text(&chunk);
         for event in &events {
             if mark_done_marker(event, &mut state) {
-                continue;
+                // A held-open body past [DONE] never EOFs; the marker
+                // ends the stream.
+                break;
             }
             if let Some(chunk) = parse_sse_event_data(event) {
                 handle_chunk(&chunk, model, cache_write_cost, &mut state, writer);
             }
         }
-    }
-    for event in decoder.finish() {
-        if mark_done_marker(&event, &mut state) {
-            continue;
+        if state.saw_done_marker {
+            break;
         }
-        if let Some(chunk) = parse_sse_event_data(&event) {
-            handle_chunk(&chunk, model, cache_write_cost, &mut state, writer);
+    }
+    if !state.saw_done_marker {
+        for event in decoder.finish() {
+            if mark_done_marker(&event, &mut state) {
+                continue;
+            }
+            if let Some(chunk) = parse_sse_event_data(&event) {
+                handle_chunk(&chunk, model, cache_write_cost, &mut state, writer);
+            }
         }
     }
     // The multiplier table is OpenAI's own; gateways price tiers per endpoint
