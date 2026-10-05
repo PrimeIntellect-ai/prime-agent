@@ -101,6 +101,12 @@ pub enum ActivityGroup {
     /// opens the factory page over the lane — the same navigation family
     /// as the subagents, heartbeats, and shells pages.
     Factory,
+    /// The machine library page: every library machine listed, one drill-in
+    /// per machine. Its group rides the factory group's exact gate (the
+    /// same `factory_activity` advertisement — the library is the
+    /// factory's own surface, so the opt-in contract covers both) and
+    /// opens the library page over the same lane.
+    Library,
     /// The active goal: its group is mounted while a goal is being
     /// pursued and opens the read-only goal panel (the objective and
     /// its facts); a goal that ended unmounts the row with it.
@@ -162,8 +168,8 @@ pub struct ActivityDock {
     /// Whether the factory group renders at all: the daemon's
     /// `factory_activity` advertisement (the factory's opt-in gate —
     /// `factory.enabled`, off by default). A daemon without the lane
-    /// mounts no factory group anywhere: no row, no traversal, no
-    /// click, no page.
+    /// mounts no factory group anywhere: no row (the run page's or the
+    /// machine library's), no traversal, no click, no page.
     pub factory_group: bool,
     /// The active goal's dock label — `Pursuing goal (12m 05s)`-style,
     /// the elapsed-time form (the operator's 2026-09-24 directive: the
@@ -190,8 +196,13 @@ impl ActivityDock {
             ActivityGroup::Heartbeats,
             ActivityGroup::Bash,
         ];
+        // The library page rides the factory group's exact gate: the same
+        // lane advertisement mounts both factory surfaces (the run page and
+        // the machine library page), so the opt-in contract covers the
+        // pair — no lane, no rows, no pages.
         if self.factory_group {
             groups.push(ActivityGroup::Factory);
+            groups.push(ActivityGroup::Library);
         }
         if self.goal_label.is_some() {
             groups.push(ActivityGroup::Goal);
@@ -825,6 +836,14 @@ pub fn render_activity_dock_segments(
                     ));
                 }
             }
+            // The machine library page's row carries no count: the
+            // library is a static list (it changes only through
+            // `prime-agent factory import | export`), so there is no
+            // live number to poll for it — the row reads like the goal
+            // group's label-only row, and the page lists the machines.
+            ActivityGroup::Library => {
+                line.push(theme.fg_span(ThemeColor::Muted, "☰ machines".to_string()));
+            }
             ActivityGroup::Goal => line.push(goal_span(dock, theme)),
         }
         let end = line.iter().map(|s| str_width(&s.content)).sum();
@@ -948,6 +967,9 @@ fn render_expanded_dock_row(
                 &items,
             )
         }
+        // The library row is label-only: no count to read, no items to
+        // list (the page carries the machines).
+        ActivityGroup::Library => expanded_group_row(theme, width, ("☰", "machines"), 0, &[]),
         ActivityGroup::Goal => vec![Span::raw(" "), goal_span(dock, theme)],
     };
     let mut row = truncate_spans_to_width(&row, width);

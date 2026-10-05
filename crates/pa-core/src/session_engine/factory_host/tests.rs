@@ -679,6 +679,25 @@ fn factory_activity_requests_validate_like_the_kernel_frame() {
             .as_deref(),
         Some("spec-1")
     );
+    // the library action's target-free pair: the list takes no target,
+    // and the graph read names the machine through `specId` (never a
+    // `runId`, which the library never reads).
+    assert_eq!(
+        parse("library", None, None, None).unwrap(),
+        FactoryActivityRequest {
+            action: "library",
+            run_id: None,
+            spec_id: None,
+            timeout_ms: None,
+        }
+    );
+    assert_eq!(
+        parse("library", None, Some("pr-manager"), None)
+            .unwrap()
+            .spec_id
+            .as_deref(),
+        Some("pr-manager")
+    );
     // unknown action
     assert_eq!(
         parse("bogus", None, None, None).unwrap_err().to_string(),
