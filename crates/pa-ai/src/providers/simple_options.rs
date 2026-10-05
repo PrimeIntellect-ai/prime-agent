@@ -265,8 +265,7 @@ mod tests {
     fn an_explicit_budget_at_the_integer_ceiling_never_overflows_the_fold() {
         // An explicitly configured maxTokens may be any nonzero u64, so the
         // thinking fold's base + budget addition must saturate before the
-        // model-max clamp: checked builds panicked on the plain `+` and
-        // release wrapped the budget.
+        // model-max clamp.
         let huge = explicit_model("anthropic", "claude-sonnet-4-5", u64::MAX);
         assert_eq!(
             effective_request_max_tokens(&huge, ModelThinkingLevel::High),
