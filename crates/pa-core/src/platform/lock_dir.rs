@@ -18,6 +18,7 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -259,6 +260,15 @@ mod win32 {
     }
 }
 
+/// The witness handle type: the owned directory fd where the platform
+/// has a directory `flock` (unix), a unit elsewhere (`Option<()>` keeps
+/// the field and the `mut self` of the consuming releases uniform across
+/// platforms; the witness is never taken there).
+#[cfg(unix)]
+type WitnessFd = std::os::fd::OwnedFd;
+#[cfg(not(unix))]
+type WitnessFd = ();
+
 /// An exclusive cross-process lock on `{path}.lock`, released on drop by
 /// removing the directory. The directory's ownership identity is captured
 /// at acquisition - the inode (TS `guardIno`) and the mtime probe the
@@ -283,7 +293,7 @@ pub struct LockDir {
     /// directory `flock`. The fd pins this guard's inode for its whole
     /// lifetime and closes with it, so a crashed holder's witness
     /// vanishes with its process - the crash-oracle contract.
-    witness: Option<std::os::fd::OwnedFd>,
+    witness: Option<WitnessFd>,
     /// The (sec, nsec) mtime probe this guard last wrote (proper-lockfile's
     /// `lock.mtime`: the updater records the exact value its `utimes` call
     /// wrote, and its `isMtimeOurs` equality - a lock whose observed mtime
@@ -316,14 +326,17 @@ impl LockDir {
     /// another process, and any underlying I/O error (missing parent,
     /// permissions, stale-reclaim failures) as-is.
     pub fn acquire(file: &Path, stale_after: Duration) -> io::Result<Self> {
-        Self::acquire_at(&Self::path_for(file), stale_after)
+        let path = Self::path_for(file);
+        Self::acquire_unguarded(&path, stale_after, false)
     }
 
     /// [`LockDir::acquire`] at an explicit lock-directory path - for
     /// protocols that name the lock directory itself (the TS supervisor
     /// registry guard locks its directory at `<registryDir>/.guard`, not
     /// at `<file>.lock`), so a rust process and a TS process serialize on
-    /// the SAME on-disk lock.
+    /// the SAME on-disk lock. This path takes the live-holder witness
+    /// ([`LockDir::witness_fd`]): a rust holder's lock cannot be
+    /// stale-reclaimed by another rust process while it lives.
     ///
     /// # Errors
     ///
@@ -331,10 +344,18 @@ impl LockDir {
     /// another process, and any underlying I/O error (missing parent,
     /// permissions, stale-reclaim failures) as-is.
     pub fn acquire_at(path: &Path, stale_after: Duration) -> io::Result<Self> {
+        Self::acquire_unguarded(path, stale_after, true)
+    }
+
+    /// The shared acquisition core: `witnessed` decides whether the guard
+    /// takes the live-holder `flock` (the registry-guard path does; the
+    /// `{file}.lock` convention does not, keeping proper-lockfile's pure
+    /// mtime protocol for those users).
+    fn acquire_unguarded(path: &Path, stale_after: Duration, witnessed: bool) -> io::Result<Self> {
         let path = path.to_path_buf();
         let stale_after = stale_after.max(MIN_STALE);
         match Self::create(&path) {
-            Ok(probe) => Self::acquired(path, probe),
+            Ok(probe) => Self::acquired(path, probe, witnessed),
             // Only an existing path is a lock collision; any other failure
             // (missing parent, permissions) is a real error, like the TS
             // protocol's non-EEXIST path - never masked as contention.
@@ -343,7 +364,7 @@ impl LockDir {
                 // The judge path removed (or raced away) the incumbent: one
                 // fresh attempt; a reappearing rival is contention.
                 match Self::create(&path) {
-                    Ok(probe) => Self::acquired(path, probe),
+                    Ok(probe) => Self::acquired(path, probe, witnessed),
                     Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                         Err(io::Error::new(
                             io::ErrorKind::WouldBlock,
@@ -379,7 +400,7 @@ impl LockDir {
     /// unstat'able directory keeps the TS `guardIno === undefined`
     /// convention (timer-driven detection only), and a platform without a
     /// probe has no value to compare.
-    fn acquired(path: PathBuf, probe: Option<(i64, i64)>) -> io::Result<Self> {
+    fn acquired(path: PathBuf, probe: Option<(i64, i64)>, witnessed: bool) -> io::Result<Self> {
         let owned = Self::ownership_id(&path);
         let adopted = match (owned, probe) {
             // Both identity halves observable: the directory at the path
@@ -398,7 +419,19 @@ impl LockDir {
         // taken while the identity pair is still verifiably ours. A WouldBlock
         // here means the directory changed hands between the probe check and
         // the flock - the same contention, never an adoption.
-        let witness = Self::witness_fd(&path)?;
+        #[cfg(unix)]
+        let witness = if witnessed {
+            Self::witness_fd(&path)?
+        } else {
+            None
+        };
+        #[cfg(not(unix))]
+        let witness: Option<WitnessFd> = {
+            // No directory flock off-unix: the witness is never taken (the
+            // flag stays read here for the signature's uniformity).
+            let _ = witnessed;
+            None
+        };
         Ok(LockDir {
             owned,
             owned_mtime: Mutex::new(probe),
@@ -424,10 +457,10 @@ impl LockDir {
     /// its process, freeing the witness exactly when the stale heuristic
     /// wants it. The `{file}.lock` convention (`acquire`) never takes the
     /// witness, so its incumbents always pass the takeover gate instantly.
-    /// `Ok(None)` where the platform has no directory `flock` (non-unix):
-    /// the identity checks remain the whole protection there.
-    fn witness_fd(path: &Path) -> io::Result<Option<std::os::fd::OwnedFd>> {
-        #[cfg(unix)]
+    /// Unix only: the platforms without a directory `flock` keep the
+    /// identity checks as the whole protection.
+    #[cfg(unix)]
+    fn witness_fd(path: &Path) -> io::Result<Option<WitnessFd>> {
         {
             use std::os::fd::AsRawFd;
             let fd = match fs::File::open(path) {
@@ -457,11 +490,6 @@ impl LockDir {
                 });
             }
             Ok(Some(fd.into()))
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = path;
-            Ok(None)
         }
     }
 
@@ -582,43 +610,170 @@ impl LockDir {
                 Err(error) => return Err(error),
             }
         }
-        if metadata.is_dir() {
-            // The live-holder witness gate: a directory whose mtime says
-            // stale but whose flock is still held belongs to a LIVE rust
-            // holder (a stalled-but-alive process, exactly the case the
-            // stale heuristic was never a safe answer to) - the takeover
-            // must wait for the holder's process to die, not for its mtime
-            // to age. Incumbents without the witness (`acquire`'s
-            // `{file}.lock` convention, TS proper-lockfile locks) always
-            // pass the gate instantly, their reclaim path unchanged.
-            #[cfg(unix)]
-            {
-                if Self::dir_flock_held(path) {
-                    return Err(io::Error::new(
-                        io::ErrorKind::WouldBlock,
-                        format!("Lock file is already being held: {}", path.display()),
-                    ));
-                }
+        if !metadata.is_dir() {
+            // Live lock: contention.
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                format!("Lock file is already being held: {}", path.display()),
+            ));
+        }
+        // Pre-judge on the original stat: a fresh lock is plain contention
+        // and never parked (the park is the stale-removal step alone - a
+        // contender parking a fresh rival's lock would churn every retry).
+        let modified = metadata.modified()?;
+        let age = std::time::SystemTime::now()
+            .duration_since(modified)
+            .unwrap_or_default();
+        if age <= stale_after {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                format!("Lock file is already being held: {}", path.display()),
+            ));
+        }
+        // The stale candidate: the atomic capture - whatever the path
+        // holds goes to the park, and every check runs ON THE PARKED NAME,
+        // where no other process can swap the directory between a check
+        // and the act.
+        let parked = Self::park_name_of(path);
+        match fs::rename(path, &parked) {
+            // A racing holder released it first: retry the create.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+            Ok(()) => {}
+        }
+        // The live-holder witness gate, on the parked name: a stale mtime
+        // never reclaims a directory a live rust holder still flocks - the
+        // takeover waits for the holder's process to die, the way the
+        // stale heuristic always wanted.
+        #[cfg(unix)]
+        {
+            if Self::dir_flock_held(&parked) {
+                Self::restore_parked(&parked, path)?;
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    format!("Lock file is already being held: {}", path.display()),
+                ));
             }
-            let modified = metadata.modified()?;
-            let age = std::time::SystemTime::now()
-                .duration_since(modified)
+        }
+        // The staleness re-judge, on the parked name: the directory the
+        // capture took may be a replacement that arrived after the first
+        // stat judged stale - its fresh mtime says so here, harmlessly.
+        let parked_metadata = match fs::symlink_metadata(&parked) {
+            Ok(metadata) => metadata,
+            // Vanished (nothing creates park names; a concurrent park of
+            // the same lock is impossible): treat as reclaimed.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        if parked_metadata.is_dir() {
+            let parked_modified = parked_metadata.modified()?;
+            let parked_age = std::time::SystemTime::now()
+                .duration_since(parked_modified)
                 .unwrap_or_default();
-            if age > stale_after {
-                // Stale: remove and let the caller retry.
-                match fs::remove_dir(path) {
+            if parked_age > stale_after {
+                // Stale: remove the parked name and let the caller retry.
+                match fs::remove_dir(&parked) {
                     Ok(()) => return Ok(()),
-                    // A racing holder released it first.
                     Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
                     Err(error) => return Err(error),
                 }
             }
         }
-        // Live lock: contention.
+        // A live or fresh replacement lock: put it back, never removed.
+        Self::restore_parked(&parked, path)?;
         Err(io::Error::new(
             io::ErrorKind::WouldBlock,
             format!("Lock file is already being held: {}", path.display()),
         ))
+    }
+
+    /// The park name for an atomic capture of the lock directory: unique
+    /// per process and per capture (the park is created by exactly one
+    /// process and no protocol ever looks at it), parked beside the lock
+    /// itself so the rename stays on one filesystem. A crash between the
+    /// rename and the restore leaves an empty park directory behind -
+    /// inert garbage the protocol never reads.
+    fn park_name_of(path: &Path) -> PathBuf {
+        static PARK_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+        let sequence = PARK_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let mut name = path.as_os_str().to_os_string();
+        name.push(format!(".park.{}.{}", std::process::id(), sequence));
+        PathBuf::from(name)
+    }
+
+    /// Put a parked directory back at the lock path: `RENAME_NOREPLACE`
+    /// on Linux (an atomic refusal when the path was re-created
+    /// meanwhile); elsewhere the path is stat'ed first and the
+    /// microseconds window is disclosed (a lock created between the stat
+    /// and the rename is replaced - non-Linux unix only). A restore that
+    /// cannot happen leaves the park behind - inert garbage the protocol
+    /// never reads - and the displaced occupant's own machinery detects
+    /// the foreign lock at its next identity check and fails closed.
+    fn restore_parked(parked: &Path, path: &Path) -> io::Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            const RENAME_NOREPLACE: u32 = 1;
+            let parked_c = std::ffi::CString::new(parked.as_os_str().as_bytes()).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("park name not encodable: {}", parked.display()),
+                )
+            })?;
+            let path_c = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("lock path not encodable: {}", path.display()),
+                )
+            })?;
+            let result = unsafe {
+                libc::renameat2(
+                    libc::AT_FDCWD,
+                    parked_c.as_ptr(),
+                    libc::AT_FDCWD,
+                    path_c.as_ptr(),
+                    RENAME_NOREPLACE,
+                )
+            };
+            if result == 0 {
+                return Ok(());
+            }
+            let error = io::Error::last_os_error();
+            match error.kind() {
+                // The path was re-taken while it was vacated: the park is
+                // abandoned for the taker's fresh lock, never clobbered.
+                io::ErrorKind::AlreadyExists | io::ErrorKind::NotFound => {
+                    tracing::warn!(
+                        "abandoned a parked lock directory beside {} (the path was re-taken)",
+                        path.display()
+                    );
+                    Ok(())
+                }
+                _ => Err(error),
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            if fs::symlink_metadata(path).is_ok() {
+                tracing::warn!(
+                    "abandoned a parked lock directory beside {} (the path was re-taken)",
+                    path.display()
+                );
+                return Ok(());
+            }
+            match fs::rename(parked, path) {
+                Ok(()) => Ok(()),
+                // The path was taken in the stat-rename window: abandon.
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    tracing::warn!(
+                        "abandoned a parked lock directory beside {} (the path was re-taken)",
+                        path.display()
+                    );
+                    Ok(())
+                }
+                Err(error) => Err(error),
+            }
+        }
     }
 
     /// True while another process holds the live-holder `flock` witness on
@@ -785,14 +940,60 @@ impl LockDir {
             .lock()
             .unwrap()
             .is_none_or(|probe| Self::observed_mtime(&self.path) == Some(probe));
-        // The witness fd is taken out first: the forget below must never
-        // leak it, whichever way the removal decides.
-        let witness = std::mem::take(&mut self.witness);
-        if !self.is_stolen() && mtime_ours {
-            self.release();
+        // The atomic capture: whatever the path holds goes to the park, so
+        // the verification below runs on a name no other process can swap.
+        let parked = Self::park_name_of(&self.path);
+        if fs::rename(&self.path, &parked).is_err() {
+            // Nothing at the path to guard (a stale takeover or a racing
+            // release already took it): never remove anything.
+            self.abandon_witness();
+            std::mem::forget(self);
+            return;
         }
-        drop(witness);
+        // The kernel-truth verification on the parked name: a witnessed
+        // guard's own flock must be ON the parked directory (the attempt
+        // on it blocks - a replacement that collides on inode number and
+        // probe mtime is still a different kernel object, so its attempt
+        // succeeds and it is recognized as foreign); the identity pair
+        // and the recorded probe stay the portable witnesses alongside.
+        let still_ours = mtime_ours && !Self::is_stolen_at(&parked, self.owned);
+        #[cfg(unix)]
+        let still_ours = match self.witness.as_ref() {
+            Some(_) => still_ours && Self::was_witness_held(&parked),
+            // An unwitnessed guard has no kernel truth to consult - the
+            // identity pair alone decides, as before.
+            None => still_ours,
+        };
+        if still_ours {
+            let _ = fs::remove_dir(&parked);
+        } else {
+            // The parked directory is a successor's: put it back, never
+            // removed (the path is free - our rename just vacated it - so
+            // the restore is the ordinary case).
+            let _ = Self::restore_parked(&parked, &self.path);
+        }
+        self.abandon_witness();
         std::mem::forget(self);
+    }
+
+    /// [`LockDir::is_stolen`] against an explicit park path (the parked
+    /// name is the only path a check must trust during a guarded removal).
+    fn is_stolen_at(parked: &Path, owned: Option<u64>) -> bool {
+        let Some(owned) = owned else {
+            return false;
+        };
+        Self::ownership_id(parked) != Some(owned)
+    }
+
+    /// Whether a parked directory carries this guard's own `flock` witness
+    /// (unix): the `flock` attempt on the parked name blocks exactly when
+    /// this guard's witness fd still holds the parked directory's inode -
+    /// the kernel-object identity the stat pair cannot forge (a replacement
+    /// that reuses the inode number and repeats the same-second probe is
+    /// still a different kernel object, and the attempt on it succeeds).
+    #[cfg(unix)]
+    fn was_witness_held(parked: &Path) -> bool {
+        Self::dir_flock_held(parked)
     }
 
     /// Abandon the guard artifact without removing anything at the path: a
@@ -803,8 +1004,14 @@ impl LockDir {
     /// successor's own sweep (TS: "A stolen-but-undetected guard is never
     /// released: that would delete the successor's lock.").
     pub fn disarm(mut self) {
-        drop(std::mem::take(&mut self.witness));
+        self.abandon_witness();
         std::mem::forget(self);
+    }
+
+    /// Close the live-holder witness handle (a no-op on platforms without
+    /// one) so a consuming abandonment never leaks the fd.
+    fn abandon_witness(&mut self) {
+        let _ = std::mem::take(&mut self.witness);
     }
 }
 
@@ -1020,7 +1227,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("auth.json");
         std::fs::write(&file, "{}").unwrap();
-        let holder = LockDir::acquire(&file, MIN_STALE).unwrap();
+        let holder = LockDir::acquire_at(&lock_of(&file), MIN_STALE).unwrap();
         let path = lock_of(&file);
         // Age the lock far past the staleness threshold while the holder
         // lives: the takeover gate must still answer contention.
@@ -1034,7 +1241,7 @@ mod tests {
         // The crash-oracle: the holder's fd closes with it (the kernel's
         // side of the witness), and the stale takeover proceeds.
         drop(holder);
-        let successor = LockDir::acquire(&file, MIN_STALE)
+        let successor = LockDir::acquire_at(&path, MIN_STALE)
             .expect("a dead holder's stale lock reclaims the moment the witness closes");
         assert!(
             std::fs::metadata(&path).unwrap().is_dir(),
@@ -1063,7 +1270,7 @@ mod tests {
         // The successor's own probe: a fresh ceil-second value, foreign to
         // ours by the exact-equality compare.
         set_mtime(&path, 123, 456).unwrap();
-        let error = LockDir::acquired(path.clone(), Some(probe))
+        let error = LockDir::acquired(path.clone(), Some(probe), true)
             .expect_err("a directory with a foreign probe is never adopted");
         assert_eq!(
             error.kind(),
