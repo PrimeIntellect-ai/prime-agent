@@ -44,8 +44,8 @@ use create::{active_session_id_of, worker_server_capabilities};
 // does not use it), so the unused-import lint is allowed deliberately here.
 #[allow(unused_imports)]
 pub(crate) use summary::{
-    compact_action_label, emit_worker_event_with, push_roster_delta, session_snapshot,
-    session_summary, RosterPushContext,
+    compact_action_label, emit_worker_event_with, persist_custom_row, push_roster_delta,
+    session_snapshot, session_summary, RosterPushContext,
 };
 use turn::TurnRunner;
 

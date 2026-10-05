@@ -5337,6 +5337,7 @@ async fn tui_idle_session_event_repaints_without_input() {
             id: None,
             active_session_id: session.clone(),
             name: "renamed-while-attached".to_string(),
+            renamed_by: None,
             rest: serde_json::Map::default(),
         })
         .await
