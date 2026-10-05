@@ -228,11 +228,19 @@ impl AgentSessionEngine {
                         return BoundaryRun::Cancelled;
                     }
                 }
+                if let Ok(result) = serde_json::to_value(&refinement) {
+                    if !emit(EngineEvent::RefineComplete { result }) {
+                        return BoundaryRun::Cancelled;
+                    }
+                }
             }
-            // TS emits `refine_failed` on the wire; the Rust daemon wire
-            // has no refine event yet — the worker log keeps the failure.
             Some(Err(error)) => {
                 eprintln!("pa-daemon: requested refinement failed: {error:#}");
+                if !emit(EngineEvent::RefineFailed {
+                    error: format!("{error:#}"),
+                }) {
+                    return BoundaryRun::Cancelled;
+                }
             }
             None => {}
         }

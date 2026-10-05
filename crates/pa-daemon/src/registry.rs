@@ -192,6 +192,8 @@ pub(crate) struct ResidentWorker {
     /// `compaction_start`, cleared by the forwarded `compaction_end`, so
     /// an `abort_compaction` never needs the worker's own answer.
     pub(crate) compaction: crate::compaction_supervision::CompactionSupervision,
+    /// The pending owner-disconnect stop (TS `ownerCleanupTimer`).
+    pub(crate) owner_cleanup: std::sync::Mutex<Option<tokio::task::AbortHandle>>,
 }
 
 /// The last-good heartbeats rows a worker answered with, tagged with the
@@ -245,6 +247,7 @@ impl ResidentWorker {
             identity_quarantined: AtomicBool::new(false),
             connection_epoch: AtomicU64::new(0),
             compaction: crate::compaction_supervision::CompactionSupervision::default(),
+            owner_cleanup: std::sync::Mutex::new(None),
         })
     }
 
