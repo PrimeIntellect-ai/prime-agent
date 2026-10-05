@@ -219,8 +219,15 @@ impl ReplKernelManager {
                 let Some(inner) = inner.upgrade() else {
                     return;
                 };
-                let _ = inner.interrupt(Some(&execution.request_id)).await;
-                tokio::time::sleep(Duration::from_millis(KERNEL_ABORT_GRACE_MS)).await;
+                // A blocked request write holds the stdin mutex. Do not let an
+                // interrupt queued behind it postpone the force-abort forever.
+                let deadline =
+                    tokio::time::Instant::now() + Duration::from_millis(KERNEL_ABORT_GRACE_MS);
+                tokio::select! {
+                    _ = inner.interrupt(Some(&execution.request_id)) => {},
+                    () = tokio::time::sleep_until(deadline) => {}
+                }
+                tokio::time::sleep_until(deadline).await;
                 // The execution stays active until its done event arrives;
                 // clearing it early would let a new cell race the interrupted
                 // one (see busy-after-interrupt).
@@ -272,6 +279,10 @@ impl ReplKernelManager {
                     };
                     let early_settle = matches!(&settled, Ok(result) if result.result.status == ExecuteStatus::Aborted);
                     if early_settle {
+                        // A blocked request writer would otherwise retain stdin's
+                        // mutex after the caller returned, wedging shutdown too.
+                        send_task.abort();
+                        let _ = send_task.await;
                         settled_result = Some(settled);
                     } else {
                         // Surfacing a failed write outranks the settled cell.
@@ -311,6 +322,57 @@ impl ReplKernelManager {
 #[cfg(test)]
 mod tests {
     use super::append_truncated;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bounded_execute_settles_when_kernel_stops_reading_stdin() {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let python = dir.path().join("ready-but-not-reading");
+        std::fs::write(
+            &python,
+            "#!/usr/bin/env python3\nimport json, time\nprint(json.dumps({'event': 'ready', 'protocol': 3, 'python': '3.13.0'}), flush=True)\ntime.sleep(30)\n",
+        )
+        .expect("write fake kernel");
+        std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod fake kernel");
+        let manager = ReplKernelManager::new(crate::kernel::shared::KernelManagerOptions {
+            python: Some(python),
+            ..Default::default()
+        });
+        manager
+            .start(KernelStartOptions::default())
+            .await
+            .expect("ready handshake");
+        // Larger than the stdin pipe: the request writer holds its mutex while
+        // waiting for this non-reader, so the interrupt write cannot acquire it.
+        let code = "x".repeat(1024 * 1024);
+        let result = tokio::time::timeout(
+            Duration::from_secs(4),
+            manager.execute_bounded(&code, ExecuteOptions::default(), Some(100)),
+        )
+        .await;
+        let result = result
+            .expect("timeout must settle even when the interrupt cannot write")
+            .expect("bounded execute returns a result");
+        assert_eq!(result.status, ExecuteStatus::Aborted);
+        let stdin = manager
+            .inner
+            .child
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .expect("child exists")
+            .stdin
+            .clone();
+        assert!(
+            stdin.try_lock().is_ok(),
+            "the aborted request must release the stdin writer lock"
+        );
+        manager.kill();
+    }
 
     #[test]
     fn capped_stream_matches_original_unicode_and_frame_semantics() {

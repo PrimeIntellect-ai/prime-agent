@@ -1118,6 +1118,46 @@ mod tests {
         );
     }
 
+    /// A ready kernel that stops reading stdin must not wedge its bootstrap
+    /// request or the failed boot's shutdown behind a full pipe.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn nonreading_kernel_fails_bootstrap_without_parking_shutdown() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let python = dir.path().join("ready-but-not-reading");
+        std::fs::write(
+            &python,
+            "#!/usr/bin/env python3\nimport json, time\nprint(json.dumps({'event': 'ready', 'protocol': 3, 'python': '3.13.0'}), flush=True)\ntime.sleep(30)\n",
+        )
+        .expect("write fake kernel");
+        std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod fake kernel");
+        let provisioner = IpythonKernelProvisioner::new(
+            dir.path(),
+            IpythonKernelProvisionerOptions {
+                python: Some(python),
+                python_skills: vec![KernelPythonSkill {
+                    name: "oversized".into(),
+                    import_name: "x".repeat(1024 * 1024),
+                    package_path: dir.path().into(),
+                    pyproject_path: dir.path().join("pyproject.toml"),
+                }],
+                ..Default::default()
+            },
+        );
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(9),
+            provisioner.ensure(None, None),
+        )
+        .await
+        .expect("timed out bootstrap must not park during failed-boot cleanup")
+        .expect_err("kernel never reads bootstrap");
+        assert!(format!("{error:#}").contains("runtime bootstrap did not finish"));
+        assert!(!provisioner.has_running_kernel());
+    }
+
     /// A kernel that answers the ready handshake but never answers the
     /// bootstrap execute (the wedged-kernel shape: the frame is lost inside
     /// the kernel) fails `ensure` with the bound's message instead of parking
