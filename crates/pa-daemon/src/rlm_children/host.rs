@@ -151,6 +151,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     usage_watch_live: false,
                     usage_rearm: false,
                     emit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+                    rename_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
                 };
                 let record = Arc::new(Mutex::new(record));
                 this.children.lock().await.push(Arc::clone(&record));
@@ -326,6 +327,15 @@ impl RlmSubagentHost for SupervisorChildSessions {
             // `No direct RLM subagent matches ...` message is the product
             // surface); only the kill below gets a delete context.
             let record = this.resolve_record(&target, "subagent").await?;
+            let rename_lock = record.lock().await.rename_lock.clone();
+            let _rename_guard = rename_lock.lock().await;
+            let no_longer_matches = {
+                let record = record.lock().await;
+                record.closed_by_parent || !record.matches(&target)
+            };
+            if no_longer_matches {
+                bail!("No direct RLM subagent matches \"{target}\" in the current parent session");
+            }
             let active_session_id = record.lock().await.active_session_id.clone();
             // Kill first: a failed kill keeps the child tracked so the caller
             // can retry; a successful kill removes it from the registry.
@@ -562,6 +572,23 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     ),
                 }
             };
+            // Serialize the daemon command and parent-side record update
+            // against another rename or delete of this child.
+            let rename_lock = if let Some(record) = &record {
+                Some(record.lock().await.rename_lock.clone())
+            } else {
+                None
+            };
+            let _rename_guard = if let Some(lock) = &rename_lock {
+                Some(lock.lock().await)
+            } else {
+                None
+            };
+            if let Some(record) = &record {
+                if record.lock().await.closed_by_parent {
+                    bail!("rlm.rename can only rename the current session or one of its direct children");
+                }
+            }
             // The rename itself is daemon-owned: the supervisor's live
             // rename route reserves the name, asserts sibling uniqueness
             // across the family, and appends the child's RLM ledger
