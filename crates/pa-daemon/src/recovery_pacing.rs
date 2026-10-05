@@ -56,6 +56,15 @@ mod tests {
 
     #[tokio::test]
     async fn aborting_the_pass_cancels_the_in_flight_fanout() {
+        /// Observes cancellation the only way an aborted task can be seen:
+        /// the guard's Drop runs when the job's own task is cancelled -
+        /// a detached job stays parked in its sleep and never drops it.
+        struct CancellationObserved(std::sync::Arc<AtomicUsize>);
+        impl Drop for CancellationObserved {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
         let entered = std::sync::Arc::new(AtomicUsize::new(0));
         let cancelled = std::sync::Arc::new(AtomicUsize::new(0));
         let pass = tokio::spawn(run_bounded(
@@ -64,9 +73,9 @@ mod tests {
                     let entered = std::sync::Arc::clone(&entered);
                     let cancelled = std::sync::Arc::clone(&cancelled);
                     move || async move {
+                        let _observed = CancellationObserved(std::sync::Arc::clone(&cancelled));
                         entered.fetch_add(1, Ordering::SeqCst);
                         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-                        cancelled.fetch_add(1, Ordering::SeqCst);
                     }
                 })
                 .collect(),
@@ -80,12 +89,18 @@ mod tests {
         }
         pass.abort();
         pass.await.unwrap_err();
-        // The in-flight fan-out dies with the pass, not detached.
-        assert_eq!(
-            cancelled.load(Ordering::SeqCst),
-            0,
-            "no in-flight job may complete after the pass is aborted"
-        );
+        // The in-flight fan-out must be cancelled, not detached: every
+        // job's cancellation guard runs. (A detached fan-out keeps the
+        // guards alive inside the parked sleeps - this is the assertion
+        // that fails without the abort-on-drop fan-out.)
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while cancelled.load(Ordering::SeqCst) < 4 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the in-flight fan-out was not cancelled with the pass"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
     }
 
     #[tokio::test]
