@@ -9,6 +9,10 @@
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
+// The whole target drives /bin/sh interpreter wrappers and unix-only
+// file permissions, so it stays off the windows cross-check (the same
+// gate the sibling kernel targets carry).
+#![cfg(unix)]
 
 //! Verifier integration tests for the revivable kernel stop (TS #2483's
 //! `stopKernel`): a snapshot-flushing stop that keeps the provisioner
@@ -22,6 +26,7 @@
 //! hermetic elsewhere. `PA_CORE_KERNEL_PYTHON` points at an explicit
 //! interpreter.
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -267,4 +272,158 @@ async fn revival_waits_for_in_flight_stop_before_booting() {
         .unwrap();
     assert_eq!(result.status, ExecuteStatus::Ok);
     let _ = first_cell.await;
+}
+
+/// A stop armed for one boot, a `kill()`, a revival boot gated on that
+/// stop's gate, and a second stop of the REVIVED boot: the second stop
+/// supersedes the first stop's gate (the two arms are for different
+/// boots), and the first stop's task - which loses the manager take -
+/// must wait a strictly OLDER gate, never the currently-installed one.
+/// Waiting the installed gate deadlocks: the first stop waits the second
+/// stop's gate, which waits the revival's boot, which waits the FIRST
+/// stop's gate (a cycle with no drain boundary left to cross). The
+/// oracle is the settle itself, bounded: every task must settle within
+/// the timeouts on the chained-gate shape; the cycle shape wedges
+/// against the first bounded await. The absolute spawn count stays pinned
+/// at two: nothing in the chain may arm a third interpreter.
+#[tokio::test]
+async fn superseding_stop_after_kill_cannot_deadlock_the_revival_gate() {
+    let Some(python) = kernel_python() else {
+        return;
+    };
+    let dir = tempfile::TempDir::new().unwrap();
+    let count = dir.path().join("starts");
+    let wrapped = counting_kernel(dir.path(), &python, &count);
+    let artifacts = dir.path().join("artifacts");
+    std::fs::create_dir_all(&artifacts).unwrap();
+    let provisioner = IpythonKernelProvisioner::new(
+        dir.path(),
+        IpythonKernelProvisionerOptions {
+            python: Some(wrapped),
+            snapshot_dir: Some(artifacts),
+            ..Default::default()
+        },
+    );
+    // Boot one, and observe it mid-flight through its first progress
+    // stage (the memo is armed; the stage precedes the interpreter spawn,
+    // and the handshake runs for seconds after it).
+    let (stage_tx, stage_rx) = tokio::sync::oneshot::channel();
+    let stage_tx = Arc::new(Mutex::new(Some(stage_tx)));
+    let progress: pa_core::kernel::bootstrap::KernelBootstrapProgressHandler =
+        Arc::new(move |message| {
+            if !message.starts_with("Waiting for the previous kernel to stop") {
+                if let Some(tx) = stage_tx.lock().unwrap().take() {
+                    let _ = tx.send(());
+                }
+            }
+        });
+    let doomed = tokio::spawn({
+        let provisioner = provisioner.clone();
+        let progress = progress.clone();
+        async move { provisioner.ensure(Some(progress), None).await }
+    });
+    tokio::time::timeout(Duration::from_secs(30), stage_rx)
+        .await
+        .expect("the first boot reached its first stage")
+        .expect("stage signal");
+    // The first stop arms its gate for that boot (nothing to join yet);
+    // one scheduler poll runs the stop task to its first await, past the
+    // arm.
+    let first_stop = tokio::spawn({
+        let provisioner = provisioner.clone();
+        async move { provisioner.stop_kernel(None).await }
+    });
+    tokio::task::yield_now().await;
+    // The kill invalidates the boot's memo generation (TS kill() clears
+    // managerPromise): the doomed boot still settles, but against no memo.
+    provisioner.kill();
+    // The revival boots fresh and parks on the first stop's gate.
+    let revival = tokio::spawn({
+        let provisioner = provisioner.clone();
+        async move { provisioner.ensure(None, None).await }
+    });
+    tokio::task::yield_now().await;
+    // A stop of the REVIVED boot supersedes the first stop's gate (its
+    // arm is for the newer memo, so the same-boot JOIN does not apply).
+    let second_stop = tokio::spawn({
+        let provisioner = provisioner.clone();
+        async move { provisioner.stop_kernel(None).await }
+    });
+    tokio::task::yield_now().await;
+    // The doomed boot settles (its failure publishes to its own memo's
+    // waiters); nothing here can wedge.
+    let settled = tokio::time::timeout(Duration::from_secs(30), doomed)
+        .await
+        .expect("the doomed boot settled")
+        .unwrap();
+    assert!(
+        settled.is_err(),
+        "a boot doomed by kill() must settle as a failure"
+    );
+    // THE ORACLE: the first stop must settle too. On the cycle shape its
+    // take-loser waits the currently-installed gate - the second stop's
+    // gate - which waits the revival's boot, which waits the FIRST
+    // stop's gate: the await below times out. On the chained-gate shape
+    // the loser waits only the gate its own arm replaced (none here), its
+    // gate opens, the revival parks, the second stop settles, all within
+    // the bound.
+    tokio::time::timeout(Duration::from_secs(30), first_stop)
+        .await
+        .expect("the first stop settled (no wait cycle)")
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(30), second_stop)
+        .await
+        .expect("the second stop settled")
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(30), revival)
+        .await
+        .expect("the revival settled")
+        .unwrap()
+        .unwrap();
+    // The second stop took and shut down the revived kernel (it stopped
+    // the NEW boot); the provisioner must be fully revivable after the
+    // cycle: a fresh ensure boots a third interpreter and serves.
+    assert!(provisioner.manager().is_none());
+    assert!(!provisioner.has_running_kernel());
+    let fresh = tokio::time::timeout(Duration::from_secs(30), provisioner.ensure(None, None))
+        .await
+        .expect("a fresh ensure booted after the cycle")
+        .unwrap();
+    let result = fresh
+        .execute("1 + 1", ExecuteOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(result.status, ExecuteStatus::Ok);
+    assert_eq!(
+        starts(&count),
+        3,
+        "the doomed boot, the revival, the fresh boot - nothing else"
+    );
+}
+
+/// A kernel interpreter wrapper that counts spawns into `count` before
+/// exec'ing the real kernel Python (see `kernel_startup_memo.rs`), so a
+/// test can pin exactly how many kernels were armed.
+fn counting_kernel(
+    dir: &std::path::Path,
+    python: &std::path::Path,
+    count: &std::path::Path,
+) -> PathBuf {
+    let wrapper = dir.join("counting-python");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nprintf x >> '{}'\nexec '{}' \"$@\"\n",
+            count.display(),
+            python.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+    wrapper
+}
+
+/// Number of interpreter spawns recorded so far.
+fn starts(count: &std::path::Path) -> u64 {
+    count.metadata().map_or(0, |m| m.len())
 }

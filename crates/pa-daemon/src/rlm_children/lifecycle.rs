@@ -217,6 +217,66 @@ impl SupervisorChildSessionsInner {
         })
     }
 
+    /// Send one child-addressed daemon command and retry it ONCE by the
+    /// child's durable selector when its routing id no longer resolves
+    /// (the passivation-aware wake, TS's tier-2 revival — shared by the
+    /// prompt and the parent-directed rename): the child's worker was
+    /// idle-evicted, or a prior wake re-keyed the supervisor roster's
+    /// child row to a fresh worker id, so the routing id the caller
+    /// holds (the record's spawn-time active id) resolves nowhere. The
+    /// retry addresses the child by its DURABLE selector (its session id
+    /// — the session-file stem the supervisor's wake resolves through
+    /// the spawn ledger, then the child id) — the daemon's wake arm
+    /// launches a fresh worker over the child's session file and the
+    /// command lands on the replay. `subject` renders the failure
+    /// contexts; the retry's context appends the wake provenance. A
+    /// non-miss failure and a child with no record keep the original
+    /// error.
+    pub(super) async fn command_with_durable_wake(
+        &self,
+        make_command: impl Fn(&str) -> DaemonCommand,
+        active_session_id: &str,
+        timeout_ms: u64,
+        subject: &str,
+    ) -> Result<()> {
+        let command = make_command(active_session_id);
+        match self.command(&command, timeout_ms).await {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                let rendered = format!("{error:#}");
+                if !rendered.starts_with("Unknown active session:") {
+                    return Err(error).with_context(|| subject.to_string());
+                }
+                let durable = self.durable_child_selector_for(active_session_id).await;
+                let Some(durable) = durable else {
+                    return Err(error).with_context(|| subject.to_string());
+                };
+                let retry = make_command(&durable);
+                self.command(&retry, timeout_ms)
+                    .await
+                    .with_context(|| format!("{subject} (woken by {durable})"))?;
+                Ok(())
+            }
+        }
+    }
+
+    /// The durable selector of the child whose routing id is
+    /// `active_session_id`: the address that reaches a passivated child
+    /// through the supervisor's ledger wake.
+    async fn durable_child_selector_for(&self, active_session_id: &str) -> Option<String> {
+        let children = self.children.lock().await;
+        for record in children.iter() {
+            let record = record.lock().await;
+            if record.active_session_id == active_session_id {
+                return Some(crate::rlm_children::durable_child_selector(
+                    record.session_id.as_deref(),
+                    &record.rlm_child_id,
+                ));
+            }
+        }
+        None
+    }
+
     pub(super) async fn prompt_child(&self, active_session_id: &str, prompt: &str) -> Result<()> {
         let make_command = |selector: &str| DaemonCommand::Prompt {
             id: None,
@@ -238,49 +298,13 @@ impl SupervisorChildSessionsInner {
             },
             rest: Map::default(),
         };
-        let command = make_command(active_session_id);
-        match self.command(&command, PROMPT_TIMEOUT_MS).await {
-            Ok(_) => Ok(()),
-            // The passivation-aware wake (TS's tier-2 revival): the
-            // child's worker was idle-evicted, so its ROUTING id no
-            // longer resolves. Retry once by the child's DURABLE selector
-            // (its session id — the session-file stem the supervisor's
-            // wake resolves through the spawn ledger, then the child id)
-            // — the daemon's wake arm launches a fresh worker over the
-            // child's session file and the prompt lands on the replay.
-            Err(error) => {
-                let rendered = format!("{error:#}");
-                if !rendered.starts_with("Unknown active session:") {
-                    return Err(error)
-                        .with_context(|| format!("prompt RLM child session {active_session_id}"));
-                }
-                let mut durable: Option<String> = None;
-                {
-                    let children = self.children.lock().await;
-                    for record in children.iter() {
-                        let record = record.lock().await;
-                        if record.active_session_id == active_session_id {
-                            durable = Some(crate::rlm_children::durable_child_selector(
-                                record.session_id.as_deref(),
-                                &record.rlm_child_id,
-                            ));
-                            break;
-                        }
-                    }
-                }
-                let Some(durable) = durable else {
-                    return Err(error)
-                        .with_context(|| format!("prompt RLM child session {active_session_id}"));
-                };
-                let retry = make_command(&durable);
-                self.command(&retry, PROMPT_TIMEOUT_MS)
-                    .await
-                    .with_context(|| {
-                        format!("prompt RLM child session {active_session_id} (woken by {durable})")
-                    })?;
-                Ok(())
-            }
-        }
+        self.command_with_durable_wake(
+            make_command,
+            active_session_id,
+            PROMPT_TIMEOUT_MS,
+            &format!("prompt RLM child session {active_session_id}"),
+        )
+        .await
     }
 
     pub(super) async fn kill_child(
