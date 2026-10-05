@@ -424,6 +424,20 @@ impl Supervisor {
             });
         }
         socket::prepare_socket_path(&self.options.socket_path).await?;
+        // The pre-bind admission re-assert (TS daemon-supervisor.ts
+        // start():860, the `assertSocketLeaseHeld` slot at the listen):
+        // the boot-time refusal above is a one-time read, and the whole
+        // telemetry/catalog boot stretch runs between it and this bind -
+        // a stop window that opens in that gap would otherwise let this
+        // boot bind mid-window and take the socket from the
+        // coordinator's intended successor. The same admission refusal,
+        // re-read once at the bind seam: a boot that reaches the bind
+        // during an active window bows out exactly like the boot-time
+        // refusal (same message, same non-zero exit), never binding.
+        // Divergence: TS's slot asserts the socket lease - the D2 lane
+        // (PR #3333) owns that atomic-bind protection; this D3 record
+        // carries the admission's choreography only.
+        supervisor_ownership::refuse_while_shutdown_admission_active()?;
         let listener = bind_transport(&self.options.socket_path)
             .await
             .with_context(|| {
