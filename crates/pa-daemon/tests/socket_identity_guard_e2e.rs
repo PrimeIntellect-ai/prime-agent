@@ -406,13 +406,21 @@ fn supervisor_renews_lifetime_socket_lease_and_reclaims_a_dead_holder() {
     wait_socket_ready(&socket);
     let lock = PathBuf::from(format!("{}.lock", socket.display()));
     assert!(lock.is_dir(), "serving supervisor must hold socket lease");
+    // Wait for the observable - the lock mtime rising above the probe
+    // value it was created with - instead of sleeping a fixed span: the
+    // holder refreshes every second, and the poll keeps the oracle tied
+    // to the actual refresh, not to a schedule.
     let before = std::fs::metadata(&lock).unwrap().modified().unwrap();
-    std::thread::sleep(Duration::from_secs(2));
-    let after = std::fs::metadata(&lock).unwrap().modified().unwrap();
-    assert!(
-        after > before,
-        "live holder must refresh lock directory mtime"
-    );
+    let mut refreshed = before;
+    let refresh_deadline = Instant::now() + Duration::from_secs(5);
+    while refreshed <= before {
+        assert!(
+            Instant::now() < refresh_deadline,
+            "live holder must refresh lock directory mtime"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+        refreshed = std::fs::metadata(&lock).unwrap().modified().unwrap();
+    }
     let mut second = spawn_supervisor(&socket, &dir.path().join("rival-agent"));
     assert!(
         second.child.try_wait().unwrap().is_none(),
@@ -427,7 +435,7 @@ fn supervisor_renews_lifetime_socket_lease_and_reclaims_a_dead_holder() {
     let mut successor = spawn_supervisor(&socket, &dir.path().join("successor-agent"));
     let deadline = Instant::now() + Duration::from_secs(18);
     while UnixStream::connect(&socket).is_err()
-        || std::fs::metadata(&lock).unwrap().modified().unwrap() <= after
+        || std::fs::metadata(&lock).unwrap().modified().unwrap() <= refreshed
     {
         assert!(
             Instant::now() < deadline,
@@ -453,20 +461,32 @@ fn live_supervisor_lease_prevents_rebind_after_external_socket_rename() {
     let mut rival = spawn_supervisor(&socket, &dir.path().join("rival-agent"));
     // TS's lifetime lease queues this startup until the 600x25ms retry
     // budget expires. Rust without a lease binds immediately: fail RED.
-    std::thread::sleep(Duration::from_secs(2));
+    // Drive the rival to its own terminal state instead of sleeping a
+    // fixed span: a slow starter that would bind without the lease must
+    // still be caught inside its full retry budget, and the lease-timed-
+    // out rival is the observable that proves it waited rather than bound.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let rival_status = loop {
+        assert!(
+            !socket.exists(),
+            "successor bound while original supervisor still held its lease"
+        );
+        if let Some(status) = rival.child.try_wait().expect("poll rival") {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "rival outlived the lease retry budget without binding or exiting"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    // TS's contender test accepts failed rivals (ENG-4600:579-585), not
+    // only ones still waiting: a rival may wait or fail, but must not bind.
     assert!(
-        !socket.exists(),
-        "successor bound while original supervisor still held its lease"
+        !rival_status.success(),
+        "a rival that exits must have refused the bind"
     );
     assert!(original.child.try_wait().unwrap().is_none());
-    // TS's contender test accepts failed rivals (ENG-4600:579-585), not
-    // only ones still waiting. A rival may wait or fail, but must not bind.
-    if let Some(status) = rival.child.try_wait().unwrap() {
-        assert!(
-            !status.success(),
-            "a rival that exits must have refused the bind"
-        );
-    }
 }
 
 /// After a stopped holder loses its lock, it must fence itself on resume;

@@ -10,6 +10,8 @@ pub mod perms;
 pub mod process;
 pub mod shell;
 
+#[cfg(target_os = "linux")]
+pub use lock_dir::move_dir_without_replacing;
 pub use lock_dir::LockDir;
 pub use perms::{
     file_mode, is_executable, is_readable_writable, restrict_dir, restrict_file, set_private_mode,

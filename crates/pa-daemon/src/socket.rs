@@ -67,6 +67,21 @@ async fn acquire_cleanup_lock(path: &Path) -> Result<pa_core::platform::LockDir>
     ))
 }
 
+/// The pinned handle is the ownership witness for the acquired lock: a
+/// path that no longer resolves to it means the lock was displaced
+/// mid-acquisition, so refuse rather than adopt the successor's lease.
+#[cfg(unix)]
+fn assert_path_pins(lock_path: &Path, lock_dir: &std::fs::File) -> Result<SocketIdentity> {
+    let identity = metadata_identity(&lock_dir.metadata()?);
+    if !lock_identity_matches(lock_path, &identity) {
+        return Err(anyhow!(
+            "Daemon socket lock {} was replaced while acquiring it",
+            lock_path.display()
+        ));
+    }
+    Ok(identity)
+}
+
 /// A supervisor-lifetime proper-lockfile lease on `{socket}.lock`.
 /// The opened directory pins the acquired inode across stale takeovers: a
 /// displaced holder never refreshes or removes the successor's lock.
@@ -90,17 +105,19 @@ impl SocketLease {
     ///
     /// # Errors
     ///
-    /// Returns an error if the directory cannot be created or locked.
+    /// Returns an error if the directory cannot be created or locked, or if
+    /// the acquired lock was replaced before its inode could be pinned.
     pub async fn acquire(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             crate::paths::ensure_dir(parent)?;
         }
         let lock = acquire_cleanup_lock(path).await?;
-        let lock_path = lock.into_path();
-        // If the open fails, ownership is unprovable; leave the artifact to
-        // expire instead of risking removal of a racing successor's lock.
-        let lock_dir = std::fs::File::open(&lock_path)?;
-        let identity = metadata_identity(&lock_dir.metadata()?);
+        let (lock_path, lock_dir) = lock.into_parts();
+        // The handle pins the inode this supervisor acquired: if the path
+        // check or metadata read fails, ownership is unprovable, so leave
+        // the artifact to expire instead of risking removal of a racing
+        // successor's lock.
+        let identity = assert_path_pins(&lock_path, &lock_dir)?;
         let compromised = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (compromise_tx, _) = tokio::sync::watch::channel(false);
         let task_path = lock_path.clone();
@@ -196,9 +213,69 @@ impl Drop for SocketLease {
         // The pinned fd prevents inode reuse while this lease is alive.
         // A successor that reclaimed a stale lock must never be released by us.
         if !self.compromised() {
-            let _ = std::fs::remove_dir(&self.lock_path);
+            self.release_lock_dir();
         }
         let _ = &self.lock_dir;
+    }
+}
+
+/// Release the lock directory without being able to unlink a successor's
+/// replacement. The directory at the lock path is first claimed under a
+/// private name with one atomic rename, so a takeover landing between the
+/// identity check and the removal cannot have its own lock unlinked: only
+/// a directory whose pinned inode still matches this lease is removed,
+/// and a claimed successor is restored without ever clobbering a newer
+/// claimant.
+#[cfg(unix)]
+impl SocketLease {
+    fn release_lock_dir(&self) {
+        let mut claim_name = self.lock_path.clone().into_os_string();
+        claim_name.push(format!(
+            ".releasing-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |age| age.as_nanos())
+        ));
+        let claim = std::path::PathBuf::from(claim_name);
+        // The claim is atomic: it takes whatever the path holds, ours or
+        // a successor's, with no window where a swap changes the answer.
+        if std::fs::rename(&self.lock_path, &claim).is_err() {
+            // Nothing at the path is ours to release.
+            return;
+        }
+        if lock_identity_matches(&claim, &self.identity) {
+            // The private name cannot be anyone else's lock: unlinking it
+            // cannot touch a successor's directory.
+            let _ = std::fs::remove_dir(&claim);
+        } else if !restore_claim(&claim, &self.lock_path) {
+            // A newer claimant owns the path, so the claimed successor
+            // cannot go back; its holder fences on the displaced inode.
+            // Remove the orphan instead of leaking it.
+            let _ = std::fs::remove_dir(&claim);
+        }
+    }
+}
+
+/// Put a claimed successor's lock back without ever clobbering a newer
+/// claimant: the move is a no-replace rename, so an occupied path fails
+/// instead of being replaced and the claimed directory stays aside for
+/// the caller to drop. `false` means the caller must drop the claim as
+/// an orphan - either a newer claimant owns the path, or this platform
+/// has no no-replace rename at all, in which case the claimed successor
+/// is never restored (its holder fences on the displaced inode; a
+/// restore attempt here could only be a replacing rename, which is
+/// exactly the clobber this release exists to prevent).
+#[cfg(unix)]
+fn restore_claim(claim: &Path, path: &Path) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        pa_core::platform::move_dir_without_replacing(claim, path).is_ok()
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        let _ = (claim, path);
+        false
     }
 }
 
@@ -465,6 +542,92 @@ mod tests {
         drop(listener);
         drop(lease);
         assert!(!pa_core::platform::LockDir::path_for(&socket).exists());
+    }
+
+    #[test]
+    fn path_pins_refuses_a_lock_replaced_after_the_pin() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let socket = dir.path().join("daemon.sock");
+        let lock_path = pa_core::platform::LockDir::path_for(&socket);
+        std::fs::create_dir(&lock_path).unwrap();
+        let pinned = std::fs::File::open(&lock_path).unwrap();
+        // A stale takeover displaces the pinned inode after the pin.
+        let aside = dir.path().join("displaced.lock");
+        std::fs::rename(&lock_path, &aside).unwrap();
+        std::fs::create_dir(&lock_path).unwrap();
+        let error = assert_path_pins(&lock_path, &pinned).unwrap_err();
+        assert!(
+            error.to_string().contains("replaced while acquiring"),
+            "{error}"
+        );
+        // The refusal leaves the successor's artifact untouched.
+        assert!(lock_path.is_dir());
+        // The matching case: the pinned inode back at the path is held.
+        std::fs::remove_dir(&lock_path).unwrap();
+        std::fs::rename(&aside, &lock_path).unwrap();
+        assert_path_pins(&lock_path, &pinned).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn restore_claim_returns_the_successor_when_the_path_is_vacant() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("daemon.sock.lock");
+        let claim = dir.path().join("daemon.sock.lock.claimed");
+        std::fs::create_dir(&claim).unwrap();
+        assert!(restore_claim(&claim, &path));
+        assert!(path.is_dir(), "the claimed directory is back at the path");
+        assert!(!claim.exists());
+    }
+
+    #[test]
+    fn restore_claim_never_clobbers_a_newer_claimant() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("daemon.sock.lock");
+        let claim = dir.path().join("daemon.sock.lock.claimed");
+        std::fs::create_dir(&claim).unwrap();
+        // A third claimant acquired the vacated path before the restore.
+        std::fs::create_dir(&path).unwrap();
+        let claimant = std::fs::symlink_metadata(&path).unwrap();
+        assert!(!restore_claim(&claim, &path));
+        // The newer claimant's lock survives untouched at the path.
+        let survivor = std::fs::symlink_metadata(&path).unwrap();
+        assert_eq!(
+            (survivor.dev(), survivor.ino()),
+            (claimant.dev(), claimant.ino()),
+            "the newer claimant's lock must not be clobbered"
+        );
+        // The claim stays aside for the caller to drop.
+        assert!(claim.is_dir());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn release_restores_a_successor_lock_claimed_in_the_takeover_race() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let socket = dir.path().join("daemon.sock");
+        let lease = SocketLease::acquire(&socket).await.unwrap();
+        let lock_path = pa_core::platform::LockDir::path_for(&socket);
+        // A successor's replacement sits at the lock path - the takeover
+        // race the atomic claim exists for; the lease's own directory is
+        // displaced and pinned by its fd.
+        let own = dir.path().join("own.lock");
+        std::fs::rename(&lock_path, &own).unwrap();
+        std::fs::create_dir(&lock_path).unwrap();
+        // The release must restore the successor's directory, never unlink
+        // it, even when it wins the claim on the lock path.
+        lease.release_lock_dir();
+        assert!(
+            lock_path.is_dir(),
+            "a claimed successor lock must be restored"
+        );
+        // The compromised lease still skips the release on drop.
+        drop(lease);
+        assert!(
+            lock_path.is_dir(),
+            "a compromised lease must not release the successor's lock"
+        );
     }
 
     #[tokio::test]
