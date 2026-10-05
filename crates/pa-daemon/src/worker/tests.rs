@@ -52,8 +52,8 @@ mod kill_broadcast_tests;
 mod queue_tests;
 mod summary_tests;
 mod warning_marker_tests;
-#[test]
-fn background_refinement_event_is_fenced_to_its_review_session() {
+#[tokio::test]
+async fn background_refinement_event_is_fenced_to_its_review_session() {
     let dir = std::env::temp_dir().join(format!("pa-refine-event-{}", uuid::Uuid::new_v4()));
     let worker = Worker::new(
         WorkerConfig {
