@@ -51,6 +51,10 @@ impl SupervisorChildSessionsInner {
         let Some(session_file) = session_file else {
             return;
         };
+        // A reseeded row nothing has observed yet: nothing to bill until a delivery primes it.
+        let Some(from) = from else {
+            return;
+        };
         // The open+parse is a blocking read of a file that can reach tens
         // of megabytes: run it on the blocking pool, never the async
         // worker (a slow file read must not stall unrelated tasks on the
@@ -68,7 +72,7 @@ impl SupervisorChildSessionsInner {
         let (batches, next) = crate::rlm_child_usage::child_usage_batches(store.entries(), from);
         {
             let mut record_guard = record.lock().await;
-            record_guard.attributed_rows = next;
+            record_guard.attributed_rows = Some(next);
         }
         if batches.is_empty() {
             return;
@@ -102,11 +106,34 @@ impl SupervisorChildSessionsInner {
     /// watcher covers the follow-up turn's usage. It never touches the
     /// run status, notices, or the settle hook.
     pub(super) async fn arm_usage_watch(this: &Arc<Self>, record: &Arc<Mutex<ChildRecord>>) {
+        if record.lock().await.closed_by_parent {
+            return;
+        }
+        // Prime a lazy cursor at the tail so the pre-restart history is never billed.
+        if record.lock().await.attributed_rows.is_none() {
+            // A local, not an if-let scrutinee: the scrutinee's guard would
+            // live through the body and deadlock the re-lock below.
+            let session_file = record
+                .lock()
+                .await
+                .session_file
+                .clone()
+                .filter(|path| !path.is_empty());
+            if let Some(session_file) = session_file {
+                let path = PathBuf::from(session_file);
+                let tail = tokio::task::spawn_blocking(move || {
+                    crate::session_store::SessionFile::open(&path)
+                        .map(|store| store.entries().len())
+                })
+                .await;
+                // A failed read stays lazy: a zero cursor would re-bill the whole history.
+                if let Ok(Ok(tail)) = tail {
+                    record.lock().await.attributed_rows.get_or_insert(tail);
+                }
+            }
+        }
         {
             let mut record = record.lock().await;
-            if record.closed_by_parent {
-                return;
-            }
             if record.usage_watch_live {
                 // A watcher is already observing this child (armed for an
                 // earlier delivery): ask IT to observe this delivery's

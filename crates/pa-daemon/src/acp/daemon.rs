@@ -1,13 +1,15 @@
 //! The daemon-attached ACP transport: the same ACP JSON-RPC surface served
-//! over a client-owned daemon session (TS
+//! over a daemon session (TS
 //! `runAcpModeWithConnection(DaemonAgentConnection)`).
 //!
-//! `session/new` creates the client-owned daemon session (`--no-session`
-//! semantics), admits its MCP servers through the
+//! Startup creates and attaches the daemon session the CLI session flags
+//! select. `session/new` binds it, admits its MCP servers through the
 //! `replace_acp_mcp_servers` wire command, and every prompt runs
 //! `prompt_and_wait` while the streamed session events fan out as ACP
-//! updates. The turn settlement (response boundary, quiescence envelope,
-//! stop reason) mirrors the in-process mode: both serve the same captures.
+//! updates. The turn settlement (response boundary, completion envelope
+//! with the live outstanding-subagent count, terminal frame after the RLM
+//! family settles, stop reason) mirrors the TS captures, and the stop
+//! sequence cancels the outstanding children (TS #1612).
 //! The daemon worker's `goal_update` session events surface through the
 //! wire mapping (`wire_events.rs`), and the autonomous accounting rides the
 //! `wait_for_headless_completion` response into the completion envelope
@@ -47,6 +49,9 @@ const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 enum LinkFrame {
     Event(Value),
     Response(DaemonResponse),
+    /// The daemon-global heartbeat-catalog broadcast the supervisor
+    /// re-broadcasts to every client (`heartbeats_changed`).
+    HeartbeatsChanged,
 }
 
 /// A client connection to the supervisor socket: JSONL command envelopes
@@ -128,6 +133,9 @@ impl DaemonLink {
                     }
                     "session_event" => {
                         let _ = frame_tx.send(LinkFrame::Event(value));
+                    }
+                    "heartbeats_changed" => {
+                        let _ = frame_tx.send(LinkFrame::HeartbeatsChanged);
                     }
                     _ => {}
                 }
@@ -228,8 +236,18 @@ pub struct DaemonAcpOptions {
     pub socket_path: PathBuf,
     pub actual_cwd: PathBuf,
     pub product_version: String,
-    /// The daemon create config built from the CLI flags (TS `defaultSessionConfig`).
-    pub create_config: Value,
+    /// The startup `create` built from the CLI session flags.
+    pub create: DaemonCommand,
+}
+
+/// The daemon session this connection created at startup; every
+/// `session/new` binds it.
+#[derive(Clone)]
+struct DaemonBinding {
+    active_session_id: String,
+    /// The create's `client_owned` lifecycle (`--no-session`): the
+    /// session ends with the connection.
+    client_owned: bool,
 }
 
 /// The hosted daemon session: the ACP identity, the daemon routing id, the
@@ -248,19 +266,8 @@ pub(crate) struct HostedSession {
     turn: Option<ActiveTurn>,
     /// The newest assistant stop reason observed on the event stream.
     assistant_stop_reason: Option<String>,
-    /// Resolved when the worker emits the turn's last `agent_end` event:
-    /// the worker sends its `prompt_and_wait` response BEFORE that marker,
-    /// so the marker is the deterministic "every turn frame is on the
-    /// wire" signal the settlement waits for (the supervisor's event relay
-    /// may otherwise trail the response). One `agent_end` per agent run —
-    /// retried and continued runs restart with their own pair — so the
-    /// marker resolves only when every started run ended (a fallback
-    /// `agent_end` for a run without a model turn settles immediately).
-    turn_emitted: Option<oneshot::Sender<()>>,
-    /// `agent_start` frames seen since the marker armed.
-    agent_runs_started: u64,
-    /// `agent_end` frames seen since the marker armed.
-    agent_runs_ended: u64,
+    /// The event mapping state lives and dies with the session, like TS.
+    mapping: WireMappingState,
 }
 
 struct ActiveTurn {
@@ -273,8 +280,7 @@ struct ActiveTurn {
     stop_done_rx: Option<oneshot::Receiver<()>>,
 }
 
-/// The daemon-attached transport state: one hosted session at most, like
-/// the in-process connection state.
+/// The ACP transport state: one hosted session at most.
 #[derive(Default)]
 pub(crate) struct DaemonAcpState {
     pub(crate) session: Option<HostedSession>,
@@ -284,12 +290,12 @@ pub(crate) struct DaemonAcpState {
 
 /// Serve the daemon-attached ACP mode until stdin closes. The caller
 /// guarantees the socket answers (the composition spawns a supervisor
-/// when none is listening); a daemon that drops mid-session fails the
-/// hosted session's requests, exactly like the TS daemon connection.
+/// when none is listening).
 ///
 /// # Errors
 ///
-/// Returns an error when the daemon socket connect fails; a daemon that
+/// Returns an error, before any ACP frame is written, when the daemon
+/// socket connect, the startup create, or its attach fails; a daemon that
 /// drops mid-session fails the hosted session's requests instead, exactly
 /// like the TS daemon connection.
 ///
@@ -326,7 +332,6 @@ pub async fn run_daemon_attached_acp_mode(options: DaemonAcpOptions) -> anyhow::
         let link = Arc::clone(&link);
         let state = Arc::clone(&state);
         tokio::spawn(async move {
-            let mut mapping = WireMappingState::default();
             let mut frames = link.frames.lock().await;
             while let Some(frame) = frames.recv().await {
                 match frame {
@@ -347,27 +352,8 @@ pub async fn run_daemon_attached_acp_mode(options: DaemonAcpOptions) -> anyhow::
                             if let Some(stop) = wire_events::assistant_stop(&event) {
                                 current.assistant_stop_reason = stop.stop_reason;
                             }
-                            // The worker's post-turn marker: the settlement
-                            // waiting on it may resume once every agent run of
-                            // the turn ended (a retried or continued run
-                            // restarts with its own `agent_start`, so the LAST
-                            // `agent_end` is the marker — an early one leaves
-                            // the trailing retry frames behind the settlement).
-                            match event.get("type").and_then(Value::as_str) {
-                                Some("agent_start") => current.agent_runs_started += 1,
-                                Some("agent_end") => {
-                                    current.agent_runs_ended += 1;
-                                    if current.agent_runs_ended >= current.agent_runs_started.max(1)
-                                    {
-                                        if let Some(emitted) = current.turn_emitted.take() {
-                                            let _ = emitted.send(());
-                                        }
-                                    }
-                                }
-                                _ => {}
-                            }
                             let turn_id = current.producer.active_prompt_turn().await;
-                            for update in wire_events::wire_updates(&event, &mut mapping) {
+                            for update in wire_events::wire_updates(&event, &mut current.mapping) {
                                 let _ = current
                                     .producer
                                     .publish(&update, turn_id, PrimeAgentEventPhase::Event, None)
@@ -409,6 +395,29 @@ pub async fn run_daemon_attached_acp_mode(options: DaemonAcpOptions) -> anyhow::
                             let _ = tx.send(response);
                         }
                     }
+                    // Heartbeats are connection-scoped, not session events,
+                    // so the consumer maps the broadcast directly instead of
+                    // `wire_updates`: TS publishes the change at origin turn 0
+                    // even while a prompt runs.
+                    LinkFrame::HeartbeatsChanged => {
+                        let guard = state.lock().await;
+                        if let Some(current) = guard.session.as_ref() {
+                            let _ = current
+                                .producer
+                                .publish(
+                                    &types::AcpSessionUpdate::SessionInfoUpdate {
+                                        meta: meta::prime_agent_meta(&PrimeAgentSessionMeta {
+                                            heartbeats_changed: Some(true),
+                                            ..Default::default()
+                                        }),
+                                    },
+                                    0,
+                                    PrimeAgentEventPhase::Event,
+                                    None,
+                                )
+                                .await;
+                        }
+                    }
                 }
             }
             // The reader hit the socket close and every frame it read
@@ -420,7 +429,14 @@ pub async fn run_daemon_attached_acp_mode(options: DaemonAcpOptions) -> anyhow::
             link.pending.lock().unwrap().clear();
         });
     }
+    let binding = bind_daemon_session(&link, &state, options.create.clone()).await?;
 
+    // Only the prompt handlers stay owned: EOF aborts them (TS aborts the
+    // controller and exits), so the process never waits on a prompt still
+    // settling its subagents. The other handlers spawn detached: a close
+    // in flight at EOF finishes — its `tx` clone holds `writer.await` — so
+    // its session still stops and releases its servers.
+    let mut handlers = tokio::task::JoinSet::new();
     let mut stdin = BufReader::new(tokio::io::stdin());
     let mut input_line = String::new();
     loop {
@@ -448,13 +464,23 @@ pub async fn run_daemon_attached_acp_mode(options: DaemonAcpOptions) -> anyhow::
         // frame's handler).
         match frame_order_prefix(&incoming, &state).await {
             FrameOrder::Spawn => {
-                let link = Arc::clone(&link);
-                let state = Arc::clone(&state);
-                let options = options.clone();
-                let options_tx = tx.clone();
-                tokio::spawn(async move {
-                    handle_incoming(incoming, &link, &state, &options, options_tx).await;
-                });
+                // `session/new` settles before the next frame is read, so
+                // EOF's teardown always sees the session it installs.
+                if matches!(&incoming, Incoming::Request { method, .. } if method == "session/new")
+                {
+                    let options_tx = tx.clone();
+                    handle_incoming(incoming, &link, &state, &options, &binding, options_tx).await;
+                } else {
+                    let link = Arc::clone(&link);
+                    let state = Arc::clone(&state);
+                    let options = options.clone();
+                    let binding = binding.clone();
+                    let options_tx = tx.clone();
+                    tokio::spawn(async move {
+                        handle_incoming(incoming, &link, &state, &options, &binding, options_tx)
+                            .await;
+                    });
+                }
             }
             FrameOrder::AdmitPrompt {
                 id,
@@ -464,7 +490,7 @@ pub async fn run_daemon_attached_acp_mode(options: DaemonAcpOptions) -> anyhow::
                 let link = Arc::clone(&link);
                 let state = Arc::clone(&state);
                 let options_tx = tx.clone();
-                tokio::spawn(async move {
+                handlers.spawn(async move {
                     handle_session_prompt(id, params, admission_id, &link, &state, options_tx)
                         .await;
                 });
@@ -474,28 +500,85 @@ pub async fn run_daemon_attached_acp_mode(options: DaemonAcpOptions) -> anyhow::
             FrameOrder::Refused { id, message } => {
                 let _ = tx.send(super::internal_error(&id, &message));
             }
-            // A cancel arms the stop task; the request form answers `{}`
-            // immediately (the notification form has no response).
-            FrameOrder::Cancel { request_id, stop } => {
+            // A cancel arms the stop task (the notification form has no
+            // response).
+            FrameOrder::Cancel(stop) => {
                 if let Some(stop) = stop {
                     let link = Arc::clone(&link);
                     tokio::spawn(async move {
                         run_cancel_stop(stop, &link).await;
                     });
                 }
-                if let Some(id) = request_id {
-                    let _ = tx.send(jsonrpc::response(&id, &json!({})));
-                }
             }
         }
+        // Reap finished prompt handlers.
+        while handlers.try_join_next().is_some() {}
     }
 
-    // A client-owned session dies with the connection: stop the work,
-    // release the servers, and kill the worker (TS dispose semantics).
-    teardown(&link, &state).await;
+    handlers.shutdown().await;
+    teardown(&link, &state, &binding).await;
     drop(tx);
     let _ = writer.await;
     Ok(0)
+}
+
+/// Create and attach the startup daemon session (TS main.ts, before the
+/// ACP connection serves). A failed attach releases the created session
+/// the way EOF does.
+async fn bind_daemon_session(
+    link: &Arc<DaemonLink>,
+    state: &Arc<Mutex<DaemonAcpState>>,
+    create: DaemonCommand,
+) -> anyhow::Result<DaemonBinding> {
+    let client_owned = matches!(
+        create,
+        DaemonCommand::Create {
+            lifecycle: Some(DaemonSessionLifecycle::ClientOwned),
+            ..
+        }
+    );
+    let created = link.request(create).await?;
+    if !created.success {
+        anyhow::bail!(created.error.unwrap_or_else(|| "unknown error".to_string()));
+    }
+    let binding = DaemonBinding {
+        active_session_id: created
+            .data
+            .as_ref()
+            .and_then(|summary| summary.get("activeSessionId"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        client_owned,
+    };
+    let attached = link
+        .request(DaemonCommand::Attach {
+            id: None,
+            active_session_id: binding.active_session_id.clone(),
+            client_id: None,
+            capabilities: None,
+            resume_cursor: None,
+            telemetry_disabled: None,
+            recovery_config: None,
+            env: None,
+            launch_env: None,
+            rest: Map::default(),
+        })
+        .await
+        .and_then(|response| {
+            if response.success {
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!(response
+                    .error
+                    .unwrap_or_else(|| "unknown error".to_string())))
+            }
+        });
+    if let Err(error) = attached {
+        teardown(link, state, &binding).await;
+        return Err(error);
+    }
+    Ok(binding)
 }
 
 enum FrameOrder {
@@ -509,12 +592,7 @@ enum FrameOrder {
         id: Value,
         message: String,
     },
-    /// `request_id` is set for the request form, which answers `{}` (TS
-    /// only registers the notification form).
-    Cancel {
-        request_id: Option<Value>,
-        stop: Option<CancelStop>,
-    },
+    Cancel(Option<CancelStop>),
 }
 
 struct CancelStop {
@@ -539,19 +617,8 @@ async fn frame_order_prefix(incoming: &Incoming, state: &Arc<Mutex<DaemonAcpStat
                 },
             }
         }
-        Incoming::Request { id, method, params } if method == "session/cancel" => {
-            let stop = arm_cancel(params, state).await;
-            FrameOrder::Cancel {
-                request_id: Some(id.clone()),
-                stop,
-            }
-        }
         Incoming::Notification { method, params } if method == "session/cancel" => {
-            let stop = arm_cancel(params, state).await;
-            FrameOrder::Cancel {
-                request_id: None,
-                stop,
-            }
+            FrameOrder::Cancel(arm_cancel(params, state).await)
         }
         _ => FrameOrder::Spawn,
     }
@@ -617,72 +684,104 @@ async fn arm_cancel(params: &Value, state: &Arc<Mutex<DaemonAcpState>>) -> Optio
     })
 }
 
-/// TS `stopSessionWork`, without the RLM child cancellations. The owned
-/// admission cancel stops a prompt that was sent before the cancel but
-/// committed after the abort. Dropping `stop_done_tx` releases the
-/// cancelled turn's response.
+/// The cancelled turn's stop sequence. Dropping `stop_done_tx` releases
+/// the cancelled turn's response.
 async fn run_cancel_stop(stop: CancelStop, link: &Arc<DaemonLink>) {
+    stop_session_work(link, &stop.daemon_session_id, Some(stop.admission_id)).await;
+    drop(stop.stop_done_tx);
+}
+
+/// TS `stopSessionWork`: abort the worker's running and queued work, stop
+/// the owned admission (a prompt sent before the stop but committed after
+/// the abort), wait the idle, then cancel the RLM children.
+async fn stop_session_work(
+    link: &Arc<DaemonLink>,
+    daemon_session_id: &str,
+    admission_id: Option<String>,
+) {
     let _ = link
         .request(DaemonCommand::AbortAndClearQueue {
             id: None,
-            active_session_id: stop.daemon_session_id.clone(),
+            active_session_id: daemon_session_id.to_string(),
             rest: Map::default(),
         })
         .await;
-    let _ = link
-        .request(DaemonCommand::CancelPromptAdmission {
-            id: None,
-            active_session_id: stop.daemon_session_id.clone(),
-            admission_id: stop.admission_id,
-            cancel_owned: Some(true),
-            rest: Map::default(),
-        })
-        .await;
+    if let Some(admission_id) = admission_id {
+        cancel_owned_admission(link, daemon_session_id, admission_id).await;
+    }
     let _ = link
         .request(DaemonCommand::WaitForIdle {
             id: None,
-            active_session_id: stop.daemon_session_id,
+            active_session_id: daemon_session_id.to_string(),
             wait_for_rlm_quiescence: None,
             rest: Map::default(),
         })
         .await;
-    drop(stop.stop_done_tx);
+    cancel_outstanding_rlm_children(link, daemon_session_id).await;
 }
 
-/// One incoming ACP frame. Requests answer; notifications may drive state.
+/// TS `cancelOutstandingRlmChildren`: cancel every roster row, no status
+/// filter — a row already settling keeps its own settle, and the cancels
+/// run one after another (TS `Promise.allSettled` is the declared
+/// divergence). A failed roster fetch or cancel is ignored, like every
+/// other stop step.
+async fn cancel_outstanding_rlm_children(link: &Arc<DaemonLink>, daemon_session_id: &str) {
+    let Ok(children) = fetch_rlm_children(link, daemon_session_id).await else {
+        return;
+    };
+    for child in children {
+        let child_id = child
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let _ = link
+            .request(DaemonCommand::CancelRlmChild {
+                id: None,
+                active_session_id: daemon_session_id.to_string(),
+                child_id,
+                rest: Map::default(),
+            })
+            .await;
+    }
+}
+
+/// TS `cancel_prompt_admission` with `cancelOwned`: a committed prompt's
+/// running turn aborts.
+async fn cancel_owned_admission(
+    link: &Arc<DaemonLink>,
+    daemon_session_id: &str,
+    admission_id: String,
+) {
+    let _ = link
+        .request(DaemonCommand::CancelPromptAdmission {
+            id: None,
+            active_session_id: daemon_session_id.to_string(),
+            admission_id,
+            cancel_owned: Some(true),
+            rest: Map::default(),
+        })
+        .await;
+}
+
+/// One incoming ACP frame. Requests answer.
 async fn handle_incoming(
     incoming: Incoming,
     link: &Arc<DaemonLink>,
     state: &Arc<Mutex<DaemonAcpState>>,
     options: &DaemonAcpOptions,
+    binding: &DaemonBinding,
     tx: producer::FrameSink,
 ) {
-    match incoming {
-        Incoming::Request { id, method, params } => {
-            handle_request(id, method, params, link, state, options, tx).await;
-        }
-        // `session/cancel` is handled in the reader loop.
-        Incoming::Notification { .. } => {}
-    }
-}
-
-async fn handle_request(
-    id: Value,
-    method: String,
-    params: Value,
-    link: &Arc<DaemonLink>,
-    state: &Arc<Mutex<DaemonAcpState>>,
-    options: &DaemonAcpOptions,
-    tx: producer::FrameSink,
-) {
+    let Incoming::Request { id, method, params } = incoming else {
+        return;
+    };
     match method.as_str() {
         "initialize" => {
-            let result = serde_json::to_value(types::initialize_result(&options.product_version))
-                .expect("serializes");
-            let _ = tx.send(jsonrpc::response(&id, &result));
+            handle_initialize(&id, &params, &options.product_version, &tx);
         }
         "session/new" => {
-            handle_session_new(id, params, link, state, options, tx).await;
+            handle_session_new(id, params, link, state, options, binding, tx).await;
         }
         "session/set_config_option" => {
             handle_set_config_option(id, params, link, state, tx).await;
@@ -701,14 +800,51 @@ async fn handle_request(
     }
 }
 
-/// Admit one session: create the client-owned daemon session, attach, and
-/// admit the MCP servers through the wire command.
+fn handle_initialize(id: &Value, params: &Value, product_version: &str, tx: &producer::FrameSink) {
+    if let Err(error_response) = validate_initialize(id, params) {
+        let _ = tx.send(error_response);
+        return;
+    }
+    let result =
+        serde_json::to_value(types::initialize_result(product_version)).expect("serializes");
+    let _ = tx.send(jsonrpc::response(id, &result));
+}
+
+/// The `initialize` schema check the TS SDK performs: the protocol version
+/// must be a number. The error body mirrors the observed TS response.
+fn validate_initialize(id: &Value, params: &Value) -> std::result::Result<(), Value> {
+    let field_error = |received: &str| {
+        jsonrpc::error_response(
+            id,
+            jsonrpc::INVALID_PARAMS,
+            "Invalid params",
+            Some(&json!({
+                "_errors": [],
+                "protocolVersion": {
+                    "_errors": [format!("Invalid input: expected number, received {received}")]
+                },
+            })),
+        )
+    };
+    match params.get("protocolVersion") {
+        None => Err(field_error("undefined")),
+        Some(value) if value.is_number() => Ok(()),
+        Some(Value::String(_)) => Err(field_error("string")),
+        Some(Value::Bool(_)) => Err(field_error("boolean")),
+        Some(Value::Null) => Err(field_error("null")),
+        Some(_) => Err(field_error("object")),
+    }
+}
+
+/// Admit one session over the startup daemon session and admit its MCP
+/// servers through the wire command.
 async fn handle_session_new(
     id: Value,
     params: Value,
     link: &Arc<DaemonLink>,
     state: &Arc<Mutex<DaemonAcpState>>,
     options: &DaemonAcpOptions,
+    binding: &DaemonBinding,
     tx: producer::FrameSink,
 ) {
     {
@@ -725,8 +861,8 @@ async fn handle_session_new(
     // Failures below clear the in-flight flag on the way out; on success
     // the hosted session takes the slot.
     let params = types::NewSessionParams::parse(&params);
-    // MCP admission runs first, exactly like the in-process path: a
-    // rejected list fails the request with the same error payloads.
+    // MCP admission runs first: a rejected list fails the request with
+    // the same error payloads.
     let resolved =
         match super::mcp::resolve_acp_mcp_servers(&params.mcp_servers, &options.actual_cwd) {
             Ok(resolved) => resolved,
@@ -747,93 +883,14 @@ async fn handle_session_new(
         return;
     }
 
-    // The client-owned daemon session: `--no-session` semantics.
-    let mut config = options.create_config.clone();
-    // The telemetry execution mode (TS main.ts `executionMode: appMode`).
-    config["executionMode"] = Value::String("acp".to_string());
-    // Verification seam: a scripted daemon session (the same `{"engine":
-    // "faux", ...}` form the in-process e2e rides). The product never sets
-    // it; the supervisor turns the path into the worker's script env.
-    if let Some(script) = std::env::var_os("PRIME_AGENT_ACP_DAEMON_SCRIPT") {
-        config["script"] = Value::String(script.to_string_lossy().to_string());
-    }
-    let create = DaemonCommand::Create {
-        id: None,
-        session_path: None,
-        continue_recent: None,
-        no_session: Some(true),
-        name: None,
-        config: Some(config),
-        // ACP-created sessions follow the worker's own telemetry posture
-        // (settings + env); external clients never toggle telemetry.
-        telemetry_disabled: None,
-        runtime_metadata: None,
-        lifecycle: Some(DaemonSessionLifecycle::ClientOwned),
-        env: None,
-        launch_env: None,
-        rest: Map::default(),
-    };
-    let create_response = match link.request(create).await {
-        Ok(response) => response,
-        Err(error) => {
-            *state.lock().await = DaemonAcpState::default();
-            let _ = tx.send(super::internal_error(&id, &error.to_string()));
-            return;
-        }
-    };
-    if !create_response.success {
-        let failure = create_response
-            .error
-            .unwrap_or_else(|| "unknown error".to_string());
-        *state.lock().await = DaemonAcpState::default();
-        let _ = tx.send(super::internal_error(&id, &failure));
-        return;
-    }
-    let summary = create_response.data.unwrap_or(Value::Null);
-    let daemon_active_session_id = summary
-        .get("activeSessionId")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .unwrap_or_default();
-
-    let attach = DaemonCommand::Attach {
-        id: None,
-        active_session_id: daemon_active_session_id.clone(),
-        client_id: None,
-        capabilities: None,
-        resume_cursor: None,
-        telemetry_disabled: None,
-        recovery_config: None,
-        env: None,
-        launch_env: None,
-        rest: Map::default(),
-    };
-    if let Ok(response) = link.request(attach).await {
-        if !response.success {
-            let failure = response
-                .error
-                .unwrap_or_else(|| "unknown error".to_string());
-            let _ = link
-                .request(DaemonCommand::Kill {
-                    id: None,
-                    active_session_id: daemon_active_session_id.clone(),
-                    rest: Map::default(),
-                })
-                .await;
-            *state.lock().await = DaemonAcpState::default();
-            let _ = tx.send(super::internal_error(&id, &failure));
-            return;
-        }
-    }
-
     let acp_session_id = uuid::Uuid::new_v4().to_string();
     let producer = UpdateProducer::new(acp_session_id.clone(), tx.clone());
     // The pickers ride the worker's own state and discovery seams: neither
     // fetch may fail the admission (TS catches discovery failures to an
     // empty list, and a state fetch failure degrades to no options).
     let (state_value, models) = (
-        fetch_connection_state(link, &daemon_active_session_id).await,
-        fetch_available_models(link, &daemon_active_session_id)
+        fetch_connection_state(link, &binding.active_session_id).await,
+        fetch_available_models(link, &binding.active_session_id)
             .await
             .unwrap_or_default(),
     );
@@ -846,29 +903,24 @@ async fn handle_session_new(
     let mcp_owner_id = uuid::Uuid::new_v4().to_string();
     let mut hosted = HostedSession {
         acp_session_id: acp_session_id.clone(),
-        daemon_active_session_id,
+        daemon_active_session_id: binding.active_session_id.clone(),
         producer,
         config,
         mcp_owner_id,
         mcp_server_names: Vec::new(),
         turn: None,
         assistant_stop_reason: None,
-        turn_emitted: None,
-        agent_runs_started: 0,
-        agent_runs_ended: 0,
+        mapping: WireMappingState::default(),
     };
     // The ACP MCP servers ride the wire command, not a local manager.
     if let Err(error) = replace_session_servers(link, &hosted, &resolved).await {
-        let failure = error.to_string();
-        let _ = link
-            .request(DaemonCommand::Kill {
-                id: None,
-                active_session_id: hosted.daemon_active_session_id.clone(),
-                rest: Map::default(),
-            })
-            .await;
+        // The worker may have applied the list before this failed (a lost
+        // acknowledgement); the clear is best-effort, like TS.
+        if !resolved.is_empty() {
+            let _ = replace_session_servers(link, &hosted, &[]).await;
+        }
         *state.lock().await = DaemonAcpState::default();
-        let _ = tx.send(super::internal_error(&id, &failure));
+        let _ = tx.send(super::internal_error(&id, &error.to_string()));
         return;
     }
     hosted.mcp_server_names = resolved
@@ -911,8 +963,7 @@ async fn handle_session_new(
     producer.commit_session_new_response().await;
 }
 
-/// Send the MCP replacement for one hosted session (the wire form of the
-/// in-process manager call).
+/// Send the MCP replacement for one hosted session.
 async fn replace_session_servers(
     link: &Arc<DaemonLink>,
     hosted: &HostedSession,
@@ -996,6 +1047,18 @@ fn cancelled_response(id: &Value) -> Value {
     )
 }
 
+/// Render a prompt-block failure as the ACP invalid-params error. The TS
+/// SDK validates the request schema; the Rust port validates the blocks it
+/// actually reads.
+fn prompt_block_error(id: &Value, error: &types::PromptBlockError) -> Value {
+    jsonrpc::error_response(
+        id,
+        jsonrpc::INVALID_PARAMS,
+        "Invalid params",
+        Some(&json!({ "reason": error.to_string() })),
+    )
+}
+
 /// Run one admitted prompt turn and return its reply frame.
 async fn prompt_turn(
     id: Value,
@@ -1005,9 +1068,9 @@ async fn prompt_turn(
     state: &Arc<Mutex<DaemonAcpState>>,
 ) -> Value {
     let params = types::PromptParams::parse(&params);
-    let admitted = match super::session::AdmittedPrompt::parse(&params.prompt) {
+    let admitted = match types::AdmittedPrompt::parse(&params.prompt) {
         Ok(admitted) => admitted,
-        Err(error) => return super::session::prompt_block_error(&id, &error),
+        Err(error) => return prompt_block_error(&id, &error),
     };
     let (producer, hosted_daemon_session_id) = {
         let guard = state.lock().await;
@@ -1021,22 +1084,8 @@ async fn prompt_turn(
         }
     };
     let turn_id = producer.begin_prompt().await;
-    // The turn-end marker: the consumer loop resolves it on the worker's
-    // post-turn `agent_end` event (after the `prompt_and_wait` response).
-    let (emitted_tx, emitted_rx) = oneshot::channel::<()>();
     // TS `abort.signal.aborted` before `promptAndWait`.
-    let cancelled = {
-        let mut guard = state.lock().await;
-        let cancelled = turn_cancelled(&guard, admission_id);
-        if !cancelled {
-            if let Some(hosted) = guard.session.as_mut() {
-                hosted.turn_emitted = Some(emitted_tx);
-                hosted.agent_runs_started = 0;
-                hosted.agent_runs_ended = 0;
-            }
-        }
-        cancelled
-    };
+    let cancelled = turn_cancelled(&*state.lock().await, admission_id);
     if cancelled {
         producer.finish_prompt(turn_id).await;
         return cancelled_response(&id);
@@ -1082,29 +1131,11 @@ async fn prompt_turn(
             return super::internal_error(&id, &error.to_string());
         }
     };
-    // The worker answers the response before its post-turn marker; wait
-    // for the marker so every turn frame is published before the settle
-    // (the event relay may otherwise trail the response). A prompt that
-    // failed before any run started (the aborted-before-delivery cancel:
-    // no agent_start/agent_end ever follows) resolves the marker now -
-    // the settle must not pay the full marker window for a turn that
-    // never ran.
-    let marker_resolved = {
-        let guard = state.lock().await;
-        matches!(
-            guard.session.as_ref(),
-            Some(hosted) if hosted.agent_runs_started == 0
-        )
-    };
-    if !response.success && marker_resolved {
-        let mut guard = state.lock().await;
-        if let Some(hosted) = guard.session.as_mut() {
-            if let Some(emitted) = hosted.turn_emitted.take() {
-                let _ = emitted.send(());
-            }
-        }
-    }
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(30), emitted_rx).await;
+    // TS `abort.signal.aborted` after `promptAndWait`: every turn frame
+    // is published by now - the worker flushes its session events before
+    // the response leaves its socket, and the supervisor's per-client
+    // writer writes a queued event ahead of a queued response - so the
+    // settle reads the stream directly, with no marker wait.
     let cancelled = {
         let guard = state.lock().await;
         turn_cancelled(&guard, admission_id)
@@ -1124,12 +1155,29 @@ async fn prompt_turn(
     }
     // The autonomous accounting for the completion envelope: the daemon's
     // headless-completion status (TS `waitForHeadlessCompletion`), fetched
-    // after the turn marker settled the run. A failed fetch degrades to no
-    // autonomous meta (the envelope still settles, like an in-process
-    // session without a run).
-    let autonomous_status = fetch_autonomous_status(link, &hosted_daemon_session_id).await;
+    // after the turn settled (the response is the run's end). A failed
+    // fetch degrades to no autonomous meta (the envelope still settles
+    // without a run).
+    let autonomous_status = fetch_autonomous_status(link, &hosted_daemon_session_id, false)
+        .await
+        .ok();
     // TS `abort.signal.aborted` after `waitForHeadlessCompletion`: queued
     // continuations (goal, post-compaction autonomous) run inside that wait.
+    if turn_cancelled(&*state.lock().await, admission_id) {
+        producer.finish_prompt(turn_id).await;
+        return cancelled_response(&id);
+    }
+    // The completion observation's roster read (TS `getRlmChildSnapshots`
+    // throws): a failed read errors the prompt before the boundary, never
+    // publishes a wrong count.
+    let children = match fetch_rlm_children(link, &hosted_daemon_session_id).await {
+        Ok(children) => children,
+        Err(error) => {
+            publish_error_boundary(&producer, turn_id).await;
+            producer.finish_prompt(turn_id).await;
+            return super::internal_error(&id, &error.to_string());
+        }
+    };
     if turn_cancelled(&*state.lock().await, admission_id) {
         producer.finish_prompt(turn_id).await;
         return cancelled_response(&id);
@@ -1138,19 +1186,8 @@ async fn prompt_turn(
         .as_ref()
         .filter(|status| status.enabled)
         .map(meta::autonomous_meta);
-    // The remaining continuation slots the quiescence observation reports
-    // (the in-process settlement computes the same subtraction).
-    let remaining_continuations = autonomous_status
-        .as_ref()
-        .filter(|status| status.enabled)
-        .map_or(0, |status| {
-            status
-                .limits
-                .max_continuations
-                .saturating_sub(status.continuations_used)
-        });
     // The boundary, completion, and terminal quiescence frames match the
-    // in-process settlement because both serve the same captures.
+    // TS captures.
     let boundary = types::AcpSessionUpdate::SessionInfoUpdate {
         meta: meta::prime_agent_meta(&PrimeAgentSessionMeta {
             terminal_quiescence_expected: Some(true),
@@ -1165,47 +1202,87 @@ async fn prompt_turn(
             Some(PrimeAgentOutcome::Result),
         )
         .await;
-    // The completion envelope mirrors the in-process settlement: the
-    // autonomous accounting rides the quiescence event, then the terminal
-    // quiescence envelope repeats the observation.
+    // The completion envelope: the turn's own observation, with the
+    // live outstanding-subagent count the settle loop then waits down to
+    // zero.
     let quiescence = types::AcpSessionUpdate::SessionInfoUpdate {
         meta: meta::prime_agent_meta(&PrimeAgentSessionMeta {
-            autonomous: autonomous_meta.clone(),
-            quiescence: Some(meta::PrimeAgentQuiescenceMeta {
-                outstanding_subagents: 0,
-                remaining_autonomous_continuations: remaining_continuations,
-            }),
+            autonomous: autonomous_meta,
+            quiescence: Some(quiescence_meta(autonomous_status.as_ref(), &children)),
             ..Default::default()
         }),
     };
     let completion_published = producer
         .publish(&quiescence, turn_id, PrimeAgentEventPhase::Event, None)
         .await;
-    let terminal = types::AcpSessionUpdate::SessionInfoUpdate {
-        meta: meta::prime_agent_meta(&PrimeAgentSessionMeta {
-            autonomous: autonomous_meta.clone(),
-            quiescence: Some(meta::PrimeAgentQuiescenceMeta {
-                outstanding_subagents: 0,
-                remaining_autonomous_continuations: remaining_continuations,
+    // The settlement loop (TS `finalizePendingTerminal`): the barrier is
+    // the event, no timer, and the roster re-read is the response-cut
+    // telemetry (a child can publish a terminal status before its result
+    // reaches the parent). A failed barrier or read errors the prompt; a
+    // degraded status would spin the loop.
+    let settled_status = loop {
+        let status = match fetch_autonomous_status(link, &hosted_daemon_session_id, true).await {
+            Ok(status) => status,
+            Err(error) => {
+                producer.finish_prompt(turn_id).await;
+                return super::internal_error(
+                    &id,
+                    &format!("ACP lifecycle reconciliation failed: {error}"),
+                );
+            }
+        };
+        if turn_cancelled(&*state.lock().await, admission_id) {
+            producer.finish_prompt(turn_id).await;
+            return cancelled_response(&id);
+        }
+        let children = match fetch_rlm_children(link, &hosted_daemon_session_id).await {
+            Ok(children) => children,
+            Err(error) => {
+                producer.finish_prompt(turn_id).await;
+                return super::internal_error(
+                    &id,
+                    &format!("ACP lifecycle reconciliation failed: {error}"),
+                );
+            }
+        };
+        if turn_cancelled(&*state.lock().await, admission_id) {
+            producer.finish_prompt(turn_id).await;
+            return cancelled_response(&id);
+        }
+        let terminal_quiescence = quiescence_meta(Some(&status), &children);
+        if terminal_quiescence.outstanding_subagents != 0 {
+            continue;
+        }
+        // TS `sealTerminal`: the terminal frame is the last update stamped
+        // with this turn; later events resume turn 0.
+        producer.finish_prompt(turn_id).await;
+        let terminal = types::AcpSessionUpdate::SessionInfoUpdate {
+            meta: meta::prime_agent_meta(&PrimeAgentSessionMeta {
+                autonomous: status.enabled.then(|| meta::autonomous_meta(&status)),
+                quiescence: Some(terminal_quiescence),
+                ..Default::default()
             }),
-            ..Default::default()
-        }),
+        };
+        let terminal_published = producer
+            .publish(
+                &terminal,
+                turn_id,
+                PrimeAgentEventPhase::TerminalQuiescence,
+                Some(PrimeAgentOutcome::Result),
+            )
+            .await;
+        if !published || !completion_published || !terminal_published {
+            return super::internal_error(&id, "Failed to publish ACP completion");
+        }
+        break status;
     };
-    let terminal_published = producer
-        .publish(
-            &terminal,
-            turn_id,
-            PrimeAgentEventPhase::TerminalQuiescence,
-            Some(PrimeAgentOutcome::Result),
-        )
-        .await;
-    producer.finish_prompt(turn_id).await;
-    if !published || !completion_published || !terminal_published {
-        return super::internal_error(&id, "Failed to publish ACP completion");
-    }
-    // The stop reason follows the TS mapping (acp-stop-reason.ts): a limit
-    // reached on the enabled run is the only non-end_turn outcome.
-    let stop_reason = meta::acp_stop_reason_for_status(false, autonomous_status.as_ref());
+    // The stop reason follows the TS mapping (acp-stop-reason.ts): the
+    // abort flag read after the settlement, and the settlement's status
+    // (`pending.status`), not the first observation's.
+    let stop_reason = meta::acp_stop_reason_for_status(
+        turn_cancelled(&*state.lock().await, admission_id),
+        Some(&settled_status),
+    );
     jsonrpc::response(
         &id,
         &serde_json::to_value(types::AcpStopReasonResponse { stop_reason }).expect("serializes"),
@@ -1232,29 +1309,111 @@ async fn publish_error_boundary(producer: &Arc<UpdateProducer>, turn_id: u64) {
 }
 
 /// Fetch the session's autonomous-run status (`wait_for_headless_completion`
-/// on the daemon wire; TS `waitForHeadlessCompletion`). `None` degrades the
-/// settlement to no autonomous meta, never to a failed prompt.
+/// on the daemon wire; TS `waitForHeadlessCompletion`), once the daemon's
+/// headless run settled. With `wait_for_rlm_quiescence`, the answer comes
+/// from the quiescence barrier instead: it holds past the parent's idle
+/// until every tracked child run settled, so it is the RLM-quiescence
+/// event the settlement loop waits on. A failure is the caller's policy
+/// (TS throws for both callers): the completion observation degrades, the
+/// settlement loop errors the prompt.
+///
+/// # Errors
+///
+/// Returns an error when the daemon connection fails or closes mid-request,
+/// when the response reports a failure, or when the status payload does not
+/// deserialize.
 async fn fetch_autonomous_status(
     link: &Arc<DaemonLink>,
     active_session_id: &str,
-) -> Option<pa_core::autonomous::AgentAutonomousStatus> {
+    wait_for_rlm_quiescence: bool,
+) -> anyhow::Result<pa_core::autonomous::AgentAutonomousStatus> {
     let response = link
         .request_until_close(DaemonCommand::WaitForHeadlessCompletion {
             id: None,
             active_session_id: active_session_id.to_string(),
-            wait_for_rlm_quiescence: None,
+            wait_for_rlm_quiescence: wait_for_rlm_quiescence.then_some(true),
             rest: Map::default(),
         })
-        .await
-        .ok()?;
+        .await?;
     if !response.success {
-        return None;
+        anyhow::bail!(response
+            .error
+            .unwrap_or_else(|| "unknown error".to_string()));
     }
-    serde_json::from_value(response.data.unwrap_or(Value::Null)).ok()
+    Ok(serde_json::from_value(
+        response.data.unwrap_or(Value::Null),
+    )?)
 }
 
-/// Close: abort, release the servers, kill the client-owned worker, fence
-/// the producer.
+/// The live child roster (`get_rlm_children` on the daemon wire; TS
+/// `getRlmChildSnapshots` throws).
+///
+/// # Errors
+///
+/// Returns an error when the daemon connection fails or closes mid-request,
+/// when the response reports a failure, or when the answer carries no
+/// children array.
+async fn fetch_rlm_children(
+    link: &Arc<DaemonLink>,
+    active_session_id: &str,
+) -> anyhow::Result<Vec<Value>> {
+    let response = link
+        .request(DaemonCommand::GetRlmChildren {
+            id: None,
+            active_session_id: active_session_id.to_string(),
+            rest: Map::default(),
+        })
+        .await?;
+    if !response.success {
+        anyhow::bail!(response
+            .error
+            .unwrap_or_else(|| "unknown error".to_string()));
+    }
+    response
+        .data
+        .unwrap_or(Value::Null)
+        .get("children")
+        .cloned()
+        .and_then(|children| children.as_array().cloned())
+        .ok_or_else(|| anyhow::anyhow!("get_rlm_children answered no children array"))
+}
+
+/// TS `outstandingSubagentCount`: the roster's live statuses, verbatim.
+fn outstanding_subagents(children: &[Value]) -> u64 {
+    children
+        .iter()
+        .filter(|child| {
+            matches!(
+                child.get("status").and_then(Value::as_str),
+                Some("queued" | "running")
+            )
+        })
+        .count() as u64
+}
+
+/// TS `quiescenceMeta`: the outstanding-subagent count plus the run's
+/// remaining continuation slots, observed together at one completion point.
+fn quiescence_meta(
+    status: Option<&pa_core::autonomous::AgentAutonomousStatus>,
+    children: &[Value],
+) -> meta::PrimeAgentQuiescenceMeta {
+    meta::PrimeAgentQuiescenceMeta {
+        outstanding_subagents: outstanding_subagents(children),
+        remaining_autonomous_continuations: status.filter(|status| status.enabled).map_or(
+            0,
+            |status| {
+                status
+                    .limits
+                    .max_continuations
+                    .saturating_sub(status.continuations_used)
+            },
+        ),
+    }
+}
+
+/// Close: stop the session's work, release the servers, and fence the
+/// producer. The daemon session stays; a later `session/new` binds it
+/// again (TS `closeSession`).
 async fn handle_session_close(
     id: Value,
     params: Value,
@@ -1269,13 +1428,13 @@ async fn handle_session_close(
         .to_string();
     let taken = {
         let mut guard = state.lock().await;
-        match guard.session.take() {
-            Some(hosted) if hosted.acp_session_id == session_id => {
-                guard.session_close_in_flight = true;
-                Some(hosted)
-            }
-            _ => None,
+        let taken = guard
+            .session
+            .take_if(|hosted| hosted.acp_session_id == session_id);
+        if taken.is_some() {
+            guard.session_close_in_flight = true;
         }
+        taken
     };
     let Some(hosted) = taken else {
         let _ = tx.send(super::internal_error(
@@ -1284,28 +1443,13 @@ async fn handle_session_close(
         ));
         return;
     };
-    let _ = link
-        .request(DaemonCommand::Abort {
-            id: None,
-            active_session_id: hosted.daemon_active_session_id.clone(),
-            rest: Map::default(),
-        })
-        .await;
+    let admission_id = hosted.turn.as_ref().map(|turn| turn.admission_id.clone());
+    stop_session_work(link, &hosted.daemon_active_session_id, admission_id).await;
     if !hosted.mcp_server_names.is_empty() {
         let _ = replace_session_servers(link, &hosted, &[]).await;
     }
-    // The worker dies before the config queue drains: a stalled
-    // `set_model`/`set_thinking_level` (holding the queue on a wire
-    // request) fails fast once the worker is gone instead of parking
-    // the close on the request timeout. Then the serialized config work
-    // settles before the producer fences (TS `await configTask`).
-    let _ = link
-        .request(DaemonCommand::Kill {
-            id: None,
-            active_session_id: hosted.daemon_active_session_id.clone(),
-            rest: Map::default(),
-        })
-        .await;
+    // The serialized config work settles before the producer fences (TS
+    // `await configTask`).
     let _ = hosted.config.queue.lock().await;
     hosted.producer.close().await;
     let _ = tx.send(jsonrpc::response(&id, &json!({})));
@@ -1313,29 +1457,38 @@ async fn handle_session_close(
     guard.session_close_in_flight = false;
 }
 
-/// Stop everything after stdin closes (TS dispose semantics).
-async fn teardown(link: &Arc<DaemonLink>, state: &Arc<Mutex<DaemonAcpState>>) {
+/// Release the connection's hold after stdin closes (TS dispose): the
+/// running prompt is cancelled (TS EOF abort → `cancel_prompt_admission`
+/// with `cancelOwned`), the MCP servers go and the producer fences. A
+/// client-owned session ends with the connection; a resident one stays
+/// and is detached when the link drops.
+async fn teardown(
+    link: &Arc<DaemonLink>,
+    state: &Arc<Mutex<DaemonAcpState>>,
+    binding: &DaemonBinding,
+) {
     let hosted = state.lock().await.session.take();
-    let Some(hosted) = hosted else {
-        return;
-    };
-    // The worker dies before the config queue drains (a stalled config
-    // operation holding the queue releases once the wire peer is gone),
-    // then the serialized config work settles before the producer fences.
-    let _ = link
-        .request(DaemonCommand::Abort {
-            id: None,
-            active_session_id: hosted.daemon_active_session_id.clone(),
-            rest: Map::default(),
-        })
-        .await;
-    let _ = link
-        .request(DaemonCommand::Kill {
-            id: None,
-            active_session_id: hosted.daemon_active_session_id.clone(),
-            rest: Map::default(),
-        })
-        .await;
-    let _ = hosted.config.queue.lock().await;
-    hosted.producer.close().await;
+    if let Some(turn) = hosted.as_ref().and_then(|hosted| hosted.turn.as_ref()) {
+        cancel_owned_admission(link, &binding.active_session_id, turn.admission_id.clone()).await;
+    }
+    if let Some(hosted) = &hosted {
+        if !hosted.mcp_server_names.is_empty() {
+            let _ = replace_session_servers(link, hosted, &[]).await;
+        }
+    }
+    // The owned worker stops before the config queue drains: a stalled
+    // config operation holding the queue on a wire request fails fast.
+    if binding.client_owned {
+        let _ = link
+            .request(DaemonCommand::CompleteOwnedSession {
+                id: None,
+                active_session_id: binding.active_session_id.clone(),
+                rest: Map::default(),
+            })
+            .await;
+    }
+    if let Some(hosted) = hosted {
+        let _ = hosted.config.queue.lock().await;
+        hosted.producer.close().await;
+    }
 }

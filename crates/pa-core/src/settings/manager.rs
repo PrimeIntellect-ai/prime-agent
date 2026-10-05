@@ -1092,6 +1092,50 @@ mod tests {
         assert_eq!(manager.get_default_model(), Some("z-ai/glm-5.3"));
     }
 
+    /// `factory.enabled` reads the GLOBAL scope only (the agent-dir
+    /// document the kernel's factory gate and `set_factory_enabled` use):
+    /// a project-scope override can never flip the gate out from under the
+    /// kernel — a project `.prime/agent/settings.json` with `enabled: true`
+    /// leaves the factory disabled while the global setting says nothing
+    /// (Macroscope review finding: the merged read could diverge the
+    /// daemon's lane advertisement and the client's `/factory status`
+    /// from what the kernel would do).
+    #[test]
+    fn factory_enabled_reads_the_global_scope_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("cwd");
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(cwd.join(".prime/agent")).unwrap();
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::write(
+            cwd.join(".prime/agent/settings.json"),
+            r#"{ "factory": { "enabled": true } }"#,
+        )
+        .unwrap();
+
+        let mut manager = SettingsManager::create(&cwd, &agent_dir);
+        assert!(
+            !manager.get_factory_enabled(),
+            "a project-scope override never enables the gate"
+        );
+
+        manager
+            .set_factory_enabled(true)
+            .expect("set factory enabled");
+        assert!(manager.get_factory_enabled());
+        let content =
+            std::fs::read_to_string(agent_dir.join("settings.json")).expect("global file");
+        assert!(
+            content.contains(r#""enabled": true"#),
+            "the write lands in the global document the kernel gate reads: {content}"
+        );
+
+        manager
+            .set_factory_enabled(false)
+            .expect("set factory disabled");
+        assert!(!manager.get_factory_enabled());
+    }
+
     #[test]
     fn reopen_keeps_the_runtime_overrides_in_the_merged_settings() {
         let mut manager = SettingsManager::in_memory(&Settings::default());

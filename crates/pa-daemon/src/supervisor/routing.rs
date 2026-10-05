@@ -36,7 +36,28 @@ pub(super) async fn fail_unsent_request(resident: &Arc<ResidentWorker>, request_
         )));
     }
 }
-pub(crate) const LONG_ROUTE_TIMEOUT_MS: u64 = 600_000;
+/// TS daemon-supervisor.ts:204 `WORKER_REQUEST_TIMEOUT_MS`.
+pub(crate) const WORKER_REQUEST_TIMEOUT_MS: u64 = 24 * 60 * 60 * 1000;
+
+/// The route budget of a client command: turn-long waits ride TS's 24 h
+/// worker-request budget; everything else is a short control route.
+pub(crate) fn client_route_timeout(command: &DaemonCommand) -> u64 {
+    if matches!(
+        command,
+        DaemonCommand::PromptAndWait { .. }
+            | DaemonCommand::WaitForIdle { .. }
+            // Headless completion settles a whole autonomous run.
+            | DaemonCommand::WaitForHeadlessCompletion { .. }
+            // Compaction runs a summarizer model call, like a turn.
+            | DaemonCommand::Compact { .. }
+            // A tree navigation may run a branch-summary model call.
+            | DaemonCommand::NavigateTree { .. }
+    ) {
+        WORKER_REQUEST_TIMEOUT_MS
+    } else {
+        ROUTE_TIMEOUT_MS
+    }
+}
 
 impl Supervisor {
     pub(crate) async fn route_command(
@@ -644,21 +665,7 @@ impl Supervisor {
                 );
             }
         }
-        let timeout = if matches!(
-            command,
-            DaemonCommand::PromptAndWait { .. }
-                | DaemonCommand::WaitForIdle { .. }
-                // Headless completion settles a whole autonomous run.
-                | DaemonCommand::WaitForHeadlessCompletion { .. }
-                // Compaction runs a summarizer model call, like a turn.
-                | DaemonCommand::Compact { .. }
-                // A tree navigation may run a branch-summary model call.
-                | DaemonCommand::NavigateTree { .. }
-        ) {
-            LONG_ROUTE_TIMEOUT_MS
-        } else {
-            ROUTE_TIMEOUT_MS
-        };
+        let timeout = client_route_timeout(command);
         let (worker_command, mut payload) = match client_command_payload(command, client_id) {
             Ok(payload) => payload,
             Err(error) => {

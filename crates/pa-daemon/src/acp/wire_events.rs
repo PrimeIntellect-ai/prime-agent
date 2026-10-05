@@ -1,9 +1,7 @@
 //! Daemon session-event mapping: the TS `acpUpdatesForSessionEvent` port
 //! for the wire shapes a daemon worker streams (`message_start/update/end`,
-//! `tool_execution_*`, `compaction_end`, `goal_update`, ...). The
-//! daemon-attached ACP transport rides this instead of the in-process
-//! loop-event projection (`events.rs`): same ACP frames, different producer
-//! side.
+//! `tool_execution_*`, `bash_*`, `compaction_end`, `goal_update`, ...): the
+//! ACP frames the daemon worker's session events produce.
 //!
 //! Events with no ACP counterpart (`turn_end`, `auto_retry_*`,
 //! `agent_begin/end`, `session_action_update`) map to nothing, exactly like
@@ -11,16 +9,20 @@
 
 use serde_json::{json, Value};
 
-use super::events::{AcpToolKind, AcpToolStatus, IPYTHON_TOOL_NAME};
 use super::meta::{prime_agent_meta, PrimeAgentCompactionMeta, PrimeAgentSessionMeta};
-use super::types::{AcpSessionUpdate, TextBlock};
+use super::types::{AcpSessionUpdate, AcpToolKind, AcpToolStatus, TextBlock};
+
+/// The model-facing Python REPL tool.
+const IPYTHON_TOOL_NAME: &str = "ipython";
 
 /// Correlates streamed chunks with their owning assistant message (the
-/// daemon stream carries the delta on `assistantMessageEvent`).
+/// daemon stream carries the delta on `assistantMessageEvent`) and bash
+/// output chunks with the run that produced them.
 #[derive(Debug, Default)]
 pub struct WireMappingState {
     next_assistant_message_sequence: u64,
     active_assistant_message_id: Option<String>,
+    active_bash_run_id: Option<String>,
 }
 
 impl WireMappingState {
@@ -190,6 +192,64 @@ pub fn wire_updates(event: &Value, state: &mut WireMappingState) -> Vec<AcpSessi
             };
             vec![update]
         }
+        // User-level bash runs outside the tool-call lifecycle: a synthetic
+        // tool call keyed by run id keeps the streamed chunks addressable.
+        "bash_start" => {
+            let command = event
+                .get("command")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let run_id = event
+                .get("runId")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            state.active_bash_run_id.clone_from(&run_id);
+            vec![AcpSessionUpdate::ToolCall {
+                tool_call_id: bash_tool_call_id(run_id),
+                title: command.clone(),
+                kind: AcpToolKind::Execute,
+                status: AcpToolStatus::InProgress,
+                raw_input: json!({ "command": command }),
+            }]
+        }
+        "bash_output" => {
+            let chunk = event
+                .get("chunk")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            vec![AcpSessionUpdate::ToolCallUpdate {
+                tool_call_id: bash_tool_call_id(state.active_bash_run_id.clone()),
+                status: Some(AcpToolStatus::InProgress),
+                content: Some(vec![super::types::ToolCallContent::new(chunk)]),
+                meta: None,
+            }]
+        }
+        "bash_end" => {
+            let run_id = event
+                .get("runId")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            if state.active_bash_run_id == run_id {
+                state.active_bash_run_id = None;
+            }
+            let completed = event.get("exitCode").and_then(Value::as_i64) == Some(0)
+                && !event
+                    .get("cancelled")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+            vec![AcpSessionUpdate::ToolCallUpdate {
+                tool_call_id: bash_tool_call_id(run_id),
+                status: Some(if completed {
+                    AcpToolStatus::Completed
+                } else {
+                    AcpToolStatus::Failed
+                }),
+                content: None,
+                meta: None,
+            }]
+        }
         "goal_update" => {
             let goal = event.get("goal");
             vec![AcpSessionUpdate::SessionInfoUpdate {
@@ -236,15 +296,27 @@ pub fn wire_updates(event: &Value, state: &mut WireMappingState) -> Vec<AcpSessi
     }
 }
 
+/// The synthetic tool-call id of a user-level bash run:
+/// `prime-agent-bash-<runId>`; a run without an id keys the bare prefix
+/// (TS `bashToolCallId`).
+fn bash_tool_call_id(run_id: Option<String>) -> String {
+    match run_id {
+        Some(run_id) => format!("prime-agent-bash-{run_id}"),
+        None => "prime-agent-bash".to_string(),
+    }
+}
+
 /// TS `toolResultText`: the text of a tool result, wherever the engine
-/// carries it.
+/// carries it. Empty text blocks drop out before the join and an empty
+/// text yields `None`, so no update carries empty content (the TS call
+/// site's `text ? { content } : {}`).
 fn tool_result_text(result: Option<&Value>) -> Option<String> {
     let result = result?;
     if let Some(text) = result.as_str() {
-        return Some(text.to_string());
+        return (!text.is_empty()).then(|| text.to_string());
     }
     if let Some(output) = result.get("output").and_then(Value::as_str) {
-        return Some(output.to_string());
+        return (!output.is_empty()).then(|| output.to_string());
     }
     let content = result.get("content")?.as_array()?;
     let parts: Vec<String> = content
@@ -259,6 +331,7 @@ fn tool_result_text(result: Option<&Value>) -> Option<String> {
                 })
                 .flatten()
         })
+        .filter(|text| !text.is_empty())
         .collect();
     (!parts.is_empty()).then(|| parts.join("\n"))
 }
@@ -470,5 +543,42 @@ mod tests {
             "message": { "role": "user" },
         }))
         .is_none());
+    }
+
+    #[test]
+    fn empty_tool_results_carry_no_content() {
+        let mut state = WireMappingState::default();
+        let updates = wire_updates(
+            &json!({
+                "type": "tool_execution_end",
+                "toolCallId": "t1",
+                "result": { "output": "" },
+                "isError": false,
+            }),
+            &mut state,
+        );
+        let value = serde_json::to_value(&updates[0]).unwrap();
+        assert_eq!(value["sessionUpdate"], "tool_call_update");
+        assert_eq!(value["status"], "completed");
+        assert!(value.get("content").is_none(), "no empty content: {value}");
+    }
+
+    #[test]
+    fn empty_text_blocks_drop_out_of_the_joined_result() {
+        let mut state = WireMappingState::default();
+        let updates = wire_updates(
+            &json!({
+                "type": "tool_execution_end",
+                "toolCallId": "t1",
+                "result": { "content": [
+                    { "type": "text", "text": "" },
+                    { "type": "text", "text": "a" },
+                ] },
+                "isError": false,
+            }),
+            &mut state,
+        );
+        let value = serde_json::to_value(&updates[0]).unwrap();
+        assert_eq!(value["content"][0]["content"]["text"], "a");
     }
 }

@@ -340,6 +340,12 @@ impl pa_tui::client_settings::ClientSettings for StubSettings {
     fn set_chat_detail(&self, _detail: &str) -> Result<()> {
         Ok(())
     }
+    fn factory_enabled(&self) -> bool {
+        false
+    }
+    fn set_factory_enabled(&self, _enabled: bool) -> Result<()> {
+        Ok(())
+    }
     fn warnings_anthropic_extra_usage(&self) -> bool {
         self.anthropic_extra_usage
     }

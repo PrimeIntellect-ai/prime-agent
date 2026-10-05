@@ -70,6 +70,9 @@ pub fn spawn_supervisor(
     if let Some(roster_path) = roster_path {
         command.env(UPDATE_ROSTER_ENV, roster_path);
     }
+    #[cfg(unix)]
+    pa_core::platform::process::set_new_session(&mut command);
+    #[cfg(not(unix))]
     pa_core::platform::process::set_new_process_group(&mut command);
     let child = command
         .spawn()
