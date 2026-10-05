@@ -444,6 +444,7 @@ pub struct Model {
 
 /// `skip_serializing_if` predicate for [`Model::max_tokens_explicit`]: the
 /// persisted/proxied JSON stays byte-identical when the flag is unset.
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde's skip predicate ABI takes the field by reference
 fn is_false(value: &bool) -> bool {
     !*value
 }

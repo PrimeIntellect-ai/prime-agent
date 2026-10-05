@@ -754,6 +754,7 @@ pub use routing::{
 /// `skip_serializing_if` predicate for [`Model::max_tokens_explicit`]: the
 /// wire/catalog JSON stays byte-identical for catalog models (the flag
 /// serializes only when set).
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde's skip predicate ABI takes the field by reference
 fn is_false(value: &bool) -> bool {
     !*value
 }
