@@ -735,6 +735,18 @@ impl Worker {
                 children.set_delete_notifier(std::sync::Arc::new(move |child_id| {
                     cache.invalidate_child(child_id);
                 }));
+                let core = std::sync::Arc::clone(&self.core);
+                let events = self.events.clone();
+                children.set_child_update_sink(std::sync::Arc::new(move |mut child| {
+                    if let Some(parent_id) = core.lock().unwrap().rlm_child_id.clone() {
+                        child["parentId"] = json!(parent_id);
+                    }
+                    crate::user_bash::emit_session_event_frame(
+                        &core,
+                        &events,
+                        json!({ "type": "rlm_child_update", "child": child }),
+                    );
+                }));
             }
         }
         let mut data = serde_json::to_value(&summary).unwrap_or(Value::Null);

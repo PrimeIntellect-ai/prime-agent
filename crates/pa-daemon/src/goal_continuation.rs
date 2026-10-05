@@ -78,6 +78,13 @@ impl AgentSessionEngine {
         }));
     }
 
+    pub(crate) fn set_late_agent_message_sink(&self, sink: pa_core::LateSentAgentMessageHandler) {
+        *self
+            .late_agent_message_sink
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sink);
+    }
+
     /// Wire the registered-jobs gate (TS #2483's
     /// `canPassivateSettledSession` `hasRegisteredCronJob`): the worker calls
     /// this once with a probe over the shared cron store; the settled-child
