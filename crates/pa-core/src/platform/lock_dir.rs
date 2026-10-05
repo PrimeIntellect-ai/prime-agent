@@ -177,6 +177,85 @@ mod win32 {
         }
         Ok(())
     }
+
+    /// `winbase.h` `BY_HANDLE_FILE_INFORMATION`, the
+    /// `GetFileInformationByHandle` output: the per-file identity fields
+    /// the lock ownership comparison reads are `nFileIndexHigh/Low`.
+    #[repr(C)]
+    struct ByHandleFileInformation {
+        dwFileAttributes: u32,
+        ftCreationTime: FileTime,
+        ftLastAccessTime: FileTime,
+        ftLastWriteTime: FileTime,
+        dwVolumeSerialNumber: u32,
+        nFileSizeHigh: u32,
+        nFileSizeLow: u32,
+        nNumberOfLinks: u32,
+        nFileIndexHigh: u32,
+        nFileIndexLow: u32,
+    }
+
+    extern "system" {
+        fn GetFileInformationByHandle(
+            handle: Handle,
+            file_information: *mut ByHandleFileInformation,
+        ) -> i32;
+    }
+
+    /// The directory's file index, the number Node reports as `ino` on
+    /// Windows (`statSync(..., { bigint: true }).ino`) and the TS
+    /// `guardStolen` compare runs against. `None` when the open or the
+    /// query fails, or on a volume with no per-file identity (a zero
+    /// index) - the TS `guardIno === undefined` arm.
+    pub(crate) fn file_index(path: &Path) -> Option<u64> {
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+        // A zero desired-access handle carries only metadata queries, so
+        // the identity read works even where attribute writes are denied.
+        let handle = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                0,
+                FILE_SHARE_ALL,
+                std::ptr::null_mut(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS,
+                std::ptr::null_mut(),
+            )
+        };
+        if handle as isize == INVALID_HANDLE_VALUE {
+            return None;
+        }
+        let mut information = ByHandleFileInformation {
+            dwFileAttributes: 0,
+            ftCreationTime: FileTime {
+                dwLowDateTime: 0,
+                dwHighDateTime: 0,
+            },
+            ftLastAccessTime: FileTime {
+                dwLowDateTime: 0,
+                dwHighDateTime: 0,
+            },
+            ftLastWriteTime: FileTime {
+                dwLowDateTime: 0,
+                dwHighDateTime: 0,
+            },
+            dwVolumeSerialNumber: 0,
+            nFileSizeHigh: 0,
+            nFileSizeLow: 0,
+            nNumberOfLinks: 0,
+            nFileIndexHigh: 0,
+            nFileIndexLow: 0,
+        };
+        let ok =
+            unsafe { GetFileInformationByHandle(handle, std::ptr::from_mut(&mut information)) };
+        unsafe { CloseHandle(handle) };
+        if ok == 0 {
+            return None;
+        }
+        let index =
+            (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow);
+        (index != 0).then_some(index)
+    }
 }
 
 /// An exclusive cross-process lock on `{path}.lock`, released on drop by
@@ -278,9 +357,21 @@ impl LockDir {
             .map(fs::Metadata::ino)
     }
 
-    /// std cannot observe a directory's identity on this platform (TS
+    /// The lock directory's identity on Windows: the NTFS file index
+    /// (`GetFileInformationByHandle`'s `nFileIndexHigh/Low`), the same
+    /// number Node's `statSync(guardPath, { bigint: true }).ino` reports
+    /// and the TS `guardStolen` comparison runs on Windows. A zero index
+    /// (FAT-family volumes, where no per-file identity exists) reads as
+    /// unobservable - TS's `guardIno === undefined` arm, timer-driven
+    /// detection only.
+    #[cfg(windows)]
+    fn ownership_id(path: &Path) -> Option<u64> {
+        win32::file_index(path)
+    }
+
+    /// No directory identity observable on this platform (TS
     /// `guardIno === undefined`): only timer-driven detection applies.
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     fn ownership_id(_path: &Path) -> Option<u64> {
         None
     }
