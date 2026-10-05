@@ -625,15 +625,26 @@ async def watch_job(handle: Any, interval_seconds: float = 5.0) -> dict[str, Any
         raise TypeError("rlm.watch.job requires a bash handle returned by bash()")
     if interval_seconds <= 0 or not math.isfinite(interval_seconds):
         raise ValueError("interval_seconds must be a positive finite number")
-    if pid in _JOB_WATCHES:
-        return {"pid": pid, "watching": True, "already_watched": True}
+    existing = _JOB_WATCHES.get(pid)
+    if existing is not None:
+        if existing["handle"] is handle:
+            return {"pid": pid, "watching": True, "already_watched": True}
+        # A different handle on a watched pid means the old job exited and
+        # the OS reused its pid before the old poller noticed: replace the
+        # stale watcher instead of answering a false already_watched. The
+        # cancelled task's finally leaves the replacement entry alone.
+        existing["task"].cancel()
     # The baseline is captured at registration (not inside the scheduled
     # task): bytes produced before the first poll still report their range.
     baseline = handle.peek_output_bytes()
     task = asyncio.get_running_loop().create_task(
         _job_watch_loop(handle, float(interval_seconds), baseline)
     )
-    _JOB_WATCHES[pid] = {"task": task, "interval": float(interval_seconds)}
+    _JOB_WATCHES[pid] = {
+        "task": task,
+        "interval": float(interval_seconds),
+        "handle": handle,
+    }
     return {"pid": pid, "watching": True}
 
 

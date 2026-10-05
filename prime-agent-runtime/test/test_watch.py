@@ -136,6 +136,57 @@ class RlmWatchJobTest(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_watch_job_replaces_a_stale_watcher_on_a_reused_pid(self) -> None:
+        """The OS reused a dead job's pid before its poller noticed the end.
+
+        The new handle on the recycled pid must get a fresh poller (not a
+        false already_watched), the stale poller must be cancelled, its late
+        cleanup must leave the replacement alone, and re-registering the
+        same handle stays the idempotent already_watched answer.
+        """
+        seen: list[tuple[int, int]] = []
+        stale = FakeJobHandle(4246, ["a" * 10])
+        fresh = FakeJobHandle(4246, ["b" * 40])
+
+        async def fake_host_request(request_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+            if request_type == "bash.progress":
+                seen.append((payload["fromBytes"], payload["toBytes"]))
+            return {"status": "ok"}
+
+        async def scenario() -> None:
+            with patch.object(rlm, "host_request", AsyncMock(side_effect=fake_host_request)):
+                rlm._JOB_WATCHES.clear()
+                await rlm.rlm.watch.job(stale, interval_seconds=0.05)
+                stale_task = rlm._JOB_WATCHES[4246]["task"]
+                # The old job dies inside the poller's sleep window; the OS
+                # hands the pid to a new job before the poller wakes.
+                stale.running = False
+                self.assertEqual(
+                    await rlm.rlm.watch.job(fresh, interval_seconds=0.01),
+                    {"pid": 4246, "watching": True},
+                )
+                # Re-registering the same handle stays already_watched.
+                self.assertEqual(
+                    await rlm.rlm.watch.job(fresh, interval_seconds=0.01),
+                    {"pid": 4246, "watching": True, "already_watched": True},
+                )
+                # The stale poller is cancelled, and its late cleanup does
+                # not undo the replacement registration that reused the pid.
+                await asyncio.sleep(0.02)
+                self.assertTrue(stale_task.cancelled())
+                self.assertEqual(rlm.rlm.watch.job_list(), [{"pid": 4246, "interval": 0.01}])
+                fresh._grow()
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline and not seen:
+                    await asyncio.sleep(0.01)
+                # The replacement ends with its own job: the table empties.
+                await asyncio.sleep(0.2)
+                self.assertEqual(rlm.rlm.watch.job_list(), [])
+
+        asyncio.run(scenario())
+        self.assertTrue(seen, "the reused-pid job never reported growth")
+        self.assertEqual(seen[-1], (0, 40))
+
 
 class RlmWatchAgentTest(unittest.TestCase):
     def test_agent_watch_forwards_to_host_handlers(self) -> None:
