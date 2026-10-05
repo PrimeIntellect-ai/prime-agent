@@ -46,7 +46,7 @@ fn set_mtime_handle(dir: &fs::File, tv_sec: i64, tv_nsec: i64) -> io::Result<()>
 }
 
 /// True while `path` still resolves to the inode the handle pins.
-#[cfg(all(unix, not(target_os = "linux")))]
+#[cfg(unix)]
 fn path_pins(path: &Path, dir: &fs::File) -> bool {
     use std::os::unix::fs::MetadataExt;
     match (fs::symlink_metadata(path), dir.metadata()) {
@@ -390,6 +390,23 @@ impl LockDir {
         }
         match rename_noreplace::rename(&candidate, path) {
             Ok(()) => Ok(dir),
+            Err(error) if Self::rename_noreplace_unsupported(&error) => {
+                // This kernel or filesystem has no RENAME_NOREPLACE: use
+                // the compatible mkdir protocol instead of failing the
+                // acquisition (settings and daemon startup must keep
+                // working wherever the mkdir protocol worked before).
+                // The private candidate must be gone before the mkdir
+                // protocol runs: a failed removal here would leak a
+                // lock artifact beside every acquisition on this
+                // filesystem, so the acquisition fails instead of
+                // succeeding with the candidate still present.
+                if let Err(remove_error) = fs::remove_dir(&candidate) {
+                    if remove_error.kind() != io::ErrorKind::NotFound {
+                        return Err(remove_error);
+                    }
+                }
+                Self::create_by_mkdir(path)
+            }
             Err(error) => {
                 // A contender holds the path (or the rename failed): the
                 // candidate is this call's alone - remove it, never the
@@ -400,18 +417,28 @@ impl LockDir {
         }
     }
 
+    /// True when a no-replace rename failed because the kernel or
+    /// filesystem does not implement it (EINVAL: the flag is unsupported
+    /// here; ENOSYS: no renameat2 at all) - the mkdir protocol is the
+    /// compatible fallback.
+    #[cfg(target_os = "linux")]
+    fn rename_noreplace_unsupported(error: &io::Error) -> bool {
+        matches!(error.raw_os_error(), Some(libc::EINVAL | libc::ENOSYS))
+    }
+
     /// The mkdir is the acquisition signal: EEXIST is the only collision.
     /// The handle pins the created inode right after the mkdir. Scope
-    /// decision, stated plainly: this platform family has no no-replace
-    /// rename, so the acquisition keeps proper-lockfile's own residual
-    /// window - a suspension longer than the staleness threshold between
-    /// the mkdir and this open can let a stale takeover win first, and
-    /// the holder then adopts the successor's lock. The identity checks
-    /// catch a displacement after the pin, not one that wins it. CI's
-    /// unix surface is linux, whose `create` above closes the window
-    /// entirely.
-    #[cfg(all(unix, not(target_os = "linux")))]
-    fn create(path: &Path) -> io::Result<Created> {
+    /// decision, stated plainly: without a no-replace rename this
+    /// protocol keeps proper-lockfile's own residual window - a
+    /// suspension longer than the staleness threshold between the mkdir
+    /// and the open can let a stale takeover win first, and the holder
+    /// then adopts the successor's lock. The identity checks catch a
+    /// displacement after the pin, not one that wins it. On linux this
+    /// path only serves filesystems whose kernel has no renameat2
+    /// support; CI's unix surface runs the candidate+publish `create`
+    /// above, which has no window.
+    #[cfg(unix)]
+    fn create_by_mkdir(path: &Path) -> io::Result<Created> {
         fs::create_dir(path)?;
         let dir = fs::File::open(path)?;
         let (sec, nanos) = probe_mtime();
@@ -424,6 +451,12 @@ impl LockDir {
             return Err(error);
         }
         Ok(dir)
+    }
+
+    /// The mkdir-protocol create for unix without a no-replace rename.
+    #[cfg(all(unix, not(target_os = "linux")))]
+    fn create(path: &Path) -> io::Result<Created> {
+        Self::create_by_mkdir(path)
     }
 
     /// The mkdir is the acquisition signal; the mtime probe makes the
@@ -635,6 +668,54 @@ mod tests {
             (metadata.dev(), metadata.ino()),
             (at_path.dev(), at_path.ino())
         );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn rename_noreplace_unsupported_only_matches_missing_support() {
+        use super::LockDir;
+        assert!(LockDir::rename_noreplace_unsupported(
+            &io::Error::from_raw_os_error(libc::EINVAL)
+        ));
+        assert!(LockDir::rename_noreplace_unsupported(
+            &io::Error::from_raw_os_error(libc::ENOSYS)
+        ));
+        // Contention and real I/O failures must keep their own errors.
+        assert!(!LockDir::rename_noreplace_unsupported(
+            &io::Error::from_raw_os_error(libc::EEXIST)
+        ));
+        assert!(!LockDir::rename_noreplace_unsupported(
+            &io::Error::from_raw_os_error(libc::EACCES)
+        ));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn mkdir_protocol_create_pins_and_probes_the_lock() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("auth.json");
+        std::fs::write(&file, "{}").unwrap();
+        let lock = lock_of(&file);
+        let handle = LockDir::create_by_mkdir(&lock).unwrap();
+        let metadata = std::fs::symlink_metadata(&lock).unwrap();
+        let pinned = handle.metadata().unwrap();
+        assert_eq!(
+            (metadata.dev(), metadata.ino()),
+            (pinned.dev(), pinned.ino()),
+            "the handle must pin the created directory"
+        );
+        let modified = metadata.modified().unwrap();
+        assert_eq!(
+            modified
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+                % 1000,
+            5,
+            "the probe mtime shape must survive the fallback"
+        );
+        let _ = fs::remove_dir(&lock);
     }
 
     #[test]
