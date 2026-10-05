@@ -90,6 +90,13 @@ _pending_host: dict[str, "asyncio.Future[dict[str, Any]]"] = {}
 # host reply can arrive after that, so waiting (and future) host_request calls fail.
 _host_closed = False
 
+# In-flight dedicated-lane MCP status requests (the eager settle and the
+# connections view ride this lane): the serve loop hands them off instead of
+# awaiting them inline, so a hanging server bounds its own request while the
+# execution queue stays free for the user's cells. Shutdown cancels the set
+# before closing the MCP registry.
+_mcp_status_tasks: "set[asyncio.Task[None]]" = set()
+
 # Interrupt bookkeeping shared between the reader thread and the loop thread.
 _interrupt_lock = threading.Lock()
 _inflight: set[str] = set()
@@ -1293,6 +1300,46 @@ async def _handle_request(
         _send({"event": "done", "id": rid, "status": "error"})
 
 
+async def _mcp_status_lane(req: dict[str, Any], ns: dict[str, Any]) -> None:
+    """One dedicated-lane `mcp_status` request.
+
+    The failure shape mirrors `_handle_request`'s backstop (one broken
+    request fails alone, never the lane, never the serve loop); a
+    shutdown cancellation is silent by design — the host is already
+    tearing the kernel down and owns the deadline.
+    """
+    try:
+        await _handle_mcp_status(req, ns)
+    except asyncio.CancelledError:
+        raise
+    except BaseException as exc:  # noqa: BLE001 - one broken lane request fails alone
+        rid = req["id"]
+        try:
+            _send(_error_event(rid, exc))
+            _send({"event": "done", "id": rid, "status": "error"})
+        except BaseException:
+            pass
+
+
+def _spawn_mcp_status_lane(req: dict[str, Any], ns: dict[str, Any]) -> None:
+    """Hand one `mcp_status` request to the dedicated lane.
+
+    `mcp_status` opens and lists the configured generic servers (the eager
+    background settle and the connections view both ride it), and a slow or
+    unreachable server can hold it for the whole per-server timeout. Awaiting
+    it inline on the execution queue would park the user's first python cell
+    behind a server handshake that no cell asked for (finding: the eager
+    settle must never contend with the user's first-turn path; the join point
+    stays at first use through the registry's per-server locks). The lane task
+    runs on the same loop (the registry dispatch joins concurrent listings
+    and an early user call onto the same in-flight open), so ordering between
+    cells is untouched — only status work stops occupying the cell queue.
+    """
+    task = asyncio.get_running_loop().create_task(_mcp_status_lane(req, ns))
+    _mcp_status_tasks.add(task)
+    task.add_done_callback(_mcp_status_tasks.discard)
+
+
 async def _serve(queue: asyncio.Queue[dict[str, Any]], ns: dict[str, Any]) -> None:
     while True:
         req = await queue.get()
@@ -1307,6 +1354,15 @@ async def _serve(queue: asyncio.Queue[dict[str, Any]], ns: dict[str, Any]) -> No
                 # Host stdin closed without a shutdown request: the host
                 # process is gone, so this is the last chance to persist.
                 _flush_final_snapshot(ns)
+            # The dedicated MCP status lane goes first: a still-listing
+            # server is cancelled (bounded, silent) so the registry close
+            # below cannot race an in-flight open under the host's 5s
+            # shutdown deadline.
+            if _mcp_status_tasks:
+                for task in list(_mcp_status_tasks):
+                    task.cancel()
+                await asyncio.wait(set(_mcp_status_tasks), timeout=1.0)
+                _mcp_status_tasks.clear()
             # MCP children must close before the loop dies; close() is internally bounded under the host's 5s deadline.
             mcp_mod = sys.modules.get("rlm.mcp")
             if mcp_mod is not None:
@@ -1326,7 +1382,9 @@ async def _serve(queue: asyncio.Queue[dict[str, Any]], ns: dict[str, Any]) -> No
         elif rtype == "list_names":
             await _handle_request(_handle_list_names, req, ns)
         elif rtype == "mcp_status":
-            await _handle_request(_handle_mcp_status, req, ns)
+            # The dedicated lane (see `_spawn_mcp_status_lane`): status/open
+            # work never occupies the execution queue.
+            _spawn_mcp_status_lane(req, ns)
 
 
 def _handle_bash_activity(req: dict[str, Any]) -> None:
