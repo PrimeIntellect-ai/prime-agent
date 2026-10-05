@@ -1,0 +1,2 @@
+- New `prime-agent factory list | import | export` commands manage the machine library of shareable `MACHINE.md` factory templates; the bundled seeds (`builder`, `pr-manager`, `review-sweep`) ship inside the runtime so every install sees them, personal machines live under the agent dir, and an invalid machine never persists.
+- `await rlm.factory.run('<name>')` runs a library machine directly without creating a harness entry; a machine that exists but is broken names its exact errors, and an existing export target is refused instead of silently overwritten.

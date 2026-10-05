@@ -320,6 +320,7 @@ pub fn default_server_capabilities() -> Vec<DaemonServerCapability> {
                 "side_question_transcript",
                 "transient_bash",
                 "kernel_bash_activity",
+                "factory_activity",
                 "session_input_admission",
                 "prompt_admission_cancellation",
                 "owned_prompt_cancellation",
@@ -676,6 +677,9 @@ pub fn command_active_session_id(command: &DaemonCommand) -> Option<&str> {
         | DaemonCommand::CancelRlmChild {
             active_session_id, ..
         }
+        | DaemonCommand::FactoryActivity {
+            active_session_id, ..
+        }
         | DaemonCommand::DeleteRlmSubagent {
             active_session_id, ..
         }
@@ -970,6 +974,7 @@ pub fn command_type_name(command: &DaemonCommand) -> &'static str {
         DaemonCommand::TailKernelBash { .. } => "tail_kernel_bash",
         DaemonCommand::KillKernelBash { .. } => "kill_kernel_bash",
         DaemonCommand::CancelRlmChild { .. } => "cancel_rlm_child",
+        DaemonCommand::FactoryActivity { .. } => "factory_activity",
         DaemonCommand::DeleteRlmSubagent { .. } => "delete_rlm_subagent",
         DaemonCommand::WaitForIdle { .. } => "wait_for_idle",
         DaemonCommand::WaitForHeadlessCompletion { .. } => "wait_for_headless_completion",
@@ -1079,6 +1084,61 @@ mod tests {
             assert!(pa_types::daemon::is_session_plane_daemon_command(kind));
         }
         assert!(default_server_capabilities().contains(&"kernel_bash_activity".to_string()));
+    }
+
+    #[test]
+    fn factory_activity_commands_are_session_scoped() {
+        for (command, action, run_id, spec_id, timeout_ms) in [
+            (
+                serde_json::json!({"type":"factory_activity","activeSessionId":"session","action":"graph"}),
+                "graph",
+                None::<&str>,
+                None::<&str>,
+                None::<u64>,
+            ),
+            (
+                serde_json::json!({"type":"factory_activity","activeSessionId":"session","action":"watch","runId":"run-1","timeoutMs":2000}),
+                "watch",
+                Some("run-1"),
+                None,
+                Some(2000),
+            ),
+            (
+                serde_json::json!({"type":"factory_activity","activeSessionId":"session","action":"run","specId":"review-loop"}),
+                "run",
+                None,
+                Some("review-loop"),
+                None,
+            ),
+            (
+                serde_json::json!({"type":"factory_activity","activeSessionId":"session","action":"stop","runId":"run-1"}),
+                "stop",
+                Some("run-1"),
+                None,
+                None,
+            ),
+        ] {
+            let line = serde_json::json!({"type":"command","id":"c1", "protocol":current_protocol_info(), "command":command}).to_string();
+            let parsed = parse_daemon_command_line(&line).unwrap();
+            assert_eq!(command_type_name(&parsed.command), "factory_activity");
+            assert_eq!(command_active_session_id(&parsed.command), Some("session"));
+            match &parsed.command {
+                DaemonCommand::FactoryActivity {
+                    action: parsed_action,
+                    run_id: parsed_run,
+                    spec_id: parsed_spec,
+                    timeout_ms: parsed_timeout,
+                    ..
+                } => {
+                    assert_eq!(parsed_action.as_str(), action);
+                    assert_eq!(parsed_run.as_deref(), run_id);
+                    assert_eq!(parsed_spec.as_deref(), spec_id);
+                    assert_eq!(*parsed_timeout, timeout_ms);
+                }
+                _ => panic!("expected FactoryActivity"),
+            }
+        }
+        assert!(default_server_capabilities().contains(&"factory_activity".to_string()));
     }
 
     #[test]

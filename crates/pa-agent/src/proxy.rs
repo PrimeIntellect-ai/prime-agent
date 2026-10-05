@@ -229,6 +229,8 @@ struct ProxyRequestOptions {
     session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     service_tier: Option<crate::types::ServiceTier>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    headers: Option<std::collections::BTreeMap<String, String>>,
 }
 
 #[derive(serde::Serialize)]
@@ -266,6 +268,7 @@ async fn proxy_run(
         },
         session_id: options.session_id.clone(),
         service_tier: options.service_tier,
+        headers: options.headers.clone(),
     };
     let body = serde_json::json!({
         "model": model,
@@ -1015,6 +1018,7 @@ mod tests {
             signal: AbortSignal::never(),
             on_payload: None,
             on_response: None,
+            headers: None,
         }
     }
 
@@ -1246,6 +1250,7 @@ mod tests {
             reasoning: ThinkingLevelWire::High,
             session_id: Some("session".to_string()),
             service_tier: Some(ServiceTier::Flex),
+            headers: Some([("X-ACP-Model-Request-ID".to_string(), "id".to_string())].into()),
         };
         let value = serde_json::to_value(&options).expect("serialize");
         let keys: std::collections::BTreeSet<String> =
@@ -1253,6 +1258,7 @@ mod tests {
         assert_eq!(
             keys,
             [
+                "headers",
                 "maxTokens",
                 "reasoning",
                 "serviceTier",

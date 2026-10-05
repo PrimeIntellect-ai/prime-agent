@@ -210,6 +210,20 @@ pub fn telemetry_disabled(settings: &pa_core::settings::SettingsManager) -> bool
     !pa_core::session_engine::telemetry::telemetry_switch(settings).enabled()
 }
 
+/// The daemon session create's `telemetry_disabled` (TS `telemetryDisabled`):
+/// only an environment opt-out rides the wire. A settings opt-out stays the
+/// live switch the session's client re-reads, so `/telemetry on` resumes the
+/// running session instead of waiting for a new one.
+pub(crate) fn create_telemetry_disabled(config: &RuntimeConfig) -> Option<bool> {
+    matches!(
+        pa_core::session_engine::telemetry::telemetry_switch(
+            &pa_core::settings::SettingsManager::create(&config.cwd, &config.agent_dir)
+        ),
+        pa_core::session_engine::telemetry::TelemetrySwitch::Env { enabled: false, .. }
+    )
+    .then_some(true)
+}
+
 /// Build the runtime config from parsed args, mirroring `runtimeConfigFromArgs`.
 pub fn runtime_config_from_args(
     parsed: &Args,

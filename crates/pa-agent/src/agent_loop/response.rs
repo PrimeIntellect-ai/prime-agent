@@ -151,6 +151,7 @@ async fn stream_assistant_response_inner(
         // composes them per request at the `StreamFn` boundary instead.
         on_payload: None,
         on_response: None,
+        headers: None,
     };
 
     let mut response = race_with_abort(

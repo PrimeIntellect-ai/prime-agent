@@ -90,7 +90,7 @@ pub fn run_interactive_mode(options: &RunOptions) -> Result<i32> {
             } else {
                 "cold"
             };
-        let startup_telemetry = (!options.config.telemetry_disabled).then(|| {
+        let mut startup_telemetry = (!options.config.telemetry_disabled).then(|| {
             let agent_dir = options.config.agent_dir.clone();
             let settings =
                 pa_core::settings::SettingsManager::create(&options.config.cwd, &agent_dir);
@@ -137,9 +137,10 @@ pub fn run_interactive_mode(options: &RunOptions) -> Result<i32> {
         }
         // `startup` (schema v1): process entry to a ready interactive
         // session environment (daemon listening). Emitted through a
-        // one-shot client that flushes immediately; the session's own
-        // telemetry rides the daemon worker.
-        if let Some(client) = startup_telemetry.as_ref() {
+        // one-shot client; the session's own telemetry rides the daemon
+        // worker. The flush handle rides to the end of the run — the
+        // quick-exit join below bounds delivery on a fast quit.
+        let startup_flush = startup_telemetry.take().map(|client| {
             let daemon_ready_ms = startup_started.elapsed().as_millis() as u64;
             let mut properties = pa_telemetry::base_properties("interactive");
             properties.set("duration_ms", serde_json::Value::from(daemon_ready_ms));
@@ -154,9 +155,9 @@ pub fn run_interactive_mode(options: &RunOptions) -> Result<i32> {
                 startup_kind: Some(startup_kind),
                 timing_scope: Some("system_work"),
             }
-            .track(client);
-            let _ = client.shutdown().await;
-        }
+            .track(&client);
+            flush_startup_telemetry(client)
+        });
         // `prime-agent agents` and bare `--resume` open the agents view
         // (TS `agentsViewRequested`); the view then opens sessions, and a
         // session exits back into the view until the user exits it. TS gates
@@ -172,29 +173,52 @@ pub fn run_interactive_mode(options: &RunOptions) -> Result<i32> {
             tui_options.onboarding.is_some(),
             continue_view.is_some(),
         );
-        if agents_view {
-            let (anchor, notice) = continue_view.map_or((None, None), |view| {
-                (Some(view.session_id), Some(view.notice))
-            });
-            run_agents_view_flow(tui_options, anchor, notice).await
-        } else {
-            let outcome =
-                pa_tui::interactive::run_interactive(tui_options.clone(), UiMode::Terminal).await?;
-            // TS `main.ts`: a direct session run closes into the agents view
-            // when the exit came through agents-back or `/resume`
-            // (`launchAgentsView` anchored on the session just left); every
-            // other exit (ctrl+c/ctrl+d, `/quit`) ends the process.
-            if outcome.return_to_agents_view {
-                // A startup attach that fell back to the view has no session
-                // identity to anchor on; its notice seeds the view's status
-                // line instead.
-                let anchor = (!outcome.session_id.is_empty()).then(|| outcome.session_id.clone());
-                run_agents_view_flow(tui_options, anchor, outcome.agents_view_notice).await
+        // The interactive dispatch, one future so EVERY exit — the view
+        // loop's, the session run's, a failed open's error return —
+        // passes the quick-exit join below.
+        let run = async {
+            if agents_view {
+                let (anchor, notice) = continue_view.map_or((None, None), |view| {
+                    (Some(view.session_id), Some(view.notice))
+                });
+                run_agents_view_flow(tui_options, anchor, notice).await
             } else {
-                print_resume_hint(outcome.resume_hint.as_deref());
-                Ok(())
+                let outcome =
+                    pa_tui::interactive::run_interactive(tui_options.clone(), UiMode::Terminal)
+                        .await?;
+                // TS `main.ts`: a direct session run closes into the agents view
+                // when the exit came through agents-back or `/resume`
+                // (`launchAgentsView` anchored on the session just left); every
+                // other exit (ctrl+c/ctrl+d, `/quit`) ends the process.
+                if outcome.return_to_agents_view {
+                    // A startup attach that fell back to the view has no session
+                    // identity to anchor on; its notice seeds the view's status
+                    // line instead.
+                    let anchor =
+                        (!outcome.session_id.is_empty()).then(|| outcome.session_id.clone());
+                    run_agents_view_flow(tui_options, anchor, outcome.agents_view_notice).await
+                } else {
+                    print_resume_hint(outcome.resume_hint.as_deref());
+                    Ok(())
+                }
             }
+        };
+        let result = run.await;
+        // The quick-exit join: the runtime that owns the handed-off drain
+        // dies with this block, so a run that ends inside the delivery
+        // window (a fast quit — the sink allows up to 1.5s) would lose
+        // the startup events to the teardown. The same shared exit bound
+        // `tui exit` and the agents-view exit report already join under
+        // applies here: the drain delivers (typical ~150ms) or drops,
+        // bounded — never cut mid-POST.
+        if let Some(flush) = startup_flush {
+            let _ = tokio::time::timeout(
+                Duration::from_millis(pa_tui::interactive::TELEMETRY_EXIT_TIMEOUT_MS),
+                flush,
+            )
+            .await;
         }
+        result
     })?;
     // tmux (verified on 3.2a) can drop the pane's final output when the
     // process dies immediately after writing it: the just-printed resume
@@ -206,6 +230,26 @@ pub fn run_interactive_mode(options: &RunOptions) -> Result<i32> {
     // contract.
     std::thread::sleep(Duration::from_millis(300));
     Ok(0)
+}
+
+/// The one-shot startup client's final flush, handed to the runtime:
+/// fire-and-forget from the paint path's perspective — the tracked
+/// `startup` events' delivery belongs to the background worker (the
+/// sink's bounded request timeout; a re-sent batch keeps its event ids,
+/// so the backend dedupes), never to the first frame. The returned
+/// handle is the quick-exit seam: the composition root joins it under
+/// the shared exit bound when the run ends inside the delivery window,
+/// so a fast quit delivers (or drops, bounded) instead of the runtime
+/// teardown cutting the worker mid-POST.
+/// `the_startup_flush_never_blocks_the_first_frame` guards the boundary
+/// with a hanging sink: the flush hand-off must complete while delivery
+/// is still blocked.
+pub(super) fn flush_startup_telemetry(
+    client: pa_telemetry::TelemetryClient,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let _ = client.shutdown().await;
+    })
 }
 
 /// TS `shutdown` prints the dim resume hint (`formatResumeHint`) to stdout
@@ -547,17 +591,7 @@ fn build_tui_options(
         // gates the completion marker, and the auth handle serves the
         // not-ready branch's sign-in steps.
         onboarding,
-        // Only Some(true) rides the wire (TS `telemetryDisabled`), and only
-        // for an environment opt-out: a settings opt-out stays the live
-        // switch the session's client re-reads, so `/telemetry on`
-        // resumes the running session instead of waiting for a new one.
-        telemetry_disabled: matches!(
-            pa_core::session_engine::telemetry::telemetry_switch(
-                &pa_core::settings::SettingsManager::create(&config.cwd, &config.agent_dir)
-            ),
-            pa_core::session_engine::telemetry::TelemetrySwitch::Env { enabled: false, .. }
-        )
-        .then_some(true),
+        telemetry_disabled: crate::mode::create_telemetry_disabled(config),
         // `/mcp login` / `/mcp logout`: the client-side auth flows run in
         // this process (the TS interactive client's placement) and persist
         // through the shared auth store the daemon's sessions read.

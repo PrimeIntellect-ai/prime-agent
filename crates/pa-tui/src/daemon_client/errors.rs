@@ -1,5 +1,7 @@
 use anyhow::Result;
-use pa_types::daemon::{DaemonCommand, DaemonErrorInfo, DaemonResponse};
+use pa_types::daemon::{
+    DaemonCommand, DaemonErrorInfo, DaemonResponse, KERNEL_NOT_RUNNING_MESSAGE,
+};
 use serde_json::Value;
 /// Why a direct request failed: `NotSent` never reached the worker (safe to
 /// fall back to the supervisor), `Wait` did and must not be retried.
@@ -103,6 +105,22 @@ pub fn is_daemon_unreachable(error: &anyhow::Error) -> bool {
                 || cause.contains("direct session connection closed")
                 || cause.contains("the session connection closed")
         })
+}
+
+/// Whether the error is the daemon's kernel-not-running refusal
+/// (`KERNEL_NOT_RUNNING_MESSAGE`: the session-addressed lanes answer
+/// with it while the session's kernel is not built — the lane never
+/// boots an idle kernel): a DEFINITIVE answer, not a transient
+/// failure — the kernel owns its run registry in memory, so a session
+/// without a kernel carries no live runs and a caller reading the
+/// count can take zero instead of an unknown.
+#[must_use]
+pub fn is_kernel_not_running(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<RequestRejected>()
+            .is_some_and(|rejected| rejected.message == KERNEL_NOT_RUNNING_MESSAGE)
+    })
 }
 
 /// Unwrap a settled response into its `data`, surfacing the daemon

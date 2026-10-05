@@ -1,6 +1,7 @@
-//! The worker-handshake boundary oracles: the handshake owns its channel
+//! The worker-connection boundary oracles: the handshake owns its channel
 //! privately until the auth answer installs it for routing — the TS
-//! `pendingClient`/`worker.client` boundary (one family per module).
+//! `pendingClient`/`worker.client` boundary — and a lost connection fails
+//! its in-flight routes (one family per module).
 
 use super::*;
 
@@ -340,4 +341,96 @@ async fn a_stale_epoch_never_overwrites_the_installed_channel() {
         .expect("the newer channel answers")
         .expect("the channel stays open");
     assert_eq!(frame.command_type, "get_state");
+}
+
+/// A lost worker connection fails its in-flight routes right away (TS
+/// `notifyClosed` -> `rejectAll`): the reader drains the connection's reply
+/// slots when the socket ends, so a route waiting on the worker's answer
+/// cannot outlive the connection it was sent on.
+#[tokio::test]
+async fn a_lost_worker_connection_fails_its_in_flight_route() {
+    let dir = std::env::temp_dir().join(format!("pa-lost-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let socket_path = dir.join("worker.sock");
+    let agent_dir = dir.join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let supervisor = Arc::new(
+        Supervisor::new(SupervisorOptions {
+            socket_path: dir.join("daemon.sock"),
+            agent_dir,
+        })
+        .expect("supervisor"),
+    );
+    let descriptor: DaemonWorkerDescriptor = serde_json::from_value(serde_json::json!({
+        "version": 2,
+        "workerId": "w-lost",
+        "pid": 4242,
+        "socketPath": socket_path.to_string_lossy(),
+        "recoveryJournalPath": "/tmp/none.jsonl",
+        "supervisorSocketPath": "/tmp/none.sock",
+        "authenticationToken": "lost-token",
+        "rootActiveSessionId": "none",
+        "createdAt": "2026-09-23T00:00:00Z",
+        "updatedAt": "2026-09-23T00:00:00Z",
+        "lifecycle": "ready",
+        "createCommand": {},
+        "consecutiveFailures": 0,
+    }))
+    .expect("descriptor");
+    let resident = ResidentWorker::new("w-lost".to_string(), descriptor, dir.join("w-lost.json"));
+    supervisor.registry.insert(Arc::clone(&resident)).await;
+
+    let listener = bind_fake_worker(&socket_path).await;
+    let connect = {
+        let supervisor = Arc::clone(&supervisor);
+        let resident = Arc::clone(&resident);
+        tokio::spawn(async move {
+            supervisor
+                .connect_worker(&resident, worker_connect_deadline())
+                .await
+        })
+    };
+    let mut fake = accept_fake_worker(listener).await;
+    let frame = read_supervisor_frame(&mut fake).await;
+    assert_eq!(frame.header.get("commandType"), Some(&json!("worker_auth")));
+    let request_id = frame
+        .header
+        .get("requestId")
+        .and_then(Value::as_str)
+        .expect("request id")
+        .to_string();
+    answer_supervisor_frame(&mut fake, &request_id, "worker_auth").await;
+    connect
+        .await
+        .expect("the connect task lives")
+        .expect("the handshake completes");
+
+    // A turn-long route in flight on the live connection.
+    let route = {
+        let supervisor = Arc::clone(&supervisor);
+        let resident = Arc::clone(&resident);
+        tokio::spawn(async move {
+            supervisor
+                .route_command_typed(
+                    &resident,
+                    "prompt_and_wait",
+                    json!({ "activeSessionId": "w-lost", "message": "go" }),
+                    super::routing::WORKER_REQUEST_TIMEOUT_MS,
+                    RouteAdmission::ClientRequest,
+                )
+                .await
+        })
+    };
+    let frame = read_supervisor_frame(&mut fake).await;
+    assert_eq!(
+        frame.header.get("commandType"),
+        Some(&json!("prompt_and_wait"))
+    );
+    drop(fake);
+    let error = tokio::time::timeout(Duration::from_secs(5), route)
+        .await
+        .expect("the lost connection fails the in-flight route")
+        .expect("the route task lives")
+        .expect_err("the drained route fails");
+    assert_eq!(error.to_string(), "Session worker dropped the request");
 }
