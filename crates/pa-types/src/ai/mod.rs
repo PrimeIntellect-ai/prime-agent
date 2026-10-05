@@ -751,6 +751,13 @@ pub use routing::{
     DataCollection, NumOrString, OpenRouterMaxPrice, OpenRouterRouting, OpenRouterSort,
     OpenRouterThreshold, VercelGatewayRouting,
 };
+/// `skip_serializing_if` predicate for [`Model::max_tokens_explicit`]: the
+/// wire/catalog JSON stays byte-identical for catalog models (the flag
+/// serializes only when set).
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// Unified model descriptor for the model registry.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -770,6 +777,13 @@ pub struct Model {
     pub context_window: u64,
     #[serde(rename = "maxTokens")]
     pub max_tokens: u64,
+    /// Set when `maxTokens` came from explicit configuration rather than the
+    /// model catalog (a models.json entry, a per-model override). An explicit
+    /// value bypasses the 32 000 default output ceiling so a configured cap
+    /// reaches the provider unchanged; catalog values stay capped (TS
+    /// `maxTokensExplicit`, the #755 fix).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub max_tokens_explicit: bool,
     /// Flagship model surfaced above non-featured models of the same provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub featured: Option<bool>,

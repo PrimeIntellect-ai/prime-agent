@@ -298,6 +298,9 @@ pub fn build_prime_inference_models_with_minimum(
             },
             context_window,
             max_tokens,
+            // Catalog chain models stay capped: only explicit
+            // configuration flips the flag.
+            max_tokens_explicit: false,
             featured: template.and_then(|t| t.featured),
             headers: None,
             compat: Some(compat),

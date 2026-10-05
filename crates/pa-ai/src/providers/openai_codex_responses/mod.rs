@@ -908,6 +908,7 @@ mod tests {
             cost: crate::types::zero_model_cost(),
             context_window: 400_000,
             max_tokens: 128_000,
+            max_tokens_explicit: false,
             featured: None,
             headers: None,
             compat: None,

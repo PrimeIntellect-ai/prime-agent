@@ -42,6 +42,7 @@ async fn engine_runs_tool_loop_and_persists() {
         cost: pa_agent::types::UsageCost::default(),
         context_window: 1_000,
         max_tokens: 100,
+        max_tokens_explicit: false,
     };
     let provider = Arc::new(ScriptedProvider::new(model.clone()));
     // First turn: call the tool. Second turn: final text.
@@ -149,6 +150,7 @@ async fn spawned_child_prompt_stamps_its_depth() {
         cost: pa_agent::types::UsageCost::default(),
         context_window: 1_000,
         max_tokens: 100,
+        max_tokens_explicit: false,
     };
     let provider = Arc::new(ScriptedProvider::new(model.clone()));
     let tmp = tempfile::tempdir().unwrap();
@@ -213,6 +215,7 @@ async fn oauth_creds_unlock_generic_mcp_gating_in_new_sessions() {
             cost: pa_agent::types::UsageCost::default(),
             context_window: 1_000,
             max_tokens: 100,
+            max_tokens_explicit: false,
         }
     }
 
