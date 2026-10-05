@@ -1883,6 +1883,27 @@ fn baseline_ledger_text(baseline_ledger: Option<&Value>) -> Option<String> {
     Some(parts.join("\n"))
 }
 
+/// Whether `marker` appears in `text` as a whole token: `swb-marker-1`
+/// must not count as present merely because `swb-marker-10` carries it as
+/// a prefix — the ledger cross-check exists to catch a claimed marker the
+/// children never produced, so a substring hit of a different builder's
+/// marker is a false pass, not a pass.
+fn contains_marker(text: &str, marker: &str) -> bool {
+    let mut rest = text;
+    while let Some(position) = rest.find(marker) {
+        let after = &rest[position + marker.len()..];
+        if after
+            .chars()
+            .next()
+            .is_none_or(|next| !next.is_ascii_alphanumeric())
+        {
+            return true;
+        }
+        rest = &rest[position + 1..];
+    }
+    false
+}
+
 fn ledger_node<'a>(ledger: Option<&'a Value>, id: &str) -> Option<&'a Value> {
     let ledger = ledger?;
     let nodes = ledger.get("nodes")?.as_array()?;
@@ -1999,12 +2020,12 @@ pub fn check_task_success(
                     ),
                     Some(text) => {
                         for marker in &markers {
-                            if !text.contains(marker) {
+                            if !contains_marker(text, marker) {
                                 problems.push(format!("{marker} missing from the baseline collect ledger"));
                             }
                         }
                         for marker in &answer.markers {
-                            if !text.contains(marker) {
+                            if !contains_marker(text, marker) {
                                 problems.push(format!(
                                     "ANSWER marker {marker} is not present in the baseline collect ledger"
                                 ));
@@ -2038,7 +2059,7 @@ pub fn check_task_success(
                         if !collector
                             .and_then(|node| node.get("answer_preview"))
                             .and_then(Value::as_str)
-                            .is_some_and(|text| text.contains(marker))
+                            .is_some_and(|text| contains_marker(text, marker))
                         {
                             problems.push(format!(
                                 "{marker} missing from the collector answer preview"

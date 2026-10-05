@@ -1065,6 +1065,71 @@ fn checks_the_builder_markers_against_the_collector_preview() {
 }
 
 #[test]
+fn the_builder_ledger_checks_match_markers_as_whole_tokens() {
+    // swb-marker-1 must not count as present merely because
+    // swb-marker-10 is: at width 10-12 the ledger cross-check is the only
+    // backstop between a claimed marker the children never produced and a
+    // passing verdict, so the substring hit of another builder's marker
+    // must not pass it.
+    let factory = build_reference_factories(12)
+        .into_iter()
+        .find(|factory| factory.kind == ReferenceFactoryKind::Builder)
+        .expect("width-12 builder reference");
+    let markers: Vec<String> = (1..=12).map(builder_marker).collect();
+    let later_markers = markers[1..].join(" ");
+
+    // Factory arm: the collector preview carries markers 2-12 only; the
+    // ANSWER claims the full set — marker-1 must still fail.
+    let ledger = status_ledger_fixture(json!({
+        "state": "done",
+        "nodes": [node_fixture(
+            "collector",
+            "done",
+            json!({ "answer_preview": format!("COLLECTED {later_markers}") })
+        )]
+    }));
+    let outcome = check(
+        &factory,
+        answer(&json!({ "markers": markers, "state": "done" })).as_ref(),
+        Some(&ledger),
+    );
+    assert!(
+        !outcome.ok,
+        "the substring trap must fail the check: {outcome:?}"
+    );
+    assert!(outcome
+        .problems
+        .iter()
+        .any(|problem| problem.contains("swb-marker-1 missing from the collector answer preview")));
+
+    // Baseline arm: the collect ledger holds builders 2-12 only; both the
+    // planted-marker check and the claimed-marker check must fail
+    // marker-1 on the substring trap.
+    let mut baseline_ledger = serde_json::Map::new();
+    for marker in &markers[1..] {
+        baseline_ledger.insert(
+            format!("builder-{}", marker.trim_start_matches("swb-marker-")),
+            json!(format!("BUILT {marker}")),
+        );
+    }
+    let baseline_outcome = check_baseline(
+        &factory,
+        answer(&json!({ "markers": markers })).as_ref(),
+        Some(&Value::Object(baseline_ledger)),
+    );
+    assert!(
+        !baseline_outcome.ok,
+        "the substring trap must fail the baseline check: {baseline_outcome:?}"
+    );
+    assert!(baseline_outcome
+        .problems
+        .iter()
+        .any(|problem| problem.contains("swb-marker-1 missing from the baseline collect ledger")));
+    assert!(baseline_outcome.problems.iter().any(|problem| problem
+        .contains("ANSWER marker swb-marker-1 is not present in the baseline collect ledger")));
+}
+
+#[test]
 fn checks_the_resident_teardown_tasks_settled_watcher_cancelled() {
     let factory = by_kind(ReferenceFactoryKind::ResidentWatcher);
     let good = answer(
