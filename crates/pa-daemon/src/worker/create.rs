@@ -641,14 +641,6 @@ impl Worker {
             core.child_script.clone_from(&child_script);
             (self.summary_locked(&core), rlm_depth)
         };
-        // A worker reload over a crashed predecessor's session file: a
-        // digested message whose row reached the durable inbox but whose
-        // notice never queued (the crash landed between the durable append
-        // and the notice's enqueue + checkpoint) would sit unread with no
-        // later trigger to wake the session — the reload reconciles the
-        // durable inbox and re-arms the one-per-batch notice (a no-op on a
-        // clean or fully-read inbox).
-        self.agent_digest.ensure_digest_notice();
         // TS `sdk.ts` seeds the Agent's queue modes from the settings
         // manager at session create (`steeringMode`/`followUpMode`): the
         // engine's agent-level queues drain per the same modes the worker
@@ -729,6 +721,25 @@ impl Worker {
                 pa_core::models::ModelRegistry::create(auth, agent_dir.join("models.json"));
             let _ = registry.refresh_available_models().await;
         });
+        // A worker reload over a crashed predecessor's session file: a
+        // digested message whose row reached the durable inbox but whose
+        // notice never queued (the crash landed between the durable append
+        // and the notice's enqueue + checkpoint) would sit unread with no
+        // later trigger to wake the session — the reload reconciles the
+        // durable inbox and re-arms the one-per-batch notice (a no-op on a
+        // clean or fully-read inbox). The re-arm defers to the create's
+        // completion wake: `ensure_digest_notice` is a turn-runner
+        // admission, and one enqueued mid-create would be delivered at the
+        // create's next yield (the RLM child reseed's `spawn_blocking`
+        // await) while the reporter bind, the session-summary bind, and
+        // the scheduled-job bind still follow — the recovered turn would
+        // run against partially initialized state and send messages with a
+        // stale or empty session summary, and a create that fails at its
+        // last fallible step would already have woken a turn. The reseed,
+        // reporter, summary, prewarm, and scheduled-job binds all precede
+        // this point; no further awaits remain before the create reply, so
+        // the wake lands on a fully initialized session.
+        self.agent_digest.ensure_digest_notice();
         self.work_notify.notify_one();
         // Warm the context-tree cache at session open: the background walk
         // fills the cache while the client settles, so an early `/context`

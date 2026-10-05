@@ -661,6 +661,88 @@ async fn a_reloaded_worker_re_arms_the_notice_for_unread_inbox_entries() {
         "the reload did not re-arm the digest notice"
     );
 }
+/// The re-armed notice's wake must not admit the recovered turn before the
+/// create's remaining initialization lands: `ensure_digest_notice` is a
+/// turn-runner admission, so the re-arm defers to the create's completion
+/// wake. Enqueued mid-create (before the reporter, session-summary, and
+/// scheduled-job binds), the notice would be delivered at the create's
+/// next yield — the RLM child reseed's `spawn_blocking` await, which the
+/// REAL engine below exercises — and the recovered turn would run against
+/// partially initialized state, its agent-message sends rendering a stale
+/// or empty session summary. The runner stays FREE here (no input
+/// suspension): with the deferral the notice is still parked when the
+/// create reply lands, so the wake provably did not fire inside the
+/// create.
+#[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
+#[tokio::test]
+async fn a_reloaded_digest_notice_wakes_only_after_create_initialization() {
+    let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir =
+        std::env::temp_dir().join(format!("pa-worker-digest-reload-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let session_path = dir.join("reloaded-session.jsonl");
+    // The crashed predecessor's durable backlog: one unread inbox entry.
+    let mut store = crate::session_store::SessionFile::create("/tmp", None, 0);
+    store.set_path(session_path.clone());
+    store.rewrite().unwrap();
+    store
+        .persist_entry(
+            "custom",
+            json!({
+                "customType": crate::worker::digest::AGENT_MESSAGE_INBOX_ENTRY_CUSTOM_TYPE,
+                "data": {
+                    "messageId": "agentmsg_crashed",
+                    "content": "REPORT 481",
+                    "from": { "activeSessionId": "sender", "sessionName": "sender" },
+                    "fromRelationship": "sibling",
+                    "target": { "activeSessionId": "target", "sessionId": "target" },
+                    "receivedAt": "2026-01-01T00:00:00.000Z",
+                    "kind": "agent_message",
+                },
+            }),
+        )
+        .unwrap();
+    // The real agent engine over the scripted faux provider: the create's
+    // post-notice RLM child reseed genuinely suspends (`spawn_blocking`
+    // over the spawn ledger), which is the yield that admits a mid-create
+    // notice on the unfixed arm.
+    let config = WorkerConfig {
+        socket_path: dir.join("worker.sock"),
+        supervisor_socket_path: PathBuf::new(),
+        token: "token".to_string(),
+        worker_instance_id: String::new(),
+        active_session_id: "target-session".to_string(),
+        agent_dir: dir.join("agent"),
+        recovery_journal_path: dir.join("recovery.jsonl"),
+        telemetry_disabled: None,
+        script: Some(json!({ "engine": "faux", "responses": ["ack"] })),
+    };
+    let worker = std::sync::Arc::new(Worker::new(config, None));
+    // No input suspension and no parked runner: a mid-create notice wake
+    // would be delivered at the create's first yield.
+    let created = worker
+        .dispatch(
+            "create",
+            &json!({ "sessionPath": session_path.to_string_lossy(), "cwd": "/tmp" }),
+        )
+        .await;
+    assert!(created.success, "create failed: {created:?}");
+    // The backlog reloaded and its notice re-armed (the one-per-batch
+    // wake), and the notice is STILL PARKED — the free runner has not
+    // delivered it inside the create.
+    assert_eq!(worker.agent_digest.inbox_snapshot()["unread"], json!(1));
+    assert_eq!(
+        lane_custom_types(&worker.core, Lane::FollowUp),
+        vec!["agent_message_digest_notice"],
+        "the recovery notice was admitted before the create finished"
+    );
+    assert!(
+        !worker.core.lock().unwrap().busy,
+        "a turn was already running when the create reply landed"
+    );
+}
 /// The push lane's coalescing bound on a busy session: the 5-second
 /// poller can emit faster than the runner drains, and one queued
 /// notice per event would pile onto the steering lane unbounded. One
