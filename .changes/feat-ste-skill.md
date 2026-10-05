@@ -1,0 +1,2 @@
+- New built-in skill `simplified-technical-english` holds the full Simplified Technical English ruleset for technical prose: verb, sentence, and word rules, a plain substitutions table, and a final check step. The skill is based on the ASD-STE100 specification rules, and the proprietary ASD approved-word dictionary is intentionally not included.
+- The opinionated prompt layer keeps its existing one-line simplified-technical-English default and now points to the built-in skill for the full ruleset when the agent writes technical documentation.
