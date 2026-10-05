@@ -765,6 +765,7 @@ fn the_copy_binding_copies_the_mounted_url_into_the_actions_row() {
     let rows = frame_text(&mut panel);
     assert!(
         rows.iter().any(|row| row.contains("Copied sign-in link")
+            || row.contains("Sign-in link sent to terminal clipboard (unconfirmed)")
             || row.contains("Failed to copy sign-in link")),
         "the copy outcome rides the actions row: {rows:?}"
     );

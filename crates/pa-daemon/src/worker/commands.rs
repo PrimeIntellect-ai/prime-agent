@@ -1,9 +1,9 @@
 //! The dispatch surface: command routing, the command handlers,
 //! and the abort family.
 use super::{
-    json, response_failure, response_success, KillCloseReason, Lane, QueueCheckpoint, QueuedItem,
-    Result, SessionFile, TurnSettle, VecDeque, Worker, PROMPT_ABORTED_BEFORE_DELIVERY,
-    SIDE_QUESTION_SETTLE_TIMEOUT,
+    json, persist_custom_row, response_failure, response_success, KillCloseReason, Lane,
+    QueueCheckpoint, QueuedItem, Result, SessionFile, TurnSettle, VecDeque, Worker,
+    PROMPT_ABORTED_BEFORE_DELIVERY, SIDE_QUESTION_SETTLE_TIMEOUT,
 };
 
 use serde_json::Value;
@@ -802,12 +802,48 @@ impl Worker {
             return response_failure(None, command, "Session name cannot be empty", None);
         }
         let mut core = self.core.lock().unwrap();
+        let previous = core
+            .store
+            .as_ref()
+            .and_then(|store| store.session_name().map(str::to_string));
         if let Some(store) = core.store.as_mut() {
             if let Err(error) = store.persist_entry("session_info", json!({ "name": name })) {
                 return response_failure(None, command, &error.to_string(), None);
             }
         }
         let summary = self.summary_locked(&core);
+        // TS #2529 `applyStateSessionName`: a rename that changed an
+        // existing name leaves the renamed session a displayed transcript
+        // notice (" by parent" when the rename arrived from the parent
+        // session); a first name leaves none. The notice's durable row
+        // lands under the SAME core lock as the name write — worker
+        // commands run concurrently, so a second lock scope here could
+        // interleave another command's writes between the name and its
+        // notice, ordering the notice against a contradicted name history.
+        // The broadcast (the client frames) runs after the lock drops, in
+        // the `session_info_changed` order TS emits.
+        let renamed_notice = previous
+            .as_deref()
+            .filter(|previous| *previous != name)
+            .map(|previous| {
+                let content = if payload.get("renamedBy").and_then(Value::as_str)
+                    == Some(
+                        pa_core::session_engine::agent_messaging::AgentFamilyRelationship::Parent
+                            .as_str(),
+                    ) {
+                    format!("Session renamed `{previous}` -> `{name}` by parent")
+                } else {
+                    format!("Session renamed `{previous}` -> `{name}`")
+                };
+                json!({
+                    "customType": pa_core::session_engine::messages::SESSION_RENAMED_CUSTOM_TYPE,
+                    "content": content,
+                    "display": true,
+                })
+            });
+        if let Some(notice) = renamed_notice.as_ref() {
+            persist_custom_row(&mut core, notice);
+        }
         drop(core);
         // TS `session.setSessionName` emits `session_info_changed` so every
         // attached client re-reads the name (the interactive mode patches
@@ -819,6 +855,9 @@ impl Worker {
         // The sender identity follows the live name.
         if let Ok(summary_value) = serde_json::to_value(&summary) {
             self.engine.set_session_summary(summary_value);
+        }
+        if let Some(notice) = renamed_notice.as_ref() {
+            self.broadcast_custom_row(notice);
         }
         response_success(
             None,
