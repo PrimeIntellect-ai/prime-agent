@@ -181,18 +181,16 @@ impl Worker {
     pub(crate) fn emit_custom_row(&self, message: &Value) {
         {
             let mut core = self.core.lock().unwrap();
-            if let Some(store) = core.store.as_mut() {
-                let _ = store.persist_entry(
-                    "custom_message",
-                    json!({
-                        "customType": message.get("customType").cloned().unwrap_or(Value::Null),
-                        "content": message.get("content").cloned().unwrap_or(Value::Null),
-                        "display": message.get("display").cloned().unwrap_or(Value::Bool(true)),
-                        "details": message.get("details").cloned().unwrap_or(Value::Null),
-                    }),
-                );
-            }
+            persist_custom_row(&mut core, message);
         }
+        self.broadcast_custom_row(message);
+    }
+
+    /// Broadcast one recorded custom row's `message_start`/`message_end`
+    /// pair (the frames attached clients render for it). Runs OUTSIDE
+    /// the `core` lock: a caller that persisted the row under its own
+    /// lock scope broadcasts after releasing it.
+    pub(crate) fn broadcast_custom_row(&self, message: &Value) {
         self.emit_worker_event(json!({ "type": "message_start", "message": message }));
         self.emit_worker_event(json!({ "type": "message_end", "message": message }));
     }
@@ -250,6 +248,30 @@ impl Worker {
         drop(core);
         self.events.send(OutboundFrame::session_event(payload));
         Ok(())
+    }
+}
+
+/// The durable half of [`Worker::emit_custom_row`]: append one custom
+/// row's `custom_message` entry while the CALLER holds the `core` lock,
+/// so a row tied to another locked write (the rename's notice, whose
+/// `session_info` name write it must not interleave with under
+/// concurrent worker commands) lands inside the caller's own lock scope.
+/// The persist error is display-row policy shared by every caller: the
+/// row is advisory, so the failure is swallowed, never the caller's.
+pub(crate) fn persist_custom_row(
+    core: &mut std::sync::MutexGuard<'_, SessionCore>,
+    message: &Value,
+) {
+    if let Some(store) = core.store.as_mut() {
+        let _ = store.persist_entry(
+            "custom_message",
+            json!({
+                "customType": message.get("customType").cloned().unwrap_or(Value::Null),
+                "content": message.get("content").cloned().unwrap_or(Value::Null),
+                "display": message.get("display").cloned().unwrap_or(Value::Bool(true)),
+                "details": message.get("details").cloned().unwrap_or(Value::Null),
+            }),
+        );
     }
 }
 
