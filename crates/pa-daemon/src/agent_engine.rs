@@ -153,6 +153,8 @@ pub struct AgentSessionEngine {
     /// emits on state change, so unchanged states (e.g. `/goal status`)
     /// stay silent.
     pub(crate) published_goal: std::sync::Mutex<Option<pa_core::goals::GoalState>>,
+    pub(crate) late_agent_message_sink:
+        std::sync::Mutex<Option<pa_core::LateSentAgentMessageHandler>>,
     /// The session's goal driver and session-manager handles, mirrored from
     /// the core session at build time: the core session's own mutex is held
     /// across a turn's admission, so goal checks inside emit callbacks

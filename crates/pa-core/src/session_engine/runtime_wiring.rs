@@ -317,12 +317,14 @@ impl KernelExecutor for KernelManagerExecutor {
         let manager = self.manager.clone();
         let code = code.to_string();
         let signal = options.signal;
+        let on_late_sent_agent_message = options.on_late_sent_agent_message;
         Box::pin(async move {
             let result = manager
                 .execute(
                     &code,
                     crate::kernel::shared::ExecuteOptions {
                         signal: signal.map(crate::kernel::cancellation::AbortSignal::from_token),
+                        on_late_sent_agent_message,
                         ..Default::default()
                     },
                 )
@@ -376,9 +378,13 @@ fn convert_execute_result(
 
 /// Build the ipython tool options for a wired kernel provisioner.
 #[must_use]
-pub fn ipython_tool_options(provisioner: Arc<KernelProvisioner>) -> IpythonToolOptions {
+pub fn ipython_tool_options(
+    provisioner: Arc<KernelProvisioner>,
+    on_late_sent_agent_message: Option<crate::tools::ipython::LateSentAgentMessageHandler>,
+) -> IpythonToolOptions {
     IpythonToolOptions {
         provisioner,
         ui: None,
+        on_late_sent_agent_message,
     }
 }

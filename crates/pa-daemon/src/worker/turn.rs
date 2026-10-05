@@ -1,11 +1,12 @@
 //! One agent turn: the runner that admits queued input, drives the
 //! engine, and settles the result.
 use super::{
-    checkpoint_queue_recovery, compact_action_label, create_daemon_event_meta, emit_refinement_row,
-    gather_delivery_batch, json, oneshot, session_snapshot, AgentMessageDigest, AssistantSnapshot,
-    DaemonOutbound, EngineEvent, EventPump, Lane, Map, Notify, OutboundFrame, PromptRequest,
-    QueueCheckpoint, QueuedItem, Result, SessionActionSnapshot, SessionCore, SessionEngine,
-    TurnSettle, Value, WorkerRecoveryJournal, ABORTED_TURN_SETTLE_ERROR,
+    checkpoint_queue_recovery, compact_action_label, create_daemon_event_meta,
+    emit_refinement_event_for_session, emit_refinement_row, gather_delivery_batch, json, oneshot,
+    session_snapshot, AgentMessageDigest, AssistantSnapshot, DaemonOutbound, EngineEvent,
+    EventPump, Lane, Map, Notify, OutboundFrame, PromptRequest, QueueCheckpoint, QueuedItem,
+    Result, SessionActionSnapshot, SessionCore, SessionEngine, TurnSettle, Value,
+    WorkerRecoveryJournal, ABORTED_TURN_SETTLE_ERROR,
 };
 
 use std::sync::{Arc, Mutex};
@@ -1030,6 +1031,14 @@ impl TurnRunner {
                         "type": "goal_update",
                         "goal": goal,
                     })],
+                    EngineEvent::RefineComplete { result } => vec![json!({
+                        "type": "refine_complete",
+                        "result": result,
+                    })],
+                    EngineEvent::RefineFailed { error } => vec![json!({
+                        "type": "refine_failed",
+                        "error": error,
+                    })],
                     // The loop's run-boundary frames (TS `agent_start`/
                     // `agent_end`): the run's whole message set rides
                     // `agent_end` (one frame per agent run — retried and
@@ -1419,10 +1428,22 @@ impl TurnRunner {
                                 emit_refinement_row(&core, &events, &review_session_id, &value);
                             }
                         }
+                        emit_refinement_event_for_session(
+                            &core,
+                            &events,
+                            &review_session_id,
+                            crate::worker::refine_complete_event(&result),
+                        );
                     }
                     Ok(None) => {}
                     Err(error) => {
                         eprintln!("pa-daemon: auto-refinement after compaction failed: {error:#}");
+                        emit_refinement_event_for_session(
+                            &core,
+                            &events,
+                            &review_session_id,
+                            json!({ "type": "refine_failed", "error": format!("{error:#}") }),
+                        );
                     }
                 }
             });

@@ -561,10 +561,16 @@ async fn golden_ipython_group_matches_ts() {
             } else {
                 None
             },
+            on_late_sent_agent_message: None,
         };
-        let result =
-            ipython::execute_ipython(&options, case["code"].as_str().expect("code"), None, None)
-                .await;
+        let result = ipython::execute_ipython(
+            &options,
+            case["code"].as_str().expect("code"),
+            None,
+            None,
+            None,
+        )
+        .await;
         let recorded = &case["result"];
         match result {
             Ok(result) => {
@@ -625,6 +631,7 @@ fn golden_schema_group_matches_ts() {
             "ipython" => crate::tools::ipython::create_ipython_tool_definition(
                 "/tmp",
                 IpythonToolOptions {
+                    on_late_sent_agent_message: None,
                     provisioner: Arc::new(MockProvisioner {
                         kernel: Arc::new(MockKernel {
                             executions: Mutex::new(Vec::new()),
