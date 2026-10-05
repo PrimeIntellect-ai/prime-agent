@@ -1388,6 +1388,67 @@ async fn collect_grace_keeps_a_settle_the_funnel_already_finalized() {
     );
 }
 
+/// The claim-owned end of the collect grace: a verdict a terminal claim
+/// already owns (the funnel's `settled` latch, a delivered notice, a
+/// cancel, delete, or close) is final — `collect_grace_may_reclear` can
+/// never let the grace re-clear it — so its 250ms window is dead time a
+/// zero-budget snapshot (`rlm.collect`'s default) cannot afford. The
+/// grace's entry gate consults the claim in the same lock hold that
+/// reads the return history: a claim-owned settle answers the collect
+/// immediately (the watcher already paid the verification before the
+/// funnel claimed), and only the unclaimed verdict — the
+/// admission-window misread the grace exists to un-settle — runs the
+/// mandatory window at every budget. The pin is the finding's exact
+/// scenario: `ParksGraceCheck` parks the third state read (refresh,
+/// settle arm, grace busy-check), so a collect that runs the grace on
+/// this claimed record parks forever and the bounded await fails; the
+/// gated path reads state exactly twice and returns the snapshot.
+#[tokio::test]
+async fn a_claim_owned_settle_answers_a_zero_budget_collect_without_the_grace() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let child_subagents = Arc::new(FakeChildSubagents::default());
+    let (sessions, _kill_rx) = sessions_with_fake_child_subagents(
+        follow_up_tx,
+        0,
+        FakeKill::Success,
+        FakeChild::ParksGraceCheck,
+        Arc::clone(&child_subagents),
+    )
+    .await;
+    // Funnel-finalized (the `settled` latch), answer captured, never
+    // returned: the steady-state record a default `rlm.collect()` reads.
+    sessions
+        .push_test_settled_child(
+            RlmChildIdentity {
+                rlm_child_id: "sub-claimed".to_string(),
+                active_session_id: "child-live".to_string(),
+                session_id: Some("child-file".to_string()),
+                session_name: "claimed".to_string(),
+            },
+            Some("done"),
+            Some("the child final answer".to_string()),
+        )
+        .await;
+    let results = tokio::time::timeout(
+        Duration::from_secs(10),
+        sessions.collect(vec!["sub-claimed".to_string()], 0),
+    )
+    .await
+    .expect("a claim-owned settle answers without the grace busy-check")
+    .expect("collect the claimed child");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].status, "done");
+    assert!(
+        results[0].settled,
+        "the claim-owned verdict returns settled at once"
+    );
+    assert_eq!(
+        results[0].answer_preview.as_deref(),
+        Some("the child final answer"),
+        "the captured answer rides the snapshot without the grace"
+    );
+}
+
 /// The "Grace reclear races the funnel latch" pin: the collect's grace
 /// gate and its re-clear commit at ONE hold of the record lock, and the
 /// settle tail's notice claim — the funnel's commit — aborts on a

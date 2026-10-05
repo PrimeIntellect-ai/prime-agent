@@ -546,10 +546,23 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 // settle, or a cancel, delete, or close claimed the row):
                 // the busy child is a follow-up turn that keeps the
                 // settled result, and only the unclaimed misread re-clears
-                // (`collect_grace_may_reclear`).
+                // (`collect_grace_may_reclear`). The claim also gates the
+                // grace's entry: a claim-owned verdict can never re-clear,
+                // so its window is dead time a zero-budget snapshot
+                // (`rlm.collect`'s default) cannot afford — the watcher
+                // already paid the verification before the funnel claimed,
+                // and the collect answers the verdict at once. Only the
+                // unclaimed verdict — the misread the grace exists to
+                // un-settle — runs the window, at every budget: the
+                // verification is the settle's reportability condition,
+                // not a wait the caller's timeout may clip (clipping it at
+                // the default timeout 0 would return the unverified
+                // snapshot the return-history gate exists to withhold).
                 let grace_due = {
                     let record = record.lock().await;
-                    !record.result_returned && record.settled_status.is_some()
+                    !record.result_returned
+                        && record.settled_status.is_some()
+                        && collect_grace_may_reclear(&record)
                 };
                 if grace_due {
                     let active_session_id = record.lock().await.active_session_id.clone();
