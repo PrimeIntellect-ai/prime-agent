@@ -30,10 +30,18 @@
 //! (`LockDir`: an empty directory with an mtime probe at
 //! `<registry>/.guard`, stale 5 s, 500 retries x 10 ms - byte-compatible
 //! with the TS lock path so both builds serialize on the SAME on-disk
-//! lock). The guard-held actions here are single-record read-modify-write
-//! cycles, so the rust port keeps `LockDir`'s momentary hold (no refresher):
-//! the TS lock's 1000 ms mtime refresh is its long-hold safety valve, and
-//! nothing here holds long.
+//! lock). While held, the guard carries the TS lock's long-hold safety
+//! valve whole: a refresher thread re-probes its mtime every 1000 ms (TS
+//! `REGISTRY_LOCK_UPDATE_MS`, proper-lockfile's unref'd update timer), the
+//! directory's inode is the ownership identity (a steal is rmdir+mkdir),
+//! the hold is asserted before and after the guarded action (TS
+//! `assertGuardHeld` - compromise detection is timer-driven and cannot
+//! preempt a synchronous stall), and a guard that changed hands is
+//! leaked, never removed (removing would delete the successor's lock; the
+//! artifact goes stale 5 s later and the successor reclaims it). A
+//! stalled read-modify-write cycle therefore cannot age past the
+//! staleness threshold and let a second process mint a duplicate
+//! `ShutdownAdmission` under it.
 //!
 //! Deliberately NOT ported (the audit's E10 registry lane, to which the
 //! module doc of `crate::supervisor` points): the owner records the fence
@@ -52,7 +60,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -66,6 +74,9 @@ pub const REGISTRY_DIR_ENV: &str = "PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGIS
 const OWNER_VERSION: u32 = 1;
 /// TS `REGISTRY_LOCK_STALE_MS`: a guard lock older than this is reclaimed.
 const REGISTRY_LOCK_STALE_MS: Duration = Duration::from_secs(5);
+/// TS `REGISTRY_LOCK_UPDATE_MS`: the held guard's mtime refresh cadence
+/// (proper-lockfile's unref'd update timer).
+const REGISTRY_LOCK_UPDATE_MS: Duration = Duration::from_millis(1_000);
 /// TS `REGISTRY_LOCK_RETRIES` x `REGISTRY_LOCK_RETRY_MS`: the guard's
 /// acquisition retry ladder (500 x 10 ms ~= 5 s).
 const REGISTRY_LOCK_RETRIES: u32 = 500;
@@ -159,17 +170,14 @@ fn shutdown_admission_path(registry_dir: &Path) -> PathBuf {
 /// cycle. Contention surfaces as a retry, a stale guard (>= 5 s) is
 /// reclaimed, and every visitor both creates the registry (mode 0700)
 /// and serializes on the same lock a TS process takes (TS
-/// `withDaemonSupervisorRegistryGuard`).
+/// `withDaemonSupervisorRegistryGuard`). While held, the guard keeps
+/// the TS lock's long-hold safety valve alive (see [`with_held_guard`]).
 fn with_registry_guard<T>(registry_dir: &Path, action: impl FnOnce() -> Result<T>) -> Result<T> {
     crate::paths::ensure_dir(registry_dir)?;
     let guard = registry_dir.join(".guard");
     for attempt in 0..=REGISTRY_LOCK_RETRIES {
         match pa_core::platform::LockDir::acquire_at(&guard, REGISTRY_LOCK_STALE_MS) {
-            Ok(lock) => {
-                let result = action();
-                drop(lock);
-                return result;
-            }
+            Ok(lock) => return with_held_guard(lock, action, REGISTRY_LOCK_UPDATE_MS),
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
             Err(error) => {
                 return Err(anyhow!(
@@ -186,6 +194,108 @@ fn with_registry_guard<T>(registry_dir: &Path, action: impl FnOnce() -> Result<T
         "Timed out waiting for the daemon supervisor registry guard: {}",
         registry_dir.display()
     ))
+}
+
+/// One action under a guard [`LockDir::acquire_at`] already won - the TS
+/// hold protocol, ported whole (TS `withDaemonSupervisorRegistryGuard`):
+///
+/// * the refresher thread is proper-lockfile's unref'd `update` timer: a
+///   tick every `update_every` re-probes the guard's mtime, so a stall
+///   in the action cannot age the lock past the 5 s staleness a successor
+///   reclaims on, and the first lost-ownership/failed-write tick latches
+///   the compromise and stops the timer (proper-lockfile's
+///   `onCompromised` + `setLockAsCompromised`, TS `compromisedError ??=
+///   error`);
+/// * the guard directory's inode is the ownership identity (a steal is
+///   rmdir+mkdir): [`LockDir::is_stolen`] checks it synchronously before
+///   and after the action, where the timer cannot run (TS `guardIno` /
+///   `guardStolen` / `assertGuardHeld`; when the inode is unobservable,
+///   only the refresher's timer-driven detection applies);
+/// * a failed assert never removes the guard - that would delete the
+///   successor's lock - and the action's result is discarded as
+///   untrusted, exactly like the TS throw out of the try block (the
+///   abandoned artifact goes stale 5 s later and the successor reclaims
+///   it; TS's post-compromise `release()` errors ERELEASED and the catch
+///   swallows it, so nothing is removed there either);
+/// * a held guard releases only while still owned (the TS `finally`
+///   releases on neither-compromised-nor-stolen).
+///
+/// # Errors
+///
+/// Returns the assert error when the guard changed hands before or after
+/// the action, the refresher spawn error, and the action's own result.
+fn with_held_guard<T>(
+    lock: pa_core::platform::LockDir,
+    action: impl FnOnce() -> Result<T>,
+    update_every: Duration,
+) -> Result<T> {
+    let lock = Arc::new(lock);
+    // proper-lockfile's `onCompromised` slot: the first updater failure
+    // wins (TS `compromisedError ??= error`).
+    let compromised: Arc<Mutex<Option<std::io::Error>>> = Arc::new(Mutex::new(None));
+    // The timer's cancel (unlock's clearTimeout) is the sender's drop; its
+    // join here is the process-exit sweep proper-lockfile leaves to the
+    // runtime - the refresher never outlives the hold.
+    let (stop, tick) = mpsc::channel::<()>();
+    let guard = Arc::clone(&lock);
+    let on_compromised = Arc::clone(&compromised);
+    let refresher = std::thread::Builder::new()
+        .name("registry-guard-refresher".to_string())
+        .spawn(move || loop {
+            match tick.recv_timeout(update_every) {
+                Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if let Err(error) = guard.refresh() {
+                        on_compromised.lock().unwrap().get_or_insert_with(|| error);
+                        break;
+                    }
+                }
+            }
+        })
+        // A spawn failure unwinds below while the hold is still ours (no
+        // refresher ever ran), so the guard releases normally on drop.
+        .context("spawn the daemon supervisor registry guard refresher")?;
+    // TS assertGuardHeld: synchronously BEFORE the action and AFTER it -
+    // the result is untrusted once the guard changed hands in between.
+    let held = assert_guard_held(&lock, &compromised).and_then(|()| {
+        let result = action();
+        assert_guard_held(&lock, &compromised).map(|()| result)
+    });
+    drop(stop);
+    refresher
+        .join()
+        .expect("the refresher only locks the unpoisonable compromise slot");
+    match held {
+        Ok(result) => {
+            // Still owned (both asserts passed): the guarded release.
+            Arc::try_unwrap(lock)
+                .expect("the joined refresher dropped its guard clone")
+                .release_when_owned();
+            result
+        }
+        Err(error) => {
+            // Compromise or steal: NEVER remove the guard - that would
+            // delete the successor's lock.
+            std::mem::forget(lock);
+            Err(error)
+        }
+    }
+}
+
+/// TS `assertGuardHeld`: the refresher's latched compromise first (its
+/// message rides the TS "was compromised: ..." interpolation), then the
+/// synchronous inode check.
+fn assert_guard_held(
+    lock: &pa_core::platform::LockDir,
+    compromised: &Mutex<Option<std::io::Error>>,
+) -> Result<()> {
+    if let Some(error) = compromised.lock().unwrap().as_ref() {
+        bail!("Daemon supervisor registry guard was compromised: {error}");
+    }
+    if lock.is_stolen() {
+        bail!("Daemon supervisor registry guard was compromised: the guard lock changed hands");
+    }
+    Ok(())
 }
 
 /// The registry's atomic record write (TS `writeJsonAtomically`):
@@ -1160,6 +1270,90 @@ mod tests {
             )
             .is_none(),
             "a pid-less hello carries no identity"
+        );
+    }
+
+    #[test]
+    fn a_normal_action_releases_the_guard() {
+        let registry = tempfile::tempdir().expect("registry root");
+        let guard = registry.path().join(".guard");
+        with_registry_guard(registry.path(), || Ok::<(), anyhow::Error>(()))
+            .expect("the guarded action runs");
+        assert!(!guard.exists(), "a held-then-asserted guard releases");
+        // A failing action releases the same way and surfaces its own
+        // error (the TS finally releases while the error propagates).
+        let error = with_registry_guard(registry.path(), || {
+            Err::<(), anyhow::Error>(anyhow!("action failed"))
+        })
+        .expect_err("the action's own error propagates");
+        assert_eq!(error.to_string(), "action failed");
+        assert!(
+            !guard.exists(),
+            "the guard releases behind a failing action"
+        );
+    }
+
+    #[test]
+    fn a_stolen_guard_fails_the_action_and_keeps_the_successors_lock() {
+        let registry = tempfile::tempdir().expect("registry root");
+        let guard = registry.path().join(".guard");
+        let error = with_registry_guard(registry.path(), || {
+            // The successor's takeover run inside the hold: rmdir+mkdir
+            // re-creates the guard under our feet (a fresh allocation in
+            // between pins the thief to a different inode, the way a real
+            // successor's mkdir is one allocation among others).
+            std::fs::remove_dir(&guard).expect("rmdir the held guard");
+            std::fs::create_dir(registry.path().join("thief-bumper")).expect("mkdir the bumper");
+            std::fs::create_dir(&guard).expect("mkdir the thief's guard");
+            Ok::<(), anyhow::Error>(())
+        })
+        .expect_err("the post-action assert must fail on the changed inode");
+        assert!(
+            error
+                .to_string()
+                .contains("Daemon supervisor registry guard was compromised")
+                && error.to_string().contains("changed hands"),
+            "the refusal is the TS compromise message: {error}"
+        );
+        assert!(
+            guard.is_dir(),
+            "the successor's guard directory is never removed"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_refresher_keeps_a_stalled_hold_fresh() {
+        // The review bot's window, forced: an action ages the guard's
+        // mtime past the staleness threshold while a rival waits on it.
+        // The refresher's ticks (a test-only 50 ms cadence; the production
+        // one is the TS 1000 ms) re-probe the mtime, so the rival sees a
+        // live lock, never a stale one to reclaim.
+        let registry = tempfile::tempdir().expect("registry root");
+        let guard = registry.path().join(".guard");
+        let lock = pa_core::platform::LockDir::acquire_at(&guard, REGISTRY_LOCK_STALE_MS)
+            .expect("acquire the guard");
+        with_held_guard(
+            lock,
+            || {
+                std::fs::File::open(&guard)
+                    .and_then(|dir| dir.set_modified(std::time::UNIX_EPOCH))
+                    .expect("age the guard's mtime past staleness");
+                std::thread::sleep(Duration::from_millis(300));
+                let rival = pa_core::platform::LockDir::acquire_at(&guard, REGISTRY_LOCK_STALE_MS);
+                assert_eq!(
+                    rival.unwrap_err().kind(),
+                    std::io::ErrorKind::WouldBlock,
+                    "a refreshed hold is never stale-reclaimed mid-action"
+                );
+                Ok::<(), anyhow::Error>(())
+            },
+            Duration::from_millis(50),
+        )
+        .expect("the refreshed hold completes");
+        assert!(
+            !guard.exists(),
+            "the guarded release removes the refresher-held lock"
         );
     }
 }
