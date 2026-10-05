@@ -116,8 +116,7 @@ async fn wire_body_for(model: Value) -> Value {
         },
         ..Default::default()
     };
-    let mut reader =
-        crate::providers::openai_completions::stream_simple_openai_completions(
+    let mut reader = crate::providers::openai_completions::stream_simple_openai_completions(
         &model,
         &Context {
             system_prompt: None,

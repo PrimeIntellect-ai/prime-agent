@@ -194,7 +194,10 @@ mod tests {
         // 32000 — most catalog models advertise far more than a turn needs.
         let catalog = model("openai-completions", "gpt-x", 131_072);
         assert_eq!(default_request_max_tokens(&catalog), Some(32_000));
-        assert_eq!(build_base_options(&catalog, None, None).max_tokens, Some(32_000));
+        assert_eq!(
+            build_base_options(&catalog, None, None).max_tokens,
+            Some(32_000)
+        );
     }
 
     #[test]
@@ -203,14 +206,20 @@ mod tests {
         // reporter's models.json entry asking for 131072 arrives whole.
         let explicit = explicit_model("openai-completions", "glm-5.2", 131_072);
         assert_eq!(default_request_max_tokens(&explicit), Some(131_072));
-        assert_eq!(build_base_options(&explicit, None, None).max_tokens, Some(131_072));
+        assert_eq!(
+            build_base_options(&explicit, None, None).max_tokens,
+            Some(131_072)
+        );
     }
 
     #[test]
     fn an_explicit_model_below_the_ceiling_keeps_its_value() {
         // min semantics: an explicit 8000 stays 8000.
         let small = explicit_model("openai-completions", "glm-5.2", 8_000);
-        assert_eq!(build_base_options(&small, None, None).max_tokens, Some(8_000));
+        assert_eq!(
+            build_base_options(&small, None, None).max_tokens,
+            Some(8_000)
+        );
     }
 
     #[test]
