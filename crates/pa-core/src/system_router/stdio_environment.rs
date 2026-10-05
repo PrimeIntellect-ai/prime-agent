@@ -20,9 +20,14 @@
 //! the leader-exit arm) so a launcher that exits first cannot strand its
 //! descendants - not even ones that ignore SIGTERM, and not on Windows,
 //! where the group relay is a no-op and the enforced stop is the taskkill
-//! tree kill. The reader completes the buffered tail as a final line at end
-//! of stream, where the TS data handler can drop a reply the adapter wrote
-//! without its trailing newline (cursor: EOF drops last adapter reply).
+//! tree kill. The close request write is raced against the close budget,
+//! where the TS reference's buffered `stdin.end` cannot block: a full
+//! stdin pipe (a large unread request, a hung adapter that stopped
+//! reading) must not stall teardown before the budgeted wait and the group
+//! kill (cursor: close write can hang forever). The reader completes the
+//! buffered tail as a final line at end of stream, where the TS data
+//! handler can drop a reply the adapter wrote without its trailing
+//! newline (cursor: EOF drops last adapter reply).
 
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
@@ -363,18 +368,30 @@ impl RouterEnvironment for StdioRouterEnvironment {
             }
             let started = Instant::now();
             let budget = options.budget_ms;
-            // Ask the adapter to exit, then close its stdin.
-            let close_id = inner.next_id;
-            if let Some(stdin) = &mut inner.stdin {
-                let line = format!("{}\n", json!({ "id": close_id, "type": "close" }));
-                let _ = stdin.write_all(line.as_bytes()).await;
-                let _ = stdin.flush().await;
-            }
-            inner.stdin = None;
             // Half the budget is reserved for the SIGTERM wait: an adapter
             // that ignores the close request but forwards SIGTERM (a
             // container wrapper) still gets its stop relayed before SIGKILL.
             let sigterm_reserve = budget.map_or(0, |budget| (budget / 2).min(1_000));
+            // Ask the adapter to exit, then close its stdin. The write is
+            // bounded by the same graceful slice the wait below draws from:
+            // the TS reference's buffered `stdin.end` never blocks, but a
+            // raw-pipe `write_all` on a full stdin pipe (a large unread
+            // request, a hung adapter that stopped reading) would stall
+            // `close` before the budgeted wait and the group kill. The
+            // abandoned write is harmless: the stdin drop below still
+            // closes the pipe, and the ladder enforces the stop.
+            let close_id = inner.next_id;
+            if let Some(stdin) = &mut inner.stdin {
+                let line = format!("{}\n", json!({ "id": close_id, "type": "close" }));
+                let write_ms = remaining_ms(started, budget, sigterm_reserve).min(1_500);
+                let _ = tokio::time::timeout(
+                    Duration::from_millis(write_ms),
+                    stdin.write_all(line.as_bytes()),
+                )
+                .await;
+                let _ = stdin.flush().await;
+            }
+            inner.stdin = None;
             let graceful_ms = remaining_ms(started, budget, sigterm_reserve).min(1_500);
             let pid = inner.pid;
             if let Some(child) = &mut inner.child {

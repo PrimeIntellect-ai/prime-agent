@@ -282,6 +282,70 @@ for line in sys.stdin:
     assert_eq!(error, "environment adapter closed");
 }
 
+/// A close into a full stdin pipe must reach the budgeted kill, not hang
+/// (cursor: close write can hang forever). The adapter answers `init`, then
+/// stops reading stdin; a large request abandoned mid-write - the same full
+/// pipe the loop's deadline race leaves behind when it cancels a blocked
+/// request - leaves the close line nowhere to go. The bounded write is
+/// abandoned, the stdin drop still ends the stream, and the adapter meets
+/// the SIGTERM ladder instead of blocking `close` forever.
+#[tokio::test]
+async fn a_close_into_a_full_stdin_pipe_hits_the_budgeted_kill() {
+    let (_dir, command) = adapter(
+        r#"
+import json
+import os
+import sys
+import time
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    request = json.loads(line)
+    if request.get("type") == "init":
+        print(json.dumps({"id": request.get("id"), "ok": True, "environment": {"pid": os.getpid()}}), flush=True)
+        break
+# The adapter stops reading stdin: the close line has nowhere to go.
+while True:
+    time.sleep(0.1)
+"#,
+    );
+    let env = StdioRouterEnvironment::new(command, None, 5_000, None);
+    let info = env.init().await.unwrap().expect("init environment info");
+    let pid = info["pid"].as_u64().expect("adapter pid") as u32;
+    // A request larger than the pipe capacity blocks mid-write; abandoning
+    // it the way the loop's race deadline does leaves the pipe full.
+    let params = std::collections::BTreeMap::from([("blob".to_string(), "A".repeat(256 * 1024))]);
+    let _ = tokio::time::timeout(Duration::from_millis(200), env.execute("big", &params)).await;
+    let started = std::time::Instant::now();
+    let closed = tokio::time::timeout(
+        Duration::from_secs(5),
+        env.close(RouterCloseOptions {
+            budget_ms: Some(2_000),
+        }),
+    )
+    .await;
+    assert!(
+        closed.is_ok(),
+        "close returned instead of hanging on the full stdin pipe"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "close stayed inside its budget"
+    );
+    // The skipped-teardown half of the finding: the adapter tree is stopped,
+    // not left running.
+    let gone_by = std::time::Instant::now() + Duration::from_secs(10);
+    while crate::platform::pid_exists(pid) && std::time::Instant::now() < gone_by {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        !crate::platform::pid_exists(pid),
+        "the budgeted kill stopped the adapter that stopped reading"
+    );
+}
+
 #[tokio::test]
 async fn closing_an_unstarted_adapter_is_a_no_op() {
     let env = StdioRouterEnvironment::new(vec!["python3".to_string()], None, 1_000, None);
