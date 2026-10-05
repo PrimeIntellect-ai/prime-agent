@@ -773,6 +773,10 @@ mod tests {
     #[path = "stream_pins.rs"]
     mod stream_pins;
 
+    // The #755 output-budget wire pins (the captured request bodies).
+    #[path = "stream_max_tokens.rs"]
+    mod stream_max_tokens;
+
     /// Serve one SSE response body for the provider's POST and return the
     /// bound address.
     async fn serve_sse(body: String) -> SocketAddr {
