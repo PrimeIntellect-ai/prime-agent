@@ -1180,3 +1180,229 @@ impl SessionUi {
         Ok(())
     }
 }
+
+/// The opening phase's echo gate: whether the post-open key dispatch
+/// ([`SessionUi::handle_key`]'s ladder) would consume this key BEFORE its
+/// editor fallback, in the state a fresh session's opening can be in — no
+/// dock focus, no mounted picker or panel, no turn. This is the fresh-state
+/// projection of the ladder: the always-fire arms in registration order,
+/// the empty-editor arms, and the two editor-context arms; keep it in
+/// lockstep with the ladder above.
+///
+/// A key claimed here takes its normal route — queued behind the session
+/// open and dispatched through the full keymap-aware ladder once the
+/// session lands — instead of echoing into the editor as a stray motion
+/// (the misroute: a user-bound `left`/`space`/single-char action must run
+/// its action, and default `left` on the empty editor is `app.agents.back`,
+/// not a cursor move).
+pub(crate) fn opening_echo_key_claimed(
+    kb: &crate::keybindings::KeybindingsManager,
+    id: &str,
+    editor: &crate::editor::Editor,
+) -> bool {
+    // The always-fire arms: the transcript viewport, the image paste, the
+    // escape ladder, the interrupt family, suspend, the model picker and
+    // cycles, the detail cycle, the dock focus, the external editor, the
+    // stash, the session-level commands, the queue browse, and the
+    // follow-up key.
+    if kb.matches(id, "tui.viewport.pageUp")
+        || kb.matches(id, "tui.viewport.pageDown")
+        || kb.matches(id, "tui.viewport.top")
+        || kb.matches(id, "tui.viewport.follow")
+        || kb.matches(id, "app.clipboard.pasteImage")
+        || kb.matches(id, "app.input.clear")
+        || kb.matches(id, "app.interrupt")
+        || kb.matches(id, "app.clear")
+        || kb.matches(id, "app.suspend")
+        || kb.matches(id, "app.model.select")
+        || kb.matches(id, "app.model.cycleForward")
+        || kb.matches(id, "app.model.cycleBackward")
+        || kb.matches(id, "app.tools.expand")
+        || kb.matches(id, "app.subagents.focus")
+        || kb.matches(id, "app.editor.external")
+        || kb.matches(id, "app.prompt.stash")
+        || kb.matches(id, "app.session.new")
+        || kb.matches(id, "app.session.resume")
+        || kb.matches(id, "app.message.navigateOlder")
+        || kb.matches(id, "app.message.navigateNewer")
+        || kb.matches(id, "app.message.moveEarlier")
+        || kb.matches(id, "app.message.moveLater")
+        || kb.matches(id, "app.message.followUp")
+    {
+        return true;
+    }
+    // The empty-editor arms (`app.exit` is the opening loop's own immediate
+    // exit and never reaches the queue).
+    if editor.get_text().trim().is_empty()
+        && (kb.matches(id, "app.agents.back")
+            || kb.matches(id, "app.session.tree")
+            || kb.matches(id, "app.session.fork"))
+    {
+        return true;
+    }
+    // The editor-context arms: Tab into a picker-command argument (the
+    // `/model`/`/mcp` partial), and Down's move-below-prompt dock handoff.
+    if kb.matches(id, "tui.input.tab")
+        && !editor.is_showing_autocomplete()
+        && editor.picker_argument_context().is_some()
+    {
+        return true;
+    }
+    kb.matches(id, "tui.editor.cursorDown")
+        && !editor.is_showing_autocomplete()
+        && !editor.is_history_navigation_active()
+        && editor.is_cursor_at_end()
+}
+
+#[cfg(test)]
+mod opening_echo_claim_tests {
+    use super::opening_echo_key_claimed;
+    use crate::editor::Editor;
+    use crate::keybindings::{KeybindingsConfig, KeybindingsManager};
+    use std::collections::BTreeMap;
+
+    fn manager(bindings: &[(&str, &str)]) -> KeybindingsManager {
+        let config: KeybindingsConfig = bindings
+            .iter()
+            .map(|(action, key)| (action.to_string(), vec![key.to_string()]))
+            .collect::<BTreeMap<_, _>>();
+        KeybindingsManager::with_user_bindings(config)
+    }
+
+    fn editor_with(text: &str) -> Editor {
+        let mut editor = Editor::new();
+        if !text.is_empty() {
+            editor.set_text(text);
+        }
+        editor
+    }
+
+    /// Default `left` on the EMPTY editor is `app.agents.back` — the
+    /// misroute the gate exists for: the key must queue (its action
+    /// runs at the fold), never echo as an editor cursor move.
+    #[test]
+    fn default_left_on_the_empty_editor_is_claimed() {
+        let kb = KeybindingsManager::new();
+        let editor = editor_with("");
+        assert!(
+            opening_echo_key_claimed(&kb, "left", &editor),
+            "left on the empty editor is app.agents.back, not an editor motion"
+        );
+    }
+
+    /// Default `left` with text in the editor stays the editor's cursor
+    /// motion (the agents-back guard fires only on the empty editor), so
+    /// the gate leaves it to the editor fallback.
+    #[test]
+    fn default_left_with_text_is_not_claimed() {
+        let kb = KeybindingsManager::new();
+        let editor = editor_with("draft");
+        assert!(
+            !opening_echo_key_claimed(&kb, "left", &editor),
+            "left with text is the editor's cursor motion"
+        );
+    }
+
+    /// The plain typing keys the opening loop echoes (space, backspace,
+    /// single chars) stay unclaimed under the default bindings.
+    #[test]
+    fn plain_editor_keys_stay_unclaimed_by_default() {
+        let kb = KeybindingsManager::new();
+        for (id, text) in [
+            ("space", ""),
+            ("backspace", ""),
+            ("delete", ""),
+            ("right", ""),
+            ("a", ""),
+            ("z", "draft"),
+        ] {
+            let editor = editor_with(text);
+            assert!(
+                !opening_echo_key_claimed(&kb, id, &editor),
+                "{id} must stay the editor fallback under default bindings"
+            );
+        }
+    }
+
+    /// A user-bound single-char action is claimed (the reviewer's
+    /// user-binding case): the bound action routes through the post-open
+    /// dispatch, never into the editor as text.
+    #[test]
+    fn a_user_bound_single_char_action_is_claimed() {
+        let kb = manager(&[("app.session.new", "a")]);
+        let editor = editor_with("");
+        assert!(
+            opening_echo_key_claimed(&kb, "a", &editor),
+            "a user-bound 'a' must run its action, not type an 'a'"
+        );
+    }
+
+    /// A user-bound space action is claimed the same way; with the
+    /// binding moved off space, space returns to the editor fallback.
+    #[test]
+    fn a_user_bound_space_action_is_claimed() {
+        let kb = manager(&[("app.session.new", "space")]);
+        let editor = editor_with("");
+        assert!(
+            opening_echo_key_claimed(&kb, "space", &editor),
+            "a user-bound space must run its action"
+        );
+        let unbound = manager(&[("app.session.new", "f9")]);
+        assert!(!opening_echo_key_claimed(&unbound, "space", &editor));
+    }
+
+    /// `app.agents.back` rebound off `left` returns `left` to the editor
+    /// fallback (the gate reads the EFFECTIVE keymap, not the default).
+    #[test]
+    fn a_rebound_agents_back_frees_left_for_the_editor() {
+        let kb = manager(&[("app.agents.back", "alt+left")]);
+        let editor = editor_with("");
+        assert!(
+            !opening_echo_key_claimed(&kb, "left", &editor),
+            "with agents.back rebound, left is the editor's cursor motion"
+        );
+    }
+
+    /// The always-fire app arms are claimed regardless of the editor's
+    /// text: the escape ladder, the interrupt family, suspend, the
+    /// model picker, the stash, the session commands, and the queue
+    /// browse keys.
+    #[test]
+    fn the_always_fire_arms_are_claimed() {
+        let kb = KeybindingsManager::new();
+        let editor = editor_with("draft");
+        for id in [
+            "escape",
+            "ctrl+c",
+            "ctrl+z",
+            "ctrl+l",
+            "alt+m",
+            "ctrl+o",
+            "alt+a",
+            "ctrl+g",
+            "ctrl+s",
+            "alt+up",
+            "alt+down",
+            "alt+enter",
+        ] {
+            assert!(
+                opening_echo_key_claimed(&kb, id, &editor),
+                "{id} is an always-fire app arm and must be claimed"
+            );
+        }
+    }
+
+    /// The empty-editor session arms (`app.session.tree`, `app.session.fork`
+    /// user-bound here — they carry no default key) are claimed only on
+    /// the empty editor.
+    #[test]
+    fn the_empty_editor_session_arms_claim_only_when_empty() {
+        let kb = manager(&[("app.session.tree", "ctrl+t")]);
+        assert!(opening_echo_key_claimed(&kb, "ctrl+t", &editor_with("")));
+        assert!(!opening_echo_key_claimed(
+            &kb,
+            "ctrl+t",
+            &editor_with("draft")
+        ));
+    }
+}
