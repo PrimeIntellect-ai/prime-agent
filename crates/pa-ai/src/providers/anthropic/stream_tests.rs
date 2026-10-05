@@ -253,10 +253,8 @@ data: {"type":"message_stop"}"#,
         .to_string()
 }
 
-/// The vLLM pin, anthropic shape: the messages POST carries exactly one
-/// `content-type: application/json` label, like the anthropic SDK the TS
-/// reference used (strict anthropic-compatible frontends validate the
-/// media type and 400 a label-less body).
+/// The messages POST carries exactly one `content-type: application/json`
+/// label; a strict anthropic-compatible frontend 400s without it.
 #[tokio::test]
 async fn wire_carries_one_content_type_application_json() {
     let head = stream_capture_head(None).await;

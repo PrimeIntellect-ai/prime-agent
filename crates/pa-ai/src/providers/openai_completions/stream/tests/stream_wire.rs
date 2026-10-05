@@ -1,16 +1,7 @@
-//! The wire-level pins: the request head the shared transport actually
-//! puts on the wire for a chat/completions POST.
-//!
-//! The TS reference issued every provider request through an SDK client
-//! (the openai npm SDK for this provider), and those clients label every
-//! JSON body `content-type: application/json`. The Rust port's shared
-//! `reqwest` transport dropped the label with the SDK, and strict
-//! OpenAI-compatible frontends answer a label-less JSON body with a
-//! 400 "Unsupported Media Type" — self-hosted vLLM's `OpenAI` server
-//! validates the media type on every request. These pins hold the
-//! transport to the SDK behavior: the label is on the wire, and a
-//! caller-configured content-type (`model.headers` or stream-options
-//! headers) still wins.
+//! The wire-level pins: the request head the shared transport puts on
+//! the wire for a chat/completions POST. The JSON body carries exactly
+//! one `content-type: application/json` label, and a caller-configured
+//! content-type (`model.headers` or stream-options headers) still wins.
 
 use super::*;
 
@@ -109,9 +100,9 @@ fn header_values(head: &str, name: &str) -> Vec<String> {
         .collect()
 }
 
-/// The vLLM pin: the chat/completions POST carries exactly one
-/// `content-type: application/json` label, like the openai SDK the TS
-/// reference used. A strict OpenAI-compatible frontend 400s without it.
+/// The chat/completions POST carries exactly one
+/// `content-type: application/json` label; a strict OpenAI-compatible
+/// frontend 400s without it.
 #[tokio::test]
 async fn wire_carries_one_content_type_application_json() {
     let head = stream_capture_head(completions_model("gpt-5.5", "openai", 1.0, 1.0), None).await;
