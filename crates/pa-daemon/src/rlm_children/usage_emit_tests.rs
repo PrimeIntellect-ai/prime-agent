@@ -51,6 +51,8 @@ fn record_with_file(child_id: &str, session_file: &Path) -> Arc<Mutex<ChildRecor
         usage_rearm: false,
         emit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         last_emitted_status: None,
+        rename_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+
     }))
 }
 

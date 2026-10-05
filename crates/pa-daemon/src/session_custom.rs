@@ -390,6 +390,12 @@ mod tests {
     use std::sync::Arc;
 
     async fn created_worker() -> Arc<Worker> {
+        created_worker_named(Some("custom")).await
+    }
+
+    /// The worker fixture over an optional create name: a `None` create
+    /// leaves the session without a `session_info` name row.
+    async fn created_worker_named(name: Option<&str>) -> Arc<Worker> {
         let dir = std::env::temp_dir().join(format!("pa-worker-sc-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let config = crate::worker::WorkerConfig {
@@ -404,12 +410,11 @@ mod tests {
             script: Some(json!({ "responses": ["ack"] })),
         };
         let worker = Arc::new(Worker::new(config, None));
-        let created = worker
-            .dispatch(
-                "create",
-                &json!({ "noSession": true, "cwd": "/tmp", "name": "custom" }),
-            )
-            .await;
+        let mut create = json!({ "noSession": true, "cwd": "/tmp" });
+        if let Some(name) = name {
+            create["name"] = json!(name);
+        }
+        let created = worker.dispatch("create", &create).await;
         assert!(created.success, "create failed: {created:?}");
         worker
     }
@@ -472,6 +477,57 @@ mod tests {
             let response = worker.dispatch("append_custom_message", &bad).await;
             assert!(!response.success, "must reject: {bad}");
         }
+    }
+
+    /// TS #2529 `applyStateSessionName`: a rename that changed an existing
+    /// name leaves the displayed `session_renamed` notice (with the
+    /// ` by parent` suffix when the rename is parent-directed); a first
+    /// name, or a rename that keeps the name, leaves none.
+    #[tokio::test]
+    async fn rename_leaves_a_displayed_notice_only_when_a_name_changed() {
+        let worker = created_worker_named(None).await;
+        // A first name leaves no notice (there was no previous name).
+        let response = worker.handle_rename("rename", &json!({ "name": "first" }));
+        assert!(response.success, "rename failed: {response:?}");
+        assert!(
+            custom_entries(&worker).is_empty(),
+            "a first name leaves no notice"
+        );
+
+        // A parent-directed rename of the existing name leaves the
+        // displayed notice with the parent suffix.
+        let response = worker.handle_rename(
+            "rename",
+            &json!({ "name": "bench-runner", "renamedBy": "parent" }),
+        );
+        assert!(response.success, "rename failed: {response:?}");
+        let rows = custom_entries(&worker);
+        assert_eq!(rows.len(), 1, "one notice row: {rows:?}");
+        assert_eq!(rows[0].0, "session_renamed");
+        assert_eq!(
+            rows[0].1,
+            json!("Session renamed `first` -> `bench-runner` by parent")
+        );
+        let display = {
+            let core = worker.core.lock().unwrap();
+            core.store.as_ref().and_then(|store| {
+                store
+                    .entries()
+                    .iter()
+                    .find(|entry| entry.type_ == "custom_message")
+                    .and_then(|entry| entry.fields.get("display").cloned())
+            })
+        };
+        assert_eq!(display, Some(json!(true)), "the notice is displayed");
+
+        // A rename that does not change the name leaves nothing new.
+        let response = worker.handle_rename("rename", &json!({ "name": "bench-runner" }));
+        assert!(response.success, "rename failed: {response:?}");
+        assert_eq!(
+            custom_entries(&worker).len(),
+            1,
+            "an unchanged name leaves no second notice"
+        );
     }
 
     /// `restore_next_turn` parks the rows and the next delivered turn

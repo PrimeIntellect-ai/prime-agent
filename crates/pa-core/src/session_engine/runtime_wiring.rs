@@ -182,9 +182,15 @@ pub fn wire_session_runtime(
     let rlm_usage = Arc::new(super::rlm_usage::RlmChildUsageAttributions::new(
         session.clone(),
     ));
+    // The daemon supplies the child-session host; an embedding without
+    // one keeps the no-children behavior, whose self-rename appends the
+    // session's own `session_info` name row.
+    let subagent_host = rlm
+        .subagent_host
+        .unwrap_or_else(|| Arc::new(super::rlm_host::NoRlmChildren::new(session.clone())));
     let rlm_bridge = Arc::new(RlmHostBridge::new(
         model_registry,
-        rlm.subagent_host,
+        subagent_host,
         rlm_usage.clone(),
     ));
     register_rlm_host_handlers(&mut handlers, &rlm_bridge);

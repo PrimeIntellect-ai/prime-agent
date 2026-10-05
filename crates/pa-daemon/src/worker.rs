@@ -44,8 +44,8 @@ use create::{active_session_id_of, worker_server_capabilities};
 // does not use it), so the unused-import lint is allowed deliberately here.
 #[allow(unused_imports)]
 pub(crate) use summary::{
-    compact_action_label, emit_worker_event_with, push_roster_delta, session_snapshot,
-    session_summary, RosterPushContext,
+    compact_action_label, emit_worker_event_with, persist_custom_row, push_roster_delta,
+    session_snapshot, session_summary, RosterPushContext,
 };
 use turn::TurnRunner;
 
@@ -92,9 +92,9 @@ use crate::peer::{
 };
 use crate::protocol::{
     create_daemon_event_meta, create_daemon_replay_info, current_protocol_info,
-    default_client_capabilities, default_server_capabilities, normalize_client_capabilities,
-    response_failure, response_success, DaemonOutbound, DaemonResponse, DaemonResumeCursor,
-    DaemonSessionClosedReason, DAEMON_APP_VERSION, DAEMON_SCHEMA_ID, DAEMON_SCHEMA_REVISION,
+    default_client_capabilities, normalize_client_capabilities, response_failure, response_success,
+    DaemonOutbound, DaemonResponse, DaemonResumeCursor, DaemonSessionClosedReason,
+    DAEMON_APP_VERSION, DAEMON_SCHEMA_ID, DAEMON_SCHEMA_REVISION,
 };
 use crate::registration::RegistrationHandle;
 use crate::session_store::{session_file_name, SessionFile};

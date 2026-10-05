@@ -12,6 +12,29 @@ fn view() -> AgentView {
     AgentView::new(Theme::builtin("prime", ColorMode::TrueColor))
 }
 
+/// The hardware caret never sits over the factory page: the page is an
+/// input-less replacement view, so `frame_cursor` suppresses the stale
+/// editor dock position while it is open (the settings menu's guard
+/// family — Macroscope review finding: the factory page left the caret
+/// parked at the previous editor position over the panel).
+#[test]
+fn the_factory_page_suppresses_the_stale_editor_cursor() {
+    let mut v = view();
+    v.dock_cursor = Some((10, 3));
+    v.factory_view = Some(crate::factory_view::FactoryView::from_reply(
+        &serde_json::json!({ "runs": [] }),
+        12,
+    ));
+    assert!(
+        v.frame_cursor().is_none(),
+        "the open factory page is an input-less overlay"
+    );
+    // ...and the editor's position reports again once the page closes
+    // (`frame_cursor` maps the dock row through the window offset).
+    v.factory_view = None;
+    assert_eq!(v.frame_cursor(), Some((11, 3)));
+}
+
 /// A paste never reaches the editor behind an overlay (the key
 /// dispatch's frame owners): the input-bearing pickers take it, the
 /// input-less overlays consume it, and only the bare dock's editor

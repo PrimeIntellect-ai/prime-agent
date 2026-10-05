@@ -86,6 +86,8 @@ const CREATE_TIMEOUT_MS: u64 = 120_000;
 const PROMPT_TIMEOUT_MS: u64 = 30_000;
 const STATE_TIMEOUT_MS: u64 = 30_000;
 const KILL_TIMEOUT_MS: u64 = 30_000;
+/// Budget for one session rename over the supervisor route (TS uses 30s).
+const RENAME_TIMEOUT_MS: u64 = 30_000;
 /// Grace over a collect budget passed to the worker `wait_for_idle`.
 const IDLE_WAIT_GRACE_MS: u64 = 5_000;
 /// Budget for one terminal-notice delivery over the supervisor route.
@@ -221,6 +223,9 @@ struct ChildRecord {
     /// and sink delivery) without holding the record lock across them.
     emit_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
     last_emitted_status: Option<&'static str>,
+    /// Serializes parent-directed rename and delete for this child.
+    rename_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
+
 }
 
 impl ChildRecord {
@@ -264,9 +269,14 @@ impl ChildRecord {
     }
 
     fn matches(&self, target: &str) -> bool {
+        self.matches_id(target) || self.session_name == target
+    }
+
+    /// The id selectors (the rename target resolution): every field a
+    /// child handle or full session id can carry — never the name.
+    fn matches_id(&self, target: &str) -> bool {
         self.rlm_child_id == target
             || self.active_session_id == target
-            || self.session_name == target
             || self.session_id.as_deref() == Some(target)
     }
 }
@@ -752,6 +762,8 @@ impl SupervisorChildSessions {
                 usage_rearm: false,
                 emit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
                 last_emitted_status: None,
+                rename_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+
             })));
     }
 

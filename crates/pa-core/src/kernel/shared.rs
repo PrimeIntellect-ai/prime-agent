@@ -28,6 +28,20 @@ pub const KERNEL_BUSY_AFTER_INTERRUPT_MESSAGE: &str = "The Python kernel is stil
 pub const MAX_BACKGROUND_OUTPUT_CHARS: usize = 64 * 1024;
 
 pub const MAX_KERNEL_STDERR_CHARS: usize = 8 * 1024;
+
+/// The `factory_activity` out-of-band frame's action vocabulary, mirroring
+/// the kernel executor's `ACTIVITY_ACTIONS` (the `/factory` view's bridge).
+pub const FACTORY_ACTIVITY_ACTIONS: [&str; 6] =
+    ["graph", "status", "watch", "run", "stop", "resume"];
+
+/// Upper bound on one `factory_activity` watch's `timeoutMs` (the kernel
+/// caps its own at 60s; the host bridge pins the view's polling cadence
+/// lower). Mirrors the kernel's `ACTIVITY_TIMEOUT_MS_CAP` for the preflight.
+pub const FACTIVITY_WATCH_TIMEOUT_MS_CAP: u64 = 60_000;
+
+/// Fixed settle bound for one `factory_activity` request (a watch adds its
+/// own declared timeout on top, plus this margin for the executor's work).
+pub const FACTIVITY_SETTLE_TIMEOUT_MS: u64 = 5_000;
 pub const MAX_KERNEL_STDERR_LOG_BYTES: u64 = 5 * 1024 * 1024;
 pub const KERNEL_STDERR_LOG_BUDGET_MARKER: &str = "[stderr log budget exhausted]\n";
 
