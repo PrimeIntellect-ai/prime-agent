@@ -253,6 +253,16 @@ impl Worker {
         let listener = bind_transport(&self.config.socket_path)
             .await
             .with_context(|| format!("bind worker socket {}", self.config.socket_path.display()))?;
+        // Mark the listener bound the moment the bind exists: a
+        // registration-refusal exit landing anywhere in the setup below
+        // (the capture gap, the identity capture, the restriction) must
+        // still run the graceful close-then-cleanup - with the flag held
+        // back, the exit path skips the close wait and the live-listener
+        // probe preserves the just-bound file, leaving a stale socket
+        // behind. The close-request permit is stored while the loop has
+        // not armed yet, so the loop consumes it as its first event.
+        self.listener_bound
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         crate::socket::bind_capture_gap().await;
         // Capture the bound file's identity before anything can replace
         // it (TS daemon-mode.ts:718, the listen callback, between the
@@ -272,8 +282,6 @@ impl Worker {
         // against wake loss: a close request that fires while an accept
         // is being handed off leaves its permit stored, and the next
         // loop iteration consumes it.
-        self.listener_bound
-            .store(true, std::sync::atomic::Ordering::SeqCst);
         let accept_error = loop {
             let stream = tokio::select! {
                 accepted = listener.accept() => match accepted {
