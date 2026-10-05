@@ -55,26 +55,6 @@ impl CallbackShared {
     }
 }
 
-/// The tests that bind the registered callback port (`53_692`)
-/// serialize on this lock across the oauth test modules: parallel
-/// test threads never collide on the one port (the OS answers the
-/// bind with `address already in use` otherwise).
-#[cfg(test)]
-pub(crate) static CALLBACK_PORT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-/// The registered port's staging probe: `true` when this run can bind
-/// it. The lock above serializes the port's binders inside one test
-/// binary; a holder outside it — an ephemeral-range collision on the
-/// runner (`53692` sits inside the kernel's 32768-60999 allocation
-/// range) — is invisible to the lock, so a test that stages the real
-/// flow probes first and skips when the port is busy: the
-/// bind-failure path is its own invariant
-/// (`tests::a_bound_port_fails_the_start_clearly`).
-#[cfg(test)]
-pub(crate) fn registered_port_stages() -> bool {
-    std::net::TcpListener::bind(("127.0.0.1", CALLBACK_PORT)).is_ok()
-}
-
 /// A running callback server.
 ///
 /// Dropping the server aborts its accept loop, releasing the
@@ -495,7 +475,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_bound_port_fails_the_start_clearly() {
-        let _port = CALLBACK_PORT_LOCK.lock().await;
         // The registered port is occupied, so the login fails (TS
         // rejects the server promise with the bind error). Skip when
         // the port was already busy before this test — the blocker

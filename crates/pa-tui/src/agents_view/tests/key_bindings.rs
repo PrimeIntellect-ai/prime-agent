@@ -171,8 +171,8 @@ fn program_key_shows_and_hides_the_spawn_program() {
 /// the header and the save/cancel hint render, the prefill is the
 /// session's name, the editing grammar matches the search field, Enter
 /// submits the trimmed name with the live target, a large paste saves
-/// expanded, Esc exits with the query untouched, and a child row never
-/// enters.
+/// expanded, Esc exits with the query untouched, and a child row enters
+/// with its own live target.
 #[test]
 fn rename_key_composes_edits_and_dispatches() {
     let mut mode = mode_with_parent_and_child();
@@ -261,15 +261,25 @@ fn rename_key_composes_edits_and_dispatches() {
         mode.pending_rename.take().map(|rename| rename.name),
         Some(pasted)
     );
-    // A subagent row never enters rename mode (TS :1871: only
-    // top-level agents rename). Expand the list so the child row is
-    // the selection's landing.
+    // A subagent row enters rename mode too (TS #2529: agent and
+    // subagent rows both carry a renameable session). Expand the list
+    // so the child row is the selection's landing.
     mode.handle_key("down");
     mode.handle_key("enter");
     mode.handle_key("down");
     assert_eq!(mode.rows[mode.selected].kind, RowKind::Subagent);
     mode.handle_key("ctrl+r");
-    assert!(matches!(mode.composer, Composer::Search));
+    let Composer::Rename(rename) = &mode.composer else {
+        panic!("the subagent row entered rename mode")
+    };
+    assert_eq!(
+        rename.target,
+        RenameTarget::Live {
+            active_session_id: "c-live".to_string()
+        },
+        "the child's live session is the rename target"
+    );
+    assert_eq!(rename.editor.get_text(), "worker one");
 }
 
 #[test]

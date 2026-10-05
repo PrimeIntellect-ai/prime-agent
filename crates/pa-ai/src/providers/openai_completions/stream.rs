@@ -658,19 +658,26 @@ async fn run_stream(
         let events = decoder.push_text(&chunk);
         for event in &events {
             if mark_done_marker(event, &mut state) {
-                continue;
+                // A held-open body past [DONE] never EOFs; the marker
+                // ends the stream.
+                break;
             }
             if let Some(chunk) = parse_sse_event_data(event) {
                 handle_chunk(&chunk, model, cache_write_cost, &mut state, writer);
             }
         }
-    }
-    for event in decoder.finish() {
-        if mark_done_marker(&event, &mut state) {
-            continue;
+        if state.saw_done_marker {
+            break;
         }
-        if let Some(chunk) = parse_sse_event_data(&event) {
-            handle_chunk(&chunk, model, cache_write_cost, &mut state, writer);
+    }
+    if !state.saw_done_marker {
+        for event in decoder.finish() {
+            if mark_done_marker(&event, &mut state) {
+                continue;
+            }
+            if let Some(chunk) = parse_sse_event_data(&event) {
+                handle_chunk(&chunk, model, cache_write_cost, &mut state, writer);
+            }
         }
     }
     // The multiplier table is OpenAI's own; gateways price tiers per endpoint
@@ -776,6 +783,11 @@ mod tests {
     // The #755 output-budget wire pins (the captured request bodies).
     #[path = "stream_max_tokens.rs"]
     mod stream_max_tokens;
+
+    // The wire-level pins (the request head on the wire) live in their
+    // own child module with this file's test harness.
+    #[path = "stream_wire.rs"]
+    mod stream_wire;
 
     /// Serve one SSE response body for the provider's POST and return the
     /// bound address.
