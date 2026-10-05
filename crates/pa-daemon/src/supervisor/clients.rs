@@ -186,6 +186,26 @@ impl Supervisor {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(timeout);
     }
+
+    /// The unauthenticated pre-ready admission budget: a pinned test
+    /// budget, else the production constant.
+    pub(crate) fn tcp_pre_ready_timeout(&self) -> Duration {
+        self.tcp_pre_ready_budget
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or(crate::tcp::DAEMON_TCP_PRE_READY_TIMEOUT)
+    }
+
+    /// Test-only: pin this supervisor's pre-ready admission budget so
+    /// the deadline state machine's tests can fire the budget without
+    /// waiting the production 120 seconds.
+    #[cfg(test)]
+    pub(crate) fn pin_tcp_pre_ready_timeout_for_tests(&self, timeout: Duration) {
+        *self
+            .tcp_pre_ready_budget
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(timeout);
+    }
 }
 
 impl Supervisor {
@@ -217,9 +237,9 @@ impl Supervisor {
         let mut tcp_authenticated = false;
         if let ClientTrust::Remote { .. } = trust {
             let (deadline_tx, deadline_rx) = tokio::sync::watch::channel(
-                tokio::time::Instant::now() + crate::tcp::DAEMON_TCP_PRE_READY_TIMEOUT,
+                tokio::time::Instant::now() + self.tcp_pre_ready_timeout(),
             );
-            let (expired_tx, expired_rx) = tokio::sync::mpsc::channel::<()>(1);
+            let (expired_tx, expired_rx) = tokio::sync::mpsc::channel::<tokio::time::Instant>(1);
             let watchdog = tokio::spawn(async move {
                 let mut deadline_rx = deadline_rx;
                 loop {
@@ -227,8 +247,19 @@ impl Supervisor {
                     let changed = tokio::time::timeout_at(deadline, deadline_rx.changed()).await;
                     match changed {
                         Err(_expired) => {
-                            let _ = expired_tx.send(()).await;
-                            return;
+                            // The signal names the window that elapsed so
+                            // the consumer can tell it apart from a window
+                            // renewed while the signal sat queued.
+                            if expired_tx.send(deadline).await.is_err() {
+                                return;
+                            }
+                            // Stay armed instead of exiting: the consumer
+                            // may drain this signal as stale (a traffic arm
+                            // renewed the window after the fire) and keep
+                            // the peer open, and that renewed window still
+                            // needs its own expiry. The next iteration
+                            // re-borrows whatever window the watch holds
+                            // once the queue drains.
                         }
                         Ok(Ok(())) => {}
                         Ok(Err(_)) => return,
@@ -237,8 +268,9 @@ impl Supervisor {
             });
             // The watchdog ends with its channel ends: this connection
             // dropping its deadline sender makes `changed()` error and the
-            // task return (the TS `clearTimeout` on close). Dropping the
-            // handle does not abort the spawned task.
+            // task return (the TS `clearTimeout` on close), and a closed
+            // connection's dropped receiver fails the signal send the same
+            // way. Dropping the handle does not abort the spawned task.
             drop(watchdog);
             tcp_deadline_rx = Some(deadline_tx.subscribe());
             tcp_deadline_tx = Some(deadline_tx);
@@ -594,9 +626,11 @@ impl Supervisor {
                         // honors, so a later stalled write is cut at the
                         // window the expired arm committed, and a
                         // slow-but-live bundle that crosses the original
-                        // armed window leaves no fired watchdog (no
-                        // leftover expiry signal to drop the live peer at
-                        // the next select).
+                        // armed window never outlives the watchdog: it
+                        // re-arms with the renewal, and even a signal
+                        // queued at the crossed boundary names the old
+                        // window, which the expired arm drains as stale
+                        // instead of closing the live peer.
                         if let Some(deadline_tx) = tcp_deadline_tx.as_ref() {
                             if tcp_authenticated {
                                 let renewed =
@@ -622,7 +656,23 @@ impl Supervisor {
                     // (dribbled partial lines renew nothing), or an
                     // authenticated one went silent past the idle window.
                     // Destroy the connection like the TS timers do.
-                    let _ = expired;
+                    if let Some(fired_at) = expired {
+                        // The signal names the window it fired at, and the
+                        // window may have moved since: this select is
+                        // biased, so a traffic arm ready in the same
+                        // instant the watchdog fired runs first, its write
+                        // renews the idle window, and the queued signal
+                        // waits for a quiet iteration. A signal from a
+                        // window the traffic arms already replaced must
+                        // not close the live peer - drain it and keep
+                        // serving; the watchdog stayed armed at the renewed
+                        // window and fires again if that one elapses
+                        // unanswered too.
+                        let renewed = tcp_deadline_rx.as_ref().map(|rx| *rx.borrow());
+                        if renewed.is_some_and(|window| window > fired_at) {
+                            continue;
+                        }
+                    }
                     if tcp_authenticated {
                         self.log_line("Closed idle TCP client connection");
                     } else {
@@ -1885,5 +1935,160 @@ mod tests {
             "a command answered after the crossed window: {after}"
         );
         connection.abort();
+    }
+
+    /// A queued expiry signal must be validated against the window the
+    /// traffic arms hold, never trusted as terminal: the biased select
+    /// polls every traffic arm ahead of the expired arm, so when a write
+    /// and the watchdog's fire land in the same instant the write renews
+    /// the window and the signal waits for the next quiet iteration -
+    /// closing on it would drop a live peer whose traffic landed exactly
+    /// at its window boundary (the Bugbot "expiry signal can drop live
+    /// peers" round). The watchdog must also stay armed after a stale
+    /// drain: a one-shot watchdog leaves the peer with no idle
+    /// enforcement at all.
+    ///
+    /// The stale state is pinned at the pre-ready boundary, where it is
+    /// deterministic: the connection parks on the factory settings read
+    /// (the locked read a fresh settings file forces) while the pinned
+    /// pre-ready budget elapses, so the watchdog fires the pre-ready
+    /// window's expiry signal before the greeting exists; the greeting
+    /// that completes afterwards re-arms the deadline to the auth window
+    /// - a queued signal naming the pre-ready window against a window
+    /// that moved after the fire. The stale signal must drain, the peer
+    /// must authenticate and round-trip a command on the same
+    /// connection, and the watchdog must still close the silent peer at
+    /// the renewed idle window.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stale_expiry_signal_spares_the_peer_whose_window_was_renewed() {
+        use pa_types::platform::transport::{AsyncReadHalf, AsyncWriteHalf};
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        struct DuplexTransport(tokio::io::DuplexStream);
+        impl TransportStream for DuplexTransport {
+            fn split(self: Box<Self>) -> (Box<dyn AsyncReadHalf>, Box<dyn AsyncWriteHalf>) {
+                let (reader, writer) = tokio::io::split(self.0);
+                (Box::new(reader), Box::new(writer))
+            }
+        }
+
+        // Read one newline-terminated frame off the duplex, retaining any
+        // bytes read past the newline for the next frame (the daemon is
+        // the only writer, so a chunk cannot overrun into a frame that
+        // does not exist yet; the retention keeps the drain byte-exact).
+        async fn drain_frame(
+            stream: &mut tokio::io::DuplexStream,
+            carry: &mut Vec<u8>,
+        ) -> serde_json::Value {
+            loop {
+                if let Some(newline) = carry.iter().position(|byte| *byte == b'\n') {
+                    let mut frame: Vec<u8> = carry.drain(..=newline).collect();
+                    frame.pop();
+                    let text = String::from_utf8_lossy(&frame);
+                    return serde_json::from_str(&text)
+                        .unwrap_or_else(|error| panic!("a daemon frame is not JSON: {error}"));
+                }
+                let mut chunk = vec![0u8; 64 * 1024];
+                let read = stream
+                    .read(&mut chunk)
+                    .await
+                    .expect("the client pipe stayed readable");
+                assert!(
+                    read > 0,
+                    "the daemon closed the connection before the frame arrived"
+                );
+                carry.extend_from_slice(&chunk[..read]);
+            }
+        }
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let options = SupervisorOptions {
+            tcp_port: None,
+            tcp_bind_host: None,
+            remote_agent_mesh: None,
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir: dir.path().join("agent"),
+        };
+        let supervisor = Arc::new(Supervisor::new(options).expect("supervisor"));
+        // The settings file lands AFTER the supervisor's own telemetry
+        // read so the connection's factory read is a cache miss (the
+        // read-through cache serves any stat identity it has seen, and
+        // an absent file is never cached): a fresh file forces the
+        // locked protocol, the pre-loop await this test parks the
+        // connection on.
+        std::fs::create_dir_all(dir.path().join("agent")).unwrap();
+        std::fs::write(dir.path().join("agent/settings.json"), "{}").unwrap();
+        // The 50ms pre-ready budget elapses while the connection parks
+        // on the held settings lock (the read's 10x20ms retry ladder
+        // outlasts it), so the watchdog fires its expiry signal before
+        // the greeting exists; the 300ms idle window pins the close
+        // phase at the end.
+        supervisor.pin_tcp_pre_ready_timeout_for_tests(Duration::from_millis(50));
+        supervisor.pin_tcp_idle_timeout_for_tests(Duration::from_millis(300));
+        // Hold the same directory lock the daemon's settings read
+        // acquires: the connection parks before the greeting until the
+        // read's retry ladder gives up (the failed read serves
+        // defaults; it is not fatal).
+        let settings_guard = pa_core::platform::lock_dir::LockDir::acquire(
+            &dir.path().join("agent/settings.json"),
+            Duration::from_secs(10),
+        )
+        .expect("the test takes the settings lock first");
+        let (server_side, mut client_side) = tokio::io::duplex(64 * 1024);
+        let connection = {
+            let supervisor = Arc::clone(&supervisor);
+            let stream: Box<dyn TransportStream> = Box::new(DuplexTransport(server_side));
+            tokio::spawn(async move {
+                supervisor
+                    .handle_client(
+                        stream,
+                        crate::supervisor::ClientTrust::Remote {
+                            auth_token: "token".to_string(),
+                        },
+                    )
+                    .await
+            })
+        };
+
+        let mut carry: Vec<u8> = Vec::new();
+        let hello = drain_frame(&mut client_side, &mut carry).await;
+        assert_eq!(hello["type"], "daemon_hello", "the greeting: {hello}");
+        // The stale signal must not close the peer: an authenticated
+        // command round-trips on the same connection.
+        let command = serde_json::json!({
+            "type": "command",
+            "id": "past-the-stale-signal",
+            "protocol": {
+                "name": crate::protocol::DAEMON_PROTOCOL_NAME,
+                "version": crate::protocol::DAEMON_PROTOCOL_VERSION,
+            },
+            "command": { "type": "list" },
+            "auth": { "token": "token" },
+        });
+        client_side
+            .write_all((serde_json::to_string(&command).unwrap() + "\n").as_bytes())
+            .await
+            .expect("the connection stays writable past the stale signal");
+        let response = drain_frame(&mut client_side, &mut carry).await;
+        assert_eq!(response["type"], "response", "a live peer's answer");
+        assert_eq!(
+            response["success"], true,
+            "the stale expiry signal drained instead of closing: {response}"
+        );
+        drop(settings_guard);
+        // The watchdog must still guard the renewed windows: the now
+        // silent peer closes at the idle window the response's write
+        // re-armed - never with a one-shot watchdog (it would never
+        // close) and never on the unvalidated stale signal (it would
+        // have closed before the answer above).
+        let closed = tokio::time::timeout(Duration::from_secs(10), connection)
+            .await
+            .expect("the drained connection still closes at its idle window");
+        let outcome = closed.expect("the connection task must end");
+        assert!(
+            outcome.is_err(),
+            "the silent peer closes at the renewed idle window"
+        );
     }
 }

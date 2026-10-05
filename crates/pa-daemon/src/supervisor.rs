@@ -151,6 +151,12 @@ pub struct Supervisor {
     /// state machine's tests bounded without sleeping the production
     /// 10 minutes.
     tcp_idle_timeout_budget: std::sync::Mutex<Option<Duration>>,
+    /// The per-supervisor unauthenticated pre-ready admission-budget
+    /// override: `None` rides the production constant (TS #2517's
+    /// `DAEMON_TCP_PRE_READY_TIMEOUT_MS`), a pinned budget keeps the
+    /// deadline state machine's tests bounded without waiting the
+    /// production 120 seconds.
+    tcp_pre_ready_budget: std::sync::Mutex<Option<Duration>>,
     /// The durable session-binding table (the stale-active-id rebind
     /// surface): every active id the supervisor has routed stays
     /// addressable through its session's durable identity, so a client
@@ -349,6 +355,7 @@ impl Supervisor {
             bound_socket_identity: std::sync::Mutex::new(None),
             worker_connect_budget: std::sync::Mutex::new(None),
             tcp_idle_timeout_budget: std::sync::Mutex::new(None),
+            tcp_pre_ready_budget: std::sync::Mutex::new(None),
             session_bindings: crate::session_bindings::SessionBindingTable::new(),
             opening_files: std::sync::Mutex::new(std::collections::HashMap::new()),
             telemetry: std::sync::Mutex::new(None),
