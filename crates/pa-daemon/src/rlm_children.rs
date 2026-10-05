@@ -225,7 +225,6 @@ struct ChildRecord {
     last_emitted_status: Option<&'static str>,
     /// Serializes parent-directed rename and delete for this child.
     rename_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
-
 }
 
 impl ChildRecord {
@@ -763,7 +762,6 @@ impl SupervisorChildSessions {
                 emit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
                 last_emitted_status: None,
                 rename_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
-
             })));
     }
 

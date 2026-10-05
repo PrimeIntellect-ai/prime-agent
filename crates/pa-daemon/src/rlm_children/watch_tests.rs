@@ -1073,7 +1073,6 @@ fn an_already_settled_child_never_re_scores_as_an_unreachable_error() {
         emit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         last_emitted_status: None,
         rename_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
-
     };
     // A running child that goes unreachable is the error class.
     assert!(super::lifecycle::should_mark_unreachable_error(&base()));
