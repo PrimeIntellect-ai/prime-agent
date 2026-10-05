@@ -966,6 +966,15 @@ impl SettingsManager {
         self.merged.request_timing.unwrap_or(false)
     }
 
+    /// `cacheKeepAlive`: unset means ON — the prompt-cache keep-alive is
+    /// the cheap side of the cache economics, so only an explicit `false`
+    /// opts out (the policy still resolves per model: models whose
+    /// requests carry no cache blocks never fire).
+    #[must_use]
+    pub fn get_cache_keep_alive(&self) -> Option<bool> {
+        self.merged.cache_keep_alive
+    }
+
     #[must_use]
     pub fn get_session_dir(&self) -> Option<std::path::PathBuf> {
         let session_dir = self.merged.session_dir.as_ref()?;

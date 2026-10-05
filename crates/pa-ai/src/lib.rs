@@ -74,3 +74,9 @@ pub use cache_pricing::{
     get_anthropic_cache_costs, get_anthropic_cache_write_cost,
     has_standard_anthropic_cache_pricing, AnthropicCacheCreationUsage,
 };
+
+/// The prompt-cache TTL seam (the `cache_control` TTL vocabulary the
+/// anthropic-messages provider writes): the session engine arms its
+/// cache keep-alive at the request's TTL minus a safety margin.
+mod prompt_cache;
+pub use prompt_cache::{prompt_cache_ttl, CACHE_TTL_FIVE_MINUTES, CACHE_TTL_ONE_HOUR};

@@ -106,7 +106,14 @@ pub(crate) fn compute_own_and_total_usage(
                     add_usage(&mut total, usage);
                 }
             }
-        } else if matches!(entry.type_.as_str(), "compaction" | "branch_summary") {
+        } else if matches!(
+            entry.type_.as_str(),
+            "compaction" | "branch_summary" | "cache_keep_alive"
+        ) {
+            // The auxiliary-call rows: the session's own spend (a
+            // summarizer call, or a prompt-cache keep-alive warm request)
+            // folded into both totals — the warm fire is attributed, not
+            // silent cost.
             if let Some(usage) = entry.fields.get("usage") {
                 add_usage(&mut total, usage);
             }
@@ -243,7 +250,7 @@ pub(crate) fn compute_own_usage_by_model(
                 }
                 continue;
             }
-            "compaction" | "branch_summary" => entry.fields.get("usage"),
+            "compaction" | "branch_summary" | "cache_keep_alive" => entry.fields.get("usage"),
             _ => continue,
         };
         if let Some(usage) = usage {
@@ -384,6 +391,53 @@ mod usage_tests {
         let (own, _) = compute_own_and_total_usage(&branch_refs_more, &entries_more);
         assert_eq!(own["input"], json!(0));
         assert_eq!(own["cost"]["total"].as_f64(), Some(0.0));
+    }
+
+    /// A `cache_keep_alive` row (a prompt-cache warm request fired while a
+    /// tool batch was pending) bills on the model its entry records: the
+    /// warm spend is visible in both totals and the per-model breakdown,
+    /// attributed rather than silent cost.
+    #[test]
+    fn cache_keep_alive_rows_bill_on_the_warm_model() {
+        let entry = |value: &Value, id: &str| crate::session_store::SessionEntry {
+            type_: value["type"].as_str().expect("type").to_string(),
+            id: id.to_string(),
+            parent_id: None,
+            timestamp: "2024-01-01T00:00:00.000Z".to_string(),
+            fields: value
+                .as_object()
+                .expect("object")
+                .clone()
+                .into_iter()
+                .collect(),
+        };
+        let usage = |cache_read: u64| {
+            json!({
+                "input": 12, "output": 1, "cacheRead": cache_read, "cacheWrite": 0,
+                "totalTokens": 12 + 1 + cache_read,
+                "cost": {"input": 0.000_012, "output": 0.000_075, "cacheRead": 0.001_2, "cacheWrite": 0, "total": 0.001_287},
+            })
+        };
+        let assistant = json!({
+            "type": "message", "id": "e1",
+            "message": {"role": "assistant", "content": "on it", "provider": "anthropic", "model": "claude-x", "usage": usage(4_000)},
+        });
+        let warm = json!({
+            "type": "cache_keep_alive", "id": "k1",
+            "provider": "anthropic", "modelId": "claude-x", "usage": usage(12_000),
+        });
+        let entries = vec![entry(&assistant, "e1"), entry(&warm, "k1")];
+        let branch: Vec<&crate::session_store::SessionEntry> = entries.iter().collect();
+        let (own, total) = compute_own_and_total_usage(&branch, &entries);
+        // The warm read adds to both totals (the session's own spend).
+        assert_eq!(total["cacheRead"], json!(16_000));
+        assert_eq!(own["cacheRead"], json!(16_000));
+        // The per-model breakdown bills it on the row's recorded model.
+        let breakdown =
+            compute_own_usage_by_model(&branch, &entries, &own, None).expect("resolved");
+        assert_eq!(breakdown.len(), 1);
+        assert_eq!(breakdown[0]["id"], json!("claude-x"));
+        assert_eq!(breakdown[0]["ownUsage"]["cacheRead"], json!(16_000));
     }
 
     /// A `branch_summary` row served by an auxiliary model (TS #2411)

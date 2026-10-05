@@ -1,0 +1,3 @@
+- A prompt-cache keep-alive now fires while a tool batch outlasts the cache TTL window: one same-shape request with `max_tokens = 1` (a nearly-free cache read) re-arms the provider prompt cache before it expires, instead of rebuying the prefix at a full 1.25x-input cache write.
+- Every warm request is attributed: a `cache_keep_alive` usage row lands on the session and folds into the usage report (totals and the per-model breakdown), with one structured log line per fire.
+- The `cacheKeepAlive` setting (default on for models whose requests carry cache blocks) opts out entirely.

@@ -284,6 +284,7 @@ fn entry_type(entry: &FileEntry) -> &'static str {
         FileEntry::BranchSummary { .. } => "branch_summary",
         FileEntry::Custom { .. } => "custom",
         FileEntry::ChildUsageAttributed { .. } => "child_usage_attributed",
+        FileEntry::CacheKeepAlive { .. } => "cache_keep_alive",
         FileEntry::CustomMessage { .. } => "custom_message",
         FileEntry::Label { .. } => "label",
         FileEntry::SessionInfo { .. } => "session_info",

@@ -21,6 +21,51 @@ fn generated_entry_ids_are_unique_and_link_to_previous_entry() {
     assert_eq!(manager.get_leaf_id(), previous.as_deref());
 }
 
+/// The durable keep-alive line carries the warm request's own usage and
+/// the model that billed it (the attribution row the usage folds read).
+#[test]
+fn append_cache_keep_alive_serializes_the_usage_row() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut manager = SessionManager::in_memory(tmp.path());
+    manager
+        .append_cache_keep_alive(
+            "anthropic",
+            "claude-x",
+            pa_types::ai::Usage {
+                input: 12,
+                output: 1,
+                cache_read: 12_000,
+                cache_write: 0,
+                total_tokens: 12_013,
+                cost: pa_types::ai::UsageCost {
+                    input: 0.000_012.into(),
+                    output: 0.000_075.into(),
+                    cache_read: 0.001_2.into(),
+                    cache_write: 0.0.into(),
+                    total: 0.001_287.into(),
+                },
+            },
+        )
+        .unwrap();
+    let line = {
+        let entries = manager.get_entries();
+        serialize_entry(
+            entries
+                .iter()
+                .rev()
+                .find(|entry| matches!(entry, FileEntry::CacheKeepAlive { .. }))
+                .expect("cache_keep_alive entry appended"),
+        )
+    };
+    let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(value["type"], "cache_keep_alive");
+    assert_eq!(value["provider"], "anthropic");
+    assert_eq!(value["modelId"], "claude-x");
+    assert_eq!(value["usage"]["cacheRead"], 12_000);
+    assert_eq!(value["usage"]["output"], 1);
+    assert!(value["id"].is_string(), "the row carries the entry id");
+}
+
 /// The durable compaction line is the full TS `CompactionEntry` record:
 /// `fromHook: false` is present (never a missing key), and the details
 /// and usage ride along.

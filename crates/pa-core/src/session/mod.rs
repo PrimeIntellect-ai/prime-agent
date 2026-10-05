@@ -232,6 +232,7 @@ fn entry_base_mut(entry: &mut FileEntry) -> Option<&mut EntryBase> {
         | FileEntry::BranchSummary { base, .. }
         | FileEntry::Custom { base, .. }
         | FileEntry::ChildUsageAttributed { base, .. }
+        | FileEntry::CacheKeepAlive { base, .. }
         | FileEntry::Label { base, .. }
         | FileEntry::SessionInfo { base, .. }
         | FileEntry::SessionState { base, .. }

@@ -328,7 +328,10 @@ impl UsageScan {
     }
 
     /// TS `foldSessionScanLine`: a `compaction` or `branch_summary`
-    /// entry's own usage (the summarization call's billed block).
+    /// entry's own usage (the summarization call's billed block), and a
+    /// `cache_keep_alive` entry's warm-request usage (the same
+    /// auxiliary-call class: the session's own spend, added to both
+    /// totals).
     pub(crate) fn fold_summarization(&mut self, usage: Option<Usage>) {
         if let Some(usage) = usage {
             add_assistant_usage(&mut self.summarization_usage, &usage);
@@ -405,7 +408,7 @@ impl ScanEntry {
                 self.child_usage.map(Usage::from),
                 self.aggregate_usage.map(Usage::from),
             ),
-            "compaction" | "branch_summary" => {
+            "compaction" | "branch_summary" | "cache_keep_alive" => {
                 scan.fold_summarization(self.usage.map(Usage::from));
             }
             _ => {}

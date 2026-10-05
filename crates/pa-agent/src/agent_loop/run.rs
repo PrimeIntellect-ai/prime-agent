@@ -12,7 +12,8 @@ use crate::types::{
 use super::abort::{
     poll_messages_unless_aborted, race_with_abort, settle_post_turn, PostTurnResult,
 };
-use super::response::stream_assistant_response;
+use super::keep_alive::{execute_tool_calls_with_keep_alive, try_arm};
+use super::response::{stream_assistant_response, StreamCapture};
 use super::tools::execute_tool_calls;
 use super::{AgentEventSink, AgentLoopConfig};
 
@@ -36,6 +37,10 @@ pub(crate) async fn run_loop(
     let mut last_turn: Option<ShouldStopAfterTurnContext> = None;
     let mut pending_messages =
         poll_messages_unless_aborted(config.get_steering_messages.as_ref(), signal).await?;
+    // The per-request capture state: the partial-message bookkeeping and
+    // the keep-alive's recorded request shape (replayed with
+    // `max_tokens = 1` while a tool batch is pending).
+    let mut stream_capture = StreamCapture::new(None);
 
     macro_rules! should_stop_before_turn {
         () => {
@@ -75,8 +80,15 @@ pub(crate) async fn run_loop(
                 }
             }
 
-            let message =
-                stream_assistant_response(current_context, config, signal, emit, stream_fn).await?;
+            let message = stream_assistant_response(
+                current_context,
+                config,
+                signal,
+                emit,
+                stream_fn,
+                &mut stream_capture,
+            )
+            .await?;
             new_messages.push(AgentMessage::from(message.clone()));
 
             if message.stop_reason == StopReason::Error
@@ -103,8 +115,30 @@ pub(crate) async fn run_loop(
             let mut tool_results: Vec<ToolResultMessage> = Vec::new();
             has_more_tool_calls = false;
             if !tool_calls.is_empty() {
-                let executed_tool_batch =
-                    execute_tool_calls(current_context, &message, config, signal, emit).await?;
+                // While the batch runs, the prompt-cache keep-alive fires
+                // the warm request when the batch outlasts the cache
+                // window; an un-armed batch (the policy gates itself to
+                // requests that carry cache blocks) runs the plain path.
+                let executed_tool_batch = match try_arm(
+                    config.cache_keep_alive.clone(),
+                    stream_capture.take_warm_request(),
+                    stream_fn,
+                ) {
+                    Some(arms) => {
+                        execute_tool_calls_with_keep_alive(
+                            current_context,
+                            &message,
+                            config,
+                            signal,
+                            emit,
+                            arms,
+                        )
+                        .await?
+                    }
+                    None => {
+                        execute_tool_calls(current_context, &message, config, signal, emit).await?
+                    }
+                };
                 tool_results.extend(executed_tool_batch.messages);
                 has_more_tool_calls = !executed_tool_batch.terminate;
 

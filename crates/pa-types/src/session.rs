@@ -274,6 +274,17 @@ pub struct ChildUsageAttributionEntry {
     pub origin: Option<ChildUsageOrigin>,
 }
 
+/// `type: "cache_keep_alive"`: one prompt-cache warm request fired while
+/// a tool batch was pending (the response was discarded; its usage is
+/// kept here so the spend is attributed, not silent).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CacheKeepAliveEntry {
+    pub provider: String,
+    pub model_id: String,
+    pub usage: Usage,
+}
+
 /// `type: "label"`: a tree-node label set from the UI.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -409,6 +420,12 @@ pub enum FileEntry {
         #[serde(flatten)]
         base: EntryBase,
     },
+    CacheKeepAlive {
+        #[serde(flatten)]
+        payload: CacheKeepAliveEntry,
+        #[serde(flatten)]
+        base: EntryBase,
+    },
     Label {
         #[serde(flatten)]
         payload: LabelEntry,
@@ -509,6 +526,12 @@ enum KnownFileEntry {
         #[serde(flatten)]
         base: EntryBase,
     },
+    CacheKeepAlive {
+        #[serde(flatten)]
+        payload: CacheKeepAliveEntry,
+        #[serde(flatten)]
+        base: EntryBase,
+    },
     Label {
         #[serde(flatten)]
         payload: LabelEntry,
@@ -561,6 +584,9 @@ impl From<KnownFileEntry> for FileEntry {
             KnownFileEntry::ChildUsageAttributed { payload, base } => {
                 Self::ChildUsageAttributed { payload, base }
             }
+            KnownFileEntry::CacheKeepAlive { payload, base } => {
+                Self::CacheKeepAlive { payload, base }
+            }
             KnownFileEntry::Label { payload, base } => Self::Label { payload, base },
             KnownFileEntry::SessionInfo { payload, base } => Self::SessionInfo { payload, base },
             KnownFileEntry::SessionState { payload, base } => Self::SessionState { payload, base },
@@ -605,6 +631,7 @@ impl FileEntry {
             | FileEntry::BranchSummary { base, .. }
             | FileEntry::Custom { base, .. }
             | FileEntry::ChildUsageAttributed { base, .. }
+            | FileEntry::CacheKeepAlive { base, .. }
             | FileEntry::Label { base, .. }
             | FileEntry::SessionInfo { base, .. }
             | FileEntry::SessionState { base, .. }
@@ -630,6 +657,7 @@ impl FileEntry {
             | FileEntry::BranchSummary { base, .. }
             | FileEntry::Custom { base, .. }
             | FileEntry::ChildUsageAttributed { base, .. }
+            | FileEntry::CacheKeepAlive { base, .. }
             | FileEntry::Label { base, .. }
             | FileEntry::SessionInfo { base, .. }
             | FileEntry::SessionState { base, .. }
@@ -658,6 +686,7 @@ impl FileEntry {
             | FileEntry::BranchSummary { base, .. }
             | FileEntry::Custom { base, .. }
             | FileEntry::ChildUsageAttributed { base, .. }
+            | FileEntry::CacheKeepAlive { base, .. }
             | FileEntry::Label { base, .. }
             | FileEntry::SessionInfo { base, .. }
             | FileEntry::SessionState { base, .. }
@@ -717,6 +746,22 @@ mod tests {
         assert_eq!(parsed.id(), Some("f1"));
         assert_eq!(parsed.parent_id(), Some("p1"));
         assert_eq!(parsed.timestamp(), "2026-01-01T00:00:00.000Z");
+        assert_roundtrips(json);
+    }
+
+    #[test]
+    fn cache_keep_alive_entry_round_trips() {
+        let json = r#"{"type":"cache_keep_alive","provider":"anthropic","modelId":"claude-x","usage":{"input":12,"output":1,"cacheRead":12000,"cacheWrite":0,"totalTokens":12013,"cost":{"input":0.000012,"output":0.000075,"cacheRead":0.0012,"cacheWrite":0,"total":0.001287}},"id":"k1","parentId":"m2","timestamp":"2026-01-01T00:00:00.000Z"}"#;
+        let parsed = entry(json);
+        assert_eq!(parsed.id(), Some("k1"));
+        assert_eq!(parsed.parent_id(), Some("m2"));
+        assert_eq!(parsed.timestamp(), "2026-01-01T00:00:00.000Z");
+        let FileEntry::CacheKeepAlive { payload, .. } = entry(json) else {
+            panic!("expected a cache_keep_alive entry");
+        };
+        assert_eq!(payload.provider, "anthropic");
+        assert_eq!(payload.model_id, "claude-x");
+        assert_eq!(payload.usage.cache_read, 12_000);
         assert_roundtrips(json);
     }
 

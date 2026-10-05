@@ -105,6 +105,41 @@ pub type AfterToolCallFn = Arc<
         + Sync,
 >;
 
+/// The loop's prompt-cache keep-alive policy (a Rust-era feature; the TS
+/// loop has no counterpart): while a tool batch is pending, the loop
+/// re-sends the just-issued request shape with `max_tokens = 1` every
+/// [`CacheKeepAliveConfig::rearm_after`] window — a nearly-free cache READ
+/// that re-arms the provider prompt cache before its TTL expires — and
+/// discards the response. The policy is resolved per run model: only
+/// requests that carry prompt-cache blocks keep the cache warm.
+#[derive(Clone)]
+pub struct CacheKeepAliveConfig {
+    /// How long after the assistant response settles before the warm
+    /// request fires (the provider cache TTL minus a safety margin).
+    pub rearm_after: std::time::Duration,
+    /// Observes one fired warm request (the discarded response's usage
+    /// for accounting, or the swallowed error). Failures here never
+    /// affect the turn.
+    pub on_fire: CacheKeepAliveFireFn,
+}
+
+/// The hook the loop invokes once per fired warm request.
+pub type CacheKeepAliveFireFn =
+    Arc<dyn Fn(CacheKeepAliveFire) -> crate::BoxFut<'static, ()> + Send + Sync>;
+
+/// One fired prompt-cache warm request.
+#[derive(Debug, Clone)]
+pub struct CacheKeepAliveFire {
+    /// The model whose request shape the warm request replayed.
+    pub model: crate::types::Model,
+    /// The discarded response's usage block, when the response settled
+    /// with one (a settled warm request always reports its cache read).
+    pub usage: Option<crate::types::Usage>,
+    /// The swallowed error when the warm request failed (a provider
+    /// error or an aborted stream); the turn proceeds regardless.
+    pub error: Option<String>,
+}
+
 /// Configuration for the agent loop (TS `AgentLoopConfig`).
 #[derive(Clone)]
 pub struct AgentLoopConfig {
@@ -132,6 +167,11 @@ pub struct AgentLoopConfig {
     pub tool_execution: ToolExecutionMode,
     pub before_tool_call: Option<BeforeToolCallFn>,
     pub after_tool_call: Option<AfterToolCallFn>,
+    /// Prompt-cache keep-alive policy for the run's model (resolved per
+    /// run by the engine-side resolver the Agent carries). `None` (the
+    /// default) keeps the feature off: no warm requests, no request-shape
+    /// capture overhead.
+    pub cache_keep_alive: Option<CacheKeepAliveConfig>,
 }
 
 impl AgentLoopConfig {
@@ -159,6 +199,7 @@ impl AgentLoopConfig {
             tool_execution: ToolExecutionMode::Parallel,
             before_tool_call: None,
             after_tool_call: None,
+            cache_keep_alive: None,
         }
     }
 
@@ -188,6 +229,7 @@ impl AgentLoopConfig {
 
 mod abort;
 mod entry;
+mod keep_alive;
 mod response;
 mod run;
 mod tool_call;

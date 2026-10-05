@@ -10,6 +10,7 @@ use crate::stream::{LlmContext, StreamFn, StreamRequestOptions, ToolDefinition};
 use crate::types::{AgentContext, AgentEvent, AgentMessage, AssistantMessage};
 
 use super::abort::{create_aborted_assistant_message, race_with_abort};
+use super::keep_alive::CacheWarmRequest;
 use super::{AgentEventSink, AgentLoopConfig};
 
 // ---------------------------------------------------------------------------
@@ -17,25 +18,47 @@ use super::{AgentEventSink, AgentLoopConfig};
 // ---------------------------------------------------------------------------
 
 /// Port of `streamAssistantResponse`.
+/// The mutable per-request capture state threaded through the streaming
+/// body: the partial-message bookkeeping (the TS closure state) and the
+/// keep-alive's recorded request shape.
+pub(crate) struct StreamCapture {
+    partial_event: Option<Arc<crate::stream::AssistantMessageEvent>>,
+    added_partial: bool,
+    warm_request: Option<CacheWarmRequest>,
+}
+
+impl StreamCapture {
+    pub(crate) fn new(warm_request: Option<CacheWarmRequest>) -> Self {
+        StreamCapture {
+            partial_event: None,
+            added_partial: false,
+            warm_request,
+        }
+    }
+
+    /// The recorded request shape, when the policy armed the capture.
+    pub(crate) fn take_warm_request(&mut self) -> Option<CacheWarmRequest> {
+        self.warm_request.take()
+    }
+}
+
 pub(crate) async fn stream_assistant_response(
     context: &mut AgentContext,
     config: &AgentLoopConfig,
     signal: Option<&AbortSignal>,
     emit: &AgentEventSink,
     stream_fn: Option<&StreamFn>,
+    capture: &mut StreamCapture,
 ) -> anyhow::Result<AssistantMessage> {
-    let mut partial_event: Option<Arc<crate::stream::AssistantMessageEvent>> = None;
-    let mut added_partial = false;
-
     // The TS closure captures `partialMessage`/`addedPartial` by reference;
     // here the finish helper runs inline in the abort path below.
     macro_rules! finish_aborted_message {
         () => {{
             let final_message = create_aborted_assistant_message(
                 config,
-                partial_event.as_deref().and_then(event_partial),
+                capture.partial_event.as_deref().and_then(event_partial),
             );
-            if added_partial {
+            if capture.added_partial {
                 *context.messages.last_mut().unwrap() = AgentMessage::from(final_message.clone());
             } else {
                 context
@@ -54,16 +77,8 @@ pub(crate) async fn stream_assistant_response(
         }};
     }
 
-    let result = stream_assistant_response_inner(
-        context,
-        config,
-        signal,
-        emit,
-        stream_fn,
-        &mut partial_event,
-        &mut added_partial,
-    )
-    .await;
+    let result =
+        stream_assistant_response_inner(context, config, signal, emit, stream_fn, capture).await;
 
     match result {
         Ok(message) => Ok(message),
@@ -86,9 +101,13 @@ async fn stream_assistant_response_inner(
     signal: Option<&AbortSignal>,
     emit: &AgentEventSink,
     stream_fn: Option<&StreamFn>,
-    partial_event: &mut Option<Arc<crate::stream::AssistantMessageEvent>>,
-    added_partial: &mut bool,
+    capture: &mut StreamCapture,
 ) -> anyhow::Result<AssistantMessage> {
+    let StreamCapture {
+        partial_event,
+        added_partial,
+        warm_request,
+    } = capture;
     crate::abort::throw_if_aborted_signal(signal)?;
 
     let mut messages: Vec<AgentMessage> = context.messages.clone();
@@ -154,6 +173,16 @@ async fn stream_assistant_response_inner(
         headers: None,
     };
 
+    // The keep-alive's request shape (the exact request this turn is
+    // about to issue): captured only when the policy is armed, so the
+    // feature costs no clones when it is off.
+    if config.cache_keep_alive.is_some() {
+        *warm_request = Some(CacheWarmRequest {
+            model: config.model.clone(),
+            context: llm_context.clone(),
+            options: options.clone(),
+        });
+    }
     let mut response = race_with_abort(
         stream_fn(config.model.clone(), llm_context, options),
         signal,

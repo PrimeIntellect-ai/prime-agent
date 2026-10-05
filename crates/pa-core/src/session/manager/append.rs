@@ -347,6 +347,32 @@ impl SessionManager {
         Ok(id)
     }
 
+    /// Append a prompt-cache keep-alive row: one warm request fired while
+    /// a tool batch was pending (the response discarded, its usage kept).
+    /// Returns the new entry id.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying I/O error when the durable append fails.
+    pub fn append_cache_keep_alive(
+        &mut self,
+        provider: &str,
+        model_id: &str,
+        usage: pa_types::ai::Usage,
+    ) -> std::io::Result<String> {
+        let base = self.next_base();
+        let id = base.id.clone().unwrap_or_default();
+        self.append_entry(FileEntry::CacheKeepAlive {
+            payload: pa_types::session::CacheKeepAliveEntry {
+                provider: provider.to_string(),
+                model_id: model_id.to_string(),
+                usage,
+            },
+            base,
+        })?;
+        Ok(id)
+    }
+
     /// Append a session-info row (the session name); returns the new entry
     /// id.
     ///

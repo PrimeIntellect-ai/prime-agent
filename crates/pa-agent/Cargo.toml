@@ -15,6 +15,9 @@ tokio.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 
 [dev-dependencies]
+# `test-util` (tokio time pause) is test-only: the cache keep-alive tests
+# drive the fire windows through the paused clock.
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

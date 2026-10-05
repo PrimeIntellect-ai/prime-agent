@@ -60,6 +60,7 @@ const KNOWN_FIELDS: &[&str] = &[
     "warnings",
     "sessionDir",
     "requestTiming",
+    "cacheKeepAlive",
 ];
 
 /// Extract each known field independently; ignore fields whose JSON type does
@@ -155,6 +156,23 @@ mod tests {
             Some(&serde_json::json!(["~/my-ext/index.ts"])),
             "the dead key is preserved untouched in extra, never parsed"
         );
+    }
+
+    /// A wrong-typed `cacheKeepAlive` behaves as unset (the known-field
+    /// registry entry): the feature keeps its default (on for models with
+    /// cache blocks), never a surviving raw value.
+    #[test]
+    fn wrong_typed_cache_keep_alive_loads_as_none() {
+        let value: Value = serde_json::json!({ "cacheKeepAlive": "off" });
+        let settings = from_value_lenient(&value);
+        assert_eq!(settings.cache_keep_alive, None);
+        assert!(
+            settings.extra.get("cacheKeepAlive").is_none(),
+            "the wrong-typed known field drops out entirely: {:?}",
+            settings.extra
+        );
+        let settings = from_value_lenient(&serde_json::json!({ "cacheKeepAlive": false }));
+        assert_eq!(settings.cache_keep_alive, Some(false));
     }
 
     /// TS #2462: a wrong-typed `requestTiming` behaves as unset (the

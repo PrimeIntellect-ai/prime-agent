@@ -277,6 +277,14 @@ pub fn entry_display_text<S: std::hash::BuildHasher + Default>(
                 format!("[child usage: {input} input, {output} output]"),
             )]
         }
+        FileEntry::CacheKeepAlive { payload, .. } => {
+            let input = payload.usage.input + payload.usage.cache_read + payload.usage.cache_write;
+            let output = payload.usage.output;
+            vec![color(
+                ThemeColor::Dim,
+                format!("[cache keep-alive: {input} input, {output} output]"),
+            )]
+        }
         FileEntry::Label { payload, .. } => vec![color(
             ThemeColor::Dim,
             format!(

@@ -101,6 +101,14 @@ pub struct AgentInitialState {
 /// the `pa-ai` unification; the loop's request surface (temperature, max
 /// tokens, reasoning, session id, API key) is carried by
 /// [`crate::agent_loop::AgentLoopConfig`] / [`crate::stream::StreamRequestOptions`].
+/// Per-run prompt-cache keep-alive resolution: the engine installs this
+/// resolver, and every run's loop config consults it with the run's
+/// serving model (a mid-session model switch re-resolves; a `None`
+/// resolution keeps the feature off for that model). See
+/// [`crate::agent_loop::CacheKeepAliveConfig`].
+pub type CacheKeepAliveResolver =
+    Arc<dyn Fn(&Model) -> Option<crate::agent_loop::CacheKeepAliveConfig> + Send + Sync>;
+
 #[derive(Default)]
 pub struct AgentOptions {
     pub initial_state: AgentInitialState,
@@ -117,6 +125,10 @@ pub struct AgentOptions {
     pub follow_up_mode: Option<QueueMode>,
     pub session_id: Option<String>,
     pub tool_execution: Option<ToolExecutionMode>,
+    /// The engine's per-run prompt-cache keep-alive resolution (the
+    /// `cacheKeepAlive` setting's policy). `None` (the default) wires
+    /// nothing.
+    pub cache_keep_alive: Option<CacheKeepAliveResolver>,
 }
 
 struct MutableAgentState {
@@ -361,6 +373,9 @@ struct AgentInner {
     model_override: Mutex<Option<AgentModelOverride>>,
     session_id: Option<String>,
     tool_execution: ToolExecutionMode,
+    /// Per-run prompt-cache keep-alive resolution (the engine-installed
+    /// resolver; a plain field: read at run-config build, never mutated).
+    cache_keep_alive: Option<CacheKeepAliveResolver>,
 }
 
 impl AgentInner {
@@ -567,7 +582,16 @@ impl AgentInner {
             Some(routed) => (routed.model.clone(), routed.thinking_level),
             None => (shared.state.model.clone(), shared.state.thinking_level),
         };
+        // The keep-alive policy resolves against the run's serving model
+        // (a mid-session `set_model` or a routed run re-resolves; the
+        // resolver answers `None` for models whose requests carry no
+        // prompt-cache blocks).
+        let cache_keep_alive = self
+            .cache_keep_alive
+            .as_ref()
+            .and_then(|resolve| resolve(&model));
         let mut config = AgentLoopConfig::new(model, Arc::clone(&self.convert_to_llm));
+        config.cache_keep_alive = cache_keep_alive;
         config.api_key = None;
         config.temperature = None;
         config.max_tokens = None;
@@ -821,6 +845,7 @@ impl Agent {
             tool_execution: options
                 .tool_execution
                 .unwrap_or(ToolExecutionMode::Parallel),
+            cache_keep_alive: options.cache_keep_alive,
         });
         Agent { inner }
     }
