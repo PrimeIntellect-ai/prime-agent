@@ -232,11 +232,11 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
     .options(&[
         "--check  Print the update channel's latest release vs the running version, without installing",
         "--force     Reinstall the latest build of the channel",
-        "--rollback  Restore the previous compiled release (the managed-install flow)",
+        "--rollback  Restore the previous version the last update kept",
         "--nightly   Switch updates to the nightly channel (the latest main build)",
         "--stable    Return updates to the stable channel",
-        "--archive <path>  Install a local release payload (the managed-install flow)",
-        "--source <url>     The https:// origin recorded as the release's install source (required with --archive)",
+        "--archive <path>  Install a local release archive",
+        "--source <url>     The https:// origin recorded as the release's install source (managed installs; required there with --archive)",
     ])
     .description(
         "Move from the TypeScript version to the Rust port in one step: `prime-agent update` \

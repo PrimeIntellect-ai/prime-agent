@@ -711,7 +711,7 @@ async fn tui_copy_emits_the_ts_osc52_sequence() {
         "the empty-transcript error renders:\n{rendered}"
     );
     assert!(
-        rendered.contains("Copied last agent message to clipboard"),
+        rendered.contains("Clipboard request sent; paste in the local terminal to verify delivery"),
         "the copy status renders:\n{rendered}"
     );
     assert!(
@@ -787,13 +787,16 @@ async fn tui_copy_toast_coalesces_consecutive_copies_and_auto_dismisses() {
             // The coalesced count-bump toast renders (observed, not
             // slept-for): the third copy's ack is the (x3) label.
             pa_tui::interactive::HeadlessStep::WaitRender {
-                needle: "Copied last agent message to clipboard (x3)".to_string(),
+                needle:
+                    "Clipboard request sent; paste in the local terminal to verify delivery (x3)"
+                        .to_string(),
                 timeout_ms: 10_000,
             },
             // Past the toast's TTL: the overlay dismisses (the newest
             // frame stops carrying the ack).
             pa_tui::interactive::HeadlessStep::WaitGone {
-                needle: "Copied last agent message to clipboard".to_string(),
+                needle: "Clipboard request sent; paste in the local terminal to verify delivery"
+                    .to_string(),
                 timeout_ms: 10_000,
             },
         ],
@@ -815,7 +818,7 @@ async fn tui_copy_toast_coalesces_consecutive_copies_and_auto_dismisses() {
             );
         }
     }
-    let label = "Copied last agent message to clipboard";
+    let label = "Clipboard request sent; paste in the local terminal to verify delivery";
     // Every copy registered: the headless OSC 52 sink is one buffer for
     // the whole run, so the exact TS sequence appears three times
     // concatenated - one emission per copy.
