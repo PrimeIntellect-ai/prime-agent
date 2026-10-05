@@ -514,6 +514,11 @@ impl Supervisor {
             // warmup waits on it (see below) while the restore pass keeps
             // awaiting the task handle itself.
             let (adoption_tx, adoption_signal) = tokio::sync::watch::channel(false);
+            // The spawned passes stay detached (they run concurrently with
+            // serving by design), but their handles are returned to the
+            // monitor below: a lease compromise aborts them instead of
+            // letting ownership passes act against a successor.
+            let mut boot_tasks = Vec::new();
             let adoption = {
                 let supervisor = Arc::clone(&self);
                 let boot = match roster.as_ref() {
@@ -533,11 +538,13 @@ impl Supervisor {
                     let _ = adoption_tx.send(true);
                 })
             };
+            boot_tasks.push(adoption);
             {
                 let supervisor = Arc::clone(&self);
-                tokio::spawn(async move {
-                    crate::update_restore::restore_pass(&supervisor, adoption, roster).await;
-                });
+                let adoption_signal = adoption_signal.clone();
+                boot_tasks.push(tokio::spawn(async move {
+                    crate::update_restore::restore_pass(&supervisor, adoption_signal, roster).await;
+                }));
             }
 
             // Warm the passive scheduled-jobs snapshot (the input-latency
@@ -559,10 +566,10 @@ impl Supervisor {
             {
                 let supervisor = Arc::clone(&self);
                 let mut adopted = adoption_signal;
-                tokio::spawn(async move {
+                boot_tasks.push(tokio::spawn(async move {
                     Supervisor::wait_for_adoption_signal(&mut adopted).await;
                     supervisor.spawn_passive_catalog_warmup();
-                });
+                }));
             }
 
             // Session-archive sweep (roadmap: the sessions directory must
@@ -571,9 +578,9 @@ impl Supervisor {
             // gates serving.
             {
                 let supervisor = Arc::clone(&self);
-                tokio::spawn(async move {
+                boot_tasks.push(tokio::spawn(async move {
                     crate::session_archive::archive_sweep_loop(&supervisor).await;
-                });
+                }));
             }
 
             // Update-prepare watchdog: aborts deadline- or
@@ -581,13 +588,14 @@ impl Supervisor {
             // command arrives to re-check.
             {
                 let supervisor = Arc::clone(&self);
-                tokio::spawn(async move {
+                boot_tasks.push(tokio::spawn(async move {
                     supervisor.update_prepare_watchdog().await;
-                });
+                }));
             }
+            boot_tasks
         };
         #[cfg(unix)]
-        tokio::select! {
+        let boot_tasks = tokio::select! {
             // `biased` polls the monitor first, deterministically: an
             // already-compromised lease must win the tie against a boot
             // block that finishes on its first poll (no reap targets, the
@@ -602,10 +610,10 @@ impl Supervisor {
                     .append("daemon socket lease compromised; relinquishing supervisor ownership");
                 return Err(anyhow!("daemon socket lease compromised"));
             }
-            () = boot_ownership => {}
-        }
+            tasks = boot_ownership => tasks,
+        };
         #[cfg(not(unix))]
-        boot_ownership.await;
+        let _boot_tasks = boot_ownership.await;
 
         #[cfg(unix)]
         socket_lease.assert_held()?;
@@ -613,6 +621,12 @@ impl Supervisor {
         let serving = tokio::select! {
             result = accept_loop::serve(&self, &*listener) => result,
             () = socket_lease.wait_compromised() => {
+                // The boot's ownership passes die with the lease: none may
+                // adopt or restore against a successor that holds the
+                // socket now.
+                for task in &boot_tasks {
+                    task.abort();
+                }
                 self.shutting_down.store(true, Ordering::SeqCst);
                 self.accept_exit.store(true, Ordering::SeqCst);
                 self.shutdown_notify.notify_waiters();
