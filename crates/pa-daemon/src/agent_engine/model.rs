@@ -310,14 +310,33 @@ impl AgentSessionEngine {
     /// registers once per engine: its queued responses then span the whole
     /// session (multi-turn scripts), instead of replaying from the top on
     /// every model resolution.
+    ///
+    /// The script model serves the session while the selection is unset or
+    /// names it; any other selection resolves through the registry (a
+    /// models.json faux-api model streams through the same registered
+    /// provider).
     pub(crate) fn resolve_model(&self) -> anyhow::Result<Model> {
         if let Some(script) = &self.config.faux_script {
-            if let Some(model) = self.faux_model.get() {
-                return Ok(model.clone());
+            let model = if let Some(model) = self.faux_model.get() {
+                model.clone()
+            } else {
+                let model = faux_model_from_script(script)?;
+                let _ = self.faux_model.set(model.clone());
+                model
+            };
+            let selection = self.current_selection();
+            let names_script_model = selection
+                .provider
+                .as_deref()
+                .is_none_or(|provider| provider == model.provider.as_str())
+                && selection
+                    .model
+                    .as_deref()
+                    .is_none_or(|model_id| model_id == model.id.as_str());
+            if names_script_model {
+                return Ok(model);
             }
-            let model = faux_model_from_script(script)?;
-            let _ = self.faux_model.set(model.clone());
-            return Ok(model);
+            return self.resolve_registry_model();
         }
         self.resolve_registry_model()
     }

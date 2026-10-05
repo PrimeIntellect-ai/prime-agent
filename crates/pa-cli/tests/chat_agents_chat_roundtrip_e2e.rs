@@ -348,6 +348,9 @@ async fn the_roundtrip_reentry_renders_the_same_transcript() {
 /// sequence, and the transcript-unchanged sojourn's re-entry still
 /// adopts — the re-entry's first draw serves the held packs (the
 /// observable the byte-identical frames cannot prove on their own).
+/// The turn is submitted through the settle barrier, so the exit stashes
+/// under the worker's final sequence (the settle update after
+/// `agent_end`).
 #[tokio::test]
 async fn a_post_turn_sojourn_reentry_still_serves_the_held_packs() {
     let _handoff_guard = HANDOFF_E2E_LOCK.lock().await;
@@ -381,8 +384,10 @@ async fn a_post_turn_sojourn_reentry_still_serves_the_held_packs() {
                     needle: "flow audit clean".to_string(),
                     timeout_ms: 20_000,
                 },
-                HeadlessStep::Submit("one more turn".to_string()),
-                HeadlessStep::WaitIdle { timeout_ms: 30_000 },
+                HeadlessStep::SubmitAndSettle {
+                    text: "one more turn".to_string(),
+                    timeout_ms: 30_000,
+                },
                 HeadlessStep::WaitRender {
                     needle: "the live turn reply".to_string(),
                     timeout_ms: 20_000,

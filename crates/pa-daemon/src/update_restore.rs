@@ -574,7 +574,7 @@ async fn continuation_treatment(
             resident,
             "prompt",
             json!({ "message": UPDATE_RESTART_CONTINUATION_PROMPT }),
-            crate::supervisor::LONG_ROUTE_TIMEOUT_MS,
+            crate::supervisor::ROUTE_TIMEOUT_MS,
             RouteAdmission::SupervisorInternal,
         )
         .await;

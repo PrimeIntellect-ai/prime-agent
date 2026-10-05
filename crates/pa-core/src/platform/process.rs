@@ -330,6 +330,7 @@ pub fn pidfd_signal(fd: i32, signal: Signal) -> bool {
         any(target_arch = "x86_64", target_arch = "aarch64")
     ))
 ))]
+#[must_use]
 pub fn pidfd_signal(_fd: i32, _signal: Signal) -> bool {
     false
 }

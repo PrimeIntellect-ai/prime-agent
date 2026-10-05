@@ -44,9 +44,12 @@ import copy
 import hashlib
 import heapq
 import json
+import math
+import os
 import re
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
 
@@ -98,6 +101,70 @@ def _is_scalar(value: Any) -> bool:
 
 def _is_positive_int(value: Any) -> bool:
     return _is_int(value) and value > 0
+
+
+MAX_GUARD_VALUE_DEPTH = 256
+"""Nesting bound on one guard comparison value (``when.value``). Every
+seam the value rides recurses per level — the traversal itself, the
+snapshot's ``deepcopy``, the wire conversion, the reply frames' JSON
+encoder — so a value deeper than this bound cannot ride any of them and
+would exhaust the interpreter's stack on the way to finding out. A
+container nested beyond the bound rejects as part of the same
+finite-JSON-data rule, with the validation answer instead of the crash."""
+
+
+def _value_is_finite(
+    value: Any, _seen: "frozenset[int] | None" = None, _depth: int = 0
+) -> bool:
+    """True when a guard comparison value is JSON clean: every nested
+    float finite, every object key a string, every leaf a JSON scalar,
+    and no cycle.
+    JSON carries no NaN/Infinity tokens, so a non-finite float would
+    serialize as the non-JSON ``NaN``/``Infinity`` tokens and break every
+    strict consumer of the reply frames (the host bridge's parser
+    included) — a machine declaring one is invalid at the source. Object
+    keys must be strings for the same reason at both ends: a non-finite
+    float key carries the token into the frame the same way, and a
+    non-string key (an int, a tuple) is either coerced by the encoder —
+    so the wire object no longer matches the machine's declared one —
+    or rejected by it; either way it is not the declared comparison.
+    Leaves outside JSON's scalar set reject the same way: a tuple (or a
+    set, bytes, any other container the JSON grammar has no spelling
+    for) serializes as something other than the declared shape if the
+    encoder accepts it at all, and the non-finite floats it can carry
+    would ride that path past this check. A self-referential container
+    is rejected too — the encoder refuses circular references outright,
+    so it can never be a valid comparison value — and the traversal
+    stops at the cycle instead of exhausting the interpreter's stack
+    chasing it. ``_seen`` threads the per-branch ancestry (a
+    shared-but-acyclic reference appearing twice stays valid: each
+    branch checks it independently). Depth bounds the nesting the same
+    way: a container nested beyond ``MAX_GUARD_VALUE_DEPTH`` levels
+    cannot ride any of the value's downstream seams (the snapshot's
+    deep copy, the wire conversion, the reply frames' encoder are each
+    recursive per level), so it rejects here with the validation answer
+    instead of exhausting the interpreter's stack further down the
+    write path.
+    """
+    if _depth > MAX_GUARD_VALUE_DEPTH:
+        return False
+    seen = _seen or frozenset()
+    if isinstance(value, (list, dict)):
+        if id(value) in seen:
+            return False
+        seen = seen | {id(value)}
+    if isinstance(value, float):
+        return math.isfinite(value)
+    if isinstance(value, (bool, int, str)) or value is None:
+        return True
+    if isinstance(value, list):
+        return all(_value_is_finite(item, seen, _depth + 1) for item in value)
+    if isinstance(value, dict):
+        return all(
+            isinstance(key, str) and _value_is_finite(item, seen, _depth + 1)
+            for key, item in value.items()
+        )
+    return False
 
 
 def _is_nonempty_str(value: Any) -> bool:
@@ -408,6 +475,13 @@ def _validate_guard(
             errors.append(f"transitions[{index}] when.op 'contains' requires a non-empty list value")
     elif op in ("eq", "ne") and not _is_scalar(value):
         errors.append(f"transitions[{index}] when.op {op!r} requires a scalar value")
+    if not _value_is_finite(value):
+        errors.append(
+            f"transitions[{index}] when.value must be finite JSON data "
+            "(JSON carries no NaN or Infinity, and only JSON shapes "
+            "serialize: lists, objects, strings, numbers, booleans, null, "
+            f"and no container nests deeper than {MAX_GUARD_VALUE_DEPTH} levels)"
+        )
 
 
 def validate_factory_machine(machine: Any) -> list[str]:
@@ -898,16 +972,30 @@ __all__ = [
     "FACTORY_HELP",
     "FactoryExecutor",
     "FactoryRun",
+    "MachineFile",
+    "MachineResolutionError",
     "canonicalize_factory_spec",
+    "cli_dispatch",
     "compile_factory_dag",
     "default_factory_executor",
+    "export_factory_spec",
+    "export_library_machine",
+    "export_machine",
     "factory_enabled",
+    "import_machine",
+    "list_machines",
+    "machine_library_dirs",
+    "parse_machine_file",
+    "render_machine_file",
+    "repo_machines_dir",
     "require_factory_enabled",
+    "resolve_machine",
     "resume_factory",
     "run_factory",
     "status_factory",
     "stop_factory",
     "topological_order",
+    "user_machines_dir",
     "validate_factory_machine",
     "validate_factory_spec",
 ]
@@ -936,6 +1024,34 @@ parent or replay checker reads.
 
 POLL_TIMEOUT_MS = 2000
 """How long each control-loop ``rlm.collect`` waits for unsettled children."""
+
+WATCH_TIMEOUT_CAP_SECONDS = 60.0
+"""Upper bound on one ``factory.watch`` timeout (seconds), the agent-side
+streaming monitor's ceiling. The host bridge caps its own lane lower
+(``FACTORY_HOST_WATCH_TIMEOUT_MS``); this is the kernel-side bound."""
+
+LAST_FIRED_WINDOW = 10
+# The unscoped graph's terminal-history window: the newest terminal runs
+# the all-runs reply carries (every live run reports regardless).
+GRAPH_RUNS_WINDOW = 20
+"""Trailing fired transitions the graph snapshot reports for edge marking."""
+
+GRAPH_EVENTS_TAIL = 40
+"""Trailing ledger events a compact (host-lane) graph snapshot carries."""
+
+FACTORY_FRAME_CAP = 262_144
+"""Serialized byte cap on one factory_activity reply frame. A graph for the
+full 1024-state machine cap fits; a snapshot that cannot shrink under the
+cap fails loudly instead of being silently truncated."""
+
+ACTIVITY_ACTIONS = ("graph", "status", "watch", "run", "stop", "resume")
+"""The host bridge's actions over one factory run, the ``factory_activity``
+frame's action vocabulary (the kernel namespace is the same surface plus
+``graph``/``watch`` for agents)."""
+
+ACTIVITY_TIMEOUT_MS_CAP = int(WATCH_TIMEOUT_CAP_SECONDS * 1000)
+"""Upper bound on one factory_activity frame's timeoutMs (the watch wait
+bound on the wire); the host bridge pins its own lower bound."""
 
 BACKOFF_MAX_ATTEMPTS = 5
 """Spawn admissions per node before a persistent rate limit fails the node."""
@@ -1263,6 +1379,13 @@ class FactoryRun:
     run_id: str
     spec_id: str
     name: str | None
+    # The canonicalized machine this run executes: a stored entry's spec or
+    # a library machine's template, kept read-only. The graph snapshot's
+    # static structure (states, transitions, run block) reads it, so
+    # agents and the TUI see the machine the run validated, and
+    # export_machine serializes the exact machine a run is running
+    # (byte-pretty, stable formatting).
+    machine: "dict[str, Any]" = field(default_factory=dict)
     state: str = "running"  # running | stopping | paused | done | failed | stopped
     started_at: float = 0.0
     max_parallel: int = RUN_MAX_PARALLEL_DEFAULT
@@ -1298,6 +1421,12 @@ class FactoryRun:
     # sources settle in one collect batch fires once, not once per source
     # settle, and re-fires only when a source settles again.
     join_fired: dict[tuple[int, str], frozenset[tuple[str, int]]] = field(default_factory=dict)
+    # Watch bookkeeping: bumped on every ledger event (every observable
+    # mutation emits one), and every registered watch future resolves with
+    # the new revision. ``factory.watch`` compares signatures, so a bump
+    # that leaves the run's state/instance shape unchanged just re-arms.
+    revision: int = 0
+    watchers: list = field(default_factory=list)
 
 
 class FactoryExecutor:
@@ -1369,6 +1498,40 @@ class FactoryExecutor:
         if reference_errors:
             raise ValueError("; ".join(reference_errors))
         run = self._create_run(entry.id, canonical, resolved, name=name)
+        return await self._launch_run(run)
+
+    async def run_machine(
+        self, machine: MachineFile, *, machine_path: Path | None = None, name: str | None = None
+    ) -> dict[str, Any]:
+        """Validate a library machine and start a run of it.
+
+        Harness entries remain runtime instances; machines in the library
+        are templates, so a library run never creates one. The machine's
+        spec goes through the same validation and canonicalization as a
+        stored entry's (``canonicalize_factory_spec``), the run records the
+        machine's name as its spec id, and the result reports the machine
+        fields so a caller can trace the run back to the library file.
+        """
+        canonical = canonicalize_factory_spec(machine.spec)
+        harness = self._resolve_harness()
+        resolved, reference_errors = self._resolve_subagents(harness, canonical)
+        if reference_errors:
+            raise ValueError("; ".join(reference_errors))
+        run = self._create_run(machine.name, canonical, resolved, name=name)
+        result = await self._launch_run(run)
+        result["machine"] = machine.name
+        if machine_path is not None:
+            result["machine_path"] = str(machine_path)
+        return result
+
+    async def _launch_run(self, run: FactoryRun) -> dict[str, Any]:
+        """Register a run, enter its entry states, and start the control loop.
+
+        Shared by ``run`` (stored entries) and ``run_machine`` (library
+        machines): both validate first, so this never sees an invalid
+        spec. Nonblocking: admission enters every entry state up to
+        ``max_parallel`` and returns; a background task continues the run.
+        """
         self._runs[run.run_id] = run
         self._event(
             run, "run_started", detail=f"{len(run.states)} states, max_parallel {run.max_parallel}"
@@ -1386,8 +1549,8 @@ class FactoryExecutor:
             self._start_loop(run)
         return {
             "run_id": run.run_id,
-            "spec_id": entry.id,
-            "name": name,
+            "spec_id": run.spec_id,
+            "name": run.name,
             "nodes": len(run.states),
             "max_parallel": run.max_parallel,
             "started": started,
@@ -1405,42 +1568,7 @@ class FactoryExecutor:
         Raises ``ValueError`` for an unknown run id.
         """
         run = self._require_run(run_id)
-        nodes: list[dict[str, Any]] = []
-        for state_id in run.order:
-            state = run.states[state_id]
-            entry_report: dict[str, Any] = {
-                "id": state.state_id,
-                "status": state.status,
-                "lifecycle": state.lifecycle,
-                "attempts": sum(
-                    instance.attempt for entry in state.entries for instance in entry.instances
-                ),
-                "entries_used": state.entries_used,
-                "max_entries": state.max_entries,
-                "entries": [
-                    {"index": entry.index, "status": entry.status, "error": entry.error}
-                    for entry in state.entries
-                ],
-                "instances": [
-                    {
-                        "index": instance.index,
-                        "entry": entry.index,
-                        "status": instance.status,
-                        "attempt": instance.attempt,
-                        "child": instance.child_id,
-                        "duration_ms": instance.duration_ms,
-                        "error": instance.error,
-                    }
-                    for entry in state.entries
-                    for instance in entry.instances
-                ],
-            }
-            latest = state.latest_settle()
-            if latest is not None and latest.answer:
-                entry_report["answer_preview"] = latest.answer
-            if state.error is not None:
-                entry_report["error"] = state.error
-            nodes.append(entry_report)
+        nodes = [self._state_report(run.states[state_id]) for state_id in run.order]
         for event in run.events:
             if event["stage"] in ("recorded", "arrived"):
                 event["stage"] = "delivered"
@@ -1452,15 +1580,7 @@ class FactoryExecutor:
             "nodes": nodes,
             "events": [dict(event) for event in run.events[-EVENT_WINDOW:]],
             "elapsed_ms": int((self._now_fn() - run.started_at) * 1000),
-            "usage": {
-                "spawns": run.spawn_count,
-                "settled": run.settle_count,
-                "tool_uses": run.tool_use_total,
-                "max_parallel": run.max_parallel,
-                "max_children": run.max_children,
-                "running": self._running_instance_count(run),
-                "transitions_fired": run.transitions_fired,
-            },
+            "usage": self._usage_report(run),
         }
 
     async def stop(self, run_id: str) -> dict[str, Any]:
@@ -1480,6 +1600,7 @@ class FactoryExecutor:
         if run.state in ("stopping", "stopped"):
             return {"run_id": run.run_id, "state": run.state, "cancelled": []}
         run.state = "stopping"
+        self._touch(run)
         stopped = await self._halt_nonterminal(run, "run stopped")
         run.state = "stopped"
         self._event(run, "run_stopped", detail=f"stopped; {len(stopped)} state(s) cancelled")
@@ -1503,6 +1624,7 @@ class FactoryExecutor:
         run.loop_generation += 1
         run.state = "running"
         run.pause_reason = None
+        self._touch(run)
         self._event(run, "resumed", detail="resumed by caller")
         # Evaluate settles first: paused runs may still carry transitions to
         # fire (escalate) before anything can be admitted.
@@ -1520,6 +1642,394 @@ class FactoryExecutor:
             "started": started,
             "pending": self._pending_state_ids(run),
         }
+
+    # -- graph, watch, host activity ------------------------------------------
+
+    def _state_report(
+        self, state: _StateRun, *, include_answer: bool = True
+    ) -> dict[str, Any]:
+        """One state's live report, the exact ``status()`` node shape.
+
+        The graph snapshot reuses it verbatim so the fused view is
+        ``status()``'s data plus the static graph (``include_answer=False``
+        drops the settle answer preview on the compact host lane, where
+        nothing renders answers). The report carries the stage's agent
+        occupancy — ``running`` (admitted children in flight) and
+        ``queued`` (prepared instances waiting for a parallel slot) —
+        so every surface reads "how many agents are at this stage"
+        without re-deriving it from the instance rows; both keys are
+        single words, so the wire's camelCase conversion carries them
+        unchanged.
+        """
+        report: dict[str, Any] = {
+            "id": state.state_id,
+            "status": state.status,
+            "lifecycle": state.lifecycle,
+            "attempts": sum(
+                instance.attempt for entry in state.entries for instance in entry.instances
+            ),
+            "entries_used": state.entries_used,
+            "max_entries": state.max_entries,
+            "entries": [
+                {"index": entry.index, "status": entry.status, "error": entry.error}
+                for entry in state.entries
+            ],
+            "instances": [
+                {
+                    "index": instance.index,
+                    "entry": entry.index,
+                    "status": instance.status,
+                    "attempt": instance.attempt,
+                    "child": instance.child_id,
+                    "duration_ms": instance.duration_ms,
+                    "error": instance.error,
+                }
+                for entry in state.entries
+                for instance in entry.instances
+            ],
+            "running": sum(
+                1
+                for entry in state.entries
+                for instance in entry.instances
+                if instance.status == "running"
+            ),
+            "queued": sum(
+                1
+                for entry in state.entries
+                for instance in entry.instances
+                if instance.status == "pending"
+            ),
+        }
+        if include_answer:
+            latest = state.latest_settle()
+            if latest is not None and latest.answer:
+                report["answer_preview"] = latest.answer
+        if state.error is not None:
+            report["error"] = state.error
+        return report
+
+    def _usage_report(self, run: FactoryRun) -> dict[str, Any]:
+        """The usage block ``status()`` returns; the graph snapshot reuses it."""
+        return {
+            "spawns": run.spawn_count,
+            "settled": run.settle_count,
+            "tool_uses": run.tool_use_total,
+            "max_parallel": run.max_parallel,
+            "max_children": run.max_children,
+            "running": self._running_instance_count(run),
+            "transitions_fired": run.transitions_fired,
+        }
+
+    def _last_fired(self, run: FactoryRun) -> list[dict[str, Any]]:
+        """The trailing fired transitions (newest firing first, at most
+        ``LAST_FIRED_WINDOW`` edges) for the diagram's edge marking. The
+        ledger is the authority: an edge that fired twice keeps its latest
+        firing only."""
+        latest: dict[str, dict[str, Any]] = {}
+        for event in run.events:
+            if event.get("kind") != "transition_fired":
+                continue
+            from_field = event.get("from")
+            # The guard rides the edge's identity: two guarded transitions
+            # may share one from+to pair, and the diagram's fired marking
+            # needs the one that actually fired (the event's ``when``).
+            edge = {
+                "from": from_field,
+                "to": event.get("to"),
+                "seq": event.get("seq"),
+                "when": event.get("when"),
+            }
+            latest[
+                f"{json.dumps(from_field, sort_keys=True)}->{event.get('to')}"
+                f"@{json.dumps(event.get('when'), sort_keys=True, default=str)}"
+            ] = edge
+        ordered = sorted(latest.values(), key=lambda edge: edge["seq"], reverse=True)
+        return ordered[:LAST_FIRED_WINDOW]
+
+    def _graph_events(self, run: FactoryRun, *, compact: bool) -> list[dict[str, Any]]:
+        """The trailing event window. The compact host lane sheds answer
+        payloads (the ``answer_captured`` rows) and carries the shorter
+        ``GRAPH_EVENTS_TAIL`` tail; the agent lane sees ``status()``'s full
+        ``EVENT_WINDOW`` window with stages untouched (``graph`` is a pure
+        read; only ``status()`` marks events delivered)."""
+        window = run.events[-(GRAPH_EVENTS_TAIL if compact else EVENT_WINDOW) :]
+        events = [dict(event) for event in window]
+        if compact:
+            events = [event for event in events if event.get("kind") != "answer_captured"]
+        return events
+
+    def _graph_snapshot(self, run: FactoryRun, *, compact: bool) -> dict[str, Any]:
+        """One live run's fused snapshot: the machine structure plus the
+        live overlay (nodes, active nodes, last-fired edges, events tail,
+        usage, budget consumed)."""
+        elapsed_ms = int((self._now_fn() - run.started_at) * 1000)
+        return {
+            "run_id": run.run_id,
+            "spec_id": run.spec_id,
+            "name": run.name,
+            "state": run.state,
+            "pause_reason": run.pause_reason,
+            "elapsed_ms": elapsed_ms,
+            "machine": _machine_structure(
+                run.machine,
+                {
+                    state_id: (run.states[state_id].model, run.states[state_id].thinking)
+                    for state_id in run.order
+                },
+            ),
+            "nodes": [
+                self._state_report(run.states[state_id], include_answer=not compact)
+                for state_id in run.order
+            ],
+            # Activity is children-shaped, not entry-shaped alone: a
+            # foreach entry that failed permanently (failure_policy
+            # continue) is terminal at the entry layer while its
+            # admitted siblings still run -- the quiescence contract
+            # (_run_complete) counts those instances, and the node report
+            # carries them as the stage's occupancy, so a stage with
+            # live children stays in the overlay exactly while its
+            # occupancy label can be nonzero.
+            "active_nodes": [
+                state_id
+                for state_id in run.order
+                if any(
+                    entry.status in ("pending", "running")
+                    or any(
+                        instance.status in ("pending", "running")
+                        for instance in entry.instances
+                    )
+                    for entry in run.states[state_id].entries
+                )
+            ],
+            "last_fired": self._last_fired(run),
+            "events": self._graph_events(run, compact=compact),
+            "usage": self._usage_report(run),
+            "budget": {"limit_ms": run.run_budget_ms, "consumed_ms": elapsed_ms},
+        }
+
+    def _spec_snapshot(
+        self, spec_id: str, canonical: dict[str, Any], *, compact: bool
+    ) -> dict[str, Any]:
+        """A stored spec's static graph: no live run exists, so the overlay
+        reports the shape a fresh run starts from (nothing entered, nothing
+        consumed). The compact flag is accepted for lane symmetry; a spec
+        graph carries no answers to shed."""
+        run_block = canonical["run"]
+        return {
+            "run_id": None,
+            "spec_id": spec_id,
+            "name": None,
+            "state": None,
+            "pause_reason": None,
+            "elapsed_ms": 0,
+            "machine": _machine_structure(canonical),
+            "nodes": [],
+            "active_nodes": [],
+            "last_fired": [],
+            "events": [],
+            "usage": None,
+            "budget": {"limit_ms": run_block.get("budget_ms"), "consumed_ms": 0},
+        }
+
+    def graph(self, ref: str | None = None, *, compact: bool = False) -> dict[str, Any]:
+        """One machine's structure fused with live runtime state.
+
+        ``ref`` naming a live run id returns that run's fused snapshot
+        (``status()``'s data plus the static graph and the diagram overlay);
+        ``ref`` naming a stored factory spec id returns the static
+        structure with no live overlay. ``ref=None`` returns every live
+        run's snapshot, oldest run first, as ``{"runs": [...]}`` (the view
+        lane's polling shape). Raises ``ValueError`` when ``ref`` names
+        neither a live run nor a stored spec, or a stored spec fails its
+        own validation.
+        """
+        if ref is None:
+            # Insertion order is start order (runs append to the registry),
+            # so the oldest run reports first; a clock tie between two
+            # starts never shuffles the panels. The unscoped list is
+            # BOUNDED: every live run reports (the dock's count and the
+            # view's panels stay exact), and the terminal history keeps
+            # at most the newest ``GRAPH_RUNS_WINDOW`` runs — the wire cap
+            # would drop older terminal runs anyway, and the bound keeps
+            # one polling reply's construction O(window), not
+            # O(registry) (the registry retains every run it ever
+            # hosted; by-ref snapshots stay available for all of them).
+            # Liveness is children-shaped, not state-shaped alone: a
+            # ``done``/``failed`` run whose instances are still in
+            # flight (the resident lifecycle — admitted residents never
+            # block completion, and the finished milestone tells the
+            # operator to ``rlm.factory.stop()`` them) is LIVE, so the
+            # page keeps the run and its stop control while any child
+            # runs; the terminal history window holds only runs with no
+            # child in flight.
+            live_states = ("running", "stopping", "paused")
+            # The registry's insertion order is start order, so the list's
+            # tail is the newest terminal history.
+            terminal_ids = [
+                run.run_id
+                for run in self._runs.values()
+                if run.state not in live_states and self._running_instance_count(run) == 0
+            ]
+            newest_terminal_ids = set(terminal_ids[-GRAPH_RUNS_WINDOW:])
+            return {
+                "runs": [
+                    self._graph_snapshot(run, compact=compact)
+                    for run in self._runs.values()
+                    if run.state in live_states
+                    or self._running_instance_count(run) > 0
+                    or run.run_id in newest_terminal_ids
+                ]
+            }
+        run = self._runs.get(ref)
+        if run is not None:
+            return self._graph_snapshot(run, compact=compact)
+        harness = self._resolve_harness()
+        entry = harness.get("factory", ref)
+        if entry is None:
+            raise ValueError(f"unknown factory run or spec {ref!r}")
+        arguments = entry.arguments if isinstance(entry.arguments, dict) else {}
+        spec = arguments.get("machine")
+        if spec is None:
+            spec = arguments.get("dag")
+        try:
+            canonical = canonicalize_factory_spec(spec)
+        except ValueError as exc:
+            raise ValueError(f"factory spec {ref!r} does not validate: {exc}") from exc
+        return self._spec_snapshot(entry.id, canonical, compact=compact)
+
+    def _signature(self, run: FactoryRun) -> tuple[Any, ...]:
+        """The run's live shape a watch treats as a change: the run state,
+        every state's entries and per-instance statuses, and the transition
+        counter. Ledger-only movement (backoff notices, repeated
+        milestones) leaves the shape unchanged, so the wait re-arms instead
+        of waking the caller with an identical graph (no per-transition
+        spam at the watch surface either).
+        """
+
+        def state_shape(state: _StateRun) -> tuple[Any, ...]:
+            return (
+                state.status,
+                state.entries_used,
+                tuple(
+                    (entry.index, entry.status, tuple(i.status for i in entry.instances))
+                    for entry in state.entries
+                ),
+            )
+
+        return (
+            run.state,
+            run.pause_reason,
+            run.transitions_fired,
+            tuple((state_id, state_shape(run.states[state_id])) for state_id in run.order),
+        )
+
+    async def watch(
+        self, run_id: str, timeout: float = 0.0, *, compact: bool = False
+    ) -> dict[str, Any]:
+        """Block until the run's state/instance shape changes or the bounded
+        ``timeout`` (seconds, capped at ``WATCH_TIMEOUT_CAP_SECONDS``)
+        elapses, then return the same fused snapshot ``graph()`` returns
+        with one extra ``changed`` key: whether a change ended the wait or
+        the deadline did. An already-changed run returns immediately; the
+        clock and sleep are the executor's injected pair, so the wait is
+        testable and bounded on the same lane the control loop uses.
+        Raises ``ValueError`` for an unknown run id or a negative or
+        non-numeric timeout.
+        """
+        import asyncio
+
+        run = self._require_run(run_id)
+        # NaN passes every arithmetic check (every comparison is false), so
+        # it must be rejected by identity: a NaN deadline would reach
+        # asyncio.sleep, which raises instead of returning the bounded
+        # snapshot (a NaN timeout is not a number here).
+        if not _is_number(timeout) or math.isnan(float(timeout)):
+            raise ValueError("timeout must be a non-negative number of seconds")
+        if timeout < 0:
+            raise ValueError("timeout must be a non-negative number of seconds")
+        timeout = min(float(timeout), WATCH_TIMEOUT_CAP_SECONDS)
+        deadline = self._now_fn() + timeout
+        baseline = self._signature(run)
+        changed = False
+        while True:
+            if self._signature(run) != baseline:
+                changed = True
+                break
+            remaining = deadline - self._now_fn()
+            if remaining <= 0:
+                break
+            waiter = asyncio.get_running_loop().create_future()
+            run.watchers.append(waiter)
+            sleeper = asyncio.ensure_future(self._sleep_fn(remaining))
+            try:
+                await asyncio.wait({sleeper, waiter}, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                if waiter in run.watchers:
+                    run.watchers.remove(waiter)
+                sleeper.cancel()
+                try:
+                    await sleeper
+                except asyncio.CancelledError:
+                    pass
+        snapshot = self._graph_snapshot(run, compact=compact)
+        return {"changed": changed, **snapshot}
+
+    async def activity(self, request: dict[str, Any]) -> Any:
+        """Handle one out-of-band ``factory_activity`` request frame (the
+        host bridge's lane): route the action to ``graph``/``status``/
+        ``watch``/``run``/``stop``/``resume`` and return the reply's result
+        payload. Raises ``ValueError`` for malformed requests and unknown
+        runs/specs (the reply carries it as the error reason). ``graph``
+        and ``watch`` answer with the compact snapshots (the host lane
+        renders diagrams, not answers); ``run`` is the lane that starts a
+        run from the daemon or TUI, so it rides the full ``run()``
+        validation. The reply's result payload carries the WIRE's
+        camelCase keys (``_wire_payload`` re-keys the snake_case rows: the
+        protocol's request frame is camelCase end to end) — the
+        conversation API (``rlm.factory.graph()`` in-kernel) stays
+        snake_case.
+        """
+        # The lane rides the same opt-in gate as the namespace: while
+        # ``factory.enabled`` is off, every activity action -- ``run``
+        # included, which would otherwise bypass the namespace's gate --
+        # refuses with the one refusal message.
+        require_factory_enabled()
+        action = request.get("action")
+        if action not in ACTIVITY_ACTIONS:
+            raise ValueError(f"unknown factory activity action {action!r}")
+        run_id = request.get("runId")
+        spec_id = request.get("specId")
+        for key, value in (("runId", run_id), ("specId", spec_id)):
+            if value is not None and not isinstance(value, str):
+                raise ValueError(f"factory activity {key} must be a string when provided")
+        timeout_ms = request.get("timeoutMs")
+        if timeout_ms is None:
+            timeout_ms = 0
+        if not _is_int(timeout_ms) or not 0 <= timeout_ms <= ACTIVITY_TIMEOUT_MS_CAP:
+            raise ValueError(
+                f"factory activity timeoutMs must be an integer between 0 and {ACTIVITY_TIMEOUT_MS_CAP}"
+            )
+        if action == "graph":
+            return _wire_payload(self.graph(run_id or spec_id, compact=True))
+        if action == "status":
+            if not run_id:
+                raise ValueError("factory activity status requires runId")
+            return _wire_payload(await self.status(run_id))
+        if action == "watch":
+            if not run_id:
+                raise ValueError("factory activity watch requires runId")
+            return _wire_payload(
+                await self.watch(run_id, timeout_ms / 1000.0, compact=True)
+            )
+        if action == "run":
+            if not spec_id:
+                raise ValueError("factory activity run requires specId")
+            return _wire_payload(await self.run(spec_id))
+        if not run_id:
+            raise ValueError(f"factory activity {action} requires runId")
+        if action == "stop":
+            return _wire_payload(await self.stop(run_id))
+        return _wire_payload(await self.resume(run_id))
 
     # -- setup --------------------------------------------------------------
 
@@ -1593,6 +2103,7 @@ class FactoryExecutor:
             run_id=uuid4().hex,
             spec_id=spec_id,
             name=name,
+            machine=canonical,
             started_at=self._now_fn(),
             max_parallel=run_spec["max_parallel"],
             max_transitions=run_spec["max_transitions"],
@@ -1656,7 +2167,21 @@ class FactoryExecutor:
             event["detail"] = detail
         event.update(extra)
         run.events.append(event)
+        # Every ledger event is an observable mutation, so the watch
+        # bookkeeping rides the same seam: bump the revision and resolve
+        # every registered watcher. ``watch`` re-checks its signature, so
+        # an event that leaves the state/instance shape unchanged (a
+        # backoff notice, a repeated milestone) just re-arms the wait.
+        self._touch(run)
         return event
+
+    def _touch(self, run: FactoryRun) -> None:
+        """Bump the run's watch revision and wake every registered watcher."""
+        run.revision += 1
+        for waiter in run.watchers:
+            if not waiter.done():
+                waiter.set_result(run.revision)
+        run.watchers = []
 
     async def _milestone(self, run: FactoryRun, kind: str, detail: str, *, node: str | None = None) -> None:
         """Record a run milestone and inject one quiet notice (one per kind).
@@ -1791,11 +2316,19 @@ class FactoryExecutor:
                 if join_signature is not None:
                     run.join_fired[join_signature[0]] = join_signature[1]
                 run.transitions_fired += 1
+                # The guard rides the fired event (and the ``last_fired``
+                # edge the graph overlay reads): two guarded transitions may
+                # share one from+to pair, so the guard is the only identity
+                # that tells the diagram WHICH of them fired.
+                when = transition.get("when")
+                fired_fields: dict[str, Any] = {"from": from_field, "to": target.state_id}
+                if when is not None:
+                    fired_fields["when"] = copy.deepcopy(when)
                 self._event(
                     run,
                     "transition_fired",
                     detail=f"{from_field!r} -> {target.state_id!r}",
-                    **{"from": from_field, "to": target.state_id},
+                    **fired_fields,
                 )
                 self._enter_state(run, target, from_state=state_id)
 
@@ -2773,9 +3306,43 @@ def default_factory_executor() -> FactoryExecutor:
 
 
 async def run_factory(spec_id: str, *, name: str | None = None) -> dict[str, Any]:
-    """Validate a stored factory spec and start a nonblocking run of it."""
+    """Validate a factory spec and start a nonblocking run of it.
+
+    The argument names a stored factory entry (a runtime instance) first;
+    when no entry carries that id, it resolves a machine from the library
+    (repo directory first, user second) and runs the template directly:
+    ``await rlm.factory.run("review-sweep")`` starts the library machine
+    without creating a harness entry. Harness entries remain runtime
+    instances; machines are templates.
+    """
     require_factory_enabled()
-    return await default_factory_executor().run(spec_id, name=name)
+    executor = default_factory_executor()
+    harness = executor._resolve_harness()
+    if harness.get("factory", spec_id) is None:
+        try:
+            machine, path = resolve_machine(spec_id)
+        except MachineResolutionError as error:
+            if error.broken:
+                raise ValueError(
+                    f"the library machine {spec_id!r} exists but is broken ({error})"
+                ) from None
+            raise ValueError(
+                f"unknown factory spec {spec_id!r}: no stored factory entry and "
+                f"no library machine with that name ({error})"
+            ) from None
+        except ValueError as error:
+            # An id that is not a legal machine name (spaces, capitals) can
+            # never resolve from the library either; the unknown-spec frame
+            # must not lose the lookup to the name-rule sentence. Only the
+            # name-rule error can arrive here: every library-file failure
+            # (unreadable, non-UTF-8, unparseable, spec-invalid) is a
+            # MachineResolutionError in the first except arm.
+            raise ValueError(
+                f"unknown factory spec {spec_id!r}: no stored factory entry, and "
+                f"the id is not a valid machine name either ({error})"
+            ) from None
+        return await executor.run_machine(machine, machine_path=path, name=name)
+    return await executor.run(spec_id, name=name)
 
 
 async def status_factory(run_id: str) -> dict[str, Any]:
@@ -2794,6 +3361,1022 @@ async def resume_factory(run_id: str) -> dict[str, Any]:
     """Resume a paused run (escalate, budget, or max_transitions pause)."""
     require_factory_enabled()
     return await default_factory_executor().resume(run_id)
+
+
+def graph_factory(ref: str | None = None, *, compact: bool = False) -> dict[str, Any]:
+    """Return one machine's structure fused with live state (see
+    ``FactoryExecutor.graph``): a live run id, a stored spec id, or no ref
+    for every live run."""
+    require_factory_enabled()
+    return default_factory_executor().graph(ref, compact=compact)
+
+
+async def watch_factory(
+    run_id: str, timeout: float = 0.0, *, compact: bool = False
+) -> dict[str, Any]:
+    """Block until the run's state/instance shape changes or the bounded
+    timeout elapses, then return the same fused snapshot ``graph()``
+    returns plus ``changed``."""
+    require_factory_enabled()
+    return await default_factory_executor().watch(run_id, timeout, compact=compact)
+
+
+def _machine_structure(
+    machine: dict[str, Any],
+    resolved: "dict[str, tuple[str | None, str | None]] | None" = None,
+) -> dict[str, Any]:
+    """One canonical machine's static graph structure: the run block, every
+    state's declared shape (id, entry, lifecycle, caps, spawn settings), the
+    transitions with their guards, and the declared state order. Live runs
+    pass their resolved spawn settings (``resolved``); spec graphs pass none
+    and surface the inline-declared ones only. The diagram layers read the
+    declared order, and edge identity pairs ``from`` (a state id, or a join's
+    id list) with ``to``.
+    """
+    run_block = machine.get("run") if isinstance(machine.get("run"), dict) else {}
+    run_out: dict[str, Any] = {
+        "max_parallel": run_block.get("max_parallel", RUN_MAX_PARALLEL_DEFAULT),
+        "max_transitions": run_block.get("max_transitions", MAX_TRANSITIONS_CAP),
+        "failure_policy": run_block.get("failure_policy", RUN_FAILURE_POLICY_DEFAULT),
+        "max_children": run_block.get("max_children", RUN_MAX_CHILDREN_DEFAULT),
+    }
+    if "budget_ms" in run_block:
+        run_out["budget_ms"] = run_block["budget_ms"]
+    states_out: list[dict[str, Any]] = []
+    for state in machine["states"]:
+        row: dict[str, Any] = {
+            "id": state["id"],
+            "entry": bool(state.get("entry", STATE_ENTRY_DEFAULT)),
+            "lifecycle": state.get("lifecycle", NODE_LIFECYCLE_DEFAULT),
+            "max_entries": state.get("max_entries", STATE_MAX_ENTRIES_DEFAULT),
+            "retries": state.get("retries", NODE_RETRIES_DEFAULT),
+        }
+        model, thinking = (resolved or {}).get(state["id"], (None, None))
+        subagent = state.get("subagent")
+        if isinstance(subagent, dict):
+            # A resolved live run carries the executor's spawn settings for
+            # both subagent forms; a spec graph surfaces the inline-declared
+            # ones only (a reference form's settings resolve at run time).
+            if model is None and subagent.get("model") is not None:
+                model = subagent["model"]
+            if thinking is None and subagent.get("thinking") is not None:
+                thinking = subagent["thinking"]
+            if subagent.get("name"):
+                row["subagent"] = subagent["name"]
+        else:
+            row["subagent"] = subagent
+        if model is not None:
+            row["model"] = model
+        if thinking is not None:
+            row["thinking"] = thinking
+        states_out.append(row)
+    transitions_out: list[dict[str, Any]] = []
+    for transition in machine.get("transitions") or []:
+        # The snapshot owns its mutable rows: a join's ``from`` list is
+        # deep-copied like ``when`` so a consumer mutating the snapshot
+        # (appending an unknown source) can never corrupt the active run's
+        # machine — a corrupted join would wait for a state that never
+        # settles and the transition would never fire.
+        row_transition: dict[str, Any] = {
+            "from": copy.deepcopy(transition["from"]),
+            "to": transition["to"],
+            "on": transition.get("on", TRANSITION_ON_KINDS[0]),
+        }
+        if "when" in transition:
+            row_transition["when"] = copy.deepcopy(transition["when"])
+        transitions_out.append(row_transition)
+    return {
+        "run": run_out,
+        "states": states_out,
+        "transitions": transitions_out,
+        "order": [state["id"] for state in machine["states"]],
+    }
+
+
+def _wire_keys(key: str) -> str:
+    """snake_case -> the wire's camelCase (``run_id`` -> ``runId``)."""
+    head, *rest = key.split("_")
+    return head + "".join(part.capitalize() for part in rest)
+
+
+def _wire_payload(value: Any) -> Any:
+    """The activity lane's wire conversion: the ``factory_activity``
+    protocol is camelCase end to end (the request frame's ``runId``/
+    ``specId``/``timeoutMs``), so the reply's result payload re-keys its
+    own snake_case rows to the same wire spelling. Only dict KEYS convert
+    (values ride verbatim: state ids, milestone text). A guard dict
+    (``output`` + ``op`` — the validated guard signature) rides the wire
+    VERBATIM: its structure keys are single words already, and its
+    comparison ``value`` mirrors the executor's declared condition
+    exactly, so re-keying it would display a condition that no longer
+    matches the machine. The in-kernel conversation API
+    (``rlm.factory.graph()`` and friends) stays snake_case.
+    """
+    if isinstance(value, dict):
+        if "output" in value and "op" in value:
+            return copy.deepcopy(value)
+        return {_wire_keys(key): _wire_payload(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_wire_payload(item) for item in value]
+    return value
+
+
+def schedule_activity(request: dict[str, Any]) -> None:
+    """Schedule one out-of-band ``factory_activity`` request on the running
+    loop. The kernel's reader thread calls this (the frame bypasses the
+    cell FIFO like ``bash_activity``); the activity runs as a loop task so
+    a busy cell never delays the host bridge, and the reply frame lands
+    when the activity settles."""
+    import asyncio
+
+    asyncio.get_running_loop().create_task(_run_activity(request))
+
+
+async def _run_activity(request: dict[str, Any]) -> None:
+    """Run one factory_activity request to completion and emit its reply."""
+    from .repl import _send
+
+    rid = request["id"]
+    try:
+        result = await default_factory_executor().activity(request)
+    except Exception as exc:  # noqa: BLE001 - the reply lane must never hang
+        # An internal executor error still answers: a dropped reply would
+        # leave the host waiter on its timeout instead of the reason. The
+        # error frame rides the same wire cap as the success frame — a
+        # multi-megabyte reason (an unknown id carrying a huge value) must
+        # never exceed the transport bound; the cap's fallback replaces it
+        # with the loud wire-cap message when it cannot fit.
+        frame: dict[str, Any] = {"event": "done", "id": rid, "status": "error", "reason": str(exc)}
+        _cap_factory_frame(frame)
+        _send(frame)
+        return
+    frame: dict[str, Any] = {"event": "done", "id": rid, "status": "ok", "result": result}
+    _cap_factory_frame(frame)
+    _send(frame)
+
+
+_WIRE_LIVE_RUN_STATES = ("running", "stopping", "paused")
+
+
+def _wire_run_row_is_live(row: Any) -> bool:
+    """Whether a wire run row is LIVE in the dock/page sense — the same
+    rule the TUI's ``is_live`` reads and the unscoped list builds (a live
+    state, or children still in flight): the wire cap's eviction must
+    never silently drop a row the dock counts and the ``/factory off``
+    guard trusts (every live run reports — the live-exactness contract)."""
+    if not isinstance(row, dict):
+        return False
+    if row.get("state") in _WIRE_LIVE_RUN_STATES:
+        return True
+    usage = row.get("usage")
+    return isinstance(usage, dict) and usage.get("running", 0) > 0
+
+
+def _shed_runs_frame(runs: list[Any]) -> bool:
+    """One shed step for an all-runs reply under the wire cap, newest data
+    kept longest: a run row's event tail trims from its oldest end first
+    (the by-ref reply's own trim rule, applied per row, oldest row first),
+    then the oldest DROPPABLE row drops — a live row never silently drops
+    (the count and panels read it; the honest answer for a frame only
+    live rows cannot fit is the loud failure). At least one row always
+    stays, so a reply never claims a registry it did not read. Returns
+    whether one step shed; ``False`` means only unsheddable rows remain."""
+    for row in runs:
+        if not isinstance(row, dict):
+            continue
+        tail = row.get("events")
+        if isinstance(tail, list) and len(tail) > 1:
+            tail.pop(0)
+            return True
+    if len(runs) > 1:
+        for index, row in enumerate(runs):
+            if not _wire_run_row_is_live(row):
+                runs.pop(index)
+                return True
+    return False
+
+
+def _cap_factory_frame(frame: dict[str, Any]) -> None:
+    """Keep one reply under the ``FACTORY_FRAME_CAP`` wire cap. Compacted
+    snapshots already shed answer payloads, so the events tail trims from
+    the oldest end first; an all-runs reply sheds the same way — each
+    row's event tail floors before any whole row drops, and the drop
+    takes the oldest DROPPABLE row (a live row never silently drops: the
+    dock's count, the page's panels, and the ``/factory off`` guard read
+    this list, and every live run reports). A frame that still cannot fit
+    fails loudly (a graph must never truncate silently)."""
+    while len(json.dumps(frame)) > FACTORY_FRAME_CAP:
+        result = frame.get("result")
+        events = result.get("events") if isinstance(result, dict) else None
+        if isinstance(events, list) and len(events) > 1:
+            events.pop(0)
+            continue
+        runs = result.get("runs") if isinstance(result, dict) else None
+        if isinstance(runs, list) and _shed_runs_frame(runs):
+            continue
+        frame.pop("result", None)
+        frame["status"] = "error"
+        frame["reason"] = "factory activity reply exceeds the wire cap"
+        return
+    # A non-finite float anywhere in the frame would serialize as the
+    # non-JSON tokens NaN/Infinity and break every strict consumer of
+    # the reply (the host bridge's parser included) — validation blocks
+    # them at the machine's source; this belt fails loudly if one ever
+    # slips through, instead of emitting the token.
+    try:
+        json.dumps(frame, allow_nan=False)
+    except ValueError:
+        frame.pop("result", None)
+        frame["status"] = "error"
+        frame["reason"] = "factory activity reply contains non-finite values"
+
+
+# ---------------------------------------------------------------------------
+# Machine library: MACHINE.md files (import, export, share).
+#
+# A MACHINE.md is the shareable unit of the machine library, mirroring the
+# SKILL.md/skills conventions: YAML frontmatter (name, description, version,
+# author) followed by one fenced ``machine-spec`` block whose payload is a
+# JSON factory spec in the exact schema ``validate_factory_spec`` accepts
+# (machine form, or dag sugar that compiles to one) -- no new spec parser.
+# The library resolves from two levels, repo first, user second:
+#
+# - repo: the bundled machines shipped INSIDE the runtime package
+#   (``src/rlm/machines/<name>/MACHINE.md``, wheel package data, so every
+#   installed kernel sees the same seeds a checkout does);
+#   ``PRIME_AGENT_MACHINES_DIR`` redirects the level at a team directory.
+# - user: ``<agent dir>/machines/<name>/MACHINE.md`` (personal machines).
+#
+# ``import_machine`` is the library's gate: it parses the file, passes the
+# spec through the SAME write-time validator as every factory write (an
+# invalid spec never persists, with exact user-correctable errors), then
+# writes the file verbatim into the user library so its documentation
+# travels with the spec. ``export_machine`` serializes a library machine, a
+# stored factory entry's spec, or a run's canonical machine back to
+# MACHINE.md (byte-pretty, stable formatting for diffs). Harness entries
+# remain runtime instances; machines in the library are templates, so
+# ``run_factory`` falls back to the library when its argument names no
+# stored entry: ``await rlm.factory.run("review-sweep")``.
+# ---------------------------------------------------------------------------
+
+MACHINE_FILE_NAME = "MACHINE.md"
+MACHINE_SPEC_FENCE = "machine-spec"
+MACHINES_DIR_NAME = "machines"
+MACHINE_NAME_MAX_LENGTH = 64
+MACHINE_DESCRIPTION_MAX_LENGTH = 1024
+MACHINE_FRONTMATTER_FIELDS: tuple[str, ...] = ("name", "description", "version", "author")
+
+_MACHINE_NAME_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]*")
+_PLAIN_FRONTMATTER_VALUE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._/@+~-]*")
+
+
+def machine_name_errors(name: Any) -> list[str]:
+    """Name rules mirrored from the skill library (validate_name)."""
+    if not isinstance(name, str) or not name:
+        return ["machine name must be a non-empty string"]
+    errors: list[str] = []
+    if len(name) > MACHINE_NAME_MAX_LENGTH:
+        errors.append(f"machine name exceeds {MACHINE_NAME_MAX_LENGTH} characters ({len(name)})")
+    if _MACHINE_NAME_PATTERN.fullmatch(name) is None:
+        errors.append(
+            "machine name contains invalid characters (must be lowercase a-z, 0-9, hyphens only)"
+        )
+    if name.endswith("-"):
+        errors.append("machine name must not end with a hyphen")
+    return errors
+
+
+def machine_description_errors(description: Any) -> list[str]:
+    """Description rules mirrored from the skill library (validate_description).
+
+    One rule is the library's own: the description is one listing row, so
+    embedded line breaks are a format error.
+    """
+    if not isinstance(description, str) or not description.strip():
+        return ["frontmatter description is required"]
+    if len(description) > MACHINE_DESCRIPTION_MAX_LENGTH:
+        return [
+            "frontmatter description exceeds "
+            f"{MACHINE_DESCRIPTION_MAX_LENGTH} characters ({len(description)})"
+        ]
+    if "\n" in description or "\r" in description:
+        return ["frontmatter description must be a single line"]
+    return []
+
+
+def _unquote_frontmatter_value(raw: str, field: str) -> "tuple[str | None, str | None]":
+    """Unquote one frontmatter value: plain, single-quoted, or double-quoted.
+
+    Plain values must stay YAML-safe (no colon anywhere), so a rendered
+    value always parses back identically.
+    """
+    value = raw.strip()
+    if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
+        try:
+            unquoted = json.loads(value)
+        except ValueError as error:
+            return None, f"frontmatter {field} has an invalid double-quoted value ({error})"
+        if not isinstance(unquoted, str):
+            return None, f"frontmatter {field} must be a string scalar"
+        return unquoted, None
+    if len(value) >= 2 and value[0] == "'" and value[-1] == "'":
+        return value[1:-1].replace("''", "'"), None
+    if ":" in value:
+        return (
+            None,
+            f"frontmatter {field} is not a plain scalar (quote the value to include ':' characters)",
+        )
+    return value, None
+
+
+def _parse_machine_frontmatter(
+    text: str, *, source: str
+) -> "tuple[dict[str, str] | None, str, list[str]]":
+    """Parse the strict frontmatter subset MACHINE.md allows.
+
+    The subset is deliberately narrower than full YAML: one ``key: value``
+    line per field, the four machine fields only, quoted values for
+    anything that is not a plain scalar. The error sentences are the
+    import gate's user-correctable surface. Returns
+    ``(fields, body, [])`` on success or ``(None, "", errors)``.
+    """
+    normalized = text.lstrip("\ufeff").replace("\r\n", "\n").replace("\r", "\n")
+    lines = normalized.split("\n")
+    if not lines or lines[0].rstrip() != "---":
+        return None, "", [f"{source}: MACHINE.md must start with a `---` frontmatter block"]
+    fields: dict[str, str] = {}
+    errors: list[str] = []
+    close_index: int | None = None
+    for index in range(1, len(lines)):
+        line = lines[index].rstrip()
+        if line == "---":
+            close_index = index
+            break
+        if not line.strip():
+            errors.append(f"{source}: frontmatter line {index + 1} is empty (one `key: value` line per field)")
+            continue
+        key, separator, raw_value = line.partition(":")
+        if not separator:
+            errors.append(f"{source}: frontmatter line {index + 1} must be `key: value`")
+            continue
+        key = key.strip()
+        if key not in MACHINE_FRONTMATTER_FIELDS:
+            errors.append(
+                f"{source}: unknown frontmatter key {key!r} "
+                f"(allowed: {', '.join(MACHINE_FRONTMATTER_FIELDS)})"
+            )
+            continue
+        if key in fields:
+            errors.append(f"{source}: frontmatter field {key!r} is declared more than once")
+            continue
+        if not raw_value.strip():
+            errors.append(f"{source}: frontmatter field {key!r} requires a value")
+            continue
+        unquoted, error = _unquote_frontmatter_value(raw_value, key)
+        if error is not None:
+            errors.append(f"{source}: {error}")
+            continue
+        assert unquoted is not None
+        fields[key] = unquoted
+    if close_index is None:
+        return None, "", [f"{source}: frontmatter is not closed (end it with a `---` line)"]
+    body = "\n".join(lines[close_index + 1 :])
+    if errors:
+        return None, "", errors
+    return fields, body, []
+
+
+def _extract_machine_spec_blocks(body: str, *, source: str) -> "tuple[str | None, list[str]]":
+    """Return the single fenced ``machine-spec`` payload from the body.
+
+    Other fenced blocks (prose examples, JSON listings) are skipped as
+    opaque units: their content never participates in the fence scan.
+    """
+    lines = body.split("\n")
+    contents: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index].rstrip()
+        if not line.lstrip().startswith("```"):
+            index += 1
+            continue
+        open_index = index
+        info = line.strip()[3:].strip()
+        index += 1
+        content_lines: list[str] = []
+        closed = False
+        while index < len(lines):
+            fence_line = lines[index].rstrip()
+            if fence_line == "```":
+                closed = True
+                index += 1
+                break
+            content_lines.append(lines[index])
+            index += 1
+        if info != MACHINE_SPEC_FENCE:
+            if not closed:
+                return None, [f"{source}: the ```{info} fence opened at line {open_index + 1} is never closed"]
+            continue
+        if not closed:
+            return None, [f"{source}: the ```{MACHINE_SPEC_FENCE} fence is never closed"]
+        contents.append("\n".join(content_lines))
+    if not contents:
+        return None, [
+            f"{source}: MACHINE.md requires exactly one fenced ```{MACHINE_SPEC_FENCE} block; found none"
+        ]
+    if len(contents) > 1:
+        return None, [
+            f"{source}: MACHINE.md requires exactly one fenced ```{MACHINE_SPEC_FENCE} block; "
+            f"found {len(contents)}"
+        ]
+    return contents[0], []
+
+
+@dataclass(frozen=True)
+class MachineFile:
+    """A parsed MACHINE.md: strict frontmatter plus the machine-spec payload."""
+
+    name: str
+    description: str
+    version: str
+    author: str
+    spec: "dict[str, Any]"
+
+
+def parse_machine_file(text: str, *, source: str = "machine file") -> "tuple[MachineFile | None, list[str]]":
+    """Parse one MACHINE.md. Returns ``(machine, [])`` or ``(None, errors)``.
+
+    This owns the FILE format only (frontmatter, fence, JSON payload); the
+    spec stays in the existing validated schema, and the import and run
+    gates pass it through ``validate_factory_spec`` separately.
+    """
+    fields, body, errors = _parse_machine_frontmatter(text, source=source)
+    if fields is None:
+        return None, errors
+    payload, errors = _extract_machine_spec_blocks(body, source=source)
+    if errors:
+        return None, errors
+    assert payload is not None
+    try:
+        spec = json.loads(payload)
+    except ValueError as error:
+        return None, [
+            f"{source}: the ```{MACHINE_SPEC_FENCE} block must contain a JSON object ({error})"
+        ]
+    if not isinstance(spec, dict):
+        return None, [
+            f"{source}: the ```{MACHINE_SPEC_FENCE} block must contain a JSON object, "
+            f"got a {type(spec).__name__}"
+        ]
+    name = fields.get("name", "")
+    errors = machine_name_errors(name)
+    errors.extend(machine_description_errors(fields.get("description")))
+    if errors:
+        return None, errors
+    return (
+        MachineFile(
+            name=name,
+            description=fields["description"],
+            version=fields.get("version", ""),
+            author=fields.get("author", ""),
+            spec=spec,
+        ),
+        [],
+    )
+
+
+def _render_frontmatter_value(value: str) -> str:
+    """Render one frontmatter value: plain when YAML-safe, else double-quoted."""
+    if _PLAIN_FRONTMATTER_VALUE.fullmatch(value) is not None:
+        return value
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _machine_contract_lines(spec: "dict[str, Any]") -> list[str]:
+    """Deterministic contract prose generated from the spec (both forms)."""
+    lines: list[str] = []
+    run = spec.get("run")
+    if isinstance(run, dict):
+        parts = [
+            f"failure_policy={run.get('failure_policy')}",
+            f"max_parallel={run.get('max_parallel')}",
+        ]
+        if "budget_ms" in run:
+            parts.append(f"budget_ms={run['budget_ms']}")
+        if "max_transitions" in run:
+            parts.append(f"max_transitions={run['max_transitions']}")
+        lines.append("Run: " + ", ".join(parts))
+    states = spec.get("states") if isinstance(spec.get("states"), list) else spec.get("nodes")
+    if not isinstance(states, list):
+        return lines
+    lines.append("")
+    lines.append("States:")
+    for state in states:
+        if not isinstance(state, dict):
+            continue
+        flags = []
+        if state.get("entry"):
+            flags.append("entry")
+        for key in ("lifecycle", "max_entries", "retries", "failure_policy", "budget_ms"):
+            if key in state:
+                flags.append(f"{key}={state[key]}")
+        label = f"- {state.get('id')}"
+        if flags:
+            label += f" ({', '.join(flags)})"
+        lines.append(label)
+        subagent = state.get("subagent")
+        if isinstance(subagent, dict):
+            settings = subagent.get("name") or subagent.get("prompt", "")[:60]
+            lines.append(f"  subagent: inline ({settings})")
+        elif isinstance(subagent, str):
+            lines.append(f"  subagent: {subagent}")
+        for inp in state.get("inputs") or []:
+            if isinstance(inp, dict):
+                optional = " [optional]" if inp.get("optional") else ""
+                lines.append(
+                    f"  input: {inp.get('name')} ({inp.get('type')}) <- {inp.get('from')}{optional}"
+                )
+        for out in state.get("outputs") or []:
+            if isinstance(out, dict):
+                lines.append(f"  output: {out.get('name')} ({out.get('type')})")
+        foreach = state.get("foreach")
+        if isinstance(foreach, dict):
+            lines.append(f"  foreach: over {foreach.get('over')}, max {foreach.get('max')}")
+    transitions = spec.get("transitions")
+    if isinstance(transitions, list):
+        lines.append("")
+        lines.append("Transitions:")
+        for transition in transitions:
+            if not isinstance(transition, dict):
+                continue
+            raw_from = transition.get("from")
+            if isinstance(raw_from, list):
+                source_text = "[" + ", ".join(str(item) for item in raw_from) + "]"
+            else:
+                source_text = str(raw_from)
+            guard = transition.get("when")
+            guard_text = ""
+            if isinstance(guard, dict):
+                port = guard.get("output")
+                path = guard.get("path")
+                target = f"{port}.{path}" if path else str(port)
+                guard_text = f" when {target} {guard.get('op')} {json.dumps(guard.get('value'))}"
+            lines.append(f"- {source_text} -> {transition.get('to')}{guard_text}")
+    return lines
+
+
+def render_machine_file(machine: MachineFile) -> str:
+    """Render a MachineFile back to canonical MACHINE.md text.
+
+    Byte-stable: the same machine always renders to the same bytes (stable
+    formatting for diffs), and ``parse_machine_file`` of the output
+    recovers the same machine.
+    """
+    frontmatter = [
+        "---",
+        f"name: {_render_frontmatter_value(machine.name)}",
+        f"description: {_render_frontmatter_value(machine.description)}",
+        f"version: {_render_frontmatter_value(machine.version)}",
+        f"author: {_render_frontmatter_value(machine.author)}",
+        "---",
+    ]
+    sections = [
+        "\n".join(frontmatter),
+        "",
+        f"# {machine.name}",
+        "",
+        "## Machine contract",
+        "",
+    ]
+    sections.extend(_machine_contract_lines(machine.spec))
+    sections.append("")
+    sections.append(f"```{MACHINE_SPEC_FENCE}")
+    sections.append(json.dumps(machine.spec, indent=2, ensure_ascii=False))
+    sections.append("```")
+    return "\n".join(sections) + "\n"
+
+
+def _machine_env_dir(name: str) -> str | None:
+    # Set-but-empty env values behave as unset (mirrors harness._env_dir).
+    value = (os.environ.get(name) or "").strip()
+    return value or None
+
+
+def repo_machines_dir() -> Path:
+    """The bundled machine library shipped inside the runtime package.
+
+    An explicit ``PRIME_AGENT_MACHINES_DIR`` wins (a team can point the
+    shared level at their own directory); otherwise the library resolves
+    relative to this module — ``src/rlm/machines`` in a checkout, exactly
+    the wheel-package data a kernel venv installs into
+    ``site-packages/rlm/machines`` — so an installed kernel sees the same
+    seeds a checkout does, with no source-tree walk-up that could pick up
+    a stray directory above an installed venv.
+    """
+    override = _machine_env_dir("PRIME_AGENT_MACHINES_DIR")
+    if override:
+        return Path(override).expanduser().resolve()
+    return Path(__file__).resolve().parent / MACHINES_DIR_NAME
+
+
+def user_machines_dir() -> Path:
+    """The personal machines directory (``<agent dir>/machines``)."""
+    raw = (
+        _machine_env_dir("PRIME_AGENT_CODING_AGENT_DIR")
+        or _machine_env_dir("PI_CODING_AGENT_DIR")
+        or str(Path.home() / ".prime" / "agent")
+    )
+    return Path(raw).expanduser().resolve() / MACHINES_DIR_NAME
+
+
+def machine_library_dirs(
+    *, repo_dir: "str | Path | None" = None, user_dir: "str | Path | None" = None
+) -> "list[tuple[str, Path]]":
+    """Library levels in resolution order: repo first, user second.
+
+    Both levels always exist (the repo level is the packaged library;
+    the user level is the personal directory under the agent dir); a
+    missing directory is simply empty, so listing and resolving skip it.
+    """
+    repo = Path(repo_dir).expanduser() if repo_dir is not None else repo_machines_dir()
+    user = Path(user_dir).expanduser() if user_dir is not None else user_machines_dir()
+    return [("repo", repo), ("user", user)]
+
+
+def _read_library_machine(path: Path) -> "tuple[MachineFile | None, str]":
+    """One library file's validity verdict, shared by scan and resolve.
+
+    The four gates both surfaces apply — read, decode, the file format's
+    strict parser, the write-time spec validator — in one helper, so
+    `factory list` and `resolve_machine` can never disagree: a file
+    invalid here is never listed as usable and never claims its name at
+    resolve time. Returns ``(machine, "")`` when the file parses and
+    validates, ``(None, "<path>: <exact errors>")`` when it fails to read,
+    decode, or parse, and ``(machine, "<path>: <exact spec errors>")``
+    when it parses but its spec fails the validator (the machine rides
+    along so resolve can tell which name the file carries).
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as error:
+        return None, f"{path}: unreadable ({error})"
+    except UnicodeDecodeError as error:
+        return None, f"{path}: not valid UTF-8 ({error})"
+    machine, errors = parse_machine_file(text, source=str(path))
+    if machine is None or errors:
+        return None, f"{path}: {'; '.join(errors)}"
+    spec_errors = validate_factory_spec(machine.spec)
+    if spec_errors:
+        return machine, f"{path}: {'; '.join(spec_errors)}"
+    return machine, ""
+
+
+def _scan_machine_library(
+    *, repo_dir: "str | Path | None" = None, user_dir: "str | Path | None" = None
+) -> "tuple[list[dict[str, Any]], list[str]]":
+    """One pass over both levels: the listed machines and broken-file
+    warnings (``<path>: <errors>``).
+
+    The shared scan behind ``list_machines`` and the CLI's ``factory list``:
+    both levels resolve identically, repo wins on name conflicts, and the
+    gates are ``_read_library_machine`` — the same verdict
+    ``resolve_machine`` applies, so a machine the listing shows always
+    parses and validates for resolve/run/import, while the files it skips
+    surface as warnings here and never claim their name on the resolve
+    surface either (their exact errors surface there only when no valid
+    machine carries the name).
+    """
+    machines: dict[str, dict[str, Any]] = {}
+    warnings: list[str] = []
+    for source, directory in machine_library_dirs(repo_dir=repo_dir, user_dir=user_dir):
+        if not directory.is_dir():
+            continue
+        for path in sorted(directory.glob(f"*/{MACHINE_FILE_NAME}")):
+            machine, error = _read_library_machine(path)
+            if error:
+                warnings.append(error)
+                continue
+            if machine.name in machines:
+                continue  # repo first: the earlier level keeps the name
+            machines[machine.name] = {
+                "name": machine.name,
+                "description": machine.description,
+                "version": machine.version,
+                "author": machine.author,
+                "source": source,
+                "path": str(path),
+            }
+    return [machines[name] for name in sorted(machines)], warnings
+
+
+def list_machines(
+    *, repo_dir: "str | Path | None" = None, user_dir: "str | Path | None" = None
+) -> "list[dict[str, Any]]":
+    """Library contents with descriptions, resolution-deduped (repo wins).
+
+    Broken files are skipped silently here (the agent-facing list);
+    ``cli_dispatch``'s ``list`` op surfaces them as warnings so the CLI's
+    ``factory list`` can say why a machine does not show.
+    """
+    return _scan_machine_library(repo_dir=repo_dir, user_dir=user_dir)[0]
+
+
+class MachineResolutionError(ValueError):
+    """One library lookup failure, with its kind.
+
+    ``broken`` distinguishes the two outcomes a caller must not blur: the
+    name's only carriers are machine files that failed to parse or
+    validate (the first file's errors say why) versus no machine carrying
+    the name at all.
+    """
+
+    def __init__(self, message: str, *, broken: bool) -> None:
+        super().__init__(message)
+        self.broken = broken
+
+
+def resolve_machine(
+    name: str,
+    *,
+    repo_dir: "str | Path | None" = None,
+    user_dir: "str | Path | None" = None,
+) -> "tuple[MachineFile, Path]":
+    """Resolve one machine by name: repo directory first, user second.
+
+    The fast path reads ``<dir>/<name>/MACHINE.md`` directly, but only
+    serves what passes ``_read_library_machine`` — the SAME validity
+    verdict the listing scan applies — and only when its DECLARED name
+    matches: a directory named ``x`` holding ``name: y`` is not the
+    machine ``x`` (the declared name is the machine's name); such a file
+    resolves only through the scan below, under its declared name like it
+    does in the skill library. A file that fails to read, decode, or
+    parse, or carries a spec the write-time validator rejects, never
+    claims its name on either surface: resolution falls through to the
+    next level exactly like the listing does, so `factory list`,
+    ``rlm.factory.run``, and export can never disagree about a name. A
+    name whose only carriers are invalid files raises
+    ``MachineResolutionError`` with ``broken=True`` and the first file's
+    exact errors (in repo-to-user order) — broken, never missing; a name
+    no machine carries raises it with ``broken=False``.
+    """
+    errors = machine_name_errors(name)
+    if errors:
+        raise ValueError("; ".join(errors))
+    broken: str | None = None
+    for _source, directory in machine_library_dirs(repo_dir=repo_dir, user_dir=user_dir):
+        path = directory / str(name) / MACHINE_FILE_NAME
+        if not path.is_file():
+            continue
+        machine, file_error = _read_library_machine(path)
+        if file_error:
+            # The same verdict the listing scan applied: an invalid file
+            # does not claim the name, so the next level gets its chance.
+            # Keep the broken frame only for a file that carries the name
+            # — one that fails outright (machine is None) or declares
+            # this name — because a file declaring another name never
+            # carried this one.
+            if broken is None and (machine is None or machine.name == name):
+                broken = file_error
+            continue
+        if machine.name == name:
+            return machine, path
+    listed = list_machines(repo_dir=repo_dir, user_dir=user_dir)
+    for entry in listed:
+        if entry["name"] == name:
+            machine, parse_errors = parse_machine_file(
+                Path(entry["path"]).read_text(encoding="utf-8"), source=entry["path"]
+            )
+            if machine is None or parse_errors:
+                raise MachineResolutionError("; ".join(parse_errors), broken=True)
+            return machine, Path(entry["path"])
+    if broken is not None:
+        raise MachineResolutionError(broken, broken=True)
+    listing = ", ".join(entry["name"] for entry in listed)
+    raise MachineResolutionError(
+        f"unknown machine {name!r}: no MACHINE.md for it in the machine library (machines: {listing or 'none'})",
+        broken=False,
+    )
+
+
+def import_machine(path: "str | Path", *, target_dir: "str | Path | None" = None) -> "dict[str, Any]":
+    """The library gate: parse a MACHINE.md, validate its spec, persist it.
+
+    The spec goes through the SAME write-time validator as every factory
+    write (``validate_factory_spec``): an invalid spec never persists, and
+    the ``ValueError`` carries every error sentence, so the surface stays
+    user-correctable. Valid files persist byte-for-byte (their own prose,
+    formatting, and line endings travel with the machine) into the user
+    library.
+    """
+    source_path = Path(path).expanduser()
+    if not source_path.is_file():
+        raise ValueError(f"machine file not found: {source_path}")
+    raw = source_path.read_bytes()
+    text = raw.decode("utf-8")
+    machine, errors = parse_machine_file(text, source=str(source_path))
+    if machine is None or errors:
+        raise ValueError("; ".join(errors))
+    spec_errors = validate_factory_spec(machine.spec)
+    if spec_errors:
+        raise ValueError("; ".join(spec_errors))
+    destination_root = Path(target_dir).expanduser() if target_dir is not None else user_machines_dir()
+    destination = destination_root / machine.name / MACHINE_FILE_NAME
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    created = not destination.exists()
+    destination.write_bytes(raw)
+    return {"name": machine.name, "path": str(destination), "created": created}
+
+
+def _single_line(text: Any) -> str:
+    """Collapse free prose onto one line (whitespace runs become spaces).
+
+    A stored entry's ``content`` is free prose while a machine description
+    must be a single line, so exports collapse rather than refuse.
+    """
+    if not isinstance(text, str):
+        return ""
+    return " ".join(text.split())
+
+
+def _write_export_target(destination: Path, text: str, *, overwrite: bool) -> None:
+    """Write an export target, never silently clobbering one.
+
+    The no-overwrite path creates the file exclusively (``open(..., "x"``):
+    the existence check and the creation are one atomic step, so a file
+    created concurrently after a plain ``exists()`` check cannot slip past
+    the refusal, and a symlink planted at the target refuses instead of
+    being followed); ``overwrite=True`` is the explicit opt-in that
+    replaces whatever is there.
+    """
+    if overwrite:
+        destination.write_text(text, encoding="utf-8")
+        return
+    try:
+        with open(destination, "x", encoding="utf-8") as handle:
+            handle.write(text)
+    except FileExistsError:
+        raise ValueError(
+            f"export path {destination} already exists (pass overwrite=True to replace it)"
+        ) from None
+
+
+def export_factory_spec(
+    spec: Any,
+    out_path: "str | Path",
+    *,
+    name: str,
+    description: str,
+    version: str = "1",
+    author: str = "",
+    overwrite: bool = False,
+) -> "dict[str, Any]":
+    """Serialize any spec (stored entry or run machine) to MACHINE.md.
+
+    Byte-pretty and stable: the same spec always renders to the same bytes.
+    The spec passes through the write-time validator first, so an exported
+    file always re-imports. The out target is never overwritten silently: an
+    existing file refuses unless ``overwrite=True`` says otherwise.
+    """
+    errors = validate_factory_spec(spec)
+    errors.extend(machine_name_errors(name))
+    errors.extend(machine_description_errors(description))
+    if errors:
+        raise ValueError("; ".join(errors))
+    machine = MachineFile(
+        name=name,
+        description=description,
+        version=version,
+        author=author,
+        spec=copy.deepcopy(spec),
+    )
+    destination = Path(out_path).expanduser()
+    if destination.is_dir():
+        raise ValueError(f"export path {destination} is a directory (pass a file path)")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    _write_export_target(destination, render_machine_file(machine), overwrite=overwrite)
+    return {"name": name, "path": str(destination), "source": "spec"}
+
+
+def export_library_machine(
+    name: str,
+    out_path: "str | Path",
+    *,
+    repo_dir: "str | Path | None" = None,
+    user_dir: "str | Path | None" = None,
+    overwrite: bool = False,
+) -> "dict[str, Any]":
+    """Export one library machine to MACHINE.md at ``out_path``.
+
+    Resolution is the library contract only (repo directory first, user
+    second); the file copies verbatim so the shared documentation travels
+    with the spec. The out target is never overwritten silently: an
+    existing file refuses unless ``overwrite=True`` says otherwise. The
+    CLI dispatches here because a fresh CLI process has no session state
+    (stored entries and live runs) to resolve from.
+    """
+    machine, path = resolve_machine(name, repo_dir=repo_dir, user_dir=user_dir)
+    destination = Path(out_path).expanduser()
+    if destination.is_dir():
+        raise ValueError(f"export path {destination} is a directory (pass a file path)")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    _write_export_target(
+        destination, path.read_text(encoding="utf-8"), overwrite=overwrite
+    )
+    return {"name": machine.name, "path": str(destination), "source": "library"}
+
+
+def export_machine(
+    target: str,
+    out_path: "str | Path",
+    *,
+    repo_dir: "str | Path | None" = None,
+    user_dir: "str | Path | None" = None,
+    overwrite: bool = False,
+) -> "dict[str, Any]":
+    """Export one machine to MACHINE.md at ``out_path``.
+
+    Resolution mirrors ``run_factory``: a stored factory entry first, a
+    live run's canonical machine second, then the library machine (repo
+    directory first, user second). Library machines copy their file
+    verbatim so the shared documentation travels with the spec; entry and
+    run specs render byte-pretty.
+    """
+    executor = default_factory_executor()
+    harness = executor._resolve_harness()
+    entry = harness.get("factory", target)
+    if entry is not None:
+        arguments = entry.arguments if isinstance(entry.arguments, dict) else {}
+        spec = arguments.get("machine")
+        if spec is None:
+            spec = arguments.get("dag")
+        if spec is None:
+            raise ValueError(f"factory entry {target!r} carries no machine or dag spec")
+        errors = machine_name_errors(target)
+        if errors:
+            raise ValueError(
+                "; ".join(errors + [f"the stored entry id {target!r} cannot become a machine name"])
+            )
+        description = _single_line(entry.content) or _single_line(entry.title)
+        return export_factory_spec(
+            spec, out_path, name=target, description=description, overwrite=overwrite
+        )
+    run = executor._runs.get(target)
+    if run is not None and run.machine:
+        errors = machine_name_errors(run.spec_id)
+        if errors:
+            raise ValueError(
+                "; ".join(errors + [f"the run's spec id {run.spec_id!r} cannot become a machine name"])
+            )
+        description = _single_line(run.name) or f"factory run {run.run_id}"
+        return export_factory_spec(
+            run.machine, out_path, name=run.spec_id, description=description, overwrite=overwrite
+        )
+    return export_library_machine(
+        target, out_path, repo_dir=repo_dir, user_dir=user_dir, overwrite=overwrite
+    )
+
+
+def cli_dispatch(payload: Any) -> "dict[str, Any]":
+    """JSON facade for the ``prime-agent factory`` subcommands.
+
+    The CLI resolves the kernel Python, feeds one JSON payload on stdin,
+    and reads one JSON result from stdout: ``{"ok": true, ...}`` or
+    ``{"ok": false, "errors": [...]}``. Every error surfaces as data, so
+    the exact validator sentences reach the command's output verbatim.
+    The payload carries only what the user typed (an op, a path, a name,
+    an out target); this process resolves every library directory itself,
+    so the kernel is the single resolution contract for list, import, and
+    export alike — a fresh CLI process has no session state (stored
+    entries, live runs), so export resolves the library only.
+    """
+    if not isinstance(payload, dict):
+        return {"ok": False, "errors": ["factory cli payload must be a JSON object"]}
+    op = payload.get("op")
+    if op == "list":
+        machines, warnings = _scan_machine_library()
+        return {"ok": True, "machines": machines, "warnings": warnings}
+    if op == "import":
+        if not isinstance(payload.get("path"), str) or not payload["path"]:
+            return {"ok": False, "errors": ["factory import requires a `path` string"]}
+        try:
+            result = import_machine(payload["path"])
+        except (ValueError, OSError) as error:
+            return {"ok": False, "errors": [str(error)]}
+        return {"ok": True, **result}
+    if op == "export":
+        if not isinstance(payload.get("name"), str) or not payload["name"]:
+            return {"ok": False, "errors": ["factory export requires a `name` string"]}
+        if not isinstance(payload.get("out"), str) or not payload["out"]:
+            return {"ok": False, "errors": ["factory export requires an `out` string"]}
+        try:
+            result = export_library_machine(payload["name"], payload["out"])
+        except (ValueError, OSError) as error:
+            return {"ok": False, "errors": [str(error)]}
+        return {"ok": True, **result}
+    return {
+        "ok": False,
+        "errors": [f"unknown factory cli op {op!r} (expected 'list', 'import' or 'export')"],
+    }
 
 
 FACTORY_HELP: str = r"""# Factory
@@ -3057,38 +4640,73 @@ status["usage"]    # spawns, settled, tool_uses, max_parallel, max_children, run
                     # transitions_fired
 ```
 
-The live monitoring views (`graph()` and a bounded `watch()`) arrive
-with the stacked live-view PR; `status()` covers the run state, node
-detail, and the event ledger until then.
+`graph()` and `watch()` are the live monitoring views this namespace
+ships alongside the stacked live-view PR's TUI page:
+
+```python
+graph = await rlm.factory.graph(result["run_id"])
+# {"run_id": "...", "spec_id": "pr-manager", "state": "running",
+#  "machine": {"order": [...], "states": [...],
+#              "transitions": [...], "run": {...}},
+#  "nodes": [...], "active_nodes": [...], "last_fired": [...],
+#  "events": [...], "usage": {...}, "budget": {"limit_ms": ...,
+#  "consumed_ms": ...}}  — structure fused with live state.
+
+every = await rlm.factory.graph()        # every live run ({"runs": [...]})
+spec = await rlm.factory.graph("pr-manager")  # a stored spec's static graph
+
+watched = await rlm.factory.watch(result["run_id"], 30)
+# the same fused snapshot plus "changed" — the call blocks until the
+# run's state/instance shape changes or the bounded timeout elapses,
+# so one call streams a run's progress without polling `status()`.
+```
+
+- `graph(ref)` fuses the machine's structure (states, guarded
+  transitions, the declared order) with the live run's overlay (the
+  node reports, active nodes, recently fired edges, the event tail,
+  usage, budget consumed); a stored spec id answers the static
+  structure, and no ref answers every live run.
+- `watch(run_id, timeout)` returns immediately with the snapshot when
+  nothing changed, blocks until the run's state/instance shape changes,
+  and answers `"changed": false` on the bounded timeout.
 
 - `run` re-validates the spec and resolves every subagent reference first,
   reporting all failures in one `ValueError` and starting nothing on any
   failure; `name=` labels the run in status and the TUI.
-- Pause and failure milestones (escalate, budget, max_transitions,
-  max_children, failed, finished) are recorded in the run's event
-  ledger, every repeat included, the pause milestones with the resume
-  call spelled out — read `status()`'s trailing events to see them.
-  Quiet conversation notices for the milestones (one per kind per run)
-  arrive with the stacked live-view PR, which adds the host side that
-  renders them.
+- Pause and failure notices (escalate, budget, max_transitions,
+  max_children, failed, finished) arrive as quiet notices in the
+  conversation once per kind per run, the pause notices with the resume
+  call spelled out — a paused run does not need polling to be noticed.
 - `stop(run_id)` cancels every running child of the run (idempotent);
   `resume(run_id)` continues a paused run and raises on a non-paused one.
-- The activity lane the daemon and TUI speak arrives with the stacked
-  live-view PR, camelCase on the wire (`runId`, `specId`, `timeoutMs`);
-  the kernel API here (`rlm.factory.*`) is snake_case.
+- The activity lane the daemon and TUI speak is camelCase on the wire
+  (`runId`, `specId`, `timeoutMs`); the kernel API here
+  (`rlm.factory.*`) is snake_case.
 
 ## Discovering machines
 
-- The machine library (arriving on the stacked machine-library PR):
-  machines are `MACHINE.md` files, one directory per machine under the
-  repository's `machines/` and a personal `machines/` library under the
-  agent dir; `prime-agent factory list | import | export` manages them. The
-  seeds are `builder`, `pr-manager`, and `review-sweep`; the worked
-  examples above derive from their shapes.
+- The machine library: machines are `MACHINE.md` files (frontmatter plus
+  one fenced `machine-spec` block), one directory per machine, resolved
+  from two levels — the bundled seeds shipped inside the runtime (visible
+  in every install; `PRIME_AGENT_MACHINES_DIR` redirects the level at a
+  team directory) first, the personal `machines/` library under the agent
+  dir second; the earlier level wins on name conflicts. `prime-agent
+  factory list | import | export` manages them: list shows only what
+  parses and validates (broken files print as warnings), import runs the same
+  write-time validation as a stored spec so an invalid machine never
+  persists, and export copies a library machine verbatim to a fresh path
+  (an existing target is refused, never overwritten). `rlm.factory.run('<name>')`
+  runs a library machine directly without creating a harness entry; a
+  machine that exists but is broken names its errors
+  instead of pretending the name is unknown. The bundled seeds are
+  `builder`, `pr-manager`, and `review-sweep`; the worked examples above
+  derive from their shapes.
 - The TUI factory page: the activity dock's `⚙ N factory` group (Enter or
-  click) opens one live diagram per run, newest run first. `j`/`k` move the
-  selection, `s` stops the selected run, `r` resumes it, `m` copies it as
-  Mermaid source, Esc closes.
+  click) opens one live diagram per run, newest run first. The up/down
+  arrows move the run selection, Enter opens the selected run's action
+  rows (stop, or resume first while the run is paused — the arrows walk
+  the rows, Enter runs the tracked action), and Esc backs out of the rows
+  before it closes the page.
 
 ## Safety
 

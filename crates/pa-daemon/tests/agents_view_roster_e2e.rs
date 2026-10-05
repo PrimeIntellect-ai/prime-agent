@@ -451,6 +451,7 @@ async fn rlm_children_key_the_roster_by_parent_path_and_child_id() {
             model: None,
             thinking: None,
             cell_source_code: None,
+            spawned_by_request_id: None,
         })
         .await
         .expect("spawn child");

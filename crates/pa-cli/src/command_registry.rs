@@ -212,11 +212,11 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
     .options(&[
         "--check  Print the update channel's latest release vs the running version, without installing",
         "--force     Reinstall the latest build of the channel",
-        "--rollback  Restore the previous compiled release (the managed-install flow)",
+        "--rollback  Restore the previous version the last update kept",
         "--nightly   Switch updates to the nightly channel (the latest main build)",
         "--stable    Return updates to the stable channel",
-        "--archive <path>  Install a local release payload (the managed-install flow)",
-        "--source <url>     The https:// origin recorded as the release's install source (required with --archive)",
+        "--archive <path>  Install a local release archive",
+        "--source <url>     The https:// origin recorded as the release's install source (managed installs; required there with --archive)",
     ])
     .description(
         "Move from the TypeScript version to the Rust port in one step: `prime-agent update` \
@@ -242,6 +242,51 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         "Export a saved session to HTML",
     ),
     CommandSpec::new(&["config"], "config", "Configure package resources"),
+    CommandSpec::new(
+        &["factory"],
+        "factory <list|import|export>",
+        "Share and run factory machines from the machine library",
+    )
+    .description(
+        "Machines are MACHINE.md templates (frontmatter plus a fenced machine-spec block) \
+resolved from the bundled library shipped inside the runtime, then from the personal \
+library under the agent dir. Run one with `await rlm.factory.run(\"<name>\")` from a session.",
+    ),
+    CommandSpec::new(
+        &["factory", "list"],
+        "factory list [--json]",
+        "List the machine library",
+    )
+    .description(
+        "Lists the bundled machines and the personal machines with their descriptions; \
+files that fail the parser skip with a warning.",
+    )
+    .options(&["--json  Print JSON"]),
+    CommandSpec::new(
+        &["factory", "import"],
+        "factory import <path> [--json]",
+        "Validate and import a MACHINE.md into the personal library",
+    )
+    .description(
+        "The machine's spec passes the kernel's write-time validator; an invalid spec \
+never persists and the exact errors print verbatim.",
+    )
+    .options(&["--json  Print JSON"]),
+    CommandSpec::new(
+        &["factory", "export"],
+        "factory export <name> --out <path> [--json]",
+        "Export a machine to a MACHINE.md file",
+    )
+    .description(
+        "Resolves the library machine named <name> (bundled first, then the personal \
+library) and copies its MACHINE.md to the output path; an existing target is \
+refused, never overwritten.",
+    )
+    .options(&[
+        "--out <path>  Destination MACHINE.md path",
+        "--json        Print JSON",
+    ])
+    .examples(&["factory export review-sweep --out shared-review-sweep.MACHINE.md"]),
     CommandSpec::new(
         &["prompt"],
         "prompt [--model <selector>] [--cwd <dir>] [--json]",

@@ -1,0 +1,1 @@
+- The daemon now always delivers a turn's events before the reply that ends the turn, and ACP mode no longer waits up to 30 seconds after some turns before answering.
