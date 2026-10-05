@@ -9,8 +9,6 @@
 //! commands) for the whole pass. This module bounds that fan-out with a
 //! small fixed cap while keeping every job off the serving path.
 
-use futures::StreamExt;
-
 /// The maximum number of descriptors the boot adoption pass works on at
 /// once. An adoption is mostly a socket connect, at most one relaunch
 /// spawn; a small cap keeps the pass steady without serializing it.
@@ -34,15 +32,18 @@ where
     if jobs.peek().is_none() {
         return;
     }
-    let mut in_flight = futures::stream::FuturesUnordered::new();
+    // JoinSet aborts its children when dropped - including the drop that
+    // follows an abort of THIS task: a cancelled adoption pass must not
+    // detach its in-flight fan-out to finish against a successor.
+    let mut in_flight = tokio::task::JoinSet::new();
     loop {
         while in_flight.len() < limit && jobs.peek().is_some() {
             let job = jobs.next().expect("peeked");
-            in_flight.push(tokio::spawn(async move {
+            in_flight.spawn(async move {
                 job().await;
-            }));
+            });
         }
-        if in_flight.next().await.is_none() {
+        if in_flight.join_next().await.is_none() {
             return;
         }
     }
@@ -52,6 +53,40 @@ where
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn aborting_the_pass_cancels_the_in_flight_fanout() {
+        let entered = std::sync::Arc::new(AtomicUsize::new(0));
+        let cancelled = std::sync::Arc::new(AtomicUsize::new(0));
+        let pass = tokio::spawn(run_bounded(
+            (0..4)
+                .map(|_| {
+                    let entered = std::sync::Arc::clone(&entered);
+                    let cancelled = std::sync::Arc::clone(&cancelled);
+                    move || async move {
+                        entered.fetch_add(1, Ordering::SeqCst);
+                        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                        cancelled.fetch_add(1, Ordering::SeqCst);
+                    }
+                })
+                .collect(),
+            4,
+        ));
+        // Wait until all four jobs are parked inside the sleep.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while entered.load(Ordering::SeqCst) < 4 {
+            assert!(std::time::Instant::now() < deadline, "jobs never started");
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        pass.abort();
+        pass.await.unwrap_err();
+        // The in-flight fan-out dies with the pass, not detached.
+        assert_eq!(
+            cancelled.load(Ordering::SeqCst),
+            0,
+            "no in-flight job may complete after the pass is aborted"
+        );
+    }
 
     #[tokio::test]
     async fn bounded_fanout_caps_concurrency_and_runs_every_job() {
