@@ -285,7 +285,11 @@ if (-not (Test-Path $payloadExe -PathType Leaf)) { Fail "the tarball did not con
 # funnel's channel-stickiness read keys on it).
 $channelLine = "install-rust.sh channel $channel"
 $marker = "$channelLine`nversion $version"
-Set-Content -LiteralPath (Join-Path $stage '.prime-agent-install') -Value $marker -NoNewline
+# -Encoding Ascii keeps the marker byte-exact: Set-Content's default
+# encoding follows $PSDefaultParameterValues['*:Encoding'] (UTF-16 or a
+# BOM), and the update funnel's channel-stickiness read + the rollback's
+# marker validation grep the raw ASCII line.
+Set-Content -LiteralPath (Join-Path $stage '.prime-agent-install') -Value $marker -Encoding Ascii -NoNewline
 
 # The launcher paths (the section below the publish writes both).
 $launcher = Join-Path $bin 'prime-agent.cmd'
