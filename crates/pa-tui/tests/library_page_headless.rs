@@ -585,8 +585,12 @@ fn library_page_lists_machines_drills_in_and_escs_back() {
         HeadlessStep::Key(dock_right()),
         HeadlessStep::Key(dock_right()),
         HeadlessStep::Key(enter()),
+        // The page mounts at once; the list fetch is async, so hold for
+        // a fetched row before the arrows walk the list (the list lands
+        // as one frame — a page-title needle alone races the fetch on a
+        // slower runner and drills into the opening row).
         HeadlessStep::WaitRender {
-            needle: "machine library".to_string(),
+            needle: "builder [repo]".to_string(),
             timeout_ms: 15_000,
         },
         // Down walks the list to pr-manager (builder is the opening
