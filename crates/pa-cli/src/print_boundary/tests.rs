@@ -115,6 +115,7 @@ async fn faux_engine_with_telemetry(
         })
         .expect("a session manager");
     let engine = create_session(SessionEngineConfig {
+        semantic_edges: None,
         cron_store: None,
         steering_mode: None,
         follow_up_mode: None,

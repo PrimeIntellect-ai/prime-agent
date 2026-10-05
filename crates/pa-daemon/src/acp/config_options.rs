@@ -8,13 +8,11 @@
 //! round-trips the value it was handed); effort choices follow the
 //! selected model's supported levels.
 //!
-//! Both transports serve the same computation: the in-process mode
-//! reads the live agent state (plus the switchable provider target), the
-//! daemon-attached transport rides the `get_connection_state` /
-//! `get_available_models` / `set_model` / `set_thinking_level` wire
-//! commands — the rust forms of the TS `AgentConnection` seams.
+//! The computation rides the daemon wire commands
+//! (`get_connection_state` / `get_available_models` / `set_model` /
+//! `set_thinking_level`) — the rust forms of the TS `AgentConnection`
+//! seams.
 
-use std::path::Path;
 use std::sync::Arc;
 
 use pa_types::ai::Model;
@@ -60,18 +58,6 @@ pub struct PickerModel {
 
 impl PickerModel {
     pub fn from_model(model: &Model) -> PickerModel {
-        PickerModel {
-            id: model.id.clone(),
-            name: model.name.clone(),
-            provider: model.provider.clone(),
-            reasoning: model.reasoning,
-        }
-    }
-
-    /// The agent-state model's view (the in-process refresh reads the live
-    /// agent model, which an out-of-band failover switch can move without
-    /// the picker's tracked slot).
-    pub fn from_agent_model(model: &pa_agent::types::Model) -> PickerModel {
         PickerModel {
             id: model.id.clone(),
             name: model.name.clone(),
@@ -152,10 +138,8 @@ pub fn session_config_options(
             })
             .collect(),
     }];
-    // #2858's map-driven capability: the levels list is the capability on
-    // both transports (the in-process side computes
-    // `get_supported_thinking_levels`, the daemon side carries the
-    // worker's #2858-computed `availableThinkingLevels`), so a model with
+    // #2858's map-driven capability: the levels list is the capability
+    // (the worker's #2858-computed `availableThinkingLevels`), so a model with
     // an addressable thinking-level map shows its effort picker even when
     // the coarse `reasoning` flag is false. A list without a non-`off`
     // entry (the `["off"]`-only or empty shape) is no selectable surface.
@@ -211,37 +195,6 @@ pub async fn publish_config_options(
         .publish(&update, 0, super::meta::PrimeAgentEventPhase::Event, None)
         .await;
 }
-
-/// The in-process transport's model discovery: the registry the CLI
-/// composition resolved against (auth storage + `models.json`, with the
-/// private-authorization cache adopted), reading the auth-configured
-/// available models (the TS `refreshAvailableModels` seam).
-pub(crate) fn acp_model_registry(agent_dir: &Path) -> pa_core::models::ModelRegistry {
-    let auth = pa_core::auth::AuthStorage::create(agent_dir);
-    let mut registry = pa_core::models::ModelRegistry::create(auth, agent_dir.join("models.json"));
-    registry.load_private_authorization_from_cache();
-    registry
-}
-
-/// The in-process transport's discovery result (TS
-/// `getAvailableModels`): `Err` carries the discovery failure the
-/// caller reports as "unavailable, try again later".
-pub(crate) fn discover_available_models(agent_dir: &Path) -> anyhow::Result<Vec<Model>> {
-    let registry = acp_model_registry(agent_dir);
-    // A malformed models.json must surface as a discovery failure (the
-    // handler's "try again later"), never as an empty catalog the picker
-    // then answers with "Unavailable model".
-    if let Some(error) = registry.get_error() {
-        anyhow::bail!("{error}");
-    }
-    Ok(registry.get_available().into_iter().cloned().collect())
-}
-
-/// The switchable provider target the in-process session's stream reads
-/// per call: the type the composition passes in so a picker model switch
-/// swaps the live target (TS `setModel`'s stream re-registration).
-pub type ProviderTargetSlot =
-    Arc<std::sync::RwLock<Option<pa_core::session_engine::provider_adapter::ProviderTarget>>>;
 
 #[cfg(test)]
 mod tests {

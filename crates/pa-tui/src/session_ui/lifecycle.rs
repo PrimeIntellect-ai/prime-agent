@@ -148,6 +148,13 @@ impl SessionUi {
             bash_activities: serde_json::json!({"activities": []}),
             bash_list_epoch: 0,
             bash_updates: activity_updates.bash,
+            factory_graph: serde_json::json!({"runs": []}),
+            factory_view_session: None,
+            factory_refresh_in_flight: false,
+            factory_refresh_queued: false,
+            factory_list_epoch: 0,
+            factory_updates: activity_updates.factory,
+            factory_selected_run: None,
             subagents_focused: false,
             activity_group: crate::chrome::ActivityGroup::Subagents,
             subagent_counts: crate::subagents::SubagentCounts::default(),
@@ -511,6 +518,11 @@ impl SessionUi {
         match dock_fold {
             DockFold::FirstFrame | DockFold::Fresh => {
                 self.bash_activities = serde_json::json!({"activities": []});
+                // The factory lane's cache dies with the previous
+                // session too: the dock count and the page mount must
+                // never show another session's runs (the 2s poll
+                // refills; the spawn below asks for the first frame).
+                self.factory_graph = serde_json::json!({"runs": []});
             }
             // The held dock keeps its registry for the same reason it
             // keeps the heartbeat catalog above.
@@ -521,6 +533,10 @@ impl SessionUi {
             DockFold::FirstFrame => self.fetch_bash_activities().await,
             DockFold::Fresh | DockFold::Held => self.spawn_bash_activity_refresh(),
         }
+        // The refilled factory cache is a background refresh away on
+        // every fold (the poll's serialization makes an immediate
+        // request safe — the in-flight slot frees on its own cycle).
+        self.spawn_factory_refresh();
         self.pending_model = reconstructed.model_id;
         self.pending_model_provider = reconstructed.model_provider;
         self.pending_thinking_suffix = reconstructed.thinking_suffix;
@@ -630,6 +646,33 @@ impl SessionUi {
         // stats and clears the readout left over from the previous session.
         if matches!(kind, RebuildKind::Rebind) {
             view.bash_view = None;
+            // The factory view dies the same death — it snapshots the
+            // previous session's kernel runs, and its refresh lane must
+            // not keep polling the new session's kernel for a view
+            // nobody mounted — but ONLY when a different session actually
+            // took the view's place. A same-session rebind (the `Unknown
+            // active session` reattach in `prompt.rs` replays over the
+            // same durable session) keeps the view mounted: the user
+            // neither switched sessions nor closed the view, and its
+            // refresh lane re-targets the reattached session's kernel on
+            // the next tick.
+            // The page dies only when it was mounted under a DIFFERENT
+            // session: a same-session rebind (the `Unknown active session`
+            // reattach) keeps the page and its count — the kernel and its
+            // runs did not change. A page that was never mounted owns no
+            // state here; the attach fold owns the cache's cross-session
+            // reset (every rebind path attaches first, so a switch's
+            // stale cache is cleared before the rebuild lands).
+            if self
+                .factory_view_session
+                .as_deref()
+                .is_some_and(|session| session != self.session_id)
+            {
+                view.factory_view = None;
+                self.factory_selected_run = None;
+                self.factory_view_session = None;
+                self.factory_graph = serde_json::json!({"runs": []});
+            }
             // The goal panel dies with the old session too: it is a
             // snapshot of the previous session's goal state, and until
             // the new session's own `goal_update` lands it would keep

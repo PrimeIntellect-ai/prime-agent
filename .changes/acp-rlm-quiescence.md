@@ -1,0 +1,1 @@
+- ACP prompts now finish only once the subagents they started have finished: the completion update reports how many were still running, the final update reports zero, and cancelling or closing the session cancels them. Closing stdin no longer waits for running work to finish.

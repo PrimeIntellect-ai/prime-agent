@@ -996,6 +996,93 @@ async fn first_signal_drains_a_settling_turn_and_rejects_new_work() {
     pump.abort();
 }
 
+/// A turn-long client route rides TS's 24 h worker-request budget
+/// (`WORKER_REQUEST_TIMEOUT_MS`, daemon-supervisor.ts:204), not the
+/// invented ten-minute cap: a `prompt_and_wait` whose worker answers a
+/// virtual hour later still succeeds.
+#[tokio::test(start_paused = true)]
+async fn a_prompt_and_wait_route_outlives_the_old_ten_minute_cap() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let options = SupervisorOptions {
+        socket_path: dir.path().join("daemon.sock"),
+        agent_dir: dir.path().join("agent"),
+    };
+    let supervisor = Arc::new(Supervisor::new(options).expect("supervisor"));
+    let descriptor: DaemonWorkerDescriptor = serde_json::from_value(serde_json::json!({
+        "version": 2,
+        "workerId": "w-longroute",
+        "pid": 0,
+        "socketPath": "/tmp/none.sock",
+        "recoveryJournalPath": "/tmp/none.jsonl",
+        "supervisorSocketPath": "/tmp/none.sock",
+        "authenticationToken": "test",
+        "rootActiveSessionId": "w-longroute",
+        "createdAt": "t",
+        "updatedAt": "t",
+        "lifecycle": "ready",
+        "createCommand": {},
+        "consecutiveFailures": 0,
+    }))
+    .expect("descriptor");
+    let descriptor_dir = dir.path().join("descriptors");
+    std::fs::create_dir_all(&descriptor_dir).unwrap();
+    let resident = Arc::new(ResidentWorker::new(
+        "w-longroute".to_string(),
+        descriptor,
+        descriptor_dir.join("w-longroute.descriptor.json"),
+    ));
+    // The fake worker holds the turn for a virtual hour — past the old
+    // ten-minute cap, inside the 24 h worker-request budget.
+    let (cmd_tx, mut cmd_rx) = mpsc::channel::<WorkerRequest>(1);
+    *resident.cmd_tx.lock().await = Some(cmd_tx);
+    let pump_resident = Arc::clone(&resident);
+    tokio::spawn(async move {
+        let request = cmd_rx.recv().await.expect("the route lands the prompt");
+        tokio::time::sleep(Duration::from_hours(1)).await;
+        let reply = pump_resident
+            .pending
+            .lock()
+            .await
+            .remove(&request.request_id)
+            .expect("the routed prompt holds a reply slot");
+        let _ = reply.send(WorkerReply::Typed(crate::protocol::response_success(
+            None,
+            "prompt_and_wait",
+            None,
+        )));
+    });
+    supervisor.registry.insert(Arc::clone(&resident)).await;
+    resident.note_connection_live();
+    resident.note_session_ready();
+    let (targeted_tx, _targeted_rx) = tokio::sync::mpsc::channel::<Arc<Value>>(16);
+    let attached = subscribers::ClientSubscriptions::new("c".to_string(), targeted_tx);
+    let command: DaemonCommand = serde_json::from_value(serde_json::json!({
+        "type": "prompt_and_wait",
+        "activeSessionId": "w-longroute",
+        "message": "go",
+    }))
+    .expect("command");
+    let route = {
+        let supervisor = Arc::clone(&supervisor);
+        tokio::spawn(async move {
+            supervisor
+                .route_client_command(
+                    &command,
+                    "c",
+                    &attached,
+                    "p-1".to_string(),
+                    "prompt_and_wait".to_string(),
+                    None,
+                )
+                .await
+        })
+    };
+    let (lines, stop) = route.await.expect("the route task lives");
+    assert!(!stop);
+    let line = lines.first().expect("the route answers with one line");
+    assert_eq!(line["success"], json!(true));
+}
+
 /// Every signal that finds a shutdown already in flight is the force
 /// request: the drain's own second signal, a signal racing the
 /// shutdown command's gate, and a signal racing an update exit - the

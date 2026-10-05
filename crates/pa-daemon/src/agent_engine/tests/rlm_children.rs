@@ -297,9 +297,9 @@ fn release_settled_child_kernel_defers_to_scheduled_jobs_and_fires_the_release_p
 /// The whole-worker idle passivation gate accepts exactly when the
 /// kernel release would fire under the shared settled gates, plus the
 /// worker-only registry rule: a child record keeps the worker resident
-/// (a revival starts with an empty registry) while the kernel release
-/// still fires — releasing a kernel keeps the worker and its registry
-/// resident.
+/// (a revival rebuilds only settled ledger rows; the passivation stop
+/// closes every row) while the kernel release still fires — releasing
+/// a kernel keeps the worker and its registry resident.
 #[test]
 fn can_passivate_worker_mirrors_the_release_gates_and_adds_the_registry_rule() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -377,9 +377,10 @@ fn can_passivate_worker_mirrors_the_release_gates_and_adds_the_registry_rule() {
         .registered_jobs_probe
         .lock()
         .expect("registered jobs probe lock") = None;
-    // A settled child record keeps the worker resident (a revival starts
-    // with an empty registry) while the kernel release still fires: the
-    // registry rule is whole-worker only.
+    // A settled child record keeps the worker resident (a revival
+    // rebuilds only settled ledger rows; the passivation stop closes
+    // every row) while the kernel release still fires: the registry
+    // rule is whole-worker only.
     let children = engine.children.clone().expect("children registry");
     engine.runtime.block_on(async {
         children
