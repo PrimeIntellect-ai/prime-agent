@@ -20,8 +20,8 @@ use crate::chat::ChatEntry;
 /// vocabulary).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ClickAction {
-    /// Toggle the card at this chat-entry index (a tool card, a bash
-    /// execution card, an agent-message row, or a shell-completion row).
+    /// Toggle the card at this chat-entry index (an expandable
+    /// transcript row).
     ToggleCardExpansion(usize),
     /// Place the editor caret at the clicked cell: `row` indexes the
     /// editor's visible content rows, `col` is the column relative to
@@ -331,11 +331,11 @@ impl AgentView {
     }
 
     /// The click action for one transcript window row: a row inside a
-    /// visible activity entry (a tool card, a bash card, an
-    /// agent-message notice, a shell-completion row) toggles that
-    /// card's own expansion. Plain text rows (user, assistant, status,
-    /// panels) are not clickable — the TS components register no
-    /// regions there either.
+    /// visible tool card, bash card, or TS `Clickable` custom row
+    /// (agent message, shell completion, compaction summary,
+    /// refinement outcome, skill invocation, injected prompt) toggles
+    /// that row's own expansion. Other rows (user, assistant, status,
+    /// slash, panels) are not clickable.
     fn transcript_click_target(&self, window_row: usize) -> Option<ClickAction> {
         let section = self
             .click
@@ -349,6 +349,10 @@ impl AgentView {
                 | ChatEntry::BashExecution(_)
                 | ChatEntry::AgentMessage(_)
                 | ChatEntry::ShellCompletion(_)
+                | ChatEntry::CompactionSummary { .. }
+                | ChatEntry::RefinementOutcome(_)
+                | ChatEntry::SkillInvocation(_)
+                | ChatEntry::InjectedPrompt(_)
         ))
         .then_some(ClickAction::ToggleCardExpansion(section.entry))
     }
@@ -422,6 +426,65 @@ mod tests {
                 view.click_target_at(view.click.window_screen_start + window_row, 0),
                 Some(ClickAction::ToggleCardExpansion(1))
             );
+        }
+    }
+
+    /// The TS click-to-expand custom rows (compaction, refinement, skill,
+    /// and injected prompt wrap their header in `Clickable`): a click
+    /// targets the row, and the toggle opens its own body.
+    #[test]
+    fn a_click_expands_the_custom_message_rows() {
+        use super::super::expansion::tests::transcript_text;
+        use crate::custom_message::{
+            InjectedPromptKind, InjectedPromptRow, RefinementOutcomeRow, SkillInvocationRow,
+        };
+        let rows = [
+            (
+                ChatEntry::CompactionSummary {
+                    summary: "kept the plan".to_string(),
+                    tokens_before: 1200,
+                    custom_instructions: None,
+                },
+                "Compacted from",
+            ),
+            (
+                ChatEntry::RefinementOutcome(Box::new(RefinementOutcomeRow {
+                    header: "Harness refined".to_string(),
+                    summary: "added a memory".to_string(),
+                    meta: "refinement meta".to_string(),
+                    edits: Vec::new(),
+                })),
+                "refinement meta",
+            ),
+            (
+                ChatEntry::SkillInvocation(Box::new(SkillInvocationRow {
+                    name: "websearch".to_string(),
+                    content: "skill body".to_string(),
+                })),
+                "skill body",
+            ),
+            (
+                ChatEntry::InjectedPrompt(Box::new(InjectedPromptRow {
+                    kind: InjectedPromptKind::Heartbeat { schedule: None },
+                    body: Some("prompt body".to_string()),
+                })),
+                "prompt body",
+            ),
+        ];
+        for (entry, body) in rows {
+            let mut view = view();
+            view.push_entry(entry);
+            view.render_frame(60, 20);
+            assert_eq!(
+                view.click_target_at(section_screen_row(&view, 0), 2),
+                Some(ClickAction::ToggleCardExpansion(0)),
+                "{body}"
+            );
+            let collapsed = transcript_text(&mut view);
+            assert!(!collapsed.contains(body), "{body} starts collapsed");
+            view.toggle_card_expansion(0);
+            let expanded = transcript_text(&mut view);
+            assert!(expanded.contains(body), "{body} expands on click");
         }
     }
 

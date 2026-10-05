@@ -432,5 +432,5 @@ async fn a_lost_worker_connection_fails_its_in_flight_route() {
         .expect("the lost connection fails the in-flight route")
         .expect("the route task lives")
         .expect_err("the drained route fails");
-    assert_eq!(error.to_string(), "Session worker dropped the request");
+    assert_eq!(error.to_string(), super::routing::WORKER_SOCKET_CLOSED);
 }

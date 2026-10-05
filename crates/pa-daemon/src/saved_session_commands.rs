@@ -72,6 +72,28 @@ pub(crate) struct NameScope {
     pub(crate) parent_session_path: Option<String>,
 }
 
+/// The roster summary's name-reservation fields, the one projection both
+/// rename scopes read (a saved row by file, a live row by active id).
+fn name_scope_from_summary(summary: &Value, name: String) -> NameScope {
+    NameScope {
+        id: summary
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        name,
+        depth: summary.get("rlmDepth").and_then(Value::as_u64).unwrap_or(0) as u32,
+        parent_session_id: summary
+            .get("parentSessionId")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        parent_session_path: summary
+            .get("parentSessionPath")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    }
+}
+
 /// One family-catalog row (TS `AgentFamilyCatalogEntry`): the fields the
 /// name-availability assertion reads.
 struct FamilyRow {
@@ -357,26 +379,9 @@ impl Supervisor {
                 .roster
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            roster.by_session_file(&canonical).map(|entry| {
-                let summary = &entry.summary;
-                NameScope {
-                    id: summary
-                        .get("sessionId")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string(),
-                    name: name.clone(),
-                    depth: summary.get("rlmDepth").and_then(Value::as_u64).unwrap_or(0) as u32,
-                    parent_session_id: summary
-                        .get("parentSessionId")
-                        .and_then(Value::as_str)
-                        .map(str::to_string),
-                    parent_session_path: summary
-                        .get("parentSessionPath")
-                        .and_then(Value::as_str)
-                        .map(str::to_string),
-                }
-            })
+            roster
+                .by_session_file(&canonical)
+                .map(|entry| name_scope_from_summary(&entry.summary, name.clone()))
         };
         if let Some(scope) = roster_row {
             return Ok(scope);
@@ -434,10 +439,92 @@ impl Supervisor {
                 )
             }
         };
-        // The pending-name reservation (TS `withSessionNameReservation`):
-        // a concurrent rename of the same name in the same scope fails
-        // with the unavailability error.
-        let key = reservation_key(&scope);
+        // The reservation ladder wraps the whole arm — the offline catalog
+        // rename and the live forward alike (TS `withSessionNameReservation`
+        // holds the key across both).
+        match self
+            .with_session_name_reservation(&scope, async {
+                if active_session_id.is_none() {
+                    // The offline catalog rename (TS `catalog.rename`):
+                    // append the session_info entry, the ledger rename,
+                    // and the roster row rewrite.
+                    let path = Path::new(session_path);
+                    if let Err(error) = append_saved_session_name(path, &scope.name) {
+                        return (
+                            vec![response_line(&response_failure(
+                                Some(command_id),
+                                type_name,
+                                &error.to_string(),
+                                None,
+                            ))],
+                            false,
+                        );
+                    }
+                    if let Some(sessions_dir) = self.sessions_dir_path() {
+                        ledger_rename_by_child_path(
+                            &self.options.agent_dir,
+                            &sessions_dir,
+                            session_path,
+                            &scope.name,
+                        );
+                    }
+                    self.rewrite_roster_session_name(session_path, &scope.name);
+                    // The renamed session file can carry passive scheduled
+                    // rows: the catalog snapshot's rows key off the session
+                    // file (TS #2487 invalidates the shared snapshot on the
+                    // saved-session rename).
+                    self.invalidate_passive_catalog();
+                    return (
+                        vec![response_line(&response_success(
+                            Some(command_id),
+                            type_name,
+                            None,
+                        ))],
+                        false,
+                    );
+                }
+                // The live form forwards to the owning worker (TS rewrites
+                // the selector onto the resolved summary's ids).
+                self.route_client_command(
+                    command,
+                    client_id,
+                    attached,
+                    command_id.to_string(),
+                    type_name.to_string(),
+                    None,
+                )
+                .await
+            })
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => (
+                vec![response_line(&response_failure(
+                    Some(command_id),
+                    type_name,
+                    &error,
+                    None,
+                ))],
+                false,
+            ),
+        }
+    }
+
+    /// The rename reservation ladder (TS `withSessionNameReservation` +
+    /// `assertSupervisorSessionNameAvailable`, the supervisor's
+    /// daemon-owned name uniqueness): reserve the scope's
+    /// `[depth, parent, name]` key, assert family name availability, run
+    /// `action` under the reservation, and release the key on every exit —
+    /// a same-key concurrent rename fails with the unavailability error,
+    /// and a family conflict fails before the action runs. The live
+    /// `rename`/`set_session_name` forwards and the saved-session arm
+    /// share this one ladder.
+    pub(crate) async fn with_session_name_reservation<T>(
+        &self,
+        scope: &NameScope,
+        action: impl std::future::Future<Output = T>,
+    ) -> Result<T, String> {
+        let key = reservation_key(scope);
         let reserved = {
             let mut pending = self
                 .pending_session_names
@@ -446,81 +533,38 @@ impl Supervisor {
             pending.insert(key.clone())
         };
         if !reserved {
-            return (
-                vec![response_line(&response_failure(
-                    Some(command_id),
-                    type_name,
-                    &name_unavailable_error(&scope.name, scope.depth),
-                    None,
-                ))],
-                false,
-            );
+            return Err(name_unavailable_error(&scope.name, scope.depth));
         }
-        let availability = self.assert_family_name_available(&scope);
+        let output = match self.assert_family_name_available(scope) {
+            Ok(()) => Ok(action.await),
+            Err(error) => Err(error),
+        };
         self.pending_session_names
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&key);
-        if let Err(error) = availability {
-            return (
-                vec![response_line(&response_failure(
-                    Some(command_id),
-                    type_name,
-                    &error,
-                    None,
-                ))],
-                false,
-            );
-        }
-        if active_session_id.is_none() {
-            // The offline catalog rename (TS `catalog.rename`): append the
-            // session_info entry, the ledger rename, and the roster row
-            // rewrite.
-            let path = Path::new(session_path);
-            if let Err(error) = append_saved_session_name(path, &scope.name) {
-                return (
-                    vec![response_line(&response_failure(
-                        Some(command_id),
-                        type_name,
-                        &error.to_string(),
-                        None,
-                    ))],
-                    false,
-                );
-            }
-            if let Some(sessions_dir) = self.sessions_dir_path() {
-                ledger_rename_by_child_path(
-                    &self.options.agent_dir,
-                    &sessions_dir,
-                    session_path,
-                    &scope.name,
-                );
-            }
-            self.rewrite_roster_session_name(session_path, &scope.name);
-            // The renamed session file can carry passive scheduled rows: the
-            // catalog snapshot's rows key off the session file (TS #2487
-            // invalidates the shared snapshot on the saved-session rename).
-            self.invalidate_passive_catalog();
-            return (
-                vec![response_line(&response_success(
-                    Some(command_id),
-                    type_name,
-                    None,
-                ))],
-                false,
-            );
-        }
-        // The live form forwards to the owning worker (TS rewrites the
-        // selector onto the resolved summary's ids).
-        self.route_client_command(
-            command,
-            client_id,
-            attached,
-            command_id.to_string(),
-            type_name.to_string(),
-            None,
-        )
-        .await
+        output
+    }
+
+    /// The name-reservation scope for a LIVE session's rename forward
+    /// (TS `summaryNameReservationInput` over the routed worker's matched
+    /// summary): the target's roster row, the same fields
+    /// [`Self::saved_session_name_scope`] reads for a saved row.
+    pub(crate) fn live_session_name_scope(
+        &self,
+        active_session_id: &str,
+        name: String,
+    ) -> Result<NameScope, String> {
+        let scope = {
+            let roster = self
+                .roster
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            roster
+                .by_active_session_id(active_session_id)
+                .map(|entry| name_scope_from_summary(&entry.summary, name))
+        };
+        scope.ok_or_else(|| format!("Unknown active session: {active_session_id}"))
     }
 
     /// The roster row rewrite of an offline rename (TS `writeRosterEntry`
