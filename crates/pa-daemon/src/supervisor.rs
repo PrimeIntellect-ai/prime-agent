@@ -588,6 +588,12 @@ impl Supervisor {
         };
         #[cfg(unix)]
         tokio::select! {
+            // `biased` polls the monitor first, deterministically: an
+            // already-compromised lease must win the tie against a boot
+            // block that finishes on its first poll (no reap targets, the
+            // spawns are instant) - a random pick could run the ownership
+            // actions against a successor that took the socket over.
+            biased;
             () = socket_lease.wait_compromised() => {
                 self.shutting_down.store(true, Ordering::SeqCst);
                 self.accept_exit.store(true, Ordering::SeqCst);
