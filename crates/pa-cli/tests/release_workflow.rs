@@ -450,7 +450,7 @@ fn windows_build_job_contract() {
         .iter()
         .find(|step| {
             step.name.as_deref()
-                == Some("Publish the R2 channel (the user path never touches GitHub)")
+                == Some("Publish the R2 channel (the channel serves no GitHub URL)")
         })
         .expect("the R2 publish step exists")
         .run
@@ -697,17 +697,8 @@ fn zero_artifacts_fail_loudly_instead_of_verifying_nothing() {
     );
 }
 
-/// The Windows entry point (`install.ps1`, the stable render) must publish on
-/// the BETA route too, not only on stable cuts: the README's `irm | iex`
-/// one-liner is the Windows install's front door, and no Rust stable has
-/// been cut yet — a stable-only upload would leave the documented route a
-/// 404 through the entire beta era. The stable render is the honest channel
-/// default (the installer's Windows channel fallback resolves the stable
-/// channel's missing win32-x64 row to beta with a printed notice).
-/// `install.sh` alone stays the stable-only exception: the bucket-root object
-/// the TS 0.9.8 funnel bootstraps through is the TypeScript product's own
-/// surface until the first Rust stable replaces it, and no TypeScript client
-/// ever shipped a Windows install.
+/// The publish's beta route serves install.ps1 (the stable render — the
+/// Windows entry point) and never overwrites install.sh (stable-only).
 #[test]
 fn the_beta_route_publishes_the_windows_entry_point() {
     let text = fs::read_to_string(repo_root().join(".github/workflows/release.yml"))
@@ -721,7 +712,7 @@ fn the_beta_route_publishes_the_windows_entry_point() {
         .iter()
         .find(|step| {
             step.name.as_deref()
-                == Some("Publish the R2 channel (the user path never touches GitHub)")
+                == Some("Publish the R2 channel (the channel serves no GitHub URL)")
         })
         .expect("the R2 publish step exists")
         .run

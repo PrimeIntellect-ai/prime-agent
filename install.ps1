@@ -8,9 +8,7 @@
 #
 # The release pipeline's publish step renders this file to <base>/install.ps1
 # (the stable channel) and <base>/install-beta.ps1 (the beta channel), the
-# build's download base + channel stamped in; the official domain
-# (https://app.primeintellect.ai/prime-agent/install.ps1) serves it once its
-# prefix carries the channel objects.
+# build's download base + channel stamped in.
 #
 # The Git Bash route is the same channel through install-rust.sh (the sh
 # one-liner `curl -fsSL .../install.sh | sh` under Git Bash/MSYS2/Cygwin);
@@ -22,8 +20,10 @@
 # or <base>/beta) gives the version, the channel manifest (<base>/latest.json
 # or <base>/beta.json) gives this platform's artifact row, and the versioned
 # release prefix serves the tarball plus its SHA256SUMS; the checksum is
-# verified before anything is published. NO GITHUB SURFACE anywhere in the
-# user path.
+# verified before anything is published. The channel carries no GitHub
+# surface: every file this installer READS comes from the base — the one
+# GitHub fetch on the Windows route is this script itself (the README's raw
+# copy), and the sh route has none.
 #
 # THE WINDOWS CHANNEL FALLBACK: the stable releases predate Windows
 # support, so the stable manifest carries no win32-x64 row until the first
