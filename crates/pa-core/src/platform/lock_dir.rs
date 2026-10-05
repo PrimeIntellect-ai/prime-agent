@@ -381,7 +381,15 @@ impl LockDir {
     fn create(path: &Path) -> io::Result<Created> {
         let candidate = private_sibling_of(path, "candidate");
         fs::create_dir(&candidate)?;
-        let dir = fs::File::open(&candidate)?;
+        let dir = match fs::File::open(&candidate) {
+            Ok(dir) => dir,
+            Err(error) => {
+                // Never leave the private candidate behind a failed pin -
+                // nothing else ever removes that private name.
+                let _ = fs::remove_dir(&candidate);
+                return Err(error);
+            }
+        };
         let (sec, nanos) = probe_mtime();
         if let Err(error) = set_mtime_handle(&dir, sec, nanos) {
             // Never leave the private candidate behind a failed probe.
