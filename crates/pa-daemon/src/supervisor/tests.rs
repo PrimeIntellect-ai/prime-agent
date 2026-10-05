@@ -2097,7 +2097,13 @@ proptest! {
             let sessions_dir = agent_dir.join("sessions");
             std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
             let parents = [sessions_dir.join("pa.jsonl"), sessions_dir.join("pb.jsonl")];
-            let options = SupervisorOptions { socket_path: dir.path().join("d.sock"), agent_dir };
+            let options = SupervisorOptions {
+                socket_path: dir.path().join("d.sock"),
+                agent_dir,
+                tcp_port: None,
+                tcp_bind_host: None,
+                remote_agent_mesh: None,
+            };
             let supervisor = Arc::new(Supervisor::new(options).expect("supervisor"));
             let active = format!("r{}-live", rows.len() - 1);
             for (index, (name, depth, parent)) in rows.iter().enumerate() {
