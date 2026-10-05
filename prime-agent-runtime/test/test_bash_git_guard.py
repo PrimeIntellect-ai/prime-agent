@@ -44,18 +44,22 @@ def bash(command: str, **kwargs: object) -> object:  # type: ignore[no-redef]
     merged.update(kwargs)
     return _direct_bash(command, **merged)
 
-# Every spawned command in this suite carries an explicit timeout.
+# Every spawned command, probe, and repo operation in this suite carries an explicit timeout.
 AWAIT_TIMEOUT = 10.0
+GIT_TIMEOUT = 60
 
 
 
 def _run_git(cwd: str, *args: str) -> None:
     # HOME=cwd keeps user-level git config out of the test repositories.
+    # GIT_TIMEOUT bounds a wedged git (index lock, prompt, hung child) the
+    # same way the force-push suite bounds its repo operations.
     subprocess.run(
         ["git", *args],
         cwd=cwd,
         check=True,
         capture_output=True,
+        timeout=GIT_TIMEOUT,
         env={**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "HOME": cwd},
     )
 
@@ -223,6 +227,9 @@ class DestructiveGitGuardTest(unittest.IsolatedAsyncioTestCase):
     def _tracked(self, *parts: str) -> Path:
         return Path(self.test_dir, *parts)
 
+    async def _run(self, command: str, **kwargs):
+        return await asyncio.wait_for(bash(command, **kwargs), AWAIT_TIMEOUT)
+
     async def _refused(self, command: str) -> str:
         try:
             handle = bash(command)
@@ -282,6 +289,54 @@ class DestructiveGitGuardTest(unittest.IsolatedAsyncioTestCase):
         # spelling proves the process was killed, never completed.
         self.assertTrue(result.exit_code < 0 or result.exit_code >= 128)
 
+    async def test_run_cuts_a_wedged_command_at_its_deadline(self):
+        # The suite's contract: every spawned command carries an explicit
+        # timeout. _run must cut a wedged command (index lock, prompt,
+        # hung child) at AWAIT_TIMEOUT instead of stalling the worker.
+        # The spying bash captures the handle so the cut's kill is proven
+        # on the process bash() actually spawned.
+        os.chdir(self.test_dir)
+        spawned = []
+        real_bash = bash
+
+        def spying_bash(cmd, **kwargs):
+            handle = real_bash(cmd, **kwargs)
+            spawned.append(handle)
+            return handle
+
+        with mock.patch(f"{__name__}.bash", spying_bash):
+            with mock.patch(f"{__name__}.AWAIT_TIMEOUT", 0.5):
+                with self.assertRaises(asyncio.TimeoutError):
+                    await self._run("sleep 5")
+        [handle] = spawned
+        # The cancelled owned await kills the process group before the
+        # TimeoutError surfaces, so the reap must already have landed; the
+        # bounded-wait form guards a watch thread that lags the cancel.
+        deadline = time.monotonic() + AWAIT_TIMEOUT
+        while handle.running and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        self.assertFalse(handle.running)
+        result = handle.poll()
+        self.assertIsNotNone(result)
+        # `sleep 5` cannot finish inside the cut window, so the wrapper
+        # died by a signal: wait() spells that negative, while a shell
+        # that first observed its child's death exits 128+signal. Either
+        # spelling proves the process was killed, never completed.
+        self.assertTrue(result.exit_code < 0 or result.exit_code >= 128)
+
+    def test_run_git_cuts_a_wedged_repo_operation(self):
+        # _run_git's explicit timeout must cut a wedged git the same way:
+        # a stub git hangs, and GIT_TIMEOUT raises instead of stalling.
+        stub_bin = Path(self.test_dir, "bin")
+        stub_bin.mkdir()
+        stub = Path(stub_bin, "git")
+        stub.write_text("#!/bin/sh\nexec sleep 5\n")
+        stub.chmod(0o755)
+        os.environ["PATH"] = f"{stub_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+        with mock.patch(f"{__name__}.GIT_TIMEOUT", 0.5):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                _run_git(self.test_dir, "status")
+
     async def test_refuses_destructive_discards_on_dirty_tree(self):
         for index, command in enumerate([
             'git checkout -- .', 'git checkout .', 'git clean -fd', 'git reset --hard', 'git restore .', '"git" reset --hard',
@@ -324,18 +379,18 @@ class DestructiveGitGuardTest(unittest.IsolatedAsyncioTestCase):
         self._init_dirty_repo()
         _run_git(self.test_dir, "add", "-A")
         _run_git(self.test_dir, "commit", "-q", "-m", "second")
-        result = await bash("git checkout -- .")
+        result = await self._run("git checkout -- .")
         self.assertEqual(result.exit_code, 0)
         # A non-`git` function never runs for a bare `git` word, and a
         # command-scoped HOME is replayed: both probe this clean tree.
         for command in ['f() { echo hi; }; git reset --hard', f'HOME={self.test_dir} cd && git reset --hard']:
             with self.subTest(command=command):
-                result = await bash(command)
+                result = await self._run(command)
                 self.assertEqual(result.exit_code, 0)
 
     async def test_bypass_kwarg_runs_discard(self):
         self._init_dirty_repo()
-        result = await bash("git reset --hard", allow_destructive_git=True)
+        result = await self._run("git reset --hard", allow_destructive_git=True)
         self.assertEqual(result.exit_code, 0)
         self.assertEqual(self._tracked("tracked.txt").read_text(), "committed\n")
 
@@ -409,26 +464,26 @@ class DestructiveGitGuardTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_fails_open_outside_a_git_repository(self):
         os.chdir(self.test_dir)
-        result = await bash("git checkout -- .")
+        result = await self._run("git checkout -- .")
         self.assertNotEqual(result.exit_code, 0)
 
     async def test_non_discard_commands_are_untouched_on_a_dirty_tree(self):
         self._init_dirty_repo()
-        result = await bash("git status")
+        result = await self._run("git status")
         self.assertEqual(result.exit_code, 0)
         self.assertIn("tracked.txt", result.output)
-        result = await bash("git log --oneline")
+        result = await self._run("git log --oneline")
         self.assertEqual(result.exit_code, 0)
         # Quoted data must not trigger the guard end to end either.
-        result = await bash("echo 'git reset --hard'")
+        result = await self._run("echo 'git reset --hard'")
         self.assertEqual(result.exit_code, 0)
         self.assertIn("git reset --hard", result.output)
         # A dry run never deletes, and the copy follows the same-command
         # reassignment, so the git guard reads the live harmless value and lets
         # both run.
-        result = await bash("git clean -n")
+        result = await self._run("git clean -n")
         self.assertEqual(result.exit_code, 0)
-        result = await bash("G='git reset --hard'; G='echo hi' H=\"$G\"; $H")
+        result = await self._run("G='git reset --hard'; G='echo hi' H=\"$G\"; $H")
         self.assertEqual(result.exit_code, 0)
         self.assertIn("hi", result.output)
         self.assertEqual(self._tracked("tracked.txt").read_text(), "modified\n")
@@ -438,9 +493,9 @@ class DestructiveGitGuardTest(unittest.IsolatedAsyncioTestCase):
         self._init_dirty_repo()
         probe = mock.Mock(return_value=[" M tracked.txt"])
         with mock.patch.object(bash_module, "_probe_uncommitted_changes", probe):
-            result = await bash("echo hi")
+            result = await self._run("echo hi")
             self.assertEqual(result.exit_code, 0)
-            result = await bash("git status")
+            result = await self._run("git status")
             self.assertEqual(result.exit_code, 0)
             probe.assert_not_called()
             await self._refused("git checkout -- .")
@@ -452,7 +507,7 @@ class DestructiveGitGuardTest(unittest.IsolatedAsyncioTestCase):
     async def test_fails_open_when_the_probe_fails(self):
         self._init_dirty_repo()
         with mock.patch.object(bash_module, "_probe_uncommitted_changes", return_value=None):
-            result = await bash("git checkout -- .")
+            result = await self._run("git checkout -- .")
         self.assertEqual(result.exit_code, 0)
         self.assertEqual(self._tracked("tracked.txt").read_text(), "committed\n")
 
@@ -477,7 +532,7 @@ class DestructiveGitGuardTest(unittest.IsolatedAsyncioTestCase):
                 _init_dirty_git_repo(target)
                 _run_git(target, "add", "-A")
                 _run_git(target, "commit", "-q", "-m", "second")
-                result = await bash(f'cd "{directory}" && git reset --hard')
+                result = await self._run(f'cd "{directory}" && git reset --hard')
                 self.assertEqual(result.exit_code, 0)
 
     async def test_multi_discard_probes_every_target_repository(self):
@@ -537,7 +592,7 @@ class DestructiveGitGuardTest(unittest.IsolatedAsyncioTestCase):
                 if refused:
                     await self._refused(command)
                 else:
-                    await bash(command)
+                    await self._run(command)
             self.assertEqual(Path(repo, "tracked.txt").read_text(), "modified\n")
 
         for command, refused, prefix in [
@@ -601,22 +656,22 @@ class DestructiveGitGuardTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_eval_refusal_honors_the_bypass_kwarg(self):
         self._init_dirty_repo()
-        result = await bash("eval 'git reset --hard'", allow_destructive_git=True)
+        result = await self._run("eval 'git reset --hard'", allow_destructive_git=True)
         self.assertEqual(result.exit_code, 0)
         self.assertEqual(self._tracked("tracked.txt").read_text(), "committed\n")
 
     async def test_safe_eval_commands_still_run(self):
         self._init_dirty_repo()
-        result = await bash("eval 'echo hi'")
+        result = await self._run("eval 'echo hi'")
         self.assertEqual(result.exit_code, 0)
         self.assertIn("hi", result.output)
         # Unquoting one level at a time must not mistake still-quoted data for
         # a payload command: this eval only prints the string.
-        result = await bash("eval \"echo 'git reset --hard'\"")
+        result = await self._run("eval \"echo 'git reset --hard'\"")
         self.assertEqual(result.exit_code, 0)
         self.assertIn("git reset --hard", result.output)
         # An eval word in argument position never runs its payload.
-        result = await bash("echo eval 'git reset --hard'")
+        result = await self._run("echo eval 'git reset --hard'")
         self.assertEqual(result.exit_code, 0)
         self.assertEqual(self._tracked("tracked.txt").read_text(), "modified\n")
 
@@ -645,7 +700,7 @@ class DestructiveGitGuardTest(unittest.IsolatedAsyncioTestCase):
         _run_git(str(self._tracked("sub")), "add", "-A")
         _run_git(str(self._tracked("sub")), "commit", "-q", "-m", "second")
         self._tracked("tracked.txt").write_text("modified\n")
-        result = await bash("git -Csub reset --hard")
+        result = await self._run("git -Csub reset --hard")
         self.assertNotEqual(result.exit_code, 0)
         self.assertEqual(self._tracked("tracked.txt").read_text(), "modified\n")
 
@@ -685,11 +740,11 @@ class DestructiveGitGuardTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_safe_redirection_commands_still_run(self):
         self._init_dirty_repo()
-        result = await bash("git status > status.txt")
+        result = await self._run("git status > status.txt")
         self.assertEqual(result.exit_code, 0)
-        result = await bash("git log --oneline > log.txt 2>/dev/null")
+        result = await self._run("git log --oneline > log.txt 2>/dev/null")
         self.assertEqual(result.exit_code, 0)
-        result = await bash("echo one \\\n two")
+        result = await self._run("echo one \\\n two")
         self.assertEqual(result.exit_code, 0)
         self.assertIn("one", result.output)
         self.assertIn("two", result.output)
@@ -766,13 +821,13 @@ class DestructiveGitGuardTest(unittest.IsolatedAsyncioTestCase):
         # A quoted "cd" in argument position is inert data: the reveal reads
         # command words only, so the discard probes the clean caller and sub
         # survives untouched.
-        result = await bash('echo "cd" && git reset --hard')
+        result = await self._run('echo "cd" && git reset --hard')
         self.assertEqual(result.exit_code, 0)
         self.assertEqual(self._tracked("sub", "tracked.txt").read_text(), "modified\n")
 
     async def test_command_scoped_assignments_do_not_persist(self):
         self._init_dirty_repo()
-        result = await bash("FOO=1 git status")
+        result = await self._run("FOO=1 git status")
         self.assertEqual(result.exit_code, 0)
         self.assertEqual(self._tracked("tracked.txt").read_text(), "modified\n")
         # The shell keeps none of these names, so `$G` runs a command that is
@@ -782,7 +837,7 @@ class DestructiveGitGuardTest(unittest.IsolatedAsyncioTestCase):
             'G=git; echo x; G=other; $G reset --hard', 'G=git; export G=other; $G reset --hard', 'G=git; command export G=other; $G reset --hard',
         ]:
             with self.subTest(command=command):
-                result = await bash(command)
+                result = await self._run(command)
                 self.assertNotEqual(result.exit_code, 0)
                 self.assertEqual(self._tracked("tracked.txt").read_text(), "modified\n")
 
@@ -795,7 +850,7 @@ class DestructiveGitGuardTest(unittest.IsolatedAsyncioTestCase):
                 await self._refused(command)
                 self.assertEqual(self._tracked("tracked.txt").read_text(), "modified\n")
         # Escaped data stays inert: this only prints.
-        result = await bash("echo \\# git reset --hard")
+        result = await self._run("echo \\# git reset --hard")
         self.assertEqual(result.exit_code, 0)
         self.assertEqual(self._tracked("tracked.txt").read_text(), "modified\n")
 
@@ -812,17 +867,17 @@ class DestructiveGitGuardTest(unittest.IsolatedAsyncioTestCase):
                 await self._refused(command)
                 self.assertEqual(self._tracked("tracked.txt").read_text(), "modified\n")
         # Index-only restores stay allowed.
-        result = await bash("git restore --staged .")
+        result = await self._run("git restore --staged .")
         self.assertEqual(result.exit_code, 0)
         self.assertEqual(self._tracked("tracked.txt").read_text(), "modified\n")
 
     async def test_heredoc_bodies_are_inert_but_substitutions_live(self):
         self._init_dirty_repo()
-        result = await bash("cat <<EOF\ngit reset --hard\nEOF")
+        result = await self._run("cat <<EOF\ngit reset --hard\nEOF")
         self.assertEqual(result.exit_code, 0)
         self.assertEqual(self._tracked("tracked.txt").read_text(), "modified\n")
         # A quoted delimiter turns expansion off: the body is inert data.
-        result = await bash("cat <<'EOF'\n$(git reset --hard)\nEOF")
+        result = await self._run("cat <<'EOF'\n$(git reset --hard)\nEOF")
         self.assertEqual(result.exit_code, 0)
         self.assertIn("$(git reset --hard)", result.output)
         await self._refused("cat <<EOF\n$(git reset --hard)\nEOF")
@@ -833,7 +888,7 @@ class DestructiveGitGuardTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_quoted_data_in_substitutions_is_inert(self):
         self._init_dirty_repo()
-        result = await bash('echo "$(echo \'git reset --hard\')"')
+        result = await self._run('echo "$(echo \'git reset --hard\')"')
         self.assertEqual(result.exit_code, 0)
         self.assertIn("git reset --hard", result.output)
         self.assertEqual(self._tracked("tracked.txt").read_text(), "modified\n")
@@ -859,7 +914,7 @@ class DestructiveGitGuardTest(unittest.IsolatedAsyncioTestCase):
         _run_git(self.test_dir, "add", ".gitignore")
         _run_git(self.test_dir, "commit", "-q", "-m", "gitignore")
         self._tracked("ignored.txt").write_text("generated\n")
-        result = await bash("git clean -f")
+        result = await self._run("git clean -f")
         self.assertEqual(result.exit_code, 0)
         self.assertTrue(self._tracked("ignored.txt").exists())
 
