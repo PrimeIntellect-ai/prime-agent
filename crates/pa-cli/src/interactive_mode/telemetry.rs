@@ -227,6 +227,24 @@ impl pa_tui::interactive::InteractionTelemetry for CliInteractionTelemetry {
         Box::pin(std::future::ready(()))
     }
 
+    fn image_fallback(
+        &self,
+        action: &'static str,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        // `tui image fallback`: one standalone event per dialog moment
+        // (a rare setup decision, not a run counter) on a one-shot
+        // client, the `agent command used` pattern.
+        Box::pin(async move {
+            let Some(client) = self.client() else {
+                return;
+            };
+            let mut properties = pa_telemetry::base_properties("interactive");
+            properties.set("action", serde_json::Value::from(action));
+            client.track("tui image fallback", properties);
+            let _ = client.shutdown().await;
+        })
+    }
+
     fn queued_input(
         &self,
         _lane: &'static str,
@@ -399,5 +417,36 @@ mod tests {
         assert!(exits[1]["properties"]
             .get("tui_hyperlinks_enabled")
             .is_none());
+    }
+
+    /// `tui image fallback` is a standalone event (the dialog is a rare
+    /// setup moment, not a run counter): each panel moment reports its
+    /// own event with the action alone.
+    #[test]
+    fn image_fallback_reports_its_own_event() {
+        crate::mode::tests::with_clean_telemetry_env(|| {
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(report_image_fallback_once());
+        });
+    }
+
+    async fn report_image_fallback_once() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let telemetry = CliInteractionTelemetry::new(dir.path().to_path_buf(), agent_dir.clone());
+        telemetry.image_fallback("opened").await;
+        telemetry.image_fallback("ask_agent").await;
+        let mirror = std::fs::read_to_string(agent_dir.join("telemetry.jsonl")).unwrap();
+        let actions: Vec<String> = mirror
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .filter(|event: &serde_json::Value| event["name"] == "tui image fallback")
+            .map(|event: serde_json::Value| {
+                event["properties"]["action"].as_str().unwrap().to_string()
+            })
+            .collect();
+        assert_eq!(actions, ["opened", "ask_agent"]);
     }
 }

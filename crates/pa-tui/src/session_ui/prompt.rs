@@ -5,9 +5,9 @@
 
 use super::{
     anyhow, collect_marked_images, evict_images_to_budget, format_image_marker, image_marker_ids,
-    mpsc, AgentView, DaemonClient, DaemonCommand, DockFold, Duration, LoadedImage, Map,
-    PromptStash, RebuildKind, Result, SessionUi, SlashCommandRegistry, StatusKind, Value,
-    UI_REQUEST_TIMEOUT_MS,
+    mpsc, strip_image_markers, AgentView, DaemonClient, DaemonCommand, DockFold, Duration,
+    LoadedImage, Map, PendingConfirm, PromptStash, RebuildKind, Result, SessionUi,
+    SlashCommandRegistry, StatusKind, Value, UI_REQUEST_TIMEOUT_MS,
 };
 /// How a submitted prompt travels to the session (TS `streamingBehavior`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,6 +18,12 @@ pub(crate) enum SubmitBehavior {
     /// delivers when the run goes idle.
     FollowUp,
 }
+
+/// The ask-agent choice's meta-instruction (text-only; the parked image
+/// draft returns to the editor for the resubmit once the setting lands):
+/// the daemon-side refusal's guidance, turned into the agent task that
+/// can act on it.
+const IMAGE_MODEL_CONFIGURE_REQUEST: &str = "Set the imageModel setting in settings.json to an image-capable model (\"provider/model-id\" or a bare id) so image prompts can be routed.";
 
 /// One backgrounded prompt round trip's settled outcome (TS `onSubmit`
 /// awaits `agentConnection.prompt` off the render path —
@@ -448,6 +454,23 @@ impl SessionUi {
         model.input.contains(&pa_types::ai::ModelInput::Image)
     }
 
+    /// Whether an image-bearing submit needs the fallback panel's
+    /// decision: the prompt attaches pasted images, the session model has
+    /// no image input, and no `settings.imageModel` is configured. A
+    /// configured reference — usable or not — stays the daemon's
+    /// dispatch judgment (its routing or its actionable refusal with the
+    /// draft restored); blocked images keep their own refusal path.
+    fn image_fallback_due(&self, text: &str, view: &AgentView) -> bool {
+        if collect_marked_images(&self.pasted_images, text).is_empty()
+            || self.model_supports_images(view)
+        {
+            return false;
+        }
+        self.client_settings
+            .as_ref()
+            .is_some_and(|settings| !settings.block_images() && settings.image_model().is_none())
+    }
+
     /// Submit a prompt (the Enter path). The user message arrives back as a
     /// `message_start` session event (no local echo), and prompts sent while
     /// a turn is active queue on the daemon side. `behavior` selects the
@@ -516,7 +539,73 @@ impl SessionUi {
         if text.starts_with('/') {
             return self.handle_slash(text, behavior, view).await;
         }
+        // The image-routing fallback: an image-bearing prompt on a
+        // text-only model with no configured imageModel would be refused
+        // at dispatch (the daemon's actionable setup error). The
+        // three-way choice panel parks the draft and lets the user
+        // decide before the round trip — nothing is stripped until a
+        // choice lands.
+        if self.image_fallback_due(text, view) {
+            view.confirm = Some(crate::confirm::ConfirmPanel::image_route_fallback());
+            self.pending_confirm = Some(PendingConfirm::ImagePrompt {
+                text: text.to_string(),
+                behavior,
+            });
+            self.track_image_fallback("opened");
+            self.dirty = true;
+            return Ok(());
+        }
         self.send_prompt(text, behavior, view)
+    }
+
+    /// Report one image-routing fallback moment (event `tui image
+    /// fallback`): the panel's mounting or its landed choice, never the
+    /// prompt text.
+    pub(super) fn track_image_fallback(&self, action: &'static str) {
+        if let Some(telemetry) = self.telemetry.clone() {
+            tokio::spawn(async move {
+                telemetry.image_fallback(action).await;
+            });
+        }
+    }
+
+    /// One answered image-routing fallback (the parked prompt's three-way
+    /// choice): the text without its image markers and bytes, the
+    /// meta-instruction asking the agent to configure imageModel (the
+    /// parked draft returning to the editor for the resubmit after the
+    /// setting lands), or the parked prompt back in the editor (the
+    /// cancel choice; the panel's escape runs the same arm).
+    pub(super) fn apply_image_prompt_choice(
+        &mut self,
+        option: &str,
+        text: &str,
+        behavior: SubmitBehavior,
+        view: &mut AgentView,
+    ) -> Result<()> {
+        self.track_image_fallback(match option {
+            crate::confirm::IMAGE_CHOICE_SEND_TEXT_ONLY => "send_text_only",
+            crate::confirm::IMAGE_CHOICE_ASK_AGENT => "ask_agent",
+            _ => "cancel",
+        });
+        match option {
+            crate::confirm::IMAGE_CHOICE_SEND_TEXT_ONLY => {
+                let stripped = strip_image_markers(text);
+                if stripped.is_empty() {
+                    view.editor.set_text(text);
+                    self.note("Nothing to send without the image.", view);
+                    return Ok(());
+                }
+                self.send_prompt(&stripped, behavior, view)
+            }
+            crate::confirm::IMAGE_CHOICE_ASK_AGENT => {
+                view.editor.set_text(text);
+                self.send_prompt(IMAGE_MODEL_CONFIGURE_REQUEST, behavior, view)
+            }
+            _ => {
+                view.editor.set_text(text);
+                Ok(())
+            }
+        }
     }
 
     // ------------------------------------------------------------------
@@ -1172,5 +1261,17 @@ impl SessionUi {
             .lock()
             .expect("prompt stash store poisoned");
         store.for_session(stash_session_id).stash_draft_head(stash);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The ask-agent choice's meta-instruction is a text-only turn: no
+    /// image markers travel on it, so no image bytes can attach.
+    #[test]
+    fn the_configure_request_carries_no_image_markers() {
+        assert!(image_marker_ids(IMAGE_MODEL_CONFIGURE_REQUEST).is_empty());
     }
 }

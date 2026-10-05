@@ -4,11 +4,12 @@
 //! impl block (a trait impl is one block per type; it moved whole).
 
 use super::{
-    artifact_reference, json, map_thinking_level, now_millis, persisted_rlm_max_depth,
-    AgentSessionEngine, Arc, BranchSummaryOutcome, BranchSummaryRequest, BranchSummaryRun,
-    CompactionOutcome, CompactionRequest, CompactionRun, EngineEvent, EngineModelSelection,
-    ParentIdentity, PromptRequest, ProviderTarget, SessionEngine, SideQuestionOutcome,
-    SideQuestionRequest, StartupScope, TurnPrompt, Value, DEFAULT_RLM_MAX_DEPTH,
+    artifact_reference, image_delegation::ImageDelegationRun, json, map_thinking_level, now_millis,
+    persisted_rlm_max_depth, AgentSessionEngine, Arc, BranchSummaryOutcome, BranchSummaryRequest,
+    BranchSummaryRun, CompactionOutcome, CompactionRequest, CompactionRun, EngineEvent,
+    EngineModelSelection, ParentIdentity, PromptRequest, ProviderTarget, SessionEngine,
+    SideQuestionOutcome, SideQuestionRequest, StartupScope, TurnPrompt, Value,
+    DEFAULT_RLM_MAX_DEPTH,
 };
 
 impl SessionEngine for AgentSessionEngine {
@@ -1617,6 +1618,48 @@ impl SessionEngine for AgentSessionEngine {
             }
             TurnPrompt::Injected(message) => Self::custom_message_carries_images(message),
         };
+        // The image-model routing decision, resolved once here: the same
+        // resolver/refusal seam `arm_image_turn_route` serves. A
+        // supervisor-backed worker (the daemon's product surface) DELEGATES
+        // the images to one child on the resolved image model and serves
+        // the parent's turn text-only with the child's description row;
+        // the per-turn model swap stays for standalone workers, and a
+        // missing/unusable `imageModel` fails the turn with the same
+        // actionable refusal either way.
+        let delegation = match (
+            self.resolve_image_turn_route(carries_images),
+            self.children.is_some(),
+        ) {
+            (Ok(Some(resolved)), true) => {
+                // The daemon's model allowlist is fail-closed on every
+                // model the session runs on (the same gate
+                // `arm_image_turn_route` asserts for the swap): a resolved
+                // image model excluded by `allowedModels` must not reach a
+                // delegation child either.
+                let selector = format!("{}/{}", resolved.model.provider, resolved.model.id);
+                let allowlist = crate::model_allowlist::load(&self.cwd(), &self.config.agent_dir);
+                if let Err(refusal) = crate::model_allowlist::assert_allowed(&allowlist, &selector)
+                {
+                    self.note_model_refused("image_route", &selector);
+                    emit(EngineEvent::Done(Err(format!("{refusal:#}"))));
+                    return;
+                }
+                self.run_image_delegation(&resolved, &turn_prompt, aborted, &mut emit)
+            }
+            (Err(refusal), _) => {
+                emit(EngineEvent::Done(Err(format!("{refusal:#}"))));
+                return;
+            }
+            _ => ImageDelegationRun::NotDelegated,
+        };
+        match delegation {
+            ImageDelegationRun::Delegated(delegated_prompt) => {
+                self.run_turns(*delegated_prompt, aborted, &mut emit);
+                return;
+            }
+            ImageDelegationRun::Ended => return,
+            ImageDelegationRun::NotDelegated => {}
+        }
         if let Err(refusal) = self.arm_image_turn_route(carries_images) {
             emit(EngineEvent::Done(Err(refusal)));
             return;

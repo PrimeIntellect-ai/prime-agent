@@ -65,6 +65,17 @@ pub fn track_model_refused(
     client.track("model refused", properties);
 }
 
+/// Track one image-turn delegation's outcome (`image delegation`, schema
+/// 2, the telemetry worker's locked interface): the delegating parent
+/// session's id and the outcome only — never child ids, model ids, or
+/// prompt/answer content.
+pub fn track_image_delegation(client: &TelemetryClient, session_id: &str, outcome: &str) {
+    let mut properties = base_properties("daemon");
+    properties.set("session_id", Value::from(session_id));
+    properties.set("outcome", Value::from(outcome));
+    client.track("image delegation", properties);
+}
+
 /// Track the disk-archive sweep's `daemon event` (schema v1, kind
 /// `sessions_archived`): a count only, never session payload.
 pub fn track_sessions_archived(client: &TelemetryClient, count: usize) {

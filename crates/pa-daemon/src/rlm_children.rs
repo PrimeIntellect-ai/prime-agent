@@ -984,10 +984,13 @@ fn spawn_name_unavailable(name: &str, depth: u32) -> anyhow::Error {
     )
 }
 
+mod delegation;
 mod host;
 mod lifecycle;
 mod registry;
 mod usage;
+
+pub(crate) use delegation::{ImageDelegationOutcome, ImageDelegationRequest};
 
 #[cfg(test)]
 mod watch_tests;

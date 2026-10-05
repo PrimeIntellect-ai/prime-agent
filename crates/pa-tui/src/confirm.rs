@@ -9,6 +9,16 @@ use crate::theme::{Theme, ThemeColor};
 use crate::width::truncate_line;
 use crate::Line;
 
+/// The image-routing fallback's "send the text without the image" choice
+/// (the markers and bytes stay out of the submitted turn).
+pub const IMAGE_CHOICE_SEND_TEXT_ONLY: &str = "Send the text without the image";
+/// The image-routing fallback's "ask the agent to configure imageModel"
+/// choice (the image draft returns to the editor for the resubmit).
+pub const IMAGE_CHOICE_ASK_AGENT: &str = "Ask the agent to configure imageModel";
+/// The image-routing fallback's keep-the-prompt choice (the draft returns
+/// to the editor; the panel's escape runs the same arm).
+pub const IMAGE_CHOICE_CANCEL: &str = "Cancel and keep the prompt";
+
 /// One answer to the pending question.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfirmAction {
@@ -41,6 +51,27 @@ impl ConfirmPanel {
                 .map(str::to_string)
                 .collect(),
             options: vec!["Yes".to_string(), "No".to_string()],
+            selected: 0,
+        }
+    }
+
+    /// The image-routing fallback's three-way choice (an image-bearing
+    /// prompt on a text-only model with no configured imageModel). The
+    /// submitted draft stays parked with the pending confirm until a
+    /// choice lands — nothing is stripped first.
+    #[must_use]
+    pub fn image_route_fallback() -> Self {
+        ConfirmPanel {
+            title: "Current model does not support images".to_string(),
+            message: vec![
+                "No imageModel is configured to route image turns to an image-capable model."
+                    .to_string(),
+            ],
+            options: vec![
+                IMAGE_CHOICE_SEND_TEXT_ONLY.to_string(),
+                IMAGE_CHOICE_ASK_AGENT.to_string(),
+                IMAGE_CHOICE_CANCEL.to_string(),
+            ],
             selected: 0,
         }
     }
@@ -134,6 +165,38 @@ mod tests {
         assert_eq!(
             panel.handle_key(&kb(), "enter"),
             ConfirmAction::Select("Yes".to_string())
+        );
+    }
+
+    #[test]
+    fn the_image_fallback_panel_navigates_three_options() {
+        let mut panel = ConfirmPanel::image_route_fallback();
+        assert_eq!(
+            panel.handle_key(&kb(), "down"),
+            ConfirmAction::None,
+            "the second row (ask the agent) is one down"
+        );
+        assert_eq!(
+            panel.handle_key(&kb(), "enter"),
+            ConfirmAction::Select(IMAGE_CHOICE_ASK_AGENT.to_string())
+        );
+        // Down past the last row stays selected; up walks back to the
+        // first row and clamps there.
+        panel.handle_key(&kb(), "down");
+        assert_eq!(
+            panel.handle_key(&kb(), "enter"),
+            ConfirmAction::Select(IMAGE_CHOICE_CANCEL.to_string())
+        );
+        panel.handle_key(&kb(), "up");
+        panel.handle_key(&kb(), "up");
+        assert_eq!(
+            panel.handle_key(&kb(), "up"),
+            ConfirmAction::None,
+            "up at the first row stays put"
+        );
+        assert_eq!(
+            panel.handle_key(&kb(), "enter"),
+            ConfirmAction::Select(IMAGE_CHOICE_SEND_TEXT_ONLY.to_string())
         );
     }
 

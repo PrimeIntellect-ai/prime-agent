@@ -182,7 +182,10 @@ impl SupervisorChildSessionsInner {
             .await?;
         // A failed prompt tears the just-created session down (TS kills the
         // created session in the create-path catch block).
-        if let Err(error) = self.prompt_child(&created.active_session_id, prompt).await {
+        if let Err(error) = self
+            .prompt_child(&created.active_session_id, prompt, &[])
+            .await
+        {
             let _ = self
                 .kill_child(&created.active_session_id, ChildCloseReason::Killed)
                 .await;
@@ -217,14 +220,33 @@ impl SupervisorChildSessionsInner {
         })
     }
 
-    pub(super) async fn prompt_child(&self, active_session_id: &str, prompt: &str) -> Result<()> {
+    pub(super) async fn prompt_child(
+        &self,
+        active_session_id: &str,
+        prompt: &str,
+        images: &[pa_agent::types::ImageContent],
+    ) -> Result<()> {
+        // The wire image blocks (`parse_prompt_images`' shape): the
+        // delegation path rides the actual image bytes natively; every
+        // text-only caller admits an empty list.
+        let wire_images = (!images.is_empty()).then(|| {
+            json!(images
+                .iter()
+                .map(|image| json!({
+                    "type": "image",
+                    "data": image.data,
+                    "mimeType": image.mime_type,
+                }))
+                .collect::<Vec<_>>())
+        });
+        // Cloned per call: the closure may run twice (the retry below).
         let make_command = |selector: &str| DaemonCommand::Prompt {
             id: None,
             active_session_id: selector.to_string(),
             message: prompt.to_string(),
             input: PromptInput {
                 content: None,
-                images: None,
+                images: wire_images.clone(),
                 streaming_behavior: None,
                 queue_if_busy: None,
                 expand_prompt_templates: None,

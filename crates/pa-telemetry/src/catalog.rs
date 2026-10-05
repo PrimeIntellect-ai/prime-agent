@@ -428,6 +428,14 @@ pub const BUILD_CHANNELS: &[&str] = &["release", "prerelease", "development", "u
 /// The #2117 workload origins.
 pub const WORKLOAD_ORIGINS: &[&str] = &["interactive", "automated", "internal", "test", "unknown"];
 
+/// The image-delegation outcome vocabulary (`image delegation`).
+pub const IMAGE_DELEGATION_OUTCOMES: &[&str] = &["answered", "failed"];
+
+/// The image-fallback dialog's action vocabulary (`tui image fallback`):
+/// the panel mounting, then the landed three-way choice (the panel's
+/// escape arm counts as `cancel`).
+pub const IMAGE_FALLBACK_ACTIONS: &[&str] = &["opened", "send_text_only", "ask_agent", "cancel"];
+
 // ---------------------------------------------------------------------------
 // Rule constructors
 // ---------------------------------------------------------------------------
@@ -1005,6 +1013,35 @@ const SESSION_ARCHIVED: EventRule = EventRule {
     ],
 };
 
+/// `image delegation` (v2): one image-carrying turn delegated to a child
+/// running the resolved `settings.imageModel` (the supervisor-backed
+/// routing for text-only session models). Outcome only — never the
+/// prompt, the child's answer, or any model id.
+const IMAGE_DELEGATION: EventRule = EventRule {
+    name: "image delegation",
+    since: 2,
+    properties: &[
+        ("session_id", required(uuid())),
+        (
+            "outcome",
+            required(enum_rule(IMAGE_DELEGATION_OUTCOMES, "failed")),
+        ),
+    ],
+};
+
+/// `tui image fallback` (v2): the interactive client's image-routing
+/// fallback dialog — an image-bearing prompt met a text-only model with
+/// no configured imageModel. The panel's mounting and its landed
+/// three-way choice, never the prompt text or image bytes.
+const TUI_IMAGE_FALLBACK: EventRule = EventRule {
+    name: "tui image fallback",
+    since: 2,
+    properties: &[(
+        "action",
+        required(enum_rule(IMAGE_FALLBACK_ACTIONS, "cancel")),
+    )],
+};
+
 /// A settled ipython cell that rendered as bash (v2): its executed
 /// `bash()` line share and command count, never command text. One of the
 /// two standalone TUI events (with `agent command used`), tracked per
@@ -1268,6 +1305,8 @@ pub fn catalog() -> Vec<&'static EventRule> {
         &DAEMON_EVENT,
         &MODEL_REFUSED,
         &SESSION_ARCHIVED,
+        &IMAGE_DELEGATION,
+        &TUI_IMAGE_FALLBACK,
         &TUI_EXIT,
         &TUI_IPYTHON_BASH_RENDERED,
     ];
@@ -1409,6 +1448,8 @@ mod tests {
             "model refused",
             "update completed",
             "tui exit",
+            "image delegation",
+            "tui image fallback",
         ] {
             assert!(names.contains(&name), "{name} stays catalogued");
         }
@@ -1529,6 +1570,28 @@ mod tests {
         let _ = sanitize("agent run completed", &mut properties);
         assert_eq!(properties.get("error_category"), Some(&Value::Null));
         assert!(properties.get("compaction_count").is_none());
+    }
+
+    #[test]
+    fn sanitize_pins_the_image_events() {
+        // `image delegation`: the outcome vocabulary, nothing else rides.
+        let mut properties = Properties::new();
+        properties.set("session_id", json!("0197d0a0-8f5c-7f2a-b0e3-2d7e0d2b3b1a"));
+        properties.set("outcome", json!("answered"));
+        properties.set("child_id", json!("sub-1234"));
+        assert_eq!(sanitize("image delegation", &mut properties), 1);
+        assert_eq!(properties.get("outcome"), Some(&json!("answered")));
+        assert!(properties.get("child_id").is_none());
+
+        // `tui image fallback`: the action vocabulary, fallback `cancel`.
+        let mut properties = Properties::new();
+        properties.set("action", json!("ask_agent"));
+        assert_eq!(sanitize("tui image fallback", &mut properties), 0);
+        assert_eq!(properties.get("action"), Some(&json!("ask_agent")));
+        let mut properties = Properties::new();
+        properties.set("action", json!("send_everything"));
+        assert_eq!(sanitize("tui image fallback", &mut properties), 1);
+        assert_eq!(properties.get("action"), Some(&json!("cancel")));
     }
 
     #[test]
