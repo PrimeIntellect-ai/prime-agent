@@ -33,8 +33,8 @@
 //! path - the routed `shutdown` reply, the SIGTERM graceful drain - and
 //! the successor's live socket must survive.
 //!
-//! On this tree the oracles fail: the poisoned gate matches the
-//! successor's live file and unlinks it. The fix rides the next commit.
+//! On a tree WITHOUT the close-then-cleanup fix these oracles fail:
+//! the poisoned gate matches the successor's live file and unlinks it.
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Read, Write};
