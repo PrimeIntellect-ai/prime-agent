@@ -229,15 +229,7 @@ impl Drop for SocketLease {
 #[cfg(unix)]
 impl SocketLease {
     fn release_lock_dir(&self) {
-        let mut claim_name = self.lock_path.clone().into_os_string();
-        claim_name.push(format!(
-            ".releasing-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |age| age.as_nanos())
-        ));
-        let claim = std::path::PathBuf::from(claim_name);
+        let claim = pa_core::platform::private_sibling_for(&self.lock_path, "releasing");
         // The claim is atomic: it takes whatever the path holds, ours or
         // a successor's, with no window where a swap changes the answer.
         if std::fs::rename(&self.lock_path, &claim).is_err() {

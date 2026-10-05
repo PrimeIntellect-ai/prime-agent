@@ -421,12 +421,25 @@ fn supervisor_renews_lifetime_socket_lease_and_reclaims_a_dead_holder() {
         std::thread::sleep(Duration::from_millis(50));
         refreshed = std::fs::metadata(&lock).unwrap().modified().unwrap();
     }
+    // TS refuses a duplicate daemon at the fast in-use gate, before any
+    // lease queueing: the rival must exit non-zero without ever binding
+    // the live socket, not wait out the lease budget.
     let mut second = spawn_supervisor(&socket, &dir.path().join("rival-agent"));
-    assert!(
-        second.child.try_wait().unwrap().is_none(),
-        "live lease must block rival startup"
-    );
-    drop(second);
+    let refusal = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(status) = second.child.try_wait().expect("poll rival") {
+            assert!(
+                !status.success(),
+                "a rival against a live daemon must refuse, not bind"
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < refusal,
+            "rival neither refused nor bound within the fast-refusal budget"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
     original.child.kill().expect("kill original holder");
     original.child.wait().expect("reap original holder");
     // The old, unaccepted socket path and the abandoned lock both remain.

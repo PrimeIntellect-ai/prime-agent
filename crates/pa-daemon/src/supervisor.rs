@@ -414,6 +414,19 @@ impl Supervisor {
             });
         }
         #[cfg(unix)]
+        {
+            // TS refuses a duplicate daemon before any lock queueing (the
+            // fast in-use check `prepareDaemonSocketPath` runs first): a
+            // live listener must fail in ~250ms, not after the lease's
+            // 600x25ms retry budget.
+            if socket::can_connect(&self.options.socket_path, Duration::from_millis(250)).await {
+                return Err(anyhow!(
+                    "Daemon socket already in use: {}",
+                    self.options.socket_path.display()
+                ));
+            }
+        }
+        #[cfg(unix)]
         let socket_lease = socket::SocketLease::acquire(&self.options.socket_path).await?;
         #[cfg(unix)]
         socket::prepare_socket_path_with_lease(&self.options.socket_path, &socket_lease).await?;
@@ -457,107 +470,136 @@ impl Supervisor {
         // refused, running turns settled) and a later signal force-exits.
         tokio::spawn(crate::signal_drain::install(Arc::clone(&self)));
 
-        // The boot reap (the operator's same-socket predecessor rule): this
-        // daemon now owns the socket's lineage, so leftover worker processes
-        // of a dead predecessor - alive, still holding their runtime session
-        // leases, unreachable through any descriptor or registration - die
-        // here, and a wedged predecessor supervisor dies with them. Daemons
-        // and workers on OTHER sockets are never touched (the scan matches
-        // the socket path alone). The reap precedes the adoption pass and
-        // the first client: a create racing a leftover holder would answer
-        // the lease refusal this pass exists to clear. Bounded by
-        // construction (every target shares one escalation window).
-        crate::boot_reap::reap_predecessors(&self).await;
+        // The boot's ownership actions - reaping this socket's predecessor
+        // lineage, the update restore, descriptor adoption - may only run
+        // while the lease holds: a supervisor displaced mid-boot must
+        // never reap or adopt against a successor that took the socket
+        // over while these passes ran, so the whole block races the
+        // lease-compromise monitor and aborts the boot the moment
+        // ownership is lost (the accept loop's select below is the same
+        // monitor's steady-state arm).
+        let boot_ownership = async {
+            // The boot reap (the operator's same-socket predecessor rule):
+            // this daemon now owns the socket's lineage, so leftover
+            // worker processes of a dead predecessor - alive, still
+            // holding their runtime session leases, unreachable through
+            // any descriptor or registration - die here, and a wedged
+            // predecessor supervisor dies with them. Daemons and workers
+            // on OTHER sockets are never touched (the scan matches the
+            // socket path alone). The reap precedes the adoption pass and
+            // the first client: a create racing a leftover holder would
+            // answer the lease refusal this pass exists to clear. Bounded
+            // by construction (every target shares one escalation window).
+            crate::boot_reap::reap_predecessors(&self).await;
 
-        // Update boot (spec §6): consume the roster from the spawn env
-        // BEFORE the sweep deletes the file it points at, sweep this
-        // socket's update scratch dir unconditionally (invariant I2 by
-        // construction), then run the restore + re-arm pass concurrently
-        // with serving — the accept loop must keep serving hellos so
-        // reconnecting clients see the resume contract (§10.3).
-        let roster = crate::update_restore::consume_roster_env();
-        self.restore.begin(roster.as_ref());
-        crate::update_restore::boot_sweep(&self.options.agent_dir, &self.options.socket_path);
-        // Descriptor adoption runs concurrently with the accept loop: a
-        // supervisor restarted over live sessions must accept their
-        // self-registrations immediately, not behind the whole descriptor
-        // scan. The fan-out is capped (recovery_pacing) so a large
-        // sessions dir cannot starve the control plane. The restore pass
-        // awaits this task (spec §6 step 2's create-or-adopt order: kept
-        // workers relaunch from their descriptors first, the roster covers
-        // the rest).
-        // The adopt pass's completion signal: the passive-catalog warmup
-        // waits on it (see below) while the restore pass keeps awaiting
-        // the task handle itself.
-        let (adoption_tx, adoption_signal) = tokio::sync::watch::channel(false);
-        let adoption = {
-            let supervisor = Arc::clone(&self);
-            let boot = match roster.as_ref() {
-                Some(roster) => AdoptionBoot::UpdateRoster {
-                    kept: Arc::new(
-                        roster
-                            .workers
-                            .iter()
-                            .map(|worker| worker.worker_id.clone())
-                            .collect(),
-                    ),
-                },
-                None => AdoptionBoot::PlainStartup,
+            // Update boot (spec §6): consume the roster from the spawn
+            // env BEFORE the sweep deletes the file it points at, sweep
+            // this socket's update scratch dir unconditionally (invariant
+            // I2 by construction), then run the restore + re-arm pass
+            // concurrently with serving — the accept loop must keep
+            // serving hellos so reconnecting clients see the resume
+            // contract (§10.3).
+            let roster = crate::update_restore::consume_roster_env();
+            self.restore.begin(roster.as_ref());
+            crate::update_restore::boot_sweep(&self.options.agent_dir, &self.options.socket_path);
+            // Descriptor adoption runs concurrently with the accept loop:
+            // a supervisor restarted over live sessions must accept their
+            // self-registrations immediately, not behind the whole
+            // descriptor scan. The fan-out is capped (recovery_pacing) so
+            // a large sessions dir cannot starve the control plane. The
+            // restore pass awaits this task (spec §6 step 2's
+            // create-or-adopt order: kept workers relaunch from their
+            // descriptors first, the roster covers the rest).
+            // The adopt pass's completion signal: the passive-catalog
+            // warmup waits on it (see below) while the restore pass keeps
+            // awaiting the task handle itself.
+            let (adoption_tx, adoption_signal) = tokio::sync::watch::channel(false);
+            let adoption = {
+                let supervisor = Arc::clone(&self);
+                let boot = match roster.as_ref() {
+                    Some(roster) => AdoptionBoot::UpdateRoster {
+                        kept: Arc::new(
+                            roster
+                                .workers
+                                .iter()
+                                .map(|worker| worker.worker_id.clone())
+                                .collect(),
+                        ),
+                    },
+                    None => AdoptionBoot::PlainStartup,
+                };
+                tokio::spawn(async move {
+                    supervisor.adopt_persisted_workers(boot).await;
+                    let _ = adoption_tx.send(true);
+                })
             };
-            tokio::spawn(async move {
-                supervisor.adopt_persisted_workers(boot).await;
-                let _ = adoption_tx.send(true);
-            })
+            {
+                let supervisor = Arc::clone(&self);
+                tokio::spawn(async move {
+                    crate::update_restore::restore_pass(&supervisor, adoption, roster).await;
+                });
+            }
+
+            // Warm the passive scheduled-jobs snapshot (the input-latency
+            // lane): the first selector-less `heartbeats_list`/`cron_list`
+            // after boot would otherwise scan the whole session-artifacts
+            // tree inline while the interactive client's open waits on it.
+            // The scan waits out the boot's adopt pass first (the pre-bar
+            // review's race finding): the scan's live-worker filter
+            // consults the registry, so a scan that raced the adopt pass
+            // would cache the just-adopted worker's artifacts as a
+            // passive row and serve the stale row for the snapshot's whole
+            // refresh window — adoption never invalidates the catalog.
+            // After the signal (a plain startup's adopt pass is ms-scale)
+            // the scan still lands well before the first client read;
+            // every invalidation and refresh rule is unchanged. The signal
+            // is fail-open: an adopt pass that died without signaling
+            // still warms (a degraded boot keeps the pre-warmup cold-read
+            // behavior, never a colder one).
+            {
+                let supervisor = Arc::clone(&self);
+                let mut adopted = adoption_signal;
+                tokio::spawn(async move {
+                    Supervisor::wait_for_adoption_signal(&mut adopted).await;
+                    supervisor.spawn_passive_catalog_warmup();
+                });
+            }
+
+            // Session-archive sweep (roadmap: the sessions directory must
+            // not grow forever): boot sweep, then the periodic re-sweep at
+            // the TS idle-eviction cadence. Housekeeping only — it never
+            // gates serving.
+            {
+                let supervisor = Arc::clone(&self);
+                tokio::spawn(async move {
+                    crate::session_archive::archive_sweep_loop(&supervisor).await;
+                });
+            }
+
+            // Update-prepare watchdog: aborts deadline- or
+            // self-expiry-breached prepare transactions even when no
+            // command arrives to re-check.
+            {
+                let supervisor = Arc::clone(&self);
+                tokio::spawn(async move {
+                    supervisor.update_prepare_watchdog().await;
+                });
+            }
         };
-        {
-            let supervisor = Arc::clone(&self);
-            tokio::spawn(async move {
-                crate::update_restore::restore_pass(&supervisor, adoption, roster).await;
-            });
+        #[cfg(unix)]
+        tokio::select! {
+            () = socket_lease.wait_compromised() => {
+                self.shutting_down.store(true, Ordering::SeqCst);
+                self.accept_exit.store(true, Ordering::SeqCst);
+                self.shutdown_notify.notify_waiters();
+                self.log
+                    .append("daemon socket lease compromised; relinquishing supervisor ownership");
+                return Err(anyhow!("daemon socket lease compromised"));
+            }
+            () = boot_ownership => {}
         }
-
-        // Warm the passive scheduled-jobs snapshot (the input-latency
-        // lane): the first selector-less `heartbeats_list`/`cron_list`
-        // after boot would otherwise scan the whole session-artifacts tree
-        // inline while the interactive client's open waits on it. The scan
-        // waits out the boot's adopt pass first (the pre-bar review's
-        // race finding): the scan's live-worker filter consults the
-        // registry, so a scan that raced the adopt pass would cache the
-        // just-adopted worker's artifacts as a passive row and serve the
-        // stale row for the snapshot's whole refresh window — adoption
-        // never invalidates the catalog. After the signal (a plain
-        // startup's adopt pass is ms-scale) the scan still lands well
-        // before the first client read; every invalidation and refresh
-        // rule is unchanged. The signal is fail-open: an adopt pass that
-        // died without signaling still warms (a degraded boot keeps the
-        // pre-warmup cold-read behavior, never a colder one).
-        {
-            let supervisor = Arc::clone(&self);
-            let mut adopted = adoption_signal;
-            tokio::spawn(async move {
-                Supervisor::wait_for_adoption_signal(&mut adopted).await;
-                supervisor.spawn_passive_catalog_warmup();
-            });
-        }
-
-        // Session-archive sweep (roadmap: the sessions directory must not
-        // grow forever): boot sweep, then the periodic re-sweep at the TS
-        // idle-eviction cadence. Housekeeping only — it never gates serving.
-        {
-            let supervisor = Arc::clone(&self);
-            tokio::spawn(async move {
-                crate::session_archive::archive_sweep_loop(&supervisor).await;
-            });
-        }
-
-        // Update-prepare watchdog: aborts deadline- or self-expiry-breached
-        // prepare transactions even when no command arrives to re-check.
-        {
-            let supervisor = Arc::clone(&self);
-            tokio::spawn(async move {
-                supervisor.update_prepare_watchdog().await;
-            });
-        }
+        #[cfg(not(unix))]
+        boot_ownership.await;
 
         #[cfg(unix)]
         socket_lease.assert_held()?;

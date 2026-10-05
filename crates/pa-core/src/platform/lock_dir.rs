@@ -58,16 +58,27 @@ fn path_pins(path: &Path, dir: &fs::File) -> bool {
 }
 
 /// A private sibling name scoped to one lock path (the candidate
-/// directory): unique per process and nanosecond, in the lock's own
-/// directory so the rename publish stays same-filesystem.
-#[cfg(target_os = "linux")]
-fn private_sibling_of(path: &Path, tag: &str) -> PathBuf {
+/// directory on linux, the lease release's claim in the daemon): unique
+/// per process and nanosecond, in the lock's own directory so a rename
+/// across the two names stays same-filesystem. Unix only.
+#[must_use]
+#[cfg(unix)]
+pub fn private_sibling_for(path: &Path, tag: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |age| age.as_nanos());
     let mut name = path.as_os_str().to_os_string();
     name.push(format!(".{tag}-{}-{nanos}", std::process::id()));
     PathBuf::from(name)
+}
+
+/// The dev+ino identity at `path`, or `None` when it cannot be stat'ed.
+#[cfg(unix)]
+fn identity_at(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    fs::symlink_metadata(path)
+        .ok()
+        .map(|metadata| (metadata.dev(), metadata.ino()))
 }
 
 /// `renameat2` with `RENAME_NOREPLACE` (linux): publish without ever
@@ -303,22 +314,6 @@ impl LockDir {
         Self { path }
     }
 
-    /// The dev+ino identity of the acquired lock directory, read from the
-    /// pinned handle: stable across stale takeovers of the public
-    /// pathname. Unix only.
-    ///
-    /// # Errors
-    ///
-    /// Returns the underlying metadata error (the handle is always valid,
-    /// so in practice only EIO-class failures surface).
-    #[cfg(unix)]
-    pub fn acquired_identity(&self) -> io::Result<(u64, u64)> {
-        use std::os::unix::fs::MetadataExt;
-        self.dir
-            .metadata()
-            .map(|metadata| (metadata.dev(), metadata.ino()))
-    }
-
     /// Transfer the lock path and the pinned handle to a caller that
     /// manages ownership and release itself (supervisor-lifetime leases
     /// with inode-guarded cleanup). Unix only.
@@ -379,7 +374,7 @@ impl LockDir {
     /// contention. EEXIST from the publish is the only collision.
     #[cfg(target_os = "linux")]
     fn create(path: &Path) -> io::Result<Created> {
-        let candidate = private_sibling_of(path, "candidate");
+        let candidate = private_sibling_for(path, "candidate");
         fs::create_dir(&candidate)?;
         let dir = match fs::File::open(&candidate) {
             Ok(dir) => dir,
@@ -416,8 +411,16 @@ impl LockDir {
                 Self::create_by_mkdir(path)
             }
             Err(error) => {
-                // A contender holds the path (or the rename failed): the
-                // candidate is this call's alone - remove it, never the
+                // An ambiguous rename failure may still have published the
+                // candidate: the pinned handle is the truth - if the path
+                // resolves to this candidate's inode, the lock was
+                // acquired, not lost, and must not be orphaned at the
+                // public path with no holder.
+                if path_pins(path, &dir) {
+                    return Ok(dir);
+                }
+                // A contender holds the path (or the rename failed clean):
+                // the candidate is this call's alone - remove it, never the
                 // incumbent at the public path.
                 let _ = fs::remove_dir(&candidate);
                 Err(error)
@@ -448,7 +451,22 @@ impl LockDir {
     #[cfg(unix)]
     fn create_by_mkdir(path: &Path) -> io::Result<Created> {
         fs::create_dir(path)?;
-        let dir = fs::File::open(path)?;
+        let created = identity_at(path);
+        let dir = match fs::File::open(path) {
+            Ok(dir) => dir,
+            Err(error) => {
+                // Never leave a fresh lock artifact behind a failed pin -
+                // it would wedge later acquisitions behind contention until
+                // it goes stale. Remove only the directory this call
+                // created, and only on a positive identity witness: an
+                // unstattable capture must not become one (None == None
+                // would remove without ownership).
+                if created.is_some_and(|identity| identity_at(path) == Some(identity)) {
+                    let _ = fs::remove_dir(path);
+                }
+                return Err(error);
+            }
+        };
         let (sec, nanos) = probe_mtime();
         if let Err(error) = set_mtime_handle(&dir, sec, nanos) {
             // Never leave a lock artifact behind a failed probe - but only
@@ -623,36 +641,42 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn acquired_identity_matches_the_created_directory() {
+    fn pinned_handle_matches_the_created_directory() {
         use std::os::unix::fs::MetadataExt;
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("auth.json");
         std::fs::write(&file, "{}").unwrap();
         let guard = LockDir::acquire(&file, MIN_STALE).unwrap();
-        let metadata = std::fs::symlink_metadata(lock_of(&file)).unwrap();
+        let (path, handle) = guard.into_parts();
+        let metadata = std::fs::symlink_metadata(&path).unwrap();
+        let pinned = handle.metadata().unwrap();
         assert_eq!(
-            guard.acquired_identity().unwrap(),
-            (metadata.dev(), metadata.ino())
+            (metadata.dev(), metadata.ino()),
+            (pinned.dev(), pinned.ino())
         );
     }
 
     #[test]
     #[cfg(unix)]
-    fn acquired_identity_survives_a_path_swap() {
+    fn pinned_handle_survives_a_path_swap() {
         use std::os::unix::fs::MetadataExt;
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("auth.json");
         std::fs::write(&file, "{}").unwrap();
         let guard = LockDir::acquire(&file, MIN_STALE).unwrap();
-        let acquired = guard.acquired_identity().unwrap();
-        // A stale takeover of the public pathname: the pinned handle must
-        // keep reporting the acquired inode, not the successor's.
-        let incumbent = lock_of(&file);
+        let (path, handle) = guard.into_parts();
+        let acquired = {
+            let metadata = handle.metadata().unwrap();
+            (metadata.dev(), metadata.ino())
+        };
+        // A stale takeover of the public pathname: the pinned handle
+        // keeps the acquired inode, not the successor's.
         let aside = dir.path().join("displaced.lock");
-        std::fs::rename(&incumbent, &aside).unwrap();
-        std::fs::create_dir(&incumbent).unwrap();
-        let successor = std::fs::symlink_metadata(&incumbent).unwrap();
-        assert_eq!(guard.acquired_identity().unwrap(), acquired);
+        std::fs::rename(&path, &aside).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let successor = std::fs::symlink_metadata(&path).unwrap();
+        let still_pinned = handle.metadata().unwrap();
+        assert_eq!((still_pinned.dev(), still_pinned.ino()), acquired);
         assert_ne!(
             acquired,
             (successor.dev(), successor.ino()),
