@@ -278,8 +278,11 @@ pub(crate) struct HostedSession {
     /// The running prompt turn; one at a time. A cancelled turn keeps
     /// the slot until its cancel stop finishes.
     turn: Option<ActiveTurn>,
-    /// The newest assistant stop reason observed on the event stream.
-    assistant_stop_reason: Option<String>,
+    /// The newest assistant stop reason observed on the event stream,
+    /// cleared when a prompt turn is admitted so a turn never reads a
+    /// previous turn's stop reason (read after the settlement for the
+    /// stop-reason response).
+    assistant_stop_reason: Option<pa_types::ai::StopReason>,
     /// The event mapping state lives and dies with the session, like TS.
     mapping: WireMappingState,
     observed_children: std::collections::HashSet<String>,
@@ -749,6 +752,9 @@ async fn admit_prompt(
         return Err("A prompt turn is already running for this ACP session".to_string());
     }
     let admission_id = format!("prompt-admission:{}", uuid::Uuid::new_v4());
+    // The stop reason is per-turn: a turn that runs no model call (a
+    // slash command) must not inherit the previous turn's stop reason.
+    hosted.assistant_stop_reason = None;
     hosted.turn = Some(ActiveTurn {
         admission_id: admission_id.clone(),
         cancelled: false,
@@ -1647,13 +1653,26 @@ async fn prompt_turn(
         }
         break status;
     };
-    // The stop reason follows the TS mapping (acp-stop-reason.ts): the
-    // abort flag read after the settlement, and the settlement's status
-    // (`pending.status`), not the first observation's.
-    let stop_reason = meta::acp_stop_reason_for_status(
-        turn_cancelled(&*state.lock().await, admission_id),
-        Some(&settled_status),
-    );
+    // The stop reason follows the TS mapping (acp-stop-reason.ts) plus the
+    // turn's final assistant stop reason (#3363): the abort flag read after
+    // the settlement, the settlement's status (`pending.status`), not the
+    // first observation's, and the newest assistant stop reason — the link's
+    // one frame consumer applies every message_end (the autonomous
+    // continuations' included, since they run inside the waits above) before
+    // the response that ended each wait resolved, so this read after the
+    // settlement sees the run's final one.
+    let (cancelled, assistant_stop_reason) = {
+        let guard = state.lock().await;
+        (
+            turn_cancelled(&guard, admission_id),
+            guard
+                .session
+                .as_ref()
+                .and_then(|hosted| hosted.assistant_stop_reason),
+        )
+    };
+    let stop_reason =
+        meta::acp_stop_reason_for_status(cancelled, Some(&settled_status), assistant_stop_reason);
     jsonrpc::response(
         &id,
         &serde_json::to_value(types::AcpStopReasonResponse { stop_reason }).expect("serializes"),

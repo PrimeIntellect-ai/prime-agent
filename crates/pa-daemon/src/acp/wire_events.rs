@@ -7,6 +7,7 @@
 //! `agent_begin/end`, `session_action_update`) map to nothing, exactly like
 //! the TS switch's default arm.
 
+use serde::Deserialize as _;
 use serde_json::{json, Value};
 
 use super::meta::{prime_agent_meta, PrimeAgentCompactionMeta, PrimeAgentSessionMeta};
@@ -43,15 +44,15 @@ impl WireMappingState {
     }
 }
 
-/// The newest assistant stop reason carried by a `message_end` event (the
-/// transport reads it after the turn for the stop-reason response); also
-/// captures an error message on a failed turn.
+/// The assistant stop reason carried by one `message_end` event: the
+/// transport keeps the newest one and reads it after the turn for the
+/// stop-reason response.
 pub struct AssistantStop {
-    pub stop_reason: Option<String>,
+    pub stop_reason: Option<pa_types::ai::StopReason>,
 }
 
-/// Extract the assistant stop/error fields from one wire event, when the
-/// event settles an assistant message.
+/// Extract the assistant stop reason from one wire event, when the event
+/// settles an assistant message.
 pub fn assistant_stop(event: &Value) -> Option<AssistantStop> {
     if event.get("type").and_then(Value::as_str) != Some("message_end") {
         return None;
@@ -63,8 +64,7 @@ pub fn assistant_stop(event: &Value) -> Option<AssistantStop> {
     Some(AssistantStop {
         stop_reason: message
             .get("stopReason")
-            .and_then(Value::as_str)
-            .map(str::to_string),
+            .and_then(|value| pa_types::ai::StopReason::deserialize(value).ok()),
     })
 }
 
@@ -646,10 +646,10 @@ mod tests {
     fn assistant_stop_reason_is_captured_from_message_end() {
         let stop = assistant_stop(&json!({
             "type": "message_end",
-            "message": { "role": "assistant", "stopReason": "end_turn" },
+            "message": { "role": "assistant", "stopReason": "length" },
         }))
         .expect("assistant message_end");
-        assert_eq!(stop.stop_reason.as_deref(), Some("end_turn"));
+        assert_eq!(stop.stop_reason, Some(pa_types::ai::StopReason::Length));
         assert!(assistant_stop(&json!({
             "type": "message_end",
             "message": { "role": "user" },

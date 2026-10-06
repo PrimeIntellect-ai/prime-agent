@@ -206,31 +206,43 @@ pub fn autonomous_meta(
     }
 }
 
-/// Map a finished turn onto an ACP stop reason (TS `acpStopReason` in
-/// acp-stop-reason.ts: autonomous quality gates deliberately never surface
-/// as a stop reason; token exhaustion is the one natively-expressed limit).
+/// Map a finished turn onto an ACP stop reason. Precedence: an explicit
+/// cancel, then the TS `acpStopReason` mapping for an enabled autonomous
+/// run, then the turn's final assistant stop reason (#3363): a per-call
+/// output-token truncation (`StopReason::Length`) is an honest
+/// `max_tokens`, so `end_turn` stays reserved for a finished answer;
+/// every other final reason (and none) keeps TS's `end_turn`.
 pub fn acp_stop_reason_for_status(
     cancelled: bool,
     status: Option<&pa_core::autonomous::AgentAutonomousStatus>,
+    assistant_stop_reason: Option<pa_types::ai::StopReason>,
 ) -> super::types::AcpStopReason {
     use pa_core::autonomous::{autonomous_limit_reason_of_status, AutonomousLimitReason};
+    use pa_types::ai::StopReason;
     if cancelled {
         return super::types::AcpStopReason::Cancelled;
-    }
-    let Some(status) = status else {
-        return super::types::AcpStopReason::EndTurn;
-    };
-    if !status.enabled {
-        return super::types::AcpStopReason::EndTurn;
     }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or_default();
-    match autonomous_limit_reason_of_status(status, now) {
+    match status
+        .filter(|status| status.enabled)
+        .and_then(|status| autonomous_limit_reason_of_status(status, now))
+    {
         Some(AutonomousLimitReason::MaxTokens) => super::types::AcpStopReason::MaxTokens,
-        Some(_) => super::types::AcpStopReason::MaxTurnRequests,
-        None => super::types::AcpStopReason::EndTurn,
+        Some(
+            AutonomousLimitReason::MaxContinuations
+            | AutonomousLimitReason::MaxTurns
+            | AutonomousLimitReason::TimeoutMs,
+        ) => super::types::AcpStopReason::MaxTurnRequests,
+        None => match assistant_stop_reason {
+            Some(StopReason::Length) => super::types::AcpStopReason::MaxTokens,
+            Some(
+                StopReason::Stop | StopReason::ToolUse | StopReason::Error | StopReason::Aborted,
+            )
+            | None => super::types::AcpStopReason::EndTurn,
+        },
     }
 }
 
@@ -260,6 +272,66 @@ mod tests {
                 "phase": "responseBoundary",
                 "outcome": "error",
             }})
+        );
+    }
+
+    #[test]
+    fn acp_stop_reason_keeps_cancel_and_run_limits_first() {
+        // The precedence the e2e cannot build against a truncated final
+        // message: the explicit cancel and the enabled run's own limits
+        // stay ahead of the final assistant stop reason (the e2e covers
+        // the disabled-status and below-mapping cases).
+        use super::super::types::AcpStopReason;
+        use pa_core::autonomous::{AgentAutonomousStatus, AutonomousLimits, NormalizedGateConfig};
+        use pa_types::ai::StopReason;
+        let status = |enabled: bool, turns_used: u64| AgentAutonomousStatus {
+            enabled,
+            continuations_used: 0,
+            turns_used,
+            tokens_used: 1_000,
+            started_at: None,
+            limits: AutonomousLimits {
+                max_continuations: 3,
+                max_turns: 12,
+                max_tokens: 80_000,
+                timeout_ms: 1_800_000,
+            },
+            gates: NormalizedGateConfig {
+                commands: Vec::new(),
+                max_retries: 0,
+                timeout_ms: 0,
+            },
+            gate_attempts: std::collections::HashMap::new(),
+            last_gate_failure: None,
+            subagent_keep_alive_ms: None,
+        };
+        // An explicit cancel wins over the turn's own truncated stop reason.
+        assert_eq!(
+            acp_stop_reason_for_status(
+                /*cancelled*/ true,
+                Some(&status(false, 1)),
+                Some(StopReason::Length)
+            ),
+            AcpStopReason::Cancelled
+        );
+        // An enabled run below its limits maps the final length (#3363).
+        assert_eq!(
+            acp_stop_reason_for_status(
+                /*cancelled*/ false,
+                Some(&status(true, 1)),
+                Some(StopReason::Length)
+            ),
+            AcpStopReason::MaxTokens
+        );
+        // The turn-request limit stays the run's stop reason even when the
+        // final message also truncated.
+        assert_eq!(
+            acp_stop_reason_for_status(
+                /*cancelled*/ false,
+                Some(&status(true, 12)),
+                Some(StopReason::Length)
+            ),
+            AcpStopReason::MaxTurnRequests
         );
     }
 
