@@ -1,12 +1,8 @@
-//! Descriptive session-open failures (operator-directed product
-//! improvement): when a session refuses to open because another holder
-//! owns it, the error names the holder and suggests what to do next.
-//!
-//! The TS refusal (`SessionAlreadyActiveError`) stops at the holder id:
-//! "Session is already active in {id}: {path}". The Rust product keeps
-//! that first line byte-identical (the print-mode e2e and the daemon wire
-//! shape both pin it) and appends the holder's identity and next steps —
-//! a sanctioned divergence documented per the #289 precedent.
+//! Descriptive session-open failures (operator-directed product improvement): when a session
+//! refuses to open because another holder owns it, the error names the holder and suggests what to
+//! do next. The TS refusal (`SessionAlreadyActiveError`) stops at the holder id; the Rust client
+//! keeps that first line byte-identical and appends the holder's identity and next steps — a
+//! sanctioned divergence.
 
 use serde_json::Value;
 use std::fmt::Write;
@@ -15,19 +11,14 @@ use std::path::Path;
 /// The live session holding a session file (one roster row's fields).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionHolder {
-    /// The holder's active session id (the attach selector).
     pub id: String,
-    /// The session's display name, when the row carries one.
     pub name: Option<String>,
-    /// The session's working directory, when the row carries one.
     pub cwd: Option<String>,
-    /// The session's model label, when the row carries one.
     pub model: Option<String>,
 }
 
-/// Find the roster row currently hosting `session_path`: the first row
-/// whose `sessionFile` canonicalizes to the same file. Rows without a
-/// matching file are skipped, so unrelated sessions never answer.
+/// Find the roster row currently hosting `session_path`: the first row whose
+/// `sessionFile` canonicalizes to the same file; rows without a matching file are skipped.
 #[must_use]
 pub fn holder_from_roster(rows: &[Value], session_path: &Path) -> Option<SessionHolder> {
     let target = canonical_form(session_path);
@@ -49,9 +40,8 @@ pub fn holder_from_roster(rows: &[Value], session_path: &Path) -> Option<Session
                 .filter(|name| !name.is_empty())
                 .map(single_line),
             cwd: row.get("cwd").and_then(Value::as_str).map(single_line),
-            // Live roster rows carry `model` as `{id, provider}` (the
-            // worker's `get_state` summary); a display string is accepted
-            // for the mock/older shapes.
+            // Live roster rows carry `model` as `{id, provider}` (the worker's
+            // `get_state` summary); a display string is accepted for the mock/older shapes.
             model: row
                 .get("model")
                 .and_then(model_label)
@@ -61,21 +51,19 @@ pub fn holder_from_roster(rows: &[Value], session_path: &Path) -> Option<Session
     })
 }
 
-/// One roster-controlled field flattened to a single line: line breaks
-/// collapse to spaces so a renamed session (or any roster-controlled
-/// value) cannot inject lines into the refusal text.
+/// One roster-controlled field flattened to a single line: line breaks collapse to
+/// spaces so a roster-controlled value cannot inject lines into the refusal text.
 fn single_line(value: &str) -> String {
-    // Every control character flattens (not only line breaks): a
-    // roster-controlled value cannot smuggle ANSI/OSC sequences into the
-    // refusal text.
+    // Every control character flattens (not only line breaks): a roster-controlled
+    // value cannot smuggle ANSI/OSC sequences into the refusal text.
     value
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect()
 }
 
-/// The model label of a `model` roster field: a display string, or the
-/// `{id, provider}` object's id (the provider only when no id rides).
+/// The model label of a `model` roster field: a display string, or the `{id, provider}`
+/// object's id (the provider only when no id rides).
 fn model_label(model: &Value) -> Option<String> {
     match model {
         Value::String(label) => Some(label.clone()),
@@ -88,10 +76,9 @@ fn model_label(model: &Value) -> Option<String> {
     }
 }
 
-/// The roster row for a known holder id (the daemon refusal already
-/// names it): a live row whose active session id matches. The
-/// path-keyed lookup alone can miss when the caller's resume path does
-/// not canonicalize against the process cwd (a relative path).
+/// The roster row for a known holder id (the daemon refusal already names it): a live row whose
+/// active session id matches. The path-keyed lookup alone can miss when the caller's resume path
+/// does not canonicalize against the process cwd (a relative path).
 #[must_use]
 pub fn holder_by_id(rows: &[Value], holder_id: &str) -> Option<SessionHolder> {
     rows.iter().find_map(|row| {
@@ -120,15 +107,13 @@ pub fn holder_by_id(rows: &[Value], holder_id: &str) -> Option<SessionHolder> {
     })
 }
 
-/// The roster rows of a daemon `list` response payload.
 pub fn roster_rows(data: &Value) -> &[Value] {
     data.get("sessions")
         .and_then(Value::as_array)
         .map_or(&[], Vec::as_slice)
 }
 
-/// The first line of the refusal: the TS `SessionAlreadyActiveError`
-/// message, byte-identical.
+/// The first line of the refusal: the TS `SessionAlreadyActiveError` message, byte-identical.
 pub(crate) fn already_active_line(holder: &str, session_path: &Path) -> String {
     format!(
         "Session is already active in {holder}: {}",
@@ -136,27 +121,17 @@ pub(crate) fn already_active_line(holder: &str, session_path: &Path) -> String {
     )
 }
 
-/// The suggested `--resume <holder>` argument, shell-quoted so a holder id
-/// the daemon or a roster row controls can never break the suggested
-/// command (or inject a second one). Unix: POSIX single quotes with the
-/// embedded-quote escape - the exact form a shell round-trips
-/// byte-identically, and inert for the hex ids the product mints.
-/// Windows: the CRT parser's backslash/quote rules PLUS cmd.exe's own
+/// The suggested `--resume <holder>` argument, shell-quoted so a holder id the daemon or a roster
+/// row controls can never break the suggested command. Unix: POSIX single quotes with the
+/// embedded-quote escape. Windows: the CRT parser's backslash/quote rules plus cmd.exe's own
 /// metacharacters (both documented in the arm below).
 pub(crate) fn quoted_resume_arg(id: &str) -> String {
     #[cfg(windows)]
     {
-        // Two parsers see a pasted command on Windows: the CRT argument
-        // parser (a backslash run before a quote folds 2n -> n, so every
-        // backslash doubles and every embedded quote escapes - neither
-        // can terminate the argument) and cmd.exe itself (every `"`
-        // toggles its quote state, exposing the separator metacharacters
-        // to command interpretation - so each of cmd's separators is
-        // ^-escaped, which renders it literal even in a toggle-out).
-        // The caret itself escapes FIRST (its own occurrences double),
-        // then the separators get their single ^ - a later caret pass would
-        // double the carets just inserted and un-escape the separators
-        // again (`^^&` leaves `&` live inside a toggle-out).
+        // Two parsers see a pasted command on Windows: the CRT argument parser (every backslash
+        // doubles and every embedded quote escapes) and cmd.exe itself (every `"` toggles its quote
+        // state, so each of cmd's separators is ^-escaped). The caret escapes FIRST: a later caret
+        // pass would double the carets just inserted and un-escape the separators again.
         let cmd_escaped = id.replace('^', "^^");
         let cmd_escaped = ['&', '|', '<', '>']
             .iter()
@@ -174,9 +149,8 @@ pub(crate) fn quoted_resume_arg(id: &str) -> String {
     }
 }
 
-/// The descriptive refusal for a holder the live roster identifies: the
-/// TS first line, then the holder's identity and the next steps (attach
-/// to the live session instead of reopening the file).
+/// The descriptive refusal for a holder the live roster identifies: the TS first line, then the
+/// holder's identity and the next steps (attach to the live session instead of reopening the file).
 #[must_use]
 pub fn already_active_error(holder: &SessionHolder, session_path: &Path) -> String {
     let mut lines = vec![already_active_line(&holder.id, session_path)];
@@ -199,12 +173,9 @@ pub fn already_active_error(holder: &SessionHolder, session_path: &Path) -> Stri
     lines.join("\n")
 }
 
-/// Decorate the daemon's ORIGINAL refusal for the interactive create
-/// path: the original message stays verbatim (never reconstructed from a
-/// possibly-relative caller path), and the holder guidance rides the SAME
-/// line — the agents-view handoff renders the refusal on a single status
-/// line, so a multiline decoration would hide the holder and the next
-/// steps behind the first paragraph.
+/// Decorate the daemon's ORIGINAL refusal for the interactive create path: the original message
+/// stays verbatim (never reconstructed from a possibly-relative caller path), and the holder
+/// guidance rides the SAME line.
 #[must_use]
 pub fn decorate_interactive_refusal(
     original: &str,
@@ -232,13 +203,9 @@ pub fn decorate_interactive_refusal(
         None if owner.starts_with("another process") => format!(
             "The holder is {owner} \u{b7} It unlocks when that process exits \u{b7} Browse live sessions: prime-agent agents"
         ),
-        // A session-id holder the roster cannot see (a leftover worker of a
-        // dead daemon holding the runtime lease, or another daemon's
-        // worker on a shared agent dir): "retry shortly" would be a false
-        // promise - no worker on THIS daemon will ever answer that id - so
-        // the guidance names what the holder can be and the two real ways
-        // around it (the holder's exit unlocks the file; a daemon boot
-        // reaps same-socket leftovers, clearing the stale lease).
+        // A session-id holder the roster cannot see: "retry shortly" would be a false promise — no
+        // worker on THIS daemon will ever answer that id — so the guidance names what the holder
+        // can be and the two real ways around it.
         None => format!(
             "Holder: session {owner} (no worker on this daemon serves it - another daemon's worker or a leftover process holds the file) \u{b7} Restarting this daemon reaps same-socket leftovers \u{b7} The file unlocks when that process exits"
         ),
@@ -246,9 +213,8 @@ pub fn decorate_interactive_refusal(
     format!("{first} \u{b7} {guidance}")
 }
 
-/// The canonical form of a session path matching
-/// `pa_daemon::lease::canonical_session_path` without pa-tui depending
-/// on pa-daemon.
+/// The canonical form of a session path matching `pa_daemon::lease::canonical_session_path`
+/// without pa-tui depending on pa-daemon.
 fn canonical_form(path: &Path) -> std::path::PathBuf {
     match path.canonicalize() {
         Ok(canonical) => canonical,
@@ -275,7 +241,6 @@ mod tests {
         row
     }
 
-    /// The first line stays byte-identical to the TS refusal message.
     #[test]
     fn the_first_line_matches_the_ts_refusal() {
         assert_eq!(
@@ -284,8 +249,6 @@ mod tests {
         );
     }
 
-    /// The roster identifies the holder row by canonical file path and
-    /// surfaces its identity fields; unrelated rows never answer.
     #[test]
     fn the_roster_names_the_holder() {
         let file = std::env::temp_dir().join("holder-probe.jsonl");
@@ -313,8 +276,6 @@ mod tests {
         assert!(text.contains("the file unlocks when that session exits"));
     }
 
-    /// A holder without optional identity fields renders the id-only
-    /// identity line.
     #[test]
     fn a_bare_holder_row_renders_the_id_only_identity() {
         let holder = SessionHolder {
@@ -329,7 +290,6 @@ mod tests {
         ));
     }
 
-    /// The roster extraction tolerates the payload wrapper.
     #[test]
     fn roster_rows_reads_the_sessions_array() {
         let data = json!({"sessions": [row("/s/a.jsonl", "a", None, None)], "other": 1});
@@ -337,9 +297,6 @@ mod tests {
         assert_eq!(roster_rows(&json!({})).len(), 0);
     }
 
-    /// The id-keyed fallback finds the holder when the caller's path
-    /// cannot canonicalize (a relative resume path): the refusal's own
-    /// holder id matches the live row.
     #[test]
     fn the_id_fallback_finds_the_holder() {
         let rows = vec![row(
@@ -354,8 +311,6 @@ mod tests {
         assert!(holder_by_id(&rows, "someone-else").is_none());
     }
 
-    /// The roster's `model` rides as an object (`{id, provider}`): the
-    /// holder line still shows the model id.
     #[test]
     fn the_holder_reads_the_object_model_field() {
         let file = std::env::temp_dir().join("holder-model.jsonl");
@@ -369,8 +324,6 @@ mod tests {
         assert!(text.contains("\u{b7} model z-ai/glm-5.3"), "{text}");
     }
 
-    /// Roster-controlled fields cannot inject lines: every interpolated
-    /// value collapses its line breaks.
     #[test]
     fn roster_controlled_fields_cannot_inject_lines() {
         let file = std::env::temp_dir().join("holder-inject.jsonl");
@@ -391,8 +344,8 @@ mod tests {
     }
 }
 
-/// The owner id named in a "Session is already active in {owner}: ..."
-/// refusal (the lease error's first line). `None` for any other text.
+/// The owner id named in a "Session is already active in {owner}: ..." refusal
+/// (the lease error's first line); `None` for any other text.
 #[must_use]
 pub fn owner_from_refusal(message: &str) -> Option<String> {
     const PREFIX: &str = "Session is already active in ";
@@ -408,9 +361,6 @@ pub fn owner_from_refusal(message: &str) -> Option<String> {
 mod decorate_tests {
     use super::*;
 
-    /// The interactive decoration preserves the original refusal line
-    /// verbatim and rides the guidance on the SAME line (the
-    /// agents-view status strip shows one line only).
     #[test]
     fn the_interactive_decoration_keeps_one_line() {
         let original =
@@ -437,11 +387,8 @@ mod decorate_tests {
         );
     }
 
-    /// A session-id holder the roster cannot see gets session-shaped
-    /// guidance that does not promise a retry that cannot succeed: the
-    /// holder is named as foreign (another daemon's worker or a leftover
-    /// process), with the two real ways around it (a daemon boot reaps
-    /// same-socket leftovers; the holder's exit unlocks the file).
+    /// A session-id holder the roster cannot see gets guidance that never
+    /// promises a retry this daemon cannot deliver.
     #[test]
     fn an_unseen_session_holder_gets_session_guidance() {
         let original = "Session is already active in 4be64bca6a0a: /tmp/s.jsonl";
@@ -458,19 +405,17 @@ mod decorate_tests {
             text.contains("The file unlocks when that process exits"),
             "{text}"
         );
-        // The false promise is gone: no retry hint for a holder this
-        // daemon cannot reach.
+
         assert!(!text.contains("retry shortly"), "{text}");
         assert!(!text.contains("not a session on this daemon"), "{text}");
     }
 
-    /// The suggested command quotes the holder id: a roster- or
-    /// daemon-controlled id with spaces or quotes can never break the
-    /// suggestion (or smuggle a second argument into it).
+    /// The suggested command quotes the holder id so a controlled id can never
+    /// break the suggestion (or smuggle a second argument into it).
     #[test]
     fn the_resume_suggestion_quotes_a_hostile_holder_id() {
-        // The holder the roster identifies (the Some arm) names the id in
-        // the suggested command: the hostile id must ride single-quoted.
+        // The Some arm names the roster-identified id in the suggested command: the
+        // hostile id must ride single-quoted.
         let holder = SessionHolder {
             id: "245ddb974b6d; rm -rf /".to_string(),
             name: None,
@@ -494,8 +439,8 @@ mod decorate_tests {
             printed.contains("--resume '245ddb974b6d; rm -rf /'"),
             "the print-mode line quotes too: {printed}"
         );
-        // The embedded-quote escape: an id carrying a single quote still
-        // round-trips as ONE argument.
+        // The embedded-quote escape: an id carrying a single quote still round-trips as ONE
+        // argument.
         assert_eq!(
             quoted_resume_arg("it's"),
             "--resume 'it'\\''s'",
@@ -503,9 +448,8 @@ mod decorate_tests {
         );
         #[cfg(windows)]
         {
-            // The cmd separator stays ^-escaped with a SINGLE caret (the
-            // caret pass runs first, so it never re-escapes its own
-            // insertions - the `^^&` un-escape regression).
+            // The cmd separator stays ^-escaped with a SINGLE caret (the caret
+            // pass runs first; the `^^&` un-escape regression).
             let quoted = quoted_resume_arg("a & b");
             assert!(
                 quoted.contains("^&"),
@@ -522,8 +466,7 @@ mod decorate_tests {
                 "the id's own caret doubles: {caret}"
             );
         }
-        // The unseen-holder arm (no roster row) suggests the daemon-restart
-        // path instead - it never interpolates the id into a command.
+        // The unseen-holder arm never interpolates the id into a command.
         let unseen = decorate_interactive_refusal(original, None, "245ddb974b6d; rm -rf /");
         assert!(
             !unseen.contains("--resume"),

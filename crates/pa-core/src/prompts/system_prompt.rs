@@ -75,15 +75,12 @@ pub struct BuildSystemPromptOptions<'a> {
     pub selected_tools: Option<Vec<&'a str>>,
     /// Additional guideline bullets appended to the dynamic tail.
     pub prompt_guidelines: Option<Vec<String>>,
-    /// Text appended to the end of the prompt.
     pub append_system_prompt: Option<String>,
-    /// Working directory.
     pub cwd: String,
     /// Conversation log path.
     pub messages_path: Option<String>,
     /// Pre-loaded context files (path, content).
     pub context_files: Vec<(String, String)>,
-    /// Pre-loaded skills.
     pub skills: Vec<Skill>,
     /// Whether to include the subagent surface in this session.
     pub allow_recursion: Option<bool>,
@@ -441,7 +438,6 @@ mod tests {
     fn default_prompt_is_layered_with_static_prefix_first() {
         let breakdown = system_prompt_breakdown(&base_options());
         let prompt = &breakdown.assembled;
-        // Static layers lead, in order.
         assert!(prompt.starts_with("# prime-agent harness"));
         assert_eq!(breakdown.segments[0].kind, SegmentKind::Static);
         assert_eq!(breakdown.segments[0].name, "core");
@@ -455,12 +451,10 @@ mod tests {
             ["core", "usage", "opinionated", "packages"],
             "core/usage/opinionated layers, then the dynamic tail"
         );
-        // The cached prefix is exactly the static segments.
         assert_eq!(
             &prompt[..breakdown.cached_prefix_len],
             layers::static_prefix(Some("mock/mock-1"))
         );
-        // Dynamic values live strictly after the prefix.
         let tail = &prompt[breakdown.cached_prefix_len..];
         assert!(tail.contains("Working directory: /w"));
         assert!(tail.contains("Conversation log: /log.jsonl"));
@@ -480,13 +474,11 @@ mod tests {
         other.context_files = vec![("AGENTS.md".to_string(), "Rule one.".to_string())];
         let left = system_prompt_breakdown(&base_options());
         let right = system_prompt_breakdown(&other);
-        // Different sessions share one byte-identical cacheable prefix.
         assert_eq!(
             left.assembled[..left.cached_prefix_len],
             right.assembled[..right.cached_prefix_len]
         );
         assert_eq!(left.cached_prefix_len, right.cached_prefix_len);
-        // And the tails differ in the session-specific values.
         assert!(right.assembled[right.cached_prefix_len..]
             .contains("Enabled generic MCP servers: `slack`"));
         assert!(right.assembled[right.cached_prefix_len..]
@@ -505,7 +497,6 @@ mod tests {
         assert!(prompt.contains("## AGENTS.md\n\nRule one."));
         assert!(prompt.contains("Working directory: /w"));
         assert!(prompt.contains("Current date: "));
-        // The layered defaults are gone.
         assert!(!prompt.contains("# prime-agent harness"));
     }
 

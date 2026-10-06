@@ -20,20 +20,15 @@ pub struct SupervisorOptions {
     pub remote_agent_mesh: Option<RemoteAgentMeshOptions>,
 }
 
-/// Which clients a worker outbound frame reaches.
-///
-/// Session events do not ride this routing: the subscriber registry
-/// resolves their delivery set at publish time (TS `handleWorkerFrame`
-/// parity), so an unattached connection never wakes for them. The variant
-/// set below is the ring's broadcast classes only — a stale session-event
-/// publish fails at compile time instead of silently waking the ring.
+/// Which clients a worker outbound frame reaches. Session events do not ride this
+/// routing: the subscriber registry resolves their delivery set at publish time (TS
+/// parity). The variants are the ring's broadcast classes only.
 #[derive(Debug, Clone)]
 pub(crate) enum ClientRouting {
     /// Every connected client (e.g. `daemon_closing`).
     Broadcast,
-    /// Every connected client except one (the shutdown initiator receives its
-    /// `daemon_closing` through the command response instead, so the
-    /// broadcast cannot overtake that response or duplicate the frame).
+    /// Every connected client except one: the shutdown initiator receives its
+    /// `daemon_closing` through the command response instead.
     BroadcastExcept { connection_id: String },
     /// Clients holding a roster subscription (`roster_subscribe`).
     RosterSubscribers,

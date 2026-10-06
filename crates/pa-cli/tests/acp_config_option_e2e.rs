@@ -1,13 +1,6 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
-// by design on hot paths (boxing 130 fns is allocation-churn with zero
-// correctness gain); the fn-length threshold is a style gate, not
-// correctness (the harness fns are intentionally linear); 64-bit targets -
-// the narrowing sits at OS/protocol boundaries where the values are
-// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
-// guarded parses), and checked conversions would add panic paths where
-// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
-// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
-// dossier for the conductor).
+// large_futures: stack futures on hot paths by design. too_many_lines:
+// style gate only. Casts: 64-bit targets; narrowing sits at bounded
+// OS/protocol boundaries.
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -137,9 +130,7 @@ fn shutdown_sandboxed_daemon(socket: &std::path::Path) {
 }
 
 /// The models.json fixture: a second faux-provider model the pickers can
-/// discover and switch to (the faux provider is registered under the
-/// stable `faux` api, so requests against it stream through the scripted
-/// provider).
+/// discover and switch to (under the stable `faux` api).
 fn faux_models_fixture() -> serde_json::Value {
     json!({
         "providers": {
@@ -166,9 +157,8 @@ fn faux_models_fixture() -> serde_json::Value {
                         "maxTokens": 4_096,
                     },
                     {
-                        // #2858's `gpt-5.3-chat-latest` shape: the coarse
-                        // `reasoning` flag is false, but the map addresses
-                        // `xhigh` — the map is the capability signal.
+                        // #2858's `gpt-5.3-chat-latest` shape: the coarse `reasoning` flag is
+                        // false, but the map addresses `xhigh`.
                         "id": "map-model",
                         "name": "Map Model",
                         "api": "faux",
@@ -345,7 +335,6 @@ fn acp_daemon_attached_config_option_pickers() {
         assert_eq!(response["error"]["code"], -32602, "{config_id}: {response}");
         assert_eq!(response["error"]["data"]["reason"], reason);
     }
-    // An unknown session is invalid params, never an internal error.
     let select = client.request(
         "session/set_config_option",
         &select_params("missing-session", "thought_level", &json!("high")),
@@ -386,8 +375,7 @@ fn acp_daemon_attached_config_option_pickers() {
         "Unsupported reasoning effort: high"
     );
 
-    // The switched session still turns: the provider target followed the
-    // switch, so the next prompt streams on the selected model.
+    // The provider target followed the switch: the next prompt streams on the selected model.
     let prompt = client.request(
         "session/prompt",
         &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "hello" }] }),
@@ -395,8 +383,7 @@ fn acp_daemon_attached_config_option_pickers() {
     let (prompt_response, _) = client.wait_response(prompt, Duration::from_mins(2));
     assert_eq!(prompt_response["result"]["stopReason"], "end_turn");
 
-    // Switching back restores the effort picker at the persisted default
-    // (the level saved while the reasoning model was active).
+    // Switching back restores the effort picker at the persisted default.
     let reasoner = r#"["faux","faux-1"]"#;
     let select = client.request(
         "session/set_config_option",
@@ -408,7 +395,6 @@ fn acp_daemon_attached_config_option_pickers() {
     assert_eq!(options[0]["currentValue"], reasoner);
     assert_eq!(options[1]["currentValue"], "high", "{options}");
 
-    // The current model re-selected: refresh only, no discovery needed.
     let select = client.request(
         "session/set_config_option",
         &select_params(&session_id, "model", &json!(reasoner)),
@@ -419,10 +405,8 @@ fn acp_daemon_attached_config_option_pickers() {
         reasoner
     );
 
-    // #2858's map-driven capability: the map model (`reasoning: false`
-    // with an addressable `xhigh`) serves its effort picker and accepts
-    // the mapped level — the coarse flag must not veto what the map
-    // addresses.
+    // #2858's map-driven capability: the map model (`reasoning: false` with an
+    // addressable `xhigh`) serves its effort picker.
     let map = r#"["faux","map-model"]"#;
     let select = client.request(
         "session/set_config_option",

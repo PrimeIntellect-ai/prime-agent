@@ -1,8 +1,7 @@
-//! The RLM ledger's read-back machinery (moved with its concern): the
-//! wire record grammar and its line parser, the replay state and the
-//! stat-identity cache records, the edge join keys, the path
-//! canonicalizers, and the `live_edges` liveness resolver with its
-//! session-artifacts index.
+//! The RLM ledger's read-back machinery: the wire record grammar and its
+//! line parser, the replay state and the stat-identity cache records, the
+//! edge join keys, the path canonicalizers, and the `live_edges`
+//! liveness resolver with its session-artifacts index.
 use anyhow::Context as _;
 
 use super::{
@@ -135,10 +134,8 @@ pub(super) fn parse_ledger_line(line: &str, index: usize) -> Result<Option<Ledge
             else {
                 bail!("malformed RLM ledger line {line_no}: invalid delete record");
             };
-            // The post-settlement amendment record carries the deleted
-            // child's captured own usage. Old readers skip unknown fields,
-            // so the snapshot rides the delete record without a version
-            // bump; a present-but-malformed snapshot is a corrupt record.
+            // The amendment record carries the deleted child's captured
+            // own usage; old readers skip unknown fields (no version bump).
             let usage = match record.get("usage") {
                 None => None,
                 Some(usage) => Some(parse_deleted_usage(usage, line_no)?),
@@ -168,11 +165,10 @@ pub(super) fn edge_key(child_id: &str, child: &str) -> String {
     )
 }
 
-/// One `live_edges` liveness pass: a recorded path that stats resolves as
-/// itself; a recorded path whose file moved resolves through its durable
-/// session id (the file-name stem) against the sessions dir and the
-/// session-artifacts tree the port writes. The per-pass cache keeps the
-/// artifact walk to at most one pass per ledger read.
+/// One `live_edges` liveness pass: a recorded path that stats resolves
+/// as itself; a moved file resolves through its durable session id (the
+/// file-name stem) against the sessions dir and the artifacts tree. The
+/// per-pass cache keeps the artifact walk to one pass per read.
 pub(super) struct LivePathResolver {
     agent_dir: PathBuf,
     sessions_dir: PathBuf,
@@ -221,11 +217,8 @@ impl LivePathResolver {
     }
 }
 
-/// The session files under the artifacts tree, keyed by their durable
-/// session id (the file-name stem): `<agent-dir>/session-artifacts/
-/// <parent-session-id>/sub-<id>/<child>.jsonl`, one level per session id.
-/// Non-session `.jsonl` sidecars (semantic edges, harness state) key by
-/// their own stems and never collide with session-id lookups.
+/// The session files under the artifacts tree, keyed by their durable session id (the file-name
+/// stem); non-session `.jsonl` sidecars key by their own stems and never collide.
 fn artifact_session_index(agent_dir: &Path) -> HashMap<String, PathBuf> {
     let mut index = HashMap::new();
     let root = agent_dir.join(crate::context_tree_children::RLM_SESSION_ARTIFACTS_DIR);

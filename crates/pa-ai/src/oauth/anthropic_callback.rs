@@ -1,30 +1,22 @@
-//! The Anthropic login's localhost callback server (TS
-//! `anthropic.ts`'s `startCallbackServer` + `oauth-page.ts`): one
-//! listener on the registered redirect port serving the callback
-//! route with the product's success/error pages. Only a matching
-//! redirect settles the login — an OAuth error response, a missing
-//! code or state, or an unknown route answers its page and keeps
-//! waiting (TS calls `settleWait` on success only). A bind failure is
-//! a hard error (TS rejects the server promise and the login fails);
-//! the Codex callback keeps its own listener on its own port.
+//! The Anthropic login's localhost callback server on the registered
+//! redirect port. Only a matching redirect settles the login; error
+//! responses, missing parameters, and unknown routes answer their
+//! page and keep waiting. A bind failure is a hard error.
 
 use std::net::ToSocketAddrs;
 use std::sync::Arc;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-/// `PI_OAUTH_CALLBACK_HOST` (TS `CALLBACK_HOST`, default `127.0.0.1`).
 pub(crate) const CALLBACK_HOST_ENV: &str = "PI_OAUTH_CALLBACK_HOST";
 
-/// The registered redirect: `http://localhost:53692/callback` (TS
-/// `REDIRECT_URI`; the port is the registration's, not a scan range).
+/// The registered redirect port (the registration's, not a scan
+/// range).
 pub(crate) const CALLBACK_PORT: u16 = 53_692;
 pub(crate) const CALLBACK_PATH: &str = "/callback";
-/// TS `REDIRECT_URI` (the exchange's `redirect_uri` in every path).
+/// The exchange's `redirect_uri` in every path.
 pub(crate) const REDIRECT_URI: &str = "http://localhost:53692/callback";
 
-/// The authorization code plus the echoed `state` from the browser
-/// redirect (TS settles both).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallbackCode {
     pub code: String,
@@ -46,10 +38,9 @@ impl CallbackShared {
         if slot.is_none() {
             *slot = Some(result);
             drop(slot);
-            // `notify_one` stores a permit when no waiter is registered
-            // yet, so a wait that checked the empty slot just before the
-            // settle still wakes on its first poll — `notify_waiters`
-            // would miss that window and hang the wait forever.
+            // `notify_one` stores a permit when no waiter is registered yet, so a wait that checked
+            // the empty slot just before the settle still wakes on its first poll —
+            // `notify_waiters` would miss that window and hang the wait forever.
             self.notify.notify_one();
         }
     }
@@ -57,9 +48,8 @@ impl CallbackShared {
 
 /// A running callback server.
 ///
-/// Dropping the server aborts its accept loop, releasing the
-/// listener's port — a settled or cancelled login never wedges the
-/// registered redirect port for the next one.
+/// Dropping aborts the accept loop, releasing the port — a settled or cancelled
+/// login never wedges the registered port.
 #[derive(Debug)]
 pub struct AnthropicCallbackServer {
     shared: Arc<CallbackShared>,
@@ -77,9 +67,8 @@ impl Drop for AnthropicCallbackServer {
 }
 
 impl AnthropicCallbackServer {
-    /// Bind the registered redirect port on the callback host (TS
-    /// `server.listen(CALLBACK_PORT, CALLBACK_HOST)`); a bind failure
-    /// is the login's hard error (TS rejects the server promise).
+    /// Bind the registered redirect port on the callback host; a bind failure is the login's hard
+    /// error.
     ///
     /// # Errors
     ///
@@ -89,20 +78,17 @@ impl AnthropicCallbackServer {
         Self::bind(&host, CALLBACK_PORT, state)
     }
 
-    /// Bind one exact host and port; the caller owns the failure
-    /// (tests pick free ports).
+    /// Bind one exact host and port; the caller owns the failure.
     ///
     /// # Errors
     ///
     /// Returns an error when the listener cannot be bound.
     pub fn bind(host: &str, port: u16, state: &str) -> Result<Self, String> {
-        // `SO_REUSEADDR`: a closed listener's recent connections linger
-        // in TIME_WAIT on the registered port (the browser race drives
-        // real sockets); the next login's bind must not fail on them
-        // (the plain `TcpListener::bind` leaves the flag unset). Unix
-        // only: on Windows the same flag instead lets a second socket
-        // bind over a live listener (the port-sharing hijack class), so
-        // the plain bind keeps the accurate in-use failure.
+        // `SO_REUSEADDR`: lingering TIME_WAIT connections on the
+        // registered port must not fail the next login's bind. Unix
+        // only: on Windows the flag instead lets a second socket bind
+        // over a live listener (the port-sharing hijack class), so the
+        // plain bind keeps the accurate in-use failure.
         let addr: std::net::SocketAddr = (host, port)
             .to_socket_addrs()
             .map_err(|error| format!("port {port}: {error}"))?
@@ -149,21 +135,19 @@ impl AnthropicCallbackServer {
         })
     }
 
-    /// The bound port (tests pick free ports and read the listener's).
     #[cfg(test)]
     pub fn port(&self) -> u16 {
         self.port
     }
 
-    /// Cancel: settle the waiter with `None` (TS `cancelWait`; the
-    /// tests drive the cancellation path).
+    /// Settle the waiter with `None` (the tests drive the cancellation
+    /// path).
     #[cfg(test)]
     pub async fn cancel(&self) {
         self.shared.settle(None).await;
     }
 
-    /// Wait for the browser redirect to settle: the code and state,
-    /// or `None` when the wait was cancelled.
+    /// The code and state, or `None` when the wait was cancelled.
     pub async fn wait_for_code(&self) -> Option<CallbackCode> {
         loop {
             if let Some(result) = self.shared.result.lock().await.take() {
@@ -174,9 +158,8 @@ impl AnthropicCallbackServer {
     }
 }
 
-/// One browser request: read it, answer it, settle the login only on a
-/// matching redirect (TS the callback handler's validation order —
-/// route, the OAuth error response, missing parameters, state).
+/// One browser request: read it, answer it, settle the login only on
+/// a matching redirect.
 async fn serve_callback(mut stream: tokio::net::TcpStream, shared: &CallbackShared, state: &str) {
     let Some(request) = read_request_head(&mut stream).await else {
         let _ = write_response(
@@ -205,7 +188,7 @@ async fn serve_callback(mut stream: tokio::net::TcpStream, shared: &CallbackShar
         return;
     }
     let query = target.split_once('?').map_or("", |(_, query)| query);
-    // TS checks the OAuth error response before the parameters: the
+    // The OAuth error response is checked before the parameters: the
     // provider answered, the login did not complete.
     if let Some(error) = query_param(query, "error") {
         let _ = write_response(
@@ -254,9 +237,8 @@ async fn serve_callback(mut stream: tokio::net::TcpStream, shared: &CallbackShar
     .await;
 }
 
-/// Read one request head (accumulating until the blank line — a
-/// fragmented browser request parses the same as a whole one; the
-/// callback request carries no body worth reading past it).
+/// Read one request head, accumulating until the blank line (a
+/// fragmented browser request parses the same as a whole one).
 async fn read_request_head(stream: &mut tokio::net::TcpStream) -> Option<String> {
     let mut head = Vec::with_capacity(1024);
     let mut buffer = [0u8; 8192];
@@ -265,8 +247,8 @@ async fn read_request_head(stream: &mut tokio::net::TcpStream) -> Option<String>
             return Some(String::from_utf8_lossy(&head).to_string());
         }
         if head.len() >= buffer.len() {
-            // An oversized head: parse what arrived (the handler's route
-            // checks reject it).
+            // An oversized head: parse what arrived; the route checks
+            // reject it.
             return Some(String::from_utf8_lossy(&head).to_string());
         }
         let read = stream.read(&mut buffer).await.ok()?;
@@ -339,8 +321,7 @@ fn escape_html(value: &str) -> String {
 }
 
 /// The callback pages: a dark minimal page carrying the login's
-/// outcome (the port's page shape; the TS flow's own wording rides
-/// the messages and the error details).
+/// outcome; the TS flow's wording rides the messages and details.
 fn render_page(title: &str, message: &str, details: Option<&str>) -> String {
     let details_html = details
         .map(|details| {
@@ -396,7 +377,6 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    /// One live server on a free loopback port, with its port.
     fn live(state: &str) -> (AnthropicCallbackServer, u16) {
         let server = AnthropicCallbackServer::bind("127.0.0.1", 0, state)
             .expect("a free loopback port binds");
@@ -404,7 +384,6 @@ mod tests {
         (server, port)
     }
 
-    /// One raw browser request and its whole response.
     async fn request(port: u16, target: &str) -> String {
         use tokio::io::AsyncReadExt as _;
         let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
@@ -451,8 +430,8 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 400 Bad Request"));
         assert!(response.contains("Anthropic authentication did not complete"));
         assert!(response.contains("Error: access_denied"));
-        // A non-matching response never settles the login (TS calls
-        // settleWait on success only); cancellation does.
+        // A non-matching response never settles the login; the cancel
+        // does.
         server.cancel().await;
         assert!(server.wait_for_code().await.is_none());
     }
@@ -480,12 +459,12 @@ mod tests {
         // the port was already busy before this test — the blocker
         // cannot stage the bind-failure path on a held port.
         let Ok(blocker) = std::net::TcpListener::bind(("127.0.0.1", CALLBACK_PORT)) else {
-            return; // the registered port is busy: this run cannot stage it.
+            return;
         };
         let error = AnthropicCallbackServer::start("the-state").unwrap_err();
         assert!(error.contains("port 53692"), "{error}");
-        // The in-use failure is OS-phrased: EADDRINUSE names the address
-        // class on Unix, WSAEADDRINUSE on Windows.
+        // The in-use failure is OS-phrased (EADDRINUSE on Unix,
+        // WSAEADDRINUSE on Windows).
         #[cfg(unix)]
         assert!(error.contains("Address already in use"), "{error}");
         #[cfg(windows)]
@@ -496,18 +475,15 @@ mod tests {
         drop(blocker);
     }
 
-    /// The missed-notification regression: a settle landing between the
-    /// wait's empty-slot check and its `notified` registration still
-    /// wakes — the settle's stored permit (`notify_one`) completes the
-    /// future's first poll. With a `notify_waiters` settle this wait
-    /// would hang and the bound fails the test.
+    /// The missed-notification regression: a settle landing between the wait's empty-slot check and
+    /// its `notified` registration still wakes (the `notify_one` permit). A `notify_waiters` settle
+    /// would hang here.
     #[tokio::test]
     async fn a_settle_in_the_registration_window_still_wakes() {
         let server = AnthropicCallbackServer::bind("127.0.0.1", 0, "the-state")
             .expect("a free loopback port binds");
         let shared = &server.shared;
-        // The settle lands before the wait registers: the stored permit
-        // must wake it.
+        // The settle lands before the wait registers.
         shared
             .settle(Some(CallbackCode {
                 code: "the-code".to_string(),

@@ -1,36 +1,22 @@
-//! Headless e2e for the `/tier` service-tier command (TS #2144's UX half):
-//! a mock supervisor serves one attached session with an `OpenRouter`
-//! completions model, and the plan drives the command through the same
-//! editor submit path a user's keystrokes take.
-//!
-//! Verifies the TS parity contract: `/tier` without an argument reports the
-//! current tier and the available ones; a tier the model does not support
-//! errors with the available list; a supported tier applies through the
-//! daemon `set_service_tier` switch and reports the applied tier; and the
-//! tray badge shows the non-default tier (`fast` for priority).
+//! Headless e2e for the `/tier` service-tier command (TS #2144): the bare
+//! command reports current and available tiers; an unsupported tier errors
+//! with the list; a supported tier applies through `set_service_tier` and
+//! the tray badge shows the non-default tier.
 #![cfg(unix)]
-// Pedantic-gate exceptions (every other pedantic warning in this crate is
-// fixed in place; each exception carries its one-line justification):
-// - the casts: terminal-layout arithmetic narrows structurally bounded
-//   values (screen coordinates, byte counts, timestamps); guarded
-//   conversions would add panic paths the bounds guarantee away.
+// Casts: structurally bounded terminal-layout arithmetic; guarded conversions add panic paths.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// - the render routes are flat tables (one arm per route); splitting them
-//   would add indirection without changing the flow.
+// Render routes are flat tables (one arm per route); splitting adds indirection.
 #![allow(clippy::too_many_lines)]
-// - widget state structs carry independent flag bits; a nested struct
-//   would add indirection without changing the shape.
+// Widget state structs carry independent flag bits.
 #![allow(clippy::struct_excessive_bools, clippy::fn_params_excessive_bools)]
-// - the futures are bounded by the surface's lifetime; boxing them would
-//   add an allocation to the steady-state loop.
+// Futures are bounded by the surface's lifetime; boxing adds a steady-state allocation.
 #![allow(clippy::large_futures)]
-// - the wrappers preserve a uniform Result-returning API surface; unwrap
-//   removals would ripple through the callers without changing behavior.
+// The wrappers preserve a uniform Result-returning API surface.
 #![allow(clippy::unnecessary_wraps)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -47,10 +33,10 @@ struct MockSupervisor {
     listener: UnixListener,
 }
 
-/// The `OpenRouter` catalog entry as the daemon's `get_model_catalog` answer
-/// carries it: completions API, so flex and priority are both eligible for
-/// the model. The same json seeds `InteractiveOptions::model_catalog` (the
-/// composition-root snapshot the picker serves before the fetch lands).
+/// The `OpenRouter` catalog entry as the daemon's `get_model_catalog` answer carries it:
+/// completions API, so flex and priority are both eligible. The same json seeds
+/// `InteractiveOptions::model_catalog` (the composition-root snapshot the picker serves before the
+/// fetch lands).
 fn openrouter_model_value() -> Value {
     json!({
         "id": "openai/gpt-5.5",
@@ -73,8 +59,8 @@ impl MockSupervisor {
         }
     }
 
-    /// Serve one connection: attach an OpenRouter-model session, answer
-    /// `set_service_tier`, and report the applied tier on `get_state`.
+    /// Serve one connection: attach an OpenRouter-model session; `set_service_tier` applies,
+    /// `get_state` reports the tier.
     fn serve(self) {
         let (stream, _) = self.listener.accept().expect("accept");
         let write_stream = stream.try_clone().expect("clone mock socket");
@@ -128,8 +114,8 @@ impl MockSupervisor {
                     write_json(&mut writer, &attach_data(id));
                 }
                 "set_service_tier" => {
-                    // The daemon arm answers success with no data; the
-                    // follow-up get_state read reports the applied tier.
+                    // The daemon arm answers success with no data; the follow-up get_state read
+                    // reports the applied tier.
                     write_json(
                         &mut writer,
                         &json!({
@@ -142,9 +128,8 @@ impl MockSupervisor {
                     );
                 }
                 "get_model_catalog" => {
-                    // The startup fetch (interactive.rs `spawn_model_catalog_refresh`)
-                    // replaces the composition-root catalog with the daemon's
-                    // answer; serve the same OpenRouter entry the eligibility
+                    // The startup fetch (`spawn_model_catalog_refresh`) replaces the
+                    // composition-root catalog; serve the same OpenRouter entry the eligibility
                     // reads run against.
                     write_json(
                         &mut writer,
@@ -214,8 +199,8 @@ fn write_json(writer: &mut UnixStream, value: &Value) {
     writer.flush().expect("flush mock frame");
 }
 
-/// The slim attach result: one session on an `OpenRouter` completions model
-/// (the catalog entry the eligibility predicate reads).
+/// The slim attach result: one session on an `OpenRouter` completions model (the catalog entry the
+/// eligibility predicate reads).
 fn attach_data(id: &str) -> Value {
     json!({
         "type": "response",
@@ -294,8 +279,6 @@ fn options(socket: PathBuf) -> InteractiveOptions {
     }
 }
 
-/// Run the headless plan against a fresh mock supervisor and return the
-/// captured frames.
 fn run_plan(steps: Vec<HeadlessStep>) -> Vec<String> {
     std::env::remove_var("TMUX");
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -319,14 +302,10 @@ fn run_plan(steps: Vec<HeadlessStep>) -> Vec<String> {
     outcome.frames
 }
 
-/// `/tier` reports the current tier with the available ones; an
-/// unsupported tier errors with the available list; a supported tier
-/// applies through the daemon switch, reports the applied tier, and the
-/// tray badge shows it.
 #[test]
 fn tier_command_shows_applies_and_rejects() {
-    // The leading settle (the sibling harnesses' pattern): the attach
-    // must land its model + provider before the first submit reads them.
+    // The leading settle (the sibling harnesses' pattern): the attach must land its model +
+    // provider before the first submit reads them.
     let steps = vec![
         HeadlessStep::WaitMs(400),
         HeadlessStep::Submit("/tier".to_string()),
@@ -339,14 +318,13 @@ fn tier_command_shows_applies_and_rejects() {
     let frames = run_plan(steps);
     assert!(!frames.is_empty(), "frames were captured");
     let all = frames.join("\n");
-    // No argument: the current tier with the model's available tiers.
     assert!(
         all.contains("Service tier: default (available: default, flex, priority)"),
         "the show note rendered:\n{all}"
     );
-    // `scale` is not a user-facing choice: the TS error names the tier and
-    // lists the available ones (the rendered row wraps the list at the
-    // frame width, so the assertion stays on the single-line head).
+    // `scale` is not a user-facing choice: the TS error names the tier and lists the available ones
+    // (the rendered row wraps the list at the frame width, so the assertion stays on the
+    // single-line head).
     assert!(
         all.contains("Service tier 'scale' is not available for the current model"),
         "the unsupported error rendered:\n{all}"
@@ -355,8 +333,6 @@ fn tier_command_shows_applies_and_rejects() {
         all.contains("Available: default, flex,"),
         "the error lists the available tiers:\n{all}"
     );
-    // `flex` applies through the daemon switch; the state refresh reports
-    // the applied tier and the tray badge shows it.
     assert!(
         all.contains("Service tier: flex"),
         "the applied-tier note rendered:\n{all}"

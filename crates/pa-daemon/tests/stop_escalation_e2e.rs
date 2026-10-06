@@ -1,31 +1,18 @@
 //! The stop-escalation e2e (the Codex daemon-comparison finding #5): a
-//! worker that ignores the graceful stop cannot outlive the command
-//! holding its session lease. The wire kill's stop aftermath runs on every
-//! route outcome (TS's root-kill `finally`), and the retire pass
-//! escalates — the bounded `shutdown` route, SIGTERM, the TERM grace,
-//! SIGKILL, the post-kill hard deadline — so a hung worker dies inside one
-//! bounded window, its session lease frees through the dead-owner
-//! reclaim, and a well-behaved worker keeps the clean stop.
-//!
-//! Linux-only e2e (`AF_UNIX` sockets, `/proc`, pidfd signaling): compiles
-//! to nothing elsewhere, like the other pa-daemon e2e verifiers.
-// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
-// the full rationale).
-// Stack-resident futures by design on the daemon's hot paths; boxing the
-// call sites for a lint tick is a perf regression with zero correctness gain.
+//! worker that ignores the graceful stop dies inside one bounded escalation
+//! window and its session lease frees; a well-behaved worker keeps the
+//! clean stop.
+// Stack-resident futures by design on the daemon's hot paths.
 #![allow(clippy::large_futures)]
-// 64-bit-only targets; the narrowing casts sit at OS boundaries
-// (pid/fd/time/size) where the values are bounded by the kernel - the
-// dead-guard expect()s would add panic paths where silent wrap was
-// deliberate.
+// Narrowing casts sit at OS boundaries (pid/fd/time/size) where the kernel
+// bounds the values.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// The fn-length threshold is a style gate, not correctness; the structure
-// campaign owns the god-fn splits as a follow-up.
+// Style gate only, not correctness.
 #![allow(clippy::too_many_lines)]
 // API-shape opinions, not defects; the surfaces are deliberate.
 #![allow(
@@ -101,7 +88,6 @@ fn process_alive(pid: u32) -> bool {
     !state.starts_with('Z') && !state.starts_with('X')
 }
 
-/// One client connection over the supervisor socket.
 struct Client {
     reader: BufReader<UnixStream>,
     writer: UnixStream,
@@ -166,8 +152,8 @@ impl Client {
     }
 }
 
-/// One session over the daemon: its addressable id and the durable id the
-/// descriptor and the session file carry.
+/// The addressable id and the durable id the descriptor and the session
+/// file carry.
 struct Session {
     active_id: String,
     session_id: String,
@@ -217,7 +203,6 @@ fn write_script(dir: &Path) -> PathBuf {
     script
 }
 
-/// The session's durable file (TS `get_session_stats` -> sessionFile).
 fn session_file_of(client: &mut Client, active_id: &str) -> PathBuf {
     let stats = client.request(
         "stats",
@@ -231,9 +216,8 @@ fn session_file_of(client: &mut Client, active_id: &str) -> PathBuf {
     )
 }
 
-/// The stopped session's descriptor: its path and the worker pid it
-/// names (the retirement removes the file when the stop proves the
-/// process gone).
+/// The descriptor's path and the worker pid it names (the retirement
+/// removes the file when the stop proves the process gone).
 fn worker_descriptor_of(agent_dir: &Path, socket: &Path, session_id: &str) -> (PathBuf, u32) {
     let descriptor_dir = pa_daemon::descriptor::descriptor_dir(agent_dir, socket);
     let found = std::fs::read_dir(&descriptor_dir)
@@ -252,7 +236,6 @@ fn worker_descriptor_of(agent_dir: &Path, socket: &Path, session_id: &str) -> (P
     (found, pid)
 }
 
-/// The session file's latest `session_state` status.
 fn session_state(session_file: &Path) -> String {
     let mut state = String::new();
     for line in std::fs::read_to_string(session_file)
@@ -271,13 +254,6 @@ fn session_state(session_file: &Path) -> String {
     state
 }
 
-/// A hung session worker — one that ignores the routed kill and the stop's
-/// graceful `shutdown` — dies inside the escalation window (the two route
-/// budgets, the TERM grace, the SIGKILL hard deadline), its descriptor
-/// dies with it, its session lease frees (the dead-owner reclaim a fresh
-/// open runs), and the session reopens. Before the fix the route timeout
-/// skipped the stop entirely: the worker stayed stopped-but-alive,
-/// holding the lease behind a route that never answers.
 #[test]
 fn a_hung_worker_is_killed_within_the_escalation_window_and_its_lease_frees() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -292,16 +268,13 @@ fn a_hung_worker_is_killed_within_the_escalation_window_and_its_lease_frees() {
     let session_file = session_file_of(&mut client, &session.active_id);
     let (descriptor, worker_pid) = worker_descriptor_of(&agent_dir, &socket, &session.session_id);
 
-    // The live worker holds the runtime lease: a fresh open's acquire
-    // refuses (the premise the escalation must break).
     assert!(
         pa_daemon::lease::acquire_runtime_session_lease(&session_file, &agent_dir).is_err(),
         "the live worker must hold the session lease"
     );
 
-    // Hang the worker: SIGSTOP freezes its command pump, so the routed
-    // kill and the stop's graceful `shutdown` both go unanswered (the
-    // hung-inside-its-turn shape).
+    // SIGSTOP freezes the worker's command pump: the routed kill and the
+    // stop's graceful `shutdown` both go unanswered.
     let stopped = Command::new("kill")
         .arg("-STOP")
         .arg(worker_pid.to_string())
@@ -309,8 +282,8 @@ fn a_hung_worker_is_killed_within_the_escalation_window_and_its_lease_frees() {
         .expect("SIGSTOP the worker");
     assert!(stopped.success(), "SIGSTOP must reach the worker");
 
-    // THE STOP: the wire kill of the hung worker. The route times out;
-    // the stop completes anyway (TS's root-kill `finally`) and escalates.
+    // THE STOP: the route times out; the stop completes anyway (TS's
+    // root-kill `finally`) and escalates.
     let sent = Instant::now();
     let killed = client.request(
         "kill",
@@ -327,9 +300,6 @@ fn a_hung_worker_is_killed_within_the_escalation_window_and_its_lease_frees() {
             .is_some_and(|error| error.contains("timed out")),
         "the refusal is the route timeout: {killed}"
     );
-    // The graceful window ran before the escalation, and the whole stop
-    // stayed bounded (two route budgets + TERM grace + SIGKILL hard
-    // deadline).
     assert!(
         elapsed >= Duration::from_secs(30),
         "the graceful route window must run before the escalation: {elapsed:?}"
@@ -339,9 +309,7 @@ fn a_hung_worker_is_killed_within_the_escalation_window_and_its_lease_frees() {
         "the escalation must stay bounded: {elapsed:?}"
     );
 
-    // The hung worker is provably dead (only the SIGKILL half of the
-    // escalation can end a SIGSTOPped process), and the stop's proof of
-    // death removed its descriptor.
+    // Only the SIGKILL half of the escalation can end a SIGSTOPped process.
     assert!(
         !process_alive(worker_pid),
         "the escalation must have killed the hung worker"
@@ -350,16 +318,11 @@ fn a_hung_worker_is_killed_within_the_escalation_window_and_its_lease_frees() {
         !descriptor.exists(),
         "the provably-dead worker's descriptor must be gone"
     );
-    // The kill's durable half ran on the failed route: the session file
-    // carries the archived state.
     assert_eq!(session_state(&session_file), "archived");
 
-    // The lease freed: a newcomer acquires it through the dead-owner
-    // reclaim (the same acquire a fresh worker runs at open).
     let lease = pa_daemon::lease::acquire_runtime_session_lease(&session_file, &agent_dir)
         .expect("the dead worker's lease must be reclaimable");
     drop(lease);
-    // The session reopens (the end-user symptom of finding #5 is gone).
     let reopened = client.request(
         "reopen",
         &json!({
@@ -394,11 +357,6 @@ fn a_hung_worker_is_killed_within_the_escalation_window_and_its_lease_frees() {
     drop(daemon);
 }
 
-/// A well-behaved worker keeps the clean stop: the wire kill answers
-/// success without waiting out any route budget, the worker exits on its
-/// own routed close (no survivor line in the log), the descriptor dies
-/// with the proven-gone process, the lease frees, and the stopped session
-/// reopens.
 #[test]
 fn a_well_behaved_worker_keeps_the_clean_stop() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -411,8 +369,6 @@ fn a_well_behaved_worker_keeps_the_clean_stop() {
     let session_file = session_file_of(&mut client, &session.active_id);
     let (descriptor, worker_pid) = worker_descriptor_of(&agent_dir, &socket, &session.session_id);
 
-    // THE STOP: the well-behaved kill answers quickly (the graceful close
-    // settles inside the route budget; no escalation window is spent).
     let sent = Instant::now();
     let killed = client.request(
         "kill",
@@ -425,7 +381,6 @@ fn a_well_behaved_worker_keeps_the_clean_stop() {
         "the clean stop must not wait out a route budget: {elapsed:?}"
     );
 
-    // The worker exits on its own routed close.
     let deadline = Instant::now() + Duration::from_secs(15);
     while process_alive(worker_pid) && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
@@ -439,14 +394,12 @@ fn a_well_behaved_worker_keeps_the_clean_stop() {
         "the cleanly stopped worker's descriptor must be gone"
     );
     assert_eq!(session_state(&session_file), "archived");
-    // The clean stop never reports a survivor.
     let log = std::fs::read_to_string(pa_daemon::paths::daemon_log_path(&socket, &agent_dir))
         .unwrap_or_default();
     assert!(
         !log.contains("survived the shutdown escalation"),
         "the clean stop must not log a survivor: {log}"
     );
-    // The lease freed and the session reopens.
     let lease = pa_daemon::lease::acquire_runtime_session_lease(&session_file, &agent_dir)
         .expect("the stopped session's lease must be free");
     drop(lease);

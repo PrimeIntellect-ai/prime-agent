@@ -1,27 +1,16 @@
-//! End-to-end verifier for the compaction abort (TS `abortCompaction` ->
-//! `_runAutoCompaction`'s `aborted` arm): a threshold compaction aborted
-//! while its summarizer request is in flight records the durable
-//! `cancelled` outcome row (the #207 seam's `cancelled` arm), broadcasts
-//! its `message_start`/`message_end` pair before the aborted
-//! `compaction_end` event, and never commits a compaction entry; the turn
-//! still settles and the session keeps working.
-// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
-// the full rationale).
-// Stack-resident futures by design on the daemon's hot paths; boxing the
-// call sites for a lint tick is a perf regression with zero correctness gain.
+//! Compaction abort e2e (TS `abortCompaction` -> `_runAutoCompaction`'s
+//! `aborted` arm): a threshold compaction aborted mid-summarizer records the
+//! durable `cancelled` outcome row, broadcasts its pair before the aborted
+//! `compaction_end`, never commits an entry, and the session keeps working.
 #![allow(clippy::large_futures)]
-// 64-bit-only targets; the narrowing casts sit at OS boundaries
-// (pid/fd/time/size) where the values are bounded by the kernel - the
-// dead-guard expect()s would add panic paths where silent wrap was
-// deliberate.
+// 64-bit-only targets; the narrowing casts sit at bounded OS boundaries.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// The fn-length threshold is a style gate, not correctness; the structure
-// campaign owns the god-fn splits as a follow-up.
+// Fn length is a style gate, not correctness.
 #![allow(clippy::too_many_lines)]
 // API-shape opinions, not defects; the surfaces are deliberate.
 #![allow(
@@ -43,8 +32,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-/// The compaction summarizer request marker (the fixed summarization
-/// system prompt rides the request's first message).
+/// The compaction summarizer request marker (the fixed summarization prompt rides the first
+/// message).
 const SUMMARIZER_MARKER: &str = "context summarization assistant";
 
 struct Supervisor {
@@ -60,13 +49,9 @@ impl Drop for Supervisor {
     }
 }
 
-/// An OpenAI-compatible SSE mock whose summarizer response can be held in
-/// flight (`hold_summarizer`): while set, any request carrying the
-/// summarization prompt sleeps before its response, so the client-side
-/// abort lands mid-compaction (the dropped request kills the connection;
-/// the mock thread exits on its failed write). The per-request usage list
-/// makes the second turn's usage cross the compaction threshold (the
-/// f14-auto battery shape: 126010 tokens against a 500-token headroom).
+/// An OpenAI-compatible SSE mock whose summarizer response can be held in flight
+/// (`hold_summarizer`): while set, any request carrying the summarization prompt
+/// sleeps, so the abort lands mid-compaction.
 struct CompactionMock {
     requests: Arc<Mutex<Vec<Value>>>,
     hold_summarizer: Arc<AtomicBool>,
@@ -130,7 +115,6 @@ fn small_usage() -> Value {
     })
 }
 
-/// The crossing turn's reported usage (the f14-auto battery shape).
 fn crossing_usage() -> Value {
     json!({
         "prompt_tokens": 126_000, "completion_tokens": 10, "total_tokens": 126_010,
@@ -191,14 +175,12 @@ fn serve(
     let index = requests.lock().expect("mock lock").len();
     requests.lock().expect("mock lock").push(body.clone());
     if is_summarizer_request(&body) && hold_summarizer.load(Ordering::SeqCst) {
-        // Held in flight: the abort drops the request from the client side
-        // long before this sleep ends; the write then fails on the closed
-        // connection and the thread exits.
+        // Held in flight: the abort drops the request long before this sleep ends; the write
+        // fails on the closed connection.
         std::thread::sleep(Duration::from_secs(30));
     }
-    // Turn 2 (the crossing turn) reports the over-threshold usage; every
-    // other request reports the small usage so the session does not
-    // re-cross.
+    // Turn 2 reports the over-threshold usage; every other request reports the
+    // small usage so the session does not re-cross.
     let usage = if index == 1 {
         crossing_usage()
     } else {
@@ -251,10 +233,8 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path) -> Supervisor {
             pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
             "15000",
         )
-        // The session create launches a worker inside this same connect
-        // budget; a parallel-load e2e run can starve a fresh worker's
-        // boot past the 30s default, so the e2e uses the load-aware
-        // override (under the create's own link budget).
+        // The create launches a worker inside this same connect budget; parallel
+        // load can starve a fresh worker's boot past the 30s default.
         .env("PA_DAEMON_WORKER_CONNECT_TIMEOUT_MS", "90000")
         .spawn()
         .expect("spawn pa-daemon supervisor");
@@ -306,8 +286,7 @@ impl Client {
 
     fn read_line(&mut self) -> Value {
         let mut line = String::new();
-        // Generous: parallel load can starve the supervisor process far
-        // past an interactive box's latency.
+        // Generous: parallel load can starve the supervisor far past an interactive box's latency.
         let deadline = Instant::now() + Duration::from_secs(90);
         self.reader
             .get_mut()
@@ -328,8 +307,8 @@ impl Client {
         }
     }
 
-    /// Park broadcast events still in flight after a response (the turn's
-    /// trailing frames can land right after the prompt completes).
+    /// Park broadcast events still in flight after a response (trailing frames can land right after
+    /// the prompt completes).
     fn drain_events(&mut self, quiet_ms: u64) {
         let deadline = Instant::now() + Duration::from_millis(quiet_ms);
         self.reader
@@ -357,11 +336,8 @@ impl Client {
         }
     }
 
-    /// Park broadcast events until one matches `probe` (early exit) or the
-    /// budget runs out. The supervisor's event forwarding can lag seconds
-    /// behind the run itself under parallel load, so the wait observes the
-    /// event instead of a fixed short drain; the generous budget keeps
-    /// the solo path fast.
+    /// Park broadcast events until one matches `probe` (early exit) or the budget runs out;
+    /// under parallel load the supervisor's forwarding can lag, so wait, not a fixed drain.
     fn wait_for_event(
         &mut self,
         budget: Duration,
@@ -382,8 +358,6 @@ impl Client {
         }
     }
 
-    /// Read lines until the response for `id` arrives, parking broadcast
-    /// events on the way.
     fn read_response(&mut self, id: &str) -> Value {
         let deadline = Instant::now() + Duration::from_mins(3);
         loop {
@@ -399,10 +373,6 @@ impl Client {
     }
 }
 
-/// Abort the in-flight threshold compaction over the daemon wire: the
-/// durable `cancelled` outcome row, its broadcast pair before the aborted
-/// `compaction_end` event, no committed compaction entry, and the session
-/// keeps working.
 #[test]
 fn abort_compaction_mid_threshold_run_records_the_cancelled_outcome() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -433,11 +403,9 @@ fn abort_compaction_mid_threshold_run_records_the_cancelled_outcome() {
         .to_string(),
     )
     .expect("write models.json");
-    // The f14-auto battery settings shape: a tiny reserve (the 4_096
-    // estimate-error floor governs the headroom), so the combined
-    // input+output ceiling sits at 119_808 on the 128k window — the
-    // 126_010 crossing fires. A tiny keep-recent budget keeps the seeded
-    // turns summarizable.
+    // The f14-auto shape: a tiny reserve (the 4_096 estimate-error floor governs
+    // the headroom) puts the combined ceiling at 119_808 on the 128k window — the
+    // 126_010 crossing fires.
     std::fs::write(
         agent_dir.join("settings.json"),
         json!({ "compaction": {"enabled": true, "reserveTokens": 500, "keepRecentTokens": 10} })
@@ -476,7 +444,6 @@ fn abort_compaction_mid_threshold_run_records_the_cancelled_outcome() {
     let attached = client.read_response("a1");
     assert_eq!(attached["success"], true, "attach failed: {attached}");
 
-    // Seed turn (small usage): the compaction threshold stays silent.
     client.send_command(
         "p1",
         &json!({"type": "prompt_and_wait", "activeSessionId": session_id, "message": "seed turn"}),
@@ -484,9 +451,8 @@ fn abort_compaction_mid_threshold_run_records_the_cancelled_outcome() {
     let seeded = client.read_response("p1");
     assert_eq!(seeded["success"], true, "seed prompt failed: {seeded}");
 
-    // The crossing turn reports 126010 tokens (over the 500-token
-    // headroom): the post-turn threshold check fires a compaction whose
-    // summarizer request the mock holds in flight.
+    // The crossing turn reports 126010 tokens (over the 500-token headroom): the
+    // threshold check fires a compaction whose summarizer request the mock holds.
     mock.hold_summarizer.store(true, Ordering::SeqCst);
     client.send_command(
         "p2",
@@ -502,9 +468,7 @@ fn abort_compaction_mid_threshold_run_records_the_cancelled_outcome() {
         "the compaction summarizer request never arrived"
     );
 
-    // Abort the in-flight compaction from a second attached client (TS
-    // `abortCompaction` on the wire; the TUI interrupt key sends the same
-    // command while the compaction loader is up).
+    // Abort the in-flight compaction from a second attached client (the TUI interrupt key).
     let mut second = Client::connect(&socket);
     second.send_command(
         "a2",
@@ -520,18 +484,14 @@ fn abort_compaction_mid_threshold_run_records_the_cancelled_outcome() {
     assert_eq!(aborted["success"], true, "abort failed: {aborted}");
     assert_eq!(aborted["command"], "abort_compaction");
 
-    // The turn completes after the cancelled compaction (TS: the aborted
-    // arm records the outcome and returns without stalling the loop).
+    // The turn completes after the cancelled compaction (the aborted arm records and returns).
     let crossed = client.read_response("p2");
     assert_eq!(
         crossed["success"], true,
         "crossing prompt failed: {crossed}"
     );
-    // The run's trailing frames can land well after the response (the
-    // supervisor's event forwarding lags under parallel load), so wait
-    // for the run's LAST expected event instead of a fixed short drain —
-    // the aborted `compaction_end` lands after the disclosure pair, and
-    // its arrival implies the whole sequence.
+    // Trailing frames can land well after the response under parallel load, so wait
+    // for the run's LAST expected event, not a fixed drain.
     client.wait_for_event(
         Duration::from_mins(1),
         "the aborted threshold compaction_end",
@@ -542,7 +502,6 @@ fn abort_compaction_mid_threshold_run_records_the_cancelled_outcome() {
         },
     );
 
-    // The start event went out before the summarizer ran (the loader).
     assert!(
         client
             .events
@@ -551,8 +510,7 @@ fn abort_compaction_mid_threshold_run_records_the_cancelled_outcome() {
         "the threshold compaction_start broadcast"
     );
 
-    // The durable cancelled row's broadcast pair, then the aborted
-    // `compaction_end` (TS `_endCompactionUnsuccessfully` order).
+    // The durable cancelled row's pair, then the aborted `compaction_end` (TS order).
     let row_start = client
         .events
         .iter()
@@ -599,14 +557,12 @@ fn abort_compaction_mid_threshold_run_records_the_cancelled_outcome() {
         "the end event follows the disclosure pair"
     );
     let end_event = client.events[compaction_end_index].clone();
-    // Aborts carry no error message or severity (TS: the row owns the
-    // disclosure; the event carries `aborted: true`).
+    // Aborts carry no error message or severity (TS: the row owns the disclosure; the
+    // event carries `aborted: true`).
     assert!(end_event.get("errorMessage").is_none(), "{end_event}");
     assert!(end_event.get("errorSeverity").is_none(), "{end_event}");
     assert_eq!(end_event["willRetry"], false);
 
-    // The durable session file carries exactly the cancelled row and no
-    // compaction entry (an aborted run never commits).
     let session_file = std::fs::read_dir(&session_dir)
         .expect("list session dir")
         .flatten()
@@ -638,8 +594,8 @@ fn abort_compaction_mid_threshold_run_records_the_cancelled_outcome() {
         json!({"reason": "threshold", "outcome": "cancelled"})
     );
 
-    // The next turn works on the un-compacted context (the disclosure row
-    // never reaches the provider request).
+    // The next turn works on the un-compacted context (the disclosure row never reaches the
+    // provider).
     mock.hold_summarizer.store(false, Ordering::SeqCst);
     let before_next = mock.request_count();
     client.send_command(
@@ -662,8 +618,8 @@ fn abort_compaction_mid_threshold_run_records_the_cancelled_outcome() {
     );
 }
 
-/// Find the resident worker's pid from the persisted descriptors (the
-/// supervisor's own durable state under `daemon-workers/<socket hash>/`).
+/// The resident worker's pid from the persisted descriptors (the supervisor's durable state under
+/// `daemon-workers/<socket hash>/`).
 fn worker_pid(agent_dir: &Path) -> u32 {
     let workers_dir = agent_dir.join("daemon-workers");
     let deadline = Instant::now() + Duration::from_mins(1);
@@ -728,14 +684,6 @@ fn signal(pid: u32, signal: &str) {
     assert!(status.success(), "kill {signal} {pid} failed");
 }
 
-/// The wedged-worker abort (the abort supervision): a worker frozen
-/// mid-compaction cannot answer its own abort command. The supervisor
-/// acknowledges the abort immediately (never the worker's 30s route
-/// timeout), declares the run terminal after the grace window — the
-/// synthetic aborted `compaction_end` clears every attached loader and the
-/// terminal record lands in the supervisor's own journal — and the
-/// replacement worker's create replay discloses the cancelled outcome in
-/// the rebuilt durable transcript.
 #[test]
 fn wedged_worker_abort_acks_immediately_and_declares_terminal() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -803,7 +751,6 @@ fn wedged_worker_abort_acks_immediately_and_declares_terminal() {
     let attached = client.read_response("a1");
     assert_eq!(attached["success"], true, "attach failed: {attached}");
 
-    // Seed turn, then the crossing turn whose summarizer the mock holds.
     client.send_command(
         "p1",
         &json!({"type": "prompt_and_wait", "activeSessionId": session_id, "message": "seed turn"}),
@@ -825,21 +772,15 @@ fn wedged_worker_abort_acks_immediately_and_declares_terminal() {
         "the compaction summarizer request never arrived"
     );
 
-    // The forwarded `compaction_start` must reach an attached client
-    // before the freeze: the client's loader is up exactly because that
-    // frame flowed through the supervisor — which is also what arms the
-    // supervisor's token. The generous budget rides out event-forwarding
-    // lag under parallel load.
+    // The forwarded `compaction_start` must reach an attached client before the freeze: the
+    // loader is up because that frame flowed — which also arms the supervisor's token.
     client.wait_for_event(
         Duration::from_mins(1),
         "the compaction_start broadcast",
         |event| event["type"] == "compaction_start",
     );
 
-    // The second client attaches while the worker still answers (the
-    // loader-holding TUI in the real flow), then the worker freezes: a
-    // SIGSTOP is the wedge — the connection stays open, the command plane
-    // stops answering.
+    // The second client attaches while the worker still answers, then the worker freezes.
     let mut second = Client::connect(&socket);
     second.send_command(
         "a2",
@@ -850,9 +791,8 @@ fn wedged_worker_abort_acks_immediately_and_declares_terminal() {
     let pid = worker_pid(&agent_dir);
     signal(pid, "-STOP");
 
-    // The abort acknowledges immediately from the supervisor plane (TS
-    // daemon-mode's in-process `abortCompaction` always replies instantly;
-    // the wedged worker must not turn it into the 30s route timeout).
+    // The abort acknowledges immediately from the supervisor plane (TS daemon-mode's
+    // in-process `abortCompaction` always replies instantly; never the 30s route timeout).
     let sent_at = Instant::now();
     second.send_command(
         "ab1",
@@ -861,18 +801,14 @@ fn wedged_worker_abort_acks_immediately_and_declares_terminal() {
     let aborted = second.read_response("ab1");
     let ack_elapsed = sent_at.elapsed();
     assert_eq!(aborted["success"], true, "abort failed: {aborted}");
-    // The bound proves the ack never waited on the wedged worker's route
-    // (30s), while staying generous for scheduling lag on the
-    // supervisor's own (immediate, worker-free) answer.
+    // The bound proves the ack never waited on the wedged worker's 30s route.
     assert!(
         ack_elapsed < Duration::from_secs(25),
         "the acknowledgment waited on the wedged worker: {ack_elapsed:?}"
     );
 
-    // The supervisor declares the run terminal after the grace window: the
-    // synthetic aborted `compaction_end` reaches the attached client (the
-    // TUI clears its loader on it). An auto run's aborted end carries no
-    // error message or severity, like the worker's own cancelled arm.
+    // The supervisor declares the run terminal after the grace: the synthetic aborted
+    // `compaction_end` reaches the attached client (no error message or severity).
     let deadline = Instant::now() + Duration::from_mins(1);
     let end_event = loop {
         second.drain_events(200);
@@ -893,8 +829,6 @@ fn wedged_worker_abort_acks_immediately_and_declares_terminal() {
     assert!(end_event.get("errorSeverity").is_none(), "{end_event}");
     assert_eq!(end_event["willRetry"], false);
 
-    // The terminal record persisted in the supervisor's own journal,
-    // unconsumed (the replacement's create replay owns the consumption).
     let journal_path = supervision_journal(&agent_dir).expect("the supervision journal exists");
     let journal = std::fs::read_to_string(&journal_path).expect("read journal");
     let record: Value = serde_json::from_str(journal.lines().last().expect("a journal record"))
@@ -903,9 +837,8 @@ fn wedged_worker_abort_acks_immediately_and_declares_terminal() {
     assert_eq!(record["activeSessionId"], session_id.as_str());
     assert_eq!(record["reason"], "threshold");
 
-    // Kill the frozen worker: the supervisor relaunches it, and the create
-    // replay discloses the aborted run — the same durable
-    // `compaction_outcome` row the worker's own auto-abort arms persist.
+    // Kill the frozen worker: the supervisor relaunches it, and the create replay discloses
+    // the aborted run — the same durable `compaction_outcome` row the worker's own arms persist.
     signal(pid, "-KILL");
     let deadline = Instant::now() + Duration::from_secs(90);
     let durable = loop {
@@ -941,8 +874,7 @@ fn wedged_worker_abort_acks_immediately_and_declares_terminal() {
         json!({"reason": "threshold", "outcome": "cancelled"})
     );
 
-    // The replay consumed the record: the journal drops it, so a later
-    // relaunch never replays it again.
+    // The replay consumed the record: the journal drops it, so a later relaunch never replays.
     let deadline = Instant::now() + Duration::from_mins(1);
     loop {
         let journal = std::fs::read_to_string(&journal_path).expect("read journal");

@@ -1,10 +1,7 @@
-//! The `agents_view` test harness and family index: the shared fixtures
-//! every scenario family drives live here (the idle-row mode, the roster
-//! and catalog builders, the parent-child, anchor, bindings, and churn
-//! modes); the tests themselves sit in the family children under
-//! `tests/`, each holding its scenarios byte-identical to the pre-split
-//! file. Add a new family by declaring the module below and moving its
-//! fixtures here only when another family drives them too.
+//! The `agents_view` test harness and family index: the shared fixtures every scenario family
+//! drives live here; the tests themselves sit in the family children under `tests/`. Add a new
+//! family by declaring the module below and moving its fixtures here only when another family
+//! drives them too.
 
 use super::*;
 
@@ -26,9 +23,8 @@ mod saved_catalog;
 mod search_selection;
 mod selection_churn;
 
-/// One idle row under test plus a holder row that keeps the selection,
-/// with the given title and one model id. The cost/age
-/// stay fixed so the expected rows are exact.
+/// One idle row under test plus a holder row that keeps the selection, with the given title
+/// and one model id. The cost/age stay fixed so the expected rows are exact.
 fn mode_with_row(title: &str, model: &str) -> (AgentsViewMode, usize) {
     let mut mode = AgentsViewMode::new(AgentsViewOptions {
         socket_path: PathBuf::from("/tmp/agents-view-test.sock"),
@@ -73,8 +69,7 @@ fn flat(line: &Line) -> String {
     line.iter().map(|s| s.content.as_str()).collect()
 }
 
-/// One SGR left report: a press, a press with the motion bit (a
-/// drag), or a release.
+/// One SGR left report: a press, a press with the motion bit (a drag), or a release.
 fn mouse_report(row: usize, press: bool, motion: bool) -> crate::mouse::MouseEvent {
     crate::mouse::MouseEvent {
         button: crate::mouse::BUTTON_LEFT,
@@ -105,9 +100,8 @@ fn parent_summary(id: &str) -> serde_json::Value {
     })
 }
 
-/// One saved-catalog row (TS `serializeSavedSessionInfo`'s shape): the
-/// path identity, the durable id, and the display fields the filters
-/// read.
+/// One saved-catalog row: the path identity, the durable id, and the display fields the
+/// filters read.
 fn saved_catalog_row(path: &str, id: &str, name: &str) -> serde_json::Value {
     serde_json::json!({
         "path": path,
@@ -166,8 +160,8 @@ fn mode_with_parent_and_child() -> AgentsViewMode {
     mode
 }
 
-/// A fresh-open view anchored on the given session (the agents-back
-/// handoff state: no carried selection, the session just left).
+/// A fresh-open view anchored on the given session (the agents-back handoff state: no carried
+/// selection, the session just left).
 fn mode_with_anchor(anchor: Option<&str>, roster: Vec<serde_json::Value>) -> AgentsViewMode {
     let mut mode = AgentsViewMode::new(AgentsViewOptions {
         socket_path: PathBuf::from("/tmp/agents-view-test.sock"),

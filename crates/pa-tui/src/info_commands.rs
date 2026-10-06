@@ -1,15 +1,9 @@
 //! Client-side info displays: the `/session`, `/context`, `/system-prompt`,
-//! `/logs`, and `/changelog` rows (TS interactive-mode `handleSessionCommand`,
-//! `handleContextCommand` over `formatContextTree`,
-//! `handleSystemPromptCommand`, `handleLogsCommand`, and
-//! `handleChangelogCommand` over `parseChangelog`). Row data and render are
-//! pure; the session UI owns the daemon fetches that feed the builders, and
-//! the read-only info panel (`info_panel`) owns the paint (the operator's
-//! 2026-09-26 directive: these displays render as the docked popup panel,
-//! not as transcript rows). Every builder returns the structured form of
-//! the TS `theme.fg(...)`-embedded info strings: one [`ClientLine`] per
-//! source line, spans carrying their theme color so the view resolves them
-//! at render time.
+//! `/logs`, and `/changelog` rows. Row data and render are pure; the
+//! session UI owns the daemon fetches, and the read-only info panel owns
+//! the paint (the operator's 2026-09-26 directive). Every builder
+//! returns one [`ClientLine`] per source line, spans carrying their
+//! theme color so the view resolves them at render time.
 
 use std::path::Path;
 
@@ -81,11 +75,9 @@ pub(crate) fn grouped(value: u64) -> String {
 /// EXACT decimal expansion of the binary double, rounded half away from
 /// zero at the digit. Neither Rust's `{:.n}` (ties half-to-even on the
 /// exact expansion) nor a float multiply-then-round (the multiply rounds
-/// too: `2.675 * 100` is `267.50000000000003`, so `.round()` gives 268
-/// where JS prints `2.67`) matches, so the rounding runs on the double's
-/// exact rational value: `value = mantissa / 2^exponent` and
-/// `value * 10^digits = mantissa * 5^digits / 2^(exponent - digits)`
-/// reduce to one integer divide with a half-away tie on the remainder.
+/// too) matches, so the rounding runs on the double's exact rational
+/// value: `value = mantissa / 2^exponent` reduces to one integer divide
+/// with a half-away tie on the remainder.
 #[must_use]
 pub fn js_to_fixed(value: f64, digits: usize) -> String {
     let bits = value.to_bits();
@@ -131,9 +123,9 @@ pub fn js_to_fixed(value: f64, digits: usize) -> String {
     format!("{integer}.{fraction:0digits$}")
 }
 
-/// The `/session` info rows (TS `handleSessionCommand` over the
-/// `get_session_stats` shape). A missing `sessionFile` renders as
-/// `In-memory`; an unset session name omits the `Name:` row.
+/// The `/session` info rows over the `get_session_stats` shape. A
+/// missing `sessionFile` renders as `In-memory`; an unset session name
+/// omits the `Name:` row.
 pub fn session_info_rows(stats: &Value, session_name: Option<&str>) -> Vec<ClientLine> {
     let count = |field: &str| stats.get(field).and_then(Value::as_u64).unwrap_or_default();
     let session_id = stats
@@ -169,8 +161,8 @@ pub fn session_info_rows(stats: &Value, session_name: Option<&str>) -> Vec<Clien
     rows
 }
 
-/// The `/logs` info rows (TS `handleLogsCommand`): the logs directory, its
-/// files sorted by name with `(N KB)` sizes, and the trailing note.
+/// The `/logs` info rows: the logs directory, its files sorted by name
+/// with `(N KB)` sizes, and the trailing note.
 #[must_use]
 pub fn logs_rows(logs_dir: &Path) -> Vec<ClientLine> {
     let mut rows = vec![
@@ -218,8 +210,8 @@ pub fn logs_rows(logs_dir: &Path) -> Vec<ClientLine> {
     rows
 }
 
-/// The `/system-prompt` header rows (TS `handleSystemPromptCommand`); the
-/// char count is the JS string length (UTF-16 code units).
+/// The `/system-prompt` header rows; the char count is the JS string
+/// length (UTF-16 code units).
 #[must_use]
 pub fn system_prompt_header_rows(prompt: &str) -> Vec<ClientLine> {
     let chars = prompt.encode_utf16().count();
@@ -229,8 +221,7 @@ pub fn system_prompt_header_rows(prompt: &str) -> Vec<ClientLine> {
     ]]
 }
 
-/// The `/system-prompt` body rows: the prompt split into source lines for
-/// per-line wrapping (the TS `Text` wraps each newline-delimited line).
+/// The `/system-prompt` body rows: the prompt split into source lines for per-line wrapping.
 #[must_use]
 pub fn system_prompt_body_rows(prompt: &str) -> Vec<ClientLine> {
     prompt
@@ -239,9 +230,8 @@ pub fn system_prompt_body_rows(prompt: &str) -> Vec<ClientLine> {
         .collect()
 }
 
-/// The `/changelog` markdown (TS `handleChangelogCommand` over
-/// `parseChangelog`): the CHANGELOG.md entries newest-first joined with
-/// a blank line, or the empty-state text.
+/// The `/changelog` markdown: the CHANGELOG.md entries newest-first
+/// joined with a blank line, or the empty-state text.
 #[must_use]
 pub fn changelog_markdown(changelog_path: &Path) -> String {
     let entries = parse_changelog(changelog_path);
@@ -256,10 +246,10 @@ pub fn changelog_markdown(changelog_path: &Path) -> String {
         .join("\n\n")
 }
 
-/// Parse the shipped CHANGELOG.md (TS `parseChangelog`): sections under
-/// `## ` headers, each entry the trimmed section text including its header
-/// line. A `## ` header without a parsable `x.y.z` version resets collection;
-/// lines before the first version header stay dropped.
+/// Parse the shipped CHANGELOG.md: sections under `## ` headers, each
+/// entry the trimmed section text including its header line. A `## `
+/// header without a parsable `x.y.z` version resets collection; lines
+/// before the first version header stay dropped.
 fn parse_changelog(changelog_path: &Path) -> Vec<String> {
     let Ok(content) = std::fs::read_to_string(changelog_path) else {
         return Vec::new();
@@ -310,11 +300,7 @@ fn is_version_header(rest: &str) -> bool {
     true
 }
 
-// ---------------------------------------------------------------------------
-// Render (the view's paint entry points)
-// ---------------------------------------------------------------------------
-
-/// Resolve one info row to styled spans (the TS `theme.fg` tokens).
+/// Resolve one info row to styled spans.
 fn styled_spans(row: &[ClientSpan], theme: &Theme) -> Line {
     row.iter()
         .map(|span| match span.color {
@@ -324,11 +310,10 @@ fn styled_spans(row: &[ClientSpan], theme: &Theme) -> Line {
         .collect()
 }
 
-/// TS `Spacer(1)` + `Text(info, 1, 0)`: one blank row, then each source
-/// line wrapped at `width - 2` with a one-column margin on each side and
-/// rows padded to the full width (continuation rows pad inside the open
-/// style, the last wrapped row after the segment's reset — TS ANSI
-/// behavior).
+/// `Spacer(1)` + `Text(info, 1, 0)`: one blank row, then each source
+/// line wrapped at `width - 2` with a one-column margin on each side
+/// and rows padded to the full width (continuation rows pad inside the
+/// open style, the last wrapped row after the segment's reset).
 #[must_use]
 pub fn render_client_text(rows: &[ClientLine], theme: &Theme, width: usize) -> Vec<Line> {
     let content_width = width.saturating_sub(2).max(1);

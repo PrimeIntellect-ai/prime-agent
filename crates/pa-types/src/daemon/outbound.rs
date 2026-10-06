@@ -9,9 +9,7 @@ use super::{
     DaemonServerCapability, Deserialize, JsonMap, Serialize, Value,
 };
 
-// ---------------------------------------------------------------------------
 // Responses and outbound events
-// ---------------------------------------------------------------------------
 
 /// `type: "response"`: success or failure outcome of one command.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -29,11 +27,9 @@ pub struct DaemonResponse {
     pub error_info: Option<DaemonErrorInfo>,
 }
 
-/// TS `UPDATE_RESTART_PREPARING_MESSAGE` (daemon-errors.ts): the
-/// client-facing rejection message for commands fenced out while the
-/// daemon prepares an update restart. The plain string stays for old
-/// clients; [`DaemonErrorInfo::UpdateRestarting`] rides alongside for
-/// clients that wait through the restart (TS #2391).
+/// `UPDATE_RESTART_PREPARING_MESSAGE`: the client-facing rejection for commands fenced out during
+/// an update restart; the plain string stays for old clients,
+/// [`DaemonErrorInfo::UpdateRestarting`] rides alongside.
 pub const UPDATE_RESTART_PREPARING_MESSAGE: &str = "Daemon is preparing an update restart";
 
 /// The session-addressed lanes' refusal when the session's kernel is not
@@ -66,11 +62,9 @@ pub enum DaemonErrorInfo {
     SessionRecovering {
         active_session_id: String,
     },
-    /// The daemon is preparing an update restart: mutating commands
-    /// (including session opens) are refused while the restart
-    /// coordinator drains and checkpoints (TS `update_restarting`, TS
-    /// #2391). A normal transient state: clients wait through it and
-    /// retry, never surface it as a hard failure.
+    /// The daemon is preparing an update restart: mutating commands are refused while the
+    /// coordinator drains and checkpoints; a transient state - clients wait and retry, never a hard
+    /// failure.
     UpdateRestarting,
     CommandResultUncertain {
         client_id: DaemonClientId,
@@ -81,29 +75,21 @@ pub enum DaemonErrorInfo {
     /// line was answered with a correlatable failure and the socket closed.
     TcpAuthFailed,
     /// `prepare_update_restart` with a different `updateId` while a prepare
-    /// transaction is active: a typed refusal the coordinator maps to
-    /// `Join`.
+    /// transaction is active: a typed refusal the coordinator maps to `Join`.
     UpdatePrepareRefused {
         active_update_id: String,
     },
-    /// `set_model` resolved the model but its provider has no credential
-    /// (and none is stale): a sign-in refusal, not a dead end — the
-    /// client offers the provider's sign-in flow (the TUI's `/login`)
-    /// and retries the switch once the login lands.
+    /// `set_model` resolved the model but its provider has no credential: a sign-in refusal, not a
+    /// dead end - the client offers the provider's sign-in flow and retries after the login lands.
     ModelProviderUnauthenticated {
         provider: String,
     },
-    /// The supervisor refused to enqueue a request-shaped client command
-    /// because the target worker is at its in-flight bound: the request
-    /// never left the supervisor, so a retry cannot duplicate it. The
-    /// supervisor's answer to a saturated route (the Codex
-    /// `-32001 "Server overloaded; retry later."` analog on our wire).
+    /// The supervisor refused a request-shaped client command because the target worker is at its
+    /// in-flight bound: the request never left the supervisor, so a retry cannot duplicate it.
     WorkerOverloaded,
-    /// A `code` this build does not know (a newer daemon's typed
-    /// refusal): forwards-compatibility — the unknown code must degrade
-    /// to the plain refusal message that rides the same response instead
-    /// of failing the response's deserialization, which would drop the
-    /// refusal and leave the request riding to its timeout.
+    /// A `code` this build does not know (a newer daemon's typed refusal):
+    /// degrade to the plain refusal message riding the same response, never
+    /// fail the deserialization (that would drop the refusal).
     #[serde(other)]
     Unknown,
 }
@@ -208,9 +194,8 @@ pub struct SocketIdentity {
     pub ino: u64,
 }
 
-/// Purpose tag of a `session_snapshot_begin` record. The catch-up value is
-/// `resync` on the wire (`daemon-protocol.ts`:
-/// `"attach" | "replacement" | "resync"`).
+/// Purpose tag of a `session_snapshot_begin` record; the catch-up value
+/// is `resync` on the wire, never `catchup`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SnapshotPurpose {
@@ -294,9 +279,8 @@ pub enum DaemonOutbound {
         supervisor_process_start_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         supervisor_socket_path: Option<String>,
-        /// The update resume contract (spec §10.3): whether the supervisor's
-        /// restore pass has finished, so a reconnecting client knows whether
-        /// to queue its attach. Rust-only extension over the TS hello.
+        /// The update resume contract (spec §10.3): whether the restore pass has finished, so a
+        /// reconnecting client knows whether to queue its attach. Rust-only extension.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         update_resume: Option<crate::daemon::update_flow::DaemonUpdateResume>,
         client_id: DaemonClientId,
@@ -313,10 +297,9 @@ pub enum DaemonOutbound {
         #[serde(flatten)]
         rest: JsonMap,
     },
-    /// The Rust-only no-stall picker-open extension: a background
-    /// daemon-side catalog refresh changed the served snapshot, so every
-    /// client re-fetches. Mirrors the wire shape of the worker's
-    /// `model_catalog_changed` broadcast frame.
+    /// The Rust-only no-stall picker-open extension: a background catalog refresh changed the
+    /// served
+    /// snapshot, so every client re-fetches (same shape as `model_catalog_changed`).
     ModelCatalogChanged {
         #[serde(flatten)]
         rest: JsonMap,
@@ -418,11 +401,8 @@ pub enum DaemonOutbound {
         #[serde(flatten)]
         rest: JsonMap,
     },
-    /// The stale-id rebind notice (Rust-only extension over the TS wire): a
-    /// worker replacement rebound a session, and the id the client holds is
-    /// superseded. Old clients ignore the unknown type; attached clients
-    /// re-attach to the session's current id so their event routing follows
-    /// it.
+    /// The stale-id rebind notice (Rust-only): a worker replacement rebound a session; attached
+    /// clients re-attach to the session's current id so their event routing follows it.
     SessionBinding {
         previous_active_session_id: String,
         active_session_id: String,
@@ -459,8 +439,8 @@ mod tests {
         rt::<DaemonOutbound>(
             r#"{"type":"response","command":"import_jsonl","success":false,"error":"e","errorInfo":{"code":"session_import_file_not_found","filePath":"/x"}}"#,
         );
-        // TS #2391 `update_restarting`: the fieldless typed refusal rides
-        // the wire beside the unchanged plain message.
+        // `update_restarting`: the fieldless typed refusal rides beside the unchanged plain
+        // message.
         rt::<DaemonOutbound>(
             r#"{"type":"response","command":"create","success":false,"error":"Daemon is preparing an update restart","errorInfo":{"code":"update_restarting"}}"#,
         );
@@ -476,7 +456,6 @@ mod tests {
             serde_json::to_value(SnapshotPurpose::Replacement).unwrap(),
             json!("replacement")
         );
-        // The catch-up purpose is `resync` on the wire, never `catchup`.
         assert_eq!(
             serde_json::to_value(SnapshotPurpose::Catchup).unwrap(),
             json!("resync")
@@ -501,17 +480,13 @@ mod tests {
         );
     }
 
-    /// A typed refusal this build does not know degrades to
-    /// [`DaemonErrorInfo::Unknown`] instead of failing the response's
-    /// deserialization: a newer daemon's unknown `code` must leave the
-    /// plain refusal message (which rides the same response) to classify
-    /// the rejection, never drop the response to the request timeout.
+    /// A typed refusal this build does not know degrades to [`DaemonErrorInfo::Unknown`] instead of
+    /// failing the response's deserialization (which would drop the refusal).
     #[test]
     fn an_unknown_error_info_code_degrades_to_unknown() {
         let parsed: DaemonErrorInfo =
             serde_json::from_str(r#"{"code":"some_future_code"}"#).expect("parse");
         assert_eq!(parsed, DaemonErrorInfo::Unknown);
-        // The known codes keep their typed shape.
         let typed: DaemonErrorInfo =
             serde_json::from_str(r#"{"code":"update_restarting"}"#).expect("parse");
         assert_eq!(typed, DaemonErrorInfo::UpdateRestarting);

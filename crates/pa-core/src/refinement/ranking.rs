@@ -1,5 +1,5 @@
-//! Harness relevance ranking and prompt rendering. Port of the ranking half
-//! of core/refinement/refinement.ts (query terms, scoring, digest formatting).
+//! Harness relevance ranking and prompt rendering (query terms, scoring,
+//! digest formatting).
 
 use std::collections::HashMap;
 
@@ -38,8 +38,7 @@ fn is_cjk(char: char) -> bool {
 ///
 /// # Panics
 ///
-/// The `next().unwrap()` on the first char of a run cannot fire: the run is
-/// checked non-empty right before.
+/// The `next().unwrap()` cannot fire: the run is checked non-empty first.
 #[must_use]
 pub fn harness_query_terms(text: &str) -> Vec<String> {
     let mut terms: Vec<String> = Vec::new();
@@ -48,7 +47,6 @@ pub fn harness_query_terms(text: &str) -> Vec<String> {
         if run.is_empty() {
             return;
         }
-        // Split the run into CJK and non-CJK segments.
         let mut segment = String::new();
         let mut segment_is_cjk = is_cjk(run.chars().next().unwrap());
         for char in run.chars() {
@@ -104,10 +102,8 @@ fn push_segment(segment: &str, is_cjk_segment: bool, terms: &mut Vec<String>) {
 }
 
 /// Inverse document frequency per query term over the entries being ranked:
-/// `ln(1 + documents / matches)`. A term present in every entry still weighs
-/// `ln(2)`, while a term in one entry of N weighs `ln(1 + N)`, so rare
-/// distinctive terms outrank ubiquitous ones. Terms matching no entry are
-/// absent (they cannot score anything).
+/// `ln(1 + documents / matches)` — rare distinctive terms outrank ubiquitous
+/// ones; terms matching no entry are absent (they cannot score anything).
 #[must_use]
 pub fn harness_query_term_idf(
     entries: &[HarnessEntry],
@@ -141,9 +137,9 @@ pub fn harness_query_term_idf(
 }
 
 /// Score one entry against query terms: weighted per-term overlap across
-/// title/content/identifier fields (field coverage weighted, not repetition),
-/// with each matched term's weight discounted by its document frequency in
-/// the ranked corpus (`idf`; a missing map weights every term at 1).
+/// title/content/identifier fields (coverage weighted, not repetition),
+/// each term discounted by its document frequency in the ranked corpus
+/// (`idf`; a missing map weights every term at 1).
 #[must_use]
 pub fn score_harness_entry_for_query(
     entry: &HarnessEntry,
@@ -182,7 +178,6 @@ fn entry_sort_key(entry: &HarnessEntry) -> String {
     format!("{}\0{}\0{}", entry.path, entry.title, entry.id)
 }
 
-/// Options for prompt rendering.
 #[derive(Debug, Default)]
 pub struct HarnessStatePromptOptions {
     pub max_entries_per_kind: Option<usize>,
@@ -379,9 +374,8 @@ pub fn format_harness_state_for_prompt(
 /// equal.
 pub const HARNESS_DIGEST_FINGERPRINT_VERSION: u32 = 1;
 
-/// The render flags the digest actually reads (TS `renderFlags` on
-/// `harnessDigestFingerprint`): the relevance query terms are excluded —
-/// the digest stays frozen per delivery.
+/// The render flags the digest actually reads: the relevance query terms
+/// are excluded — the digest stays frozen per delivery.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HarnessDigestRenderFlags {
     pub include_ipython_examples: bool,
@@ -407,30 +401,17 @@ fn refinement_kind_name(kind: RefinementKind) -> &'static str {
 }
 
 /// Stable fingerprint of the harness material a digest renders (TS
-/// `harnessDigestFingerprint`). Equal states (per the fields the digest
-/// actually prints) produce equal fingerprints, so cold boundaries can
-/// skip digest re-delivery with a state comparison instead of a
-/// rendered-text comparison that query-term relevance keeps invalidating.
-///
-/// Covered: entry identity and content (entry order is normalized away, as
-/// is the call contract on non-skill entries, which the formatter never
-/// prints), plus the render flags and each refinement's printed fields in
-/// stored order, since the formatter renders a positional newest tail. The
-/// shell-examples flag participates only when `IPython` examples are not
-/// rendered: the formatter never reads it then, so it is normalized out of
-/// the fingerprint to keep an unchanged digest fresh. Excluded: `metadata`,
-/// `source`, the invisible `created_at`/`updated_at` bookkeeping, and
-/// relevance query terms.
+/// `harnessDigestFingerprint`): equal states produce equal fingerprints,
+/// so cold boundaries skip re-delivery with a state comparison instead of
+/// a rendered-text comparison that query-term relevance keeps invalidating.
 #[must_use]
 pub fn harness_digest_fingerprint(
     state: &HarnessState,
     render_flags: HarnessDigestRenderFlags,
 ) -> String {
-    // The section key is the renderer's grouping (the formatter prints
-    // entries under their section, never `entry.kind`), so the material
-    // keys `kind` by the section: an entry moved between sections renders
-    // differently and must invalidate the digest, even when its `kind`
-    // field disagrees with its section (a hand-edited store).
+    // The section key is the renderer's grouping: an entry moved between
+    // sections renders differently and must invalidate the digest, even
+    // when its `kind` field disagrees with its section.
     let mut entries: Vec<(&'static str, &HarnessEntry)> = state
         .entries
         .iter()
@@ -472,8 +453,7 @@ pub fn harness_digest_fingerprint(
         serde_json::Value::Object(material)
     };
     // Refinements keep their stored order: the formatter renders the newest
-    // tail of the array, so an order-only change renders differently and must
-    // not reuse the previous digest.
+    // tail, so an order-only change renders differently.
     let refinement_material = state
         .refinements
         .iter()
@@ -486,10 +466,8 @@ pub fn harness_digest_fingerprint(
             serde_json::Value::Object(material)
         })
         .collect::<Vec<_>>();
-    // The formatter renders the shell call-contract only when IPython
-    // examples are absent, so the shell flag cannot change the digest while
-    // IPython examples take precedence; fingerprint only the flags the
-    // render reads.
+    // The shell call-contract renders only when IPython examples are
+    // absent: fingerprint only the flags the render reads.
     let effective_shell_examples = if render_flags.include_ipython_examples {
         false
     } else {
@@ -564,7 +542,6 @@ mod tests {
         assert!(terms.contains(&"修复".to_string()));
         assert!(terms.contains(&"登录".to_string()));
         assert!(!terms.contains(&"fix".to_string())); // short runs drop
-                                                      // Distinct terms only.
         let dupes = harness_query_terms("alpha alpha alpha");
         assert_eq!(dupes.iter().filter(|t| *t == "alpha").count(), 1);
     }
@@ -630,8 +607,7 @@ mod tests {
         let documents: f64 = 3.0;
         assert!((idf["session"] - (1.0 + documents / 2.0).ln()).abs() < 1e-9);
         assert!((idf["quantum"] - (1.0 + documents / 1.0).ln()).abs() < 1e-9);
-        // The discount scales the weighted overlap: "quantum" covers 2
-        // fields of 1 entry.
+        // The discount scales the weighted overlap: "quantum" covers 2 fields of 1 entry.
         let rare_score = score_harness_entry_for_query(&rare, &terms, Some(&idf));
         assert!((rare_score - (1.0 + documents / 1.0).ln() * 1.5).abs() < 1e-9);
         // A term in every entry still weighs ln(2); degenerate corpora stay
@@ -873,10 +849,8 @@ mod tests {
         let mut reordered = state.clone();
         reordered.refinements.reverse();
         assert_ne!(harness_digest_fingerprint(&reordered, flags), baseline);
-        // The material keys `kind` by the SECTION the formatter prints
-        // under: an entry moved between sections (even one whose `kind`
-        // field still disagrees, as a hand-edited store can) renders
-        // differently and must invalidate the digest.
+        // The material keys `kind` by the printed SECTION: an entry moved
+        // between sections renders differently and must invalidate.
         let mut moved = state.clone();
         let moved_skill = moved
             .entries
@@ -932,7 +906,6 @@ mod tests {
         assert!(text.contains("recent refinements: 1"));
         assert!(text.contains("routing improved"));
         assert!(text.contains("When to call `await refine.run()`"));
-        // Empty state renders the placeholder.
         let empty_text = format_harness_state_for_prompt(
             &empty_harness_state(),
             &HarnessStatePromptOptions::default(),

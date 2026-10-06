@@ -1,22 +1,7 @@
-//! The dedicated bash view (the operator's 2026-09-23 redesign, refined
-//! 2026-09-24): the session's kernel bash registry — the background
-//! commands the agent's REPL started — as a columned table (command,
-//! duration, pid, status) whose columns hug their content (the columns
-//! never stretch to the terminal edge) while the table surface fills
-//! the full width (the selected row's wash spans the terminal, the
-//! operator's 2026-09-24 ruling), and Enter on a row opens the detail
-//! drill-in (the operator's refined shape): one metadata row (pid,
-//! started, duration, status), the exact command, and the fetched output
-//! tail in a scrollable region — up/down walk the output, and reaching
-//! the top of the loaded window lazily loads more of the tail (the
-//! window starts at [`FIRST_TAIL_LINES`] and doubles on each load up to
-//! the 200-line wire cap). The status colors code the rows (running
-//! green, finished dim, failed red). The pane runs all the way to the
-//! bottom of the screen: no rule rides below the shortcuts hint — one
-//! blank line of spacing rides under it (the operator's 2026-09-24
-//! ruling). Pure
-//! presentation and selection: the host owns the 2s registry refresh,
-//! fetches the output tails, and executes the kill.
+//! The dedicated bash view: the kernel bash registry as a columned table
+//! (command, duration, pid, status), with Enter opening a detail drill-in
+//! (metadata, exact command, scrollable lazy-loaded output tail). Pure
+//! presentation; the host owns the refresh, fetches, and kills.
 
 use serde_json::Value;
 
@@ -28,12 +13,6 @@ use crate::theme::{Theme, ThemeColor};
 use crate::width::{str_width, truncate_line, wrap_text};
 use crate::{Line, Span};
 
-// The paint primitives (the columned table geometry and the row/line
-// shapers the pane's render methods assemble over) moved to the child
-// module at the same tree position (bash_view::render); the facade
-// bindings keep the render methods' and the key loop's bare paths in
-// scope, and the duration re-import keeps the unit battery's bare
-// duration calls in scope.
 mod render;
 
 #[cfg(test)]
@@ -43,25 +22,18 @@ use render::{
     Columns,
 };
 
-/// The preferred visible rows of the list.
 const PREFERRED_VISIBLE: usize = 8;
 
-/// Rows the list reserves outside its items (the inline geometry: rule,
-/// title, blank, column header, blank, hint, blank — the conditional
-/// scroll-indicator row rides `menu_list_layout`'s scroll reservation,
-/// never counted twice). No rule rides below the hint: one blank line of
-/// spacing rides under the shortcuts instead (the operator's 2026-09-24
-/// ruling).
+/// Rows the list reserves outside its items: rule, title, blank, column
+/// header, blank, hint, blank (the scroll indicator rides the layout's
+/// own scroll reservation).
 const LIST_FRAME_ROWS: usize = 7;
 
-/// The lines the open detail asks for first (the lazy tail: the pane
-/// shows the newest output and loads more of it on upward scroll, so a
-/// finished task's full output never loads up front).
+/// The lines the open detail asks for first: more of the tail loads on
+/// upward scroll, so a finished task's full output never loads up front.
 pub const FIRST_TAIL_LINES: u32 = 50;
 
-/// The lines the host's `tail_kernel_bash` request can carry at most (the
-/// wire's own cap, a u32 on the payload): the load-more window doubles up
-/// to this and stops.
+/// The wire's per-request cap: the load-more window doubles up to this.
 pub const TAIL_LINES: u32 = 200;
 
 /// An opaque kernel bash id and its latest catalog metadata (the
@@ -83,12 +55,8 @@ impl BashActivity {
     }
 }
 
-/// Accept either the daemon response's `activities` array or the array
-/// itself. Rows without a nonempty string id are ignored; ids are never
-/// interpreted as pids. Running shells ride the top (the operator's
-/// running-first ruling, 2026-09-25): the stable sort keeps the
-/// registry's own order within each side, the idle, stopped, and dead
-/// rows follow the live work.
+/// Accept either the daemon response's `activities` array or the array itself; rows
+/// without a nonempty string id are ignored. Running shells sort first (stable within each side).
 #[must_use]
 pub fn parse_bash_activities(data: &Value) -> Vec<BashActivity> {
     let rows = data.get("activities").unwrap_or(data);
@@ -139,22 +107,17 @@ enum Mode {
     Detail { id: String },
 }
 
-/// One key press while the view is open.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BashViewAction {
     Close,
-    /// Enter on a list row: the host fetches the row's output tail
-    /// ([`FIRST_TAIL_LINES`] lines) and delivers it back with
-    /// [`BashView::set_output`]; `generation` stamps the open it was
-    /// issued under.
+    /// Enter on a list row: the host fetches the row's output tail ([`FIRST_TAIL_LINES`] lines)
+    /// and delivers it with [`BashView::set_output`]; `generation` stamps the open.
     OpenDetail {
         id: String,
         generation: u64,
     },
-    /// Up at the top of the loaded output window (the lazy tail): the
-    /// host re-fetches the row's output with the grown `lines` window
-    /// and delivers it back the same way, stamped with the same open's
-    /// `generation`.
+    /// Up at the top of the loaded window: the host re-fetches with the
+    /// grown `lines` window, stamped with the same open's `generation`.
     LoadMore {
         id: String,
         generation: u64,
@@ -168,61 +131,44 @@ pub enum BashViewAction {
     None,
 }
 
-/// The dedicated bash view over the kernel bash registry.
 #[derive(Debug)]
 pub struct BashView {
-    /// The latest registry snapshot (the host's 2s refresh keeps it
-    /// current).
+    /// The latest registry snapshot (kept current by the host's refresh).
     activities: Vec<BashActivity>,
-    /// The detail drill-in's open generation: each open increments it,
-    /// and the host stamps its tail requests with the generation they
-    /// were issued under — a late response from an earlier open of the
-    /// same row never overwrites the newer one's output.
+    /// Each open increments it; the host stamps tail requests with the open's
+    /// generation, so a late response never overwrites the newer open's output.
     detail_generation: u64,
     selected_id: Option<String>,
     mode: Mode,
-    /// The fetched output window of the open detail row: `Some` once a
-    /// tail landed (empty output included), `None` while the open fetch
-    /// is in flight.
+    /// The open detail row's fetched output window: `Some` once a tail
+    /// landed (empty included), `None` while the fetch is in flight.
     output_tail: Option<(String, Vec<String>)>,
-    /// The tail window the current detail open holds: it starts at
-    /// [`FIRST_TAIL_LINES`] and each lazy load doubles it up to
-    /// [`TAIL_LINES`].
+    /// The tail window the open holds: starts at [`FIRST_TAIL_LINES`],
+    /// doubles per lazy load up to [`TAIL_LINES`].
     tail_window: u32,
-    /// The loaded window holds everything the wire can still give: set
-    /// when a response came back shorter than its request (the kernel
-    /// retained buffer's own end) or the wire's line cap was reached.
-    /// Upward scroll at the top then shows the leading marker instead of
-    /// issuing another fetch.
+    /// The loaded window holds everything the wire can still give (a short
+    /// response or the cap was reached); scroll then shows the leading marker, not another fetch.
     tail_complete: bool,
     /// A lazy load-more fetch is in flight: the marker stays and the up
     /// key does not stack a second request.
     loading_more: bool,
-    /// The failed open fetch's retry is in flight (an Up press re-issued
-    /// it): further Ups do not stack duplicates, and the retry's landing
-    /// or failure clears the claim — a late duplicate failure can never
-    /// paint an error over output that already arrived.
+    /// The failed open fetch's retry is in flight: further Ups stack no
+    /// duplicates, and its landing or failure clears the claim.
     open_retry: bool,
-    /// The output region's scroll position: how many lines the window
-    /// rides lifted off the newest output (0 = bottom-anchored on the
-    /// newest lines).
+    /// How many lines the window sits lifted off the newest output
+    /// (0 = bottom-anchored on the newest lines).
     scroll_from_end: usize,
-    /// The output region's rendered height from the last paint: the key
-    /// loop's scroll math walks the same window the pane rendered (a
-    /// render always precedes a key press; 0 means nothing painted yet
-    /// and the region cannot scroll).
+    /// The output region's rendered height from the last paint
+    /// (0 means nothing painted yet and the region cannot scroll).
     detail_region_rows: std::cell::Cell<usize>,
     error: Option<String>,
-    /// Whether the shown error came from a tail fetch: a later
-    /// successful fetch supersedes it (the retried load proves the
-    /// failure gone); a kill error keeps the registry-refresh lifecycle
-    /// ([`BashView::clear_error`]).
+    /// Whether the shown error came from a tail fetch (a kill error
+    /// keeps the registry-refresh lifecycle, [`BashView::clear_error`]).
     fetch_error: bool,
     viewport_rows: usize,
 }
 
 impl BashView {
-    /// Build the view over a registry snapshot.
     #[must_use]
     pub fn new(activities: Vec<BashActivity>, viewport_rows: usize) -> Self {
         let mut view = BashView {
@@ -245,10 +191,8 @@ impl BashView {
         view
     }
 
-    /// Reset the open detail's fetched-output state (new open, back to
-    /// the list, or the row vanished): the next open starts from a fresh
-    /// [`FIRST_TAIL_LINES`] window, bottom-anchored, with nothing in
-    /// flight.
+    /// Reset the open detail's fetched-output state (new open, back, or
+    /// row vanished): the next open starts fresh, bottom-anchored.
     fn reset_detail_output(&mut self) {
         self.output_tail = None;
         self.tail_window = FIRST_TAIL_LINES;
@@ -281,23 +225,16 @@ impl BashView {
             .filter(|(id, _)| self.activities.iter().any(|row| row.id == *id));
     }
 
-    /// A fetched output window of one row (the host's `tail_kernel_bash`
-    /// response); a window for a closed pane, a different row, or an
-    /// earlier open of the same row is ignored. The open fetch
-    /// bottom-anchors the region; a lazy load-more's larger window keeps
-    /// the scroll anchored so the region continues into the newly loaded
-    /// older lines, and a window that grew nothing keeps the current one
-    /// (the retained buffer's end — or the wire's byte cap — was
-    /// reached).
+    /// A fetched output window of one row; a window for a closed pane, a
+    /// different row, or an earlier open is ignored. A lazy load-more keeps
+    /// the scroll anchored; a window that grew nothing keeps the current one.
     pub fn set_output(&mut self, id: &str, tail: &str, generation: u64) {
         if self.detail_id().as_deref() != Some(id) || self.detail_generation != generation {
             return;
         }
         let lines: Vec<String> = tail.lines().map(clean_line).collect();
-        // A landed window supersedes a shown fetch error (the retry — or
-        // the fresh open — proves the failure gone); a kill error keeps
-        // its registry-refresh lifecycle. A landed window also releases
-        // the open retry's in-flight claim.
+        // A landed window supersedes a shown fetch error and releases the
+        // open retry's claim; a kill error keeps its own lifecycle.
         self.open_retry = false;
         if self.fetch_error {
             self.error = None;
@@ -307,10 +244,8 @@ impl BashView {
             self.loading_more = false;
             let loaded = self.output_tail.as_ref().map(|(_, output)| output.len());
             if loaded.is_some_and(|loaded| lines.len() > loaded) {
-                // The region keeps walking into the newly loaded lines:
-                // the user pressed up at the loaded top, so the window
-                // lands anchored just above where it stopped (measured
-                // from the end, one old window's height back).
+                // The window lands anchored just above where the scroll
+                // stopped: one old window's height back from the end.
                 self.scroll_from_end = loaded.unwrap_or(0);
                 self.output_tail = Some((id.to_string(), lines));
             }
@@ -332,36 +267,23 @@ impl BashView {
         }
     }
 
-    /// Surface a fetch or kill failure (the host's error channel). A
-    /// fetch failure carries the detail-open generation it was issued
-    /// under — like the tail responses, a late error from an earlier
-    /// open of the same row never lands on the newer open (and never
-    /// releases its in-flight load claim). A landed fetch failure
-    /// restores the lazy-load window to the loaded size (so the retry
-    /// re-issues instead of reading the wire cap as the end) and
-    /// releases the in-flight claim for the retry; a kill error touches
-    /// neither — it knows nothing about the load's fate.
+    /// A fetch failure carries its open generation — a late error from an earlier open
+    /// never lands on the newer one; a kill error knows nothing about the load's fate.
     pub fn set_error(&mut self, error: String, fetch: bool, generation: Option<u64>) {
         if fetch && generation.is_some_and(|generation| generation != self.detail_generation) {
             return;
         }
         if fetch {
             // A failed lazy load never leaves its grown window behind:
-            // the retry re-issues from the loaded size (a window left at
-            // the wire's line cap would read as the end and stop
-            // retrying — the remaining output would be permanently
-            // inaccessible).
+            // a window left at the cap would read as the end.
             if self.loading_more {
                 self.tail_window = self
                     .output_tail
                     .as_ref()
                     .map_or(FIRST_TAIL_LINES, |(_, output)| output.len() as u32);
             }
-            // Only a fetch failure releases the in-flight claims (the
-            // lazy load's, the open retry's): a kill error knows nothing
-            // about the fetches' fate, and a duplicate racing the still-
-            // in-flight one could let either response overwrite the
-            // other's scroll state.
+            // Only a fetch failure releases the in-flight claims; a kill
+            // error knows nothing about the fetches' fate.
             self.loading_more = false;
             self.open_retry = false;
         }
@@ -369,9 +291,8 @@ impl BashView {
         self.fetch_error = fetch;
     }
 
-    /// A landed REGISTRY update supersedes a shown error (a retried kill
-    /// proves the failure gone): the host calls this only when the
-    /// registry itself changed, not on unrelated dock repaints.
+    /// A landed registry update supersedes a shown error; the host calls
+    /// this only when the registry itself changed.
     pub fn clear_error(&mut self) {
         self.error = None;
         self.fetch_error = false;
@@ -402,9 +323,7 @@ impl BashView {
         }
     }
 
-    /// One key id (the picker pattern: up/down move — in the detail they
-    /// scroll the output region — Enter opens or runs, back returns,
-    /// cancel closes).
+    /// One key id; in the detail, up/down scroll the output region.
     pub fn handle_key(&mut self, key: &str, kb: &KeybindingsManager) -> BashViewAction {
         if key == "ctrl+c" || kb.matches(key, "tui.select.cancel") {
             return BashViewAction::Close;
@@ -433,8 +352,7 @@ impl BashView {
     }
 
     /// Up/down: the list walks rows by id; the detail scrolls the output
-    /// region (up toward the older lines, down back to the newest), and
-    /// up at the top of the loaded window lazily loads more of the tail.
+    /// region, and up at the loaded top lazily loads more of the tail.
     fn move_selection(&mut self, delta: isize) -> BashViewAction {
         match self.mode.clone() {
             Mode::List => {
@@ -450,10 +368,8 @@ impl BashView {
         }
     }
 
-    /// Scroll the detail's output region: up lifts the window off the
-    /// newest lines, down lowers it back; up at the loaded top issues the
-    /// lazy load-more (the window doubles up to the wire's line cap) or
-    /// stops at the retained buffer's beginning.
+    /// Scroll the detail's output region: up lifts the window off the newest lines,
+    /// down lowers it back; at the loaded top, load more or stop.
     fn scroll_output(&mut self, delta: isize) -> BashViewAction {
         let Mode::Detail { id } = self.mode.clone() else {
             return BashViewAction::None;
@@ -464,13 +380,10 @@ impl BashView {
             .filter(|(tail_id, _)| tail_id == &id)
             .map(|(_, output)| output.len())
         else {
-            // The open fetch failed before anything loaded: an Up press
-            // retries it (the shown fetch error has no other retry from
-            // the detail view). While the open fetch is still in flight
-            // (no error shown), Up does nothing.
+            // The open fetch failed before anything loaded: Up retries
+            // it; while it is in flight, Up does nothing.
             if self.fetch_error {
-                // One retry at a time: the claim holds until the retry
-                // lands or fails, so key repeats never stack duplicate
+                // One retry at a time: key repeats never stack duplicate
                 // same-generation fetches.
                 if self.open_retry {
                     return BashViewAction::None;
@@ -493,7 +406,6 @@ impl BashView {
                 self.scroll_from_end = from_end + 1;
                 return BashViewAction::None;
             }
-            // At the top of the loaded window: load more of the tail.
             if !self.tail_complete && !self.loading_more {
                 let next = self.tail_window.saturating_mul(2).min(TAIL_LINES);
                 if next > self.tail_window {
@@ -548,13 +460,10 @@ impl BashView {
         }
     }
 
-    /// The list's visible-row budget (the inline shape).
     fn visible_items(&self) -> usize {
         let reserved = LIST_FRAME_ROWS + if self.error.is_some() { 2 } else { 0 };
-        // The shared layout floors at one row so a picker never reads
-        // empty; this view must never render past its viewport, so a
-        // frame too short for any row renders none (the scroll
-        // indicator follows: nothing to scroll).
+        // The shared layout floors at one row so a picker never reads empty; this view
+        // never renders past its viewport, so a frame too short for any row renders none.
         if self.viewport_rows <= reserved {
             return 0;
         }
@@ -567,7 +476,6 @@ impl BashView {
         )
     }
 
-    /// Render the view's frame: the columned list or the detail drill-in.
     pub fn render(&self, theme: &Theme, width: usize, kb: &KeybindingsManager) -> Vec<Line> {
         match &self.mode {
             Mode::List => self.render_list(theme, width, kb),
@@ -575,9 +483,8 @@ impl BashView {
         }
     }
 
-    /// The list pane: the title line with the live counts, the dim column
-    /// header, one columned row per activity, the scroll indicator, and a
-    /// single bottom hint line.
+    /// The list pane: title, column header, one row per activity, the
+    /// scroll indicator, and one hint line.
     fn render_list(&self, theme: &Theme, width: usize, kb: &KeybindingsManager) -> Vec<Line> {
         let running = self
             .activities
@@ -615,18 +522,15 @@ impl BashView {
             }
         }
         lines.extend(self.pane_footer(theme, width, &Self::list_hint(kb)));
-        // The budget math keeps every normal viewport exact; a terminal
-        // shorter than the frame itself degrades by truncation — the
+        // A terminal shorter than the frame degrades by truncation: the
         // pane never renders past its allocated rows.
         lines.truncate(self.viewport_rows.max(1));
         lines
     }
 
-    /// The detail drill-in (the operator's refined shape): one metadata
-    /// row (pid, started, duration, status), the exact command, and the
-    /// fetched output in a scrollable region — nothing else. A short
-    /// viewport shrinks the command first, then the output region — the
-    /// action row and the hint never yield.
+    /// The detail drill-in: one metadata row (pid, started, duration, status),
+    /// the exact command, and the fetched output in a scrollable region. A short
+    /// viewport shrinks the command first, then the output.
     fn render_detail(
         &self,
         theme: &Theme,
@@ -643,20 +547,13 @@ impl BashView {
             lines.extend(self.pane_footer(theme, width, &self.detail_hint(kb)));
             return lines;
         };
-        // The drill-in's command block is the EXACT command — embedded
-        // newlines and spacing stay verbatim — with the non-newline
-        // control characters scrubbed: a command carrying an escape
-        // sequence never executes terminal control operations when
-        // rendered.
+        // The command renders verbatim with non-newline control characters scrubbed:
+        // an embedded escape sequence never executes terminal control operations.
         let command_exact = scrub_controls(&activity.command);
         let actions = Self::available_actions(activity);
         let error_rows = if self.error.is_some() { 2 } else { 0 };
-        // The pane's fixed rows: the rule, the metadata row, the blank
-        // under the command, the blank over the hint, the hint, the blank
-        // below the hint, the actions block (blank + row), and the error
-        // block when present. The command and the output region ride the
-        // remaining budget in that order — the output keeps at least one
-        // row, so a long command clips before the region starves.
+        // The command and the output region ride the remaining budget in
+        // that order — the output keeps at least one row.
         let fixed = 6 + if actions.is_empty() { 0 } else { 2 } + error_rows;
         let budget = self.viewport_rows.saturating_sub(fixed);
         let command_width = width.saturating_sub(4).max(10);
@@ -676,10 +573,8 @@ impl BashView {
         if command_rows > 0 {
             let mut shown = command_rows;
             if command_clipped {
-                // The trailing marker rides inside the block's own
-                // budget (a clipped block spends exactly its lines +
-                // marker): the clip never overspends the viewport, and
-                // the command's tail is what a clip drops.
+                // A clipped block spends exactly its lines + marker: the
+                // clip never overspends the viewport.
                 shown = command_rows.saturating_sub(1);
             }
             for line in &command_wrapped[..shown] {
@@ -695,12 +590,8 @@ impl BashView {
             }
         }
         lines.push(Vec::new());
-        // The output region: the fetched window (scrollable — the newest
-        // lines ride at the bottom, the `\u{2026}` marker rides over the
-        // first row whenever content continues above, the `\u{2193}`
-        // marker rides under the last row while the window sits lifted
-        // off the newest output), a fetching note while the open fetch is
-        // in flight, or the empty-output note once it landed.
+        // The fetched window (scrollable, newest lines at the bottom, edge markers
+        // continues), a fetching note while in flight, or the empty-output note once landed.
         if output_rows > 0 {
             let tail = self
                 .output_tail
@@ -710,19 +601,11 @@ impl BashView {
                 Some((_, output)) if !output.is_empty() => {
                     let len = output.len();
                     let from_end = self.scroll_from_end.min(len.saturating_sub(output_rows));
-                    // The pre-marker window: the `output_rows` rows the
-                    // region covers, lifted `from_end` lines off the
-                    // newest output (0 = the newest line rides the
-                    // region's bottom).
+                    // The `output_rows` window lifted `from_end` lines
+                    // off the newest output (0 = newest at the bottom).
                     let window_start = len.saturating_sub(output_rows + from_end);
-                    // More below: the window sits lifted off the newest
-                    // output (a scrolled-up view). A marker replaces its
-                    // edge row of the window, so a marker renders only
-                    // while a content row survives beside it: a one-row
-                    // region (the designed minimum under a long command)
-                    // always shows the output line itself, never a
-                    // marker-only row (and the subtractions never
-                    // underflow).
+                    // A marker replaces the window's edge row, so it renders only while a content
+                    // row survives beside it: a one-row region never shows a marker-only row.
                     let more_bottom = from_end > 0 && output_rows > 1;
                     // More above: older loaded lines the window scrolled
                     // past, or a lazily loadable tail window.
@@ -779,18 +662,14 @@ impl BashView {
         lines.extend(self.pane_footer(theme, width, &self.detail_hint(kb)));
         lines.truncate(self.viewport_rows.max(1));
         // The key loop's scroll math walks the same region the pane
-        // rendered: record its height after the truncation above (a
-        // sub-frame viewport may have cut the region short).
+        // rendered: record its height after the truncation above.
         let total = fixed + command_rows + output_rows;
         let rendered = output_rows.saturating_sub(total.saturating_sub(self.viewport_rows));
         self.detail_region_rows.set(rendered);
         lines
     }
-    /// The list's bottom hint line: the back and cancel keys both close
-    /// from the list while both are bound, and an override that empties
-    /// the back binding drops its key (the hint never advertises a key
-    /// the handler does not take; the cancel fallback is the pane's
-    /// core key).
+    /// The list's bottom hint: an override that empties the back binding drops
+    /// its key (the hint never advertises a key the handler does not take).
     fn list_hint(kb: &KeybindingsManager) -> String {
         let key = |binding: &str, fallback: &str| {
             kb.first_key(binding)
@@ -812,9 +691,8 @@ impl BashView {
         )
     }
 
-    /// The detail pane's bottom hint line: the region's scroll keys, and
-    /// the run key only while the open row still offers its cancel
-    /// action.
+    /// The detail pane's bottom hint: the scroll keys, and the run key
+    /// only while the open row still offers its cancel action.
     fn detail_hint(&self, kb: &KeybindingsManager) -> String {
         let key = |binding: &str, fallback: &str| {
             kb.first_key(binding)
@@ -846,8 +724,7 @@ impl BashView {
     }
 
     /// The pane footer: the error block, a blank, the hint line, and one
-    /// blank line below the shortcuts (the operator's 2026-09-24 ruling:
-    /// no rule rides under the hint — spacing, not a divider).
+    /// blank below the shortcuts (spacing, not a divider).
     fn pane_footer(&self, theme: &Theme, width: usize, hint: &str) -> Vec<Line> {
         let mut lines = Vec::new();
         if let Some(error) = &self.error {

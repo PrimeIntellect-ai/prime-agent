@@ -1,13 +1,5 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
-// by design on hot paths (boxing 130 fns is allocation-churn with zero
-// correctness gain); the fn-length threshold is a style gate, not
-// correctness (the harness fns are intentionally linear); 64-bit targets -
-// the narrowing sits at OS/protocol boundaries where the values are
-// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
-// guarded parses), and checked conversions would add panic paths where
-// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
-// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
-// dossier for the conductor).
+// large_futures: stack futures on hot paths by design. too_many_lines: style gate
+// only. Casts: 64-bit targets; narrowing sits at bounded OS/protocol boundaries.
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -17,14 +9,9 @@
     clippy::cast_precision_loss
 )]
 
-//! End-to-end verifier for the clipboard/auth/update command group: a
-//! scripted daemon session driven headlessly — `/copy` emits the TS OSC 52
-//! clipboard sequence after a turn, `/import` replaces the session from a
-//! fixture JSONL (with the missing-cwd confirm retry and the TS file error),
-//! `/traces` renders the status block and writes the setting through the
-//! composition-root hook, `/login` + `/logout` run the provider auth flows
-//! through a scripted hook, and `/update` applies the busy guard and runs
-//! the package child.
+//! End-to-end verifier for the clipboard/auth/update command group: a scripted
+//! daemon session driven headlessly — `/copy`, `/import`, `/traces`, `/login`,
+//! `/logout`, and `/update` through their composition-root hooks.
 #![cfg(unix)]
 
 use std::path::{Path, PathBuf};
@@ -180,10 +167,7 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
     panic!("supervisor socket never appeared");
 }
 
-// ---------------------------------------------------------------------------
-// Scripted hooks (the composition-root seams; the real implementations live
-// inside the crate, so the verifier drives the traits directly).
-// ---------------------------------------------------------------------------
+// Scripted hooks (composition-root seams; the verifier drives the traits directly).
 
 use std::sync::{Arc, Mutex};
 
@@ -247,8 +231,7 @@ impl TracesCommands for ScriptedTraces {
     }
 
     fn preview(&self, session_file: Option<&str>) -> TracesFuture<TracePreviewOutcome> {
-        // The scripted preview: a session file renders the ready block
-        // header; no file is the TS fallback row.
+        // The scripted preview: a session file renders the ready block header.
         let outcome = match session_file {
             Some(file) => TracePreviewOutcome::Ready(Box::new(TracePreviewInfo {
                 session_file: file.to_string(),
@@ -274,8 +257,7 @@ impl TracesCommands for ScriptedTraces {
         &self,
         _session_file: Option<&str>,
     ) -> TracesFuture<pa_tui::traces::TraceUploadReport> {
-        // The scripted one-shot upload: the queued reports answer in
-        // order, defaulting to the uploaded row.
+        // The scripted one-shot upload: the queued reports answer in order.
         let report =
             self.uploads
                 .lock()
@@ -294,17 +276,14 @@ impl TracesCommands for ScriptedTraces {
         progress: TraceUploadAllNoteSender,
         cancel: TraceUploadCancel,
     ) -> TracesFuture<TraceUploadAllReport> {
-        // The scripted sweep: two files upload with a live counter; the
-        // 300ms hold keeps the run in flight across a second submit (the
-        // one-sweep-at-a-time guard reads the live run synchronously).
+        // The scripted sweep: two files upload with a live counter; the hold
+        // keeps the run in flight across a second submit.
         Box::pin(async move {
             let _ = cancel;
             let _ = progress.send(TraceUploadAllNote::Progress {
                 completed: 0,
                 total: 2,
             });
-            // The hold keeps the run in flight across the next submit
-            // (the one-sweep guard reads the live run synchronously).
             tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
             let _ = progress.send(TraceUploadAllNote::Progress {
                 completed: 2,
@@ -325,8 +304,7 @@ impl TracesCommands for ScriptedTraces {
         &self,
         _panel: pa_tui::auth_panel::AuthPanelHandle,
     ) -> TracesFuture<TraceLoginOutcome> {
-        // The scripted login flow: the queued outcomes answer in order,
-        // defaulting to the credential's resolution.
+        // The scripted login flow: the queued outcomes answer in order.
         let outcome = self.logins.lock().unwrap().pop_front().unwrap_or_else(|| {
             if self.credential.lock().unwrap().is_some() {
                 TraceLoginOutcome::Status(
@@ -341,13 +319,11 @@ impl TracesCommands for ScriptedTraces {
     }
 }
 
-/// The login/logout flows the scripted hook serves: one API-key provider
-/// whose key the hook stores, like the composition root's auth store.
+/// The login/logout flows the scripted hook serves (one API-key provider).
 struct ScriptedProviderAuth {
     stored_keys: Mutex<std::collections::HashMap<String, String>>,
     calls: Mutex<Vec<String>>,
-    /// Whether the login catalog carries the Prime Inference row (the
-    /// panel-driven flow's team picker test drives it).
+    /// Whether the login catalog carries the Prime Inference row (team picker test).
     prime_row: bool,
 }
 
@@ -387,8 +363,7 @@ impl ScriptedProviderAuth {
         }
     }
 
-    /// The Prime Inference row (the panel-driven flow the team picker
-    /// test drives).
+    /// The Prime Inference row (the team picker test drives it).
     fn prime_row() -> ProviderRow {
         ProviderRow {
             id: PRIME_INFERENCE_PROVIDER_ID.to_string(),
@@ -473,8 +448,7 @@ impl ProviderAuthCommands for ScriptedProviderAuth {
         Box::pin(async move { None })
     }
 
-    /// The panel-driven flow (the Prime Inference login): one progress
-    /// line, then the team picker; the pick settles the TS status.
+    /// The panel-driven flow: one progress line, then the team picker (TS status).
     fn login_on_panel(
         &self,
         provider: &ProviderRow,
@@ -516,8 +490,7 @@ impl ProviderAuthCommands for ScriptedProviderAuth {
     }
 }
 
-/// The `/update` funnel the verifier scripts: record the run, answer a
-/// fixed outcome (the headless verifier never runs a real install).
+/// The `/update` funnel the verifier scripts: record the run, answer a fixed outcome.
 struct ScriptedUpdate {
     calls: Mutex<u32>,
     outcome: Result<String, String>,
@@ -531,8 +504,7 @@ impl UpdateCommands for ScriptedUpdate {
     }
 }
 
-/// The interactive options over one attached scripted session, with the
-/// command hooks injected.
+/// The interactive options over one attached scripted session, hooks injected.
 #[allow(clippy::too_many_arguments)]
 fn command_options(
     socket: &Path,
@@ -581,8 +553,7 @@ fn command_options(
     }
 }
 
-/// One scripted session created directly against the supervisor (the same
-/// create flow the interactive run uses).
+/// One scripted session created against the supervisor (the interactive create flow).
 async fn create_session_via_daemon(
     socket: &Path,
     script_path: &Path,
@@ -635,18 +606,12 @@ fn enter() -> pa_tui::interactive::HeadlessStep {
     ))
 }
 
-// ---------------------------------------------------------------------------
 // /copy
-// ---------------------------------------------------------------------------
 
-/// `/copy` before any assistant message answers the TS error row; after a
-/// turn it copies the last assistant text through the OSC 52 channel (the
-/// headless capture holds the exact TS sequence).
 #[tokio::test]
 async fn tui_copy_emits_the_ts_osc52_sequence() {
     use base64::Engine;
-    // No platform clipboard tools in the verifier: the copy chain falls to
-    // OSC 52 (the TS fallback when no tool copied).
+    // No clipboard tools in the verifier: the copy chain falls to OSC 52 (the TS fallback).
     for var in [
         "DISPLAY",
         "WAYLAND_DISPLAY",
@@ -686,16 +651,12 @@ async fn tui_copy_emits_the_ts_osc52_sequence() {
     );
     let plan = pa_tui::interactive::HeadlessPlan {
         steps: vec![
-            // Before any assistant message: the TS error row.
             pa_tui::interactive::HeadlessStep::Submit("/copy".to_string()),
             pa_tui::interactive::HeadlessStep::Submit("hi".to_string()),
-            // Let the turn start before the idle barrier samples the
-            // session state (the barrier passes while no turn is active).
+            // Let the turn start before the idle barrier samples the state (it passes when idle).
             pa_tui::interactive::HeadlessStep::WaitMs(400),
             pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
-            // After the turn: the status row plus the OSC 52 emission.
             pa_tui::interactive::HeadlessStep::Submit("/copy".to_string()),
-            // An argument is the TS usage error.
             pa_tui::interactive::HeadlessStep::Submit("/copy extra".to_string()),
         ],
         width: 120,
@@ -727,17 +688,9 @@ async fn tui_copy_emits_the_ts_osc52_sequence() {
     );
 }
 
-/// Three consecutive `/copy` commands COALESCE into one toast (the count
-/// bump `(x3)`): every copy still registers (three OSC 52 emissions), but
-/// the frames never stack duplicate toast rows and no frame shows the
-/// label more than once — the toast is the compact ephemeral overlay, and
-/// once its TTL passes the acknowledgment is gone from the settled frame
-/// (never a durable transcript row).
 #[tokio::test]
 async fn tui_copy_toast_coalesces_consecutive_copies_and_auto_dismisses() {
     use base64::Engine;
-    // No platform clipboard tools in the verifier: the copy chain falls to
-    // OSC 52 (the TS fallback when no tool copied).
     for var in [
         "DISPLAY",
         "WAYLAND_DISPLAY",
@@ -780,20 +733,17 @@ async fn tui_copy_toast_coalesces_consecutive_copies_and_auto_dismisses() {
             pa_tui::interactive::HeadlessStep::Submit("hi".to_string()),
             pa_tui::interactive::HeadlessStep::WaitMs(400),
             pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
-            // Three consecutive copies inside the toast's TTL.
             pa_tui::interactive::HeadlessStep::Submit("/copy".to_string()),
             pa_tui::interactive::HeadlessStep::Submit("/copy".to_string()),
             pa_tui::interactive::HeadlessStep::Submit("/copy".to_string()),
-            // The coalesced count-bump toast renders (observed, not
-            // slept-for): the third copy's ack is the (x3) label.
+            // The coalesced count-bump toast renders (observed, not slept-for).
             pa_tui::interactive::HeadlessStep::WaitRender {
                 needle:
                     "Clipboard request sent; paste in the local terminal to verify delivery (x3)"
                         .to_string(),
                 timeout_ms: 10_000,
             },
-            // Past the toast's TTL: the overlay dismisses (the newest
-            // frame stops carrying the ack).
+            // Past the toast's TTL: the overlay dismisses.
             pa_tui::interactive::HeadlessStep::WaitGone {
                 needle: "Clipboard request sent; paste in the local terminal to verify delivery"
                     .to_string(),
@@ -808,8 +758,6 @@ async fn tui_copy_toast_coalesces_consecutive_copies_and_auto_dismisses() {
             .await
             .expect("interactive run");
 
-    // Verification seam: dump the captured frames for manual frame-diffing
-    // against the TS product (PA_TUI_DUMP_FRAMES=<dir>).
     if let Ok(dir) = std::env::var("PA_TUI_DUMP_FRAMES") {
         for (index, frame) in outcome.frames.iter().enumerate() {
             let _ = std::fs::write(
@@ -830,9 +778,7 @@ async fn tui_copy_toast_coalesces_consecutive_copies_and_auto_dismisses() {
         emission.repeat(3),
         "every copy ran the OSC 52 chain"
     );
-    // The coalesced toast acknowledges the count: three consecutive copies
-    // read as one "(x3)" toast, never stacked duplicate rows (the plan's
-    // WaitRender observed the label land; the run's frames confirm).
+    // Three consecutive copies read as one "(x3)" toast, never stacked rows.
     let coalesced_label = format!("{label} (x3)");
     assert!(
         outcome
@@ -848,8 +794,7 @@ async fn tui_copy_toast_coalesces_consecutive_copies_and_auto_dismisses() {
             "frame {index} shows the copy toast at most once, got {rows}"
         );
     }
-    // The toast is ephemeral: past its TTL the settled frame no longer
-    // carries the acknowledgment (a durable status row would persist).
+    // The toast is ephemeral: past its TTL the settled frame no longer shows it.
     let last = outcome.frames.last().expect("the settled frame");
     assert!(
         !last.contains(label),
@@ -857,12 +802,9 @@ async fn tui_copy_toast_coalesces_consecutive_copies_and_auto_dismisses() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // /login Prime Inference: the inline team picker
-// ---------------------------------------------------------------------------
 
-/// One raw key step (the arrows and Esc the typed-text path cannot
-/// express).
+/// One raw key step (the arrows and Esc the typed-text path cannot express).
 fn key(code: crossterm::event::KeyCode) -> pa_tui::interactive::HeadlessStep {
     pa_tui::interactive::HeadlessStep::Key(crossterm::event::KeyEvent::new(
         code,
@@ -870,11 +812,6 @@ fn key(code: crossterm::event::KeyCode) -> pa_tui::interactive::HeadlessStep {
     ))
 }
 
-/// `/login` → the Prime Inference row → the login flow drives the inline
-/// auth panel: the progress line and the team PICKER render in the TUI
-/// (TS `PrimeTeamSelectorComponent`), Enter picks the team, and the
-/// settled status lands — with no terminal takeover anywhere in the
-/// frames.
 #[tokio::test]
 async fn tui_prime_login_renders_the_inline_team_picker() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -911,9 +848,6 @@ async fn tui_prime_login_renders_the_inline_team_picker() {
     );
     let plan = pa_tui::interactive::HeadlessPlan {
         steps: vec![
-            // The selector opens; Enter selects the Prime Inference row;
-            // the flow drives the inline auth panel (progress, then the
-            // team picker).
             pa_tui::interactive::HeadlessStep::Submit("/login".to_string()),
             enter(),
             pa_tui::interactive::HeadlessStep::WaitMs(400),
@@ -930,17 +864,14 @@ async fn tui_prime_login_renders_the_inline_team_picker() {
             .await
             .expect("interactive run");
     let rendered = rendered_frames(&outcome);
-    // The login dialog's panel title (TS `LoginDialogComponent`).
     assert!(
         rendered.contains("Login to Prime Inference"),
         "the auth panel mounts with the TS dialog title:\n{rendered}"
     );
-    // The progress line rides the panel (TS `dialog.showProgress`).
     assert!(
         rendered.contains("Loading Prime teams..."),
         "the panel renders the flow's progress:\n{rendered}"
     );
-    // The team picker is the TS `PrimeTeamSelectorComponent` panel.
     assert!(
         rendered.contains("Select a Prime Team:"),
         "the team picker mounts with the TS panel title:\n{rendered}"
@@ -953,8 +884,6 @@ async fn tui_prime_login_renders_the_inline_team_picker() {
         rendered.contains("Search teams"),
         "the team picker renders the TS search field:\n{rendered}"
     );
-    // Personal first, the slug/role meta, the current marker on the
-    // stored selection (none stored: personal is current).
     assert!(
         rendered.contains("Personal"),
         "the personal-account row renders:\n{rendered}"
@@ -975,7 +904,6 @@ async fn tui_prime_login_renders_the_inline_team_picker() {
         rendered.contains("Beta Team"),
         "the second team row renders:\n{rendered}"
     );
-    // The pick settles the TS status row.
     assert!(
         rendered.contains("Saved API key for Prime Inference. Using team \"Acme Corp\"."),
         "the team pick settles the TS status:\n{rendered}"
@@ -985,8 +913,7 @@ async fn tui_prime_login_renders_the_inline_team_picker() {
         vec!["login_on_panel".to_string()],
         "the panel flow ran"
     );
-    // No terminal takeover anywhere: the flow never clears the screen
-    // (the old numbered prompt and the alt-screen leave are gone).
+    // No terminal takeover: the flow never clears the screen (the alt-screen leave is gone).
     assert!(
         !rendered.contains("\u{1b}[2J"),
         "no clear-screen escape in any frame:\n{rendered}"
@@ -1001,9 +928,7 @@ async fn tui_prime_login_renders_the_inline_team_picker() {
     );
 }
 
-/// Esc on the team picker cancels the SELECTION (TS `onCancel`): the
-/// stored selection stays and the login completes with the default team
-/// status — the login itself is not cancelled.
+/// Esc on the team picker cancels the SELECTION (TS `onCancel`): the login still completes.
 #[tokio::test]
 async fn tui_prime_login_escape_keeps_the_default_team_status() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -1057,13 +982,11 @@ async fn tui_prime_login_escape_keeps_the_default_team_status() {
         rendered.contains("Select a Prime Team:"),
         "the team picker mounted:\n{rendered}"
     );
-    // TS `onCancel` resolves the default team status: the login itself
-    // succeeded (the key was stored before the picker).
+    // TS `onCancel` resolves the default team status: the login succeeded (key stored first).
     assert!(
         rendered.contains("Saved API key for Prime Inference. Using personal account."),
         "the cancelled pick settles the default team status:\n{rendered}"
     );
-    // The panel unmounted: a later frame no longer renders the picker.
     let last = outcome.frames.last().expect("a final frame");
     assert!(
         !last.contains("Select a Prime Team:"),
@@ -1071,14 +994,8 @@ async fn tui_prime_login_escape_keeps_the_default_team_status() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // /import
-// ---------------------------------------------------------------------------
 
-/// `/import` on a missing file answers the TS error; on the exported
-/// fixture it replaces the session after the confirm; on a fixture whose
-/// stored cwd is gone it asks the TS missing-cwd confirm and retries with
-/// the fallback cwd.
 #[tokio::test]
 async fn tui_import_replaces_the_session_from_a_fixture() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -1109,8 +1026,7 @@ async fn tui_import_replaces_the_session_from_a_fixture() {
         None,
         None,
     );
-    // The fixture: the live session's exported JSONL branch, plus a copy
-    // whose header cwd points at a gone directory (the missing-cwd path).
+    // The fixture: the exported branch, plus a copy whose header cwd points at a gone directory.
     let fixture = dir.path().join("fixture.jsonl");
     let gone_fixture = dir.path().join("gone-cwd-fixture.jsonl");
     let plan = pa_tui::interactive::HeadlessPlan {
@@ -1120,11 +1036,9 @@ async fn tui_import_replaces_the_session_from_a_fixture() {
                 "/import /definitely/not/there.jsonl".to_string(),
             ),
             enter(),
-            // A turn to make the fixture worth importing.
             pa_tui::interactive::HeadlessStep::Submit("hi".to_string()),
             pa_tui::interactive::HeadlessStep::WaitMs(400),
             pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
-            // Export the live branch to the fixture file.
             pa_tui::interactive::HeadlessStep::Submit(format!("/export {}", fixture.display())),
         ],
         width: 120,
@@ -1152,8 +1066,7 @@ async fn tui_import_replaces_the_session_from_a_fixture() {
         "the export status renders:\n{rendered}"
     );
     assert!(fixture.is_file(), "the export wrote the fixture");
-    // The gone-cwd fixture: the exported branch with a header cwd that no
-    // longer exists (the TS `MissingSessionCwdError` path).
+    // The gone-cwd fixture: a header cwd that no longer exists (TS `MissingSessionCwdError`).
     let gone_cwd = dir.path().join("gone-dir");
     let lines: Vec<String> = std::fs::read_to_string(&fixture)
         .expect("read fixture")
@@ -1167,7 +1080,6 @@ async fn tui_import_replaces_the_session_from_a_fixture() {
     gone_lines.extend(lines.into_iter().skip(1));
     std::fs::write(&gone_fixture, gone_lines.join("\n")).expect("write gone-cwd fixture");
 
-    // A fresh session for the import itself.
     let fresh_id = create_session_via_daemon(
         &supervisor.socket,
         &script_path,
@@ -1188,13 +1100,10 @@ async fn tui_import_replaces_the_session_from_a_fixture() {
     );
     let plan = pa_tui::interactive::HeadlessPlan {
         steps: vec![
-            // The import: confirm, then the status row plus the imported
-            // branch's messages.
             pa_tui::interactive::HeadlessStep::Submit(format!("/import {}", fixture.display())),
             enter(),
             pa_tui::interactive::HeadlessStep::WaitMs(400),
-            // The gone-cwd fixture: the TS missing-cwd confirm, Yes
-            // retries with the fallback cwd.
+            // The gone-cwd confirm; Yes retries with the fallback cwd.
             pa_tui::interactive::HeadlessStep::Submit(format!(
                 "/import {}",
                 gone_fixture.display()
@@ -1244,7 +1153,6 @@ async fn tui_import_replaces_the_session_from_a_fixture() {
         "the imported branch's assistant text answers on the fresh session"
     );
     client.close();
-    // The usage error for a missing argument.
     let options = command_options(
         &supervisor.socket,
         dir.path(),
@@ -1272,15 +1180,8 @@ async fn tui_import_replaces_the_session_from_a_fixture() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // /traces
-// ---------------------------------------------------------------------------
 
-/// `/traces` renders the TS status block and drives the settings writes
-/// through the hook; the upload/preview/login arms run the engine surface
-/// end to end (the one-shot upload, the preview block, the upload-all
-/// sweep with its live counter, and the login flow's parked terminal
-/// run).
 #[tokio::test]
 async fn tui_traces_renders_status_and_toggles_the_setting() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -1350,8 +1251,7 @@ async fn tui_traces_renders_status_and_toggles_the_setting() {
         rendered.contains("Session file: "),
         "the session file row renders:\n{rendered}"
     );
-    // The enable arm: the setting write, then the one-shot upload's
-    // message riding the status row (TS `formatTraceUploadResult`).
+    // The enable arm: the setting write, then the upload's message on the status row.
     assert!(
         rendered.contains("Trace sharing enabled. Trace uploaded (64 bytes)."),
         "the enable status renders:\n{rendered}"
@@ -1366,8 +1266,7 @@ async fn tui_traces_renders_status_and_toggles_the_setting() {
         ),
         "the usage warning renders:\n{rendered}"
     );
-    // The preview arm renders the TS block over the scripted engine
-    // result.
+    // The preview arm renders the TS block over the scripted engine result.
     assert!(
         rendered.contains("Trace Preview"),
         "the preview block renders:\n{rendered}"
@@ -1380,8 +1279,7 @@ async fn tui_traces_renders_status_and_toggles_the_setting() {
         rendered.contains("Uploadable: Yes"),
         "the preview uploadable row renders:\n{rendered}"
     );
-    // The one-shot upload arm: the same formatted row, as a status row
-    // (no credential only would be the error).
+    // The one-shot upload arm: the same formatted row, as a status row.
     assert!(
         rendered.contains("Trace uploaded (64 bytes)."),
         "the upload row renders:\n{rendered}"
@@ -1393,8 +1291,6 @@ async fn tui_traces_renders_status_and_toggles_the_setting() {
     );
 }
 
-/// The upload-all sweep runs in the background: the live counter rewrites
-/// the status row, and the settled summary lands when the run finishes.
 #[tokio::test]
 async fn tui_traces_upload_all_sweeps_with_live_progress() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -1439,8 +1335,7 @@ async fn tui_traces_upload_all_sweeps_with_live_progress() {
             .await
             .expect("interactive run");
     let rendered = rendered_frames(&outcome);
-    // The live counter (TS `showStatus`: the clear-key hint follows the
-    // run loop's binding).
+    // The live counter (the clear-key hint follows the run loop's binding).
     assert!(
         rendered.contains("Uploading traces: 2/2 (Ctrl+C to cancel)"),
         "the progress row renders:\n{rendered}"
@@ -1450,9 +1345,8 @@ async fn tui_traces_upload_all_sweeps_with_live_progress() {
         rendered.contains("Uploaded 2 of 2 traces; 128 bytes stored."),
         "the summary row renders:\n{rendered}"
     );
-    // The one-sweep guard: the second submit while the first still runs
-    // never starts a second sweep (the TS warning it shows is a status
-    // row the later progress rewrites in place, exactly like TS).
+    // The one-sweep guard: a second submit while the first runs shows a status
+    // row the later progress rewrites in place.
     assert_eq!(
         rendered.matches("Uploading traces: 0/2").count(),
         1,
@@ -1460,9 +1354,6 @@ async fn tui_traces_upload_all_sweeps_with_live_progress() {
     );
 }
 
-/// Without a credential the upload arms answer the TS errors; the enable
-/// arm parks the login first (a cancelled login stops it silently, an
-/// errored login shows the flow's row).
 #[tokio::test]
 async fn tui_traces_without_a_credential_runs_the_login_flow() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -1483,7 +1374,6 @@ async fn tui_traces_without_a_credential_runs_the_login_flow() {
         &session_dir,
     )
     .await;
-    // The enable arm's parked login: the scripted flow fails.
     let traces = Arc::new(ScriptedTraces::new(None));
     traces
         .logins
@@ -1505,9 +1395,8 @@ async fn tui_traces_without_a_credential_runs_the_login_flow() {
     let plan = pa_tui::interactive::HeadlessPlan {
         steps: vec![
             pa_tui::interactive::HeadlessStep::Submit("/traces on".to_string()),
-            // The login flow runs in the background against the inline
-            // auth panel: the settle wait lets its outcome row land in
-            // the captured frames.
+            // The login flow runs against the inline panel: the settle wait lets
+            // its outcome row land in the captured frames.
             pa_tui::interactive::HeadlessStep::WaitMs(400),
         ],
         width: 120,
@@ -1527,8 +1416,7 @@ async fn tui_traces_without_a_credential_runs_the_login_flow() {
         "the enable stops after the failed login:\n{rendered}"
     );
 
-    // A cancelled login stays silent (TS the cancelled dialog); the
-    // upload arms answer their TS rows.
+    // A cancelled login stays silent; the upload arms answer their TS rows.
     let traces = Arc::new(ScriptedTraces::new(None));
     let traces_view = Arc::clone(&traces);
     let options = command_options(
@@ -1570,8 +1458,6 @@ async fn tui_traces_without_a_credential_runs_the_login_flow() {
     );
 }
 
-/// A successful login lets the enable arm continue (TS the login-first
-/// `on` path): the setting write, then the one-shot upload message.
 #[tokio::test]
 async fn tui_traces_login_enables_and_uploads() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -1593,8 +1479,7 @@ async fn tui_traces_login_enables_and_uploads() {
     )
     .await;
     let traces = Arc::new(ScriptedTraces::new(None));
-    // The login succeeds and the credential resolves afterwards (TS
-    // re-reads it after the flow).
+    // The login succeeds and the credential resolves afterwards (TS re-reads it).
     traces
         .logins
         .lock()
@@ -1622,9 +1507,6 @@ async fn tui_traces_login_enables_and_uploads() {
     let plan = pa_tui::interactive::HeadlessPlan {
         steps: vec![
             pa_tui::interactive::HeadlessStep::Submit("/traces on".to_string()),
-            // The login flow runs in the background against the inline
-            // auth panel: the settle wait lets its outcome row land in
-            // the captured frames.
             pa_tui::interactive::HeadlessStep::WaitMs(400),
         ],
         width: 120,
@@ -1635,9 +1517,8 @@ async fn tui_traces_login_enables_and_uploads() {
             .await
             .expect("interactive run");
     let rendered = rendered_frames(&outcome);
-    // TS `showStatus` rewrites back-to-back status rows in place: the
-    // login's row is superseded by the enable row (the surviving TS
-    // observable); the enable write proves the flow itself completed.
+    // TS `showStatus` rewrites back-to-back status rows in place: the login's row
+    // is superseded by the enable row; the enable write proves the flow completed.
     assert!(
         rendered.contains("Trace sharing enabled. Trace uploaded (64 bytes)."),
         "the enable continues after the login:\n{rendered}"
@@ -1649,13 +1530,8 @@ async fn tui_traces_login_enables_and_uploads() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // /login + /logout
-// ---------------------------------------------------------------------------
 
-/// `/login` opens the provider selector, prompts for the key in the panel,
-/// and stores it through the hook; `/logout` lists the stored credential
-/// and removes it.
 #[tokio::test]
 async fn tui_login_and_logout_run_the_provider_flows() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -1692,14 +1568,10 @@ async fn tui_login_and_logout_run_the_provider_flows() {
     );
     let plan = pa_tui::interactive::HeadlessPlan {
         steps: vec![
-            // The selector opens; Enter selects the api-key row; the
-            // panel prompt takes the key; Enter stores it.
             pa_tui::interactive::HeadlessStep::Submit("/login".to_string()),
             enter(),
             pa_tui::interactive::HeadlessStep::Type("sk-test-key".to_string()),
             enter(),
-            // The logout selector lists the stored credential; Enter
-            // removes it.
             pa_tui::interactive::HeadlessStep::Submit("/logout".to_string()),
             enter(),
         ],
@@ -1781,15 +1653,11 @@ async fn tui_login_and_logout_run_the_provider_flows() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // /update
-// ---------------------------------------------------------------------------
 
-/// `/update` runs OUT-OF-BAND, mid-turn: the confirm renders while the
-/// turn streams (there is no busy guard — the update replaces only the
-/// on-disk binary, the daemon keeps running), `Yes` spawns the funnel,
-/// and the outcome lands as a note row; a second run while one is in
-/// flight is refused.
+/// `/update` runs OUT-OF-BAND, mid-turn: the confirm renders while the turn
+/// streams (the update replaces only the binary; the daemon keeps running);
+/// the outcome lands as a note row; a second in-flight run is refused.
 #[tokio::test]
 async fn tui_update_runs_out_of_band_during_a_turn() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -1832,11 +1700,8 @@ async fn tui_update_runs_out_of_band_during_a_turn() {
         steps: vec![
             pa_tui::interactive::HeadlessStep::Submit("hi".to_string()),
             pa_tui::interactive::HeadlessStep::WaitMs(800),
-            // The confirm renders mid-turn (no busy guard, no waiting).
             pa_tui::interactive::HeadlessStep::Submit("/update".to_string()),
             pa_tui::interactive::HeadlessStep::WaitMs(400),
-            // `Yes`: the run spawns and the outcome lands while the turn
-            // still streams.
             enter(),
             pa_tui::interactive::HeadlessStep::WaitRender {
                 needle: "updated to".to_string(),
@@ -1872,8 +1737,6 @@ async fn tui_update_runs_out_of_band_during_a_turn() {
     );
 }
 
-/// `/update` failure lands as the error row, and the in-flight guard
-/// refuses a second run until the outcome lands.
 #[tokio::test]
 async fn tui_update_failure_lands_the_error_row() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -1920,8 +1783,7 @@ async fn tui_update_failure_lands_the_error_row() {
                 needle: "the installer exited with code 3".to_string(),
                 timeout_ms: 10_000,
             },
-            // The outcome landed: the guard is clear and a second run
-            // confirms again instead of being refused.
+            // The outcome landed: the guard is clear; a second run confirms again.
             pa_tui::interactive::HeadlessStep::Submit("/update".to_string()),
             pa_tui::interactive::HeadlessStep::WaitMs(400),
         ],
@@ -1948,8 +1810,6 @@ async fn tui_update_failure_lands_the_error_row() {
     assert_eq!(*update_view.calls.lock().unwrap(), 1, "one funnel run");
 }
 
-/// `/logout` with an empty store answers the TS status directly, with no
-/// selector.
 #[tokio::test]
 async fn tui_logout_with_no_stored_credentials_reports_the_ts_status() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -1992,8 +1852,7 @@ async fn tui_logout_with_no_stored_credentials_reports_the_ts_status() {
             .await
             .expect("interactive run");
     let rendered = rendered_frames(&outcome);
-    // The long status wraps at the frame width; assert its two line
-    // segments.
+    // The long status wraps at the frame width; assert its two line segments.
     assert!(
         rendered.contains("No stored credentials to remove. /logout only removes credentials saved by /login; environment variables and"),
         "the empty-store status head renders:\n{rendered}"

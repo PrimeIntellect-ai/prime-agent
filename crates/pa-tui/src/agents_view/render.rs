@@ -1,7 +1,6 @@
-//! The render surface: the frame composer (splash, search prompt,
-//! sectioned list, hints), the row builders, the notice/list/row
-//! renderers, the cell/truncate helpers, and the terminal/
-//! headless renderer (moved with their concern).
+//! The render surface: the frame composer (splash, search prompt, sectioned list, hints), the
+//! row builders, the notice/list/row renderers, the cell/truncate helpers, and the terminal/
+//! headless renderer.
 use super::{
     build_layout, mpsc, pad_line, section_title, str_width, truncate_text, AgentsStep,
     AgentsViewMode, AgentsViewRow, AgentsViewUiMode, Composer, Duration, Line, Result, RowKind,
@@ -9,19 +8,16 @@ use super::{
 };
 
 impl AgentsViewMode {
-    /// Compose one frame (splash, search prompt, sectioned list, hints).
     pub(super) fn render_frame(
         &mut self,
         width: usize,
         height: usize,
     ) -> (Vec<Line>, Option<(usize, usize)>) {
-        // The frame height feeds the page step (TS reads
-        // `ui.terminal.rows` live at key time instead).
+        // The frame height feeds the page step (TS reads `ui.terminal.rows` live at key time).
         self.last_height = height;
         let mut lines: Vec<Line> = Vec::new();
-        // TS `getAgentCountsText` rides the splash as extra metadata. Like
-        // TS `countRowsBySection`, it counts agent-kind rows only — nested
-        // subagent and summary rows never inflate the header.
+        // The splash counts agent-kind rows only — nested subagent and summary rows never
+        // inflate the header.
         let count_agents = |section: Section| {
             self.rows
                 .iter()
@@ -48,15 +44,11 @@ impl AgentsViewMode {
             splash_hide_cwd: self.scope_active,
             ..Default::default()
         };
-        // `render_splash` already trails one blank row (TS renderContent's
-        // `headerLines.push("")`), so the incident notice rides directly
-        // under it (TS `renderContent`'s `headerLines.push("",
-        // ...noticeLines)`): the warning line and its pointer stay above
-        // the scope label and the search prompt.
+        // `render_splash` already trails one blank row, so the incident notice rides directly
+        // under it: the warning line and its pointer stay above the scope label and the prompt.
         lines.extend(crate::chrome::render_splash(&chrome, theme, width));
         lines.extend(self.render_incident_notice(width));
-        // The scoped view's back label (TS `<back> back · <title> ›
-        // subagents`), dim, over the full width under the splash.
+        // The scoped view's back label, dim, over the full width under the splash.
         if self.scope_active {
             if let Some(scope) = &self.options.scope {
                 let title = scope
@@ -75,11 +67,8 @@ impl AgentsViewMode {
             }
         }
 
-        // TS `renderPrompt`: the composer's header lines go above the box,
-        // before the cursor row is taken; the box's own rows follow, and
-        // the cursor rides inside them. The prompt's editor mutates its
-        // own scroll state, so the theme borrow above ends here and the
-        // frame re-borrows it for the list below.
+        // The prompt's editor mutates its own scroll state, so the theme borrow
+        // above ends here and the frame re-borrows it for the list below.
         let (header, prompt_rows, box_cursor) = self.render_prompt(width);
         lines.extend(header);
         let prompt_start = lines.len();
@@ -87,21 +76,15 @@ impl AgentsViewMode {
         let cursor = box_cursor.map(|(row, col)| (prompt_start + row, col));
         lines.push(vec![]);
 
-        // The notice panel (a multi-line refusal from the previous run)
-        // takes its rows between the list and the hint line, so the list
-        // window shrinks while the full text stays visible. A budget that
-        // cannot hold the borders and one content row (a degenerate pane)
-        // falls back to the hint-line status with the notice's first line.
+        // The notice panel takes its rows between the list and the hint line. A budget that
+        // cannot hold the borders and one content row falls back to the hint-line status.
         let budget = height.saturating_sub(lines.len() + 1);
-        // The panel is built and the notice's borrow ends here (render_list
-        // below takes the mode mutably).
+        // The notice's borrow ends here (render_list below takes the mode mutably).
         let notice_panel = self
             .notice
             .as_deref()
             .filter(|_| budget >= 4)
             .map(|notice| self.render_notice(notice, width, budget));
-        // Owned: the fallback's borrow of the notice must end before the
-        // mutable list render below.
         let status_fallback: Option<String> = notice_panel
             .is_none()
             .then(|| {
@@ -128,14 +111,9 @@ impl AgentsViewMode {
         (lines, cursor)
     }
 
-    /// The prompt block (TS `renderPrompt`, :2917-2926): the search
-    /// composer renders the transparent editor shape (the muted `> `
-    /// prefix, the dim "Search sessions" placeholder) over the plain
-    /// surface; the rename composer renders the real editor box (TS
-    /// `Editor.render` with the background) — the warning header block
-    /// inside it, the draft in the text color, the dim placeholder
-    /// while empty. Returns the lines above the box, the box's rows,
-    /// and the cursor's row within the box and its column.
+    /// The prompt block: the search composer renders the transparent editor shape
+    /// (muted `> ` prefix, dim placeholder); the rename composer renders the real
+    /// editor box — the warning header inside it, the draft, the dim placeholder.
     fn render_prompt(&mut self, width: usize) -> (Vec<Line>, Vec<Line>, Option<(usize, usize)>) {
         let theme = &self.theme;
         match &mut self.composer {
@@ -159,21 +137,16 @@ impl AgentsViewMode {
                 (
                     Vec::new(),
                     vec![prompt],
-                    // The cursor caps at the same width the query
-                    // displays (`truncate_text` keeps width - 5, the
-                    // editor box's own cap): a longer query would
-                    // otherwise park the caret past the last rendered
-                    // cell, where the terminal frame skips it.
+                    // The cursor caps at the same width the query displays
+                    // (`truncate_text` keeps width - 5): a longer query would park the
+                    // caret past the last rendered cell, where the frame skips it.
                     Some((0, 4 + str_width(&self.query).min(width.saturating_sub(5)))),
                 )
             }
-            // The reply composer's real editor box (the rename box's
-            // shape): the target's header line rides INSIDE the box, the
-            // placeholder names the action by the target's state, and
-            // the cursor comes from the box. An open completion renders
-            // its overlay panel above the box — the chat's stacking (TS
-            // draws the same dropdown through the editor's TUI overlay,
-            // editor.ts `showOverlay`, anchored over the box).
+            // The reply composer's real editor box (the rename box's shape): the
+            // target's header rides INSIDE the box, the placeholder names the action
+            // by the target's state, and an open completion renders its overlay
+            // above the box (the chat's stacking).
             Composer::Reply(reply) => {
                 let overlay = crate::view::editor_surface::overlay(&reply.editor, theme, width);
                 let header = reply.header_line(theme);
@@ -188,12 +161,8 @@ impl AgentsViewMode {
                 );
                 (overlay, surface.rows, surface.cursor)
             }
-            // The rename composer's real editor box (TS `CustomEditor.render`
-            // over `Editor.render`): the warning header rides INSIDE the box
-            // (the header block under the top row, TS `getHeaderLine` via
-            // `renderHeaderContentLine`), the draft renders through the
-            // editor's own surface, and the cursor comes from the box —
-            // the #3117 SF1 2-row shape closes.
+            // The rename composer's real editor box: the warning header rides INSIDE
+            // the box, the draft renders through the editor's own surface.
             Composer::Rename(rename) => {
                 let header =
                     vec![theme.fg(ThemeColor::Warning, "Rename agent session".to_string())];
@@ -210,11 +179,8 @@ impl AgentsViewMode {
         }
     }
 
-    /// The notice panel: the notice's own lines wrapped to the pane's
-    /// inner width inside a bordered box, with the dismissal row last. The
-    /// content fits the budget (the borders and the dismissal row are the
-    /// fixed three); an overflow names the cap instead of silently
-    /// cutting the refusal.
+    /// The notice panel: the notice's lines wrapped to the pane's inner width inside a bordered
+    /// box, with the dismissal row last. An overflow names the cap instead of cutting silently.
     pub(super) fn render_notice(&self, notice: &str, width: usize, budget: usize) -> Vec<Line> {
         let theme = &self.theme;
         let inner = width.saturating_sub(4).max(1);
@@ -226,14 +192,12 @@ impl AgentsViewMode {
             }
             content.extend(crate::width::wrap_text(line, inner));
         }
-        // The fixed rows: the borders and the dismissal row. The notice's
-        // content fits what is left; an overflow names the cap (the marker
-        // wraps with the same width, so a narrow pane never overflows the
-        // border).
+        // The fixed rows are the borders and the dismissal row; an overflow names the cap (the
+        // marker wraps, so a narrow pane never overflows the border).
         let cap = budget.saturating_sub(3).max(1);
         if content.len() > cap {
-            // One row of room carries the marker alone: a truncated
-            // refusal never renders without the indication.
+            // One row of room carries the marker alone: a truncated refusal never renders without
+            // the indication.
             if cap == 1 {
                 content.clear();
             } else {
@@ -280,32 +244,23 @@ impl AgentsViewMode {
         panel
     }
 
-    /// The sectioned session list (TS `renderSessionRows`): the rows group
-    /// into section blocks behind their headings, and the viewport follows
-    /// the selection — the slice centers on the selected row and clips
-    /// the overflow behind leading/trailing ellipses, so a roster rebuild
-    /// (spawn churn, activity re-sorts) never scrolls the user's position
-    /// off-screen. Nested rows (summary rows and expanded subagents)
-    /// render inside their top-level agent's section block, and the
-    /// headings count top-level agents only (TS `getDisplayRowsForSection`
-    /// / `countRowsBySection`).
+    /// The sectioned session list: the viewport centers the slice on the selected row, so a
+    /// roster rebuild never scrolls the user's position off-screen.
     pub(super) fn render_list(
         &mut self,
         width: usize,
         max_rows: usize,
         frame_row: usize,
     ) -> Vec<Line> {
-        /// One rendered display entry of the sectioned list (TS
-        /// `DisplayItem`): the spacer between section blocks, a section
-        /// heading, or one row (carrying its `self.rows` index — the
-        /// click surface's row identity).
+        /// One rendered display entry: the spacer between section blocks, a section heading,
+        /// or one row (carrying its `self.rows` index — the click surface's row identity).
         enum DisplayItem<'a> {
             Spacer,
             Heading(Section),
             Row(usize, &'a AgentsViewRow),
         }
-        // The click surface records this render's visible rows; the
-        // early exits below leave it empty.
+        // The click surface records this render's visible rows; the early exits below leave it
+        // empty.
         self.click_rows.clear();
         if max_rows == 0 {
             return Vec::new();
@@ -319,9 +274,7 @@ impl AgentsViewMode {
             return vec![vec![self.theme.fg(ThemeColor::Dim, text.to_string())]];
         }
         let layout = build_layout(&self.rows, width);
-        // The display-item sequence (TS `displayItems`): each non-empty
-        // section contributes a spacer (when not first), its heading, then
-        // its rows.
+        // Each non-empty section contributes a spacer (when not first), its heading, then its rows.
         let counts: Vec<(Section, usize)> = [Section::Running, Section::Idle, Section::Inactive]
             .into_iter()
             .map(|section| {
@@ -335,10 +288,8 @@ impl AgentsViewMode {
             })
             .collect();
         let mut display: Vec<DisplayItem> = Vec::new();
-        // While a query is active the list is a ranked picker: one flat,
-        // relevance-ordered run of hits (per-row icons carry the status),
-        // not status section blocks. Without a query the sectioned
-        // layout stays TS-identical.
+        // While a query is active the list is a ranked picker: one flat, relevance-ordered run
+        // of hits (per-row icons carry the status), not status section blocks.
         if self.query.trim().is_empty() {
             for (section, count) in &counts {
                 if *count == 0 {
@@ -366,12 +317,8 @@ impl AgentsViewMode {
                     .map(|(index, row)| DisplayItem::Row(index, row)),
             );
         }
-        // The viewport (TS `renderSessionRows`): reserve the column header
-        // and its spacer, center the slice on the selected row, and clip
-        // the overflow behind ellipsis lines. The selected row's display
-        // index drives the window, so a rebuild that re-sorts the rows
-        // keeps the selection on-screen instead of snapping the window
-        // back to the top of the list.
+        // The viewport: reserve the column header and its spacer, center the slice on the
+        // selected row, clip the overflow — a re-sorting rebuild keeps the selection on-screen.
         let header_rows = max_rows.saturating_sub(1).min(2);
         let visible_rows = max_rows - header_rows;
         let selected_identity = self
@@ -396,9 +343,8 @@ impl AgentsViewMode {
             start
         };
         let slice_end = (slice_start + content_rows).min(display.len());
-        // The viewport's front rows (the leading ellipsis and the
-        // column legend block) shift the session rows down — the click
-        // rows and the hover band carry the shift with them.
+        // The viewport's front rows shift the session rows down — the click rows and the hover
+        // band carry the shift.
         let shift = header_rows + usize::from(show_leading);
         let mut lines: Vec<Line> = Vec::with_capacity(content_rows);
         let mut click_rows: Vec<(usize, usize)> = Vec::new();
@@ -417,10 +363,8 @@ impl AgentsViewMode {
                     )]);
                 }
                 DisplayItem::Row(index, row) => {
-                    // The row's frame position carries the hover
-                    // (operator directive 2026-09-29): the light band
-                    // rides the row the mouse rests on, exactly the
-                    // rows the click grammar covers.
+                    // The row's frame position carries the hover (operator directive
+                    // 2026-09-29): the light band rides the row the mouse rests on.
                     let frame_position = frame_row + local + shift;
                     let hovered = self.hover_row == Some(frame_position);
                     lines.push(self.render_row(row, &layout, width, hovered));
@@ -456,12 +400,8 @@ impl AgentsViewMode {
             .into_iter()
             .map(|(local, index)| (frame_row + local + shift, index))
             .collect();
-        // The hover revalidates against THIS frame's rows (the session
-        // surface's hover contract): a roster rebuild that moved the
-        // rows re-aims the band at the row that took the hovered
-        // position's place, and a row that scrolled out of the window
-        // clears it — the band can never brighten a row the mouse is
-        // no longer on.
+        // The hover revalidates against THIS frame's rows: a rebuild that moved the rows re-aims
+        // the band, and a row that scrolled out clears it.
         if self.hover_row.is_some_and(|row| {
             !self
                 .click_rows
@@ -473,15 +413,8 @@ impl AgentsViewMode {
         lines
     }
 
-    /// One session row (TS `renderRow`): the summary rows render their
-    /// `▸/▾ title` cell over the full width; agent rows render icon, title
-    /// (nested rows indented), model, cost/age. The selected row
-    /// carries the selection background; a hovered unselected row
-    /// carries the light hover band (operator directive 2026-09-29: the
-    /// row is clickable — every row, the summaries and the nested
-    /// children included, opens on a click), and a hovered selected row
-    /// keeps its selection band (the one color the hover shares; the
-    /// focused state is never demoted).
+    /// One session row: summary rows render their `▸/▾ title` cell over the full width; agent
+    /// rows render icon, title (nested rows indented), model, cost/age.
     pub(super) fn render_row(
         &self,
         row: &AgentsViewRow,
@@ -490,8 +423,7 @@ impl AgentsViewMode {
         hovered: bool,
     ) -> Line {
         let theme = &self.theme;
-        // TS `renderCodeRow`: a muted, truncated program line on the tool-panel
-        // background; never selection-painted.
+        // A muted, truncated program line on the tool-panel background; never selection-painted.
         if row.kind == RowKind::Code {
             let text = format!("{}  {}", "  ".repeat(row.depth), row.title);
             let line = pad_line(
@@ -503,19 +435,12 @@ impl AgentsViewMode {
         let selected = Some(row.identity.as_str())
             == self.rows.get(self.selected).map(|r| r.identity.as_str());
         if row.kind == RowKind::SubagentSummary {
-            // TS: `formatTableCell(`${indent}${expanded ? "▾" : "▸"} ${title}`, width)`.
             let indent = "  ".repeat(row.depth);
             let marker = if row.expanded { "\u{25be}" } else { "\u{25b8}" };
             let text = format!("{indent}{marker} {}", row.title);
-            // BOTH summary lines bill the descendant tree in the Cost
-            // column (the operator's 2026-09-26 ask, then the follow-up:
-            // an all-done tree renders no running line, so the inactive
-            // line — the row the operator actually sees then — carries
-            // the same aggregate; TS renders no cost on the summary
-            // row): each title spans the Session + Model zone — every
-            // row yields its leading cells to the cost column — and the
-            // aggregate rides the same right-aligned `${:.2}` cell the
-            // agent rows print, leaving the Age column blank behind it.
+            // BOTH summary lines bill the descendant tree in the Cost column (operator directive
+            // 2026-09-26: an all-done tree renders no running line, so the inactive line carries
+            // the same aggregate; deliberate divergence from TS, which renders no cost there).
             if crate::agents_view_forest::is_summary_row_identity(&row.identity) {
                 let zone = layout.name_width + 2 + layout.model_width;
                 let title = crate::agents_view_state::truncate_text(&text, zone);
@@ -533,8 +458,7 @@ impl AgentsViewMode {
                             .unwrap_or_default(),
                     ),
                 ];
-                // The summary rows always pad to the full width (their
-                // original shape); the finish adds the affordance bands.
+                // The summary rows always pad to the full width; the finish adds the bands.
                 let line = pad_line(line, width);
                 return finish_session_row(theme, line, selected, hovered, width);
             }
@@ -556,9 +480,6 @@ impl AgentsViewMode {
         let icon_style = theme
             .fg_style(icon_color)
             .add_modifier(ratatui::style::Modifier::BOLD);
-        // TS `renderRow`: `${"  ".repeat(depth)}${icon} ${title}` padded to
-        // the name column, then the model cell, then the dim
-        // cost/age details.
         let indent = "  ".repeat(row.depth);
         let indent_width = str_width(&indent);
         let mut line: Line = Vec::new();
@@ -619,9 +540,8 @@ impl AgentsViewMode {
                 .name_width
                 .saturating_sub(2 + indent_width + badge_width),
         );
-        // Session titles render uniformly (no bold for named sessions);
-        // explicit product decision — differs from TS `styleRowTitle`, which
-        // bolds explicit session names.
+        // Session titles render uniformly (no bold for named sessions): deliberate divergence
+        // from TS `styleRowTitle`, which bolds explicit session names.
         let pad = layout
             .name_width
             .saturating_sub(str_width(&title) + 2 + indent_width + badge_width);
@@ -671,27 +591,24 @@ impl AgentsViewMode {
     /// notice's first line when the degenerate pane skipped the panel.
     pub(super) fn render_hints(&self, width: usize, status_override: Option<&str>) -> Line {
         let theme = &self.theme;
-        // Every slot's effective binding label (TS `keyText`), hoisted so
-        // the mode branches and the bar slots share one definition.
+        // Every slot's effective binding label, hoisted so the branches and the bar slots share
+        // one definition.
         let first = |id: &str| {
             self.keybindings
                 .first_key(id)
                 .map(|key| crate::keybindings::format_key_text(&key))
         };
         if self.exit_armed {
-            // TS `renderHints`: the exit hint renders the effective
-            // `app.clear` key ("Press Ctrl+C again to exit"); a disabled
-            // binding (an empty override) falls back to the plain hint.
+            // The exit hint renders the effective `app.clear` key; a disabled binding falls back
+            // to the plain hint.
             let hint = first("app.clear").map_or_else(
                 || "Press again to exit".to_string(),
                 |key| format!("Press {key} again to exit"),
             );
             return truncate_line(&vec![theme.fg(ThemeColor::Muted, hint)], width);
         }
-        // The armed stop-or-delete confirm: "Press ctrl+x again to
-        // stop|delete" (TS `renderHints`'s delete hint, keyed by the
-        // armed row's CURRENT live work — a row that settles between
-        // the presses shows the word the confirm now carries).
+        // The armed stop-or-delete confirm, keyed by the armed row's CURRENT live work (a row
+        // that settles between the presses shows the word the confirm now carries).
         if let Some(pending) = &self.pending_delete {
             let stop = self
                 .rows
@@ -705,24 +622,19 @@ impl AgentsViewMode {
             );
             return truncate_line(&vec![theme.fg(ThemeColor::Muted, hint)], width);
         }
-        // TS `renderHints`: the status renders in its own tone (a
-        // failure reads error, a plain report muted). The truncation
-        // keeps the style: the row is one span, clipped to the width
-        // (`truncate_line` re-wraps plain text and would strip it — the
-        // tone is the row's whole point, the #3117 SF6 divergence).
+        // The status renders in its own tone. `truncate_text` keeps the style:
+        // `truncate_line` re-wraps plain text and would strip the span — the tone
+        // is the row's whole point (deliberate divergence).
         if let Some(status) = self.status.as_ref() {
             return vec![theme.fg(status.tone().color(), truncate_text(status.text(), width))];
         }
-        // The notice fallback (the degenerate pane's first refusal
-        // line) is the error family it always was.
+        // The notice fallback (the degenerate pane's refusal line) stays Error.
         if let Some(status) = status_override {
             return vec![theme.fg(ThemeColor::Error, truncate_text(status, width))];
         }
-        // The reply composer's hints (TS `renderReplyComposerHints`,
-        // :2964-2978): the confirm key's word by the target's CURRENT
-        // state (steer while it streams, send live, resume & send
-        // saved), the queue hint while the draft has text, and cancel
-        // over the cancel binding's every key.
+        // The reply composer's hints: the confirm key's word by the target's CURRENT
+        // state (steer while it streams, send live, resume & send saved), the queue
+        // hint while the draft has text, and cancel over the cancel binding's keys.
         if let Composer::Reply(reply) = &self.composer {
             let current = self.current_reply_summary(&reply.target);
             let live = current
@@ -758,9 +670,7 @@ impl AgentsViewMode {
             let hint = hints.join("   ");
             return truncate_line(&vec![theme.fg(ThemeColor::Muted, hint)], width);
         }
-        // The rename composer's hint (TS :2942-2944): save/cancel over
-        // the confirm/cancel bindings' every key (`keyText` — TS shows
-        // "Enter save   Esc/Ctrl+C cancel").
+        // The rename composer's hint: save/cancel over the confirm/cancel bindings' every key.
         if let Composer::Rename(_) = &self.composer {
             let hint = format!(
                 "{} save   {} cancel",
@@ -769,11 +679,8 @@ impl AgentsViewMode {
             );
             return truncate_line(&vec![theme.fg(ThemeColor::Muted, hint)], width);
         }
-        // TS `renderHints`: every hint slot renders the effective binding
-        // (`keyText`, arrows for up/down/left/right), so a user override
-        // moves the hint with the handler. The summary row swaps the open
-        // action for expand/collapse (TS `renderHints`'s `rightAction`);
-        // the scoped view adds the parent-back hint.
+        // Every hint slot renders the effective binding, so a user override moves the hint with
+        // the handler.
         let right_action = match self.rows.get(self.selected) {
             Some(row) if row.kind == RowKind::SubagentSummary => {
                 if row.expanded {
@@ -784,15 +691,9 @@ impl AgentsViewMode {
             }
             _ => "open",
         };
-        // The bar lists every effective action key of the view, so a
-        // merged binding can never ship without its slot (the
-        // operator's completeness directive). Every segment — including
-        // navigate, open, parent, and new — renders its bindings' first
-        // effective keys and drops entirely when its action is unbound
-        // (the same contract as the jump and stop-or-delete slots; the
-        // bar never advertises a default key the handler does not
-        // take).
-        // A two-key segment keeps whichever of the pair is bound.
+        // The bar lists every effective action key, so a merged binding can never ship without
+        // its slot (the operator's completeness directive); a two-key segment keeps whichever
+        // is bound.
         let pair = |a: &str, b: &str| match (first(a), first(b)) {
             (Some(a), Some(b)) => Some(format!("{a}/{b}")),
             (Some(only), None) | (None, Some(only)) => Some(only),
@@ -802,17 +703,16 @@ impl AgentsViewMode {
         if let Some(keys) = pair("tui.select.up", "tui.select.down") {
             segments.push(format!("{keys} navigate"));
         }
-        // The jump slot shows the first effective key of each edge
-        // binding (the full key sets would overflow the one-line hint);
-        // an override that empties either binding drops the slot.
+        // The jump slot shows the first effective key of each edge binding (the full key sets
+        // would overflow the hint).
         if let (Some(top), Some(bottom)) = (first("tui.select.top"), first("tui.select.bottom")) {
             segments.push(format!("{top}/{bottom} first/last"));
         }
         if let Some(keys) = pair("tui.select.confirm", "app.agents.open") {
             segments.push(format!("{keys} {right_action}"));
         }
-        // The rename, stop-or-delete, program, and parent hints only show with an
-        // empty search, and only when the selected row has a target for them.
+        // The rename, stop-or-delete, program, and parent hints only show with an empty search
+        // and a target.
         if self.query.is_empty() {
             // The multi-key slots render every configured key (dispatch
             // takes the whole set).
@@ -822,9 +722,9 @@ impl AgentsViewMode {
             {
                 segments.push(format!("{keys} rename"));
             }
-            // The reply slot (the operator's completeness directive: TS
-            // shows none — the space arm is undiscoverable without it):
-            // only while the selected row is replyable.
+            // The reply slot (the operator's completeness directive: TS shows none,
+            // so the space arm would be undiscoverable): only while the selected row
+            // is replyable.
             if let Some(keys) = all("app.agents.reply").filter(|_| self.reply_target().is_some()) {
                 segments.push(format!("{keys} reply"));
             }
@@ -856,15 +756,9 @@ impl AgentsViewMode {
     }
 }
 
-/// One session row's affordance finish (operator directive
-/// 2026-09-29): the selected row pads to the full width and keeps the
-/// ONE selection band — a hovered selected row keeps it too (the
-/// focused state is never demoted) — while a hovered unselected row
-/// pads and gains the ONE light hover band, the same color the
-/// selection paints (the one-color ruling: the states distinguish by
-/// cue, never by color) and the same "clickable" affordance the
-/// dock's groups carry, and every other row renders exactly as
-/// before.
+/// One session row's affordance finish (operator directive 2026-09-29): the selected row keeps
+/// the ONE selection band; a hovered unselected row gains the ONE light hover band — the same
+/// color the selection paints (distinguish by cue, never by color).
 pub(super) fn finish_session_row(
     theme: &Theme,
     mut line: Line,
@@ -901,9 +795,6 @@ pub(super) fn truncate_line(line: &Line, width: usize) -> Line {
 pub(super) enum Renderer {
     Terminal {
         term: ratatui::Terminal<crate::hyperlinks::LinkBackend>,
-        /// The `showHardwareCursor` setting snapshot the surface mounted
-        /// with (TS constructs the agents-view TUI with the live
-        /// `settingsManager.getShowHardwareCursor()`).
         show_hardware_cursor: bool,
     },
     Headless {
@@ -923,34 +814,26 @@ impl Renderer {
     ) -> Result<Renderer> {
         match ui {
             AgentsViewUiMode::Terminal => {
-                // The raw-mode bracket's `cfmakeraw` write clears IXON,
-                // which is the kernel's one trigger for lifting a pending
-                // Ctrl+S stop (see the flow e2e's launch route).
+                // The raw-mode bracket's `cfmakeraw` write clears IXON, the kernel's one
+                // trigger for lifting a pending Ctrl+S stop (see the flow e2e's launch route).
                 crossterm::terminal::enable_raw_mode()?;
-                // The terminal state changed: every later setup step is
-                // fallible and an error from any of them still owns the
-                // release. The flag arms here, not at the end of setup.
+                // The terminal state changed: every later setup step is fallible and still owns
+                // the release — the flag arms here, not at the end of setup.
                 surface_mounted.store(true, std::sync::atomic::Ordering::SeqCst);
-                // Adopt the alternate screen the previous surface left in
-                // place (TS `pendingAltScreenHandoff`); only the first
-                // surface of the process enters it, so a view switch never
-                // flashes the primary screen.
+                // Adopt the alternate screen the previous surface left in place: only the first
+                // surface of the process enters it, so a view switch never flashes the primary
+                // screen.
                 crate::altscreen::enter()?;
-                // The enhanced-key modes come up with the raw-mode
-                // bracket (TS `ProcessTerminal.start`): pastes arrive as
-                // one chunk, the kitty probe runs before the reader
-                // thread starts polling.
+                // The enhanced-key modes come up with the raw-mode bracket: pastes arrive as one
+                // chunk, the kitty probe runs before the reader starts polling.
                 crate::enhanced_keys::enable(&mut std::io::stdout())?;
-                // The view's rows open on a click (the session surface's
-                // mouse grammar): SGR button tracking while the view owns
-                // the terminal, released on every exit path.
+                // SGR button tracking while the view owns the terminal, released on every exit
+                // path.
                 crate::mouse_tracking::enable(&mut std::io::stdout())?;
-                // One reader thread feeds the view; the reader registry
-                // joins the previous surface's reader (the chat it opened)
-                // before this one starts polling. The reader also observes
-                // Ctrl+C pairs for the exit guard: this thread stays alive
-                // when the view loop is wedged in a daemon request, so the
-                // force-quit contract holds regardless of loop state.
+                // One reader thread feeds the view; the registry joins the previous surface's
+                // reader before this one starts polling. The reader also observes Ctrl+C pairs:
+                // it stays alive when the view loop is wedged in a daemon request, so the
+                // force-quit contract holds.
                 // The paste-aware variant (the session surface's reader):
                 // a marker-less multi-line keystroke burst coalesces into
                 // one paste — Enter submits in the composers, so a burst
@@ -959,10 +842,8 @@ impl Renderer {
                     crate::input::ReaderInput::BurstPaste(text) => {
                         ui_tx.send(UiInput::Paste(text)).is_ok()
                     }
-                    // A report the guard reassembled from a sequence the
-                    // reader split at a committed-`ESC` boundary: the same
-                    // contract as the terminal's own mouse events below —
-                    // consumed unless tracking is active.
+                    // A guard-reassembled report: consumed unless tracking is active,
+                    // the same contract as the terminal's own mouse events below.
                     crate::input::ReaderInput::Mouse(report) => {
                         if crate::mouse_tracking::active() {
                             ui_tx.send(UiInput::Mouse(report)).is_ok()
@@ -973,13 +854,9 @@ impl Renderer {
                     crate::input::ReaderInput::Event(event) => match event {
                         crossterm::event::Event::Key(key) => {
                             exit_guard.observe_key(&key);
-                            // The id door filters the way every session handler
-                            // does (`let Some(id) = key_event_to_id(&key)`): kitty
-                            // Release events and unmappable keys map to no id, and
-                            // a forwarded empty id would run handle_key's "any
-                            // other key" arm — clearing the armed exit hint
-                            // between the presses of a double Ctrl+C, so the
-                            // second press re-arms instead of exiting.
+                            // The id door filters as every session handler does: a forwarded
+                            // empty id would run handle_key's "any other key" arm — clearing
+                            // the armed exit hint between the presses of a double Ctrl+C.
                             let Some(id) = crate::keys::key_event_to_id(&key) else {
                                 return true;
                             };
@@ -989,9 +866,8 @@ impl Renderer {
                             ui_tx.send(UiInput::Paste(text)).is_ok()
                         }
                         crossterm::event::Event::Mouse(mouse) => {
-                            // Mouse reports are consumed even when tracking is
-                            // off (terminal noise downstream); an active surface
-                            // decodes and dispatches them.
+                            // Mouse reports are consumed even when tracking is off; an active
+                            // surface decodes and dispatches them.
                             let report = crate::mouse_tracking::active()
                                 .then(|| crate::mouse::from_crossterm(mouse))
                                 .flatten();
@@ -1005,19 +881,10 @@ impl Renderer {
                     },
                 });
                 let terminal = ratatui::Terminal::new(crate::hyperlinks::stdout_backend())?;
-                // The adopted buffer still holds the previous view's frame;
-                // the first draw repaints the same buffer (a fresh alt
-                // screen is already blank). TS paints the new frame
-                // straight over the old one, so the clear escape must
-                // never reach the pane on its own: queue it with the
-                // cursor hide and let the first draw's single flush carry
-                // clear + frame together. A separate clear-and-flush here
-                // shows a blank pane for the whole render gap — a visible
-                // flicker on every surface switch. The cursor hides with
-                // the mount (TS `TUI.start` writes hideCursor, never a
-                // show): a shown cursor here sits visible at a stale
-                // position until the first frame decides the visibility,
-                // the exact window the cursor glitch shows in.
+                // The adopted buffer still holds the previous view's frame: queue the clear escape
+                // with the cursor hide so the first draw's single flush carries clear + frame
+                // together (a separate clear-and-flush shows a blank pane for the whole
+                // render gap).
                 crossterm::queue!(
                     std::io::stdout(),
                     crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
@@ -1029,9 +896,7 @@ impl Renderer {
                 })
             }
             AgentsViewUiMode::Headless(plan) => {
-                // The click grammar's dispatch gate (the terminal arm's
-                // enable records the same state; a headless stdout only
-                // records it): a headless run's Click steps drive the same
+                // The click grammar's dispatch gate: a headless run's Click steps drive the same
                 // active-tracking branch a terminal's reports take.
                 let _ = crate::mouse_tracking::enable(&mut std::io::stdout());
                 let steps = plan.steps;
@@ -1063,10 +928,8 @@ impl Renderer {
                                 }
                             }
                             AgentsStep::Click { row, col } => {
-                                // The SGR press/release pair a click sends
-                                // (the report cells are one-based):
-                                // decoded by the same parser the terminal
-                                // path feeds.
+                                // The SGR press/release pair a click sends (one-based report
+                                // cells), decoded by the same parser the terminal path feeds.
                                 for sequence in [
                                     format!("\x1b[<0;{};{}M", col + 1, row + 1),
                                     format!("\x1b[<0;{};{}m", col + 1, row + 1),
@@ -1110,13 +973,8 @@ impl Renderer {
                 let area = term.size().expect("terminal size");
                 let (lines, cursor) = mode.render_frame(area.width as usize, area.height as usize);
                 crate::hyperlinks::install_frame(&lines);
-                // TS cursor control: the hardware cursor is positioned at
-                // the focused caret for IME on every frame, but only shown
-                // when `showHardwareCursor` is on (default off). ratatui's
-                // `set_cursor_position` shows unconditionally, so only the
-                // show case may hand it the caret; the hidden case queues
-                // the bare MoveTo after the paint instead (TS positions
-                // the caret while the cursor stays hidden).
+                // ratatui's `set_cursor_position` shows unconditionally, so only the show case may
+                // hand it the caret; the hidden case queues the bare MoveTo after the paint.
                 let show = *show_hardware_cursor;
                 term.draw(|f| {
                     let area = ratatui::layout::Rect::new(0, 0, area.width, area.height);
@@ -1137,10 +995,9 @@ impl Renderer {
                 if !show {
                     if let Some((row, col)) = cursor {
                         if row < area.height as usize && col < area.width as usize {
-                            // execute! (not queue!): the position write must
-                            // flush now — the paint backend's flush already
-                            // ran inside `draw`, so a queued write would sit
-                            // in the stdout buffer until the next frame.
+                            // execute! (not queue!): the paint's flush already ran inside `draw`,
+                            // so a queued write would sit in the stdout buffer until the next
+                            // frame.
                             let _ = crossterm::execute!(
                                 std::io::stdout(),
                                 crossterm::cursor::MoveTo(col as u16, row as u16)
@@ -1178,48 +1035,31 @@ impl Renderer {
         }
     }
 
-    /// Teardown. `preserve_alt_screen` mirrors TS `ui.stop({ preserveAltScreen })`:
-    /// a handoff to the chat the view just selected keeps the alternate screen
-    /// (and raw mode, so the handoff gap cannot echo into the preserved frame)
-    /// for the adopting surface, hiding the cursor; a real exit releases the
-    /// screen and restores the terminal. `flushFullscreen` stays false either
-    /// way (TS agents-view-mode `finish`): the picker frame is never flushed
-    /// onto the main screen.
+    /// Teardown. `preserve_alt_screen` mirrors TS `ui.stop({ preserveAltScreen })`: a handoff to
+    /// the chat keeps the alternate screen (and raw mode), hiding the cursor; a real exit
+    /// releases the screen. The frame never flushes onto the main screen (TS
+    /// `flushFullscreen: false`).
     pub(super) fn finish(self, preserve_alt_screen: bool) -> Vec<String> {
         match self {
             Renderer::Terminal { term, .. } => {
-                // ratatui's `Terminal` drop restores the cursor its last
-                // frame hid (the `hidden_cursor` flag): run the drop
-                // before the handoff's hide so the hide is the final
-                // word — TS `stop(preserveAltScreen)` leaves the cursor
-                // hidden for the surface taking the screen over. The
-                // real-exit arm ends shown for the shell either way.
+                // ratatui's `Terminal` drop restores the cursor its last frame hid: run the drop
+                // before the handoff's hide so the hide is the final word.
                 drop(term);
-                // The view's input reader stands down before the pane is
-                // handed on (TS tears its listener down with the view):
-                // the adopting session's mount joins this reader through
-                // the registry, and a parked reader would hold crossterm's
-                // global event-reader lock indefinitely — the wake makes
-                // the flagged reader exit now instead of parking the
-                // switch on the join.
+                // The input reader stands down before the pane is handed on: a parked reader would
+                // hold crossterm's global event-reader lock indefinitely — the wake exits it now.
                 crate::input::request_reader_stop();
                 if preserve_alt_screen {
-                    // The enhanced-key modes release with the raw-mode
-                    // bracket (TS `stop` on every exit, handoffs included).
+                    // The enhanced-key modes release with the raw-mode bracket on every exit,
+                    // handoffs included.
                     let mut out = std::io::stdout();
                     let _ = crate::enhanced_keys::disable(&mut out);
-                    // The adopting surface re-enables tracking through its
-                    // own setting; the view never leaves it on.
+                    // The adopting surface re-enables tracking through its own setting; the view
+                    // never leaves it on.
                     let _ = crate::mouse_tracking::disable(&mut out);
                     let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Hide);
                 } else {
-                    // The one exit restore ends the view's real exit: the
-                    // probe standdown, the input drain, the mode releases,
-                    // the alt-screen leave, the sync/SGR tail, and the
-                    // cooked-tty verification — the same whole-terminal
-                    // contract every exit path guarantees. (The view never
-                    // flushes its frame: TS agents-view `finish` passes
-                    // `flushFullscreen: false`.)
+                    // The one exit restore ends the view's real exit — the same whole-terminal
+                    // contract every exit path guarantees (the frame never flushes).
                     crate::exit_restore::restore_terminal();
                 }
                 Vec::new()

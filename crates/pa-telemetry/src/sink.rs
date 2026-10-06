@@ -19,10 +19,8 @@ pub enum SinkOutcome {
 /// they never panic, never block long (their own timeout applies), and report
 /// [`SinkOutcome::Dropped`] instead of propagating errors upward.
 ///
-/// The batch future is boxed (not a native RPITIT) because the client stores
-/// sinks as `Vec<Arc<dyn TelemetrySink>>` for fan-out; RPITIT methods are
-/// not dyn-compatible. The `+ Send` bound is explicit and the lifetime ties
-/// the future to the sink borrow, so implementations can borrow `&self`.
+/// The future is boxed, not RPITIT, because sinks are stored as `dyn TelemetrySink` for fan-out
+/// (RPITIT is not dyn-compatible); the `'a` lifetime lets implementations borrow `&self`.
 ///
 /// `install_id` is the pseudonymous installation id used as the sink-side
 /// identity (the analytics body's `installation_id`).

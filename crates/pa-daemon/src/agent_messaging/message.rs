@@ -1,21 +1,15 @@
-//! The `agent_message.send` controller (moved with its concern): the family
-//! roster + message delivery through the supervisor, the direct peer
-//! transport with the supervisor-routed fallback, and the wire receipt
-//! mapping.
+//! The `agent_message.send` controller: the family roster + message
+//! delivery through the supervisor, the direct peer transport with the
+//! supervisor-routed fallback, and the wire receipt mapping.
 use super::{
     json, row_is_child, row_is_parent, row_is_sibling, row_str, AgentFamilyMember,
     AgentFamilyRelationship, AgentMessageController, AgentMessageDeliveryStatus,
     AgentMessageReceipt, AgentMessageSendInput, Arc, FamilyIdentity, SupervisorLink, Value,
 };
 
-/// `agent_message.send` controller for daemon workers. The family roster
-/// and message delivery both go through the supervisor; a send first tries
-/// the direct worker-to-worker peer transport (thin-supervisor stage 3) and
-/// falls back to the supervisor-routed `send_message` (the TS worker's
-/// `sendRemoteAgentSessionMessage` path). Neither path is retried: daemon
-/// commands are not idempotent.
-/// Exposed for the agent-family e2e verifier (`tests/agent_family_e2e.rs)`:
-/// the same controller construction the worker engine wires.
+/// `agent_message.send` controller for daemon workers: the family roster and message
+/// delivery go through the supervisor; a send tries the direct peer transport first,
+/// falling back to the supervisor-routed `send_message`. Neither path is retried.
 pub struct LinkAgentMessageController {
     pub(super) link: Arc<SupervisorLink>,
     pub(super) active_session_id: String,
@@ -23,8 +17,7 @@ pub struct LinkAgentMessageController {
     /// This worker's own session summary, pushed by the worker at create
     /// (and rename); the sender identity block for direct deliveries.
     pub(super) own_summary: Arc<std::sync::Mutex<Option<Value>>>,
-    /// This session's resident RLM children (the same registry
-    /// `rlm.list_subagents` reads); `None` for standalone workers.
+    /// This session's resident RLM children; `None` for standalone workers.
     pub(super) children: Option<Arc<crate::rlm_children::SupervisorChildSessions>>,
 }
 
@@ -55,9 +48,8 @@ async fn roster_summaries(
     link: &Arc<crate::supervisor_link::SupervisorLink>,
     worker_token: &str,
 ) -> anyhow::Result<Vec<Value>> {
-    // TS uses the supervisor's pushed in-memory peer roster, not `list`
-    // (which refreshes every worker serially). Surface an unavailable
-    // supervisor instead of silently claiming the caller has no siblings.
+    // TS uses the supervisor's pushed in-memory peer roster, not `list` (which refreshes
+    // every worker serially): surface the unavailable supervisor, never a false empty family.
     // The budget is the shared `list_agent_peers` window (TS #2516
     // `AGENT_PEER_LIST_REQUEST_TIMEOUT_MS`): the supervisor's own mesh
     // refresh for the command stays inside half of it, so the local
@@ -78,13 +70,10 @@ async fn roster_summaries(
 impl AgentMessageController for LinkAgentMessageController {
     async fn family(&self) -> anyhow::Result<Vec<AgentFamilyMember>> {
         let sessions = roster_summaries(&self.link, &self.worker_token).await?;
-        // The calling session's durable family identity (its own ids and
-        // its recorded parent edge); never derived from names.
+        // The calling session's durable family identity (its own ids and recorded parent edge).
         let identity = self.family_identity();
-        // This session's resident children, keyed for the roster join.
-        // The registry is the same source `rlm.list_subagents` reads, so
-        // the family view and the RLM roster can never disagree on which
-        // children exist.
+        // This session's resident children, keyed for the roster join (the
+        // same registry `rlm.list_subagents` reads, so both views agree).
         let mut children = match &self.children {
             Some(children) => children.child_identities().await,
             None => Vec::new(),
@@ -114,15 +103,11 @@ impl AgentMessageController for LinkAgentMessageController {
                 .filter(|name| !name.is_empty())
                 .map(str::to_string);
             // A roster row owned by this session's children registry is a
-            // Child member (keyed by its RLM child id and persisted session
-            // id as aliases, so every identifier form the roster exposes
-            // addresses it).
+            // Child member, keyed by every identifier form the roster exposes.
             let row_rlm_child_id = row_str(&session, "rlmChildId").map(str::to_string);
             if let Some(position) = children.iter().position(|child| {
-                // The join is durable-keyed so a child worker replacement
-                // (a new live id, the same rlm child id / persisted session
-                // id) consumes its registry record here instead of leaving
-                // it for the leftover loop below to append twice.
+                // The join is durable-keyed so a child worker replacement (a new live id, the
+                // same durable ids) consumes its registry record instead of appending twice.
                 child.active_session_id == active_session_id
                     || row_rlm_child_id
                         .as_deref()
@@ -131,22 +116,16 @@ impl AgentMessageController for LinkAgentMessageController {
             }) {
                 let child = children.swap_remove(position);
                 let mut member = child_member(&child, name);
-                // A worker replacement keeps the durable ids but swaps the
-                // live one: the roster row carries the CURRENT active id
-                // while the registry record holds the id from spawn. The
-                // member keys on the row's live id so role-addressed sends
-                // target the live worker, never the replaced id.
+                // A worker replacement keeps the durable ids but swaps the live one: the member
+                // keys on the row's CURRENT live id so role-addressed sends hit the live worker.
                 if active_session_id != child.active_session_id {
                     member.id.clone_from(&active_session_id);
                 }
                 child_members.push(member);
                 continue;
             }
-            // The session that spawned this worker (when this worker is a
-            // subagent): a Parent member resolved through the durable edge,
-            // never a name. The persisted session id decides first (it
-            // survives the parent's worker replacements and any storage
-            // move), then the live active id, then the session-file alias.
+            // The session that spawned this worker (a subagent): a Parent member via the
+            // durable edge.
             if row_is_parent(&session, &identity) {
                 parent_member = Some(AgentFamilyMember {
                     relationship: AgentFamilyRelationship::Parent,
@@ -159,9 +138,8 @@ impl AgentMessageController for LinkAgentMessageController {
                 });
                 continue;
             }
-            // A row whose durable parent edge points back at this session
-            // is a Child (the registry may lose a record across a worker
-            // replacement; the recorded edge never lies).
+            // A row whose durable parent edge points back at this session is a Child (the
+            // registry may lose a record across a worker replacement; the edge never lies).
             if row_is_child(&session, &identity) {
                 let mut aliases = session
                     .get("rlmChildId")
@@ -182,11 +160,8 @@ impl AgentMessageController for LinkAgentMessageController {
                 continue;
             }
             // Siblings share this session's durable parent edge (other
-            // subagents of the same parent); a top-level session's
-            // siblings are the other parentless top-level sessions.
-            // Everything else is outside the nuclear family: it is not
-            // addressable by role, so no name-keyed send can cross
-            // families.
+            // subagents of the same parent); a top-level session's siblings
+            // are the other parentless top-level sessions.
             if !row_is_sibling(&session, &identity) {
                 continue;
             }
@@ -194,8 +169,7 @@ impl AgentMessageController for LinkAgentMessageController {
                 relationship: AgentFamilyRelationship::Sibling,
                 id: active_session_id,
                 name,
-                // The persisted session id also addresses a sibling
-                // (TS family entries are keyed by it).
+                // The persisted session id also addresses a sibling.
                 aliases: (!session_id.is_empty())
                     .then(|| session_id.to_string())
                     .into_iter()
@@ -237,20 +211,9 @@ impl AgentMessageController for LinkAgentMessageController {
         if input.target == self.active_session_id {
             anyhow::bail!("Agent messaging cannot target the sending session");
         }
-        // Direct peer delivery first (stage 3): a single-use `worker`
-        // grant on the target's own socket, bypassing the supervisor's
-        // route plane. Falls back to the supervisor-routed send (the TS
-        // remote path) whenever the direct link cannot be established -
-        // but never after the delivery command was sent: the grant burns
-        // on first use, so an in-flight delivery's outcome is final.
-        // A message delivered to one of this session's own children starts
-        // a follow-up turn there (delayed messaging): re-arm that child's
-        // usage observation BEFORE the delivery — a fast child can start
-        // and settle its turn before the delivery await returns, and an
-        // observation armed after the fact phases out against an idle
-        // child and never bills (TS keeps the child subscription alive
-        // across the whole turn; the Rust task-run watcher retired at its
-        // settle).
+        // A delivery to one of this session's own children starts a follow-up turn there:
+        // re-arm that child's usage observation BEFORE the delivery (a fast child can
+        // settle before the await returns; a late-armed observation never bills).
         if let Some(children) = &self.children {
             children.observe_child_usage(&input.target).await;
         }
@@ -276,10 +239,8 @@ enum DirectDelivery {
 }
 
 impl LinkAgentMessageController {
-    /// Try the direct worker-to-worker path. `Unavailable` only when the
-    /// delivery command never reached the target (no ticket, connect
-    /// failure, or failed grant burn - the message was not delivered);
-    /// once the command is sent the outcome is final either way.
+    /// Try the direct worker-to-worker path: `Unavailable` only when the
+    /// delivery command never reached the target; once sent, the outcome is final.
     async fn deliver_direct(&self, input: &AgentMessageSendInput) -> DirectDelivery {
         let ticket = match self
             .link
@@ -360,8 +321,7 @@ impl LinkAgentMessageController {
             .ok_or_else(|| anyhow::anyhow!("Supervisor returned an invalid agent-message receipt"))
     }
 
-    /// This session's durable family identity from its own pushed summary:
-    /// the ids its family references it by, and its recorded parent edge.
+    /// This session's durable family identity from its own pushed summary.
     /// `None` fields degrade; the active session id always comes from the
     /// worker's own link config (the summary may lag a rename).
     fn family_identity(&self) -> FamilyIdentity {
@@ -373,10 +333,8 @@ impl LinkAgentMessageController {
         FamilyIdentity::from_summary(summary.as_ref(), &self.active_session_id)
     }
 
-    /// The TS `createAgentSessionMessageSender` shape for agent-origin
-    /// sends: the sending session's endpoint fields plus the `agent`
-    /// client identity (the TS daemon attributes kernel sends this way
-    /// when no client id is in play).
+    /// The TS `createAgentSessionMessageSender` shape for agent-origin sends: the sending
+    /// session's endpoint fields plus the `agent` client identity.
     fn sender_block(&self) -> Value {
         let summary = self
             .own_summary
@@ -406,10 +364,8 @@ impl LinkAgentMessageController {
             {
                 sender["runtimeKind"] = json!(kind);
             }
-            // The sender's durable parent edge rides the block so the
-            // receiving session can label the delivery by its TRUE
-            // relationship (a child only when this sender's recorded
-            // parent is the recipient), never by runtime kind alone.
+            // The sender's durable parent edge rides the block so the receiving
+            // session can label the delivery by its TRUE relationship.
             for (field, summary_field) in [
                 ("parentActiveSessionId", "parentActiveSessionId"),
                 ("parentSessionId", "parentSessionId"),
@@ -428,11 +384,8 @@ impl LinkAgentMessageController {
     }
 }
 
-/// One registry child as a family member: a Child relationship keyed by
-/// its live active session id, named by its session name, with the RLM
-/// child id and the persisted session id as alias selectors (every
-/// identifier form `rlm.list_subagents` and the roster expose). `name`
-/// from the roster row overrides the registry's when set (a fresh rename).
+/// One registry child as a family member: a Child relationship keyed by its live active
+/// session id, RLM child id and persisted session id as alias selectors.
 fn child_member(
     child: &crate::rlm_children::RlmChildIdentity,
     name: Option<String>,
@@ -451,9 +404,8 @@ fn child_member(
     }
 }
 
-/// Map a delivery receipt payload (the `worker_deliver_message` response
-/// data, both delivery paths) onto the kernel receipt shape. `None` marks
-/// a payload that does not carry the TS receipt fields.
+/// Map a delivery receipt payload (the `worker_deliver_message` response data) onto the
+/// kernel receipt shape; `None` marks a payload without the TS receipt fields.
 fn receipt_from_wire(data: &Value, input: AgentMessageSendInput) -> Option<AgentMessageReceipt> {
     let target = data.get("target")?;
     let id = data.get("id")?.as_str()?.to_string();

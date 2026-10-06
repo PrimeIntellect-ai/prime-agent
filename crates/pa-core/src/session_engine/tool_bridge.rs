@@ -1,7 +1,6 @@
-//! Bridge pa-core tool definitions into the pa-agent loop's `AgentTool`.
-//! Port role: TS createAgentSession assembles tools from the built-in set;
-//! this adapter is the Rust equivalent of passing `ToolDefinition`s to the
-//! loop unchanged.
+//! Bridge pa-core tool definitions into the pa-agent loop's `AgentTool`
+//! (TS `createAgentSession` passes `ToolDefinition`s to the loop
+//! unchanged; this adapter is the Rust equivalent).
 
 use std::sync::Arc;
 
@@ -84,21 +83,15 @@ impl AgentTool for ToolDefinitionBridge {
                 let abort = abort.clone();
                 let signal = signal.clone();
                 tokio::spawn(async move {
-                    // Park on the signal's watch channel: an abort fires the
-                    // cancellation token immediately (tighter than the loop's
-                    // old few-ms poll contract), and an uninterrupted call
-                    // leaves no wake-up work behind — a completed tool call
-                    // must not keep a 10 ms polling task alive for the
-                    // session's lifetime.
+                    // Park on the signal's watch channel: an abort fires the token
+                    // immediately, and an uninterrupted call leaves no wake-up work behind —
+                    // a completed tool call must not keep a 10 ms polling task alive.
                     signal.aborted().await;
                     abort.cancel();
                 });
             }
-            // Streamed tool updates become `tool_execution_update` events:
-            // the same in-flight previews TS forwards to attached clients
-            // (streaming cell/bash output, and the kernel-boot stage notes
-            // the interactive loader mirrors). The loop's callback owns the
-            // accepting/abort gating.
+            // Streamed tool updates become `tool_execution_update` events — the same
+            // in-flight previews TS forwards; the loop's callback owns the gating.
             let tool_on_update: Option<crate::tools::tool_definition::OnUpdate> =
                 Some(Arc::new(move |update| {
                     on_update(AgentToolResult {
@@ -188,10 +181,8 @@ mod tests {
             tool.execution_mode(),
             Some(LoopToolExecutionMode::Sequential)
         );
-        // prepare_arguments flows through.
         let prepared = tool.prepare_arguments(&serde_json::json!({ "text": "hi" }));
         assert_eq!(prepared.unwrap()["text"], "HI");
-        // Execution returns the loop's result shape.
         let result = tool
             .clone()
             .execute(
@@ -205,9 +196,8 @@ mod tests {
         assert_eq!(result.content.len(), 1);
     }
 
-    /// Streamed tool updates reach the loop's update callback (TS `onUpdate`
-    /// -> `tool_execution_update`): the interactive loader's kernel-boot
-    /// note and live cell output ride this channel.
+    /// The interactive loader's kernel-boot note and live cell output
+    /// ride this channel.
     #[tokio::test]
     async fn streamed_updates_reach_the_loop_callback() {
         use std::sync::Mutex;

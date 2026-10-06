@@ -1,4 +1,4 @@
-//! Skill discovery, validation, and prompt formatting. Port of core/skills.ts.
+//! Skill discovery, validation, and prompt formatting.
 
 pub mod diagnostics;
 pub mod discovery;
@@ -24,7 +24,7 @@ pub use prompt_templates::{
     LoadPromptTemplatesOptions, PromptTemplate,
 };
 
-/// Source provenance for a resource (port of source-info.ts, synthetic form).
+/// Source provenance for a resource (the TS source-info shape).
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceInfo {
@@ -51,8 +51,8 @@ pub enum SourceOrigin {
 }
 
 /// Markdown entry test: the file name carries a lowercase `.md` extension
-/// (TS `endsWith('.md')` parity: mixed-case suffixes stay undiscovered, and a
-/// bare `.md` name has no extension and does not count).
+/// (TS `endsWith('.md')` parity: mixed-case suffixes stay undiscovered, and
+/// a bare `.md` name has no extension and does not count).
 #[must_use]
 pub fn skill_markdown_name(name: &str) -> bool {
     std::path::Path::new(name)
@@ -137,8 +137,7 @@ pub struct PythonSkillRuntimeInfo {
 ///
 /// # Panics
 ///
-/// The `expect` on the Python metadata cannot fire: the loader marks a
-/// skill `Python` only when its metadata was parsed.
+/// The `expect` cannot fire: a skill is marked `Python` only when its metadata was parsed.
 #[must_use]
 pub fn get_python_skill_runtime_info(skills: &[Skill]) -> Vec<PythonSkillRuntimeInfo> {
     skills
@@ -204,8 +203,8 @@ pub(crate) fn validate_description(description: &str) -> Vec<String> {
 pub(crate) use validate_description as validate_skill_description;
 pub(crate) use validate_name as validate_skill_name;
 
-/// Format skills for a system prompt (Agent Skills XML standard).
-/// Skills with disableModelInvocation are excluded.
+/// Format skills for a system prompt (Agent Skills XML standard); skills
+/// with disableModelInvocation are excluded.
 #[must_use]
 pub fn format_skills_for_prompt(skills: &[Skill]) -> String {
     let visible: Vec<&Skill> = skills
@@ -256,12 +255,9 @@ pub(crate) fn escape_xml(value: &str) -> String {
         .replace('\'', "&apos;")
 }
 
-/// Expand skill commands (`/skill:<name> [args]`) into the `<skill ...>`
-/// message block. Port of `AgentSession._expandSkillCommand`: a non-skill
-/// input passes through unchanged; an unknown skill name passes through
-/// (the surfaces show their own unknown-command notice); a skill file that
-/// fails to read passes through. Returns the skill the expansion used so
-/// the caller can report the invocation.
+/// Expand skill commands (`/skill:<name> [args]`) into the `<skill ...>` message block: a non-skill
+/// input, an unknown skill name (the surfaces show their own unknown-command notice), and a skill
+/// file that fails to read all pass through. Returns the skill the expansion used.
 #[must_use]
 pub fn expand_skill_command<'a>(text: &str, skills: &'a [Skill]) -> (String, Option<&'a Skill>) {
     let Some((name, args)) = parse_slash_command(text) else {

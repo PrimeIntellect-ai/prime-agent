@@ -1,35 +1,21 @@
-//! `pa-tui-replay`: render a captured agent session in the pa-tui agent view.
-//!
-//! Modes:
-//! - live (default): full-screen TUI in a real terminal; typing, editing keys,
-//!   and history navigation behave like the interactive product.
-//! - `--frame WxH`: render one 80x24-style frame as plain text to stdout
-//!   (headless structural dump for the tmux verifier).
-//! - `--panic-exit`: panic mid-loop after the first paint (the exit-restore
-//!   verifier's driver: a real unwind on a live surface must still leave
-//!   the terminal whole — alt screen left, cooked tty, no mode leaks).
-// Pedantic-gate exceptions (every other pedantic warning in this crate is
-// fixed in place; each exception carries its one-line justification):
-// - the casts: terminal-layout arithmetic narrows structurally bounded
-//   values (screen coordinates, byte counts, timestamps); guarded
-//   conversions would add panic paths the bounds guarantee away.
+//! `pa-tui-replay`: render a captured agent session in the pa-tui agent view. Modes: live
+//! (default) — full-screen TUI in a real terminal; `--frame WxH` — one frame as plain
+//! text to stdout (the tmux verifier); `--panic-exit` — panic mid-loop after the first
+//! paint (the exit-restore verifier: a real unwind must leave the terminal whole).
+// Casts: terminal-layout arithmetic narrows structurally bounded values.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// - the render routes are flat tables (one arm per route); splitting them
-//   would add indirection without changing the flow.
+// Flat route tables: splitting the arms would add indirection.
 #![allow(clippy::too_many_lines)]
-// - widget state structs carry independent flag bits; a nested struct
-//   would add indirection without changing the shape.
+// Independent flag bits: a nested struct would add indirection.
 #![allow(clippy::struct_excessive_bools, clippy::fn_params_excessive_bools)]
-// - the futures are bounded by the surface's lifetime; boxing them would
-//   add an allocation to the steady-state loop.
+// Futures are bounded by the surface's lifetime; boxing would add a per-loop allocation.
 #![allow(clippy::large_futures)]
-// - the wrappers preserve a uniform Result-returning API surface; unwrap
-//   removals would ripple through the callers without changing behavior.
+// Wrappers keep a uniform Result-returning API; removals would ripple through callers.
 #![allow(clippy::unnecessary_wraps)]
 
 use anyhow::{Context, Result};
@@ -125,8 +111,8 @@ fn main() -> Result<()> {
         Box::new(stream),
         &options,
         Box::new(|text| {
-            // In replay mode submissions print to the transcript as new user
-            // turns would be queued; nothing is sent to a model.
+            // Submissions print to the transcript; nothing is sent to a
+            // model.
             let _ = text;
         }),
     )

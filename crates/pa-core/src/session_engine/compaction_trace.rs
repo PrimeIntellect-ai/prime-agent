@@ -1,15 +1,7 @@
 //! Compaction phase tracing (debug seam, off by default): one line per
-//! phase boundary of the compaction pipeline, so a post-summary stall
-//! (the compacted text rendered but the compaction indicator keeps
-//! spinning) can be attributed to the phase that owns the extra time.
-//!
-//! `PA_COMPACTION_TRACE=1` (or `stderr`) writes stderr;
-//! `PA_COMPACTION_TRACE=<path>` appends one JSON line per boundary. The
-//! path must be a regular file (or creatable as one): the sink opens it
-//! once, synchronously, at the first trace line — a FIFO would block that
-//! first line until a reader appears. The first trace line of the
-//! process also starts the elapsed clock, so `elapsedMicros` on every
-//! line reads as time since the run began.
+//! phase boundary, so a post-summary stall can be attributed to its phase.
+//! `PA_COMPACTION_TRACE=1` (or `stderr`) writes stderr; `=<path>` appends
+//! one JSON line per boundary to a regular file (a FIFO would block).
 
 use std::io::Write;
 use std::sync::OnceLock;
@@ -37,9 +29,8 @@ fn sink() -> &'static Sink {
     })
 }
 
-/// One phase boundary. `phase` names the boundary (dotted
-/// `surface.stage[.what]`); `detail` carries phase-specific numbers
-/// (counts, byte sizes, entry ids).
+/// One phase boundary: `phase` names it (dotted `surface.stage[.what]`);
+/// `detail` carries phase-specific numbers.
 pub fn trace(phase: &str, detail: &serde_json::Value) {
     let sink = sink();
     if matches!(sink, Sink::Off) {

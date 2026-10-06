@@ -1,13 +1,10 @@
-//! The runtime boundary: typed execution modes and options, mirroring the
-//! `resolveAppMode` / `runtimeConfigFromArgs` split in `main.ts`. Crates that
-//! provide the real runtime (pa-core session engine, pa-daemon workers,
-//! pa-tui) plug in behind [`Runtime::run`] at merge time.
+//! The runtime boundary: typed execution modes and options. Crates that provide the
+//! real runtime plug in behind [`Runtime::run`] at merge time.
 
 use std::path::PathBuf;
 
 use crate::args::{Args, AutonomousConfig, Mode};
 
-/// The process-level execution mode, mirroring `AppMode` in main.ts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppMode {
     Interactive,
@@ -19,8 +16,8 @@ pub enum AppMode {
 }
 
 impl AppMode {
-    /// Resolve the execution mode from parsed args and stdin TTY state,
-    /// mirroring `resolveAppMode`.
+    /// Resolve the execution mode from parsed args and stdin TTY
+    /// state.
     #[must_use]
     pub fn resolve(parsed: &Args, stdin_is_tty: bool) -> AppMode {
         match parsed.mode {
@@ -50,7 +47,6 @@ impl AppMode {
         }
     }
 
-    /// The print output mode, mirroring `toPrintOutputMode`.
     #[must_use]
     pub fn print_output_mode(&self) -> Mode {
         match self {
@@ -60,16 +56,14 @@ impl AppMode {
     }
 }
 
-/// A seeded persistent goal (`initialGoal` in the runtime config).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitialGoal {
     pub objective: String,
     pub token_budget: Option<u32>,
 }
 
-/// The typed per-session runtime configuration, mirroring
-/// `AgentSessionRuntimeConfig`. This is the API boundary the pa-core/pa-ai
-/// crates consume at merge time.
+/// The typed per-session runtime configuration: the API boundary the
+/// pa-core/pa-ai crates consume at merge time.
 #[derive(Debug, Clone, Default)]
 #[allow(clippy::struct_excessive_bools)] // the mirrored `AgentSessionRuntimeConfig` API shape is deliberate
 pub struct RuntimeConfig {
@@ -101,23 +95,19 @@ pub struct RuntimeConfig {
 #[derive(Debug, Clone, Default)]
 #[allow(clippy::struct_excessive_bools)] // the selection's flag set is the deliberate client-side surface
 pub struct SessionOptions {
-    /// `--continue`/`-c`: the launch surfaces the newest saved session for
-    /// the cwd through the agents view (preselected, never a blind reopen)
-    /// and falls back to a fresh session without a candidate.
+    /// `--continue`/`-c`: the launch surfaces the newest saved session for the cwd
+    /// through the agents view (preselected, never a blind reopen).
     pub continue_recent: bool,
     pub resume_bare: bool,
     pub resume: Option<String>,
     pub fork: Option<String>,
     pub no_session: bool,
     pub session_dir: Option<PathBuf>,
-    /// True when `--cwd` selected the working directory; resumed sessions
-    /// then use that directory instead of the header cwd (main.ts
-    /// `explicitCwdOverride`).
+    /// True when `--cwd` selected the working directory; resumed
+    /// sessions then use that directory instead of the header cwd.
     pub cwd_from_flag: bool,
 }
 
-/// Everything the CLI hands to the runtime, mirroring what `main.ts` computes
-/// before entering the mode runners.
 #[derive(Debug, Clone)]
 pub struct RunOptions {
     pub app_mode: AppMode,
@@ -134,9 +124,8 @@ pub struct RunOptions {
     pub list_models: Option<Option<String>>,
     /// The combined first prompt (stdin + @file text + first message).
     pub initial_message: Option<String>,
-    /// The `@file` image attachments for the initial prompt (TS
-    /// `initialImages`; only the non-interactive prompt path sends them -
-    /// the interactive initial-message image arm is not yet wired).
+    /// The `@file` image attachments for the initial prompt; only the
+    /// non-interactive prompt path sends them (the interactive arm is unwired).
     pub initial_images: Vec<pa_agent::types::ImageContent>,
     pub verbose: bool,
     pub offline: bool,
@@ -180,9 +169,8 @@ impl std::fmt::Display for MissingSubsystem {
 
 impl std::error::Error for MissingSubsystem {}
 
-/// The runtime boundary. `run` executes the requested mode; the current build
-/// has only the [`UnavailableRuntime`] implementation, which produces typed
-/// [`MissingSubsystem`] errors for every mode that needs unmerged crates.
+/// The runtime boundary. `run` executes the requested mode; the current build has
+/// only [`UnavailableRuntime`] (typed [`MissingSubsystem`] errors).
 pub trait Runtime {
     /// Execute the requested mode.
     ///
@@ -207,10 +195,8 @@ impl Runtime for UnavailableRuntime {
     }
 }
 
-/// TS main.ts `telemetryDisabled = isTelemetryEnabled(settings) ? undefined
-/// : true`: env overrides first (`PI_OFFLINE` / `DO_NOT_TRACK` /
-/// `PRIME_AGENT_TELEMETRY`), then the settings AND. Returns true when
-/// telemetry is disabled for this invocation.
+/// Env overrides first (`PI_OFFLINE` / `DO_NOT_TRACK` / `PRIME_AGENT_TELEMETRY`),
+/// then the settings AND; `true` when disabled for this invocation.
 pub fn telemetry_disabled(settings: &pa_core::settings::SettingsManager) -> bool {
     !pa_core::session_engine::telemetry::telemetry_switch(settings).enabled()
 }
@@ -238,8 +224,8 @@ pub fn runtime_config_from_args(
     app_mode: AppMode,
     telemetry_disabled: bool,
 ) -> RuntimeConfig {
-    // isLocalPath: only npm:/git:/github:/http(s):/ssh: sources are not local;
-    // everything else resolves against the session cwd (utils/paths.ts).
+    // Only npm:/git:/github:/http(s):/ssh: sources are not local;
+    // everything else resolves against the session cwd.
     let is_local_path = |value: &str| {
         let trimmed = value.trim();
         !(trimmed.starts_with("npm:")
@@ -319,9 +305,8 @@ pub(crate) mod tests {
         for key in vars {
             std::env::remove_var(key);
         }
-        // Restore the env FIRST, then resume the panic: a failed
-        // assertion must fail the test (never swallow), and the restore
-        // must survive it.
+        // Restore the env FIRST, then resume the panic: a failed assertion must
+        // fail the test (never swallow).
         let outcome = std::panic::catch_unwind(body);
         for (key, value) in saved {
             match value {
@@ -334,10 +319,8 @@ pub(crate) mod tests {
         }
     }
 
-    /// The opt-out chain (the operator's explicit ask: nothing sends when
-    /// disabled): settings `telemetry.enabled=false` disables, and the env
-    /// overrides apply in the documented precedence - `DO_NOT_TRACK` and
-    /// `PI_OFFLINE` disable even against `PRIME_AGENT_TELEMETRY=1`.
+    /// The opt-out chain (the operator's explicit ask): `DO_NOT_TRACK`/`PI_OFFLINE` disable
+    /// even against `PRIME_AGENT_TELEMETRY=1`.
     #[test]
     fn telemetry_opt_out_resolves_disabled() {
         with_clean_telemetry_env(|| {
@@ -370,8 +353,7 @@ pub(crate) mod tests {
         });
     }
 
-    /// Default-on: a fresh install resolves enabled (telemetry stays on by
-    /// default, matching the TS posture) with the env overrides cleared.
+    /// A fresh install resolves enabled (the TS posture) with the env overrides cleared.
     #[test]
     fn telemetry_defaults_on() {
         with_clean_telemetry_env(|| {

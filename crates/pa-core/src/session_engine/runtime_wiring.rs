@@ -1,8 +1,7 @@
-//! Wires the session runtime (goal + rlm-heartbeat host bridge) and the
-//! Python kernel into the session engine build. This is the product-path
-//! equivalent of the TS `AgentSession` host-request controllers: the kernel
-//! provisioner receives the host-handler registry, and the agent loop gains
-//! the `ipython` tool backed by that kernel.
+//! Wires the session runtime (goal + rlm-heartbeat host bridge) and the Python kernel
+//! into the session engine build (the product-path equivalent of the TS `AgentSession`
+//! host-request controllers): the kernel provisioner receives the host-handler registry,
+//! and the agent loop gains the `ipython` tool backed by that kernel.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -27,9 +26,8 @@ use super::host_requests::SessionBinding;
 use super::rlm_host::{register_rlm_host_handlers, RlmHostBridge, RlmSubagentHost};
 use super::runtime::SessionRuntime;
 
-/// RLM inputs the session composition supplies: a shared model registry and
-/// the daemon child-session host. Both optional; defaults are derived from
-/// `agent_dir` (registry) or the no-children behavior (host).
+/// RLM inputs the session composition supplies: a shared model registry and the daemon
+/// child-session host; defaults derive from `agent_dir` or the no-children behavior.
 #[derive(Default)]
 pub struct RlmWiring {
     /// Registry `rlm.find_models` searches. Defaults to the `agent_dir` catalog.
@@ -40,31 +38,24 @@ pub struct RlmWiring {
 }
 
 /// The embedding's cron wiring for the kernel's `rlm_heartbeat.*` host
-/// requests (TS daemon-mode wires its `AgentCronJobStore.forSessionArtifacts()`
-/// into the session runtime): the shared store plus the durable session
-/// identity the kernel-created jobs bind to.
+/// requests: the shared store plus the durable session identity the
+/// kernel-created jobs bind to.
 #[derive(Clone)]
 pub struct KernelCronWiring {
     /// The daemon worker's scheduled-jobs store.
     pub store: std::sync::Arc<crate::cron::store::AgentCronJobStore>,
-    /// The session identity kernel-created jobs bind to; `None` until the
-    /// embedding knows it (the engine falls back to the in-memory
-    /// manager's identity).
+    /// `None` until the embedding knows it (the engine falls back to the
+    /// in-memory manager's identity).
     pub binding: Option<KernelCronBinding>,
-    /// The post-mutation seam for kernel `rlm_heartbeat.*` requests (TS
-    /// daemon-mode's `removeQueuedHeartbeatFollowUp` +
-    /// `cronScheduler.wake()` inside its rlm heartbeat controllers):
-    /// the daemon worker's hook; `None` leaves mutations unannounced
-    /// (the embedded/standalone default).
+    /// The post-mutation seam for kernel `rlm_heartbeat.*` requests;
+    /// `None` leaves mutations unannounced (the embedded default).
     pub mutation_hook: Option<super::host_requests::RlmHeartbeatMutationHook>,
 }
 
 /// The live/durable session identity for kernel-created rlm heartbeats.
 #[derive(Clone, Debug)]
 pub struct KernelCronBinding {
-    /// The live active session id the daemon routes commands by (TS
-    /// `options.activeSessionId`): the supervisor's `heartbeat_manage`
-    /// resolves it.
+    /// The live active session id the daemon routes commands by.
     pub active_session_id: String,
     /// The durable session id the store partitions by.
     pub session_id: String,
@@ -80,14 +71,13 @@ impl std::fmt::Debug for KernelCronWiring {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("KernelCronWiring")
             .field("binding", &self.binding)
-            // The store + the hook are deliberately opaque (the type has no
-            // meaningful debug form): `..` documents the omission.
+            // `..` documents the deliberately-opaque store + hook.
             .finish_non_exhaustive()
     }
 }
 
-/// Session-scoped runtime wiring: the shared session manager handle, the
-/// kernel host-handler registry, and the runtime itself.
+/// Session-scoped runtime wiring: the shared session manager handle,
+/// the kernel host-handler registry, and the runtime itself.
 pub struct SessionKernelWiring {
     pub session: Arc<tokio::sync::Mutex<SessionManager>>,
     pub handlers: HostRequestHandlers,
@@ -99,10 +89,8 @@ pub struct SessionKernelWiring {
     pub rlm_usage: Arc<super::rlm_usage::RlmChildUsageAttributions>,
 }
 
-/// Build the session runtime and register the `goal.*`, `rlm_heartbeat.*`,
-/// and `rlm.*` host handlers the kernel reaches through its registry.
-/// `goal_complete_purge` is the embedding's queued-goal-context purge (TS
-/// `_completeGoalFromHost` -> `_clearQueuedGoalContexts`).
+/// Build the session runtime and register the `goal.*`, `rlm_heartbeat.*`, and `rlm.*`
+/// host handlers; `goal_complete_purge` is the embedding's queued-goal-context purge.
 #[must_use]
 pub fn wire_session_runtime(
     session: SessionManager,
@@ -111,13 +99,10 @@ pub fn wire_session_runtime(
     goal_complete_purge: Option<QueuedGoalContextPurge>,
     cron_store: Option<KernelCronWiring>,
 ) -> SessionKernelWiring {
-    // The embedding's durable session identity overrides the in-memory
-    // manager's when supplied (see [`KernelCronWiring`]): the daemon worker
-    // owns the session file, so the engine's manager never carries it, but
-    // kernel-created rlm heartbeats must bind the live session id the
-    // supervisor routes commands by, plus the durable id + file (the
-    // partition the store writes and the rebind pass moves onto live
-    // sessions).
+    // The embedding's durable session identity overrides the in-memory manager's
+    // when supplied: kernel-created rlm heartbeats must bind the live session id the
+    // supervisor routes by, plus the durable id + file (the partition the store writes
+    // and the rebind pass moves onto live sessions).
     let fallback_binding = || {
         (
             session.get_session_id().to_string(),
@@ -145,10 +130,9 @@ pub fn wire_session_runtime(
         ),
         None => fallback_binding(),
     };
-    // An embedding-owned store (the daemon worker's scheduled-jobs store)
-    // replaces the engine-private one, so kernel `rlm_heartbeat.*` writes
-    // reach the daemon catalog; the private file store remains the
-    // embedded/standalone default.
+    // An embedding-owned store replaces the engine-private one, so
+    // kernel `rlm_heartbeat.*` writes reach the daemon catalog; the
+    // private file store remains the embedded/standalone default.
     let mutation_hook = cron_store
         .as_ref()
         .and_then(|wiring| wiring.mutation_hook.clone());
@@ -172,10 +156,9 @@ pub fn wire_session_runtime(
         let mut registry =
             crate::models::registry::ModelRegistry::create(auth, agent_dir.join("models.json"));
         // Adopt the on-disk private authorization before freezing the Arc:
-        // `rlm.find_models` and child-spawn resolution search this registry,
-        // and a fresh registry otherwise gates every private
-        // `internal/*` model out (only the async refresh populates the
-        // authorized set).
+        // `rlm.find_models` and child-spawn resolution search this registry, and a
+        // fresh registry otherwise gates every private `internal/*` model out (only
+        // the async refresh populates the authorized set).
         registry.load_private_authorization_from_cache();
         Arc::new(registry)
     });
@@ -217,20 +200,10 @@ pub fn kernel_python_skills(skills: &[Skill]) -> Vec<KernelPythonSkill> {
         .collect()
 }
 
-/// Build the kernel provisioner for a session: host handlers for the
-/// goal/heartbeat bridge plus the pre-imported Python skills.
-///
-/// The session's agent dir is propagated explicitly into the kernel env
-/// (`PRIME_AGENT_CODING_AGENT_DIR`): ambient inheritance is correct for the
-/// product paths, but an embedding host whose ambient env differs from the
-/// session's agent dir must not leak its own paths into the kernel. Same
-/// discipline as the daemon worker env (#109).
-///
-/// `cwd` is the SESSION's working directory (TS
-/// `new IpythonKernelProvisioner(this._cwd, ...)`), not the host process's:
-/// the kernel-resident tools (bash/edit) run there, and a runtime whose
-/// session cwd differs from the process cwd (a daemon worker switched onto
-/// another session file) must spawn the kernel in the session's cwd.
+/// Build the kernel provisioner for a session: host handlers for the goal/heartbeat bridge
+/// plus the pre-imported skills. The session's agent dir is propagated into the kernel env
+/// (`PRIME_AGENT_CODING_AGENT_DIR`): an embedding host whose ambient env differs must not
+/// leak its own paths into the kernel (#109). `cwd` is the SESSION's working directory.
 #[allow(clippy::too_many_arguments)] // one wiring funnel, same style as AgentSession::from_session_arc
 #[must_use]
 pub fn kernel_provisioner(
@@ -260,9 +233,8 @@ pub fn kernel_provisioner(
             session_id: Some(session_id),
             host_handlers: handlers,
             python_skills,
-            // Only persistent sessions (which have an artifact dir) get a
-            // revivable snapshot, TS `snapshotDir` (the session artifact
-            // dir).
+            // Only persistent sessions (which have an artifact dir) get
+            // a revivable snapshot (TS `snapshotDir`).
             snapshot_dir,
             ready_gate: None,
             on_restore,
@@ -297,8 +269,7 @@ impl IpythonKernelProvisioner for KernelProvisioner {
     }
 }
 
-/// Adapts the kernel manager to the ipython tool's executor contract,
-/// converting the kernel protocol result to the tool-facing shape.
+/// Adapts the kernel manager to the ipython tool's executor contract.
 struct KernelManagerExecutor {
     manager: crate::kernel::manager::ReplKernelManager,
 }

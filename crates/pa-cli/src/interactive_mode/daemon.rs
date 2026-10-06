@@ -1,6 +1,5 @@
-//! The daemon-ensure concern (moved with its concern): the socket
-//! probe, the stale-daemon shutdown, the detached supervisor spawn,
-//! and the startup poll window with its timing consts.
+//! The daemon-ensure concern: the socket probe, the stale-daemon shutdown, the
+//! detached supervisor spawn, and the startup poll window.
 
 use anyhow::Context as _;
 
@@ -20,16 +19,11 @@ const DAEMON_SHUTDOWN_WAIT_MS: u64 = 5_000;
 /// the timeout error are unchanged.
 const DAEMON_PROBE_INTERVAL_MS: u64 = 1;
 
-/// The daemon probe outcome (TS `DaemonVersionProbe`).
 enum DaemonProbe {
-    /// No socket answered.
     Absent,
-    /// A supervisor answered whose protocol/schema matches this build.
     Current,
-    /// A supervisor answered with a different protocol/schema. The client
-    /// rides boxed: its size is platform-dependent (the win32 transport
-    /// carries the pipe handles), and the box keeps the enum's other
-    /// arms paying nothing for the largest one.
+    /// A supervisor answered with a different protocol/schema. The client rides
+    /// boxed: its size is platform-dependent, so the box keeps the other arms small.
     Stale(Box<pa_tui::daemon_client::DaemonClient>),
 }
 
@@ -54,14 +48,13 @@ async fn probe_daemon(socket_path: &Path) -> DaemonProbe {
 }
 
 /// Ensure a current daemon is listening on `socket_path`, spawning this
-/// executable in `--mode daemon` when it is not (TS `ensureDaemonRunning`:
-/// probe; a stale idle daemon is shut down, a busy one refuses replacement).
+/// executable in `--mode daemon` when it is not (a stale idle daemon is
+/// shut down, a busy one refuses replacement).
 ///
 /// # Errors
-/// Returns an error when this process's executable path cannot be
-/// resolved, when a stale daemon has active work and refuses replacement,
-/// when the supervisor process cannot be spawned, or when no current
-/// daemon starts before the startup timeout.
+/// Returns an error when the executable path cannot be resolved, a stale
+/// daemon refuses replacement, the supervisor cannot be spawned, or no
+/// current daemon starts before the startup timeout.
 pub async fn ensure_daemon_running(socket_path: &Path, spawn_cwd: &Path) -> Result<()> {
     match probe_daemon(socket_path).await {
         DaemonProbe::Current => return Ok(()),
@@ -73,11 +66,11 @@ pub async fn ensure_daemon_running(socket_path: &Path, spawn_cwd: &Path) -> Resu
 }
 
 /// [`ensure_daemon_running`] with an explicit supervisor executable (the
-/// product path uses this process's own binary, TS parity).
+/// product path uses this process's own binary).
 ///
 /// # Errors
-/// Returns an error when the supervisor process cannot be spawned or when
-/// no current daemon starts before the startup timeout.
+/// Returns an error when the supervisor cannot be spawned or no current
+/// daemon starts before the startup timeout.
 pub async fn ensure_daemon_running_with(
     exe: &Path,
     socket_path: &Path,
@@ -98,9 +91,8 @@ pub async fn ensure_daemon_running_with(
         match probe_daemon(socket_path).await {
             DaemonProbe::Current => return Ok(()),
             DaemonProbe::Stale(client) => {
-                // A concurrent launcher won the socket with a build whose
-                // protocol matches ours at connect time but failed the
-                // schema check: re-probe before deciding.
+                // A concurrent launcher won the socket with a build whose protocol matches at
+                // connect time but failed the schema check: re-probe before deciding.
                 client.close();
             }
             DaemonProbe::Absent => {}
@@ -115,8 +107,8 @@ pub async fn ensure_daemon_running_with(
     }
 }
 
-/// Shut a stale daemon down when no session is busy (TS
-/// `shutdownStaleDaemonIfNotBusy`); a busy one refuses replacement.
+/// Shut a stale daemon down when no session is busy; a busy one refuses
+/// replacement.
 async fn shutdown_stale_daemon(
     client: pa_tui::daemon_client::DaemonClient,
     socket_path: &Path,
@@ -147,7 +139,6 @@ async fn shutdown_stale_daemon(
             socket_path.display()
         ));
     }
-    // Idle: replace it.
     if let Ok((client, _)) = pa_tui::daemon_client::DaemonClient::connect(socket_path).await {
         let _ = client
             .request_ok(pa_types::daemon::DaemonCommand::Shutdown {
@@ -174,8 +165,8 @@ async fn wait_for_socket_gone(socket_path: &Path) -> bool {
     false
 }
 
-/// Spawn a detached supervisor on `socket_path` (TS spawns its own entrypoint
-/// with `--mode daemon --daemon-socket`; the child outlives this CLI).
+/// Spawn a detached supervisor on `socket_path` (the child outlives this
+/// CLI).
 fn spawn_supervisor_detached(socket_path: &Path, spawn_cwd: &Path, exe: &Path) -> Result<()> {
     let mut command = Command::new(exe);
     command
@@ -186,9 +177,9 @@ fn spawn_supervisor_detached(socket_path: &Path, spawn_cwd: &Path, exe: &Path) -
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         // Strip inherited worker/supervisor role env vars so the spawned
-        // supervisor never starts in worker mode (a CLI running inside a
-        // daemon worker would otherwise launch a supervisor that listens but
-        // never handshakes) — the TS launcher deletes the same set.
+        // supervisor never starts in worker mode (a CLI inside a worker would
+        // otherwise launch a supervisor that listens but never handshakes) —
+        // the TS launcher deletes the same set.
         .env_remove(pa_daemon::worker::WORKER_ROLE_ENV)
         .env_remove(pa_daemon::worker::WORKER_TOKEN_ENV)
         .env_remove(pa_daemon::worker::WORKER_ACTIVE_SESSION_ID_ENV)
@@ -197,10 +188,8 @@ fn spawn_supervisor_detached(socket_path: &Path, spawn_cwd: &Path, exe: &Path) -
         .env_remove(pa_daemon::worker::WORKER_SOCKET_ENV)
         .env_remove(pa_daemon::worker::WORKER_INSTANCE_ID_ENV)
         .env_remove(pa_daemon::worker::WORKER_SCRIPT_ENV)
-        // A lease owner id inherited from an ancestor (a CLI running
-        // inside a worker's env) would name a stale session in every
-        // lease this daemon's workers write — TS `daemon-launch.ts`
-        // deletes the same var before spawning the supervisor.
+        // A lease owner id inherited from an ancestor would name a stale session in every
+        // lease this daemon's workers write — TS deletes the same var before spawning.
         .env_remove(pa_daemon::lease::SESSION_LEASE_OWNER_ID_ENV);
     // A daemon must not share the launching TUI's terminal session: a
     // session-wide terminal cleanup could hang it up after the TUI exits.

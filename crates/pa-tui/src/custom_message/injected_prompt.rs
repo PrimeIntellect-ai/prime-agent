@@ -28,8 +28,8 @@ use crate::theme::{Theme, ThemeColor};
 use crate::{Line, Span};
 use serde_json::Value;
 
-/// One injected prompt row (TS `InjectedPromptMessageComponent`); the kind
-/// picks the header shape, `body` renders as markdown when expanded.
+/// One injected prompt row; the kind picks the header shape, `body`
+/// renders as markdown when expanded.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InjectedPromptRow {
     pub kind: InjectedPromptKind,
@@ -39,20 +39,19 @@ pub struct InjectedPromptRow {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum InjectedPromptKind {
-    /// `◷ Heartbeat prompt · <schedule>` (error pulse, muted label; the
-    /// clock glyph is the dock's Heartbeats icon — the operator-directed
-    /// divergence in the module docs).
+    /// `◷ Heartbeat prompt · <schedule>` (the clock glyph is the dock's
+    /// Heartbeats icon — the module docs' divergence).
     Heartbeat { schedule: Option<String> },
     /// `<goal label>[ · <objective preview>]` (muted; TS `goalLabel`/`metaText`).
     Goal {
         kind: Option<String>,
         objective: Option<String>,
     },
-    /// `◆ Restored Python kernel state` / `◆ Started fresh Python kernel`.
+    /// `◆ Restored Python kernel state` / `◆ Started fresh Python
+    /// kernel`.
     KernelRestored { restored: bool },
     /// `Python skills unavailable · <skill names>` (muted label, dim
-    /// names; TS PR #2381's header — no marker glyph), expandable to the
-    /// full report.
+    /// names, no marker glyph), expandable to the full report.
     PythonSkillsUnavailable { skills: Vec<String> },
 }
 
@@ -138,13 +137,12 @@ fn prompt_header(row: &InjectedPromptRow, theme: &Theme) -> Line {
     let muted = theme.fg_style(ThemeColor::Muted);
     let dim = theme.fg_style(ThemeColor::Dim);
     let accent = theme.fg_style(ThemeColor::Accent);
-    // TS `InjectedPromptMessageComponent.updateDisplay`: the header always
-    // renders; the expanded form adds the markdown body below it (the
-    // kernel-state row stays header-only).
+    // The header always renders; the expanded form adds the markdown
+    // body below it.
     let header: Line = match &row.kind {
         InjectedPromptKind::Heartbeat { schedule } => vec![
-            // The ◷ clock (the dock's Heartbeats icon), not the TS ♥ heart:
-            // the operator-directed divergence in the module docs.
+            // The ◷ clock (the module docs' divergence from the TS ♥
+            // heart).
             Span::styled("\u{25f7}".to_string(), theme.fg_style(ThemeColor::Error)),
             Span::raw(" "),
             Span::styled("Heartbeat prompt".to_string(), muted),
@@ -210,10 +208,8 @@ fn expanded_prompt_body(row: &InjectedPromptRow, detail: Detail) -> Option<&str>
         .filter(|_| detail.tool_output_expanded())
 }
 
-/// TS `heartbeatPromptSchedule` over `compactHeartbeatSchedule`: a blank
-/// schedule shows as `scheduled` (the `prompt` compact form), every other
-/// expression as `every <expression>` (a leading case-insensitive `every`
-/// plus whitespace stripped from the stored expression first).
+/// A blank schedule shows as `scheduled`, every other expression as `every <expression>`
+/// (a leading case-insensitive `every` plus whitespace stripped first).
 fn heartbeat_schedule(schedule: Option<&str>) -> String {
     let trimmed = schedule.map_or("", str::trim);
     let compact = if trimmed.is_empty() {
@@ -233,7 +229,6 @@ fn heartbeat_schedule(schedule: Option<&str>) -> String {
     }
 }
 
-/// TS `goalLabel`.
 fn goal_label(kind: Option<&str>) -> String {
     match kind {
         Some("continuation") => "Goal continuation",
@@ -244,9 +239,8 @@ fn goal_label(kind: Option<&str>) -> String {
     .to_string()
 }
 
-/// TS `metaText`: ` \u{b7} <collapsed objective>` truncated to the TS budget
-/// (`max(20, 90 - width("Goal continuation \u{b7} "))` = 70) with the default
-/// `...` ellipsis.
+/// ` \u{b7} <collapsed objective>` truncated to the 70-column budget with
+/// the default `...` ellipsis.
 fn goal_meta(objective: &str) -> String {
     let collapsed: String = objective.split_whitespace().collect::<Vec<_>>().join(" ");
     format!(" \u{b7} {}", truncate_text(&collapsed, 70, "..."))
@@ -329,11 +323,8 @@ mod tests {
             let rows = render_injected_prompt(&row, Detail::Overview, &theme(), 60);
             assert_eq!(flat(&rows[1]).trim_end(), format!(" {label}"));
         }
-        // A long objective truncates to the TS budget with the default
-        // `...` ellipsis, after whitespace collapsing. TS `metaText`
-        // truncates only the objective (70 columns); the rendered row
-        // adds the 1-column inset plus the 20-column
-        // `Goal continuation \u{b7} ` prefix for a 91-wide line.
+        // A long objective truncates to the 70-column budget after whitespace collapsing;
+        // the rendered row adds the inset plus the 20-column prefix for a 91-wide line.
         let objective = format!("{} tail", "word ".repeat(15));
         let row = InjectedPromptRow {
             kind: InjectedPromptKind::Goal {
@@ -349,7 +340,6 @@ mod tests {
         let visible: String = meta.trim_end_matches('.').to_string();
         let preview = visible.trim_end();
         assert_eq!(str_width(preview) + 3, 91, "meta {meta:?}");
-        // The truncated objective alone stays within the TS budget.
         let prefix = " Goal continuation \u{b7} ";
         assert_eq!(
             str_width(preview.trim_start_matches(prefix)) + 3,
@@ -360,8 +350,7 @@ mod tests {
 
     #[test]
     fn python_skills_unavailable_header_shapes() {
-        // Collapsed: muted label + dim names (the TS header has no marker
-        // glyph); no body.
+        // Collapsed: muted label + dim names, no body.
         let row = InjectedPromptRow {
             kind: InjectedPromptKind::PythonSkillsUnavailable {
                 skills: vec!["websearch".to_string(), "edit".to_string()],
@@ -383,7 +372,6 @@ mod tests {
             flat(&rows[1]).trim_end(),
             " Python skills unavailable \u{b7} websearch, edit"
         );
-        // The names truncate to the TS budget (62 columns, `...`).
         let long: Vec<String> = (0..12).map(|i| format!("skill-{i}")).collect();
         let row = InjectedPromptRow {
             kind: InjectedPromptKind::PythonSkillsUnavailable { skills: long },
@@ -415,7 +403,6 @@ mod tests {
                 body: None,
             };
             let rows = render_injected_prompt(&row, Detail::All, &theme(), 60);
-            // Header only, no body even expanded.
             assert_eq!(rows.len(), 2, "{rows:?}");
             assert_eq!(flat(&rows[1]).trim_end(), format!(" \u{25c6} {label}"));
         }

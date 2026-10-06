@@ -1,17 +1,7 @@
-//! The owned-session and worker-recovery surface (protocol breadth wave
-//! b9): the supervisor arms for `complete_owned_session`,
-//! `promote_owned_session`, and `retry_worker` (TS daemon-supervisor
-//! `case "complete_owned_session"` / `case "promote_owned_session"` /
-//! `case "retry_worker"` + `promoteOwnedWorker` / `retryWorkerRecovery`).
-//!
-//! A worker is client-owned while its descriptor carries `ownerClientId`
-//! (the creating client's id, stamped by `handle_create`). `complete`/`
-//! promote` move that ownership: completing stops the owned worker (the
-//! TS `stopWorker` cleanup), promoting clears the owner so the session
-//! outlives its creating client. `retry_worker` is the supervisor's
-//! manual recovery trigger (the audit's fix: the Rust supervisor
-//! previously routed it to the worker, which answered the unknown-worker
-//! error instead of recovering).
+//! The owned-session and worker-recovery surface: `complete_owned_session`
+//! stops the owned worker, `promote_owned_session` clears the owner so the
+//! session outlives its creating client, and `retry_worker` is the
+//! supervisor's manual recovery trigger (the worker never sees it).
 
 use std::sync::Arc;
 
@@ -27,17 +17,11 @@ use crate::supervisor::{Supervisor, ROUTE_TIMEOUT_MS};
 
 impl Supervisor {
     /// Resolve the resident a `retry_worker` targets: the direct match on
-    /// the root active session id or the root persisted session id (TS
-    /// `direct`), then the generic selector resolution. This is the ONE
-    /// descriptor-scan primitive behind the owned-session arms
-    /// (`complete_owned_session`, `promote_owned_session`,
-    /// `retry_worker`), so the boot-reconciliation quarantine fences
-    /// HERE, by construction: a quarantined resident's descriptor never
-    /// matches — a `retry_worker` with a superseded durable id must not
-    /// reach the live-but-unreconciled worker (its summary would name the
-    /// wrong session, and a disconnected one would RELAUNCH the stale
-    /// persisted create path). The refusal reads as the unknown session —
-    /// the conservative miss, never a route on the unreconciled identity.
+    /// the root active session id or the root persisted session id, then
+    /// the generic selector resolution. This is the ONE descriptor-scan
+    /// primitive behind the owned-session arms, so the boot-reconciliation
+    /// quarantine fences HERE: a quarantined resident never matches, and
+    /// the refusal reads as the unknown session.
     async fn resolve_retry_target(&self, selector: &str) -> Result<Arc<ResidentWorker>, String> {
         for resident in self.registry.list().await {
             if resident.identity_quarantined() {
@@ -86,11 +70,9 @@ impl Supervisor {
             );
         }
         // TS `stopWorker`: the owned stop tears the worker down; the
-        // ephemeral schedule cancel (`cancelEphemeralWorkerScheduledJobs`)
-        // rides `stop_worker` itself, keyed on the descriptor's owner. The
-        // stop's durable intent persists before the worker is told, and a
-        // persist failure fails the owned stop (TS throws) instead of
-        // stopping an untombstoned worker.
+        // ephemeral schedule cancel rides `stop_worker` itself. The stop's
+        // durable intent persists before the worker is told, and a persist
+        // failure fails the owned stop.
         if let Err(error) = self.stop_worker(&resident).await {
             return Self::owned_failure(
                 command_id,
@@ -110,7 +92,6 @@ impl Supervisor {
 
     /// `promote_owned_session`: the owner clears the ownership so the
     /// session outlives its creating client (TS `promoteOwnedWorker`).
-    /// The response carries the session's public summary.
     pub(crate) async fn handle_promote_owned_session(
         self: &Arc<Self>,
         command: &DaemonCommand,
@@ -353,12 +334,10 @@ mod tests {
     }
 
     /// The boot-reconciliation quarantine fences the owned-session scan:
-    /// a `retry_worker`/`complete`/`promote` selector — the address OR the
-    /// OLD durable id — never reaches a live-but-unreconciled worker
-    /// (whose summary would name the wrong session, or whose relaunch
-    /// would replay the stale persisted create path). The live word
-    /// (the worker's own roster push) reconciles the identity and the
-    /// scan serves again — on the reconciled identity only.
+    /// the address OR the OLD durable id never reaches the unreconciled
+    /// worker; the live word (the worker's own roster push) reconciles
+    /// the identity and the scan serves again — on the reconciled
+    /// identity only.
     #[tokio::test]
     async fn the_owned_session_scan_refuses_a_quarantined_identity() {
         let dir = std::env::temp_dir().join(format!("pa-own-{}", uuid::Uuid::new_v4()));
@@ -366,8 +345,6 @@ mod tests {
         let supervisor = supervisor_with_stale_identity(&dir).await;
         let resident = supervisor.registry.get("w-a").await.expect("resident");
 
-        // The quarantined boot outcome: every owned-session selector
-        // refuses — the address AND the stale persisted durable id.
         resident.mark_identity_quarantined();
         assert!(
             supervisor.resolve_retry_target("w-a").await.is_err(),
@@ -412,9 +389,8 @@ mod tests {
             .await;
         assert!(response.success, "the delta applied: {response:?}");
 
-        // The scan serves again — the address resolves, and the OLD
-        // durable id stays unresolvable (the identity moved; the stale
-        // persisted id must never reach the worker again).
+        // The scan serves again: the address resolves, the OLD durable id
+        // never does.
         let resolved = supervisor
             .resolve_retry_target("w-a")
             .await

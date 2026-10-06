@@ -1,26 +1,16 @@
-//! The session-hold refusal e2e: a create the reuse seam cannot answer —
-//! the file's holder is a live FOREIGN process (the TypeScript product's
-//! daemon or one of its surviving workers, on the shared session store) —
-//! rejects with the descriptive refusal and its typed wire info, and the
-//! daemon logs the detected conflict. Untyped create failures keep the
-//! supervisor's wrap (the control).
-// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
-// the full rationale).
-// Stack-resident futures by design on the daemon's hot paths; boxing the
-// call sites for a lint tick is a perf regression with zero correctness gain.
+//! Session-hold refusal e2e: a create whose file's holder is a live FOREIGN
+//! process (the TypeScript product's daemon or workers, on the shared session
+//! store) rejects with the descriptive refusal and its typed wire info, and
+//! the daemon logs the conflict. Untyped create failures keep the wrap (control).
 #![allow(clippy::large_futures)]
-// 64-bit-only targets; the narrowing casts sit at OS boundaries
-// (pid/fd/time/size) where the values are bounded by the kernel - the
-// dead-guard expect()s would add panic paths where silent wrap was
-// deliberate.
+// 64-bit-only targets; the narrowing casts sit at bounded OS boundaries.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// The fn-length threshold is a style gate, not correctness; the structure
-// campaign owns the god-fn splits as a follow-up.
+// Fn length is a style gate, not correctness.
 #![allow(clippy::too_many_lines)]
 // API-shape opinions, not defects; the surfaces are deliberate.
 #![allow(
@@ -52,8 +42,7 @@ impl Drop for Daemon {
     }
 }
 
-// The timeout panic path cannot wait on the child; the test process exits
-// immediately afterwards, reaping it.
+// The timeout panic path cannot wait on the child; the test process exits and reaps it.
 #[allow(clippy::zombie_processes)]
 fn spawn_daemon(socket: &Path, agent_dir: &Path) -> Daemon {
     let mut command = Command::new(env!("CARGO_BIN_EXE_pa-daemon"));
@@ -170,7 +159,6 @@ fn write_script(dir: &Path, responses: &[&str]) -> PathBuf {
     script_path
 }
 
-/// The session's durable file (TS `get_session_stats` -> sessionFile).
 fn session_file_of(client: &mut Client, id: &str, request_id: &str) -> String {
     client.send_command(
         request_id,
@@ -184,8 +172,6 @@ fn session_file_of(client: &mut Client, id: &str, request_id: &str) -> String {
         .to_string()
 }
 
-/// The active id a create response answered (the summary's `id`, the same
-/// field a pane attaches by).
 fn create_session(client: &mut Client, request_id: &str, config: &Value) -> (String, Value) {
     client.send_command(request_id, &json!({ "type": "create", "config": config }));
     let created = client.read_response(request_id);
@@ -198,25 +184,17 @@ fn create_session(client: &mut Client, request_id: &str, config: &Value) -> (Str
     (id, created)
 }
 
-/// A create over a file a live FOREIGN process holds — this test process
-/// stands in for the other product's daemon worker, exactly the role the
-/// TypeScript product's holder plays on the shared session store — answers
-/// with the session-hold refusal (the descriptive text, never the bare
-/// `Session is already active` dump, never the untyped
-/// `session worker create failed` wrap), carries the typed
-/// `session_already_active` wire info, and leaves the detected conflict
-/// in the daemon's rotating log.
+/// A create over a file a live FOREIGN process holds (this test process stands in for the
+/// other product's worker) answers the session-hold refusal with the typed wire info.
 #[test]
 fn a_foreign_lease_holder_rejects_the_create_with_the_hold_refusal() {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let socket = dir.path().join("daemon.sock");
     let agent_dir = dir.path().join("agent");
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
-    // The sessions dir must exist before the create: the lease stores the
-    // canonical session path, and on macOS a not-yet-existing parent
-    // canonicalizes differently than the file does once it exists (the
-    // /var -> /private/var symlink), which breaks the kill path's append
-    // ownership on this platform (a base-red the Linux CI does not see).
+    // The sessions dir must exist before the create: on macOS a not-yet-existing
+    // parent canonicalizes differently than the existing file (the /var ->
+    // /private/var symlink), which breaks the kill path's append ownership.
     std::fs::create_dir_all(agent_dir.join("sessions")).expect("sessions dir");
     let _daemon = spawn_daemon(&socket, &agent_dir);
 
@@ -227,14 +205,12 @@ fn a_foreign_lease_holder_rejects_the_create_with_the_hold_refusal() {
         "script": script_path.to_string_lossy(),
     });
 
-    // One session exists so the refusal targets a real file.
     let mut client = Client::connect(&socket);
     let (worker_id, _created) = create_session(&mut client, "c1", &create_config);
     let session_file = session_file_of(&mut client, &worker_id, "s1");
 
     // The worker dies so no resident serves the file: the holder below is
-    // genuinely foreign to this daemon (this test process, in the role of
-    // the other product's worker).
+    // genuinely foreign to this daemon.
     client.send_command(
         "k1",
         &json!({ "type": "kill", "activeSessionId": worker_id }),
@@ -242,9 +218,8 @@ fn a_foreign_lease_holder_rejects_the_create_with_the_hold_refusal() {
     let killed = client.read_response("k1");
     assert_eq!(killed["success"], true, "kill failed: {killed}");
 
-    // The foreign holder: THIS test process takes the runtime lease, naming
-    // a known active session — the same record the TypeScript product's
-    // holder writes on the shared session store.
+    // The foreign holder: THIS test process takes the runtime lease, naming a known
+    // active session — the same record the TypeScript product's holder writes.
     std::env::set_var(pa_daemon::lease::SESSION_LEASES_ENABLED_ENV, "1");
     std::env::set_var(
         pa_daemon::lease::SESSION_LEASE_OWNER_ID_ENV,
@@ -257,8 +232,6 @@ fn a_foreign_lease_holder_rejects_the_create_with_the_hold_refusal() {
     .expect("lease acquire probe")
     .expect("the lease must be held");
 
-    // The create over the held file rejects with the refusal, not the bare
-    // dump and not the supervisor's untyped wrap.
     client.send_command(
         "c2",
         &json!({
@@ -293,10 +266,8 @@ fn a_foreign_lease_holder_rejects_the_create_with_the_hold_refusal() {
         error.contains("Session: foreign01ab3c"),
         "the footer names the session: {error}"
     );
-    // This test process runs a build of this product (the cargo test
-    // binary under /target/), so the holder classification reads as
-    // another Rust build, never as the TypeScript product or an unnamed
-    // process.
+    // This test process runs a build of this product, so the holder classification
+    // reads as another Rust build, never the TypeScript product.
     assert!(
         error.starts_with("This session is currently open in another Rust build of Prime Agent"),
         "the holder is classified, not guessed: {error}"
@@ -310,8 +281,8 @@ fn a_foreign_lease_holder_rejects_the_create_with_the_hold_refusal() {
         "the typed rejection relays verbatim, never under the untyped wrap: {error}"
     );
 
-    // The typed wire info carries the raw fields (the TS
-    // `serializeDaemonError` shape) for clients that render or act on it.
+    // The typed wire info carries the raw fields (the TS `serializeDaemonError` shape)
+    // for clients that render or act on it.
     assert_eq!(
         rejected["errorInfo"]["code"], "session_already_active",
         "{rejected}"
@@ -330,8 +301,8 @@ fn a_foreign_lease_holder_rejects_the_create_with_the_hold_refusal() {
         "the wire info carries the canonical session path: {rejected}"
     );
 
-    // The daemon logs the detected conflict itself — not just the raw
-    // session-worker failure — in the rotating log beside its socket.
+    // The daemon logs the detected conflict itself in the rotating log beside its
+    // socket.
     let log_path = pa_daemon::paths::daemon_log_path(&socket, &agent_dir);
     let log = std::fs::read_to_string(&log_path).unwrap_or_default();
     assert!(
@@ -347,8 +318,8 @@ fn a_foreign_lease_holder_rejects_the_create_with_the_hold_refusal() {
         "the daemon log carries the refusal: {log}"
     );
 
-    // An untyped create failure keeps the supervisor's wrap (the control):
-    // a corrupt session file fails inside the worker's open.
+    // An untyped create failure keeps the supervisor's wrap (the control): a
+    // corrupt session file fails inside the worker's open.
     let corrupt = dir.path().join("corrupt-session.jsonl");
     std::fs::write(&corrupt, "this is not session jsonl\n").expect("write corrupt file");
     client.send_command(

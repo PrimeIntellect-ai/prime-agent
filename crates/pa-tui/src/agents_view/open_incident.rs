@@ -1,8 +1,6 @@
-//! The open flow (the entry anchor, the subagent list toggle, the
-//! row-open funnel with its finish bookkeeping and the scope back/
-//! root navigation) and the incident-notice surface (the structured-
-//! log poll, the dismissal, and the panel render - moved with their
-//! concern).
+//! The open flow (the entry anchor, the subagent list toggle, the row-open funnel with its
+//! finish bookkeeping and the scope back/root navigation) and the incident-notice surface (the
+//! structured-log poll, the dismissal, and the panel render).
 use super::{
     ancestor_session_ids, has_session_children, scope_ancestors, AgentsViewMode, AgentsViewRow,
     Line, OpenedRow, PathBuf, RowKind, SessionSelection, Value, ANCHOR_LOADING_HINT,
@@ -21,18 +19,13 @@ impl AgentsViewMode {
             RowKind::SubagentSummary => self.toggle_subagent_list(&row),
             RowKind::Subagent => self.open_subagent_row(&row),
             RowKind::Agent => self.open_row(&row, Vec::new()),
-            // A program row is read-only context: the open action never
-            // fires on it.
+            // A program row is read-only context: the open action never fires on it.
             RowKind::Code => {}
         }
     }
 
-    /// The selected row's program target summary line (TS
-    /// `cycleProgramForSelected`'s target + `targetHasSpawnCode`,
-    /// :1701-1735): the agent row itself for a top-level selection, its
-    /// parent for a summary line or a nested child, resolved to the
-    /// target's summary row — the one place that says whether the
-    /// program exists (the cycle and the hint slot both read it).
+    /// The selected row's program target summary line: the agent row itself for a top-level
+    /// selection, its parent for a summary line or a nested child.
     pub(super) fn program_target(&self) -> Option<&AgentsViewRow> {
         let row = self.rows.get(self.selected)?;
         let target = match row.kind {
@@ -47,13 +40,10 @@ impl AgentsViewMode {
         })
     }
 
-    /// TS `cycleProgramForSelected` (:1696-1719): show or hide the spawn
-    /// program of the selected row's target. The list expands with it
-    /// (the code sits directly above the subagents it launched), and a
-    /// target with no recorded program reports instead of toggling.
+    /// Show or hide the spawn program of the selected row's target. The list expands with it,
+    /// and a target with no recorded program reports instead of toggling.
     pub(super) fn cycle_program_for_selected(&mut self) {
-        // TS :1701-1708: no target summary line, or a line whose children
-        // carry no code, is the same report.
+        // No target summary line, or a line whose children carry no code, is the same report.
         let target = match self.program_target() {
             Some(summary) if summary.has_spawn_code => summary.parent_identity.clone(),
             _ => None,
@@ -62,25 +52,20 @@ impl AgentsViewMode {
             self.set_status("No program recorded for these subagents");
             return;
         };
-        // TS :1709-1717: the program only renders inside the expanded
-        // list, so reveal the expansion too, toggle the program, and
-        // re-sync the selection (the rebuild can re-order rows).
+        // The program only renders inside the expanded list, so reveal the expansion too,
+        // toggle the program, and re-sync the selection (the rebuild can re-order rows).
         self.expanded_parents.insert(target.clone());
         if !self.program_shown_parents.remove(&target) {
             self.program_shown_parents.insert(target);
             self.actions.push("program_shown");
         }
-        // `rebuild_rows` ends with TS `syncSelectedRowState`, so the
-        // selection re-resolves onto its row through the rebuild.
+        // The selection re-resolves onto its row through the rebuild (the rebuild re-syncs it).
         self.rebuild_rows();
     }
 
-    /// Toggle the selected parent's subagent list (TS
-    /// `toggleSubagentList`, the operator's 2026-09-28 one-line merge):
-    /// alt+right and open both land here; the target is the selected
-    /// row's parent for a summary line, the row itself otherwise —
-    /// one line, one expansion set. An agent row with no descendants
-    /// keeps the insert inert (its line never renders).
+    /// Toggle the selected parent's subagent list (the operator's 2026-09-28 one-line merge):
+    /// alt+right and open both land here; the target is the parent for a summary line, the row
+    /// itself otherwise.
     pub(super) fn toggle_subagent_list(&mut self, row: &AgentsViewRow) {
         let target = match row.kind {
             RowKind::SubagentSummary => row.parent_identity.clone(),
@@ -90,10 +75,8 @@ impl AgentsViewMode {
             return;
         };
         if self.expanded_parents.remove(&target) {
-            // Collapsing also hides the spawn program (TS
-            // `toggleSubagentList` clears `programShownParents` with the
-            // expansion, :1680-1682): the program only renders inside
-            // the open list.
+            // Collapsing also hides the spawn program: the program only renders inside the
+            // open list.
             self.program_shown_parents.remove(&target);
         } else {
             self.expanded_parents.insert(target);
@@ -101,9 +84,8 @@ impl AgentsViewMode {
         self.rebuild_rows();
     }
 
-    /// Drill into a nested child row (TS `openSelectedSubagent`): the open
-    /// result carries the child's ancestor chain, so the tree re-expands to
-    /// the row when the chat returns to the view.
+    /// Drill into a nested child row: the open result carries the child's ancestor chain, so
+    /// the tree re-expands to the row when the chat returns to the view.
     pub(super) fn open_subagent_row(&mut self, row: &AgentsViewRow) {
         let ancestors = ancestor_session_ids(&self.rows, row.parent_identity.as_deref());
         if row.summary.get("activeSessionId").is_some() || row.summary.get("sessionFile").is_some()
@@ -111,10 +93,8 @@ impl AgentsViewMode {
             self.open_row(row, ancestors);
             return;
         }
-        // The whole subagent tree belongs to its root agent's session, so a
-        // child without its own runtime resolves to its top-level ancestor
-        // (TS `createUnattachableChildOpenResult`): open the parent, keep
-        // the child row selected, and surface why.
+        // A child without its own runtime resolves to its top-level ancestor: open the parent,
+        // keep the child row selected, and surface why.
         let root = self.find_subagent_root_row(row);
         let Some(root) = root else {
             self.set_status("Cannot open agent without an active runtime or saved session file");
@@ -130,7 +110,7 @@ impl AgentsViewMode {
         );
     }
 
-    /// The top-level ancestor row of a nested row (TS `findSubagentRootRow`).
+    /// The top-level ancestor row of a nested row.
     pub(super) fn find_subagent_root_row(&self, row: &AgentsViewRow) -> Option<&AgentsViewRow> {
         let mut identity = row.parent_identity.as_deref();
         let mut guard = 0;
@@ -151,9 +131,8 @@ impl AgentsViewMode {
         None
     }
 
-    /// Open a session row: attach a live session, or reopen the saved
-    /// file (TS `finish({ type: "open" })`), carrying the row's identity,
-    /// key, and depth metadata for the flow.
+    /// Open a session row: attach a live session, or reopen the saved file, carrying the
+    /// row's identity, key, and depth metadata for the flow.
     pub(super) fn open_row(&mut self, row: &AgentsViewRow, ancestors: Vec<String>) {
         self.open_row_with(row, ancestors, None, None);
     }
@@ -215,8 +194,8 @@ impl AgentsViewMode {
         self.set_status("Cannot open agent without an active runtime or saved session file");
     }
 
-    /// Record the open outcome (TS the run result the loop consumes): the
-    /// selection plus the row metadata the flow and the session carry.
+    /// Record the open outcome: the selection plus the row metadata the flow and the session
+    /// carry.
     pub(super) fn finish_open(
         &mut self,
         selection: SessionSelection,
@@ -249,18 +228,14 @@ impl AgentsViewMode {
         self.running = false;
     }
 
-    /// Hand the terminal back to the scope root's session (TS
-    /// `finish({ type: "scope_back" })` when `pop`: the scoped view
-    /// detaches and the flow pops the scope frame — the return chat it
-    /// opened from reopens, and a later agents-back lands in the parent
-    /// scope. Escape reopens the same session without popping the frame.
+    /// Hand the terminal back to the scope root's session. With `pop`, the flow pops the scope
+    /// frame; Escape reopens the same session without popping it.
     pub(super) fn open_scope_root(&mut self, pop: bool) {
         let Some(scope) = self.options.scope.clone() else {
             return;
         };
         let Some(active) = scope.active_session_id.clone().filter(|id| !id.is_empty()) else {
-            // No runtime to return to: the flow reopens the view (TS
-            // scope_back without a return chat continues the loop).
+            // No runtime to return to: the flow reopens the view.
             self.scope_popped = pop;
             self.running = false;
             return;
@@ -297,10 +272,8 @@ impl AgentsViewMode {
         self.running = false;
     }
 
-    /// TS `refreshIncidentNotices`: one best-effort poll of the structured
-    /// agent log (a missing or unreadable log simply retries a bounded
-    /// tail on the next poll and never breaks the view). `true` when the
-    /// collapsed notice line changed, so the caller re-renders.
+    /// One best-effort poll of the structured agent log (a missing or unreadable log simply
+    /// retries the bounded tail). `true` when the collapsed notice line changed.
     pub(super) fn refresh_incident_notices(&mut self) -> bool {
         let Some(agent_dir) = pa_types::platform::agent_dir() else {
             return false;
@@ -316,8 +289,8 @@ impl AgentsViewMode {
         )
     }
 
-    /// Dismiss the collapsed incident notice (TS `dismissIncidentNotice`):
-    /// `false` when none is showing; the dismissal status line confirms it.
+    /// Dismiss the collapsed incident notice: `false` when none is showing; the dismissal
+    /// status line confirms it.
     pub(super) fn dismiss_incident_notice(&mut self) -> bool {
         if !crate::incident_notices::dismiss_incident_notice_state(&mut self.incident_notice_state)
         {
@@ -327,9 +300,8 @@ impl AgentsViewMode {
         true
     }
 
-    /// The incident notice lines for the header (TS `renderIncidentNotice`):
-    /// the styled warning line wrapped over the pane width, each wrapped row
-    /// prefixed with the one-column gutter like the startup notices.
+    /// The incident notice lines for the header: the styled warning line wrapped over the pane
+    /// width, each wrapped row prefixed with the one-column gutter like the startup notices.
     pub(super) fn render_incident_notice(&self, width: usize) -> Vec<Line> {
         let Some(notice) = self.incident_notice_state.notice.as_ref() else {
             return Vec::new();
@@ -342,8 +314,7 @@ impl AgentsViewMode {
                 crate::incident_notices::INCIDENT_NOTICE_POINTER
             ),
         );
-        // Wrap instead of truncating, so the pointer to the incident CLI
-        // stays readable; `Math.max(1, width - 1)`.
+        // Wrap instead of truncating, so the pointer to the incident CLI stays readable.
         let wrap_width = width.saturating_sub(1).max(1);
         crate::width::wrap_line(&vec![styled], wrap_width)
             .into_iter()

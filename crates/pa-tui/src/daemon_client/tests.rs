@@ -91,7 +91,6 @@ async fn handshake_and_request_round_trip() {
         .unwrap();
     assert_eq!(data["ok"], true);
 
-    // A session event frames arrives out of band, ahead of its response.
     client
         .request_ok(DaemonCommand::Prompt {
             id: None,
@@ -159,7 +158,6 @@ async fn request_timeout_reports_socket() {
     assert!(error
         .to_string()
         .contains(socket.display().to_string().as_str()));
-    // A transport failure is never a rejection.
     assert!(!is_daemon_rejection(&error));
 }
 
@@ -168,8 +166,7 @@ async fn a_request_after_the_reader_died_refuses_instead_of_riding_the_budget() 
     let dir = tempfile::TempDir::new().unwrap();
     let socket = dir.path().join("d.sock");
     let listener = UnixListener::bind(&socket).unwrap();
-    // A daemon that greets, then drops the socket: the client's reader
-    // task ends and its close-time failure pass runs.
+    // A daemon that greets, then drops the socket.
     tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         let mut writer = stream;
@@ -229,9 +226,9 @@ async fn a_request_after_the_reader_died_refuses_instead_of_riding_the_budget() 
     assert!(error
         .to_string()
         .contains(socket.display().to_string().as_str()));
-    // The refusal is a transport failure: transient for the submit
-    // path (the pane stays mounted for the reconnect driver), never
-    // a daemon rejection.
+    // The refusal is a transport failure: transient for the submit path
+    // (the pane stays mounted for the reconnect driver), never a daemon
+    // rejection.
     assert!(is_daemon_unreachable(&error));
     assert!(!is_daemon_rejection(&error));
 }
@@ -253,7 +250,6 @@ fn failed_response_is_a_typed_rejection() {
         .expect("typed rejection");
     assert_eq!(rejection.command, "prompt");
     assert_eq!(rejection.message, "Prompt cannot be empty");
-    // The rendered message is byte-identical to the pre-typed string.
     assert_eq!(
         rejection.to_string(),
         "the daemon rejected the prompt request: Prompt cannot be empty"
@@ -271,12 +267,8 @@ fn model_catalog_changed_parses_to_the_refresh_event() {
     ));
 }
 
-/// The cross-view layout handoff's live-sequence tracker keys the
-/// stash on the LATEST sequence the worker reported, so the
-/// session-event frame's `meta.sequence` must ride the parsed event
-/// (`view::handoff`): a turn during the run advances the tracker past
-/// the run's own attach value, and the post-turn sojourn re-entry
-/// matches the value the next attach reports.
+/// The layout handoff keys the stash on the LATEST sequence the worker
+/// reported, so `meta.sequence` must ride the parsed session event.
 #[test]
 fn session_event_parses_the_meta_sequence_for_the_handoff_tracker() {
     let with_sequence = json!({
@@ -329,10 +321,8 @@ fn plain_errors_are_not_rejections() {
     assert!(!is_daemon_rejection(&error));
 }
 
-/// TS #2391 `update_restarting` wire round-trip (the
-/// daemon-errors.test.ts mirror): the typed info survives the wire
-/// to a `RequestRejected`, and the exact-message fallback recognizes
-/// the older daemon's plain-string rejection. An unrelated refusal
+/// TS #2391 `update_restarting` wire round-trip: the typed info
+/// survives the wire to a `RequestRejected`, and an unrelated refusal
 /// never classifies as the update-restart transient state.
 #[test]
 fn update_restarting_rejection_round_trips_the_wire() {
@@ -349,14 +339,12 @@ fn update_restarting_rejection_round_trips_the_wire() {
         rejection.error_info,
         Some(pa_types::daemon::DaemonErrorInfo::UpdateRestarting)
     );
-    // The legacy daemon: the same plain string with no errorInfo.
     let legacy = serde_json::from_str::<DaemonResponse>(
         r#"{"type":"response","command":"create","success":false,"error":"Daemon is preparing an update restart"}"#,
     )
     .expect("legacy refusal parses");
     let error = response_data_or_error("create", legacy).unwrap_err();
     assert!(is_update_restarting_rejection(&error));
-    // An unrelated refusal is not the update-restart state.
     let other = serde_json::from_str::<DaemonResponse>(
         r#"{"type":"response","command":"create","success":false,"error":"Unknown active session: active-gap"}"#,
     )
@@ -595,8 +583,6 @@ async fn direct_upgrade_routes_attach_and_streams_events() {
     assert!(client.upgrade_direct("s1").await.unwrap());
     assert_eq!(client.direct_session_id().as_deref(), Some("s1"));
 
-    // The attach travels over the direct link and its event streams
-    // from the worker socket through the same event channel.
     let data = client
         .request_ok(DaemonCommand::Attach {
             id: None,
@@ -613,8 +599,6 @@ async fn direct_upgrade_routes_attach_and_streams_events() {
         .await
         .unwrap();
     assert_eq!(data["activeSessionId"], "s1");
-    // The link survives across requests: a second session-plane request
-    // still routes over the direct socket.
     let state = client
         .request_ok(DaemonCommand::GetState {
             id: None,
@@ -641,10 +625,9 @@ async fn direct_upgrade_routes_attach_and_streams_events() {
 
 #[tokio::test]
 async fn dead_connection_fails_pending_requests_immediately() {
-    // The supervisor dies after the handshake while a request is in
-    // flight: the reader task must fail the pending request at once
-    // (the exit-hang class: the abort was accepted, but the client
-    // then waited out the full request timeout on a dead socket).
+    // The supervisor dies after the handshake while a request is in flight:
+    // the reader task must fail the pending request at once (the exit-hang
+    // class).
     let dir = tempfile::TempDir::new().unwrap();
     let socket = dir.path().join("d.sock");
     let listener = UnixListener::bind(&socket).unwrap();
@@ -686,8 +669,7 @@ async fn dead_connection_fails_pending_requests_immediately() {
         error.to_string().contains("the daemon connection closed"),
         "unexpected error: {error}"
     );
-    // The dead-connection failure is transport, never a daemon
-    // refusal: the interactive loop must still exit on it.
+    // The dead-connection failure is transport, never a daemon refusal.
     assert!(!is_daemon_rejection(&error));
     client.close();
     let _ = handle.await;

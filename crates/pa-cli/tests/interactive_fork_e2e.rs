@@ -1,13 +1,5 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
-// by design on hot paths (boxing 130 fns is allocation-churn with zero
-// correctness gain); the fn-length threshold is a style gate, not
-// correctness (the harness fns are intentionally linear); 64-bit targets -
-// the narrowing sits at OS/protocol boundaries where the values are
-// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
-// guarded parses), and checked conversions would add panic paths where
-// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
-// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
-// dossier for the conductor).
+// large_futures: stack futures on hot paths by design. too_many_lines: style gate
+// only. Casts: 64-bit targets; narrowing sits at bounded OS/protocol boundaries.
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -17,15 +9,11 @@
     clippy::cast_precision_loss
 )]
 
-//! End-to-end verifier for the interactive `--fork` launch (the audit's S4
-//! stub): the fork copies its source into a fresh session file client-side,
-//! the daemon opens the copy — never the source — through the create
-//! `sessionPath`, and the TUI renders the copied transcript and takes new
-//! turns on the fork. The real supervisor, the re-executed test binary as
-//! the interactive client (the same `main_with_runtime` entry point the
-//! shipped binary calls), and the scripted engine seam drive the full
-//! path; the source is hosted by a live worker for the whole run, proving
-//! a session the daemon already owns forks fine (TS parity: no
+//! End-to-end verifier for the interactive `--fork` launch: the fork copies
+//! its source into a fresh session file client-side, the daemon opens the
+//! copy — never the source — through the create `sessionPath`, and the TUI
+//! renders the copied transcript and takes new turns on the fork. The source
+//! stays hosted by a live worker for the whole run (TS parity: no
 //! daemon-active guard on the fork arm).
 #![cfg(unix)]
 
@@ -46,9 +34,8 @@ use pa_types::daemon::DaemonCommand;
 const CHILD_ENV: &str = "PA_INTERACTIVE_FORK_CHILD";
 
 /// The interactive client half: the same entry point the shipped binary
-/// calls, over the pty the parent opened — the real fork startup
-/// (`--fork` resolution, the client-side copy, the daemon create, the TUI).
-/// The exit code lands in the outcome file for the parent to assert.
+/// calls, over the pty the parent opened — the real fork startup. The exit
+/// code lands in the outcome file for the parent to assert.
 #[test]
 fn interactive_fork_child_mode() {
     let Ok(config) = std::env::var(CHILD_ENV) else {
@@ -90,7 +77,6 @@ impl Drop for Supervisor {
     }
 }
 
-/// Pids whose parent is `ppid` (the supervisor's live worker children).
 fn child_pids_of(ppid: u32) -> Vec<u32> {
     let mut pids = Vec::new();
     let entries = std::fs::read_dir("/proc").expect("read /proc");
@@ -184,8 +170,7 @@ fn graceful_shutdown(socket: &Path) -> Option<u32> {
 }
 
 // The Supervisor holds the Child so its Drop owns the protocol shutdown,
-// the kill, and the wait (teardown runs even on panic); the lint wants the
-// reap inline instead.
+// the kill, and the wait; the lint wants the reap inline instead.
 #[allow(clippy::zombie_processes)]
 fn spawn_supervisor(socket: &Path, agent_dir: &Path, session_dir: &Path) -> Supervisor {
     let mut command = Command::new(env!("CARGO_BIN_EXE_prime-agent"));
@@ -376,10 +361,6 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
-/// The interactive `--fork` launch, end to end: the client copies a live
-/// hosted session into a fresh file, the daemon opens the fork, the TUI
-/// renders the copied transcript and takes a new turn on it, and the
-/// source stays hosted with its bytes untouched.
 #[tokio::test]
 async fn interactive_fork_launch_copies_and_the_daemon_opens_the_fork() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -388,9 +369,8 @@ async fn interactive_fork_launch_copies_and_the_daemon_opens_the_fork() {
     let cwd = dir.path().join("project");
     std::fs::create_dir_all(&session_dir).expect("sessions dir");
     std::fs::create_dir_all(&cwd).expect("project dir");
-    // The home has onboarding behind it: a completed first run is the
-    // only thing that skips the flow (the marker alone gates it — a
-    // fork user has one), and the launch must open the fork, not the
+    // The home has onboarding behind it: a completed first run is the only
+    // thing that skips the flow, and the launch must open the fork, not the
     // welcome.
     pa_core::settings::SettingsManager::create(&cwd, &agent_dir)
         .set_onboarding_shown(true)
@@ -425,21 +405,19 @@ async fn interactive_fork_launch_copies_and_the_daemon_opens_the_fork() {
     let source_entries = read_entries(&source);
     let source_id = source_entries[0]["id"].as_str().expect("id").to_string();
 
-    // Host the source on a live worker: the fork must work on a session
-    // the daemon already owns (the copy never touches the hosted file).
-    // The daemon hosts a saved file under its own worker id, so the
-    // response names that id (the file's own id stays on disk).
+    // Host the source on a live worker: the fork must work on a session the
+    // daemon already owns (the copy never touches the hosted file). The
+    // daemon hosts a saved file under its own worker id, so the response
+    // names that id.
     let active_source = make_session_active(&socket, &source, &cwd).await;
     assert!(!active_source.is_empty(), "the source hosts on a worker");
     let source_before = std::fs::read(&source).expect("read source");
 
-    // The interactive launch child: the same entry point the binary calls,
-    // on a pty, forking the hosted source by its id. The interactive seam
-    // reads PRIME_AGENT_FAUX_SCRIPT as a script FILE path (it rides the
-    // create config to the daemon worker).
-    // The scripted engine indexes responses by the session's prompt
-    // ordinal (message_count / 2): the fork's copied exchange occupies
-    // index 0, so the first LIVE turn on the fork runs at index 1.
+    // The interactive launch child on a pty, forking the hosted source by
+    // its id; the seam reads PRIME_AGENT_FAUX_SCRIPT as a script FILE path.
+    // The scripted engine indexes responses by the prompt ordinal
+    // (message_count / 2): the copied exchange occupies index 0, so the
+    // first LIVE turn runs at index 1.
     let fork_script = dir.path().join("script-fork.json");
     std::fs::write(
         &fork_script,

@@ -1,18 +1,15 @@
-//! Session-list rendering for the `list` command: summary validation, display
-//! ids, and the fixed-column table, ported from `cli/daemon-list-format.ts`,
-//! `core/session-id.ts`, and the summary guards in `cli/daemon-command.ts`.
+//! Session-list rendering for the `list` command: summary validation,
+//! display ids, and the fixed-column table.
 
 use serde_json::Value;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// 12-char display id, mirroring `DISPLAY_ID_LENGTH`.
 const DISPLAY_ID_LENGTH: usize = 12;
 
 /// Display order for the status column. `offline` - the remote mesh
 /// reachability axis - sorts between idle and archived (TS #2516).
 const LIST_STATUS_ORDER: [&str; 4] = ["working", "idle", "offline", "archived"];
 
-/// A validated session summary row ready for the table.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SessionSummary {
     id: String,
@@ -61,8 +58,8 @@ impl SessionSummary {
     }
 }
 
-/// `isSessionSummary`: a structural guard so malformed daemon rows fall back
-/// to raw JSON output exactly like the TS client.
+/// A structural guard so malformed daemon rows fall back to raw JSON
+/// output.
 fn is_session_summary(value: &Value) -> bool {
     if !value.is_object() {
         return false;
@@ -103,7 +100,7 @@ fn pointer<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
         .try_fold(value, |current, key| current.get(key))
 }
 
-/// `isLiveSessionSummary`: a session summary with a routable active id.
+/// A session summary with a routable active id.
 fn is_live_session_summary(value: &Value) -> bool {
     is_session_summary(value) && string_field(value, "activeSessionId").is_some()
 }
@@ -138,9 +135,8 @@ fn session_summary_from_value(value: &Value) -> Option<SessionSummary> {
     })
 }
 
-/// `getSessionSummaries` for surfaces that read the wire rows directly (the
-/// sessions table): `Some(rows)` when every row validates, else `None` so
-/// the caller prints raw JSON like the TS client.
+/// `Some(rows)` when every row validates, else `None` so the caller
+/// prints raw JSON (for surfaces that read the wire rows directly).
 pub(crate) fn validated_session_values(data: &Value) -> Option<Vec<&Value>> {
     let sessions = data.get("sessions")?.as_array()?;
     sessions
@@ -149,8 +145,8 @@ pub(crate) fn validated_session_values(data: &Value) -> Option<Vec<&Value>> {
         .collect()
 }
 
-/// `getSessionSummaries`: `Some(rows)` when every row validates, else `None`
-/// so the caller prints raw JSON like the TS client.
+/// `getSessionSummaries` for wire-row surfaces: `Some(rows)` when every
+/// row validates, else `None`.
 pub(crate) fn get_session_summaries(data: &Value) -> Option<Vec<SessionSummary>> {
     validated_session_values(data)?
         .iter()
@@ -158,14 +154,13 @@ pub(crate) fn get_session_summaries(data: &Value) -> Option<Vec<SessionSummary>>
         .collect()
 }
 
-/// `isLiveSessionSummary` as a public guard for create/rename output paths.
+/// A public guard for create/rename output paths.
 pub(crate) fn live_session_summary(data: &Value) -> Option<&Value> {
     is_live_session_summary(data).then_some(data)
 }
 
-/// The shared CLI table renderer (TS `formatTable`): every column pads to
-/// the widest cell's terminal display width, so a wide glyph (CJK, emoji)
-/// cannot drift the columns after it. Two spaces separate columns.
+/// The shared CLI table renderer (TS `formatTable`): every column pads to the widest
+/// cell's terminal display width, so a wide glyph cannot drift the columns after it.
 pub(crate) fn format_table<const N: usize>(headers: &[&str; N], rows: &[[String; N]]) -> String {
     let widths: [usize; N] = std::array::from_fn(|column| {
         rows.iter()
@@ -178,9 +173,8 @@ pub(crate) fn format_table<const N: usize>(headers: &[&str; N], rows: &[[String;
         row.iter()
             .zip(widths)
             .map(|(cell, width)| {
-                // TS `padCell`: pad only, never truncate — a cell wider
-                // than its column (an unsanitized ANSI name) renders whole
-                // like TS, its escape bytes skipped by both measures.
+                // Pad only, never truncate — a wider cell renders whole; its
+                // escape bytes are skipped by both measures.
                 let pad = width.saturating_sub(pa_tui::width::str_width(cell));
                 format!("{cell}{}", " ".repeat(pad))
             })
@@ -204,10 +198,7 @@ const LIST_HEADERS: [&str; 7] = [
 /// byte-for-byte.
 const HOST_HEADER: &str = "host";
 
-/// The fixed-column table, mirroring `formatSessionListTable` (colors are
-/// TTY-only in TS; this output is color-free like TS piped output). The
-/// host column appears only when a remote mesh session is present, and
-/// remote rows carry a display-only model identity (TS #2516).
+/// The fixed-column table; color-free like TS piped output.
 pub(crate) fn format_session_list_table(sessions: &[SessionSummary]) -> String {
     let now = now_ms();
     let mut sorted: Vec<&SessionSummary> = sessions.iter().collect();
@@ -278,7 +269,7 @@ fn session_model_cell(session: &SessionSummary) -> String {
         .unwrap_or_default()
 }
 
-/// `formatSessionDisplayId`: the last 12 chars of a hex-normalized id.
+/// The last 12 chars of a hex-normalized id.
 pub(crate) fn format_session_display_id(id: &str) -> String {
     let normalized = normalize_session_id(id);
     if is_hex(&normalized) {
@@ -287,7 +278,7 @@ pub(crate) fn format_session_display_id(id: &str) -> String {
     tail(id, DISPLAY_ID_LENGTH)
 }
 
-/// `matchesSessionIdSuffix`: hex-suffix matching for short selectors.
+/// Hex-suffix matching for short selectors.
 pub(crate) fn matches_session_id_suffix(candidate: &str, suffix: &str) -> bool {
     let normalized_candidate = normalize_session_id(candidate);
     let normalized_suffix = normalize_session_id(suffix);
@@ -313,7 +304,7 @@ fn tail(value: &str, length: usize) -> String {
     }
 }
 
-/// `formatSessionAge`: `<n>s|m|h|d|w|y` bucketing from the modified timestamp.
+/// `<n>s|m|h|d|w|y` bucketing from the modified timestamp.
 pub(crate) fn format_session_age(modified: Option<&str>, now_ms: u64) -> String {
     let Some(modified) = modified else {
         return String::new();
@@ -345,7 +336,7 @@ pub(crate) fn format_session_age(modified: Option<&str>, now_ms: u64) -> String 
 }
 
 /// RFC 3339 timestamp to epoch milliseconds, the subset `new Date(text)`
-/// accepts for daemon timestamps (UTC `Z`-suffixed ISO strings).
+/// accepts (UTC `Z`-suffixed ISO strings).
 pub(crate) fn parse_iso_ms(text: &str) -> Option<u64> {
     let text = text.trim();
     let (date, rest) = text.split_once('T')?;

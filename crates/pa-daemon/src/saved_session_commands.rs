@@ -1,20 +1,6 @@
-//! The saved-session catalog and peer-roster surface (protocol breadth
-//! wave b11): the supervisor arms for `rename_saved_session`,
-//! `delete_saved_session`, and `list_agent_peers` (TS daemon-supervisor
-//! cases), the worker arms the selector forms forward to (TS daemon-mode
-//! cases), and the shared catalog writes (TS daemon-catalog-process
-//! `rename`/`delete` over `SessionManager.open().appendSessionInfo` /
-//! `deleteSessionFile`).
-//!
-//! Rename walks the TS ladder: the name-reservation input (live roster row
-//! or saved session, else `Session not found`), the pending-name
-//! reservation, the family name-availability assertion, and then either
-//! the offline catalog rename (append the `session_info` entry, the RLM
-//! ledger rename, the roster row rewrite) or the forward to the live
-//! worker. Delete refuses the active session, tombstones the RLM ledger
-//! unless the session is positively top-level, deletes the file (trash
-//! first, unlink fallback — plus the artifact partition), and drops the
-//! roster row.
+//! The saved-session catalog and peer-roster surface: the supervisor arms
+//! for `rename_saved_session`, `delete_saved_session`, and
+//! `list_agent_peers`; the worker arms the selector forms forward to.
 
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
@@ -30,17 +16,14 @@ use crate::session_store::{read_session_info, SessionFile};
 use crate::supervisor::Supervisor;
 use crate::worker::Worker;
 
-/// The session-name-unavailability error (TS
-/// `formatAgentSessionNameUnavailable`).
 pub(crate) fn name_unavailable_error(name: &str, depth: u32) -> String {
     format!(
         "Agent name \"{name}\" is unavailable: an agent of that name already exists at depth {depth} under this parent"
     )
 }
 
-/// The reservation key (TS `sessionNameReservationKey`): the JSON-encoded
-/// `[depth, parentType, parentValue, name]` tuple - the parent keyed by
-/// its path, its persisted id, or the root scope.
+/// The reservation key: the JSON-encoded `[depth, parentType, parentValue, name]` tuple - the
+/// parent keyed by its path, its persisted id, or the root scope.
 pub(crate) fn reservation_key(scope: &NameScope) -> String {
     let (parent_type, parent_value) = match (
         scope.depth,
@@ -59,10 +42,8 @@ pub(crate) fn reservation_key(scope: &NameScope) -> String {
     json!([scope.depth, parent_type, parent_value, scope.name]).to_string()
 }
 
-/// The TS name scope a rename target carries into the availability check.
-/// Shared with the create path: a spawn admission reserves its child's name
-/// under the same `[depth, parent, name]` key (TS #2396
-/// `createRlmSubagentRuntime`).
+/// The name scope a rename target carries into the availability check;
+/// spawn admissions reserve under the same `[depth, parent, name]` key.
 pub(crate) struct NameScope {
     /// The renamed session's own id (the availability check ignores it).
     pub(crate) id: String,
@@ -103,8 +84,7 @@ struct FamilyRow {
     parent_session_path: Option<String>,
 }
 
-/// TS `sameAgentSessionNameParent`: depth-0 rows share one scope; deeper
-/// rows must share the parent path.
+/// Depth-0 rows share one scope; deeper rows must share the parent path.
 fn same_name_parent(left: &FamilyRow, right: &NameScope) -> bool {
     if left.depth == 0 && right.depth == 0 {
         return true;
@@ -115,26 +95,21 @@ fn same_name_parent(left: &FamilyRow, right: &NameScope) -> bool {
     left.parent_session_path.is_some() && left.parent_session_path == right.parent_session_path
 }
 
-/// Append one `session_info` name entry to a saved session file (TS
-/// catalog `rename`).
 pub(crate) fn append_saved_session_name(path: &Path, name: &str) -> anyhow::Result<()> {
     let mut session = SessionFile::open(path)?;
     session.append_session_info(name);
     session.rewrite()
 }
 
-/// Delete a session file (TS `deleteSessionFile`): try the `trash` CLI
-/// first, fall back to unlink, run the after-file-removed hook, and remove
-/// the session's artifact partition once the file itself is gone. Answers
-/// the TS `DeleteSessionFileResult` wire object.
+/// Delete a session file: try the `trash` CLI first, fall back to unlink,
+/// then the hook and the artifact partition removal.
 pub(crate) fn delete_session_file(path: &Path) -> Value {
     delete_session_file_after_file_removed(path, &|_| {})
 }
 
-/// TS `deleteSessionFile` with its `afterFileRemoved` hook: the hook runs
+/// `deleteSessionFile` with its `afterFileRemoved` hook: the hook runs
 /// once the file is gone but BEFORE the artifact partition's removal (the
-/// daemon's `cancelScheduledJobsForSessionFile`, which needs the partition
-/// registered on the store).
+/// job-cancel hook needs the partition registered on the store).
 pub(crate) fn delete_session_file_after_file_removed(
     path: &Path,
     after_file_removed: &dyn Fn(&Path),
@@ -159,7 +134,7 @@ pub(crate) fn delete_session_file_after_file_removed(
     }
 }
 
-/// Remove the session's artifact partition (TS `deleteSessionArtifacts`):
+/// Remove the session's artifact partition
 /// `<root>/session-artifacts/<id>`, only once the session file is gone.
 pub(crate) fn remove_session_artifacts(session_path: &Path) {
     let Some(stem) = session_path
@@ -175,8 +150,7 @@ pub(crate) fn remove_session_artifacts(session_path: &Path) {
     let _ = std::fs::remove_dir_all(artifacts);
 }
 
-/// The RLM ledger rename for an offline saved-session rename (best effort,
-/// TS logs and continues).
+/// The RLM ledger rename for an offline saved-session rename (best effort).
 pub(crate) fn ledger_rename_by_child_path(
     agent_dir: &Path,
     sessions_dir: &Path,
@@ -189,29 +163,15 @@ pub(crate) fn ledger_rename_by_child_path(
     }
 }
 
-/// TS `tombstoneSavedSessionDelete`: tombstone every ledger edge at the
-/// deleted path unless the session is positively top-level (a known
-/// top-level summary, or a readable session info with no parent and
-/// depth 0). The tombstone carries the deleted session's captured own
-/// usage: the transcript dies right after this (the trash/unlink), so
-/// the spend must ride the tombstone - without the snapshot the
-/// deleted-descendant bucket reads a removed path and bills zero (the
-/// Rust-side instance of TS #2506's Macroscope race). Returns how many
-/// edges received the usage snapshot.
-/// The pre-delete capture of one saved-session delete (phase 1 — the
-/// reads need the file ALIVE): `TopLevel` never tombstones (a known
-/// top-level summary, or a readable session info with no parent and
-/// depth 0); a child carries its whole-file own usage (absent when no
-/// billable work — the tombstone still lands bare).
+/// The pre-delete capture (phase 1 — the reads need the file ALIVE):
+/// `TopLevel` never tombstones; a child carries its whole-file own usage
+/// (absent when no billable work — the tombstone still lands bare).
 pub(crate) enum SavedDeleteCapture {
     TopLevel,
     Child {
         usage: Option<crate::session_usage::SessionUsageSummary>,
-        /// The canonical session key captured while the file still
-        /// existed (phase 1): a final-component symlink delete unlinks
-        /// the LINK, and re-canonicalizing the caller's path afterwards
-        /// answers the fallback form, missing the edge keyed at the
-        /// target - the tombstone must use the pre-unlink key.
+        /// The canonical session key captured while the file still existed:
+        /// a symlink delete unlinks the LINK, so the tombstone uses the pre-unlink key.
         canonical_path: String,
     },
 }
@@ -220,13 +180,10 @@ pub(crate) fn capture_saved_session_delete(
     session_path: &str,
     known_runtime_kind: Option<&str>,
 ) -> SavedDeleteCapture {
-    // The caller picks the path: a non-regular file (a FIFO, a device, a
-    // directory) is never a session, and opening one for reading BLOCKS
-    // indefinitely on Linux (a FIFO waits for a writer) - the capture
-    // reads nothing there.
+    // A non-regular file (a FIFO, a device, a directory) is never a
+    // session, and opening one for reading BLOCKS indefinitely on Linux —
+    // the capture reads nothing there.
     let regular = std::fs::metadata(Path::new(session_path)).is_ok_and(|meta| meta.is_file());
-    // The pre-unlink canonical key: captured while the file exists, so a
-    // symlink delete keys the edge at its target.
     let canonical_path = canonical_session_path(Path::new(session_path))
         .to_string_lossy()
         .to_string();
@@ -244,8 +201,6 @@ pub(crate) fn capture_saved_session_delete(
     if positively_top_level {
         return SavedDeleteCapture::TopLevel;
     }
-    // Captured while the file is still alive (the trash/unlink lands
-    // before the tombstone phase).
     let usage = if regular {
         crate::session_usage::read_own_usage_summary(Path::new(session_path))
     } else {
@@ -257,10 +212,8 @@ pub(crate) fn capture_saved_session_delete(
     }
 }
 
-/// The post-delete tombstone append (phase 2 — the file is gone; only a
-/// SUCCESSFUL removal tombstones, or a failed delete would bill a live
-/// transcript as deleted spend). Returns how many edges received the
-/// usage snapshot.
+/// The post-delete tombstone append (phase 2 — only a SUCCESSFUL removal
+/// tombstones, or a failed delete would bill a live transcript as deleted spend).
 pub(crate) fn tombstone_saved_session_delete_captured(
     agent_dir: &Path,
     sessions_dir: &Path,
@@ -296,8 +249,8 @@ pub(crate) fn tombstone_saved_session_delete_captured(
 }
 
 impl Supervisor {
-    /// The family-catalog rows (TS `familyCatalogEntries`): the roster
-    /// rows plus the saved depth-0 sessions the roster does not know.
+    /// The family-catalog rows: the roster rows plus the saved depth-0
+    /// sessions the roster does not know.
     fn family_rows(&self, extra_sessions_dir: Option<&Path>) -> Vec<FamilyRow> {
         let mut rows = Vec::new();
         {
@@ -326,7 +279,7 @@ impl Supervisor {
             }
         }
         if let Some(dir) = extra_sessions_dir {
-            // TS scans the catalog for depth-0 rows only: a parented file
+            // The catalog scan takes depth-0 rows only: a parented file
             // without a recorded depth reads as -1 and stays out.
             for info in crate::session_store::list_sessions(dir) {
                 if info.rlm_depth != 0 || info.parent_session_path.is_some() {
@@ -343,8 +296,7 @@ impl Supervisor {
         rows
     }
 
-    /// TS `assertAgentSessionNameAvailable`: a same-name, same-depth,
-    /// same-parent row that is not the renamed session itself conflicts.
+    /// A same-name, same-depth, same-parent row that is not the renamed session itself conflicts.
     fn assert_family_name_available(&self, scope: &NameScope) -> Result<(), String> {
         let rows = self.family_rows(self.sessions_dir_path().as_deref());
         for row in rows {
@@ -363,9 +315,8 @@ impl Supervisor {
         crate::paths::sessions_dir(&self.options.agent_dir).ok()
     }
 
-    /// The name-reservation input (TS `savedSessionNameReservationInput`):
-    /// the live roster row for the path, else the saved session info;
-    /// a miss answers `Session not found`.
+    /// The name-reservation input: the live roster row for the path, else
+    /// the saved session info; a miss answers `Session not found`.
     fn saved_session_name_scope(
         &self,
         session_path: &str,
@@ -567,8 +518,6 @@ impl Supervisor {
         scope.ok_or_else(|| format!("Unknown active session: {active_session_id}"))
     }
 
-    /// The roster row rewrite of an offline rename (TS `writeRosterEntry`
-    /// with the summary's new sessionName).
     fn rewrite_roster_session_name(&self, session_path: &str, name: &str) {
         let canonical = canonical_session_path(Path::new(session_path))
             .to_string_lossy()
@@ -592,9 +541,8 @@ impl Supervisor {
         }
     }
 
-    /// `delete_saved_session` selector-less (TS supervisor arm): refuse the
-    /// active session, let a live connected worker own the delete,
-    /// tombstone the ledger, delete the file, drop the roster row.
+    /// `delete_saved_session` selector-less: refuse the active session, let a live connected worker
+    /// own the delete, tombstone the ledger, delete the file, drop the roster row.
     pub(crate) async fn handle_delete_saved_session(
         self: &Arc<Self>,
         command: &DaemonCommand,
@@ -641,10 +589,8 @@ impl Supervisor {
                 );
             }
         }
-        // A worker still hosting the file owns the delete (TS forwards to
-        // a connected owner or refuses while it is unreachable). A
-        // worker another client owns is invisible: the delete answers the
-        // unknown-target error (TS `assertWorkerAccessibleToClient`).
+        // A worker still hosting the file owns the delete; another
+        // client's worker is invisible (the unknown-target error).
         if let Some(owner) = self.registry.find_by_session_file(session_path).await {
             let owner_id = {
                 let descriptor = owner.descriptor.lock().await;
@@ -690,9 +636,8 @@ impl Supervisor {
             );
         }
         let sessions_dir = self.sessions_dir_path();
-        // Phase 1 while the file is alive (the usage read needs it); the
-        // tombstone append waits for the removal to SUCCEED — a failed
-        // delete must not bill a live transcript as deleted spend.
+        // Phase 1 while the file is alive; the tombstone waits for the
+        // removal to SUCCEED (see `capture_saved_session_delete`).
         let capture = capture_saved_session_delete(
             session_path,
             roster_entry
@@ -703,9 +648,7 @@ impl Supervisor {
         let result = delete_session_file(Path::new(session_path));
         let removed = result.get("ok").and_then(Value::as_bool) == Some(true);
         if removed {
-            // The deleted session file can carry passive scheduled rows: the
-            // catalog snapshot must rescan instead of serving them (TS #2487
-            // invalidates the shared snapshot on the saved-session delete).
+            // A deleted session file can carry passive scheduled rows: the catalog must rescan.
             self.invalidate_passive_catalog();
             let captured = tombstone_saved_session_delete_captured(
                 &self.options.agent_dir,
@@ -716,10 +659,8 @@ impl Supervisor {
                 self.note_deleted_child_usage_captured("saved_delete", captured);
             }
             // The deleted file's binding dies with it: a stale id for the
-            // session can never rebind again (no successor worker can take
-            // the file over), so the entries drop instead of leaking for
-            // the daemon's lifetime. `canonical` was resolved while the
-            // file still existed - the same key the table stores.
+            // session can never rebind again. `canonical` was resolved while
+            // the file still existed - the same key the table stores.
             self.session_bindings.forget_file(&canonical);
             // The tombstone above changed the ledger, whether or not the
             // deleted session had a roster row (a subagent of a stopped
@@ -751,9 +692,8 @@ impl Supervisor {
         )
     }
 
-    /// `list_agent_peers` (TS supervisor arm): the requester authenticates
-    /// with its worker token; every other live ready connected worker with
-    /// a rostered root row answers as a peer summary.
+    /// `list_agent_peers`: the requester authenticates with its worker
+    /// token; every other live ready connected worker answers as a peer.
     pub(crate) async fn handle_list_agent_peers(
         self: &Arc<Self>,
         command: &DaemonCommand,
@@ -825,8 +765,7 @@ impl Supervisor {
     }
 }
 
-/// TS `agentPeerSummary`: the roster row's summary projected onto the
-/// agent-message peer shape.
+/// The roster row's summary projected onto the agent-message peer shape.
 fn agent_peer_summary(summary: &Value) -> Value {
     let mut peer = json!({
         "activeSessionId": summary
@@ -882,9 +821,8 @@ fn agent_peer_summary(summary: &Value) -> Value {
 }
 
 impl Worker {
-    /// `rename_saved_session` (TS daemon-mode case): a live target renames
-    /// through the session's own rename path (answering with no data, the
-    /// TS shape); an offline file gets the catalog append.
+    /// `rename_saved_session`: a live target renames through the session's
+    /// own rename path (answering with no data); an offline file gets the catalog append.
     pub(crate) fn handle_rename_saved_session(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("rename_saved_session") {
             return response;
@@ -919,8 +857,8 @@ impl Worker {
             })
         };
         if own_file {
-            // The live form answers `success(id, "rename_saved_session")`
-            // with no data, unlike the `rename` command's summary.
+            // The live form answers success with no data, unlike the
+            // `rename` command's summary.
             let mut payload = Map::new();
             payload.insert("name".to_string(), json!(name));
             let mut response = self.handle_rename("rename_saved_session", &Value::Object(payload));
@@ -942,9 +880,8 @@ impl Worker {
         }
     }
 
-    /// `delete_saved_session` (TS daemon-mode case): refuse the live
-    /// session, tombstone the ledger, delete the file and its artifacts,
-    /// answer the delete result.
+    /// `delete_saved_session`: refuse the live session, tombstone the
+    /// ledger, delete the file and its artifacts, answer the delete result.
     pub(crate) async fn handle_delete_saved_session(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("delete_saved_session") {
             return response;
@@ -974,15 +911,11 @@ impl Worker {
         }
         let sessions_dir = crate::paths::sessions_dir(&self.config.agent_dir)
             .unwrap_or_else(|_| self.config.agent_dir.join("sessions"));
-        // Phase 1 while the file is alive (the usage read needs it); the
-        // tombstone append waits for the removal to SUCCEED — a failed
-        // delete must not bill a live transcript as deleted spend.
+        // Phase 1 while the file is alive; the tombstone waits for a
+        // successful removal (see `capture_saved_session_delete`).
         let capture = capture_saved_session_delete(session_path, None);
-        // TS `delete_saved_session`: the hook runs between the file's
-        // removal and the artifact partition's removal — the durable job
-        // cancel (belt: the partition removal is the load-bearing delete,
-        // a failed removal still leaves cancelled jobs that can never
-        // fire). The partition registers only when its store file exists.
+        // The hook runs between the file's removal and the partition's
+        // removal — the durable job cancel (needs the partition registered).
         let result = delete_session_file_after_file_removed(path, &|deleted| {
             self.cancel_deleted_session_jobs(deleted);
         });
@@ -1003,10 +936,8 @@ mod tombstone_usage_tests {
     use super::*;
     use serde_json::json;
 
-    /// TS `tombstoneSavedSessionDelete`: the two phases in one call. The
-    /// real delete handler keeps the phases SPLIT (the capture must ride
-    /// the file being alive and the tombstone waits for the removal to
-    /// succeed); only the tests use the combined shape.
+    /// The two phases in one call; the real delete handler keeps them
+    /// SPLIT. Only the tests use the combined shape.
     fn tombstone_saved_session_delete(
         agent_dir: &Path,
         sessions_dir: &Path,
@@ -1052,11 +983,8 @@ mod tombstone_usage_tests {
         path
     }
 
-    /// The saved-session delete captures the spend while the file is alive
-    /// and rides it on the tombstone: the deleted-descendant bucket still
-    /// bills the parent after the transcript is gone (the Rust-side
-    /// instance of TS #2506's Macroscope race - a tombstone whose usage
-    /// read lands after the trash finds nothing).
+    /// The deleted-descendant bucket still bills the parent after the
+    /// transcript is gone (the Rust-side instance of TS #2506's Macroscope race).
     #[test]
     fn saved_session_delete_captures_usage_before_the_unlink() {
         let root = temp_dir("capture");
@@ -1076,7 +1004,6 @@ mod tombstone_usage_tests {
                 name: "lane".to_string(),
             })
             .unwrap();
-        // The delete (a known subagent): the tombstone captures pre-unlink.
         let captured = tombstone_saved_session_delete(
             &agent_dir,
             &sessions_dir,
@@ -1104,8 +1031,6 @@ mod tombstone_usage_tests {
         );
     }
 
-    /// A positively top-level session never tombstones (no capture, no
-    /// bucket): the delete is a plain file removal.
     #[test]
     fn top_level_deletes_never_capture() {
         let root = temp_dir("top-level");
@@ -1127,10 +1052,6 @@ mod tombstone_usage_tests {
         );
     }
 
-    /// A final-component symlink delete keys the edge at its TARGET while
-    /// the link exists; the post-unlink phase 2 must reuse that key (the
-    /// link is gone, so re-canonicalizing the caller's path answers the
-    /// fallback form and would miss the edge entirely).
     #[cfg(unix)]
     #[test]
     fn symlink_delete_tombstones_the_edge_keyed_at_the_target() {
@@ -1154,11 +1075,9 @@ mod tombstone_usage_tests {
                 name: "w".into(),
             })
             .unwrap();
-        // The delete goes through a final-component symlink to the
-        // child, and the REAL two-phase flow runs the tombstone only
-        // AFTER the delete removed the link: the capture happens while
-        // the link exists, the unlink lands, then phase 2 must still
-        // key the edge at the target the link pointed at.
+        // The delete goes through a final-component symlink: the capture
+        // happens while the link exists, then phase 2 must still key the
+        // edge at the target.
         let link = sessions_dir.join("link-to-child.jsonl");
         std::os::unix::fs::symlink(&child, &link).unwrap();
         let capture = capture_saved_session_delete(&link.to_string_lossy(), Some("subagent"));
@@ -1181,9 +1100,6 @@ mod tombstone_usage_tests {
         );
     }
 
-    /// A non-regular session path (a FIFO) is never a session: the
-    /// capture reads nothing there - the blocking open would hang a
-    /// FIFO's read forever - and the tombstone still lands bare.
     #[cfg(unix)]
     #[test]
     fn a_non_regular_session_path_captures_nothing() {

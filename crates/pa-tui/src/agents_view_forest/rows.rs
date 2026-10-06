@@ -23,8 +23,7 @@ struct BaseRow {
     age: String,
     own_cost: f64,
     recursive_cost: f64,
-    /// Every descendant's spend (the running line's cost cell): the
-    /// rollup's descendant total, status-independent.
+    /// Every descendant's spend: the rollup's descendant total, status-independent.
     descendant_cost: f64,
     descendant_count: usize,
     running_subagent_count: usize,
@@ -32,16 +31,9 @@ struct BaseRow {
     search_score: Option<f64>,
 }
 
-/// Build the session-list rows (TS `buildAgentsViewRows`, plus the
-/// operator's one-line subagent summary): top-level agents, each with
-/// its ONE subagents line (`N subagents (M running)` — N = the full
-/// roster, M = the running subset — expanding to the whole roster in
-/// one group, running rows first). `expanded` holds the parent row
-/// identities whose lines are open; `program_shown` holds the parent
-/// identities whose spawn programs render inside the open list (TS
-/// `programShownParents`); `rollups` carries the unfiltered hierarchy
-/// totals; a scope excludes its root and lifts its direct children to
-/// top-level rows.
+/// Build the session-list rows (plus the operator's one-line subagent summary): top-level
+/// agents, each with its ONE subagents line expanding to the whole roster in one group, running
+/// rows first; a scope excludes its root and lifts its direct children to top-level rows.
 pub(crate) fn build_rows<S: std::hash::BuildHasher + Default>(
     records: &[UnifiedRecord],
     scope: Option<&AgentsViewScope>,
@@ -51,8 +43,7 @@ pub(crate) fn build_rows<S: std::hash::BuildHasher + Default>(
     anchor: Option<&str>,
 ) -> Vec<AgentsViewRow> {
     let now = now_ms();
-    // The scope root's keys, used to lift its direct children to
-    // top-level rows (TS `isDirectScopeChild`).
+    // The scope root's keys, used to lift its direct children to top-level rows.
     let scope_root = scope.and_then(|scope| {
         records
             .iter()
@@ -128,8 +119,7 @@ pub(crate) fn build_rows<S: std::hash::BuildHasher + Default>(
             record: position,
         });
     }
-    // Parent linkage (TS `findParentRow` over each row's summary keys): a
-    // subagent row nests under the first row its parent keys resolve to.
+    // Parent linkage: a subagent row nests under the first row its parent keys resolve to.
     let by_summary_key: HashMap<String, usize> = base
         .iter()
         .enumerate()
@@ -151,15 +141,13 @@ pub(crate) fn build_rows<S: std::hash::BuildHasher + Default>(
             .find_map(|key| by_summary_key.get(key).copied())
             .filter(|parent| *parent != index);
         let Some(parent) = parent else {
-            // Saved catalogs stream progressively, so a child can arrive
-            // before its parent. Keep it reachable as a root until the
-            // parent record appears.
+            // Saved catalogs stream progressively, so a child can arrive before its parent: keep
+            // it reachable as a root until the parent record appears.
             base[index].kind = RowKind::Agent;
             continue;
         };
-        // A branched/forked session links to its source but is a top-level
-        // chat in its own right, so it must not nest (nor count in the
-        // expander).
+        // A branched/forked session links to its source but is a top-level chat in its own
+        // right, so it must not nest (nor count in the expander).
         if !is_subagent_descendant(&records[base[index].record], &records[base[parent].record]) {
             base[index].kind = RowKind::Agent;
             continue;
@@ -168,13 +156,9 @@ pub(crate) fn build_rows<S: std::hash::BuildHasher + Default>(
         children_by_parent.entry(parent).or_default().push(index);
         parent_by_child.insert(index, parent);
     }
-    // Busy-descendant tally from the live rows, iterative over the parent
-    // forest so deep chains cannot overflow (TS `runningSubagentCount`).
-    // The traversal is dynamically bounded — every row appended during the
-    // walk is itself traversed — so a chain of any depth folds before its
-    // parent (TS's `index < tallyOrder.length` loop; a fixed `0..len` range
-    // would strand grandchildren and their descendants out of every fold:
-    // the busy tally, the descendant counts, and the cost rollups).
+    // Busy-descendant tally from the live rows, iterative over the parent forest so deep chains
+    // cannot overflow. The traversal is dynamically bounded — every row appended during the walk
+    // is itself traversed — so a chain of any depth folds before its parent.
     let mut tally_order: Vec<usize> = (0..base.len())
         .filter(|index| !nested.contains(index))
         .collect();
@@ -200,20 +184,17 @@ pub(crate) fn build_rows<S: std::hash::BuildHasher + Default>(
             descendants_cost += base[*child].recursive_cost;
         }
         base[*index].running_subagent_count = running;
-        // Rollups follow the unfiltered hierarchy; the per-pass walk is the
-        // fallback when the caller passed none (TS `rollup ?? descendants`).
+        // Rollups follow the unfiltered hierarchy; the per-pass walk is the fallback when the
+        // caller passed none.
         if !rollups.contains_key(&base[*index].identity) {
             base[*index].descendant_count = descendants;
             base[*index].descendant_cost = descendants_cost;
             base[*index].recursive_cost = base[*index].own_cost + descendants_cost;
         }
     }
-    // An active query renders the picker as one flat, globally ranked
-    // run: every hit and every retained ancestor gets one row (no
-    // nesting, no `N subagents` summaries), `compare_base` orders scored
-    // hits by relevance and recency and sinks unscored ancestors below
-    // every hit, and each row keeps its parent linkage so drill-ins
-    // still resolve the ancestor chain.
+    // An active query renders the picker as one flat, globally ranked run: every hit and every
+    // retained ancestor gets one row (no nesting, no `N subagents` summaries), hits rank by
+    // relevance and recency, unscored ancestors sink below every hit.
     if records.iter().any(|record| record.search_score.is_some()) {
         let scope_root_record = scope_root.as_ref().map(|(root, _)| *root);
         let mut flat: Vec<usize> = (0..base.len())
@@ -230,8 +211,8 @@ pub(crate) fn build_rows<S: std::hash::BuildHasher + Default>(
             })
             .collect();
     }
-    // Flatten: roots in list order, each followed by its summary row and,
-    // when expanded, its children (TS `emit`).
+    // Flatten: roots in list order, each followed by its summary row and, when expanded, its
+    // children.
     let roots: Vec<usize> = (0..base.len())
         .filter(|index| !nested.contains(index))
         .collect();
@@ -255,24 +236,18 @@ pub(crate) fn build_rows<S: std::hash::BuildHasher + Default>(
     rows
 }
 
-/// The assembled forest one emit pass walks.
 struct RowForest<'a, S: std::hash::BuildHasher + Default> {
     base: &'a [BaseRow],
     children_by_parent: &'a HashMap<usize, Vec<usize>>,
     expanded: &'a HashSet<String, S>,
-    /// The parents whose spawn programs render inside their open list
-    /// (TS `programShownParents`).
+    /// The parents whose spawn programs render inside their open list.
     program_shown: &'a HashSet<String, S>,
     anchor: Option<&'a str>,
 }
 
 impl<S: std::hash::BuildHasher + Default> RowForest<'_, S> {
-    /// Emit one row, then its ONE summary line, then its expanded
-    /// children (TS `emit`): depth and parent identity come from the
-    /// walk. The line expands to the FULL roster in one group — the
-    /// running children first (each carrying its own running state and
-    /// its own nested line), the not-running children after — so every
-    /// descendant is reachable through the nesting alone.
+    /// Emit one row, then its ONE summary line, then its expanded children: the line expands to
+    /// the FULL roster in one group, the running children first.
     fn emit(
         &self,
         index: usize,
@@ -299,18 +274,15 @@ impl<S: std::hash::BuildHasher + Default> RowForest<'_, S> {
         }
         let mut sorted = children.clone();
         sorted.sort_by(|a, b| compare_base(&self.base[*a], &self.base[*b], self.anchor));
-        // One group, one order (the operator's contract): the running
-        // rows first — `compare_base`'s section rank already sinks the
-        // not-running rows below them — so the partition is explicit
-        // rather than left to the comparator's section ordering.
+        // One group, one order (the operator's contract): the running rows first — the
+        // partition is explicit rather than left to the comparator's section ordering.
         let (running_kids, other_kids): (Vec<usize>, Vec<usize>) = sorted
             .iter()
             .copied()
             .partition(|child| self.base[*child].section == Section::Running);
         let ordered: Vec<usize> = running_kids.into_iter().chain(other_kids).collect();
-        // TS `groupChildrenBySpawnCode`: while the program shows, each spawn cell's
-        // code renders once above the children it launched. Hidden keeps the flat
-        // running-first order.
+        // While the program shows, each spawn cell's code renders once above the children it
+        // launched; hidden keeps the flat running-first order.
         let groups: Vec<(Option<&str>, Vec<usize>)> = if self.program_shown.contains(&row.identity)
         {
             let mut groups: Vec<(Option<&str>, Vec<usize>)> = Vec::new();
@@ -377,23 +349,12 @@ fn remote_host_label(summary: &Value) -> Option<String> {
     })
 }
 
-/// The subagents line under one agent (the operator's 2026-09-28
-/// one-dropdown directive): `"{total} subagents ({running} running)"` —
-/// `total` = the FULL descendant roster (running + inactive), `running`
-/// = the running subset — expanding to the whole roster in one group,
-/// the running rows first. TS parity: TS `createSubagentSummaryRow`
-/// titles one `"{n} subagents running"` / `"{n} subagents"` line that
-/// expands to every child — this is the same one-line shape with the
-/// operator's both-counts label, a sanctioned divergence. The title
-/// stays count-only (the expanded children render their own Model
-/// column).
-///
-/// The line reuses its parent's summary so the open action and selection
-/// keys resolve the parent. The `cost` cell is the whole descendant
-/// tree's spend — the line always renders while any descendant exists,
-/// so the aggregate never loses its row (TS `createSubagentSummaryRow`
-/// pins `recursiveCost: 0` there, a deliberate divergence) — and the
-/// line carries no age.
+/// The subagents line under one agent (the operator's 2026-09-28 one-dropdown directive):
+/// `"{total} subagents ({running} running)"` — `total` = the FULL descendant roster, `running` =
+/// the running subset — expanding to the whole roster in one group, the running rows first (a
+/// sanctioned divergence: TS titles one `"{n} subagents running"` line). The line reuses its
+/// parent's summary so the open action and selection keys resolve the parent; the `cost` cell is
+/// the whole descendant tree's spend (TS pins `recursiveCost: 0` there, a deliberate divergence).
 fn merged_summary_row(parent: &BaseRow, depth: usize, expanded: bool) -> AgentsViewRow {
     let total = parent.descendant_count;
     let running = parent.running_subagent_count;
@@ -416,24 +377,18 @@ fn merged_summary_row(parent: &BaseRow, depth: usize, expanded: bool) -> AgentsV
     }
 }
 
-/// TS `hasSpawnCode` (agents-view-state.ts:1021-1023): the summary's
-/// `spawnCode` is a string with a non-blank trim. The ONE predicate —
-/// and the value the program rows render, never a second read.
+/// The summary's `spawnCode` is a string with a non-blank trim — the ONE predicate and the
+/// value the program rows render, never a second read.
 fn spawn_code(summary: &Value) -> Option<&str> {
     let code = summary.get("spawnCode").and_then(Value::as_str)?;
     (!code.trim().is_empty()).then_some(code)
 }
 
-/// TS `MAX_SPAWN_CODE_LINES` (agents-view-state.ts:67): the program
-/// body's row cap, so a long spawn cell cannot flood the view.
+/// The program body's row cap, so a long spawn cell cannot flood the view.
 const MAX_SPAWN_CODE_LINES: usize = 10;
 
-/// TS `buildSpawnCodeRows` (agents-view-state.ts:1051-1083): one spawn
-/// cell's program as read-only rows — the code's lines (trailing
-/// whitespace stripped, capped, the remainder counted), wrapped in
-/// blank pad rows. Each row reuses the parent's section and summary and
-/// carries the code line in `title` (code rows are never selected,
-/// searched, or deleted, so no separate code field exists).
+/// One spawn cell's program as read-only rows: the code's lines (stripped, capped, the remainder
+/// counted), wrapped in blank pad rows, the code line in `title` (never selected or searched).
 fn spawn_code_rows(
     parent: &BaseRow,
     code: &str,
@@ -457,14 +412,11 @@ fn spawn_code_rows(
         expanded: false,
         has_spawn_code: false,
     };
-    // TS `spawnCode.replace(/\s+$/, "")`: strip the trailing whitespace
-    // editors leave, then split the program into its lines — the cap
-    // reads the first lines and counts the rest from the one iterator,
-    // with no intermediate collection.
+    // Strip the trailing whitespace editors leave, then split into lines — the cap reads the
+    // first lines and counts the rest from the one iterator, with no intermediate collection.
     let mut lines = code.trim_end().split('\n');
     let mut rows: Vec<AgentsViewRow> = Vec::new();
-    // A blank panel line above and below pads the program into a clean
-    // block (TS :1081-1082).
+    // A blank panel line above and below pads the program into a clean block.
     rows.push(make_row("", "pad-top"));
     for (line_index, line) in lines.by_ref().take(MAX_SPAWN_CODE_LINES).enumerate() {
         rows.push(make_row(line, &line_index.to_string()));
@@ -483,8 +435,7 @@ fn spawn_code_rows(
     rows
 }
 
-/// TS `compareAgentsViewRows`: section rank, then empty sessions sink,
-/// then recency, then title, then session id.
+/// Section rank, then empty sessions sink, then recency, then title, then session id.
 fn compare_base(a: &BaseRow, b: &BaseRow, anchor: Option<&str>) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     fn get_str<'a>(summary: &'a Value, field: &str) -> Option<&'a str> {
@@ -498,10 +449,8 @@ fn compare_base(a: &BaseRow, b: &BaseRow, anchor: Option<&str>) -> std::cmp::Ord
             crate::agents_view_state::timestamp_ms(Some(value))
         })
     };
-    // Search hits rank relevance first: the score decides before
-    // anything else, retained ancestors (unscored) sink below every hit,
-    // and recency breaks score ties; section grouping only orders rows
-    // that the query did not rank.
+    // Search hits rank relevance first: the score decides before anything else, retained
+    // ancestors sink below every hit; section grouping only orders rows the query did not rank.
     if let (Some(left), Some(right)) = (a.search_score, b.search_score) {
         let by_score = left.total_cmp(&right);
         if by_score != Ordering::Equal {

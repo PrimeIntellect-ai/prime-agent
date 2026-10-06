@@ -1,18 +1,7 @@
-//! Per-worker stderr capture for spawn diagnostics: each session worker's
-//! stderr goes to a per-worker log file under the daemon's logs dir
-//! (`<agent-dir>/logs/`, the same layout as the supervisor's own rotating
-//! log), and a bounded tail of that file rides the not-ready launch errors
-//! (the Codex `app-server-daemon` behavior: `pid_start.rs` opens the file,
-//! `pid.rs` reads a 4 KiB tail into the "did not become ready" context).
-//!
-//! Retention rule: the file is truncated at every spawn of its worker, so
-//! it holds exactly the current launch's stderr (never the previous
-//! attempt's), and the spawn-time prune keeps only the newest
-//! [`RETAINED_FILES`] worker logs by modified time, deleting the older
-//! ones — but never a log younger than [`PRUNE_PROTECTION_SECS`] and
-//! never the just-opened log itself (coarse-mtime ties could sort either
-//! into the deletion window). The tail a not-ready error carries is the
-//! last [`TAIL_BYTES`] of the file.
+//! Per-worker stderr capture for spawn diagnostics: each worker's stderr goes
+//! to a per-worker log under the daemon's logs dir, a bounded tail rides the
+//! not-ready launch errors, and the spawn-time prune keeps only the newest
+//! [`RETAINED_FILES`] logs.
 
 use std::fs::File;
 use std::io::{Read as _, Seek as _, SeekFrom};
@@ -24,35 +13,25 @@ use anyhow::{anyhow, Context, Result};
 /// `STDERR_LOG_TAIL_BYTES`).
 const TAIL_BYTES: u64 = 4096;
 
-/// How many worker stderr logs the daemon retains (the spawn-time prune
-/// cap; see the module docs for the full retention rule).
+/// How many worker stderr logs the daemon retains (the prune cap).
 const RETAINED_FILES: usize = 64;
 
-/// Logs younger than this are never prune targets: a launch's log must
-/// survive from its spawn until the launch settles (the probe and auth
-/// fit inside the platform launch budgets — the 30s Unix default, the
-/// 90s Windows default, and the e2e override), so one concurrent spawn's
-/// prune cannot unlink another's fresh log.
+/// Logs younger than this are never prune targets: a concurrent spawn's prune
+/// cannot unlink another launch's fresh log.
 const PRUNE_PROTECTION_SECS: u64 = 120;
 
-/// The worker's stderr log: `worker-<id>.stderr.log` under the daemon's
-/// logs dir, the existing state-dir convention the supervisor's own log
-/// uses.
+/// The worker's stderr log: `worker-<id>.stderr.log` under the
+/// daemon's logs dir.
 pub(crate) fn log_path(agent_dir: &Path, worker_id: &str) -> PathBuf {
     crate::paths::logs_dir(agent_dir).join(format!("worker-{worker_id}.stderr.log"))
 }
 
-/// Open the worker's stderr log for a spawn: the file is created (or
-/// truncated from a previous launch) so the child starts with an empty
-/// log, then the logs dir is pruned to the retention cap. The caller
-/// hands the file to the child as its `Stdio::stderr`.
+/// Open the worker's stderr log for a spawn: created or truncated so
+/// the child starts with an empty log, then the logs dir is pruned.
 ///
 /// # Errors
 ///
-/// Returns an error when the logs dir cannot be created or the file
-/// cannot be opened for writing: the daemon owns durable state, so a
-/// worker whose stderr cannot be captured does not launch detached with
-/// its diagnostics silently lost (the Codex `open_stderr_log` rule).
+/// Returns an error when the logs dir cannot be created or the file cannot be opened.
 pub(crate) fn open_for_spawn(log_path: &Path) -> Result<File> {
     let logs_dir = log_path
         .parent()
@@ -68,17 +47,9 @@ pub(crate) fn open_for_spawn(log_path: &Path) -> Result<File> {
     Ok(file)
 }
 
-/// Keep only the newest [`RETAINED_FILES`] worker stderr logs (by modified
-/// time) and delete the rest: worker ids are minted per launch, so without
-/// the prune every session a daemon ever hosted would leave a log behind.
-/// The just-opened log (`keep`) is spared if coarse-mtime ties sort it
-/// into the deletion window: the child holds its descriptor, but a later
-/// tail read opens by pathname. Logs younger than
-/// [`PRUNE_PROTECTION_SECS`] are never prune targets either: concurrent
-/// launches each know only their own `keep`, so only their age protects
-/// one spawn's fresh log from another spawn's prune. Deletion of the rest
-/// is best-effort (a live worker's file may be open; an unlinked file
-/// keeps receiving the child's writes until it exits).
+/// Keep only the newest [`RETAINED_FILES`] logs: worker ids are minted per
+/// launch, so without the prune every session ever hosted leaves a log. The
+/// just-opened log (`keep`) is spared; deletion is best-effort.
 fn prune_retained(logs_dir: &Path, keep: &Path) {
     let Ok(entries) = std::fs::read_dir(logs_dir) else {
         return;
@@ -93,9 +64,8 @@ fn prune_retained(logs_dir: &Path, keep: &Path) {
         })
         .filter_map(|path| {
             let modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok()?;
-            // A future mtime (clock skew) reads as not-yet-elapsed, i.e.
-            // protected: a skewed clock must not turn a fresh launch's
-            // log into a prune target.
+            // A future mtime (clock skew) reads as protected: a skewed clock must not
+            // turn a fresh log into a prune target.
             let fresh = modified.elapsed().map_or(true, |age| {
                 age < std::time::Duration::from_secs(PRUNE_PROTECTION_SECS)
             });
@@ -123,18 +93,12 @@ fn prune_retained(logs_dir: &Path, keep: &Path) {
     }
 }
 
-/// Read the last [`TAIL_BYTES`] of a worker stderr log, dropping the
-/// leading partial line when the file is larger than the tail so the tail
-/// starts on a line boundary (the Codex `read_log_tail` shape). The read
-/// itself is bounded: the not-ready error can fire while the worker is
-/// still running (the auth-budget arm), and an unbounded read would let
-/// the worker's ongoing stderr output grow the tail past the cap. Returns
-/// `Ok(None)` for a missing or empty log.
+/// Read the last [`TAIL_BYTES`] of a worker stderr log, dropping the leading partial
+/// line (the read is bounded). Returns `Ok(None)` for a missing or empty log.
 ///
 /// # Errors
 ///
-/// Returns an error when the log cannot be opened, inspected, or read and
-/// it exists.
+/// Returns an error when the log cannot be opened, inspected, or read and it exists.
 fn read_tail(path: &Path) -> Result<Option<String>> {
     let mut file = match File::open(path) {
         Ok(file) => file,
@@ -170,13 +134,9 @@ fn read_tail(path: &Path) -> Result<Option<String>> {
     Ok(Some(contents))
 }
 
-/// Attach the worker's captured stderr tail to a not-ready launch failure
-/// so the error names the panic the supervisor only saw as silence (the
-/// Codex `append_stderr_log_tail_context` + `PidLogTail::append_to_context`
-/// shape). The base error's headline stays the message's first line; the
-/// tail rides below it, one indented line per log line. An unreadable log
-/// degrades to a note instead of replacing the launch failure, and a
-/// silent worker (empty log) keeps its bare headline.
+/// Attach the worker's captured stderr tail to a not-ready launch failure so
+/// the error names the panic the supervisor only saw as silence. The base
+/// headline stays first; an unreadable log degrades to a note.
 pub(crate) fn not_ready_with_tail(base: anyhow::Error, log_path: &Path) -> anyhow::Error {
     match read_tail(log_path) {
         Ok(Some(tail)) => anyhow!(
@@ -206,9 +166,8 @@ mod tests {
         path
     }
 
-    /// Set the file's mtime to the Unix epoch plus `seconds`, so prune
-    /// order is deterministic regardless of filesystem timestamp
-    /// granularity (the `session_archive` test convention).
+    /// Set the file's mtime deterministically regardless of filesystem
+    /// timestamp granularity.
     fn backdate(path: &Path, seconds: i64) {
         let mtime = filetime::FileTime::from_unix_time(seconds, 0);
         filetime::set_file_mtime(path, mtime).expect("set mtime");
@@ -235,8 +194,6 @@ mod tests {
             tail.contains(&format!("panic trace line {}", line_index - 1)),
             "holds the newest line"
         );
-        // The dropped leading partial line left the tail on a line
-        // boundary: every retained line is whole.
         assert!(
             tail.lines()
                 .all(|line| line.starts_with("panic trace line")),
@@ -327,10 +284,8 @@ mod tests {
         // A foreign file in the logs dir is never pruned (the daemon's
         // own log lives here too).
         let daemon_log = write_log(&logs_dir, "daemon.sock.abcd1234.log", "supervisor line\n");
-        // The just-opened log is the pathological case Macroscope flagged:
-        // it sorts OLDEST (a coarse-mtime tie would do this), so the prune
-        // must spare it from the deletion window instead of unlinking it
-        // while the worker still holds its descriptor.
+        // The just-opened log sorts OLDEST (a coarse-mtime tie would
+        // do this): the prune must spare it from the deletion window.
         let keep = logs_dir.join("worker-000.stderr.log");
         prune_retained(&logs_dir, &keep);
         let mut remaining: Vec<String> = std::fs::read_dir(&logs_dir)
@@ -375,9 +330,8 @@ mod tests {
     fn prune_spares_a_fresh_burst_of_launches() {
         let dir = tempfile::tempdir().expect("temp dir");
         let logs_dir = dir.path().join("logs");
-        // A same-tick launch burst: every log carries the current
-        // modified time, so every one is inside the prune-protection
-        // window and no spawn's prune may touch another's fresh log.
+        // A same-tick launch burst: every log is inside the
+        // prune-protection window.
         for index in 0..(RETAINED_FILES + 6) {
             write_log(
                 &logs_dir,

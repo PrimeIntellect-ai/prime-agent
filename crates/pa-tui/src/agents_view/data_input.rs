@@ -1,8 +1,6 @@
-//! The data assembly and the input surface: the unified records,
-//! the row rebuild (the reconciled roster+catalog with the query
-//! filter), the roster update apply, the saved-catalog stream
-//! reconcile, and the selection/key/mouse dispatch residue
-//! (moved with their concern).
+//! The data assembly and the input surface: the unified records, the row rebuild (the
+//! reconciled roster+catalog with the query filter), the roster update apply, the saved-catalog
+//! stream reconcile, and the selection/key/mouse dispatch residue.
 use super::{
     build_rows, compute_rollups, filter_empty_sessions, filter_unified_sessions,
     parse_search_query, reconcile_unified_sessions, resolve_selection, scope_ancestors, scope_root,
@@ -12,23 +10,16 @@ use super::{
 };
 
 impl AgentsViewMode {
-    /// The unified records the view runs on (reconciled from the live
-    /// roster and the saved catalog).
     pub(super) fn records(&self) -> Vec<crate::agents_view_state::UnifiedRecord> {
         reconcile_unified_sessions(&self.roster, &self.saved)
     }
 
-    /// Rebuild rows from the current roster, catalog, and query (TS
-    /// `reconcileCatalogs` + `getFilteredRecords`). A scoped run lists the
-    /// scope root's subtree with the root's own row excluded (its direct
-    /// children list as top-level rows); a scope root that left the roster
-    /// falls back to the global list with a status message and reports the
-    /// drop so the flow discards the scope.
+    /// Rebuild rows from the current roster, catalog, and query. A scoped run lists the scope
+    /// root's subtree with the root's own row excluded; a gone scope root falls back.
     pub(super) fn rebuild_rows(&mut self) {
         let identity = self.rows.get(self.selected).map(|row| row.identity.clone());
         let records = self.records();
-        // Scope resolution (TS `resolveAgentsViewScopeFrames`): a frame
-        // whose root is gone drops, with the nearest fallback surfaced as a
+        // A scope frame whose root is gone drops, with the nearest fallback surfaced as a
         // status message.
         let mut scope_active = false;
         let scoped = match &self.options.scope {
@@ -51,9 +42,8 @@ impl AgentsViewMode {
             Some(scoped) => scoped,
             None => &records,
         };
-        // The empty-catalog filter preserves the anchor and the scope root
-        // (TS `preservedSessionIds`); the search filter keeps ancestors so
-        // a match never orphans its parent row.
+        // The empty-catalog filter preserves the anchor and the scope root; the search filter
+        // keeps ancestors so a match never orphans its parent row.
         let mut preserved = Vec::new();
         if let Some(anchor) = self.options.anchor_session_id.as_deref() {
             preserved.push(anchor);
@@ -70,9 +60,7 @@ impl AgentsViewMode {
             let parsed = parse_search_query(self.query.trim());
             filter_unified_sessions(&filtered, &parsed)
         };
-        // TS `computeRecursiveRollups(this.unifiedRecords)`: the rollup
-        // runs over the full reconciled set, so a filter never changes a
-        // row's total.
+        // The rollup runs over the full reconciled set, so a filter never changes a row's total.
         let rollups = compute_rollups(&records);
         let mut rows = build_rows(
             &filtered,
@@ -82,10 +70,8 @@ impl AgentsViewMode {
             &rollups,
             self.options.anchor_session_id.as_deref(),
         );
-        // The entry anchor's row may be nested: arm the same ancestor
-        // expansion below so this pass reveals it (a top-level anchor has
-        // no ancestors, and a scoped view never lists the anchor at all —
-        // the scope root is excluded — so the wait just stands by).
+        // The entry anchor's row may be nested: arm the same ancestor expansion below so this
+        // pass reveals it (a scoped view never lists the anchor).
         if let (true, Some(anchor)) = (
             self.anchor_selection_pending
                 && self.options.scope.is_none()
@@ -101,10 +87,8 @@ impl AgentsViewMode {
                 },
             ));
         }
-        // Re-expand the drilled-in row's ancestors (TS
-        // `applyPendingAncestorExpansion`): a nested ancestor's row only
-        // appears once its own parent is expanded, so expand-and-rebuild
-        // until a pass reveals nothing new.
+        // Re-expand the drilled-in row's ancestors: a nested row appears only once its parent is
+        // expanded (expand-and-rebuild until a pass reveals nothing new).
         if let Some(wanted) = self.pending_ancestors.take() {
             let mut added = true;
             while added {
@@ -115,9 +99,7 @@ impl AgentsViewMode {
                     }
                     let session_id = row.summary.get("sessionId").and_then(Value::as_str);
                     if session_id.is_some_and(|id| wanted.iter().any(|w| w == id)) {
-                        // The drilled row sits under the ONE merged
-                        // line (running and inactive rows alike), so
-                        // the reveal opens it.
+                        // The drilled row sits under the ONE merged line, so the reveal opens it.
                         if self.expanded_parents.insert(row.identity.clone()) {
                             added = true;
                         }
@@ -135,19 +117,16 @@ impl AgentsViewMode {
                 }
             }
         }
-        // Keep the selection on the same row across rebuilds, falling back
-        // to the carried identity/key (TS `resolveAgentsViewSelectionState`).
+        // Keep the selection on the same row across rebuilds, falling back to the carried
+        // identity/key.
         self.selected = resolve_selection(
             &rows,
             self.selected,
             identity.as_deref().or(self.selected_identity.as_deref()),
             self.selected_key.as_ref(),
         );
-        // The entry anchor lands the selection on the anchor session's row
-        // once it appears (the agents-back handoff: the view opens on the
-        // session just left); until then the rebuild's default holds. The
-        // sync below then pins the anchor row, so later rebuilds restore
-        // onto it through the carried identity/key alone.
+        // The entry anchor lands the selection on its row once it appears; the sync below pins it,
+        // so later rebuilds restore onto it through the carried identity/key alone.
         if let (true, Some(anchor)) = (
             self.anchor_selection_pending,
             self.options.anchor_session_id.as_deref(),
@@ -161,10 +140,8 @@ impl AgentsViewMode {
             }
         }
         self.rows = rows;
-        // The armed confirm only rides a row the list still carries
-        // under the session key it armed with: a removed, re-created,
-        // or re-keyed row retires it, so the hint always matches a row
-        // the execution gate accepts.
+        // The armed confirm only rides a row the list still carries under the session key it
+        // armed with: a removed, re-created, or re-keyed row retires it.
         if let Some(pending) = &self.pending_delete {
             let still_there = self.rows.iter().any(|row| row.identity == pending.identity);
             let unchanged_key = self
@@ -213,12 +190,8 @@ impl AgentsViewMode {
         self.rebuild_rows();
     }
 
-    /// Track the selected row's identity and key (TS
-    /// `syncSelectedRowState`): they survive rebuilds and view re-entry,
-    /// and EVERY selection move refreshes them. A stale key from an
-    /// earlier position would otherwise win the active-session-id
-    /// fallback on the next roster rebuild and teleport the selection
-    /// back to where the user arrowed from.
+    /// Track the selected row's identity and key: they survive rebuilds, and EVERY selection move
+    /// refreshes them (a stale key would win the active-session-id fallback on the next rebuild).
     pub(super) fn sync_selected_row_state(&mut self) {
         if let Some(row) = self.rows.get(self.selected) {
             self.selected_identity = Some(row.identity.clone());
@@ -229,12 +202,8 @@ impl AgentsViewMode {
         }
     }
 
-    /// Move the selection by `delta` selectable rows (TS `moveSelection`,
-    /// which ends with `syncSelectedRowState`): the move refreshes the
-    /// carried identity/key so the next roster rebuild resolves the
-    /// selection back onto the row the user actually landed on. The first
-    /// move is an explicit user choice: it cancels the entry anchor's wait,
-    /// which must never override it.
+    /// Move the selection by `delta` selectable rows, refreshing the carried identity/key. The
+    /// first move is an explicit user choice: it cancels the entry anchor's wait.
     pub(super) fn move_selection(&mut self, delta: isize) {
         self.anchor_selection_pending = false;
         self.search_return = None;
@@ -258,16 +227,12 @@ impl AgentsViewMode {
         let next = (current as isize + delta).clamp(0, selectable.len() as isize - 1) as usize;
         self.selected = selectable[next];
         self.sync_selected_row_state();
-        // TS `moveSelection` (:1487-1493): the reply stays armed only
-        // while the selection sits on the targeted agent row.
+        // The reply stays armed only while the selection sits on the targeted row.
         self.disarm_reply_off_selected();
     }
 
-    /// Jump the selection to the first or last selectable row
-    /// (`home`/`end` and their ctrl/super variants). The same contract
-    /// as `move_selection`: an explicit user choice ends the entry
-    /// anchor's wait and refreshes the carried identity/key so the next
-    /// roster rebuild resolves the selection back onto the landed row.
+    /// Jump the selection to the first or last selectable row (`home`/`end` and their ctrl/super
+    /// variants), with `move_selection`'s contract.
     pub(super) fn move_selection_to(&mut self, edge: SelectionEdge) {
         self.anchor_selection_pending = false;
         self.search_return = None;
@@ -285,42 +250,29 @@ impl AgentsViewMode {
         }
         .unwrap_or(0);
         self.sync_selected_row_state();
-        // The list-edge jumps are moves like TS's `moveSelection`: the
-        // reply disarms when the selection leaves the targeted row.
+        // The list-edge jumps are moves too: the reply disarms when the selection
+        // leaves the row.
         self.disarm_reply_off_selected();
     }
 
-    /// Open the selected row (TS `openSelected`): the summary row toggles
-    /// its list, a nested child drills into its transcript with its
-    /// ancestor chain, and a top-level agent opens its session.
+    /// Open the selected row: the summary row toggles its list, a nested child drills into its
+    /// transcript with its ancestor chain, and a top-level agent opens its session.
     ///
-    /// While the entry anchor still waits on its row (the saved catalog
-    /// streams in), the selection is the rebuild's default, not the
-    /// user's — opening it would confirm an arbitrary row (on a
-    /// continue-recent launch that can be an unrelated live session). The
-    /// open waits instead: the anchor lands the selection once its row
-    /// appears, and any direction key or row click cancels the wait for
-    /// an explicit manual pick. A scoped view never lists its anchor
-    /// (the scope root is excluded), so its wait never resolves — it
-    /// keeps the open.
-    /// End the entry anchor's wait (the anchor row landed).
+    /// While the entry anchor still waits, opening would confirm an arbitrary row, so the open
+    /// waits: a direction key or row click cancels the wait.
     pub(super) fn end_anchor_wait(&mut self) {
         self.anchor_selection_pending = false;
         self.clear_anchor_loading_hint();
     }
 
-    /// Buffer one streamed saved row (TS `refreshSavedSessions`'s
-    /// `onSession`): the loop flushes the batch in its reconcile window,
-    /// never per row.
+    /// Buffer one streamed saved row: the loop flushes the batch in its reconcile window, never
+    /// per row.
     pub(super) fn buffer_saved_stream_item(&mut self, session: Value) {
         self.saved_stream.push(session);
     }
 
-    /// Flush the streamed batch into the catalog (TS's bounded reconcile
-    /// window): upsert by the row's own identity - the path first, then
-    /// the durable id - so a superseded fetch's late frames never
-    /// duplicate a row, then one rebuild. Returns whether the catalog
-    /// changed.
+    /// Flush the streamed batch into the catalog: upsert by path first, then durable id, so a
+    /// superseded fetch's late frames never duplicate a row. Returns whether the catalog changed.
     pub(super) fn flush_saved_stream(&mut self) -> bool {
         if self.saved_stream.is_empty() {
             return false;
@@ -342,20 +294,14 @@ impl AgentsViewMode {
         true
     }
 
-    /// Drop the unflushed stream batch: the terminal response replaces the
-    /// catalog wholesale (its array is the authoritative set), and a
-    /// terminal failure keeps the last good rows.
+    /// Drop the unflushed stream batch: the terminal response replaces the catalog wholesale, and
+    /// a terminal failure keeps the last good rows.
     pub(super) fn drop_saved_stream(&mut self) {
         self.saved_stream.clear();
     }
 
-    /// The saved-catalog fetch settled on a terminal failure: the entry
-    /// anchor's wait ends with it (TS `resolveMissingSelectionAnchor`'s
-    /// finally arm). The anchor's row can only arrive through this fetch,
-    /// so a pending wait behind the failure would keep re-arming the
-    /// loading hint on every open — an open the failed catalog can never
-    /// satisfy. The selection stands on the rebuild's default row, and the
-    /// status line keeps the fetch's own honest error.
+    /// The saved-catalog fetch settled on a terminal failure: the entry anchor's wait ends with
+    /// it (the anchor's row can only arrive through this fetch).
     pub(super) fn settle_anchor_wait_on_saved_failure(&mut self) {
         self.end_anchor_wait();
     }
@@ -397,14 +343,8 @@ impl AgentsViewMode {
         self.sync_selected_row_state();
     }
 
-    /// The selected row's stop-or-delete arming target (the confirm's
-    /// [`PendingDelete`]), `None` for rows with no stop-or-delete action
-    /// (summary rows, and rows carrying neither a live session nor a
-    /// saved file). `stop` is true while the row has live work (TS
-    /// `hasLiveWork`).
-    /// A landed saved-catalog snapshot: the authoritative array replaces
-    /// the stream's rows, with this run's deleted paths filtered out (a
-    /// slow fetch never restores a row the daemon already deleted).
+    /// A landed saved-catalog snapshot: the authoritative array replaces the stream's rows, with
+    /// this run's deleted paths filtered out (a slow fetch never restores a deleted row).
     pub(super) fn apply_saved_loaded(&mut self, sessions: Vec<Value>) {
         self.saved = sessions
             .into_iter()
@@ -416,14 +356,11 @@ impl AgentsViewMode {
             })
             .collect();
         self.saved_fetch_failed = false;
-        // The catalog settled (TS `persistentState.savedCatalogLoaded =
-        // true`): the flow's next view run reuses it without a fetch.
+        // The flow's next view run reuses the settled catalog without a fetch.
         self.saved_catalog_loaded = true;
     }
 
-    /// Whether the loop must re-arm the saved-catalog fetch (one retry
-    /// per terminal failure; the consumption clears the failure intent
-    /// with it, so the retry in flight is the only one until IT fails).
+    /// Whether the loop must re-arm the saved-catalog fetch (one retry per terminal failure).
     pub(super) fn take_saved_fetch_rearm(&mut self) -> bool {
         let rearm = std::mem::take(&mut self.saved_query_rearm);
         if rearm {
@@ -432,55 +369,42 @@ impl AgentsViewMode {
         rearm
     }
 
-    /// The loading hint belongs to the wait alone: ending the wait by
-    /// either arm (the anchor landing or the user's first move) drops it
-    /// so the status line returns to the flow's own notice — the error
-    /// catalog-failure message included — instead of a stale loading
-    /// message.
+    /// The loading hint belongs to the wait alone: ending the wait by either arm drops it, so the
+    /// status line returns to the flow's own notice, never a stale loading message.
     pub(super) fn clear_anchor_loading_hint(&mut self) {
         if self.status_text() == Some(ANCHOR_LOADING_HINT) {
             self.status = None;
         }
     }
 
-    /// The selection page step (TS `handleListNavigation`: the page keys
-    /// move by `Math.max(1, visibleListRows())`, where `visibleListRows()`
-    /// is the terminal rows minus the fixed frame chrome — splash, search
-    /// prompt, hints — floored at 4 rows).
+    /// The selection page step: the page keys move by the terminal rows minus the fixed frame
+    /// chrome (splash, search prompt, hints), floored at 4 rows.
     pub(super) fn page_step(&self) -> usize {
         self.last_height.saturating_sub(9).max(4).max(1)
     }
 
-    /// Handle one key id. Every action dispatches through the effective
-    /// keybindings in TS dispatch order (`AgentsViewMode.handleInput`,
-    /// then `CustomEditor.handleInput`/`Editor.handleInput`), so a user
-    /// `keybindings.json` override moves both the handler and the hint —
-    /// the same contract as the session view (#184).
+    /// Handle one key id. Every action dispatches through the effective keybindings in TS
+    /// dispatch order, so a user override moves both the handler and the hint — the same contract
+    /// as the session view (#184).
     pub(super) fn handle_key(&mut self, key: &str) {
-        // TS `handleInput`'s first call: a sticky line clears on any
-        // keypress (the transient lines ride their own expiry).
+        // A sticky line clears on any keypress (the transient lines ride their own
+        // expiry).
         self.clear_sticky_status();
         let was_armed = self.exit_armed;
-        // The notice panel: any key closes it (the refusal's ways out
-        // stay copy-pasteable while it is up), except the exit key,
-        // which falls through so the double-press exit convention keeps
-        // working with the panel open.
+        // The notice panel: any key closes it (the refusal's ways out stay copy-pasteable while
+        // it is up), except the exit key, which falls through so the double-press exit convention
+        // keeps working with the panel open.
         if self.notice.is_some() && !self.keybindings.matches(key, "app.clear") {
             self.notice = None;
             return;
         }
         self.notice = None;
-        // Any other key clears the exit hint (TS `clearCtrlCExitHint`).
-        // Any other key clears the exit hint (TS `clearCtrlCExitHint`)
-        // and the stop-or-delete confirm (TS `clearDeleteConfirmation`
-        // at the top of `handleInput`).
+        // Any other key clears the exit hint and the stop-or-delete confirm.
         self.exit_armed = false;
         let was_delete_armed = self.pending_delete.take();
         let has_query = !self.query.is_empty();
-        // TS `handleInput`'s composer branches (:1119-1126 and the
-        // armed-reply gates before `editor.handleInput`): the armed
-        // composer owns every key before the app-level handlers — the
-        // draft comes out owned, and an unarmed Search parks nothing.
+        // The armed composer owns every key before the app-level handlers; the draft
+        // comes out owned, and an unarmed Search parks nothing.
         match std::mem::replace(&mut self.composer, Composer::Search) {
             Composer::Rename(rename) => {
                 self.handle_rename_key(rename, key);
@@ -492,12 +416,9 @@ impl AgentsViewMode {
             }
             Composer::Search => {}
         }
-        // TS `app.clear` (default ctrl+c): the first press arms the exit
-        // hint, a second press while armed exits the view (TS
-        // `handleCtrlC`). One handled Ctrl+C press: the force-quit guard
-        // disarms once the whole observed pair was handled without an
-        // exit (this press armed the state); an exit re-arms from the
-        // run loop's break.
+        // `app.clear` (default ctrl+c): the first press arms the exit hint, a second press while
+        // armed exits. One handled Ctrl+C press: the force-quit guard disarms once the whole
+        // observed pair was handled; an exit re-arms from the run loop's break.
         if self.keybindings.matches(key, "app.clear") {
             if key == "ctrl+c" {
                 self.exit_guard.note_ctrl_c_handled();
@@ -509,14 +430,9 @@ impl AgentsViewMode {
             }
             return;
         }
-        // Esc (tui.select.cancel) dismisses the incident notice while it is
-        // the only thing to cancel: an empty search prompt (the TS gate also
-        // requires no armed reply and no autocomplete popup; this view's
-        // search editor has neither). An armed delete confirmation is the
-        // more dangerous state: Esc cancels it (the take() above) and keeps
-        // the notice instead of dismissing the notice and leaving the
-        // delete armed to fire on the next press without a fresh
-        // confirmation. Without a visible notice, Esc keeps its back/exit
+        // Esc dismisses the incident notice while it is the only thing to cancel (an empty search
+        // prompt). An armed delete confirmation is the more dangerous state: Esc cancels it (the
+        // take() above) and keeps the notice; without a visible notice, Esc keeps its back/exit
         // meaning.
         if was_delete_armed.is_none()
             && !has_query
@@ -525,18 +441,15 @@ impl AgentsViewMode {
         {
             return;
         }
-        // TS `app.agents.rename` (default ctrl+r, empty editor only,
-        // before the delete arm — TS :1153): enter the rename composer.
+        // `app.agents.rename` (default ctrl+r, empty editor only, before the delete arm):
+        // enter the rename composer.
         if !has_query && self.keybindings.matches(key, "app.agents.rename") {
             self.enter_rename_mode();
             return;
         }
-        // TS `app.agents.delete` (default ctrl+x, empty editor only — TS
-        // `handleInput`'s gate): stop or delete the selected row. The
-        // first press arms the confirm over the row (the hint reads
-        // "stop" while the row has live work, "delete" otherwise — TS
-        // `hasLiveWork`), the second press on the same row executes, and
-        // any other key clears the arm.
+        // `app.agents.delete` (default ctrl+x, empty editor only): the first press arms the
+        // confirm (the hint reads "stop" for live work, "delete" otherwise), the second press on
+        // the same row executes, any other key clears the arm.
         if !has_query && self.keybindings.matches(key, "app.agents.delete") {
             // Stopping or deleting a tailnet peer happens on its machine
             // (TS #2516); the view stays read-only context for it.
@@ -546,9 +459,9 @@ impl AgentsViewMode {
             self.confirm_delete_for_selected(was_delete_armed);
             return;
         }
-        // TS `app.agents.reply` (default space, empty editor only —
-        // TS :1164): arm the reply composer over the selected agent row;
-        // the same target disarms. A space with a query is search text.
+        // `app.agents.reply` (default space, empty editor only): arm the reply over
+        // the selected row; the same target disarms, and a space with a query is
+        // search text.
         if !has_query && self.keybindings.matches(key, "app.agents.reply") {
             self.toggle_reply();
             return;
@@ -593,15 +506,14 @@ impl AgentsViewMode {
             self.running = false;
             return;
         }
-        // TS `app.agents.program` (default ctrl+o, empty editor only,
-        // after the new-session action): show or hide the selected
+        // `app.agents.program` (default ctrl+o, empty editor only): show or hide the selected
         // row's target spawn program.
         if !has_query && self.keybindings.matches(key, "app.agents.program") {
             self.cycle_program_for_selected();
             return;
         }
-        // TS `app.agents.expand` (default alt+right, search empty): toggle
-        // the selected parent's list when it has children.
+        // `app.agents.expand` (default alt+right, search empty): toggle the selected parent's
+        // list when it has children.
         if !has_query && self.keybindings.matches(key, "app.agents.expand") {
             let selected = self.rows.get(self.selected).cloned();
             if let Some(row) = selected {
@@ -611,18 +523,14 @@ impl AgentsViewMode {
             }
             return;
         }
-        // TS `app.agents.open` (right) and the editor submit (enter, the
-        // `tui.select.confirm` slot) both open the selection (a non-empty
-        // query still opens while the cursor sits at its end — always
-        // true for this editor); the summary row toggles its list instead.
+        // `app.agents.open` (right) and the editor submit (enter) both open the selection; the
+        // summary row toggles its list instead.
         if self.keybindings.matches(key, "app.agents.open")
             || self.keybindings.matches(key, "tui.select.confirm")
         {
             self.open_selected();
             return;
         }
-        // List navigation (TS `handleListNavigation`): the selection keys
-        // and the page keys move the selection.
         if self.keybindings.matches(key, "tui.select.up") {
             self.move_selection(-1);
             return;
@@ -639,11 +547,9 @@ impl AgentsViewMode {
             self.move_selection(self.page_step() as isize);
             return;
         }
-        // The list-edge jump keys (operator directive, no TS
-        // counterpart): one-row up/down is too slow on a large forest,
-        // so home/end and their ctrl/super variants select the first/
-        // last row. The search editor keeps `ctrl+a`/`ctrl+e` for its
-        // own line ends.
+        // The list-edge jump keys (operator directive, no TS counterpart): one-row up/down is
+        // too slow on a large forest, so home/end and their ctrl/super variants select the
+        // first/last row (the search editor keeps `ctrl+a`/`ctrl+e` for its own line ends).
         if self.keybindings.matches(key, "tui.select.top") {
             self.move_selection_to(SelectionEdge::First);
             return;
@@ -652,9 +558,8 @@ impl AgentsViewMode {
             self.move_selection_to(SelectionEdge::Last);
             return;
         }
-        // The scoped view's parent key (TS `app.agents.back`, default
-        // left): with an empty search it hands the terminal back to the
-        // scope root's session and pops the scope; the global view has no
+        // The scoped view's parent key (default left): with an empty search it hands the
+        // terminal back to the scope root's session and pops the scope; the global view has no
         // hierarchy parent and consumes the key without opening a chat.
         if !has_query && self.keybindings.matches(key, "app.agents.back") {
             if self.scope_active {
@@ -662,10 +567,8 @@ impl AgentsViewMode {
             }
             return;
         }
-        // TS `app.input.clear` (default escape, the editor's `onEscape`):
-        // clear the search; scoped, reopen the last-opened session (the
-        // scope root in this flow) without touching the scope frame;
-        // otherwise exit.
+        // `app.input.clear` (default escape): clear the search; scoped, reopen the last-opened
+        // session (the scope root in this flow) without touching the scope frame; otherwise exit.
         if self.keybindings.matches(key, "app.input.clear") {
             if !self.query.is_empty() {
                 self.query.clear();
@@ -677,15 +580,13 @@ impl AgentsViewMode {
             }
             return;
         }
-        // TS `app.exit` (default ctrl+d, empty editor — the editor's
-        // `onCtrlD`): leave the view without opening a session.
+        // `app.exit` (default ctrl+d, empty editor): leave the view without opening a session.
         if !has_query && self.keybindings.matches(key, "app.exit") {
             self.running = false;
             return;
         }
-        // Editor text keys (TS `Editor.handleInput`): backspace deletes the
-        // last character, ctrl+u clears the line, and any single
-        // character is search text.
+        // Editor text keys: backspace deletes the last character, ctrl+u clears the line, and
+        // any single character is search text.
         if self
             .keybindings
             .matches(key, "tui.editor.deleteCharBackward")
@@ -728,11 +629,10 @@ impl AgentsViewMode {
         }
     }
 
-    /// Materialize the armed composer's parked suggestion request (TS's
-    /// editor contract: `getSuggestions` resolves after the keystroke
-    /// batch, so the host materializes it — the chat's
-    /// `materialize_editor_autocomplete`). The search field and the
-    /// provider-less editors park nothing.
+    /// Materialize the armed composer's parked suggestion request: `getSuggestions`
+    /// resolves after the keystroke batch, so the host materializes it (the chat's
+    /// `materialize_editor_autocomplete`). Search and provider-less editors park
+    /// nothing.
     pub(super) fn materialize_composer_autocomplete(&mut self) {
         match &mut self.composer {
             Composer::Search => {}
@@ -741,12 +641,10 @@ impl AgentsViewMode {
         }
     }
 
-    /// One paste (bracketed, or the paste-aware reader's coalesced
-    /// marker-less burst — tmux ≤3.2 forwards pastes without markers,
-    /// and Enter submits in the composers, so a burst typed line by
-    /// line would submit per line): the armed composer's editor takes
-    /// it through TS's paste path (inline, or an atomic marker for a
-    /// large one); the search field ignores it, exactly as before.
+    /// One paste (bracketed, or the reader's coalesced marker-less burst — tmux ≤3.2
+    /// forwards pastes without markers, and Enter submits, so a line-by-line burst
+    /// would submit per line): the armed composer's editor takes it; the search field
+    /// ignores it.
     pub(super) fn handle_paste(&mut self, text: &str) {
         match std::mem::replace(&mut self.composer, Composer::Search) {
             Composer::Search => {}
@@ -763,32 +661,21 @@ impl AgentsViewMode {
         }
     }
 
-    /// One mouse report (the session surface's click grammar, scoped to
-    /// the view's rows): a plain left press always re-records the row
-    /// under it (a release lost to a focus change or a touch cancel
-    /// never pins the next tap to the old row), a drag kills the
-    /// pending click, and a plain release on the same row selects and
-    /// opens that row — the Enter action with its own preamble (a
-    /// showing notice panel consumes the click, the exit hint and the
-    /// stop-or-delete confirm clear with it), so the selection's own
-    /// feedback (the band moves, the session opens) is the click's.
-    /// The clicked row is an explicit user choice, a direction key's
-    /// peer: it ends the entry anchor's wait, so the open targets the
-    /// clicked row, never the loading hint. Wheel turns and other
-    /// buttons are consumed without a dispatch: the view's window is
-    /// selection-centered, not scroll-driven.
+    /// One mouse report, scoped to the view's rows: a plain left press always re-records the row
+    /// under it, a drag kills the pending click, and a plain release on the same row selects and
+    /// opens that row — the Enter action with its own preamble (a showing notice panel consumes
+    /// the click, the exit hint and the stop-or-delete confirm clear with it). The clicked row is
+    /// an explicit user choice: it ends the entry anchor's wait, so the open targets the clicked
+    /// row. Wheel turns and other buttons are consumed without a dispatch (the view's window is
+    /// selection-centered, not scroll-driven).
     pub(super) fn handle_mouse(&mut self, event: &crate::mouse::MouseEvent) {
         if !crate::mouse_tracking::active() {
             return;
         }
-        // A buttonless motion report is the hover (operator directive
-        // 2026-09-29, `?1003` any-event tracking): the row under the
-        // mouse carries the light hover band while it resolves to a
-        // session row — the render revalidates the row against each
-        // frame's click surface, so a roster rebuild that moves the
-        // rows re-aims the band and a row that scrolled away clears
-        // it. Motion never disturbs the click grammar: a pending
-        // press keeps its row (only a left-button drag marks it).
+        // A buttonless motion report is the hover (operator directive 2026-09-29, `?1003` any-event
+        // tracking): the row under the mouse carries the light hover band while it resolves to a
+        // session row. Motion never disturbs the click grammar: a pending press keeps its row
+        // (only a left-button drag marks it).
         if event.button == crate::mouse::BUTTON_NONE && event.motion {
             let row = event.y.saturating_sub(1) as usize;
             let hover = self
@@ -802,20 +689,17 @@ impl AgentsViewMode {
         if event.button != crate::mouse::BUTTON_LEFT {
             return;
         }
-        // Modifier presses stay inert — the session surface treats them
-        // as selection-only, and this view has no selection surface to
-        // offer (a stale pending click dies with them).
+        // Modifier presses stay inert — this view has no selection surface to offer (a stale
+        // pending click dies with them).
         if event.shift || event.alt || event.ctrl {
             self.pressed_click = None;
             return;
         }
         let row = event.y.saturating_sub(1) as usize;
         if event.press {
-            // A fresh plain press always re-records its row (the session
-            // surface's `fullscreenPressedClick` always assigns): a
-            // release lost to a focus change or a touch cancel must
-            // never pin the next tap to the old row. A motion report
-            // while pressed only marks the drag.
+            // A fresh plain press always re-records its row: a release lost to a focus change
+            // or a touch cancel must never pin the next tap to the old row. A motion report while
+            // pressed only marks the drag.
             if event.motion {
                 if let Some(pressed) = self.pressed_click.as_mut() {
                     pressed.dragged = true;
@@ -837,12 +721,9 @@ impl AgentsViewMode {
         let Some((_, index)) = self.click_rows.iter().find(|(r, _)| *r == row) else {
             return;
         };
-        // The click is an input like any key, so the open runs the Enter
-        // action's own preamble (`handle_key`'s): a showing notice panel
-        // consumes the click — the close is its whole action — and the
-        // exit hint and the stop-or-delete confirm clear with it, so a
-        // later ctrl+x re-arms over the clicked row instead of executing
-        // a stale arm.
+        // The click runs the Enter action's preamble: a showing notice panel consumes it, and the
+        // exit hint and the stop-or-delete confirm clear with it, so a later ctrl+x re-arms over
+        // the clicked row instead of executing a stale arm.
         if self.notice.is_some() {
             self.notice = None;
             return;
@@ -857,10 +738,9 @@ impl AgentsViewMode {
         self.anchor_selection_pending = false;
         self.clear_anchor_loading_hint();
         self.sync_selected_row_state();
-        // The click moves the selection like a direction key, so the
-        // keyboard rule applies before the open: a toggle-click (a
-        // subagent summary or code row) stays in the view, and the
-        // composer never stays armed against a row the highlight left.
+        // The click moves the selection like a direction key, so the keyboard rule
+        // applies before the open: the composer never stays armed against a row the
+        // highlight left.
         self.disarm_reply_off_selected();
         self.open_selected();
     }

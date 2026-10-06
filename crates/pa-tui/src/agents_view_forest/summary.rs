@@ -10,12 +10,11 @@ fn get_str<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
         .filter(|s| !s.is_empty())
 }
 
-/// The model column text: the bare model id plus `:level` when a thinking
-/// level is active ("off" reads as noise and stays bare).
+/// The model column text: the bare model id plus `:level` when a thinking level is active
+/// ("off" reads as noise and stays bare).
 pub(crate) fn session_model(summary: &Value) -> String {
-    // Live workers publish the model object with `id` (the engine's
-    // `model_metadata`); seeded roster rows and saved-session rows carry
-    // `modelId` (the persisted selector). Both read as the full model id.
+    // Live workers publish the model object with `id`; seeded roster rows and saved-session
+    // rows carry `modelId` (the persisted selector). Both read as the full model id.
     let Some(id) = get_str(summary, "model")
         .or_else(|| {
             summary
@@ -112,10 +111,10 @@ pub fn summary_identity(summary: &Value) -> String {
     format!("{scope}session:{}", get("sessionId").unwrap_or_default())
 }
 
-/// The selection key of one summary (TS `getAgentsViewSelectionKey`): the
-/// id fallbacks carry the row's `remoteHost`, so they only match rows in
-/// the same host scope (TS #2516's review fix: a local session that
-/// reuses a remote row's ids can never take that row's selection).
+/// The selection key of one summary: the id fallbacks carry the row's
+/// `remoteHost`, so they only match rows in the same host scope (TS #2516's
+/// review fix: a local session that reuses a remote row's ids can never take
+/// that row's selection).
 #[must_use]
 pub fn selection_key(summary: &Value) -> SelectionKey {
     let get = |field: &str| {

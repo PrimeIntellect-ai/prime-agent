@@ -1,19 +1,7 @@
 //! Session HTML export: the standalone viewer file a session export
-//! produces. The template (HTML + CSS + JS, plus vendored markdown and
-//! syntax-highlight libraries, see `assets/export-html/NOTICE.md`) is the
-//! product export template, embedded verbatim; the session data rides inside
-//! the file as a base64 JSON blob the template decodes and renders
-//! client-side (message rows, tool cards, code blocks, the session tree
-//! sidebar).
-//!
-//! Two entry points:
-//! - [`export_session_to_html`] exports a live session (the daemon worker's
-//!   `export_html` command, driven by the TUI `/export` and `/share`).
-//! - [`export_from_file`] exports an arbitrary session file (the CLI
-//!   `session export` command).
-//!
-//! Rendering of an exported session is the template's job; this module owns
-//! the data shape (`SessionExportData`) and the file write.
+//! produces. The template (see `assets/export-html/NOTICE.md`) is
+//! embedded verbatim; the session data rides inside as a base64 JSON
+//! blob the template renders client-side.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -45,11 +33,8 @@ const TEMPLATE_JS: &str = include_str!("../../assets/export-html/template.js");
 const MARKED_JS: &str = include_str!("../../assets/export-html/vendor/marked.min.js");
 const HIGHLIGHT_JS: &str = include_str!("../../assets/export-html/vendor/highlight.min.js");
 
-/// The session data embedded into an exported file. Field names are the
-/// template's wire contract (`template.js` decodes the base64 blob and
-/// destructures these keys): `header`, `entries`, `leafId`, `systemPrompt`,
-/// `tools`, `renderedTools`. Absent optional sections serialize to `null`,
-/// which the template treats as "not present".
+/// The session data embedded into an exported file; field names are the template's wire contract.
+/// Absent optional sections serialize to `null`, which the template treats as "not present".
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionExportData {
@@ -66,17 +51,13 @@ pub struct SessionExportData {
     /// when the exporter knows them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<Value>>,
-    /// Pre-rendered HTML for custom tool calls/results, keyed by
-    /// tool-call id ([`pre_render_custom_tools`] output). The template
-    /// falls back to its generic tool rendering for entries without an
-    /// entry here. Omitted (not `null`) like the TS `JSON.stringify`
-    /// drops undefined fields.
+    /// Pre-rendered HTML for custom tool calls/results, keyed by tool-call id; the template falls
+    /// back to its generic rendering for entries without one. Omitted (not `null`) like TS
+    /// `JSON.stringify` drops undefined.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rendered_tools: Option<Value>,
 }
 
-/// The `.jsonl` suffix of a session file name, without the extension (TS
-/// `basename(sessionFile, ".jsonl")`).
 fn session_basename(session_file: &Path) -> String {
     let name = session_file
         .file_name()
@@ -88,8 +69,6 @@ fn session_basename(session_file: &Path) -> String {
     }
 }
 
-/// The default HTML output file name (TS
-/// `` `${APP_NAME}-session-${basename}.html` ``), relative like the TS one.
 #[must_use]
 pub fn default_html_output_path(session_file: &Path) -> String {
     format!(
@@ -99,8 +78,7 @@ pub fn default_html_output_path(session_file: &Path) -> String {
 }
 
 /// Fill the export template: the CSS block, the inline scripts, and the
-/// base64 session data (TS `generateHtml`; each placeholder appears once, so
-/// substitution is first-occurrence like the TS `replace`).
+/// base64 session data.
 fn generate_html(data: &SessionExportData, theme: &theme::ExportTheme) -> String {
     let session_data = serde_json::to_string(data).unwrap_or_default();
     let session_data = base64::engine::general_purpose::STANDARD.encode(session_data);
@@ -127,15 +105,13 @@ fn write_export(html: &str, session_file: &Path, output_path: Option<&str>) -> R
 
 /// Export a session to HTML (the daemon worker's `export_html` command).
 ///
-/// `theme_name` is the session's configured theme (settings), resolved like
-/// the TS exporter against `agent_dir`; `session_file` is the session's
-/// JSONL path, which names the default output file; a given `output_path`
-/// is used verbatim (the caller resolves it against the session's cwd).
+/// `theme_name` is resolved against `agent_dir`; `session_file` names the default
+/// output file; a given `output_path` is used verbatim.
 ///
 /// # Errors
 ///
-/// Returns an error when the configured theme cannot be resolved or the
-/// export file cannot be written.
+/// Returns an error when the configured theme cannot be resolved or the export file
+/// cannot be written.
 pub fn export_session_to_html(
     data: &SessionExportData,
     theme_name: Option<&str>,
@@ -148,15 +124,14 @@ pub fn export_session_to_html(
     write_export(&html, session_file, output_path)
 }
 
-/// Export an arbitrary session file to HTML (the CLI `session export`
-/// command). Loads the file exactly like a session open (repair and
-/// migration included), so the exported data is what a resume would see.
+/// Export an arbitrary session file to HTML (the CLI `session export` command). Loads
+/// the file exactly like a session open (repair and migration included), so the
+/// exported data is what a resume would see.
 ///
 /// # Errors
 ///
-/// Returns an error when the input file does not exist, cannot be loaded or
-/// migrated, when the default theme cannot be resolved, or when the export
-/// file cannot be written.
+/// Returns an error when the input file cannot be loaded or migrated, the theme
+/// cannot be resolved, or the file cannot be written.
 pub fn export_from_file(
     input_path: &Path,
     output_path: Option<&str>,
@@ -171,10 +146,8 @@ pub fn export_from_file(
     write_export(&html, input_path, output_path)
 }
 
-/// The export's tools section: each tool's model-facing contract
-/// (name/description/JSON-schema parameters), exactly the TS exporter's
-/// `state.tools.map` — the template renders these into its
-/// "Available Tools" list.
+/// The export's tools section: each tool's model-facing contract (name/description/JSON-schema
+/// parameters).
 pub fn tools_section(tools: &[Arc<dyn pa_agent::types::AgentTool>]) -> Vec<Value> {
     tools
         .iter()
@@ -188,9 +161,6 @@ pub fn tools_section(tools: &[Arc<dyn pa_agent::types::AgentTool>]) -> Vec<Value
         .collect()
 }
 
-/// Build the export data from a session file: the header entry, every other
-/// entry in file order, and the last entry's id as the leaf (the TS
-/// `SessionManager` index build).
 fn session_data_from_file(input_path: &Path) -> Result<SessionExportData> {
     let cwd = std::env::current_dir().unwrap_or_default();
     let mut manager = SessionManager::in_memory(&cwd);
@@ -249,9 +219,8 @@ mod tests {
         path
     }
 
-    /// A fixture session exports to a self-contained HTML file: the template
-    /// scaffolding, the theme CSS variables, and the base64 session data
-    /// decoding to the exact header/entries/leaf shape.
+    /// The embedded base64 session data decodes to the exact
+    /// header/entries/leaf shape.
     #[test]
     fn export_from_file_shape() {
         let dir = tempfile::TempDir::new().expect("temp dir");
@@ -266,7 +235,6 @@ mod tests {
         assert!(html.contains("Session Export"));
         assert!(html.contains("--accent: #7c6faf;"));
         assert!(html.contains("marked.min.js") || html.contains("marked"));
-        // The embedded session data decodes to the session's rows.
         let start = html
             .find("session-data\" type=\"application/json\">")
             .expect("session data element");
@@ -291,9 +259,6 @@ mod tests {
         );
     }
 
-    /// The default output name is the branded session basename (TS
-    /// `` `${APP_NAME}-session-<basename>.html` ``) and the file lands in
-    /// the working directory.
     #[test]
     fn default_output_name() {
         let dir = tempfile::TempDir::new().expect("temp dir");
@@ -323,8 +288,6 @@ mod tests {
         );
     }
 
-    /// The tools section maps each tool to its model-facing contract,
-    /// with the template's `name`/`description`/`parameters` keys.
     #[test]
     fn tools_section_wire_shape() {
         use pa_agent::types::{AgentTool, AgentToolResult};
@@ -373,8 +336,7 @@ mod tests {
         );
     }
 
-    /// The export data shape serializes with the template's wire keys
-    /// (camelCase, header/entries/leafId order).
+    /// Serializes with the template's wire keys (camelCase).
     #[test]
     fn export_data_wire_keys() {
         let data = SessionExportData {

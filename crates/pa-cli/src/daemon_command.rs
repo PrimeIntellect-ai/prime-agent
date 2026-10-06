@@ -1,11 +1,7 @@
 //! The daemon-backed command runner behind the public commands `list`,
 //! `sessions`, `stop`, `rename`, `send`, and `schedule`: argument parsing,
-//! request shaping, and output rendering. Ported from
-//! `cli/daemon-command.ts` (the `handleDaemonCommand` surface reachable
-//! from public routing).
-//!
-//! `schedule` maps to the internal `cron` command and `stop` to `kill`, exactly
-//! like `runInternalAgentCommand`/`runNestedAgentCommand` in public-command.ts.
+//! request shaping, and output rendering. `schedule` maps to the internal
+//! `cron` command and `stop` to `kill`.
 
 use std::path::{Path, PathBuf};
 
@@ -19,15 +15,13 @@ use crate::daemon_session_list::{
     matches_session_id_suffix,
 };
 
-/// Parsed arguments for one daemon client command.
 #[derive(Debug)]
 struct ParsedDaemonCommand {
     socket_path: PathBuf,
     json: bool,
     positionals: Vec<String>,
-    /// `--help`/`-h` becomes the internal no-op `help` command, exactly like
-    /// the TS `runDaemonClientCommand` fallthrough. The public router
-    /// intercepts help requests before this layer.
+    /// `--help`/`-h` becomes the internal no-op `help` command, exactly like the TS
+    /// `runDaemonClientCommand` fallthrough.
     help: bool,
 }
 
@@ -50,9 +44,8 @@ pub(crate) fn run_daemon_command(command: &str, args: &[String]) -> Result<()> {
     }
 }
 
-/// Port of `parseDaemonClientCommand`: option scanning with `--` passthrough
-/// semantics (`send`/`cron` keep the separator as an operand, the others
-/// consume it). The command name is fixed by the public router.
+/// Option scanning with `--` passthrough semantics (`send`/`cron` keep the
+/// separator as an operand, the others consume it).
 fn parse_daemon_command(command: &str, args: &[String]) -> Result<ParsedDaemonCommand> {
     let mut socket_path = default_socket_path();
     let mut json = false;
@@ -66,7 +59,6 @@ fn parse_daemon_command(command: &str, args: &[String]) -> Result<ParsedDaemonCo
             positionals.push(arg.to_string());
             continue;
         }
-        // send/cron parse `--` themselves as an end-of-flags separator.
         if arg == "--" {
             if command == "cron" || command == "send" {
                 positionals.push(arg.to_string());
@@ -74,9 +66,7 @@ fn parse_daemon_command(command: &str, args: &[String]) -> Result<ParsedDaemonCo
             passthrough = true;
             continue;
         }
-        // `--help`/`-h` before the command becomes the internal `help`
-        // command, which prints nothing; the public router intercepts help
-        // requests before this layer, so the branch only preserves parity.
+
         if arg == "--help" || arg == "-h" {
             return Ok(ParsedDaemonCommand {
                 socket_path,
@@ -111,7 +101,7 @@ fn default_socket_path() -> PathBuf {
     crate::config::resolve_daemon_socket_path(None)
 }
 
-/// `normalizeSocketPath`: lexically resolve against the current directory.
+/// Lexically resolve against the current directory.
 fn normalize_socket_path(value: &str) -> PathBuf {
     let path = Path::new(value);
     if path.is_absolute() {
@@ -123,7 +113,7 @@ fn normalize_socket_path(value: &str) -> PathBuf {
     }
 }
 
-/// `requireSuccess`: surface the daemon's error text.
+/// Surface the daemon's error text.
 fn require_success(response: pa_types::daemon::DaemonResponse) -> Result<Option<Value>> {
     if !response.success {
         return Err(anyhow!(response.error.unwrap_or_default()));
@@ -138,16 +128,11 @@ fn print_json(value: &Value) {
     }
 }
 
-/// `requireActiveSessionId`: the first operand.
 fn require_active_session_id(args: &[String]) -> Result<String> {
     args.first()
         .cloned()
         .ok_or_else(|| anyhow!("Missing agent id or name"))
 }
-
-// ---------------------------------------------------------------------------
-// list
-// ---------------------------------------------------------------------------
 
 fn run_list(client: &mut DaemonClient, args: &[String], json: bool) -> Result<()> {
     let mut all = false;
@@ -197,12 +182,8 @@ fn list_command(all: bool) -> DaemonCommand {
     }
 }
 
-// ---------------------------------------------------------------------------
-// sessions
-// ---------------------------------------------------------------------------
-
 /// The same list RPC as `prime-agent list`, rendered as the
-/// one-line-per-agent operator table (TS `runSessions`).
+/// one-line-per-agent operator table.
 fn run_sessions(client: &mut DaemonClient, args: &[String], json: bool) -> Result<()> {
     let mut all = false;
     for arg in args {
@@ -243,8 +224,8 @@ fn run_sessions(client: &mut DaemonClient, args: &[String], json: bool) -> Resul
     Ok(())
 }
 
-/// `resolveLiveSessionSelector`: match a name/id/session-id selector against
-/// the live session list, with unambiguous hex-suffix fallback.
+/// Match a name/id/session-id selector against the live session list,
+/// with unambiguous hex-suffix fallback.
 fn resolve_live_session_selector(client: &mut DaemonClient, selector: &str) -> Result<String> {
     let response = client.request(list_command(false))?;
     let data = require_success(response)?;
@@ -282,10 +263,6 @@ fn resolve_live_session_selector(client: &mut DaemonClient, selector: &str) -> R
     }
 }
 
-// ---------------------------------------------------------------------------
-// kill (stop)
-// ---------------------------------------------------------------------------
-
 fn run_kill(client: &mut DaemonClient, args: &[String], json: bool) -> Result<()> {
     let active_session_id = require_active_session_id(args)?;
     let response = client.request(DaemonCommand::Kill {
@@ -296,8 +273,8 @@ fn run_kill(client: &mut DaemonClient, args: &[String], json: bool) -> Result<()
     print_response_data(&response, json)
 }
 
-/// `printResponseData`: pretty-print the response data (the whole response as
-/// JSON when there is none and `--json` was asked), else `ok`.
+/// Pretty-print the response data (the whole response as JSON when
+/// there is none and `--json` was asked), else `ok`.
 fn print_response_data(response: &pa_types::daemon::DaemonResponse, json: bool) -> Result<()> {
     let data = require_success(response.clone())?;
     if json || data.is_some() {
@@ -329,10 +306,6 @@ fn response_value(response: &pa_types::daemon::DaemonResponse) -> Value {
     }
     value
 }
-
-// ---------------------------------------------------------------------------
-// rename
-// ---------------------------------------------------------------------------
 
 fn run_rename(client: &mut DaemonClient, args: &[String], json: bool) -> Result<()> {
     let active_session_id = require_active_session_id(args)?;
@@ -369,10 +342,6 @@ fn run_rename(client: &mut DaemonClient, args: &[String], json: bool) -> Result<
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// send
-// ---------------------------------------------------------------------------
-
 struct ParsedSendArgs {
     target_active_session_id: String,
     from_active_session_id: Option<String>,
@@ -395,7 +364,7 @@ fn run_send(client: &mut DaemonClient, args: &[String], json: bool) -> Result<()
         print_json(&data);
         return Ok(());
     }
-    // `isAgentMessageReceipt`: a target block with a routable active id.
+    // A target block with a routable active id.
     let receipt_target = data
         .get("target")
         .filter(|target| {
@@ -486,10 +455,6 @@ fn parse_send_args(args: &[String]) -> Result<ParsedSendArgs> {
         message,
     })
 }
-
-// ---------------------------------------------------------------------------
-// cron (schedule)
-// ---------------------------------------------------------------------------
 
 fn run_cron(client: &mut DaemonClient, args: &[String], json: bool) -> Result<()> {
     let subcommand = args.first().map_or("list", String::as_str);
@@ -595,7 +560,7 @@ fn run_cron_cancel(client: &mut DaemonClient, args: &[String], json: bool) -> Re
     Ok(())
 }
 
-/// `getCronJob`: the job id and next run when the response carries a job.
+/// The job id and next run when the response carries a job.
 fn cron_job_id_and_next_run(data: &Value) -> Option<(String, String)> {
     let job = data.get("job")?;
     let id = job.get("id").and_then(Value::as_str)?.to_string();
@@ -606,7 +571,6 @@ fn cron_job_id_and_next_run(data: &Value) -> Option<(String, String)> {
     Some((id, next_run))
 }
 
-/// `formatAgentCronJob`: the one-line schedule list entry.
 fn format_agent_cron_job(job: &Value) -> String {
     let id = job.get("id").and_then(Value::as_str).unwrap_or_default();
     let status = job
@@ -651,9 +615,8 @@ fn format_agent_cron_job(job: &Value) -> String {
     )
 }
 
-/// `toLocaleString()` for a cron timestamp: en-US long-form-ish date with a
-/// 12-hour clock, e.g. `9/16/2026, 6:36:59 PM`. Rendered in UTC; a daemon
-/// machine running a non-UTC system timezone shifts the wall-clock part.
+/// `toLocaleString()` for a cron timestamp: en-US date with a 12-hour clock,
+/// e.g. `9/16/2026, 6:36:59 PM`. Rendered in UTC.
 fn cron_datetime(value: Option<&Value>) -> String {
     let Some(value) = value.and_then(Value::as_str) else {
         return "-".to_string();

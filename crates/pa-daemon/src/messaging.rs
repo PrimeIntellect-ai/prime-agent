@@ -1,15 +1,8 @@
-//! Supervisor `send_message` arm: agent-to-agent message routing.
-//!
-//! Port of the `send_message` block in `modes/daemon/daemon-supervisor.ts`:
-//! resolve the source and target workers, refuse self-targeting, then route
-//! `worker_deliver_message` to the target with sender info from the source
-//! session (agent origin) or the sending client (CLI origin). A target that
-//! is not resident is woken from the saved-session catalog: the selector
-//! resolves to a session file (`session_catalog.rs`), a resident worker
-//! hosting the file is reused, and otherwise a new worker spawns over it
-//! (the headless resume machinery). The TS family-reach assertion needs the
-//! session family catalog, which the thin supervisor does not keep yet; it
-//! stays deferred with it.
+//! Supervisor `send_message` arm: resolve the source and target workers,
+//! refuse self-targeting, then route `worker_deliver_message` to the
+//! target with sender info from the source session (agent origin) or the
+//! sending client (CLI origin); a non-resident target is woken from the
+//! saved-session catalog.
 
 use std::sync::Arc;
 
@@ -27,10 +20,8 @@ use crate::supervisor::Supervisor;
 const WORKER_REQUEST_TIMEOUT_MS: u64 = 30_000;
 
 impl Supervisor {
-    /// `send_message`: route to the target worker as `worker_deliver_message`.
-    /// An unknown target is not final: the supervisor wakes the saved session
-    /// the selector names (catalog resolve + worker reuse) before giving up
-    /// with the TS unknown-session error.
+    /// `send_message`: route to the target worker as `worker_deliver_message`;
+    /// an unknown target wakes the saved session before the TS error.
     pub(crate) async fn handle_send_message(
         self: &Arc<Self>,
         command_id: &str,
@@ -64,10 +55,8 @@ impl Supervisor {
             Ok(resident) => resident,
             Err(error) => {
                 // The wake scope needs the source summary (its cwd filters
-                // the catalog's local pass, TS `source?.summary.cwd`); a
-                // wake is the only path that reads it before the
-                // self-target guard, and a woken target is never the
-                // source, so the guard's error precedence is unchanged.
+                // the catalog's local pass); a woken target is never the
+                // source, so the read precedes the self-target guard.
                 let wake_source = match &source {
                     Some(source) => match self.source_worker_summary(source).await {
                         Ok(summary) => Some((Arc::clone(source), summary)),
@@ -144,8 +133,7 @@ impl Supervisor {
         let sender = match &source {
             Some(source) => {
                 // The wake already read the summary for its scope; every
-                // other path reads it here (the TS sender endpoint comes
-                // from the roster summary).
+                // other path reads it here.
                 let summary = match source_summary.take() {
                     Some(summary) => summary,
                     None => match self.source_worker_summary(source).await {
@@ -294,8 +282,8 @@ impl Supervisor {
     }
 
     /// The send source's live session summary (`get_state`), strict: the
-    /// read's error fails the send (the roster's own `worker_summary`
-    /// downgrades an unreachable worker to a recovering row instead).
+    /// read's error fails the send (the roster's `worker_summary` downgrades
+    /// instead).
     async fn source_worker_summary(&self, resident: &Arc<ResidentWorker>) -> Result<Value> {
         let state = self
             .route_command_typed(
@@ -319,12 +307,9 @@ impl Supervisor {
             .ok_or_else(|| anyhow!("source session state unavailable"))
     }
 
-    /// Wake the saved session an unknown target selector names (the TS
-    /// `send_message` wake block): catalog-resolve the selector, reuse a
-    /// resident worker that already hosts the file, or spawn one over it.
-    /// `Unknown` keeps the caller's unknown-session error; `Failed` carries
-    /// the wake's own error (a catalog ambiguity outranks the miss, like
-    /// the TS `Ambiguous session selector` propagation).
+    /// Wake the saved session an unknown target selector names: catalog-resolve
+    /// the selector, reuse a resident worker that already hosts the file, or
+    /// spawn one over it.
     pub(crate) async fn wake_saved_target(
         self: &Arc<Self>,
         resolve_error: &anyhow::Error,
@@ -336,8 +321,7 @@ impl Supervisor {
             return WakeOutcome::Failed(rendered);
         }
         // The catalog scope: the source session's cwd and session dir when
-        // the send is agent-origin, the supervisor's defaults otherwise
-        // (TS `source?.summary.cwd ?? defaultSessionConfig.cwd`).
+        // agent-origin, the supervisor's defaults otherwise.
         let cwd = source
             .and_then(|(_, summary)| summary.get("cwd"))
             .and_then(Value::as_str)
@@ -376,11 +360,9 @@ impl Supervisor {
             &cwd,
         ) {
             Ok(Some(info)) => info,
-            // The saved-session catalog misses RLM children: they
-            // persist in the parent's session-artifacts tree, not the
-            // sessions dir. The spawn ledger still tracks them, so a
-            // child selector falls back to its live edges (child id,
-            // session id, or name) and wakes the child's own file.
+            // The saved-session catalog misses RLM children (they persist in
+            // the parent's session-artifacts tree); the spawn ledger still
+            // tracks them, so a child selector falls back to its live edges.
             Ok(None) => {
                 return match self.wake_ledger_child(selector).await {
                     Some(outcome) => outcome,
@@ -397,10 +379,9 @@ impl Supervisor {
         }
         // The wake create: one worker over the saved file (the headless
         // resume path), carrying the session's own cwd. The persisted
-        // header depth rides `config.rlmDepth` - the key launch_worker
-        // copies into the DURABLE create command's rest, where the
-        // supervisor's parent-owned passivation fence reads it (a root's
-        // header depth of 0 restates its rootness).
+        // header depth rides `config.rlmDepth`, the key launch_worker
+        // copies into the DURABLE create command's rest where the
+        // passivation fence reads it.
         let create = DaemonCommand::Create {
             id: None,
             session_path: Some(session_path.clone()),
@@ -417,11 +398,8 @@ impl Supervisor {
             launch_env: None,
             rest: Map::default(),
         };
-        // The caller's route budget bounds the WAIT, not the launch (the
-        // round-7 bots' finding: dropping the future skipped the launch's
-        // own cleanup): the launch detaches and runs to completion; a
-        // timeout tries the join lookup first and answers with the
-        // retryable budget note otherwise.
+        // The caller's route budget bounds the WAIT, not the launch (dropping
+        // the future skipped the cleanup): the launch detaches, runs to completion.
         let launch = tokio::spawn({
             let supervisor = Arc::clone(self);
             let create = create;
@@ -438,10 +416,8 @@ impl Supervisor {
                 WakeOutcome::Woken(resident)
             }
             Ok(Ok(Err(error))) => {
-                // The check-and-launch race (two concurrent wakes for the
-                // same saved file): the rival wins the session lease while
-                // this launch runs — join its resident instead of failing
-                // the command (TS's in-flight-join revival semantics).
+                // The check-and-launch race: the rival wins the session lease —
+                // join its resident instead of failing.
                 if let Some(resident) = self.registry.find_by_session_file(&session_path).await {
                     return WakeOutcome::Woken(resident);
                 }
@@ -507,12 +483,8 @@ impl Supervisor {
         }
     }
 
-    /// Spawn one worker over a ledger child's session file (the same
-    /// create the saved-session wake uses), with the same concurrent-wake
-    /// protections the roster wake carries: reuse before launch, and a
-    /// launch refusal joins the rival's registered resident instead of
-    /// failing the command (the second bot round's finding: the durable-id
-    /// path is the revival children actually take).
+    /// Spawn one worker over a ledger child's session file, with the same
+    /// concurrent-wake protections as the saved-session wake.
     async fn launch_ledger_child_wake(
         self: &Arc<Self>,
         session_file: &str,
@@ -520,8 +492,7 @@ impl Supervisor {
         child_id: &str,
         depth: u32,
     ) -> WakeOutcome {
-        // Reuse before spawning (TS `createOrReuseWorker`): a concurrent
-        // revival may already host the file.
+        // Reuse before spawning: a concurrent revival may already host the file.
         if let Some(resident) = self.registry.find_by_session_file(session_file).await {
             return WakeOutcome::Woken(resident);
         }
@@ -531,13 +502,11 @@ impl Supervisor {
             continue_recent: Some(false),
             no_session: None,
             name: None,
-            // The child identity rides the fields the launch path reads:
-            // `config.rlmDepth` + `runtime_metadata.rlmChildId` are the
-            // keys launch_worker copies into the DURABLE create command's
-            // rest (the supervisor's parent-owned passivation fence reads
-            // `create_command.rest.rlmDepth`); a bare create `rest` is
-            // never read there. Without the identity the revived child's
-            // fence sees a root and never re-passivates.
+            // The child identity rides `config.rlmDepth` +
+            // `runtime_metadata.rlmChildId` — the keys launch_worker copies
+            // into the DURABLE create command's rest, which the passivation
+            // fence reads; without them the revived child's fence sees a
+            // root and never re-passivates.
             config: Some(json!({ "cwd": cwd, "rlmDepth": depth })),
             telemetry_disabled: None,
             runtime_metadata: Some(json!({ "kind": "subagent", "rlmChildId": child_id })),
@@ -546,15 +515,9 @@ impl Supervisor {
             launch_env: None,
             rest: Map::default(),
         };
-        // The launch bounded by the caller's route budget, DETACHED (the
-        // round-7 bots' finding: dropping the launch future at the
-        // budget skipped launch_worker's own cleanup and left a
-        // half-registered resident): the launch runs to completion on
-        // its own task - its registry/descriptor/monitor bookkeeping
-        // all land - and only THIS caller's wait is bounded. A timeout
-        // is not an error: the join lookup runs (the background launch
-        // may have registered by then) and the caller answers with the
-        // retryable budget note.
+        // The launch is DETACHED and bounded only by the caller's wait:
+        // dropping the future at the budget skipped launch_worker's own
+        // cleanup and left a half-registered resident.
         let launch = tokio::spawn({
             let supervisor = Arc::clone(self);
             let create = create;
@@ -571,9 +534,8 @@ impl Supervisor {
                 WakeOutcome::Woken(resident)
             }
             Ok(Ok(Err(error))) => {
-                // The check-and-launch race: the rival wins the session
-                // lease while this launch runs — join its resident (TS's
-                // in-flight-join revival semantics).
+                // The check-and-launch race: the rival wins the lease — join
+                // its resident instead of failing.
                 if let Some(resident) = self.registry.find_by_session_file(session_file).await {
                     return WakeOutcome::Woken(resident);
                 }
@@ -595,8 +557,7 @@ impl Supervisor {
 }
 
 /// Whether a ledger child edge answers a wake selector: by its recorded
-/// name, its RLM child id, or its persisted session id (the session-file
-/// stem).
+/// name, its RLM child id, or its persisted session id (the file stem).
 fn ledger_edge_matches(edge: &crate::rlm_ledger::RlmLedgerEdge, selector: &str) -> bool {
     edge.name == selector
         || edge.child_id == selector
@@ -606,8 +567,7 @@ fn ledger_edge_matches(edge: &crate::rlm_ledger::RlmLedgerEdge, selector: &str) 
 }
 
 /// Sender endpoint for an agent-origin message: the source session's live
-/// summary (the TS supervisor reads the same fields from its roster
-/// entry).
+/// summary.
 fn sender_endpoint_from_summary(summary: &Value, client_id: &str) -> Value {
     let mut sender = json!({
         "activeSessionId": summary
@@ -627,9 +587,8 @@ fn sender_endpoint_from_summary(summary: &Value, client_id: &str) -> Value {
             sender["sessionName"] = json!(name);
         }
     }
-    // The durable parent edge rides the supervisor-routed endpoint too (the
-    // peer transport's sender block already carries it), so the receiving
-    // session can label the delivery by its TRUE relationship.
+    // The durable parent edge rides the supervisor-routed endpoint too, so
+    // the receiving session can label the delivery by its TRUE relationship.
     for field in [
         "parentActiveSessionId",
         "parentSessionId",
@@ -666,9 +625,6 @@ mod tests {
         DaemonWorkerDescriptor, DaemonWorkerLifecycle, DurableDaemonCreateCommand,
     };
 
-    /// The supervisor sender endpoint carries the source session's durable
-    /// parent edge, so the receiving worker can label the delivery by its
-    /// TRUE relationship (the peer transport's sender block matches).
     #[test]
     fn sender_endpoint_carries_the_durable_parent_edge() {
         let sender = sender_endpoint_from_summary(
@@ -687,8 +643,6 @@ mod tests {
         assert_eq!(sender["parentSessionId"], "sess-a");
         assert_eq!(sender["parentSessionPath"], "/agent/sessions/sess-a.jsonl");
 
-        // A top-level source carries no parent edge: the endpoint omits the
-        // fields entirely.
         let root = sender_endpoint_from_summary(
             &json!({
                 "activeSessionId": "aaa111",
@@ -768,8 +722,6 @@ mod tests {
         }
     }
 
-    /// An unknown target answers with the TS unknown-session error, with
-    /// the request id and command echoed on the failure response.
     #[tokio::test]
     async fn unknown_target_answers_with_the_ts_error() {
         let supervisor = supervisor();
@@ -785,8 +737,6 @@ mod tests {
         );
     }
 
-    /// The source resolves before the target, so an unknown source fails
-    /// even when the target is resident.
     #[tokio::test]
     async fn unknown_source_fails_like_the_ts_source_lookup() {
         let supervisor = supervisor();
@@ -801,7 +751,6 @@ mod tests {
         );
     }
 
-    /// A session cannot message itself (TS self-target guard).
     #[tokio::test]
     async fn self_target_is_refused() {
         let supervisor = supervisor();
@@ -816,9 +765,6 @@ mod tests {
         );
     }
 
-    /// A selector that names two saved sessions is ambiguous, and the
-    /// catalog's ambiguity error outranks the unknown-active-session miss
-    /// (TS preserves it for a2a senders).
     #[tokio::test]
     async fn ambiguous_saved_selector_carries_the_catalog_error() {
         let supervisor = supervisor();
@@ -840,9 +786,6 @@ mod tests {
         );
     }
 
-    /// The ledger fallback selector: a child edge answers by name, by its
-    /// RLM child id, and by its persisted session id (the file stem), never
-    /// by a partial id.
     #[test]
     fn ledger_edges_match_by_name_child_id_and_session_id() {
         let edge = crate::rlm_ledger::RlmLedgerEdge {
@@ -861,10 +804,6 @@ mod tests {
         assert!(!ledger_edge_matches(&edge, "parent.jsonl"));
     }
 
-    /// Delivery routes `worker_deliver_message` to the resolved target with
-    /// a CLI-origin sender; the resident has no live worker connection, so
-    /// the route fails with the not-connected error (the arm reached the
-    /// routing stage with the right command).
     #[tokio::test]
     async fn delivery_routes_worker_deliver_message_to_the_target() {
         let supervisor = supervisor();

@@ -1,4 +1,4 @@
-//! Worker tests (moved with their concerns).
+//! Worker tests.
 use super::*;
 
 fn worker_with_journal() -> Arc<Worker> {
@@ -43,9 +43,7 @@ fn latest_record(worker: &Worker) -> crate::journal::WorkerRecoveryRecord {
         .expect("session record")
 }
 
-/// An idle-time injected continuation is journal busy evidence: the
-/// admission (not the pickup) proves the work, so a plain boot revives
-/// the worker to deliver it.
+/// The admission (not the pickup) proves the work, so a plain boot revives the worker.
 #[tokio::test]
 async fn idle_time_injected_admission_is_busy_evidence() {
     let worker = created_worker_with_journal().await;
@@ -80,11 +78,7 @@ async fn idle_time_injected_admission_is_busy_evidence() {
     let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
 }
 
-/// The detached bash completion notice admits through the steering
-/// lane: an idle session wakes on an invisible injected row, and the
-/// admission is journal busy evidence (the crash between the notice
-/// and its delivery revives the worker with the row replaying — the
-/// wake survives re-adoption and revival alike).
+/// An idle session wakes on an invisible injected row; the admission is journal busy evidence.
 #[tokio::test]
 async fn a_bash_completion_notice_admits_the_steering_lane_with_busy_evidence() {
     let worker = created_worker_with_journal().await;
@@ -127,8 +121,7 @@ async fn a_bash_completion_notice_admits_the_steering_lane_with_busy_evidence() 
             .is_some_and(|preview| preview.starts_with("Background command finished: ")),
         "the queue row carries the TS preview label: {item:?}"
     );
-    // TS `queueVisible: visibleQueued`: an idle session's wake is an
-    // invisible injected turn.
+    // An idle session's wake is an invisible injected turn.
     assert!(!item.queue_visible, "the idle wake stays invisible");
     drop(core);
     assert!(
@@ -150,8 +143,7 @@ async fn a_bash_completion_notice_admits_the_steering_lane_with_busy_evidence() 
     let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
 }
 
-/// A busy session queues the notice as a visible steer row (TS
-/// `queueIfBusy`), the same row with the queued delivery class.
+/// A busy session queues the notice as a visible steer row (TS `queueIfBusy`).
 #[tokio::test]
 async fn a_bash_completion_notice_on_a_busy_session_queues_a_visible_steer_row() {
     let worker = created_worker_with_journal().await;
@@ -176,9 +168,7 @@ async fn a_bash_completion_notice_on_a_busy_session_queues_a_visible_steer_row()
     let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
 }
 
-/// The kernel read the result first: the undelivered notice withdraws
-/// (pid+command — pids are reused), and the withdrawal settles the
-/// busy evidence so the journal never promises a replay the row left.
+/// The withdrawal settles the busy evidence so the journal never promises a replay.
 #[tokio::test]
 async fn bash_consumed_withdraws_the_undelivered_notice_and_settles() {
     let worker = created_worker_with_journal().await;
@@ -281,12 +271,7 @@ async fn cancelled_admission_drop_settles_the_verdict() {
     let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
 }
 
-/// A withdrawal landing mid-turn settles the rows but never the
-/// verdict: the in-flight turn is live work (TS computes settled
-/// busy from `isSessionActive`, never from the lanes alone), so a
-/// crash after the withdrawal still reads interrupted. Only the
-/// turn's own `turn_end` — after the runner's idle flip — settles
-/// the same empty lanes back to idle.
+/// The in-flight turn is live work: only its own `turn_end` (after the idle flip) settles it.
 #[tokio::test]
 async fn mid_turn_withdrawal_keeps_the_in_flight_turn_busy() {
     let worker = created_worker_with_journal().await;
@@ -310,8 +295,8 @@ async fn mid_turn_withdrawal_keeps_the_in_flight_turn_busy() {
         steering.is_empty() && follow_up.is_empty(),
         "the withdrawn rows left the snapshot: {steering:?} {follow_up:?}"
     );
-    // The turn ends: the runner's idle flip precedes its settle, so
-    // the same empty lanes now record busy=false.
+    // The turn ends: the runner's idle flip precedes its settle, so the
+    // same empty lanes now record busy=false.
     worker.core.lock().unwrap().busy = false;
     worker.dispatch("clear_queue", &json!({})).await;
     let latest = latest_record(&worker);

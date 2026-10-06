@@ -1,101 +1,52 @@
 //! Bounded backpressure on the supervisor's request path (the Codex
-//! `app-server-transport` mirror, comparison report finding 4).
-//!
-//! Codex fronts its one `app-server` process with a bounded internal queue
-//! (`CHANNEL_CAPACITY = 128`, `app-server-transport/src/transport/mod.rs:21-24`)
-//! and answers a request that finds it full with an explicit typed error
-//! (`-32001 "Server overloaded; retry later."`, `mod.rs:228-259`) instead of
-//! blocking or dropping; non-request traffic awaits (`mod.rs:265`), and each
-//! connection drains a deep bounded outbound queue (32K messages with a
-//! compile-time headroom assert, `websocket.rs:46-49`).
-//!
-//! This daemon fronts N per-session worker processes, so the same guarantees
-//! adapt per unit: [`WORKER_INFLIGHT_CAPACITY`] bounds the in-flight
-//! requests of one worker (128, like Codex's single-process bound — the
-//! supervisor's aggregate bound is `128 * N`, and a flooding client
-//! exhausts only the session it floods), and
-//! [`CLIENT_OUTBOUND_CAPACITY`] bounds one client connection's outbound
-//! queue (the 32K mirror). A request-shaped client command that finds its
-//! worker saturated is answered with the typed [`DaemonErrorInfo`]
-//! `worker_overloaded` refusal (the `-32001` analog): the request never
-//! entered the queue, so nothing is dropped silently and a retry cannot
-//! duplicate it. Supervisor-internal routes (stop/kill, create replay,
-//! disconnect cleanup, polls) are never refused — they wait for a slot
-//! inside the route's own timeout budget, the same backpressure split
-//! Codex makes between requests and notifications.
+//! `app-server-transport` mirror): [`WORKER_INFLIGHT_CAPACITY`] bounds one
+//! worker's in-flight requests (Codex `CHANNEL_CAPACITY = 128`);
+//! [`CLIENT_OUTBOUND_CAPACITY`] bounds a client's outbound queue (the 32K
+//! mirror). A saturated worker answers requests with the typed
+//! `worker_overloaded` refusal; internal routes wait, never refuse.
 
 use pa_types::daemon::DaemonErrorInfo;
 
 use crate::protocol::{response_failure, DaemonResponse};
 
-/// In-flight requests one worker accepts before its route saturates. Also
-/// the bound of the supervisor-to-worker command channel: admission (an
-/// in-flight permit) precedes enqueue, so the queue and the in-flight set
-/// share this one bound — a wedged writer parks at most this many frames.
-///
-/// Codex's value for its one-process daemon (`CHANNEL_CAPACITY = 128`):
-/// "128 messages should be plenty for an interactive CLI" — the same holds
-/// for the one session one of our workers serves.
+/// In-flight requests one worker accepts before its route saturates; also the
+/// bound of the supervisor-to-worker command channel (admission precedes
+/// enqueue). Codex's `CHANNEL_CAPACITY = 128` for its one-process daemon.
 pub(crate) const WORKER_INFLIGHT_CAPACITY: usize = 128;
 
-/// Capacity of the supervisor's shared client event broadcast ring. The
-/// ring's per-receiver drop on lag is the defined backpressure for a slow
-/// reader (the supervisor must never block on one client); the connection
-/// loop's lag arm makes every drop observable in the daemon log.
+/// Capacity of the supervisor's shared client event broadcast ring: the
+/// per-receiver drop on lag is the defined backpressure for a slow reader.
 pub(crate) const EVENT_RING_CAPACITY: usize = 4096;
 
-/// Capacity of one client connection's targeted session-event queue (the
-/// subscriber registry's delivery path). The ring above bounds the
-/// broadcast-class window per connection; this bounds the session-event
-/// window: a slow reader fills it, drops are logged (one line per stall
-/// cycle), and the supervisor never blocks on one client. Same magnitude
-/// as the ring so a client receives comparable buffering headroom for
-/// each class.
+/// Capacity of one client connection's targeted session-event queue: a slow reader fills
+/// it, drops are logged, and the supervisor never blocks on one client.
 pub(crate) const TARGETED_EVENT_QUEUE_CAPACITY: usize = 4096;
 
-/// Outbound response bundles one client connection may hold before its
-/// senders stall. A wedged client (reading nothing) stalls only its own
-/// dispatch tasks at this bound — worker slots free as replies arrive, so
-/// other clients and workers are unaffected.
-///
-/// The Codex `WEBSOCKET_OUTBOUND_CHANNEL_CAPACITY = 32 * 1024` mirror:
-/// "WebSocket clients can briefly lag behind normal turn output bursts
-/// while the writer task is healthy, so give them more headroom than
-/// internal channels."
+/// Outbound response bundles one client connection may hold before its senders stall: a
+/// wedged client stalls only its own dispatch tasks (Codex `WEBSOCKET_OUTBOUND_CHANNEL_CAPACITY`).
 pub(crate) const CLIENT_OUTBOUND_CAPACITY: usize = 32 * 1024;
 const _: () = assert!(CLIENT_OUTBOUND_CAPACITY > WORKER_INFLIGHT_CAPACITY);
 
-/// Concurrent dispatch tasks one client connection may run. The
-/// connection loop acquires a permit per inbound command BEFORE spawning
-/// its dispatch task: once this bound is reached the loop stops reading
-/// the client's socket, and the client's own send buffer carries any
-/// further input — transport-level flow control instead of unbounded
-/// daemon-side task spawn. A healthy connection runs a handful of
-/// concurrent commands (a turn, a poll, a streaming list); the bound is
-/// generous headroom for one client with many sessions.
+/// Concurrent dispatch tasks one client connection may run: the loop acquires a permit
+/// per inbound command BEFORE spawning its dispatch task, so at this bound it stops
+/// reading the socket — transport-level flow control.
 pub(crate) const CLIENT_DISPATCH_CONCURRENCY: usize = 64;
 
-/// What a route does when its worker is at the in-flight bound. Codex's
-/// split: a request answers the explicit overload error immediately
-/// (`mod.rs:228-259`), a notification awaits capacity (`mod.rs:265`).
+/// What a route does when its worker is at the in-flight bound: a request
+/// answers the explicit overload error immediately, a notification awaits
+/// capacity (Codex's split).
 #[derive(Clone, Copy)]
 pub(crate) enum RouteAdmission {
-    /// A client's request-shaped command: the route answers the typed
-    /// `worker_overloaded` refusal the moment the worker saturates. The
-    /// caller retries; the request was never queued, so the retry cannot
-    /// duplicate it.
+    /// A client's request-shaped command: answers the typed `worker_overloaded` refusal
+    /// the moment the worker saturates (never queued, so the retry cannot duplicate it).
     ClientRequest,
-    /// Supervisor-internal traffic (stop/kill, create replay, disconnect
-    /// cleanup, polls): the route waits for an in-flight slot inside its
-    /// own timeout budget and surfaces the existing timeout error if the
-    /// budget runs out — control-plane traffic is never refused.
+    /// Supervisor-internal traffic (stop/kill, create replay, cleanup, polls): waits
+    /// for a slot inside its own timeout budget — never refused.
     SupervisorInternal,
 }
 
-/// The saturated-route refusal a client command answers: typed
-/// `worker_overloaded` on the wire, the worker id in the message so a
-/// multi-session client knows which session to retry. The id is stamped by
-/// the client-facing seam like every worker response's.
+/// The saturated-route refusal a client command answers: typed `worker_overloaded` on
+/// the wire, the worker id so a multi-session client knows what to retry.
 pub(crate) fn overloaded_response(command_type: &str, worker_id: &str) -> DaemonResponse {
     response_failure(
         None,
@@ -138,10 +89,8 @@ mod tests {
         )
     }
 
-    /// Install a live command channel nobody drains (the returned halves
-    /// must outlive the routes under test, or the channel would read as a
-    /// dead connection): a wedged worker that accepts frames but never
-    /// answers.
+    /// Install a live command channel nobody drains: a wedged worker that accepts frames
+    /// but never answers (the halves must outlive the routes under test).
     async fn wedged_worker(
         resident: &Arc<ResidentWorker>,
     ) -> (
@@ -165,11 +114,6 @@ mod tests {
         .expect("supervisor")
     }
 
-    /// The regression at the heart of the finding: a request-shaped client
-    /// command that finds its worker at the in-flight bound is answered
-    /// with the explicit typed refusal — never queued, never dropped,
-    /// never a silent timeout — while supervisor-internal traffic waits
-    /// inside its budget and surfaces the budget error instead.
     #[tokio::test]
     async fn a_saturated_worker_answers_client_requests_with_the_typed_overload_refusal() {
         let dir = tempfile::TempDir::new().expect("temp dir");
@@ -185,8 +129,6 @@ mod tests {
             held.push(inflight.clone().acquire_owned().await.expect("permit"));
         }
 
-        // The client command answers the overload refusal — an answer, not
-        // an error and not a dropped request.
         let refused = supervisor
             .route_command_typed(
                 &resident,
@@ -210,14 +152,11 @@ mod tests {
             line["errorInfo"]["code"],
             serde_json::json!("worker_overloaded")
         );
-        // Nothing was queued or held: the refusal was the whole exchange.
         assert!(
             resident.pending.lock().await.is_empty(),
             "the refused request never entered the in-flight set"
         );
 
-        // Internal traffic at the same bound never refuses: it waits out
-        // its budget and surfaces the budget error.
         let waited = supervisor
             .route_command_typed(
                 &resident,
@@ -234,8 +173,7 @@ mod tests {
         );
         assert!(resident.pending.lock().await.is_empty());
 
-        // One freed slot admits the next client command again (it queues
-        // and waits for its reply — bounded, visible, retryable).
+        // One freed slot admits the next client command again.
         held.pop();
         let admitted = supervisor
             .route_command_typed(
@@ -253,9 +191,6 @@ mod tests {
         );
     }
 
-    /// The saturated internal route does not hold anything while it waits:
-    /// a slot freed mid-budget admits it (control-plane traffic recovers
-    /// with the worker instead of refusing).
     #[tokio::test]
     async fn a_saturated_internal_route_admits_once_a_slot_frees() {
         let dir = tempfile::TempDir::new().expect("temp dir");
@@ -282,13 +217,11 @@ mod tests {
                     .await
             })
         };
-        // Still waiting on admission, nothing queued.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert!(
             resident.pending.lock().await.is_empty(),
             "the waiting route has not been admitted yet"
         );
-        // Freeing a slot admits the waiting route into the in-flight set.
         held.pop();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
@@ -304,11 +237,6 @@ mod tests {
         waiting.abort();
     }
 
-    /// The other saturation seam: a wedged writer whose parked frames
-    /// outlived their routes' budgets leaves free in-flight slots behind a
-    /// full queue — the client request must still answer the same explicit
-    /// refusal (never a silent queue-park), and internal traffic still
-    /// only ever waits.
     #[tokio::test]
     async fn a_full_queue_answers_client_requests_with_the_same_refusal() {
         let dir = tempfile::TempDir::new().expect("temp dir");

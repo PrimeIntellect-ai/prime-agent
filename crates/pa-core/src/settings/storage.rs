@@ -1,6 +1,5 @@
 //! Settings storage: global (agentDir/settings.json) + project
 //! (cwd/<config-dir>/settings.json) files with lock-retry and atomic writes.
-//! Port of `FileSettingsStorage` / `InMemorySettingsStorage`.
 
 use std::collections::HashMap;
 use std::fs;
@@ -10,10 +9,8 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use anyhow::{anyhow, Result};
 
-/// The TS `CONFIG_DIR_NAME` (pkg.piConfig.configDir fallback).
 pub const CONFIG_DIR_NAME: &str = ".prime/agent";
 
-/// Scope of a settings document.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsScope {
     Global,
@@ -21,18 +18,12 @@ pub enum SettingsScope {
 }
 
 /// Read/modify/write under a per-file advisory lock. `update` returns the next
-/// document or `None` to leave the file unchanged (TS `withLock`).
+/// document or `None` to leave the file unchanged.
 pub trait SettingsStorage: Send + Sync {
     /// The scope's current content, exactly what [`Self::with_lock`]'s read
     /// arm would deliver, without a write-back channel. Implementations may
-    /// serve a process-cached copy validated against the file as it stands;
-    /// `FileSettingsStorage` does (the TS product keeps one
-    /// `SettingsManager` per session-services instance and serves its
-    /// in-memory snapshot per call, so its per-turn path takes no lock at
-    /// all, while this port rebuilds the manager per call and would
-    /// otherwise pay the full lock cycle each time). Writers must still go
-    /// through [`Self::with_lock`], whose read-modify-write file protocol is
-    /// untouched.
+    /// serve a process-cached copy validated against the file as it stands.
+    /// Writers must still go through [`Self::with_lock`].
     ///
     /// # Errors
     ///
@@ -59,8 +50,7 @@ pub trait SettingsStorage: Send + Sync {
 }
 
 /// File-backed storage with proper-lockfile directory locks (`{file}.lock`
-/// empty directory), retrying briefly on contention like the TS
-/// `acquireLockSyncWithRetry` (10 x 20ms).
+/// empty directory), retrying briefly on contention like the TS `acquireLockSyncWithRetry`.
 pub struct FileSettingsStorage {
     global_path: PathBuf,
     project_path: PathBuf,
@@ -110,28 +100,10 @@ impl FileSettingsStorage {
     }
 }
 
-/// Same-process serialization for one settings document (the `#2915`
-/// pattern, proven on the auth lock in `crates/pa-core/src/auth/storage.rs`).
-///
-/// The TS product runs its synchronous settings lock on a single thread, so
-/// two `acquireLock`-style calls in one process can never contend there: the
-/// 10x20ms retry only ever fires against another process. The Rust engine is
-/// threaded, and two worker threads racing the same settings document pay the
-/// full TS retry sleep against each other (strace-verified on this lane: two
-/// threads' `mkdir settings.json.lock` attempts 11us apart, the loser
-/// `clock_nanosleep`s the full 20ms — a stall the auth-lock cycles' own
-/// same-process serialization used to pace away by accident, and which the
-/// auth read-through cache unmasks). A process-local mutex keyed by the
-/// document path serializes same-process callers for the microseconds the
-/// small read/modify/write holds; the file protocol and its retry semantics
-/// are untouched, so a foreign holder (another process) still surfaces
-/// `WouldBlock` and still takes the 10x20ms retry.
-///
-/// The mutex is a leaf: the locked section performs only the document's own
-/// filesystem operations and the caller's `update` callback, and no settings
-/// callback re-enters `with_lock` (every callback is a pure JSON transform).
-/// Poisoning cannot wedge later reads: the file protocol is the correctness
-/// mechanism, so a poisoned mutex is recovered instead of propagated.
+/// Same-process serialization for one settings document: the TS lock is
+/// single-threaded; the Rust engine is threaded, and two racing worker threads
+/// would pay the full retry sleep against each other. The mutex is a leaf; a
+/// poisoned mutex is recovered — the file protocol is the correctness mechanism.
 fn process_lock(path: &Path) -> MutexGuard<'static, ()> {
     static LOCKS: OnceLock<Mutex<HashMap<PathBuf, &'static Mutex<()>>>> = OnceLock::new();
     let registry = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
@@ -145,11 +117,9 @@ fn process_lock(path: &Path) -> MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// The stat identity a cached read is validated against: device, inode,
-/// mtime (nanoseconds), and length. Every writer the protocol knows either
-/// replaces the document by atomic rename (a new inode) or rewrites it in
-/// place (a new mtime), so a matching identity means the cached content is
-/// byte-identical to what a locked read would return right now.
+/// The stat identity a cached read is validated against: device, inode, mtime
+/// (nanoseconds), and length — every known writer changes one, so a match means
+/// the cached content is byte-identical to a locked read right now.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct FileIdentity {
     dev: u64,
@@ -198,27 +168,18 @@ struct CachedRead {
     content: String,
 }
 
-/// Validated content per settings document, process-wide: the read-through
-/// cache for [`FileSettingsStorage::read`]. Entries live for the process (a
-/// handful of small documents per process, mirroring the process-lock
-/// registry's lifetime policy); a stat identity that no longer matches
-/// simply misses and re-reads, so entries never outlive their file.
+/// Validated content per settings document, process-wide: the read-through cache
+/// for [`FileSettingsStorage::read`]; a stale stat identity simply misses and re-reads.
 static READ_CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedRead>>> = OnceLock::new();
 
-/// The process-wide read-through cache, created on first use.
 fn read_cache() -> &'static Mutex<HashMap<PathBuf, CachedRead>> {
     READ_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 impl SettingsStorage for FileSettingsStorage {
-    /// The consolidated read arm: on a cache hit, one `stat` and the cached
-    /// content (no lock protocol at all — the TS session's own per-turn
-    /// reads take no lock either); on a miss, the full locked protocol
-    /// cycle, byte-identical to `with_lock`'s read arm, which also
-    /// populates the cache. The same-process mutex still orders this
-    /// against in-process writers (see [`process_lock`]), and an external
-    /// write changes the stat identity, so the next read misses and
-    /// re-reads fresh.
+    /// The consolidated read arm: on a cache hit, one `stat` and the cached content;
+    /// on a miss, the full locked cycle, byte-identical to `with_lock`'s read arm, which
+    /// also populates the cache. The same-process mutex still orders in-process writers.
     fn read(&self, scope: SettingsScope) -> Result<Option<String>> {
         let path = self.path(scope);
         let _process_guard = process_lock(path);
@@ -240,7 +201,6 @@ impl SettingsStorage for FileSettingsStorage {
                 }
             }
         }
-        // Miss: the full protocol read — the lock protocol is unchanged.
         let guard = Self::acquire_lock(path)?;
         let content = fs::read_to_string(path)?;
         drop(guard);
@@ -297,53 +257,36 @@ impl SettingsStorage for FileSettingsStorage {
     }
 }
 
-/// The TS `WriteFileAtomicOptions` (atomic-file.ts) for
-/// [`atomic_write_with`]: `fsync` is the durability opt-in and defaults to
-/// OFF, exactly like the TS reference.
+/// The TS `WriteFileAtomicOptions` for [`atomic_write_with`]: `fsync` is
+/// the durability opt-in and defaults to OFF.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct AtomicWriteOptions {
-    /// fsync the temp file before the rename (TS
-    /// `WriteFileAtomicOptions.fsync`; opt-in, default off).
     pub fsync: bool,
 }
 
 // Test-only served-path counter: how many times this thread took the
-// opt-in fsync branch of `atomic_write_with`. The per-call-site durability
-// tests assert their writer's delta through the real write path (0 for the
-// TS-default no-sync sites, exactly 1 for the opted-in cron state write) —
-// the anti-vacuity pattern: the oracle fails loudly if a site's durability
-// binding flips.
+// opt-in fsync branch of `atomic_write_with`.
 #[cfg(test)]
 thread_local! {
     static OPT_IN_FSYNC: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// The per-thread count of opt-in fsync branches taken by
-/// [`atomic_write_with`] (test-only; see the counter's declaration).
+/// The per-thread count of opt-in fsync branches taken by [`atomic_write_with`] (test-only).
 #[cfg(test)]
 pub(crate) fn opt_in_fsync_calls() -> usize {
     OPT_IN_FSYNC.with(std::cell::Cell::get)
 }
 
-/// Atomic write: temp file + rename, private mode like `writeFileAtomicSync`
-/// (its win32-only destination-busy retry rides along in `rename_onto`).
-///
-/// The TS default durability: NO fsync. `writeFileAtomicSync`'s `fsync` is
-/// opt-in (atomic-file.ts: `if (options.fsync) fsyncSync(descriptor)`) and
-/// every non-journal TS call site passes only `{mode}` — the crash window is
-/// the one TS ships: the atomic rename still means a reader never sees a
-/// torn file, and a hard crash leaves either the previous file (before the
-/// rename) or the new file (after it). Sites whose crash-safety genuinely
-/// needs the pre-rename fsync opt in through [`atomic_write_with`] — the
-/// audit is per call site, never blanket.
+/// Atomic write: temp file + rename, private mode like `writeFileAtomicSync`.
+/// TS default durability: NO fsync (opt-in) — a hard crash leaves either the
+/// previous file or the new file. Sites needing the pre-rename fsync opt in
+/// through [`atomic_write_with`]; the audit is per call site, never blanket.
 pub fn atomic_write(path: &Path, content: &str) -> Result<()> {
     atomic_write_with(path, content, AtomicWriteOptions::default())
 }
 
 /// [`atomic_write`] with explicit [`AtomicWriteOptions`]: the TS
-/// `writeFileAtomicSync(path, data, options)` shape. The opt-in this port's
-/// call sites use is `fsync: true` — the durability the TS cron state keeps
-/// (cron-jobs.ts `writeJobsState` passes `{ mode: 0o600, fsync: true }`).
+/// `writeFileAtomicSync(path, data, options)` shape.
 pub fn atomic_write_with(path: &Path, content: &str, options: AtomicWriteOptions) -> Result<()> {
     let temp = PathBuf::from(format!("{}.tmp{}", path.display(), std::process::id()));
     {
@@ -362,7 +305,6 @@ pub fn atomic_write_with(path: &Path, content: &str, options: AtomicWriteOptions
     Ok(())
 }
 
-/// In-memory storage (tests, embedded hosts).
 #[derive(Default)]
 pub struct InMemorySettingsStorage {
     global: Mutex<Option<String>>,
@@ -426,10 +368,6 @@ mod tests {
         assert_eq!(crate::platform::perms::file_mode(&path), Some(0o600));
     }
 
-    /// The helper's TS-parity contract: the default takes NO fsync branch
-    /// (the served-path counter stays flat — TS `writeFileAtomicSync` without
-    /// `options.fsync`), the opt-in takes exactly one, and both land the
-    /// exact bytes through the private temp + rename.
     #[test]
     fn atomic_write_default_skips_fsync_and_opt_in_takes_exactly_one() {
         let dir = tempfile::tempdir().unwrap();
@@ -453,7 +391,6 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), "durable bytes\n");
         #[cfg(unix)]
         assert_eq!(crate::platform::perms::file_mode(&path), Some(0o600));
-        // The temp never leaks: only the destination remains.
         let names: Vec<String> = fs::read_dir(path.parent().unwrap())
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
@@ -461,10 +398,6 @@ mod tests {
         assert_eq!(names, ["state.json".to_string()]);
     }
 
-    /// Per-call-site served-path oracle (settings-manager.ts:390 passes only
-    /// `{ mode: 0o600 }`): the settings write goes through the real
-    /// `with_lock` writer and takes NO fsync branch, landing the exact
-    /// document bytes.
     #[test]
     fn settings_write_takes_the_ts_default_no_sync() {
         let dir = tempfile::tempdir().unwrap();
@@ -484,11 +417,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let storage = FileSettingsStorage::new(dir.path().join("cwd"), dir.path().join("agent"));
         let global = dir.path().join("agent").join("settings.json");
-        // Absent document: `Ok(None)`, like `with_lock`'s read arm.
         assert_eq!(storage.read(SettingsScope::Global).unwrap(), None);
         assert!(!global.exists());
-        // A write through the full protocol; the next read re-reads the new
-        // identity (the atomic rename replaced the inode).
         storage
             .with_lock(SettingsScope::Global, &mut |current| {
                 assert_eq!(current, None);
@@ -499,21 +429,16 @@ mod tests {
             storage.read(SettingsScope::Global).unwrap().as_deref(),
             Some(r#"{ "theme": "prime" }"#)
         );
-        // A second manager over the same paths reads the same content
-        // (per-instance state is untouched; the document is shared).
         let other = FileSettingsStorage::new(dir.path().join("cwd"), dir.path().join("agent"));
         assert_eq!(
             other.read(SettingsScope::Global).unwrap().as_deref(),
             Some(r#"{ "theme": "prime" }"#)
         );
-        // An external in-place rewrite changes the mtime: the identity no
-        // longer matches and the read re-reads fresh.
         std::fs::write(&global, r#"{ "theme": "dark" }"#).unwrap();
         assert_eq!(
             storage.read(SettingsScope::Global).unwrap().as_deref(),
             Some(r#"{ "theme": "dark" }"#)
         );
-        // An external atomic-rename write changes the inode: same re-read.
         let tmp = global.with_extension("json.tmp-ext");
         std::fs::write(&tmp, r#"{ "theme": "ink" }"#).unwrap();
         std::fs::rename(&tmp, &global).unwrap();
@@ -525,9 +450,6 @@ mod tests {
 
     #[test]
     fn read_arm_error_matches_with_lock_read() {
-        // A directory at the document path: `with_lock`'s read arm fails
-        // with the raw io error; the read arm surfaces the same class
-        // (not `Ok(None)`).
         let dir = tempfile::tempdir().unwrap();
         let agent = dir.path().join("agent");
         std::fs::create_dir_all(agent.join("settings.json")).unwrap();
@@ -537,8 +459,6 @@ mod tests {
 
     #[test]
     fn read_arm_default_is_with_lock_read() {
-        // The trait default delegates to `with_lock`: the in-memory backend
-        // serves through its own protocol, unchanged.
         let storage = InMemorySettingsStorage::default();
         storage
             .with_lock(SettingsScope::Global, &mut |current| {
@@ -553,10 +473,8 @@ mod tests {
         assert_eq!(storage.read(SettingsScope::Project).unwrap(), None);
     }
 
-    /// A relative agent dir (a relative `PRIME_AGENT_CODING_AGENT_DIR`)
-    /// locks and loads: the lock probe's `utimensat` resolves relative lock
-    /// paths against `AT_FDCWD`, and the settings document under it is
-    /// read back under the same lock.
+    /// A relative agent dir (a relative `PRIME_AGENT_CODING_AGENT_DIR`) locks and
+    /// loads: the lock probe's `utimensat` resolves relative lock paths against `AT_FDCWD`.
     #[test]
     #[cfg(unix)]
     fn relative_agent_dir_locks_and_loads() {

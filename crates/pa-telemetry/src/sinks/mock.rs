@@ -14,9 +14,8 @@ pub struct RecordedBatch {
     pub events: Vec<TelemetryEvent>,
 }
 
-/// Records all batches in memory; used by unit tests here and in downstream
-/// crate tests. Never drops by itself, but `fail_batches` flips the outcome to
-/// exercise the client's drop policy.
+/// Records all batches in memory for unit tests here and downstream;
+/// `failing()` flips the outcome to exercise the client's drop policy.
 #[derive(Debug, Default)]
 pub struct MockSink {
     batches: Mutex<Vec<RecordedBatch>>,

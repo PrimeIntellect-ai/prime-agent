@@ -6,17 +6,13 @@ use super::*;
 #[test]
 fn enter_toggles_the_summary_row_and_drills_into_a_child() {
     let mut mode = mode_with_parent_and_child();
-    // The selection starts on the parent; down lands on the summary
-    // row, and Enter toggles it (TS `openSelected` on a summary row).
     mode.handle_key("down");
     assert_eq!(mode.rows[mode.selected].kind, RowKind::SubagentSummary);
     mode.handle_key("enter");
     assert_eq!(mode.rows.len(), 3);
     assert!(mode.rows[1].expanded);
-    // Enter on the summary row again collapses.
     mode.handle_key("enter");
     assert_eq!(mode.rows.len(), 2);
-    // Expand, walk to the child, drill in (TS `openSelectedSubagent`).
     mode.handle_key("enter");
     mode.handle_key("down");
     assert_eq!(mode.rows[mode.selected].kind, RowKind::Subagent);
@@ -26,19 +22,14 @@ fn enter_toggles_the_summary_row_and_drills_into_a_child() {
         opened.selection,
         SessionSelection::Attach("c-live".to_string())
     );
-    // The drill-in carries the ancestor chain for the return
-    // re-expansion and the child's depth for its tray label.
     assert_eq!(opened.expanded_ancestors, vec!["p".to_string()]);
     assert_eq!(opened.rlm_depth, Some(1));
-    // The child itself has no children in this fixture.
     assert!(!opened.has_children);
     assert!(!mode.running);
 }
 
 #[test]
 fn pending_ancestors_expand_and_selection_restores_after_reentry() {
-    // A fresh run carrying the drilled-in child's return state (TS
-    // `pendingExpandedAncestorSessionIds` + the persisted selection).
     let mut mode = AgentsViewMode::new(AgentsViewOptions {
         socket_path: PathBuf::from("/tmp/agents-view-test.sock"),
         cwd: PathBuf::from("/tmp"),
@@ -66,8 +57,6 @@ fn pending_ancestors_expand_and_selection_restores_after_reentry() {
         roster_entry("c", "running", &child_summary("c", "p", "worker one")),
     ];
     mode.rebuild_rows();
-    // The ancestor expansion opened the parent's list and the child
-    // row's selection restored.
     assert_eq!(mode.rows.len(), 3);
     assert!(mode.rows[1].expanded);
     assert_eq!(mode.rows[mode.selected].title, "worker one");
@@ -86,8 +75,6 @@ fn scoped_left_returns_the_root_and_pops_the_scope() {
     assert!(mode.scope_active);
     assert_eq!(mode.rows.len(), 1);
     assert_eq!(mode.rows[0].kind, RowKind::Agent);
-    // The parent key hands the terminal back to the scope root and
-    // marks the scope popped for the flow.
     mode.handle_key("left");
     assert!(mode.scope_popped);
     let opened = mode.opened.as_ref().expect("scope-back open");
@@ -95,16 +82,13 @@ fn scoped_left_returns_the_root_and_pops_the_scope() {
         opened.selection,
         SessionSelection::Attach("p-live".to_string())
     );
-    // The scope root has no ancestors of its own, so nothing
-    // re-expands after the return chat.
     assert!(opened.expanded_ancestors.is_empty());
 }
 
 #[test]
 fn unattachable_child_opens_its_root_with_a_status() {
     let mut mode = mode_with_parent_and_child();
-    // A finished child with no runtime and no file resolves to its
-    // top-level ancestor (TS `createUnattachableChildOpenResult`).
+    // A finished child with no runtime and no file resolves to its top-level ancestor.
     let unattachable = serde_json::json!({
         "sessionId": "gc",
         "lifecycle": "live",
@@ -118,10 +102,9 @@ fn unattachable_child_opens_its_root_with_a_status() {
     });
     mode.roster
         .push(roster_entry("gc", "inactive", &unattachable));
-    // The grandchild is roster-inactive under the running child: the
-    // ONE merged group nests it under the child's own line — expand
-    // the parent's line first, then the child's (whose identity is
-    // its parent-qualified `agent:` alias), so the row renders.
+    // The grandchild is roster-inactive under the running child: the ONE merged group nests it
+    // under the child's own line — expand the parent's line first, then the child's (whose
+    // identity is its parent-qualified `agent:` alias), so the row renders.
     mode.expanded_parents.insert("file:/x/p.jsonl".to_string());
     mode.rebuild_rows();
     let child_identity = mode
@@ -141,8 +124,6 @@ fn unattachable_child_opens_its_root_with_a_status() {
     mode.selected = grandchild;
     mode.handle_key("enter");
     let opened = mode.opened.as_ref().expect("open recorded");
-    // The parent chain's root session opens instead, with the child
-    // row kept for the selection restore and a status message.
     assert_eq!(
         opened.selection,
         SessionSelection::Attach("p-live".to_string())

@@ -1,5 +1,5 @@
-//! The git-context concern (moved with its concern): the quiet git
-//! probes and the header's git-context capture (TS captureGitContext).
+//! The git-context concern: the quiet git probes and the header's git-context capture (TS
+//! `captureGitContext`).
 
 use std::process::Stdio;
 

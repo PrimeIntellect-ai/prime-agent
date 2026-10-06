@@ -3,9 +3,8 @@
 
 use super::*;
 
-// Side questions end to end: `start_side_question`/`abort_side_question` over
-// the scripted engine, events routed back to the owner client
-// (TS daemon-mode handlers + `core/side-question.ts`).
+// TS daemon-mode handlers + `core/side-question.ts` parity, over the
+// scripted engine.
 #[test]
 fn side_questions_start_abort_and_events_scripted() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -15,9 +14,9 @@ fn side_questions_start_abort_and_events_scripted() {
     let _daemon = spawn_daemon(&socket, &agent_dir);
     let (mut client, _hello) = Client::connect(&socket);
 
-    // Create a scripted session whose side-question script fails once
-    // transiently (retried with fast delays), then answers after a delay long
-    // enough to observe the in-flight guards and the abort.
+    // The side-question script fails once transiently (retried with fast
+    // delays), then answers after a delay long enough to observe the
+    // in-flight guards and the abort.
     let script_path = dir.path().join("script.json");
     std::fs::write(
         &script_path,
@@ -56,8 +55,8 @@ fn side_questions_start_abort_and_events_scripted() {
         .expect("session id")
         .to_string();
 
-    // Attach first: the supervisor fans worker frames (including
-    // `side_question_event`) out to clients attached to the session.
+    // The supervisor fans worker frames (including `side_question_event`)
+    // out to clients attached to the session.
     client.send_command(
         "a1",
         &serde_json::json!({ "type": "attach", "activeSessionId": session_id }),
@@ -65,7 +64,6 @@ fn side_questions_start_abort_and_events_scripted() {
     let attached = client.read_response("a1");
     assert_eq!(attached["success"], true, "attach failed: {attached}");
 
-    // Unknown session fails with the TS routing error.
     client.send_command(
         "sq-missing",
         &serde_json::json!({
@@ -79,7 +77,6 @@ fn side_questions_start_abort_and_events_scripted() {
     assert_eq!(missing["success"], false);
     assert_eq!(missing["error"], "Unknown active session: no-such-session");
 
-    // Start a side question; the response acknowledges immediately.
     client.send_command(
         "sq1",
         &serde_json::json!({
@@ -93,8 +90,8 @@ fn side_questions_start_abort_and_events_scripted() {
     let (started, mut sq1_lines) = client.read_response_and_lines("sq1");
     assert_eq!(started["success"], true, "start failed: {started}");
 
-    // The retry played out before the partial answer: the failure was
-    // transient and the second provider attempt answers.
+    // The retry played out before the partial answer: the second provider
+    // attempt answers.
     let mut running_answers: Vec<String> = Vec::new();
     let partial_answer = loop {
         let line = client.next_line_of_type(&mut sq1_lines, "side_question_event");
@@ -143,7 +140,6 @@ fn side_questions_start_abort_and_events_scripted() {
         "A side question is already running for this client and session"
     );
 
-    // Aborting an unknown id reports { aborted: false }.
     client.send_command(
         "ab-unknown",
         &serde_json::json!({
@@ -156,8 +152,7 @@ fn side_questions_start_abort_and_events_scripted() {
     assert_eq!(aborted["success"], true, "abort failed: {aborted}");
     assert_eq!(aborted["data"], serde_json::json!({ "aborted": false }));
 
-    // Abort the live run: { aborted: true }, then a cancelled event carrying
-    // the partial answer streamed so far.
+    // Abort the live run: the cancelled event carries the partial answer.
     client.send_command(
         "ab1",
         &serde_json::json!({
@@ -179,8 +174,8 @@ fn side_questions_start_abort_and_events_scripted() {
     };
     assert_eq!(cancelled["answer"], partial_answer);
 
-    // A cancelled run is gone: the same id starts again and this time
-    // completes (the script replays from the top, fresh conversation).
+    // The same id starts again and completes (the script replays from the
+    // top).
     client.send_command(
         "sq2",
         &serde_json::json!({

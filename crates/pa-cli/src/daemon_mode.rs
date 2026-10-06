@@ -1,7 +1,5 @@
-//! `--mode daemon`: the supervisor process. The interactive client spawns
-//! this mode (detached) when no daemon is listening, so `prime-agent` alone
-//! is enough to bring the full session stack up (port of the TS
-//! `daemon-mode.ts` entry: the CLI process becomes the supervisor).
+//! `--mode daemon`: the supervisor process. The interactive client spawns this
+//! mode (detached) when no daemon is listening.
 
 use anyhow::Result;
 
@@ -16,7 +14,6 @@ pub struct DaemonTcpFlags {
     pub bind_host: Option<String>,
 }
 
-/// Run the daemon supervisor in-process until it shuts down.
 pub fn run_daemon_mode(daemon_socket: Option<&str>, tcp: &DaemonTcpFlags) -> Result<i32> {
     let socket_path = config::resolve_daemon_socket_path(daemon_socket);
     let agent_dir = config::get_agent_dir();

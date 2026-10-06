@@ -1,13 +1,5 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
-// by design on hot paths (boxing 130 fns is allocation-churn with zero
-// correctness gain); the fn-length threshold is a style gate, not
-// correctness (the harness fns are intentionally linear); 64-bit targets -
-// the narrowing sits at OS/protocol boundaries where the values are
-// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
-// guarded parses), and checked conversions would add panic paths where
-// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
-// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
-// dossier for the conductor).
+// large_futures: stack futures on hot paths by design. too_many_lines: style gate
+// only. Casts: 64-bit targets; narrowing sits at bounded OS/protocol boundaries.
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -18,15 +10,9 @@
 )]
 
 //! End-to-end verifier for the interactive TUI: spawn the real supervisor
-//! (`prime-agent --mode daemon`, the same binary the interactive runtime
-//! launches when no daemon is running), then drive the TUI headlessly
-//! against a scripted daemon session — create/attach, prompt, streamed
-//! assistant output, session list, and a session switch — and assert on the
-//! rendered frames plus the daemon-side session state.
-//!
-//! The scripted engine seam (`create` config `script`) is the same faux
-//! provider contract `pa-daemon/tests/supervisor_e2e/main.rs` uses; the product
-//! never sets it.
+//! (`prime-agent --mode daemon`), drive the TUI headlessly against a scripted
+//! daemon session, and assert on rendered frames plus daemon-side state. The
+//! `script` seam is the faux provider contract; the product never sets it.
 #![cfg(unix)]
 
 use std::fmt::Write as _;
@@ -50,16 +36,12 @@ struct Supervisor {
 }
 
 /// Stop the daemon on `socket` by protocol so it can shut its workers down;
-/// kill the child when the protocol path fails. Drop runs even when the test
-/// panics, so a failing test must not leak worker processes.
+/// kill the child when the protocol path fails.
 impl Drop for Supervisor {
     fn drop(&mut self) {
         graceful_shutdown(&self.socket);
-        // Snapshot the live worker children before the kill: workers run in
-        // their own process groups (detached, TS parity), so a graceful
-        // shutdown that times out orphans them when the supervisor dies.
-        // Reap them here — the supervisor-lost exit window is a backstop,
-        // not the teardown contract.
+        // Snapshot the live worker children before the kill: workers are detached,
+        // so a timed-out graceful shutdown orphans them when the supervisor dies.
         let worker_pids = child_pids_of(self.child.id());
         let _ = self.child.kill();
         let _ = self.child.wait();
@@ -70,17 +52,11 @@ impl Drop for Supervisor {
     }
 }
 
-/// Kill a leaked worker process (SIGKILL; it already failed the graceful
-/// path) and wait briefly for it to disappear.
+/// Kill a leaked worker process (SIGKILL) and wait briefly for it to disappear.
 fn kill_worker(pid: u32) {
-    // The worker pid is a child of the supervisor we just killed, so it is
-    // not our child and cannot be waited on directly; poll /proc liveness.
-    // Best effort by design: this runs inside `Drop` (a failing test's
-    // unwind path included), where an assert would abort the process and
-    // orphan every other parallel test's daemons. The contractual
-    // worker-leak detection lives in `assert_daemon_stops_clean` (a plain
-    // test body, where a panic is a proper failure); here a surviving
-    // worker is re-killed and reported to stderr instead.
+    // The worker pid is not our child, so poll /proc liveness. Best effort by
+    // design: an assert in `Drop` would abort the process and orphan the parallel
+    // tests; the contract lives in `assert_daemon_stops_clean`.
     for round in 0..2 {
         unsafe {
             libc::kill(pid as i32, libc::SIGKILL);
@@ -100,23 +76,19 @@ fn kill_worker(pid: u32) {
     eprintln!("worker {pid} still alive after two teardown kills");
 }
 
-/// RAII guard for a detached supervisor (spawned by
-/// `ensure_daemon_running_with`): shuts the daemon down on scope exit.
+/// RAII guard for a detached supervisor: shuts the daemon down on scope exit.
 struct DetachedDaemon {
     socket: PathBuf,
 }
 
 impl Drop for DetachedDaemon {
     fn drop(&mut self) {
-        // Best effort by design: this runs inside `Drop` (a failing test's
-        // unwind path included), where an assert would ABORT the process and
-        // orphan every other parallel test's daemons. A supervisor that
-        // misses the graceful exit deadline is SIGKILLed by pid instead.
+        // Best effort by design: this runs inside `Drop`, where an assert would
+        // ABORT the process and orphan every other parallel test's daemons.
         let supervisor_pid = graceful_shutdown(&self.socket);
         if let Some(pid) = supervisor_pid {
             // Snapshot the supervisor's live worker children before it goes
-            // (they are detached, so they survive its death), then reap any
-            // that the graceful shutdown did not stop.
+            // (they are detached, so they survive its death).
             let worker_pids = child_pids_of(pid);
             let deadline = Instant::now() + Duration::from_secs(10);
             while process_alive(pid) {
@@ -137,7 +109,6 @@ impl Drop for DetachedDaemon {
     }
 }
 
-/// Pids whose parent is `ppid` (the supervisor's live worker children).
 fn child_pids_of(ppid: u32) -> Vec<u32> {
     let mut pids = Vec::new();
     let entries = std::fs::read_dir("/proc").expect("read /proc");
@@ -165,8 +136,7 @@ fn child_pids_of(ppid: u32) -> Vec<u32> {
 }
 
 /// Liveness that ignores zombies: a detached child nobody reaps keeps its
-/// `/proc` entry (exit status pending), so path existence alone would call
-/// an exited process alive.
+/// `/proc` entry, so path existence alone would call an exited process alive.
 fn process_alive(pid: u32) -> bool {
     let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
         return false;
@@ -179,11 +149,8 @@ fn process_alive(pid: u32) -> bool {
     !state.starts_with('Z') && !state.starts_with('X')
 }
 
-/// Shut the spawned supervisor down by protocol and assert that it — and
-/// every worker process it spawned — actually exited and the socket file
-/// went away. A daemon that only stops its workers but stays parked on its
-/// listening socket would leak both processes (the TS client's
-/// `waitForDaemonGone` relies on the daemon exiting).
+/// Shut the supervisor down by protocol and assert it, its workers, and its
+/// socket all went away.
 fn assert_daemon_stops_clean(socket: &Path) {
     // Sync JSONL exchange (called from the sync guard path).
     use std::io::{BufRead, BufReader, Write};
@@ -212,7 +179,6 @@ fn assert_daemon_stops_clean(socket: &Path) {
     writer.write_all(line.as_bytes()).expect("send shutdown");
     writer.flush().expect("flush");
 
-    // The supervisor process exits by itself and cleans up its socket.
     let deadline = Instant::now() + Duration::from_secs(10);
     while process_alive(supervisor_pid) {
         assert!(
@@ -225,7 +191,6 @@ fn assert_daemon_stops_clean(socket: &Path) {
         !socket.exists(),
         "the spawned supervisor removed its socket file"
     );
-    // No worker process outlives the shutdown.
     for pid in worker_pids {
         let deadline = Instant::now() + Duration::from_secs(10);
         while process_alive(pid) {
@@ -239,9 +204,7 @@ fn assert_daemon_stops_clean(socket: &Path) {
 }
 
 /// Sync JSONL shutdown request (Drop runs inside the async test runtime, so
-/// no nested runtime may be built here). Best effort; callers kill the child
-/// process afterwards regardless. Returns the supervisor pid from the hello
-/// so the caller can reap the workers it spawned.
+/// no nested runtime). Returns the supervisor pid from the hello.
 fn graceful_shutdown(socket: &Path) -> Option<u32> {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
@@ -275,8 +238,7 @@ fn graceful_shutdown(socket: &Path) -> Option<u32> {
         return None;
     }
     let _ = writer.flush();
-    // Wait briefly for the supervisor to accept the shutdown (it stops every
-    // worker before exiting, so the response is the sync point).
+    // The response is the sync point: the supervisor stops every worker before exiting.
     let _ = reader
         .get_ref()
         .set_read_timeout(Some(Duration::from_secs(5)));
@@ -285,13 +247,8 @@ fn graceful_shutdown(socket: &Path) -> Option<u32> {
     supervisor_pid
 }
 
-/// The headless run's wall: the plan's barriers are each bounded, but the
-/// run loop has no global exit bound — a turn that never settles holds the
-/// idle gate closed and the run parks forever. The wall turns that into a
-/// failing test instead of a hung binary; dropping the expired future
-/// cancels the run loop, and the supervisor guards still tear the daemons
-/// down. Generous against real load: the suite settles in 16-63s wall and
-/// the longest plan's barriers sum to ~120s.
+/// The headless run's wall: a turn that never settles holds the idle gate
+/// closed and parks the run forever; the wall makes that a failing test.
 const HEADLESS_RUN_BOUND: Duration = Duration::from_secs(300);
 
 async fn run_headless_bounded(
@@ -313,14 +270,9 @@ async fn run_headless_bounded(
     }
 }
 
-/// Kill supervisors leaked by earlier runs of this verifier: a binary
-/// that dies without unwinding (a kill, an abort) runs no `Drop`, so its
-/// daemons get reparented to init and keep contending for CPU and memory
-/// with every later run. A daemon matches when its `--daemon-socket` sits
-/// in a `tempfile`-created `.tmpXXXXXX` dir (this suite's spawn shape —
-/// the product's own daemons never use that prefix) and its parent is
-/// dead (ppid 1). A daemon of a still-running test keeps its test binary
-/// as the parent and never matches.
+/// Kill supervisors leaked by earlier runs (a dead binary runs no `Drop`, so
+/// its daemons are reparented to init): a daemon matches when its socket dir
+/// is a `tempfile`-created `.tmpXXXXXX` dir and its parent is dead.
 fn sweep_orphan_test_daemons() {
     static SWEEPED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     if SWEEPED.set(()).is_err() {
@@ -352,12 +304,8 @@ fn sweep_orphan_test_daemons() {
         let Some(socket) = arg_after("--daemon-socket") else {
             continue;
         };
-        // The orphan signature: a test-spawned daemon (its socket lives in a
-        // `tempfile`-created `.tmpXXXXXX` dir — the product's own daemons
-        // never use that prefix) whose parent is dead (ppid 1 after the
-        // killed run's reparent). A live run's daemon keeps its owning test
-        // binary as the parent, and the user's product daemons fail the
-        // path test, so neither is ever swept.
+        // A live run's daemon keeps its owning test binary as the parent, and
+        // the user's product daemons fail the socket-dir test, so neither is swept.
         let orphan_socket_dir = Path::new(&socket)
             .parent()
             .and_then(Path::file_name)
@@ -405,8 +353,7 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
         .arg(&socket)
         .env("PRIME_AGENT_CODING_AGENT_DIR", &agent_dir)
         // The daemon's startup catalog refresh must never reach the network
-        // from a test: PI_OFFLINE keeps it on the bundled/models.json
-        // snapshot (the same fallback the picker renders).
+        // from a test: PI_OFFLINE keeps it on the bundled/models.json snapshot.
         .env("PI_OFFLINE", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -425,12 +372,8 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
     ] {
         command.env_remove(var);
     }
-    // Ambient provider credentials (PRIME_API_KEY on the dev box, or any
-    // other provider key variable) must not leak into the daemon's catalog:
-    // every spawned supervisor in this verifier serves fixtures whose only
-    // configured model comes from a models.json file, so the ambient
-    // catalog cannot widen a test's scope. The supervisor strips these from
-    // the session workers it spawns too (they inherit its environment).
+    // Ambient provider credentials must not leak into the daemon's catalog:
+    // every spawned supervisor here serves models.json fixtures only.
     for provider in pa_ai::models_generated::get_providers() {
         if let Some(vars) = pa_ai::env_api_keys::get_api_key_env_vars(provider) {
             for var in vars {
@@ -439,26 +382,17 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
         }
     }
     command.env_remove("PRIME_TEAM_ID");
-    // A supervisor killed by a failing test must not leak its session
-    // workers into later test binaries: the worker's supervisor-lost exit
-    // (TS `exitIfSupervisorOrphanedForTooLong`) runs on this short window
-    // instead of the 5-minute default.
+    // A supervisor killed by a failing test must not leak its session workers:
+    // the supervisor-lost exit runs on this short window, not the 5-minute default.
     command.env(
         pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
         "15000",
     );
-    // A full workspace run around this suite (the battery) can starve a
-    // freshly-launched session worker's boot far past the 30s default
-    // connect budget; the generous override keeps the suite's session
-    // creates deterministic under that load (the supervisor passes its
-    // environment to the workers it spawns).
+    // A full workspace run can starve a session worker's boot far past the
+    // 30s default connect budget; this keeps session creates deterministic.
     command.env("PA_DAEMON_WORKER_CONNECT_TIMEOUT_MS", "90000");
-    // Die with this test binary: a supervisor that outlives the process
-    // (a kill or abort runs no `Drop`) gets reparented to init and keeps
-    // running, so the kernel SIGKILLs it the moment its parent dies. The
-    // guard's protocol teardown below stays the normal exit path; this is
-    // the backstop. The per-test guards drop before the owning harness
-    // thread can exit, so the early-fire window is empty.
+    // Die with this test binary: the kernel SIGKILLs a supervisor that gets
+    // reparented to init; the guard's protocol teardown stays the exit path.
     unsafe {
         command.pre_exec(move || {
             libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
@@ -476,8 +410,7 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
     panic!("supervisor socket never appeared");
 }
 
-/// Create a live session through the daemon protocol (the same `create`
-/// config the TUI sends), writing the scripted engine config first.
+/// Create a live session through the daemon protocol, writing the scripted engine config first.
 async fn create_session_via_daemon(
     socket: &Path,
     script_path: &Path,
@@ -526,8 +459,7 @@ async fn tui_attaches_prompts_streams_lists_and_switches() {
     std::fs::create_dir_all(&session_dir).expect("session dir");
     let supervisor = spawn_supervisor(dir.path());
 
-    // A second live session created through the daemon protocol, so the
-    // switch target is known by id (not by list position).
+    // A second live session via the daemon protocol, so the switch target is known by id.
     let script = serde_json::json!({ "responses": [
         { "text": "hello from scripted", "delayMs": 20 },
         { "text": "second turn" },
@@ -583,10 +515,7 @@ async fn tui_attaches_prompts_streams_lists_and_switches() {
             pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
             pa_tui::interactive::HeadlessStep::Submit("again".to_string()),
             pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
-            // Session list (the read-only info panel over the dock), then
-            // close it and switch to the second session by id: the
-            // transcript must rebuild from its (empty) snapshot and the next
-            // prompt must run against the switched session.
+            // Session list, then switch to the second session by id.
             pa_tui::interactive::HeadlessStep::Submit("/list".to_string()),
             pa_tui::interactive::HeadlessStep::WaitRender {
                 needle: "live sessions:".to_string(),
@@ -626,8 +555,6 @@ async fn tui_attaches_prompts_streams_lists_and_switches() {
         rendered.contains("live sessions:"),
         "session list rendered:\n{rendered}"
     );
-    // After the switch, the third prompt ran against the switched session:
-    // the scripted engine replays response 0 for it.
     assert!(
         rendered.contains("switched to session"),
         "switch note rendered:\n{rendered}"
@@ -642,7 +569,6 @@ async fn tui_attaches_prompts_streams_lists_and_switches() {
         "the switched session produced its first scripted turn"
     );
 
-    // Daemon-side verification: both sessions hold their turns.
     let (client, _events) = pa_tui::daemon_client::DaemonClient::connect(&supervisor.socket)
         .await
         .expect("connect supervisor");
@@ -674,7 +600,6 @@ async fn tui_attaches_prompts_streams_lists_and_switches() {
     );
     client.close();
 
-    // The session files are on disk (reattach survives a TUI restart).
     let persisted = std::fs::read_dir(&session_dir)
         .expect("read session dir")
         .flatten()
@@ -684,9 +609,7 @@ async fn tui_attaches_prompts_streams_lists_and_switches() {
     drop(supervisor);
 }
 
-/// The product's settings-backed onboarding persistence (the
-/// `SettingsOnboardingSink` glue over the public settings manager, minus
-/// the best-effort telemetry the e2e harness has no client for).
+/// The product's settings-backed onboarding persistence (`SettingsOnboardingSink` glue).
 struct FreshHomeOnboardingSink {
     cwd: PathBuf,
     agent_dir: PathBuf,
@@ -721,8 +644,7 @@ impl pa_tui::interactive::OnboardingSink for FreshHomeOnboardingSink {
     }
 }
 
-/// The product sink whose completion write always fails (the failed
-/// persistence path): reads stay real, the marker write errors.
+/// The product sink whose completion write always fails: reads stay real, the write errors.
 struct FailingMarkOnboardingSink {
     cwd: PathBuf,
     agent_dir: PathBuf,
@@ -755,14 +677,7 @@ impl pa_tui::interactive::OnboardingSink for FailingMarkOnboardingSink {
     }
 }
 
-/// A fresh install asks the trace question exactly once, as the first-run
-/// onboarding step — the opt-in moment for trace sharing (sharing ships
-/// OFF, so `Share` opts in and `Not now` leaves it off; TS asks
-/// unconditionally with the same default). One Enter answers it: the
-/// answer and the completion flag persist together, and the released pane
-/// runs the submitted turn. The flag then gates the next launch's task
-/// mount (the `onboarding_gate_follows_settings_and_auth` unit) and the
-/// phase's own marker check, so the question never returns.
+/// A fresh install asks the trace question exactly once; TS asks unconditionally (divergence).
 #[tokio::test]
 async fn fresh_home_asks_the_trace_question_once_and_completes() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -780,8 +695,7 @@ async fn fresh_home_asks_the_trace_question_once_and_completes() {
     )
     .expect("script.json");
 
-    // The task mounts exactly as the product's model-ready gate builds it;
-    // the sink persists through the real settings manager.
+    // The task mounts exactly as the product's model-ready gate builds it.
     let mut options = base_options(&supervisor, dir.path(), &session_dir);
     options.onboarding = Some(pa_tui::interactive::OnboardingTask {
         sink: std::sync::Arc::new(FreshHomeOnboardingSink {
@@ -792,8 +706,6 @@ async fn fresh_home_asks_the_trace_question_once_and_completes() {
         current_model: None,
         provider_auth: None,
     });
-    // Enter answers the mounted question on its pre-selected `Share` row;
-    // the submission that follows must reach the editor, not the dialog.
     let plan = pa_tui::interactive::HeadlessPlan {
         steps: vec![
             pa_tui::interactive::HeadlessStep::Key(crossterm::event::KeyEvent::new(
@@ -810,8 +722,6 @@ async fn fresh_home_asks_the_trace_question_once_and_completes() {
         .await
         .expect("interactive run");
 
-    // The question owned the pane first, then released it to the session:
-    // the answer and the completion flag persisted together.
     let rendered = outcome.frames.join("\n");
     assert!(
         rendered.contains("Share agent traces"),
@@ -833,19 +743,14 @@ async fn fresh_home_asks_the_trace_question_once_and_completes() {
     drop(supervisor);
 }
 
-/// A provisioned home (sharing explicitly opted out, a copied config) never
-/// sees the trace question: the standing choice stands and the flow
-/// completes silently — the session screen owns the first frame, the
-/// submitted prompt runs directly, and only the completion flag is
-/// written. (TS #2368 asks such a home the question; the operator's
-/// existing-user ruling removes it for the rust port.)
+/// A provisioned home (sharing explicitly opted out) never sees the question
+/// (TS #2368 asks it; the operator's existing-user ruling removes it here).
 #[tokio::test]
 async fn provisioned_opt_out_home_completes_silently_without_the_question() {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
     let session_dir = agent_dir.join("sessions");
     std::fs::create_dir_all(&session_dir).expect("session dir");
-    // The provisioned opt-out home: copied config, no onboarding flag.
     std::fs::write(
         agent_dir.join("settings.json"),
         r#"{ "agentTraces": { "enabled": false } }"#,
@@ -872,8 +777,7 @@ async fn provisioned_opt_out_home_completes_silently_without_the_question() {
         current_model: None,
         provider_auth: None,
     });
-    // No key step answers anything: the flow must complete before the
-    // plan's submission reaches the editor.
+    // No key step answers anything: the flow must complete before the submission runs.
     let plan = pa_tui::interactive::HeadlessPlan {
         steps: vec![
             pa_tui::interactive::HeadlessStep::Submit("hi".to_string()),
@@ -896,9 +800,6 @@ async fn provisioned_opt_out_home_completes_silently_without_the_question() {
         "the question never owned a session frame:\n{rendered}"
     );
 
-    // The silent completion persists only the flag: the standing opt-out
-    // survives untouched and a fresh manager reads the pair, so the gate
-    // never mounts the task again.
     let settings = pa_core::settings::SettingsManager::create(dir.path(), &agent_dir);
     assert!(
         !settings.get_agent_traces_enabled(),
@@ -912,11 +813,7 @@ async fn provisioned_opt_out_home_completes_silently_without_the_question() {
 }
 
 /// The scripted provider-auth surface the full-flow verifier drives: the
-/// Prime Inference row and its panel-driven login (a progress line, the
-/// paste prompt, the store), one api-key provider row (the picker's
-/// connect step), and one `mcp:` service row (the picker's exclusion).
-/// Credentials persist through the real auth store so the model-readiness
-/// probe and the connected marks read them like the product does.
+/// Prime Inference row, one api-key provider row, one `mcp:` service row.
 struct FullFlowProviderAuth {
     agent_dir: PathBuf,
 }
@@ -1009,8 +906,7 @@ impl pa_tui::provider_auth::ProviderAuthCommands for FullFlowProviderAuth {
         let provider_id = provider.id.clone();
         let provider_name = provider.name.clone();
         Box::pin(async move {
-            // Only the Prime row runs here (the flow's sign-in step);
-            // anything else cancels.
+            // Only the Prime row runs here; anything else cancels.
             if provider_id != pa_tui::provider_auth::PRIME_INFERENCE_PROVIDER_ID {
                 return pa_tui::provider_auth::ProviderAuthOutcome::Cancelled;
             }
@@ -1058,15 +954,8 @@ impl pa_tui::provider_auth::ProviderAuthCommands for FullFlowProviderAuth {
     }
 }
 
-/// The full first-run flow on a fresh home with no usable model (TS
-/// #2340's `runOnboardingFlow` not-ready branch): the welcome screen's
-/// login action starts the flow, the Prime Inference sign-in runs through
-/// the inline auth panel (a progress line, the paste prompt), the default
-/// GLM 5.3 model applies behind the pane, the connect-more-providers
-/// picker connects one more provider through its key prompt and
-/// re-mounts with the connected mark, and the trace question ends the
-/// flow — every answer, both credentials, and the completion flag
-/// persist together, and the released pane runs the submitted turn.
+/// The full first-run flow with no usable model (TS `runOnboardingFlow`'s
+/// not-ready branch): every answer, both credentials, and the flag persist.
 #[tokio::test]
 async fn fresh_home_runs_the_full_sign_in_flow_to_completion() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -1085,9 +974,8 @@ async fn fresh_home_runs_the_full_sign_in_flow_to_completion() {
     .expect("script.json");
 
     let mut options = base_options(&supervisor, dir.path(), &session_dir);
-    // The readiness probe mirrors the flow's contract: the home is not
-    // ready until the sign-in stores its credential (the model-ready
-    // gate at flow end).
+    // The readiness probe mirrors the flow's contract: not ready until the
+    // sign-in stores its credential (the model-ready gate at flow end).
     let probe_agent_dir = agent_dir.clone();
     let model_ready = std::sync::Arc::new(move || {
         pa_core::auth::AuthStorage::create(&probe_agent_dir)
@@ -1120,40 +1008,28 @@ async fn fresh_home_runs_the_full_sign_in_flow_to_completion() {
             crossterm::event::KeyModifiers::NONE,
         ))
     };
-    // The plan waits on observable readiness, not fixed sleeps: each
-    // barrier holds the queued batch until a frame rendered after arming
-    // contains the condition, so a loaded runner cannot fire keys at a
-    // pane whose field or picker has not mounted yet (the pane drive
-    // implements the same WaitRender contract the run loop's session
-    // steps use).
+    // The plan waits on observable readiness, not fixed sleeps: each barrier
+    // holds the queued batch until a rendered frame contains the condition.
     let wait_render = |needle: &str| pa_tui::interactive::HeadlessStep::WaitRender {
         needle: needle.to_string(),
         timeout_ms: 5_000,
     };
     let plan = pa_tui::interactive::HeadlessPlan {
         steps: vec![
-            // The welcome screen's login action starts the flow.
             enter(),
-            // The Prime sign-in: the paste prompt mounts with the flow.
             wait_render("Paste a Prime API key below:"),
             pa_tui::interactive::HeadlessStep::Type("faux-prime-key".to_string()),
             enter(),
-            // The model applies behind the pane, then the picker mounts.
             wait_render("Connect other providers, or continue."),
-            // Down to the provider row: Enter runs its key prompt.
             down(),
             enter(),
             wait_render("Enter API key"),
             pa_tui::interactive::HeadlessStep::Type("faux-key".to_string()),
             enter(),
-            // The picker re-mounts with the connected mark; Enter on the
-            // pinned Continue row ends the step.
             wait_render("\u{2713}"),
             enter(),
-            // The trace question: Enter on the pre-selected Share row.
             wait_render("Share agent traces"),
             enter(),
-            // The released pane runs the submitted turn.
             pa_tui::interactive::HeadlessStep::Submit("hi".to_string()),
             pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
         ],
@@ -1189,25 +1065,17 @@ async fn fresh_home_runs_the_full_sign_in_flow_to_completion() {
         rendered.contains("hello full flow"),
         "the completed flow released the pane and the first turn ran:\n{rendered}"
     );
-    // The default-model apply's round trip: the scripted engine refuses
-    // live model switches by design (Engine::switch_model returns false
-    // for the harness), so the daemon's refusal row is the proof the
-    // apply REQUEST reached it and its failure surfaced like TS's
-    // applySelectedModel error path — the flow still completes and the
-    // marker still writes (the readiness probe reads the registry, not
-    // the session).
+    // The scripted engine refuses live model switches by design, so the
+    // refusal row is the proof the apply REQUEST reached it.
     assert!(
         rendered.contains("This session does not support model switching"),
         "the apply round-tripped and the scripted engine's refusal surfaced:\n{rendered}"
     );
-    // The connected provider's status row shows the store outcome.
     assert!(
         rendered.contains("Saved API key for Faux Key"),
         "the provider login's status row applied:\n{rendered}"
     );
 
-    // Everything persisted together: the flag, the answer, both
-    // credentials.
     let settings = pa_core::settings::SettingsManager::create(dir.path(), &agent_dir);
     assert!(
         settings.get_onboarding_shown(),
@@ -1231,11 +1099,6 @@ async fn fresh_home_runs_the_full_sign_in_flow_to_completion() {
     drop(supervisor);
 }
 
-/// A failed completion write surfaces a warning row and never kills the
-/// run: a provisioned home whose settings write fails still completes the
-/// flow for this run (the session stays usable), the warning names the
-/// failed persistence, and the unpersisted marker honestly re-mounts the
-/// flow next launch. The run never dies over a settings write.
 #[tokio::test]
 async fn a_failed_completion_write_surfaces_a_warning_and_never_kills_the_run() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -1293,7 +1156,6 @@ async fn a_failed_completion_write_surfaces_a_warning_and_never_kills_the_run() 
         rendered.contains("could not be saved"),
         "the failed persistence surfaced as a warning row:\n{rendered}"
     );
-    // The marker honestly stayed unset: the next launch re-mounts the flow.
     let settings = pa_core::settings::SettingsManager::create(dir.path(), &agent_dir);
     assert!(
         !settings.get_onboarding_shown(),
@@ -1302,13 +1164,8 @@ async fn a_failed_completion_write_surfaces_a_warning_and_never_kills_the_run() 
     drop(supervisor);
 }
 
-/// The re-show regression: the agents-view flow re-runs the onboarding
-/// phase for every session it opens with the SAME task (the task mounts
-/// once at startup, then rides the cloned options), so the phase gates on
-/// the persisted completion marker itself. A `Not now` answer completes
-/// the flow (opt-out + flag together), and a second session opened with
-/// the same task starts straight at the session screen — the question
-/// never returns, `/traces` stays the change path.
+/// The re-show regression: the agents-view flow re-runs the onboarding phase
+/// per session open, so the phase gates on the persisted marker itself.
 #[tokio::test]
 async fn a_completed_flow_never_reopens_the_question_for_a_later_session() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -1317,9 +1174,7 @@ async fn a_completed_flow_never_reopens_the_question_for_a_later_session() {
     std::fs::create_dir_all(&session_dir).expect("session dir");
     let supervisor = spawn_supervisor(dir.path());
 
-    // One scripted response: the faux queue spans one session (each
-    // created session replays from the top), so both runs render the
-    // same turn text and the assertions stay per-run.
+    // The faux queue spans one session (each created session replays from the top).
     let script = serde_json::json!({ "responses": [
         { "text": "hello each session", "delayMs": 20 },
     ] });
@@ -1329,8 +1184,7 @@ async fn a_completed_flow_never_reopens_the_question_for_a_later_session() {
     )
     .expect("script.json");
 
-    // The SAME options (the same task object) back both session runs, the
-    // way `run_agents_view_flow` clones `base` into every session open.
+    // The SAME options object backs both session runs, as the agents-view flow clones `base`.
     let mut options = base_options(&supervisor, dir.path(), &session_dir);
     options.onboarding = Some(pa_tui::interactive::OnboardingTask {
         sink: std::sync::Arc::new(FreshHomeOnboardingSink {
@@ -1341,8 +1195,7 @@ async fn a_completed_flow_never_reopens_the_question_for_a_later_session() {
         current_model: None,
         provider_auth: None,
     });
-    // Down + Enter answers `Not now` (the answer that used to re-show the
-    // question on every later session open), then the turn runs.
+    // Down + Enter answers `Not now` (the answer that used to re-show), then the turn runs.
     let first_plan = pa_tui::interactive::HeadlessPlan {
         steps: vec![
             pa_tui::interactive::HeadlessStep::Key(crossterm::event::KeyEvent::new(
@@ -1381,9 +1234,7 @@ async fn a_completed_flow_never_reopens_the_question_for_a_later_session() {
         "the completion flag persisted with the answer"
     );
 
-    // The second session with the same task: no key step answers anything,
-    // so the phase must exit before the submission reaches the editor —
-    // the persisted marker is the phase's own gate.
+    // The second session, same task: no key answers anything; the marker must gate itself.
     let second_plan = pa_tui::interactive::HeadlessPlan {
         steps: vec![
             pa_tui::interactive::HeadlessStep::Submit("again".to_string()),
@@ -1407,9 +1258,6 @@ async fn a_completed_flow_never_reopens_the_question_for_a_later_session() {
     drop(supervisor);
 }
 
-/// The product launch path: `ensure_daemon_running` spawns a detached
-/// `prime-agent --mode daemon` when nothing is listening, then the TUI
-/// attaches through it.
 #[tokio::test]
 async fn ensure_daemon_running_spawns_supervisor_and_tui_attaches() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -1418,10 +1266,8 @@ async fn ensure_daemon_running_spawns_supervisor_and_tui_attaches() {
     std::fs::create_dir_all(&session_dir).expect("session dir");
     let socket = dir.path().join("spawned.sock");
     std::env::set_var("PRIME_AGENT_CODING_AGENT_DIR", &agent_dir);
-    // The internally-spawned supervisor inherits this process's env: give
-    // its session workers the short supervisor-lost exit window so a killed
-    // supervisor cannot leak them into later test binaries (the
-    // `spawn_supervisor` fixture sets the same variable on its children).
+    // The internally-spawned supervisor inherits this process's env: the short
+    // supervisor-lost window keeps a killed supervisor from leaking workers.
     std::env::set_var(
         pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
         "15000",
@@ -1470,8 +1316,7 @@ async fn ensure_daemon_running_spawns_supervisor_and_tui_attaches() {
         restore_dock_focus: false,
         client_settings: None,
     };
-    // The interactive runtime's own launch sequence, minus the TTY: spawn
-    // the real supervisor binary detached and wait for the hello handshake.
+    // The interactive runtime's launch sequence, minus the TTY: spawn detached, wait for hello.
     let _guard = DetachedDaemon {
         socket: socket.clone(),
     };
@@ -1500,17 +1345,9 @@ async fn ensure_daemon_running_spawns_supervisor_and_tui_attaches() {
         Some("spawned hello")
     );
 
-    // The product contract under test: shut the spawned supervisor down by
-    // protocol and require the process tree to actually exit (the guard
-    // stays as the panic backstop; this call asserts the clean stop).
     assert_daemon_stops_clean(&socket);
 }
 
-/// Slash-command dispatch over a live scripted session: the session command
-/// executes in the worker (durable echo + result rows reach the transcript
-/// and the session file), client commands without a UI report
-/// unavailability, unknown commands get the TS suggestion error, and the
-/// autocomplete menu renders from the shared registry.
 #[tokio::test]
 async fn tui_dispatches_slash_commands_menu_and_suggestions() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -1519,9 +1356,8 @@ async fn tui_dispatches_slash_commands_menu_and_suggestions() {
     std::fs::create_dir_all(&session_dir).expect("session dir");
     let supervisor = spawn_supervisor(dir.path());
 
-    // The faux engine (`engine: "faux"`) drives the real agent engine over
-    // the scripted faux provider, so the worker's session-command admission
-    // path runs exactly as in the product.
+    // The faux engine drives the real agent engine over the scripted faux
+    // provider, so the session-command admission path runs as in the product.
     let script = serde_json::json!({ "engine": "faux", "responses": [
         { "text": "scripted reply" },
     ] });
@@ -1564,11 +1400,8 @@ async fn tui_dispatches_slash_commands_menu_and_suggestions() {
     };
     let plan = pa_tui::interactive::HeadlessPlan {
         steps: vec![
-            // A session command runs in the worker and its durable rows
-            // render (echo + result).
             pa_tui::interactive::HeadlessStep::Submit("/goal status".to_string()),
             pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
-            // Unknown command: the exact TS suggestion error.
             pa_tui::interactive::HeadlessStep::Submit("/modle".to_string()),
             // Probe pass over the autocomplete menu (typed keystroke by
             // keystroke, completed with Enter). The attach-time
@@ -1627,8 +1460,6 @@ async fn tui_dispatches_slash_commands_menu_and_suggestions() {
         .await
         .expect("interactive run");
 
-    // Verification seam: dump the captured frames for manual frame-diffing
-    // against the TS product (PA_TUI_DUMP_FRAMES=<dir>).
     if let Ok(dir) = std::env::var("PA_TUI_DUMP_FRAMES") {
         for (index, frame) in outcome.frames.iter().enumerate() {
             let _ = std::fs::write(
@@ -1658,8 +1489,6 @@ async fn tui_dispatches_slash_commands_menu_and_suggestions() {
         rendered.contains("Enter select \u{b7} Esc close"),
         "the menu-panel hint rendered:\n{rendered}"
     );
-    // The menu: the first registry entry is selected at `/`, and `/goa`
-    // fuzzy-matches to the goal command.
     assert!(
         rendered.contains("\u{203a} settings"),
         "the slash menu rendered with the selected first entry:\n{rendered}"
@@ -1673,8 +1502,6 @@ async fn tui_dispatches_slash_commands_menu_and_suggestions() {
         "the fuzzy best match for /goa rendered selected:\n{rendered}"
     );
 
-    // The durable rows persisted: the session file carries the echo and
-    // result custom entries for both executions.
     let mut saw_echo = false;
     let mut saw_result = false;
     for entry in std::fs::read_dir(&session_dir)
@@ -1700,21 +1527,16 @@ async fn tui_dispatches_slash_commands_menu_and_suggestions() {
     drop(supervisor);
 }
 
-/// The `/model` picker + `/effort` surface, end to end through the daemon:
-/// a models.json custom model lists in the picker (name label), Enter
-/// applies it through the daemon `set_model` command (durable `model_change`
-/// row + the TS `Model: <id>` confirm row), and `/effort` on a model without
-/// reasoning reports the TS unsupported note (the thinking-level plumbing:
-/// the worker reports the model's supported levels, the client treats an
-/// `off`-only list as no thinking).
+/// `/model` + `/effort` through the daemon: a models.json custom model lists
+/// and Enter applies it (durable `model_change` row); `/effort` without
+/// reasoning reports the TS unsupported note (an `off`-only list is no thinking).
 #[tokio::test]
 async fn tui_model_picker_applies_and_effort_reports() {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
     let session_dir = agent_dir.join("sessions");
     std::fs::create_dir_all(&session_dir).expect("session dir");
-    // The battery layout: a custom provider in models.json carries the
-    // model (id, name, endpoint), so it resolves without any network.
+    // A models.json custom provider carries the model, so it resolves without any network.
     std::fs::write(
         agent_dir.join("models.json"),
         serde_json::json!({
@@ -1739,14 +1561,8 @@ async fn tui_model_picker_applies_and_effort_reports() {
     ] });
     std::fs::write(dir.path().join("script.json"), script.to_string()).expect("write script");
     let supervisor = spawn_supervisor(dir.path());
-    // The catalog snapshot the composition root injects (available models
-    // over the same registry). The registry scope is pinned hermetically:
-    // the auth storage reads no ambient environment, so an ambient provider
-    // credential (PRIME_API_KEY on the dev box makes every bundled
-    // prime-inference model available) cannot leak the bundled catalog in —
-    // the models.json mock is the ONLY available model, per the assertion's
-    // intent. `spawn_supervisor` strips the same variables from the daemon
-    // side.
+    // The catalog snapshot the composition root injects, pinned hermetically:
+    // ambient credentials (PRIME_API_KEY on the dev box) cannot leak in.
     let auth = pa_core::auth::AuthStorage::in_memory_without_env(
         &pa_core::auth::AuthStorageData::default(),
         std::sync::Arc::new(pa_core::auth::NoOAuth),
@@ -1802,8 +1618,7 @@ async fn tui_model_picker_applies_and_effort_reports() {
             pa_tui::interactive::HeadlessStep::Type("mock".to_string()),
             pa_tui::interactive::HeadlessStep::Type("\n".to_string()),
             pa_tui::interactive::HeadlessStep::Submit("/effort".to_string()),
-            // ctrl+l opens the picker over the user's own text: the pick
-            // must keep it (TS's selector never touches the editor).
+            // ctrl+l opens the picker over the user's own text: the pick must keep it.
             pa_tui::interactive::HeadlessStep::Type("keep me".to_string()),
             pa_tui::interactive::HeadlessStep::Key(crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Char('l'),
@@ -1838,9 +1653,8 @@ async fn tui_model_picker_applies_and_effort_reports() {
         "the /effort command reported the TS unsupported-model note:\n{rendered}"
     );
 
-    // The durable rows persisted: the creation-prefix `model_change` plus
-    // the switch's own row (TS `appendModelChange` runs on every switch,
-    // even to the current model).
+    // The durable rows persisted: the creation-prefix `model_change` plus the
+    // switch's own row (a switch to the current model still records one).
     let mut model_changes = 0;
     for entry in std::fs::read_dir(&session_dir)
         .expect("read session dir")
@@ -1860,8 +1674,7 @@ async fn tui_model_picker_applies_and_effort_reports() {
         model_changes >= 2,
         "the set_model switch persisted its model_change row (saw {model_changes})"
     );
-    // The ctrl+l pick kept the editor's own text: the final frame's prompt
-    // row still carries it (an apply-side clear would leave it empty).
+    // The ctrl+l pick kept the editor's own text (an apply-side clear would leave it empty).
     let last = outcome.frames.last().expect("a final frame");
     assert!(
         last.contains("keep me"),
@@ -1870,12 +1683,8 @@ async fn tui_model_picker_applies_and_effort_reports() {
     drop(supervisor);
 }
 
-/// `/effort` on a thinking-capable model whose `reasoning` flag is false
-/// but whose `thinkingLevelMap` declares addressable levels (the live
-/// catalog's `gpt-5.3-chat-latest` shape): the map is the capability
-/// signal, so the command applies the level instead of reporting the
-/// unsupported-model note. No scripted engine runs — the switch and the
-/// state read must resolve the models.json model, not the faux one.
+/// The `thinkingLevelMap` (not the `reasoning` flag) is the capability signal:
+/// `/effort` applies its declared level.
 #[tokio::test]
 async fn tui_effort_applies_on_a_map_addressable_model_without_the_reasoning_flag() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -1976,8 +1785,6 @@ async fn tui_effort_applies_on_a_map_addressable_model_without_the_reasoning_fla
         "a map-addressable model must not report the unsupported-model note:\n{rendered}"
     );
 
-    // The durable `thinking_level_change` row persisted for the applied
-    // level (TS `appendThinkingLevelChange` on an effective change).
     let mut level_changes = 0;
     for entry in std::fs::read_dir(&session_dir)
         .expect("read session dir")
@@ -2001,10 +1808,8 @@ async fn tui_effort_applies_on_a_map_addressable_model_without_the_reasoning_fla
     drop(supervisor);
 }
 
-/// `/compact` on a fresh session: the compaction skips (TS
-/// `CompactionSkippedError`) and the warning reaches the transcript through
-/// the `compaction_end` event, with the durable echo row — TS's live
-/// `showWarning` on the manual compaction path.
+/// The skip (TS `CompactionSkippedError`) reaches the transcript through the
+/// `compaction_end` event.
 #[tokio::test]
 async fn tui_compact_on_a_short_session_warns_nothing_to_compact() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -2013,8 +1818,7 @@ async fn tui_compact_on_a_short_session_warns_nothing_to_compact() {
     std::fs::create_dir_all(&session_dir).expect("session dir");
     let supervisor = spawn_supervisor(dir.path());
 
-    // The real agent engine over the scripted faux provider: the skip path
-    // never reaches the provider, so the script stays unused.
+    // The real agent engine over the faux provider: the skip path never reaches it.
     let script = serde_json::json!({ "engine": "faux", "responses": [] });
     std::fs::write(dir.path().join("script.json"), script.to_string()).expect("write script");
     let options = pa_tui::interactive::InteractiveOptions {
@@ -2064,8 +1868,6 @@ async fn tui_compact_on_a_short_session_warns_nothing_to_compact() {
     let outcome = run_headless_bounded(options, plan)
         .await
         .expect("interactive run");
-    // Verification seam: dump the captured frames for manual frame-diffing
-    // against the TS product (PA_TUI_DUMP_FRAMES=<dir>).
     if let Ok(dump) = std::env::var("PA_TUI_DUMP_FRAMES") {
         for (index, frame) in outcome.frames.iter().enumerate() {
             let _ = std::fs::write(
@@ -2083,8 +1885,6 @@ async fn tui_compact_on_a_short_session_warns_nothing_to_compact() {
         rendered.contains("Session is too short to compact"),
         "the skip warning rendered (TS compaction_end errorMessage):\n{rendered}"
     );
-    // The skip records no durable result row (TS's queued-command catch arm
-    // stays silent): only the echo row persisted.
     let mut saw_compaction_entry = false;
     let mut saw_result_row = false;
     for entry in std::fs::read_dir(&session_dir)
@@ -2110,23 +1910,15 @@ async fn tui_compact_on_a_short_session_warns_nothing_to_compact() {
     drop(supervisor);
 }
 
-/// `/compact` on a grown session: the compaction loader replaces the working
-/// loader while the summarizer runs (TS `startCompactionLoader`), then the
-/// summary row renders (TS `CompactionSummaryMessageComponent`) at the head
-/// of the rebuilt transcript (TS `rebuildChatFromMessages`). The loader row
-/// is a soft evidence capture (its in-flight window is delayMs-paced and a
-/// loaded box can batch the whole window past the paint loop);
-/// the settled outcome — the summary row, the rebuilt transcript, and the
-/// retained tail — carries the hard asserts.
+/// The loader row is a soft capture: a loaded box can batch the delayMs-paced
+/// window past the paint loop.
 #[tokio::test]
 async fn tui_compact_shows_the_loader_then_the_summary_and_rebuilds() {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
     let session_dir = agent_dir.join("sessions");
     std::fs::create_dir_all(&session_dir).expect("session dir");
-    // TS `getCompactionSettings` feeds every compaction path, `/compact`
-    // included: the settings-pinned cut budget keeps this run small while
-    // exercising the same keep-recent cut the default budget drives.
+    // The settings-pinned cut budget keeps the run small on the same keep-recent cut.
     std::fs::write(
         agent_dir.join("settings.json"),
         serde_json::json!({ "compaction": { "keepRecentTokens": 10 } }).to_string(),
@@ -2134,20 +1926,10 @@ async fn tui_compact_shows_the_loader_then_the_summary_and_rebuilds() {
     .expect("write settings");
     let supervisor = spawn_supervisor(dir.path());
 
-    // The session shape (TS-binary-verified): a large
-    // first turn gives the compactor history to summarize, the small
-    // second turn crosses the 10-token keep-recent budget AT its user
-    // message — a non-split cut that keeps the whole second turn — and
-    // the third scripted response is the summarizer's summary. Its delay
-    // holds the compaction in flight for the loader window: 1.5s is the
-    // load-realistic bound (the healthy loop paints hundreds of frames
-    // in that window, so the loader evidence below still captures on the
-    // mission box's ambient daemon load — at the original 300ms the loop
-    // stalled past the window in ~half the runs, batching the start and
-    // finish events into one iteration). The cut must stay on the user
-    // message: a mid-turn (assistant) cut is a split-turn compaction that
-    // makes TWO summarizer wire calls (TS parity), which this
-    // single-summary script does not serve.
+    // The session shape (TS-binary-verified): the second turn crosses the
+    // budget at its user message, the third response is the summary, and its
+    // 1.5s delay holds the loader window; a mid-turn cut would make TWO
+    // summarizer calls, which this single-summary script does not serve.
     let filler = "history ".repeat(150);
     let script = serde_json::json!({
         "engine": "faux",
@@ -2210,11 +1992,7 @@ async fn tui_compact_shows_the_loader_then_the_summary_and_rebuilds() {
             pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
             pa_tui::interactive::HeadlessStep::Submit("/compact focus on the goal".to_string()),
             pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
-            // The collapsible block (TS `applyChatExpansion` fanning
-            // `toolOutputExpanded` into `CompactionSummaryMessageComponent`):
-            // Ctrl+O twice walks overview -> details -> all, expanding the
-            // summary into the markdown body plus the token metadata; the
-            // third press wraps back to overview and re-collapses it.
+            // Ctrl+O twice walks overview -> details -> all; the third press wraps to overview.
             ctrl_o(),
             ctrl_o(),
             pa_tui::interactive::HeadlessStep::SettleIdle,
@@ -2228,8 +2006,6 @@ async fn tui_compact_shows_the_loader_then_the_summary_and_rebuilds() {
         .await
         .expect("interactive run");
 
-    // Verification seam: dump the captured frames for manual frame-diffing
-    // against the TS product (PA_TUI_DUMP_FRAMES=<dir>).
     if let Ok(dump) = std::env::var("PA_TUI_DUMP_FRAMES") {
         for (index, frame) in outcome.frames.iter().enumerate() {
             let _ = std::fs::write(
@@ -2239,16 +2015,9 @@ async fn tui_compact_shows_the_loader_then_the_summary_and_rebuilds() {
         }
     }
     let rendered = outcome.frames.join("\n");
-    // The loader (TS `Compacting context (focus: ...)... (Ctrl+C to
-    // cancel)`) is a soft, best-effort capture: its in-flight window is
-    // delayMs-paced, and on a box loaded by the fleet's daemons the render
-    // loop can stall past the whole window — the compaction-started and
-    // compaction-finished events then apply in one batched iteration (the
-    // loop drains the queued events before it paints), so no captured frame
-    // ever shows the loader row. Any finite pacing window leaves that race,
-    // so frame-level loader assertions belong in a sandboxed run on an
-    // idle box. Here the observed loader row is evidence only; the hard
-    // asserts below pin the settled outcome — the parity-critical claims.
+    // The loader row is a soft, best-effort capture: a loaded box can batch the
+    // delayMs-paced window past the paint loop, so no frame may show it; the
+    // frame-level assertion belongs in a sandboxed run.
     let loader = "Compacting context (focus: focus on the goal)... (Ctrl+C to cancel)";
     let loader_frames = outcome
         .frames
@@ -2258,7 +2027,6 @@ async fn tui_compact_shows_the_loader_then_the_summary_and_rebuilds() {
     println!(
         "compaction loader evidence: {loader_frames} frames captured the loader row (soft check)"
     );
-    // The summary row: the TS header plus the collapsed summary.
     assert!(
         rendered.contains("\u{25c6} Context compacted"),
         "the compaction summary header rendered:\n{rendered}"
@@ -2267,10 +2035,7 @@ async fn tui_compact_shows_the_loader_then_the_summary_and_rebuilds() {
         rendered.contains("the session story"),
         "the summary text rendered:\n{rendered}"
     );
-    // The rebuilt transcript presents the retained tail first, then the
-    // summary (TS `orderMessagesForTranscript`): the settled bottom-follow
-    // frame shows the retained second turn above the summary row, and the
-    // compacted-away first turn is gone.
+    // The rebuilt transcript shows the retained second turn above the summary row.
     let last = outcome.frames.last().expect("the settled frame");
     assert!(
         last.contains("kept intact"),
@@ -2285,10 +2050,7 @@ async fn tui_compact_shows_the_loader_then_the_summary_and_rebuilds() {
         "the compacted-away first turn dropped from the rebuilt transcript:\n{last}"
     );
 
-    // The collapsible block: the expanded frames show the markdown body and
-    // the dim metadata row (TS `new Markdown(summary, ...)` + the
-    // `Compacted from N tokens \u{b7} focus: ...` row); the wrap back to
-    // overview re-collapses (the `EventSummary` returns, metadata gone).
+    // The expanded frames show the body and metadata; the wrap back to overview re-collapses.
     let expanded = outcome
         .frames
         .iter()
@@ -2311,7 +2073,6 @@ async fn tui_compact_shows_the_loader_then_the_summary_and_rebuilds() {
         "the third Ctrl+O re-collapsed the block:\n{last}"
     );
 
-    // The compaction entry persisted (the durable `compaction` record).
     let mut saw_compaction_entry = false;
     for entry in std::fs::read_dir(&session_dir)
         .expect("read session dir")
@@ -2331,12 +2092,6 @@ async fn tui_compact_shows_the_loader_then_the_summary_and_rebuilds() {
     drop(supervisor);
 }
 
-/// Session-tree verifier: two scripted turns, then `/tree` navigation back
-/// to the first user message, a fork from it, and a clone at the leaf.
-/// Exercises the full loop the TS `/tree` surface owns: the `get_session_tree`
-/// fetch, the selector pane, the "Summarize branch?" choice, `navigate_tree`
-/// (branch move + transcript rebuild + editor text restore), `fork` (new
-/// session file), and the leaf no-op.
 #[tokio::test]
 async fn tui_session_tree_navigates_forks_and_clones() {
     use crossterm::event::{KeyCode, KeyModifiers};
@@ -2372,8 +2127,7 @@ async fn tui_session_tree_navigates_forks_and_clones() {
         theme: "prime".to_string(),
         code_block_indent: "  ".to_string(),
         // The default tree filter keeps every message row visible, and the
-        // branch-summary prompt is skipped so navigation needs no
-        // summarizer call (TS `branchSummary.skipPrompt`).
+        // branch-summary prompt is skipped (TS `branchSummary.skipPrompt`).
         tree_filter_mode: "default".to_string(),
         branch_summary_skip_prompt: true,
         show_images: true,
@@ -2412,18 +2166,15 @@ async fn tui_session_tree_navigates_forks_and_clones() {
             pa_tui::interactive::HeadlessStep::SettleIdle,
             enter.clone(),
             pa_tui::interactive::HeadlessStep::SettleIdle,
-            // `/fork` opens the user-message selector; Enter forks before
-            // the selected (latest) user message.
+            // `/fork` opens the selector; Enter forks before the selected (latest) user message.
             pa_tui::interactive::HeadlessStep::Submit("/fork".to_string()),
             pa_tui::interactive::HeadlessStep::SettleIdle,
             enter.clone(),
             pa_tui::interactive::HeadlessStep::SettleIdle,
-            // The fork re-entered the user message in the editor; submit
-            // runs it on the forked session.
+            // The fork re-entered the user message; submit runs it on the forked session.
             enter.clone(),
             pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
-            // `/tree` again, then navigate two rows up (the first answer)
-            // to cut the branch back to that point.
+            // `/tree` again, then two rows up (the first answer) cuts the branch back.
             pa_tui::interactive::HeadlessStep::Submit("/tree".to_string()),
             pa_tui::interactive::HeadlessStep::SettleIdle,
             up.clone(),
@@ -2446,7 +2197,6 @@ async fn tui_session_tree_navigates_forks_and_clones() {
         }
     }
     let rendered = outcome.frames.join("\n");
-    // The selector pane (TS `TreeSelectorComponent` layout).
     assert!(
         rendered.contains("Session Tree"),
         "the tree pane rendered:\n{rendered}"
@@ -2459,13 +2209,10 @@ async fn tui_session_tree_navigates_forks_and_clones() {
         rendered.contains("user: first question") && rendered.contains("user: second question"),
         "the entry rows rendered:\n{rendered}"
     );
-    // The leaf no-op note (TS `showStatus("Already at this point")`).
     assert!(
         rendered.contains("Already at this point"),
         "the leaf selection was a no-op:\n{rendered}"
     );
-    // The fork (TS `showUserMessageSelector` + `showStatus("Forked to new
-    // session")`).
     assert!(
         rendered.contains("Fork from Message"),
         "the fork selector rendered:\n{rendered}"
@@ -2474,15 +2221,11 @@ async fn tui_session_tree_navigates_forks_and_clones() {
         rendered.contains("Forked to new session"),
         "the fork note rendered:\n{rendered}"
     );
-    // The forked session kept the pre-fork path and answered the re-entered
-    // user message with its own scripted turn.
     assert!(
         rendered.contains("post-fork answer"),
         "the forked session ran a turn:\n{rendered}"
     );
-    // The navigation: TS `showStatus("Navigated to selected point")` plus
-    // the transcript rebuilt on the moved branch (the abandoned turn drops
-    // from the settled frame).
+    // The transcript rebuilt on the moved branch (the abandoned turn drops).
     assert!(
         rendered.contains("Navigated to selected point"),
         "the navigation note rendered:\n{rendered}"
@@ -2501,7 +2244,6 @@ async fn tui_session_tree_navigates_forks_and_clones() {
         settled.contains("first answer"),
         "the moved branch kept the target path:\n{settled}"
     );
-    // The fork created a second session file.
     let session_files: Vec<_> = std::fs::read_dir(&session_dir)
         .expect("read session dir")
         .flatten()
@@ -2515,13 +2257,7 @@ async fn tui_session_tree_navigates_forks_and_clones() {
     drop(supervisor);
 }
 
-/// Streaming-throughput verifier: two big (~12k-token) unpaced faux turns
-/// must render at the producer's rate, not at a fixed frame-rate ceiling.
-/// The worker coalesces provider deltas into latest-snapshot frames (at
-/// most one per flush tick), so a burst of ~3000 deltas lands as a handful
-/// of wire frames and the turn settles within seconds. The pre-fix
-/// regression broadcast one wire frame per delta and the TUI starved at
-/// the tick rate: a single turn rendered for over a minute.
+/// Two ~12k-token unpaced turns must render at the producer's rate, not a frame-rate ceiling.
 #[tokio::test]
 async fn tui_big_streamed_turns_render_at_the_producer_rate() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -2530,23 +2266,15 @@ async fn tui_big_streamed_turns_render_at_the_producer_rate() {
     std::fs::create_dir_all(&session_dir).expect("session dir");
     let supervisor = spawn_supervisor(dir.path());
 
-    // Two ~12k-token fillers (chars/4 estimate), unpaced: the faux provider
-    // streams each as ~3000 full-partial deltas as fast as it can. Every
-    // ~250-word segment carries a MARK-nn marker so mid-turn frames prove
-    // the applied content progressed instead of jumping once at turn end.
+    // Two ~12k-token fillers; each segment carries a MARK-nn marker for the mid-turn progression.
     let mut filler = String::new();
     for segment in 0..24 {
         let _ = write!(filler, "MARK-{segment:02} ");
         filler.push_str(&"history ".repeat(250));
     }
-    // Paced at 3000 tokens/second so the ~12k-token turn streams for
-    // ~4s: the mid-turn marker-progression assertion needs several wire
-    // updates inside the turn (an unpaced faux finishes in ~0.3s and the
-    // whole stream lands in a handful of frames). The 45s settle bound is
-    // calibrated against the producer pace with a load-realistic margin: a
-    // healthy render settles in seconds even on a loaded box, while the
-    // pre-fix starvation pipeline (one ~4-token delta per 50ms tick) took
-    // 150+ seconds per turn — an order of magnitude past the bound.
+    // Paced at 3000 tokens/second so the turn streams for ~4s: the mid-turn
+    // progression assertion needs several wire updates inside the turn (an
+    // unpaced faux finishes in ~0.3s). The 45s bound clears a starved render.
     let script = serde_json::json!({
         "engine": "faux",
         "tokensPerSecond": 3_000,
@@ -2592,10 +2320,6 @@ async fn tui_big_streamed_turns_render_at_the_producer_rate() {
         restore_dock_focus: false,
         client_settings: None,
     };
-    // 45s per turn is the throughput bound: the producer finishes each
-    // turn in ~4s, so 45s tolerates real box load (sibling e2e binaries,
-    // daemons from other suites) while a starved render — 150+ seconds per
-    // turn before the fix — still expires the barrier with margin.
     let plan = pa_tui::interactive::HeadlessPlan {
         steps: vec![
             pa_tui::interactive::HeadlessStep::Submit("first".to_string()),
@@ -2612,8 +2336,6 @@ async fn tui_big_streamed_turns_render_at_the_producer_rate() {
         .expect("interactive run");
     let wall = started.elapsed();
 
-    // Verification seam: dump the captured frames for manual frame-diffing
-    // against the TS product (PA_TUI_DUMP_FRAMES=<dir>).
     if let Ok(dump) = std::env::var("PA_TUI_DUMP_FRAMES") {
         for (index, frame) in outcome.frames.iter().enumerate() {
             let _ = std::fs::write(
@@ -2627,8 +2349,7 @@ async fn tui_big_streamed_turns_render_at_the_producer_rate() {
         !rendered.contains("timed out waiting for the turn to finish"),
         "a WaitIdle barrier expired; the render starved behind the stream:\n{rendered}"
     );
-    // Both turns settled with their full text (the window follows the
-    // tail, so the second turn's marker is the strongest full-render proof).
+    // Both turns settled full (the window follows the tail: the last marker is the proof).
     assert!(
         rendered.contains("tail marker intact"),
         "the second big turn fully rendered:\n{rendered}"
@@ -2638,10 +2359,7 @@ async fn tui_big_streamed_turns_render_at_the_producer_rate() {
         Some(format!("{filler}second big turn done, tail marker intact").as_str()),
         "the final assistant text is the full second turn"
     );
-    // The applied content progressed mid-turn: the tail-following window
-    // showed a growing run of segment markers while the turn streamed (a
-    // starved pipeline shows the whole turn once at its end, so only the
-    // final markers would ever appear).
+    // The applied content progressed mid-turn (a starved pipeline shows it once at its end).
     let marks: std::collections::BTreeSet<String> = outcome
         .frames
         .iter()
@@ -2662,12 +2380,7 @@ async fn tui_big_streamed_turns_render_at_the_producer_rate() {
     drop(supervisor);
 }
 
-/// User-keybinding verifier (TS `keybindings.json` parity, roadmap item
-/// "keybinding customization"): a settings fixture rebinding
-/// `app.tools.expand` from `ctrl+o` to `ctrl+alt+x` drives the whole
-/// surface — the prompt-context hint renders the OVERRIDE key, the
-/// override key fires the action, the default key no longer does, and
-/// `/hotkeys` documents the effective binding instead of the default.
+/// A settings fixture rebinding `app.tools.expand` to `ctrl+alt+x` drives the surface.
 #[tokio::test]
 async fn tui_renders_and_fires_user_keybindings_from_settings() {
     use crossterm::event::{KeyCode, KeyModifiers};
@@ -2676,8 +2389,7 @@ async fn tui_renders_and_fires_user_keybindings_from_settings() {
     let agent_dir = dir.path().join("agent");
     let session_dir = agent_dir.join("sessions");
     std::fs::create_dir_all(&session_dir).expect("session dir");
-    // The settings fixture: one binding overridden exactly like a user's
-    // `~/.prime/agent/keybindings.json` would.
+    // One binding overridden exactly like a user's `~/.prime/agent/keybindings.json` would.
     std::fs::write(
         agent_dir.join("keybindings.json"),
         r#"{ "app.tools.expand": "ctrl+alt+x" }"#,
@@ -2718,8 +2430,7 @@ async fn tui_renders_and_fires_user_keybindings_from_settings() {
         provider_auth: None,
         update_commands: None,
         telemetry: None,
-        // The exact load path the CLI uses: the fixture overrides the
-        // default set.
+        // The exact load path the CLI uses: the fixture overrides the default set.
         keybindings: pa_tui::keybindings::KeybindingsManager::create(&agent_dir),
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
@@ -2737,19 +2448,13 @@ async fn tui_renders_and_fires_user_keybindings_from_settings() {
     let ctrl_o = key(KeyCode::Char('o'), KeyModifiers::CONTROL);
     let plan = pa_tui::interactive::HeadlessPlan {
         steps: vec![
-            // One scripted turn so the transcript holds a rendered reply.
             pa_tui::interactive::HeadlessStep::Submit("hello".to_string()),
             pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
-            // The user's key fires the rebound action: overview -> details.
             ctrl_alt_x,
-            // The default key must no longer fire it (a second cycle would
-            // reach the "all" mode).
+            // The default key must no longer fire it (a second cycle reaches "all").
             ctrl_o,
-            // The documentation surface renders the effective binding: the
-            // read-only info panel mounts over the dock (the operator's
-            // 2026-09-26 directive — the guide no longer floods the
-            // transcript), End jumps the scrollable window to the
-            // document's bottom, and Esc closes it back to the dock.
+            // The info panel mounts over the dock (operator directive 2026-09-26);
+            // End jumps to the document's bottom, Esc closes it.
             pa_tui::interactive::HeadlessStep::Submit("/hotkeys".to_string()),
             pa_tui::interactive::HeadlessStep::WaitRender {
                 needle: "Move cursor / browse history".to_string(),
@@ -2773,8 +2478,7 @@ async fn tui_renders_and_fires_user_keybindings_from_settings() {
             },
         ],
         width: 120,
-        // Tall enough that the `/hotkeys` info panel holds a real window
-        // of the guide.
+        // Tall enough that the `/hotkeys` panel holds a real window of the guide.
         height: 60,
     };
     let outcome = run_headless_bounded(options, plan)
@@ -2782,34 +2486,24 @@ async fn tui_renders_and_fires_user_keybindings_from_settings() {
         .expect("interactive run");
     let rendered = outcome.frames.join("\n");
 
-    // The hint renders the user's binding, not the default, at the
-    // collapsed startup detail level (the overview mode; operator
-    // directive 2026-09-28).
+    // The hint renders the user's binding, not the default (operator directive 2026-09-28).
     assert!(
         rendered.contains("Collapsed mode (Ctrl+Alt+X to expand)"),
         "the prompt-context hint renders the override:\n{rendered}"
     );
-    // The override key fired the action: the detail cycled to the
-    // thinking-reveal level.
     assert!(
         rendered.contains("Details mode (Ctrl+Alt+X to expand)"),
         "the override key cycled conversation detail:\n{rendered}"
     );
-    // The default key leaves the detail unchanged: the default ctrl+o is
-    // no longer bound, so the level never reaches the expanded mode.
     assert!(
         !rendered.contains("Expanded mode (Ctrl+Alt+X to collapse)"),
         "the default ctrl+o must not cycle after the override:\n{rendered}"
     );
-    // The scripted turn still ran under the custom bindings.
     assert!(
         rendered.contains("scripted reply"),
         "the scripted turn rendered:\n{rendered}"
     );
-    // `/hotkeys` renders in the info panel: the guide's first window
-    // rendered (the Navigation row), End jumped the scrollable window to
-    // the document's bottom (the Fullscreen table), and the override's
-    // own row is covered by the hotkeys guide unit tests.
+    // End jumped the window to the document's bottom (the override row has unit tests).
     assert!(
         rendered.contains("Move cursor / browse history"),
         "the hotkeys panel rendered the guide:\n{rendered}"
@@ -2818,15 +2512,13 @@ async fn tui_renders_and_fires_user_keybindings_from_settings() {
         rendered.contains("mouse click on link"),
         "the End key jumped the panel to the guide's bottom:\n{rendered}"
     );
-    // The removed default key is gone (no other default binding uses
-    // ctrl+o).
+    // The removed default key is gone (no other default binding uses ctrl+o).
     assert!(
         !rendered.contains("Ctrl+O"),
         "the hotkeys guide must not show the removed default:\n{rendered}"
     );
     // The guide stayed out of the transcript (the operator's no-flooding
-    // directive): after Esc closed the panel the last frame holds the
-    // scripted reply and the dock, not the guide's rows.
+    // directive): the last frame holds the reply and the dock only.
     let last = outcome.frames.last().expect("frames");
     assert!(
         !last.contains("Move cursor / browse history"),
@@ -2840,10 +2532,7 @@ async fn tui_renders_and_fires_user_keybindings_from_settings() {
 }
 
 /// The visible follow-up queue (TS `queuedMessagesContainer`): prompts
-/// submitted while a turn runs park on their lanes — Enter on the steering
-/// lane, the follow-up key on the follow-up lane — and render as dim
-/// preview rows above the prompt dock with the browse hint. The strip
-/// clears as the queue drains behind the run.
+/// submitted while a turn runs park as dim preview rows with the browse hint.
 #[tokio::test]
 async fn tui_prompts_queued_behind_a_turn_render_the_queue_strip() {
     use crossterm::event::{KeyCode, KeyModifiers};
@@ -2853,10 +2542,8 @@ async fn tui_prompts_queued_behind_a_turn_render_the_queue_strip() {
     std::fs::create_dir_all(&session_dir).expect("session dir");
     let supervisor = spawn_supervisor(dir.path());
 
-    // The first turn holds in flight for 1.5s (`delayMs`): the parked
-    // submissions land inside that window, deterministically busy (the
-    // runner flips `busy` when it pops the work, long before the 750ms
-    // barrier below).
+    // The first turn holds for 1.5s (`delayMs`): the parked submissions land
+    // inside that window (the runner flips `busy` long before the 750ms barrier).
     let script_path = dir.path().join("script.json");
     let script = serde_json::json!({ "responses": [
         { "text": "first turn", "delayMs": 1500 },
@@ -2903,18 +2590,14 @@ async fn tui_prompts_queued_behind_a_turn_render_the_queue_strip() {
     let plan = pa_tui::interactive::HeadlessPlan {
         steps: vec![
             pa_tui::interactive::HeadlessStep::Submit("start the slow turn".to_string()),
-            // Half-way through the scripted hold the turn is provably
-            // running: the parked submissions below queue behind it.
+            // Half-way through the hold the turn is running: the parked prompts queue behind it.
             pa_tui::interactive::HeadlessStep::WaitMs(750),
-            // Enter while the turn runs parks on the steering lane.
             pa_tui::interactive::HeadlessStep::Submit("steering prompt".to_string()),
-            // The follow-up key (alt+enter) parks on the follow-up lane.
             pa_tui::interactive::HeadlessStep::Type("follow-up prompt".to_string()),
             pa_tui::interactive::HeadlessStep::Key(crossterm::event::KeyEvent::new(
                 KeyCode::Enter,
                 KeyModifiers::ALT,
             )),
-            // The barrier holds until the queue drained behind the turn.
             pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 60_000 },
         ],
         width: 100,
@@ -2926,7 +2609,6 @@ async fn tui_prompts_queued_behind_a_turn_render_the_queue_strip() {
 
     assert!(!outcome.frames.is_empty(), "frames were captured");
     let rendered = outcome.frames.join("\n");
-    // The queue strip rendered both parked previews and the browse hint.
     assert!(
         rendered.contains("Steering: steering prompt"),
         "the steering preview rendered:\n{rendered}"
@@ -2939,8 +2621,6 @@ async fn tui_prompts_queued_behind_a_turn_render_the_queue_strip() {
         rendered.contains("to browse and edit queued messages"),
         "the browse hint rendered:\n{rendered}"
     );
-    // The queued prompts delivered once the run went idle: their turns'
-    // scripted responses rendered, and the strip cleared.
     assert!(
         rendered.contains("steered delivery"),
         "the steering prompt delivered:\n{rendered}"
@@ -2959,22 +2639,9 @@ async fn tui_prompts_queued_behind_a_turn_render_the_queue_strip() {
     drop(supervisor);
 }
 
-/// The live-dogfood failure pair (Kevin's repro, 2026-09-21): a session
-/// created with an explicit `--provider`/`--model` on a worker whose
-/// registry has no configured credentials — the auth-scoped `available`
-/// list is empty while the bundled catalog still carries the flagged
-/// model. The pre-fix turn failed with "No models available" (the daemon
-/// fed the resolver the auth-scoped list; TS `resolveCliModel` uses
-/// `getAll()`), and a `/model` pick failed with "Model not found" leaving
-/// the status label stale. The fixed contract is TS parity: the flagged
-/// model resolves from the full catalog, the turn fails at the run-start
-/// auth validation with the TS login-guidance message
-/// (`_validateCanStartAgentRun`), and the pick of the unsigned provider
-/// never surfaces the dead-end "Model not found" — the daemon's typed
-/// refusal routes the sign-in flow (TS `ensureModelProviderConfigured`),
-/// which in this headless composition (no provider-auth hook) lands the TS
-/// external-config error; the failed pick keeps the label (nothing
-/// switched).
+/// The live-dogfood failure pair (Kevin's repro, 2026-09-21): the flagged
+/// model resolves from the full catalog and fails at run-start auth
+/// validation with the TS login-guidance message — never "Model not found".
 #[tokio::test]
 async fn tui_flagged_model_turn_reports_the_ts_preflight_error_without_credentials() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -2982,11 +2649,8 @@ async fn tui_flagged_model_turn_reports_the_ts_preflight_error_without_credentia
     let session_dir = agent_dir.join("sessions");
     std::fs::create_dir_all(&session_dir).expect("session dir");
     let supervisor = spawn_supervisor(dir.path());
-    // The dogfood layout: no models.json, no stored credentials, and the
-    // hermetic supervisor strips every ambient provider key, so the
-    // worker's auth-scoped catalog is empty while the bundled catalog
-    // carries the flagged model. The picker catalog is a client-side
-    // snapshot (the same seam the composition root injects).
+    // No models.json and no credentials (ambient keys stripped), so the
+    // auth-scoped catalog is empty but the bundled catalog carries the model.
     let glm: pa_types::ai::Model = serde_json::from_value(serde_json::json!({
         "id": "z-ai/glm-5.3", "name": "GLM 5.3", "api": "openai-completions",
         "provider": "prime-inference", "baseUrl": "https://inference.example/v1",
@@ -3067,9 +2731,8 @@ async fn tui_flagged_model_turn_reports_the_ts_preflight_error_without_credentia
         "the auth-blind turn resolution must not report the resolver's empty-catalog error:\n{rendered}"
     );
     let last = outcome.frames.last().expect("a final frame");
-    // The reasoning fixture renders its live effort suffix (TS
-    // `getModelContextLabel`): the label the failed pick must hold is
-    // `model:effort`, with the daemon's effective level for glm-5.3.
+    // The failed pick must hold the `model:effort` label (TS
+    // `getModelContextLabel`) with glm-5.3's effective level.
     assert!(
         last.contains("z-ai/glm-5.3:high ·"),
         "the footer label holds the resolved flagged model (the failed pick switched nothing):\n{last}"
@@ -3077,12 +2740,8 @@ async fn tui_flagged_model_turn_reports_the_ts_preflight_error_without_credentia
     drop(supervisor);
 }
 
-/// The dogfood acceptance for a pick that CAN apply: a models.json provider
-/// (its inline key configures auth) carries two models, the session starts
-/// on the first, and a `/model` pick of the second must move the footer
-/// label immediately and leave the next turn resolving the switched model
-/// (the turn reaches the provider; the dead endpoint's retry banner is the
-/// proof the run started, not a resolution failure).
+/// The dogfood acceptance: a `/model` pick must move the footer label immediately
+/// and leave the next turn on the switched model.
 #[tokio::test]
 async fn tui_model_pick_refreshes_the_label_and_the_next_turn_resolves() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -3111,18 +2770,15 @@ async fn tui_model_pick_refreshes_the_label_and_the_next_turn_resolves() {
         .to_string(),
     )
     .expect("write models.json");
-    // Retries off (settings default is a 3-attempt retry chain whose
-    // countdown holds the turn busy past the headless idle window): the
-    // post-switch turn fails once at the dead endpoint and settles.
+    // Retries off (the default 3-attempt retry chain would hold the turn busy
+    // past the idle window): the post-switch turn fails once and settles.
     std::fs::write(
         agent_dir.join("settings.json"),
         serde_json::json!({ "retry": { "enabled": false } }).to_string(),
     )
     .expect("write settings.json");
     let supervisor = spawn_supervisor(dir.path());
-    // The client-side catalog snapshot over the same registry scope as the
-    // daemon's (hermetic auth; the models.json key is the only configured
-    // credential).
+    // The client-side snapshot over the same registry scope as the daemon's (hermetic auth).
     let auth = pa_core::auth::AuthStorage::in_memory_without_env(
         &pa_core::auth::AuthStorageData::default(),
         std::sync::Arc::new(pa_core::auth::NoOAuth),
@@ -3206,15 +2862,8 @@ async fn tui_model_pick_refreshes_the_label_and_the_next_turn_resolves() {
     drop(supervisor);
 }
 
-/// `--models` scope end to end: the create config's `models` patterns
-/// reach the daemon session through the supervisor's durable create
-/// (the scope rides the same allow-list a respawn replays), and the
-/// declared cycle keys (TS `handleModelCycle`) walk the session's
-/// scope order — not the catalog's: mock-2 sits between the scoped
-/// pair in the catalog and must never appear, forward cycles
-/// mock-1 -> mock-3, backward mock-3 -> mock-1, both with the
-/// provider-qualified status row. The cycle arms had no dispatch site
-/// on the base, so the test fails there at the first render barrier.
+/// `--models` scope end to end: the cycle keys walk the session's scope
+/// order, not the catalog's (mock-2 must never appear).
 #[tokio::test]
 async fn tui_scoped_models_cycle_through_the_session_scope() {
     use crossterm::event::{KeyCode, KeyModifiers};
@@ -3250,9 +2899,8 @@ async fn tui_scoped_models_cycle_through_the_session_scope() {
     .expect("write models.json");
     let supervisor = spawn_supervisor(dir.path());
     let mut options = base_options(&supervisor, dir.path(), &session_dir);
-    // No scripted engine: the real startup chain resolves the session's
-    // model against the registry (the scripted engine answers no model
-    // and the cycle would refuse to switch).
+    // No scripted engine: the real startup chain resolves the session's model
+    // (the scripted engine answers none and the cycle would refuse to switch).
     options.script_path = None;
     options.models = Some(vec![
         "test-provider/mock-1".to_string(),
@@ -3263,17 +2911,13 @@ async fn tui_scoped_models_cycle_through_the_session_scope() {
     };
     let plan = pa_tui::interactive::HeadlessPlan {
         steps: vec![
-            // The startup chain lands on the first scoped model; the
-            // attach settles before the cycle.
             pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
-            // alt+m cycles forward through the scope: mock-1 -> mock-3
-            // (unscoped cycling would show mock-2, the next available).
+            // alt+m cycles forward: mock-1 -> mock-3 (unscoped would show mock-2).
             key(KeyCode::Char('m'), KeyModifiers::ALT),
             pa_tui::interactive::HeadlessStep::WaitRender {
                 needle: "Model: test-provider/mock-3".to_string(),
                 timeout_ms: 30_000,
             },
-            // shift+alt+m cycles backward: mock-3 -> mock-1.
             key(KeyCode::Char('m'), KeyModifiers::SHIFT | KeyModifiers::ALT),
             pa_tui::interactive::HeadlessStep::WaitRender {
                 needle: "Model: test-provider/mock-1".to_string(),
@@ -3345,10 +2989,6 @@ fn base_options(
     }
 }
 
-/// `/name` and its `/rename` alias (TS `handleNameCommand`): the rename
-/// travels to the daemon, the session file persists the `session_info`
-/// entry (the #188/#194 rename machinery), and the no-argument form reports
-/// the current name.
 #[tokio::test]
 async fn tui_renames_session_through_slash_command() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -3366,7 +3006,6 @@ async fn tui_renames_session_through_slash_command() {
             // Set through the alias: /rename resolves to /name.
             pa_tui::interactive::HeadlessStep::Submit("/rename my session".to_string()),
             pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
-            // The no-argument form reports the current name.
             pa_tui::interactive::HeadlessStep::Submit("/name".to_string()),
             pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
         ],
@@ -3377,8 +3016,6 @@ async fn tui_renames_session_through_slash_command() {
         .await
         .expect("interactive run");
     let rendered = outcome.frames.join("\n");
-    // Verification seam: dump the captured frames for manual frame-diffing
-    // against the TS product (PA_TUI_DUMP_FRAMES=<dir>).
     if let Ok(dir) = std::env::var("PA_TUI_DUMP_FRAMES") {
         for (index, frame) in outcome.frames.iter().enumerate() {
             let _ = std::fs::write(
@@ -3395,8 +3032,7 @@ async fn tui_renames_session_through_slash_command() {
         rendered.contains("Session name: my session"),
         "the /name report row rendered:\n{rendered}"
     );
-    // The #188/#194 persistence: the session file carries the session_info
-    // entry with the name.
+    // The session file carries the `session_info` entry with the name.
     let mut saw_name = false;
     for entry in std::fs::read_dir(&session_dir)
         .expect("read session dir")
@@ -3419,8 +3055,7 @@ async fn tui_renames_session_through_slash_command() {
         saw_name,
         "the session_info entry persisted (the /name arm reaches the rename machinery)"
     );
-    // The daemon state reports the name (the summary the roster and the
-    // agents view read).
+    // The daemon state reports the name (the summary the roster and agents view read).
     let (client, _client_events) = pa_tui::daemon_client::DaemonClient::connect(&supervisor.socket)
         .await
         .expect("connect");
@@ -3435,9 +3070,6 @@ async fn tui_renames_session_through_slash_command() {
     assert_eq!(state["sessionName"], "my session");
 }
 
-/// `/btw` (and its `/side` alias): the side-question pane mounts above the
-/// dock, the daemon streams the answer, a reply follows up through the
-/// pane, and Esc closes it.
 #[tokio::test]
 async fn tui_side_question_pane_flow() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -3445,7 +3077,6 @@ async fn tui_side_question_pane_flow() {
     let session_dir = agent_dir.join("sessions");
     std::fs::create_dir_all(&session_dir).expect("session dir");
     let supervisor = spawn_supervisor(dir.path());
-    // Two scripted answers: the first /btw turn, then the follow-up reply.
     let script = serde_json::json!({ "engine": "faux", "responses": [
         { "text": "Paris, obviously" },
         { "text": "Second answer" },
@@ -3461,49 +3092,39 @@ async fn tui_side_question_pane_flow() {
             pa_tui::interactive::HeadlessStep::Submit(
                 "/btw what is the capital of France".to_string(),
             ),
-            // The side question runs outside the turn state (the WaitIdle
-            // barrier cannot see it), and its answer is a daemon-driven
-            // stream: wait for the rendered condition (early exit) instead
-            // of a fixed wall-clock window.
+            // The side question runs outside the turn state (WaitIdle cannot
+            // see it): wait for the rendered condition, not a fixed window.
             pa_tui::interactive::HeadlessStep::WaitRender {
                 needle: "Paris, obviously".to_string(),
                 timeout_ms: 30_000,
             },
-            // The pane's run must SETTLE before the follow-up: TS's
-            // active-run guard drops a follow-up submitted while the run
-            // is still streaming (it keeps the draft and warns). The
-            // settled hint row ("reply to follow up") is the pane's own
-            // idle marker, so wait for it — never a fixed window.
+            // The pane must SETTLE first: TS's active-run guard drops a
+            // follow-up submitted mid-stream; the settled hint row is the marker.
             pa_tui::interactive::HeadlessStep::WaitRender {
                 needle: "reply to follow up".to_string(),
                 timeout_ms: 30_000,
             },
             pa_tui::interactive::HeadlessStep::SettleIdle,
-            // The open pane captures a plain reply as a follow-up side
-            // question (TS's side-conversation ladder).
+            // The open pane captures a plain reply as a follow-up side question.
             pa_tui::interactive::HeadlessStep::Submit("and its largest city".to_string()),
             pa_tui::interactive::HeadlessStep::WaitRender {
                 needle: "Second answer".to_string(),
                 timeout_ms: 30_000,
             },
-            // Settle again: an Esc against a still-running pane would
-            // CANCEL the run instead of closing the pane (TS's two-stage
-            // escape), so the close step needs the pane idle too.
+            // Settle again: an Esc mid-run would CANCEL the run instead of
+            // closing the pane (TS's two-stage escape).
             pa_tui::interactive::HeadlessStep::WaitRender {
                 needle: "reply to follow up".to_string(),
                 timeout_ms: 30_000,
             },
             pa_tui::interactive::HeadlessStep::SettleIdle,
-            // A slash command inside the pane gets the TS notice turn.
             pa_tui::interactive::HeadlessStep::Submit("/model".to_string()),
             pa_tui::interactive::HeadlessStep::WaitRender {
                 needle: "Slash commands are not available in side conversations.".to_string(),
                 timeout_ms: 30_000,
             },
             pa_tui::interactive::HeadlessStep::SettleIdle,
-            // Esc returns to the main thread: the pane's hint row is the
-            // surface's own state, so wait for it to leave the newest
-            // frame.
+            // Esc returns to the main thread: wait for the pane's hint row to leave the frame.
             escape,
             pa_tui::interactive::HeadlessStep::WaitGone {
                 needle: "esc to return to session".to_string(),
@@ -3518,8 +3139,6 @@ async fn tui_side_question_pane_flow() {
         .await
         .expect("interactive run");
     let rendered = outcome.frames.join("\n");
-    // Verification seam: dump the captured frames for manual frame-diffing
-    // against the TS product (PA_TUI_DUMP_FRAMES=<dir>).
     if let Ok(dir) = std::env::var("PA_TUI_DUMP_FRAMES") {
         for (index, frame) in outcome.frames.iter().enumerate() {
             let _ = std::fs::write(
@@ -3536,7 +3155,6 @@ async fn tui_side_question_pane_flow() {
         rendered.contains("Paris, obviously"),
         "the streamed answer rendered in the pane:\n{rendered}"
     );
-    // The follow-up renders as a user-message bubble (TS `questionBubble`).
     assert!(
         rendered.contains("and its largest city"),
         "the follow-up question rendered:\n{rendered}"
@@ -3555,15 +3173,12 @@ async fn tui_side_question_pane_flow() {
         rendered.contains("reply to follow up · esc to return to session"),
         "the pane hint rendered:\n{rendered}"
     );
-    // Esc closed the pane: the final frame shows no pane rows.
     let last = outcome.frames.last().expect("a final frame");
     assert!(
         !last.contains("esc to return to session"),
         "esc closed the pane:\n{last}"
     );
-    // The side turns never reached the session transcript (TS: side
-    // questions are not durable): the session file has no side-question
-    // user rows.
+    // Side questions are not durable: the session file has no side-question user rows.
     let mut leaked = false;
     for entry in std::fs::read_dir(&session_dir)
         .expect("read session dir")
@@ -3579,8 +3194,6 @@ async fn tui_side_question_pane_flow() {
     assert!(!leaked, "the side question stayed out of the session file");
 }
 
-/// `/settings` (TS `showSettingsSelector`): the menu mounts in the dock
-/// and the settings rows cycle through the daemon switch.
 #[tokio::test]
 async fn tui_settings_menu_cycles_rows() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -3608,8 +3221,7 @@ async fn tui_settings_menu_cycles_rows() {
             pa_tui::interactive::HeadlessStep::Submit("/settings".to_string()),
             pa_tui::interactive::HeadlessStep::WaitMs(500),
             pa_tui::interactive::HeadlessStep::SettleIdle,
-            // Enter on the first row (Auto-compact) cycles it to false —
-            // the daemon `set_auto_compaction` switch.
+            // Enter on the first row (Auto-compact) cycles it to false (`set_auto_compaction`).
             enter(),
             pa_tui::interactive::HeadlessStep::WaitMs(500),
             pa_tui::interactive::HeadlessStep::SettleIdle,
@@ -3623,8 +3235,6 @@ async fn tui_settings_menu_cycles_rows() {
         .await
         .expect("interactive run");
     let rendered = outcome.frames.join("\n");
-    // Verification seam: dump the captured frames for manual frame-diffing
-    // against the TS product (PA_TUI_DUMP_FRAMES=<dir>).
     if let Ok(dir) = std::env::var("PA_TUI_DUMP_FRAMES") {
         for (index, frame) in outcome.frames.iter().enumerate() {
             let _ = std::fs::write(
@@ -3647,11 +3257,8 @@ async fn tui_settings_menu_cycles_rows() {
     );
 }
 
-/// The operator's Esc-ordering pin (2026-09-25): while a turn streams, the
-/// cwd completion menu (`./` + Tab) lists the non-hidden entries only (the
-/// `.claude` directory stays out of the menu), and Esc closes the menu
-/// without interrupting the running turn — the abort ladder runs only when
-/// no menu is open.
+/// The operator's Esc-ordering pin (2026-09-25): Esc closes the cwd
+/// completion menu without interrupting the streaming turn.
 #[tokio::test]
 async fn tui_esc_closes_the_completion_menu_without_interrupting_the_turn() {
     use crossterm::event::KeyCode;
@@ -3663,8 +3270,7 @@ async fn tui_esc_closes_the_completion_menu_without_interrupting_the_turn() {
     std::fs::create_dir_all(dir.path().join(".claude")).expect("dot dir");
     std::fs::write(dir.path().join("main.rs"), "fn main() {}").expect("write");
     std::fs::write(dir.path().join("notes.md"), "notes").expect("write");
-    // One turn: a fast text block marks it provably streaming, then the
-    // slow thinking block keeps it alive while the menu interaction runs.
+    // A fast text block marks it streaming; the slow thinking block holds the menu window.
     let script = serde_json::json!({
         "engine": "faux",
         "tokensPerSecond": 4,
@@ -3693,8 +3299,7 @@ async fn tui_esc_closes_the_completion_menu_without_interrupting_the_turn() {
                 needle: "the turn is streaming".to_string(),
                 timeout_ms: 30_000,
             },
-            // The editor stays live during the turn: `./` + Tab opens the
-            // cwd completion menu over it.
+            // The editor stays live during the turn: `./` + Tab opens the menu over it.
             pa_tui::interactive::HeadlessStep::Type("./".to_string()),
             key(KeyCode::Tab),
             pa_tui::interactive::HeadlessStep::SettleIdle,
@@ -3702,8 +3307,7 @@ async fn tui_esc_closes_the_completion_menu_without_interrupting_the_turn() {
                 needle: "notes.md".to_string(),
                 timeout_ms: 30_000,
             },
-            // Esc closes the menu; the turn keeps running to its final
-            // answer (a leaked abort would kill it mid-stream).
+            // Esc closes the menu; the turn keeps running (a leaked abort would kill it).
             key(KeyCode::Esc),
             pa_tui::interactive::HeadlessStep::WaitGone {
                 needle: "notes.md".to_string(),
@@ -3718,7 +3322,6 @@ async fn tui_esc_closes_the_completion_menu_without_interrupting_the_turn() {
         .await
         .expect("interactive run");
     let rendered = outcome.frames.join("\n");
-    // The menu listed the cwd's non-hidden entries and never the dot dir.
     assert!(
         rendered.contains("main.rs") && rendered.contains("notes.md"),
         "the cwd completion menu listed the non-hidden entries:\n{rendered}"
@@ -3734,12 +3337,7 @@ async fn tui_esc_closes_the_completion_menu_without_interrupting_the_turn() {
     drop(supervisor);
 }
 
-/// Prompt-stash verifier (TS `prompt-stash-state.ts` + the
-/// interactive-mode stash call sites): a draft in the editor belongs to
-/// the session it was typed in. The in-place `/switch` stashes it for the
-/// outgoing session and clears the editor (Enter after the switch submits
-/// nothing), and a switch back restores it — the restored draft is a live
-/// editor draft (Enter submits it, and only to the session it belongs to).
+/// Prompt-stash verifier: a draft in the editor belongs to the session it was typed in.
 #[tokio::test]
 async fn tui_prompt_stash_round_trips_across_in_place_switch() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -3811,17 +3409,12 @@ async fn tui_prompt_stash_round_trips_across_in_place_switch() {
     };
     let plan = pa_tui::interactive::HeadlessPlan {
         steps: vec![
-            // A draft for session A, never submitted.
             pa_tui::interactive::HeadlessStep::Type("f24 stash draft hello".to_string()),
-            // The switch stashes the draft for A and clears the editor.
             pa_tui::interactive::HeadlessStep::Submit(format!("/switch {second}")),
-            // The editor must be empty now: Enter submits nothing, and the
-            // draft never bleeds into session B.
+            // Enter submits nothing; the draft never bleeds into session B.
             enter(),
             pa_tui::interactive::HeadlessStep::WaitMs(500),
-            // Switch back: the stashed draft returns to the editor.
             pa_tui::interactive::HeadlessStep::Submit(format!("/switch {first}")),
-            // The restored draft is live: Enter submits it — to session A.
             enter(),
             pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
         ],
@@ -3837,8 +3430,7 @@ async fn tui_prompt_stash_round_trips_across_in_place_switch() {
         "the switch-back restored the stashed draft:\n{rendered}"
     );
 
-    // Daemon-side: the restored draft ran on session A, and session B
-    // never received it (the editor cleared at the switch).
+    // Daemon-side: the restored draft ran on session A; B never received it.
     let (client, _events) = pa_tui::daemon_client::DaemonClient::connect(&supervisor.socket)
         .await
         .expect("connect supervisor");
@@ -3872,10 +3464,7 @@ async fn tui_prompt_stash_round_trips_across_in_place_switch() {
 }
 
 /// Prompt-stash verifier, the agents-view handoff arm: the (user-rebound)
-/// `app.session.resume` key leaves for the agents view WITH a draft in the
-/// editor — the draft is stashed for the session, and the chat that reopens
-/// that session (the agents-view loop's next run, same process store)
-/// restores it. The restored draft submits on Enter.
+/// `app.session.resume` key stashes the draft; reopening the chat restores it.
 #[tokio::test]
 async fn tui_prompt_stash_survives_the_agents_view_handoff() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -3884,10 +3473,8 @@ async fn tui_prompt_stash_survives_the_agents_view_handoff() {
     let agent_dir = dir.path().join("agent");
     let session_dir = agent_dir.join("sessions");
     std::fs::create_dir_all(&session_dir).expect("session dir");
-    // The keybindings fixture: `app.session.resume` has no default key, so
-    // the fixture binds it to a plain key exactly like the TS parity flow
-    // drives the same surface (both products fire the action while the
-    // editor carries text).
+    // `app.session.resume` has no default key, so the fixture binds it to a
+    // plain key (both products fire the action with text in the editor).
     std::fs::write(
         agent_dir.join("keybindings.json"),
         r#"{ "app.session.resume": "f2" }"#,
@@ -3908,9 +3495,8 @@ async fn tui_prompt_stash_survives_the_agents_view_handoff() {
     )
     .await;
 
-    // The clipboard seam fixture: the draft carries a pasted image, so the
-    // handoff must round-trip the image bytes too (the reopened chat is a
-    // fresh UI with an empty paste registry — the stash hydrates it).
+    // The draft carries a pasted image, so the handoff must round-trip the
+    // bytes (the reopened chat's paste registry is empty — the stash hydrates it).
     let png_path = dir.path().join("fixture.png");
     std::fs::write(&png_path, MINIMAL_PNG).expect("write fixture image");
     std::env::set_var("PRIME_AGENT_TEST_CLIPBOARD_IMAGE", &png_path);
@@ -3952,11 +3538,9 @@ async fn tui_prompt_stash_survives_the_agents_view_handoff() {
         restore_dock_focus: false,
     };
 
-    // Run one: the draft is typed, then the resume key hands the pane to
-    // the agents view (the outcome pa-cli's agents-view loop consumes).
+    // Run one: the draft is typed, then the resume key hands the pane to the agents view.
     let plan_one = pa_tui::interactive::HeadlessPlan {
         steps: vec![
-            // The pasted image rides the draft into the stash.
             pa_tui::interactive::HeadlessStep::Key(KeyEvent::new(
                 KeyCode::Char('v'),
                 KeyModifiers::CONTROL,
@@ -3979,12 +3563,9 @@ async fn tui_prompt_stash_survives_the_agents_view_handoff() {
         "the resume key hands the pane to the agents view"
     );
 
-    // Run two (the agents view reopened the session): the same process
-    // store restores the stashed draft into the fresh editor.
     let plan_two = pa_tui::interactive::HeadlessPlan {
         steps: vec![
             pa_tui::interactive::HeadlessStep::WaitMs(300),
-            // The restored draft is live: Enter submits it.
             pa_tui::interactive::HeadlessStep::Key(KeyEvent::new(
                 KeyCode::Enter,
                 KeyModifiers::NONE,
@@ -4007,8 +3588,7 @@ async fn tui_prompt_stash_survives_the_agents_view_handoff() {
         "the restored draft carries its image marker:\n{rendered}"
     );
 
-    // The persisted user message carries the image content: the fresh
-    // chat's registry held the image only through the stash hydrate.
+    // The persisted message carries the image: the registry held it only through the hydrate.
     let mut persisted_with_image = false;
     for entry in std::fs::read_dir(&session_dir)
         .expect("read session dir")
@@ -4026,7 +3606,6 @@ async fn tui_prompt_stash_survives_the_agents_view_handoff() {
         "the restored draft attached the stashed image bytes on submit"
     );
 
-    // Daemon-side: the restored draft ran on the session.
     let (client, _events) = pa_tui::daemon_client::DaemonClient::connect(&supervisor.socket)
         .await
         .expect("connect supervisor");
@@ -4046,12 +3625,7 @@ async fn tui_prompt_stash_survives_the_agents_view_handoff() {
     drop(supervisor);
 }
 
-/// Prompt-stash verifier, the pasted-image arm: the stashed draft carries
-/// its pasted image. The clipboard seam fixture (`PRIME_AGENT_TEST_
-/// CLIPBOARD_IMAGE`, the `script_path` verification-seam pattern) drives the
-/// real paste path; the stash must round-trip the image bytes so the
-/// restored draft's `[image #N]` marker attaches them on submit (the
-/// persisted user message carries the image content).
+/// Prompt-stash verifier, the pasted-image arm: the stashed draft round-trips its image bytes.
 #[tokio::test]
 async fn tui_prompt_stash_restores_a_pasted_image_with_the_draft() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -4060,14 +3634,11 @@ async fn tui_prompt_stash_restores_a_pasted_image_with_the_draft() {
     let agent_dir = dir.path().join("agent");
     let session_dir = agent_dir.join("sessions");
     std::fs::create_dir_all(&session_dir).expect("session dir");
-    // A one-pixel PNG: the clipboard fixture stands in for the system
-    // clipboard (this harness has no display server).
+    // A one-pixel PNG: the fixture stands in for the system clipboard (no display server).
     let png_path = dir.path().join("fixture.png");
     std::fs::write(&png_path, MINIMAL_PNG).expect("write fixture image");
-    // The seam only ever applies to the paste path (ctrl+v) — nothing else
-    // in this binary reads the clipboard. The var stays set for the whole
-    // test process: the parallel stash tests each reset it before their
-    // own paste, so a cross-test remove would race them.
+    // The seam only applies to the paste path (ctrl+v). The var stays set for
+    // the whole process: a cross-test remove would race the parallel stash tests.
     std::env::set_var("PRIME_AGENT_TEST_CLIPBOARD_IMAGE", &png_path);
     let supervisor = spawn_supervisor(dir.path());
     let script = serde_json::json!({
@@ -4138,18 +3709,15 @@ async fn tui_prompt_stash_restores_a_pasted_image_with_the_draft() {
     };
     let plan = pa_tui::interactive::HeadlessPlan {
         steps: vec![
-            // Paste an image (the seam fixture), then type around its
-            // marker so the draft carries the marker.
+            // Paste an image (the seam fixture), then type around its marker.
             ctrl_v(),
             pa_tui::interactive::HeadlessStep::WaitMs(300),
             pa_tui::interactive::HeadlessStep::Type(" f24 image draft".to_string()),
-            // Stash on switch, restore on switch back.
             pa_tui::interactive::HeadlessStep::Submit(format!("/switch {second}")),
             pa_tui::interactive::HeadlessStep::WaitMs(300),
             pa_tui::interactive::HeadlessStep::Submit(format!("/switch {first}")),
             pa_tui::interactive::HeadlessStep::WaitMs(300),
-            // Submit the restored draft: the marker must resolve to the
-            // stashed image bytes.
+            // Submit the restored draft: the marker resolves to the stashed bytes.
             enter(),
             pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
         ],
@@ -4168,10 +3736,7 @@ async fn tui_prompt_stash_restores_a_pasted_image_with_the_draft() {
         rendered.contains("[image #1]"),
         "the restored draft carries its image marker:\n{rendered}"
     );
-    // The persisted user message carries the image content: the restored
-    // marker attached the stashed bytes on submit. The create response's
-    // id is the active session id, so scan the session dir for the image
-    // content (only session A received the draft).
+    // The persisted message carries the image: the restored marker attached the stashed bytes.
     let mut persisted_with_image = String::new();
     for entry in std::fs::read_dir(&session_dir)
         .expect("read session dir")
@@ -4194,12 +3759,8 @@ async fn tui_prompt_stash_restores_a_pasted_image_with_the_draft() {
     drop(supervisor);
 }
 
-/// TS `handlePromptStash` — the `app.prompt.stash` action on its DEFAULT
-/// key (ctrl+s): with a draft in the editor the key stashes the whole
-/// draft (text plus its pasted image) and the editor clears; with an
-/// empty editor the key restores it — the restored draft is live, Enter
-/// submits it, and the image marker resolves to the stashed bytes (the
-/// same clipboard-seam machinery as the switch round-trip above).
+/// TS `handlePromptStash` — `app.prompt.stash` on its DEFAULT key (ctrl+s):
+/// stash with a draft, restore with an empty editor.
 #[tokio::test]
 async fn tui_ctrl_s_stashes_and_restores_the_prompt_draft() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -4208,10 +3769,7 @@ async fn tui_ctrl_s_stashes_and_restores_the_prompt_draft() {
     let agent_dir = dir.path().join("agent");
     let session_dir = agent_dir.join("sessions");
     std::fs::create_dir_all(&session_dir).expect("session dir");
-    // The clipboard seam fixture: the draft carries a pasted image, so the
-    // manual stash must round-trip the image bytes exactly like the auto
-    // paths do (the var stays set for the whole test process, matching the
-    // parallel stash tests' pattern).
+    // The draft carries a pasted image, so the manual stash must round-trip the bytes too.
     let png_path = dir.path().join("fixture.png");
     std::fs::write(&png_path, MINIMAL_PNG).expect("write fixture image");
     std::env::set_var("PRIME_AGENT_TEST_CLIPBOARD_IMAGE", &png_path);
@@ -4270,30 +3828,25 @@ async fn tui_ctrl_s_stashes_and_restores_the_prompt_draft() {
     };
     let plan = pa_tui::interactive::HeadlessPlan {
         steps: vec![
-            // A draft carrying a pasted image.
             key(KeyCode::Char('v'), KeyModifiers::CONTROL),
             pa_tui::interactive::HeadlessStep::WaitRender {
                 needle: "[image #1]".to_string(),
                 timeout_ms: 5_000,
             },
             pa_tui::interactive::HeadlessStep::Type(" f24 ctrl s draft".to_string()),
-            // The manual stash: the status names it, the editor clears.
             key(KeyCode::Char('s'), KeyModifiers::CONTROL),
             pa_tui::interactive::HeadlessStep::WaitRender {
                 needle: "Stashed prompt".to_string(),
                 timeout_ms: 5_000,
             },
-            // The editor is provably empty: Enter submits nothing (were the
-            // draft still there, this submit would start its turn).
+            // Enter submits nothing (were the draft still there, this submit would start its turn).
             key(KeyCode::Enter, KeyModifiers::NONE),
             pa_tui::interactive::HeadlessStep::WaitMs(400),
-            // The restore: the draft (text and image marker) returns.
             key(KeyCode::Char('s'), KeyModifiers::CONTROL),
             pa_tui::interactive::HeadlessStep::WaitRender {
                 needle: "Restored stashed prompt".to_string(),
                 timeout_ms: 5_000,
             },
-            // The restored draft is live: Enter submits it with its image.
             key(KeyCode::Enter, KeyModifiers::NONE),
             pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
         ],
@@ -4313,16 +3866,14 @@ async fn tui_ctrl_s_stashes_and_restores_the_prompt_draft() {
         .position(|frame| frame.contains("Restored stashed prompt"))
         .expect("the restore status rendered");
     assert!(stash_index < restore_index);
-    // Between the stash and the restore the editor holds no draft: the
-    // stash cleared it (the empty Enter between the two keys submitted
-    // nothing, so the draft never became a user message either).
+    // Between the stash and the restore the editor holds no draft (the empty
+    // Enter submitted nothing, so it never became a user message).
     for frame in &frames[stash_index..restore_index] {
         assert!(
             !frame.contains("f24 ctrl s draft"),
             "the stash cleared the editor:\n{frame}"
         );
     }
-    // The restored draft carries its image marker again.
     assert!(
         frames[restore_index..]
             .iter()
@@ -4330,8 +3881,7 @@ async fn tui_ctrl_s_stashes_and_restores_the_prompt_draft() {
         "the restored draft carries its image marker"
     );
 
-    // Daemon-side: exactly the restored draft's turn ran (the empty
-    // Enter submitted nothing), and its image bytes persisted.
+    // Daemon-side: exactly the restored draft's turn ran, and its image bytes persisted.
     let (client, _events) = pa_tui::daemon_client::DaemonClient::connect(&supervisor.socket)
         .await
         .expect("connect supervisor");
@@ -4437,28 +3987,23 @@ async fn tui_ctrl_s_stash_keeps_a_held_draft_and_reports_the_empty_editor() {
     };
     let plan = pa_tui::interactive::HeadlessPlan {
         steps: vec![
-            // Empty editor, nothing stashed: the report, no restore.
             key(KeyCode::Char('s'), KeyModifiers::CONTROL),
             pa_tui::interactive::HeadlessStep::WaitRender {
                 needle: "No prompt to stash".to_string(),
                 timeout_ms: 5_000,
             },
-            // A draft, then the stash that takes it.
             pa_tui::interactive::HeadlessStep::Type("f24 guard draft".to_string()),
             key(KeyCode::Char('s'), KeyModifiers::CONTROL),
             pa_tui::interactive::HeadlessStep::WaitRender {
                 needle: "Stashed prompt".to_string(),
                 timeout_ms: 5_000,
             },
-            // A fresh draft while the stash holds one: the report, and
-            // the fresh draft stays in the editor.
             pa_tui::interactive::HeadlessStep::Type("f24 second draft".to_string()),
             key(KeyCode::Char('s'), KeyModifiers::CONTROL),
             pa_tui::interactive::HeadlessStep::WaitRender {
                 needle: "Prompt stash already has a draft".to_string(),
                 timeout_ms: 5_000,
             },
-            // The fresh draft stayed live: Enter submits it.
             key(KeyCode::Enter, KeyModifiers::NONE),
             // The admitted submit returns the held FIRST draft to the emptied
             // editor (TS `promptStashToRestore`, interactive-mode.ts:5752-5759).
@@ -4475,9 +4020,7 @@ async fn tui_ctrl_s_stash_keeps_a_held_draft_and_reports_the_empty_editor() {
         .await
         .expect("interactive run");
     let frames = &outcome.frames;
-    // The already-held guard fired while the fresh draft sat in the
-    // editor: from the guard's status onward the draft stays rendered
-    // (it submits on the next Enter, so it also becomes the user row).
+    // The guard fired while the fresh draft sat in the editor: it stays rendered from then on.
     let guard_index = frames
         .iter()
         .position(|frame| frame.contains("Prompt stash already has a draft"))
@@ -4499,7 +4042,6 @@ async fn tui_ctrl_s_stash_keeps_a_held_draft_and_reports_the_empty_editor() {
         "the admitted send restored the held draft into the editor"
     );
 
-    // Daemon-side: the fresh draft submitted (it never left the editor).
     let (client, _events) = pa_tui::daemon_client::DaemonClient::connect(&supervisor.socket)
         .await
         .expect("connect supervisor");
@@ -4519,10 +4061,7 @@ async fn tui_ctrl_s_stash_keeps_a_held_draft_and_reports_the_empty_editor() {
     drop(supervisor);
 }
 
-/// The `app.prompt.stash` action is remappable through
-/// `keybindings.json` (the TS binding surface's contract): a user binding
-/// replaces the default outright — ctrl+s goes inert (the draft stays in
-/// the editor) and the user key stashes/restores instead.
+/// `app.prompt.stash` is remappable: a user binding replaces the default outright.
 #[tokio::test]
 async fn tui_ctrl_s_stash_is_remappable_via_keybindings_json() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -4593,23 +4132,19 @@ async fn tui_ctrl_s_stash_is_remappable_via_keybindings_json() {
     let plan = pa_tui::interactive::HeadlessPlan {
         steps: vec![
             pa_tui::interactive::HeadlessStep::Type("f24 remap draft".to_string()),
-            // The replaced default: ctrl+s no longer owns the action —
-            // the draft stays in the editor.
+            // The replaced default: ctrl+s no longer owns the action.
             key(KeyCode::Char('s'), KeyModifiers::CONTROL),
             pa_tui::interactive::HeadlessStep::WaitMs(400),
-            // The user key carries the action: the stash clears the editor.
             key(KeyCode::F(3), KeyModifiers::NONE),
             pa_tui::interactive::HeadlessStep::WaitRender {
                 needle: "Stashed prompt".to_string(),
                 timeout_ms: 5_000,
             },
-            // And restores it.
             key(KeyCode::F(3), KeyModifiers::NONE),
             pa_tui::interactive::HeadlessStep::WaitRender {
                 needle: "Restored stashed prompt".to_string(),
                 timeout_ms: 5_000,
             },
-            // The restored draft is live: Enter submits it.
             key(KeyCode::Enter, KeyModifiers::NONE),
             pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
         ],
@@ -4624,9 +4159,8 @@ async fn tui_ctrl_s_stash_is_remappable_via_keybindings_json() {
         .iter()
         .position(|frame| frame.contains("Stashed prompt"))
         .expect("the remapped key stashed");
-    // The inertness proof: from the moment the full draft existed until
-    // the remapped key stashed it, EVERY frame still shows the draft in
-    // the editor — the ctrl+s press in that window did nothing.
+    // The inertness proof: from the full draft until the remapped stash,
+    // EVERY frame still shows the draft — the ctrl+s press did nothing.
     let full_draft_index = frames
         .iter()
         .position(|frame| frame.contains("f24 remap draft"))
@@ -4650,7 +4184,6 @@ async fn tui_ctrl_s_stash_is_remappable_via_keybindings_json() {
         "the restored draft returned to the editor"
     );
 
-    // Daemon-side: the restored draft submitted.
     let (client, _events) = pa_tui::daemon_client::DaemonClient::connect(&supervisor.socket)
         .await
         .expect("connect supervisor");
@@ -4670,13 +4203,9 @@ async fn tui_ctrl_s_stash_is_remappable_via_keybindings_json() {
     drop(supervisor);
 }
 
-/// Ctrl+s during a queue browse (Bugbot 79739005): the browse parks the
-/// real draft in `queue_selection` and shows the selected parked
-/// message's text in the editor, so the stash must leave the browse
-/// first — like every other editor-mutating exit — and stash the
-/// user's own draft, never the browsed parked text. The disarmed browse
-/// also keeps the next Enter from applying an empty edit that would
-/// DELETE the parked message.
+/// Ctrl+s during a queue browse (Bugbot 79739005): the browse parks the real
+/// draft and shows the parked text, so the stash must stash the user's draft,
+/// and the disarmed browse keeps the next Enter from deleting the parked message.
 #[tokio::test]
 async fn tui_ctrl_s_during_queue_browse_stashes_the_draft_and_keeps_the_parked_message() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -4685,8 +4214,7 @@ async fn tui_ctrl_s_during_queue_browse_stashes_the_draft_and_keeps_the_parked_m
     let agent_dir = dir.path().join("agent");
     let session_dir = agent_dir.join("sessions");
     std::fs::create_dir_all(&session_dir).expect("session dir");
-    // The first turn holds for 8s: the whole queue dance (park two
-    // prompts, draft, browse, stash, an empty Enter) runs inside the
+    // The first turn holds for 8s: the whole queue dance runs inside the
     // busy window, deterministically.
     let supervisor = spawn_supervisor(dir.path());
     let script = serde_json::json!({
@@ -4748,11 +4276,9 @@ async fn tui_ctrl_s_during_queue_browse_stashes_the_draft_and_keeps_the_parked_m
     };
     let plan = pa_tui::interactive::HeadlessPlan {
         steps: vec![
-            // The slow turn holds the run busy through the whole dance.
             pa_tui::interactive::HeadlessStep::Submit("start the slow turn".to_string()),
             pa_tui::interactive::HeadlessStep::WaitMs(750),
-            // Two parked prompts: Enter while busy parks on the steering
-            // lane, alt+Enter parks on the follow-up lane.
+            // Enter parks on the steering lane, alt+Enter on the follow-up lane.
             pa_tui::interactive::HeadlessStep::Submit("steering prompt".to_string()),
             pa_tui::interactive::HeadlessStep::Type("follow-up prompt".to_string()),
             key(KeyCode::Enter, KeyModifiers::ALT),
@@ -4760,8 +4286,7 @@ async fn tui_ctrl_s_during_queue_browse_stashes_the_draft_and_keeps_the_parked_m
                 needle: "Follow-up: follow-up prompt".to_string(),
                 timeout_ms: 5_000,
             },
-            // A real draft, then the browse that parks it and loads the
-            // newest parked message's text into the editor.
+            // A real draft, then the browse that parks it and loads the newest parked text.
             pa_tui::interactive::HeadlessStep::Type("f24 browse draft".to_string()),
             pa_tui::interactive::HeadlessStep::WaitRender {
                 needle: "f24 browse draft".to_string(),
@@ -4772,22 +4297,17 @@ async fn tui_ctrl_s_during_queue_browse_stashes_the_draft_and_keeps_the_parked_m
                 needle: "enter steers".to_string(),
                 timeout_ms: 5_000,
             },
-            // The stash: it leaves the browse (restoring the draft) and
-            // stashes the draft — never the browsed parked text.
             key(KeyCode::Char('s'), KeyModifiers::CONTROL),
             pa_tui::interactive::HeadlessStep::WaitRender {
                 needle: "Stashed prompt".to_string(),
                 timeout_ms: 5_000,
             },
-            // The empty-editor Enter with the browse disarmed submits
-            // nothing: with the armed-browse bug this Enter would apply
-            // an empty edit and DELETE the parked follow-up.
+            // The empty-editor Enter with the browse disarmed submits nothing
+            // (the armed-browse bug would apply an empty edit and DELETE it).
             key(KeyCode::Enter, KeyModifiers::NONE),
-            // The run drains: the slow turn ends and both parked prompts
-            // deliver (the follow-up's delivery IS the survival proof).
+            // The run drains: both parked prompts deliver (the follow-up's delivery is the proof).
             pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 60_000 },
-            // The stash held the pre-browse draft: the key restores it,
-            // Enter submits it.
+            // The stash held the pre-browse draft: the key restores it, Enter submits it.
             key(KeyCode::Char('s'), KeyModifiers::CONTROL),
             pa_tui::interactive::HeadlessStep::WaitRender {
                 needle: "Restored stashed prompt".to_string(),
@@ -4812,17 +4332,15 @@ async fn tui_ctrl_s_during_queue_browse_stashes_the_draft_and_keeps_the_parked_m
         .position(|frame| frame.contains("Stashed prompt"))
         .expect("the stash status rendered");
     assert!(browse_index < stash_index);
-    // The browse ended with the stash: its header never renders again
-    // (the armed browse is what would route the next Enter into a
-    // queue edit).
+    // The browse ended with the stash: its header never renders again (the
+    // armed browse would route the next Enter into a queue edit).
     for frame in &frames[stash_index..] {
         assert!(
             !frame.contains("enter steers"),
             "the browse ended at the stash:\n{frame}"
         );
     }
-    // Both parked prompts delivered after the turn: the stash + the
-    // empty Enter deleted nothing, and nothing submitted early.
+    // Both parked prompts delivered: nothing was deleted and nothing submitted early.
     let rendered = frames.join("\n");
     assert!(
         rendered.contains("steered delivery"),
@@ -4832,8 +4350,6 @@ async fn tui_ctrl_s_during_queue_browse_stashes_the_draft_and_keeps_the_parked_m
         rendered.contains("followed up delivery"),
         "the parked follow-up survived the stash and the empty Enter:\n{rendered}"
     );
-    // The stash held the pre-browse draft, not the browsed parked
-    // text: the restore returns it.
     let restore_index = frames
         .iter()
         .position(|frame| frame.contains("Restored stashed prompt"))
@@ -4845,7 +4361,6 @@ async fn tui_ctrl_s_during_queue_browse_stashes_the_draft_and_keeps_the_parked_m
             .any(|frame| frame.contains("f24 browse draft")),
         "the restored draft is the pre-browse draft, not the parked text"
     );
-    // Daemon-side: the restored draft's turn ran last.
     let (client, _events) = pa_tui::daemon_client::DaemonClient::connect(&supervisor.socket)
         .await
         .expect("connect supervisor");
@@ -4865,13 +4380,8 @@ async fn tui_ctrl_s_during_queue_browse_stashes_the_draft_and_keeps_the_parked_m
     drop(supervisor);
 }
 
-/// The declared chat-editor keybindings dispatch (Phase A of the audit
-/// table): ctrl+l opens the model picker, and the no-default-key actions
-/// (`app.interrupt`, `app.session.new`) fire from a user keybindings.json.
-/// Both were declared (ctrl+l also advertised in `/hotkeys`) without a
-/// dispatch site on the base — the test fails there at the first render
-/// barrier. ctrl+s's own dispatch landed upstream with its own e2e
-/// (see `tui_ctrl_s_stashes_and_restores_the_prompt_draft`).
+/// Declared chat-editor keybindings dispatch: ctrl+l opens the picker, and
+/// the no-default actions fire from a user keybindings.json.
 #[tokio::test]
 async fn tui_dispatches_declared_editor_keybindings() {
     use crossterm::event::{KeyCode, KeyModifiers};
@@ -4886,9 +4396,7 @@ async fn tui_dispatches_declared_editor_keybindings() {
     )
     .expect("write keybindings.json");
     let supervisor = spawn_supervisor(dir.path());
-    // The second response keeps the turn alive on a visible marker while
-    // the interrupt key lands (the pacing the menu-over-turn verifiers
-    // use; the turn aborts long before its final answer).
+    // The second response keeps the turn alive while the interrupt key lands.
     let script = serde_json::json!({
         "engine": "faux",
         "tokensPerSecond": 4,
@@ -4904,8 +4412,7 @@ async fn tui_dispatches_declared_editor_keybindings() {
     });
     std::fs::write(dir.path().join("script.json"), script.to_string()).expect("write script");
     let mut options = base_options(&supervisor, dir.path(), &session_dir);
-    // The exact load path the CLI uses: the fixture binds the two
-    // no-default-key actions.
+    // The exact load path the CLI uses: the fixture binds the two no-default-key actions.
     options.keybindings = pa_tui::keybindings::KeybindingsManager::create(&agent_dir);
     let key = |code: KeyCode, modifiers: KeyModifiers| {
         pa_tui::interactive::HeadlessStep::Key(crossterm::event::KeyEvent::new(code, modifiers))
@@ -4916,15 +4423,12 @@ async fn tui_dispatches_declared_editor_keybindings() {
     };
     let plan = pa_tui::interactive::HeadlessPlan {
         steps: vec![
-            // The script's quick reply plays first so the slow turn below
-            // streams while the interrupt key lands.
+            // The quick reply plays first so the slow turn streams while the interrupt lands.
             pa_tui::interactive::HeadlessStep::Submit("hello".to_string()),
             pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
-            // ctrl+l opens the /model surface.
             key(KeyCode::Char('l'), KeyModifiers::CONTROL),
             wait_render("Search models"),
             key(KeyCode::Esc, KeyModifiers::NONE),
-            // The slow turn runs so the interrupt key lands mid-turn.
             pa_tui::interactive::HeadlessStep::Submit("start the slow turn".to_string()),
             wait_render("the slow turn is streaming"),
             key(
@@ -4933,11 +4437,8 @@ async fn tui_dispatches_declared_editor_keybindings() {
             ),
             wait_render("Press Ctrl+C again to exit"),
             pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
-            // A draft in the editor when the new-session key lands: TS
-            // `handleClearCommand` discards it (`resetCurrentSessionRenderState`),
-            // it must not ride into the new session.
+            // A draft in the editor when the new-session key lands: it must not ride along.
             pa_tui::interactive::HeadlessStep::Type("stale draft".to_string()),
-            // The fixture binding runs the /new flow.
             key(
                 KeyCode::Char('n'),
                 KeyModifiers::CONTROL | KeyModifiers::ALT,
@@ -4965,8 +4466,7 @@ async fn tui_dispatches_declared_editor_keybindings() {
         !rendered.contains("the final answer that the abort must never deliver"),
         "the interrupt aborted the turn before its final answer:\n{rendered}"
     );
-    // The new session started with no draft: the stale text the editor
-    // held at the keypress never rendered into the new session's frames.
+    // The new session started with no draft: the stale text never rendered into its frames.
     let last = outcome.frames.last().expect("a final frame");
     assert!(
         !last.contains("stale draft"),
@@ -4975,8 +4475,7 @@ async fn tui_dispatches_declared_editor_keybindings() {
     drop(supervisor);
 }
 
-/// The empty `prompt`/`prompt_and_wait` input payload (no content, images, or
-/// admission): every optional field stays absent on the wire.
+/// The empty `prompt`/`prompt_and_wait` payload: every optional field stays absent on the wire.
 fn empty_prompt_input() -> pa_types::daemon::PromptInput {
     pa_types::daemon::PromptInput {
         content: None,
@@ -4994,10 +4493,8 @@ fn empty_prompt_input() -> pa_types::daemon::PromptInput {
     }
 }
 
-/// Create a live session over the daemon wire and settle one scripted turn
-/// in it, so the session ends IDLE with a durable transcript and no owner
-/// client (the "settled session a `prime-agent --resume <id>` attach
-/// opens" fixture).
+/// Create a live session over the daemon wire and settle one scripted turn in
+/// it, so it ends IDLE with a durable transcript and no owner client.
 async fn create_idle_session_with_settled_turn(
     socket: &Path,
     script_path: &Path,
@@ -5024,13 +4521,9 @@ async fn create_idle_session_with_settled_turn(
     session
 }
 
-/// The attach-render regression (the blank-pane bug class from the live
-/// dogfood): attaching to an IDLE settled session must paint the settled
-/// transcript from the attach snapshot alone — no key, submit, or resize
-/// input. TS `renderInitialMessages` ends in `requestRender` after the
-/// session load; the Rust equivalent is `rebuild_view`'s dirty flag, and
-/// this verifier pins that path (the run's only step is a settle window,
-/// so any frame below comes from the attach's own render scheduling).
+/// The attach-render regression (the blank-pane bug class): attaching to an
+/// IDLE settled session must paint the transcript from the attach snapshot
+/// alone; the run's only step is a settle window.
 #[tokio::test]
 async fn tui_attach_to_idle_session_renders_without_input() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -5326,9 +4819,8 @@ async fn tui_idle_session_event_repaints_without_input() {
             .await
             .expect("interactive run")
     });
-    // The attach settles first; the rename then arrives as a pure daemon
-    // event on the idle session (the second wire client never touches the
-    // TUI's input).
+    // The attach settles first; the rename arrives as a pure daemon event
+    // (the second client never touches the TUI's input).
     tokio::time::sleep(std::time::Duration::from_millis(750)).await;
     let (renamer, _events) = pa_tui::daemon_client::DaemonClient::connect(&socket)
         .await
@@ -5355,12 +4847,8 @@ async fn tui_idle_session_event_repaints_without_input() {
 }
 
 /// The bare-launch safety regression (the P6 continue-recent trap): a plain
-/// `prime-agent` interactive run (no session flags) must open a FRESH
-/// session even when a newer saved session exists for the cwd — the saved
-/// file's content is never reopened, appended, or resumed blindly. A bare
-/// launch that resumed the newest session would resurrect whatever that
-/// session is (on a shared session dir: an orchestrator's context and its
-/// scheduled jobs).
+/// `prime-agent` run must open a FRESH session even when a newer saved session
+/// exists for the cwd — resuming it blindly would resurrect whatever it holds.
 #[tokio::test]
 async fn tui_bare_launch_opens_a_fresh_session_when_a_newer_saved_one_exists_for_the_cwd() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -5369,9 +4857,8 @@ async fn tui_bare_launch_opens_a_fresh_session_when_a_newer_saved_one_exists_for
     std::fs::create_dir_all(&session_dir).expect("session dir");
     let supervisor = spawn_supervisor(dir.path());
 
-    // A saved session for the cwd that a blind continue-recent would pick:
-    // a valid header plus a poisoned exchange. Its bytes must stay exactly
-    // as written — a resume would append to the file.
+    // A saved session a blind continue-recent would pick: valid header,
+    // poisoned exchange. Its bytes must stay as written — a resume would append.
     let poisoned_id = "poisoned0000000000000000000001";
     let poisoned_path = session_dir.join(format!("{poisoned_id}.jsonl"));
     let poisoned_bytes = format!(
@@ -5380,8 +4867,6 @@ async fn tui_bare_launch_opens_a_fresh_session_when_a_newer_saved_one_exists_for
     );
     std::fs::write(&poisoned_path, &poisoned_bytes).expect("write poisoned session");
 
-    // The bare launch's scripted turn: the TUI creates a fresh session and
-    // submits the first prompt to it.
     let script = serde_json::json!({ "responses": [
         { "text": "fresh session reply" },
     ] });
@@ -5400,8 +4885,6 @@ async fn tui_bare_launch_opens_a_fresh_session_when_a_newer_saved_one_exists_for
         .await
         .expect("interactive run");
 
-    // The fresh session ran the turn; the poisoned session was never the
-    // opened one.
     let rendered = outcome.frames.join("\n");
     assert!(
         rendered.contains("fresh session reply"),
@@ -5422,7 +4905,6 @@ async fn tui_bare_launch_opens_a_fresh_session_when_a_newer_saved_one_exists_for
         after, poisoned_bytes,
         "the bare launch never wrote to the saved session file"
     );
-    // A fresh session file appeared next to it.
     let new_files: Vec<std::path::PathBuf> = std::fs::read_dir(&session_dir)
         .expect("read sessions dir")
         .flatten()
@@ -5447,14 +4929,9 @@ async fn tui_bare_launch_opens_a_fresh_session_when_a_newer_saved_one_exists_for
     drop(supervisor);
 }
 
-/// The backgrounded submit keeps the WIRE in submit order (the ordered
-/// submit worker): two back-to-back submissions — the first starting its
-/// turn, the second arriving while the first's round trip is still in
-/// flight — reach the daemon in submit order, so the session file's
-/// first mention of each prompt is first-then-second and both scripted
-/// turns render. A per-submit task would schedule the two wire writes
-/// independently; the ordered channel pins the order the blocked loop
-/// and TS's single-threaded event loop guaranteed.
+/// The backgrounded submit keeps the WIRE in submit order: two back-to-back
+/// submissions (the second while the first's round trip is in flight) reach
+/// the daemon in order; the ordered channel pins it.
 #[tokio::test]
 async fn tui_two_back_to_back_submits_reach_the_daemon_in_order() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -5505,9 +4982,8 @@ async fn tui_two_back_to_back_submits_reach_the_daemon_in_order() {
         restore_dock_focus: false,
         client_settings: None,
     };
-    // Two submits with NO barrier between them: the second's round trip is
-    // armed while the first is still in flight — the ordering case the
-    // per-submit spawn could flip under load.
+    // Two submits with NO barrier: the second's round trip arms while the
+    // first is in flight — the case a per-submit spawn could flip.
     let plan = pa_tui::interactive::HeadlessPlan {
         steps: vec![
             pa_tui::interactive::HeadlessStep::Submit("first submit".to_string()),
@@ -5529,9 +5005,7 @@ async fn tui_two_back_to_back_submits_reach_the_daemon_in_order() {
         rendered.contains("second scripted reply"),
         "the queued second turn rendered:\n{rendered}"
     );
-    // The daemon received the two prompts in submit order: the session
-    // file mentions "first submit" before "second submit" (the queue
-    // admission and message rows all carry the wire order).
+    // The daemon received the prompts in order: "first submit" before "second submit".
     let mut first_index = None;
     let mut second_index = None;
     for entry in std::fs::read_dir(&session_dir)
@@ -5556,13 +5030,9 @@ async fn tui_two_back_to_back_submits_reach_the_daemon_in_order() {
     drop(supervisor);
 }
 
-/// A submit that outlived its session (the backgrounded round trip
-/// straddled a `/switch`): the outcome stays SILENT on the newly mounted
-/// session — no turn bookkeeping, no loader, no error row, no draft
-/// clobber — while the daemon still ran the submitted turn for the
-/// switched-away session (TS's staleness guard: a superseded submit's
-/// success never touches the new session; interactive-mode.ts guards
-/// the catch on `promptStashSessionId`/`inputSubmissionGeneration`).
+/// A submit that outlived its session (the round trip straddled a `/switch`):
+/// the outcome stays SILENT on the newly mounted session, while the daemon
+/// still ran the turn for the switched-away session (TS's staleness guard).
 #[tokio::test]
 async fn tui_submit_outlived_by_switch_stays_silent_on_the_new_session() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -5571,10 +5041,8 @@ async fn tui_submit_outlived_by_switch_stays_silent_on_the_new_session() {
     std::fs::create_dir_all(&session_dir).expect("session dir");
     let supervisor = spawn_supervisor(dir.path());
 
-    // The switched-away session's reply is slow enough that its turn
-    // finishes AFTER the switch has completed: the reply is provably
-    // post-switch, so a stale-outcome leak would render it on the new
-    // session.
+    // The reply lands after the switch completes (provably post-switch), so
+    // a stale-outcome leak would render it on the new session.
     let script = serde_json::json!({ "responses": [
         { "text": "a turn reply", "delayMs": 400 },
     ] });
@@ -5635,9 +5103,8 @@ async fn tui_submit_outlived_by_switch_stays_silent_on_the_new_session() {
         restore_dock_focus: false,
         client_settings: None,
     };
-    // The submit's round trip straddles the switch: the switch step
-    // applies one headless step after the submit, long before the
-    // outcome's ack lands.
+    // The round trip straddles the switch: the switch applies one headless
+    // step after the submit, long before the ack lands.
     let plan = pa_tui::interactive::HeadlessPlan {
         steps: vec![
             pa_tui::interactive::HeadlessStep::Submit("for a".to_string()),
@@ -5661,9 +5128,6 @@ async fn tui_submit_outlived_by_switch_stays_silent_on_the_new_session() {
         rendered.contains("b turn reply"),
         "the post-switch prompt ran on the new session:\n{rendered}"
     );
-    // The outlived submit's outcome never touched the new session: the
-    // switched-away session's reply (provably post-switch) never
-    // rendered, and no error row surfaced for a submit that succeeded.
     assert!(
         !rendered.contains("a turn reply"),
         "the stale outcome never leaked the old session's turn:\n{rendered}"
@@ -5672,9 +5136,8 @@ async fn tui_submit_outlived_by_switch_stays_silent_on_the_new_session() {
         !rendered.contains("\u{26a0} Error"),
         "a stale succeeded submit stays silent:\n{rendered}"
     );
-    // The daemon still ran the outlived submit's turn for the
-    // switched-away session: the submitted prompt was never lost. The
-    // reply lands ~400ms in, so poll the session file for it.
+    // The daemon still ran the outlived submit's turn (the prompt was never
+    // lost); the reply lands ~400ms in, so poll the session file.
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut ran = false;
     while Instant::now() < deadline {
@@ -5700,13 +5163,9 @@ async fn tui_submit_outlived_by_switch_stays_silent_on_the_new_session() {
     );
 }
 
-/// A headless run whose plan completes while the submitted turn is still
-/// settling: the driver drops its input sender after `HeadlessDone`, and a
-/// closed `ui_rx` is select-ready forever. The loop must park the closed arm
-/// (the run's exit gate waits on the turn's events) — an unparked
-/// always-ready arm hot-spins the select and starves the very turn events the
-/// gate needs (the outlived-submit stall), while the pending streamed reply
-/// still lands and the run ends on its own.
+/// A headless run whose plan completes while the turn still settles: the
+/// closed `ui_rx` is select-ready forever, so the loop must park the closed
+/// arm (the exit gate waits on the turn's events) — an unparked arm hot-spins.
 #[tokio::test]
 async fn tui_headless_done_with_a_turn_settling_parks_the_closed_input_channel() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -5715,8 +5174,7 @@ async fn tui_headless_done_with_a_turn_settling_parks_the_closed_input_channel()
     std::fs::create_dir_all(&session_dir).expect("session dir");
     let supervisor = spawn_supervisor(dir.path());
 
-    // The reply lands well after the plan's only step, so `HeadlessDone`
-    // arrives while the turn is provably still active.
+    // The reply lands well after the plan's only step, so `HeadlessDone` arrives mid-turn.
     let script = serde_json::json!({ "responses": [
         { "text": "slow scripted reply", "delayMs": 400 },
     ] });
@@ -5758,8 +5216,7 @@ async fn tui_headless_done_with_a_turn_settling_parks_the_closed_input_channel()
         restore_dock_focus: false,
         client_settings: None,
     };
-    // No trailing WaitIdle: the plan ends at the submit, and the run's
-    // exit gate must hold on its own until the turn settles.
+    // No trailing WaitIdle: the exit gate must hold on its own until the turn settles.
     let plan = pa_tui::interactive::HeadlessPlan {
         steps: vec![pa_tui::interactive::HeadlessStep::Submit(
             "hello there".to_string(),
@@ -5790,11 +5247,8 @@ async fn tui_headless_done_with_a_turn_settling_parks_the_closed_input_channel()
 }
 
 /// A refused submit restores the draft through the backgrounded outcome:
-/// killing the session's worker (and removing its file, so the durable-id
-/// rebind cannot resurrect it) makes the prompt's round trip settle as a
-/// refusal, and the outcome folds back as the `⚠ Error` row plus the
-/// draft back in the editor (TS `onSubmit`'s catch: showError + the
-/// restore/retain ladder) — the turn never ran.
+/// killing the worker (and removing its file, so no rebind can resurrect it)
+/// settles the round trip as a refusal — the turn never ran.
 #[tokio::test]
 async fn tui_refused_submit_restores_the_draft_after_the_round_trip() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -5816,12 +5270,8 @@ async fn tui_refused_submit_restores_the_draft_after_the_round_trip() {
     )
     .await;
 
-    // Kill the worker and remove its file AFTER the TUI attached but
-    // BEFORE the submit: the harness task lands at +400ms (the attach
-    // completed at run start), and the plan's WaitMs(900) holds the
-    // submit until long after the kill's stop resolved — the prompt then
-    // settles as a refusal (the durable-id rebind cannot resume a session
-    // with no file), never as a turn.
+    // Kill the worker after the attach but before the submit: WaitMs(900)
+    // holds the submit until long after the kill resolves — a refusal, not a turn.
     let kill_socket = supervisor.socket.clone();
     let kill_session_dir = session_dir.clone();
     let kill_session_id = session_id.clone();
@@ -5899,8 +5349,7 @@ async fn tui_refused_submit_restores_the_draft_after_the_round_trip() {
         .expect("interactive run");
     kill_task.await.expect("the kill task");
     let rendered = outcome.frames.join("\n");
-    // The refusal surfaced as the error row, and the draft returned to the
-    // editor (the restore arm: empty editor, own generation, same session).
+    // The refusal surfaced as the error row, and the draft returned to the editor.
     assert!(
         rendered.contains("\u{26a0} Error"),
         "the refused submit surfaced the error row:\n{rendered}"

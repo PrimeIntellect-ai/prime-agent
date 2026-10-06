@@ -1,39 +1,22 @@
-//! The agents-view session search: a picker over the session's identity
-//! fields — the display NAME (primary), the durable session ID, and the
-//! CWD. The name target is the SESSION column's own title — the
-//! `session_title` ladder over the merged summary, clipped to the
-//! column's width cap — so a prompt-derived title is searchable exactly
-//! as far as the column displays it. The TS corpus fields — the full
-//! first message, the transcript text, file paths — never match (a
-//! deliberate divergence from TS `session-view-search.ts`, which joined
-//! them; the query language stays TS-shaped).
-//!
-//! Matching follows the session/command-picker standard (VS Code
-//! quick-open `fuzzyScorer.ts` + `filters.ts`; Zed's project switcher;
-//! tmux choose-tree): tiered and ranked — identity paste > name exact >
-//! name prefix > name substring > name fuzzy (the TS subsequence scorer
-//! with its strict ceiling) > id prefix/substring > cwd basename/path —
-//! with recency as the tiebreaker. Every token must match some target,
-//! and a record's rank follows its WORST token's tier (a multi-token
-//! search never trades one token's weak tier away for another's strong
-//! one); within a tier, lower quality ranks first.
+//! The agents-view session search: a picker over the display NAME (primary), the durable session
+//! ID, and the CWD — the name target is the SESSION column's own title, so a prompt-derived title
+//! is searchable exactly as far as the column displays it. The TS corpus fields (first message,
+//! transcript, file paths) never match — a deliberate divergence (the query language stays
+//! TS-shaped).
 
 use crate::fuzzy::fuzzy_match;
 
-/// The strict fuzzy ceiling above which a token counts as unmatched (TS
-/// `STRICT_FUZZY_MAX_TOKEN_SCORE`).
+/// The strict fuzzy ceiling above which a token counts as unmatched.
 const STRICT_FUZZY_MAX_TOKEN_SCORE: f64 = 25.0;
 
 /// One record's match targets, in rank order (lower tier ranks first).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SessionSearchText {
-    /// The SESSION column's title: the `session_title` ladder over the
-    /// merged summary (`sessionName`, then the first message, then the
-    /// cwd basename, then the id), clipped to the column's width cap.
+    /// The SESSION column's title: the `session_title` ladder over the merged summary, clipped to
+    /// the column's width cap.
     pub name: String,
     /// The durable session id (daemon `sessionId`, saved `id`).
     pub id: String,
-    /// The session working directory.
     pub cwd: String,
     /// The remote row's tailnet host and display model (TS #2516): the
     /// picker matches remote agents by `MagicDNS` hostname and remote
@@ -57,8 +40,8 @@ impl SessionSearchText {
     }
 }
 
-/// One parsed search query (TS `ParsedSearchQuery`): `re:` enters regex
-/// mode; otherwise whitespace tokens with `"quoted phrase"` support.
+/// One parsed search query: `re:` enters regex mode; otherwise whitespace tokens with
+/// `"quoted phrase"` support.
 pub struct ParsedSearchQuery {
     regex: Option<fancy_regex::Regex>,
     tokens: Vec<SearchToken>,
@@ -71,12 +54,9 @@ enum SearchToken {
     Phrase(String),
 }
 
-/// The `re:` backtrack budget. `fancy-regex` keeps JS-shaped features
-/// (lookarounds, backreferences) by backtracking, which has no
-/// worst-case time bound; the search runs synchronously on the TUI
-/// thread for every record on every keystroke, so one `find` is bounded
-/// to this many backtracking attempts. A pattern that needs more fails
-/// the find, and `score_search` treats the record as unmatched.
+/// The `re:` backtrack budget: `fancy-regex` backtracks (no worst-case bound), and the search
+/// runs synchronously on the TUI thread for every record on every keystroke — one `find` is
+/// bounded to this many backtracking attempts.
 const REGEX_BACKTRACK_LIMIT: usize = 10_000;
 
 /// Parse a query; invalid `re:` patterns parse to no matches.
@@ -163,23 +143,15 @@ fn push_token(tokens: &mut Vec<SearchToken>, buffer: &mut String, kind: fn(Strin
     }
 }
 
-/// One token's match: the tier it reached (lower ranks first — the
-/// documented tier ladder) and its within-tier quality (lower ranks
-/// better). `score_search` bounds the quality aggregate inside one tier
-/// stride, so quality can never reorder records across tiers.
+/// One token's match: the tier it reached (lower ranks first) and its within-tier quality (lower
+/// ranks better); quality aggregates stay inside one tier stride.
 struct TokenMatch {
     tier: f64,
     quality: f64,
 }
 
-/// Score one record's targets against the query: `Some(score)` when the
-/// query matches (lower is better — the `fuzzy_match` convention), `None`
-/// otherwise. Every token must match at least one target (VS Code
-/// `doScoreItemFuzzyMultiple`: "we require all queries to match"), and a
-/// record's rank follows its WORST token's tier: the quality sums are
-/// clamped inside one tier stride before the tier offset is added, so no
-/// within-tier difference — however long the name or however sprawling
-/// the fuzzy match — can cross a tier boundary.
+/// Score one record's targets against the query: `Some(score)` when the query matches (lower is
+/// better). Every token must match at least one target; the record's rank follows its WORST token.
 #[must_use]
 pub fn score_search(targets: &SessionSearchText, query: &ParsedSearchQuery) -> Option<f64> {
     if query.matches_never {
@@ -190,8 +162,7 @@ pub fn score_search(targets: &SessionSearchText, query: &ParsedSearchQuery) -> O
         if corpus.is_empty() {
             return None;
         }
-        // A find that blows its backtrack budget fails here (see
-        // `REGEX_BACKTRACK_LIMIT`): the record just does not match.
+        // A find that blows its backtrack budget fails here: the record just does not match.
         return regex
             .find(&corpus)
             .ok()
@@ -215,9 +186,9 @@ pub fn score_search(targets: &SessionSearchText, query: &ParsedSearchQuery) -> O
     Some(worst_tier * TIER_STRIDE + quality)
 }
 
-/// The tier stride: the worst token's tier decides a record's rank before
-/// any quality does, and `score_search` clamps the summed quality inside
-/// one stride so it can never cross a tier boundary.
+/// The tier stride: the worst token's tier decides a record's rank before any quality does, and
+/// `score_search` clamps the summed quality inside one stride so it can never cross a tier
+/// boundary.
 const TIER_STRIDE: f64 = 100_000.0;
 
 /// One fuzzy token: the best tier it reaches across the targets (TS kept
@@ -232,12 +203,9 @@ fn token_score(token: &str, targets: &SessionSearchText) -> Option<TokenMatch> {
     })
 }
 
-/// One contiguous token (or the contiguous phase of a fuzzy token). The
-/// tiers mirror VS Code quick-open scoring: the identity match is highest
-/// (`PATH_IDENTITY_SCORE` — a pasted full id is unambiguous), then the
-/// name ranks exact > prefix > substring, then the id prefix and
-/// substring (paste-a-fragment targeting), then the CWD basename and
-/// full path.
+/// One contiguous token (or the contiguous phase of a fuzzy token). The tiers mirror VS Code
+/// quick-open scoring: the identity match is highest, then the name ranks exact > prefix >
+/// substring, then the id prefix and substring, then the CWD basename and full path.
 fn contiguous_token_score(token: &str, targets: &SessionSearchText) -> Option<TokenMatch> {
     let needle = normalize(token);
     if needle.is_empty() {
@@ -255,8 +223,7 @@ fn contiguous_token_score(token: &str, targets: &SessionSearchText) -> Option<To
     if let Some(name) = label_score(&needle, &targets.name) {
         return Some(name);
     }
-    // Targets normalize like the needle (TS lowercased the whole corpus):
-    // ids and paths match case-insensitively.
+    // Targets normalize like the needle: ids and paths match case-insensitively.
     if let Some(found) = normalize(&targets.id).find(&needle) {
         let tier = if found == 0 { 5.0 } else { 6.0 };
         return Some(TokenMatch {
@@ -288,8 +255,7 @@ fn contiguous_token_score(token: &str, targets: &SessionSearchText) -> Option<To
         })
 }
 
-/// The name tiers: exact, prefix (shorter labels win, VS Code
-/// `prefixLengthBoost`), then substring (earlier wins).
+/// The name tiers: exact, prefix (shorter labels win), then substring (earlier wins).
 fn label_score(needle: &str, name: &str) -> Option<TokenMatch> {
     let name = normalize(name);
     if name.is_empty() {
@@ -313,7 +279,7 @@ fn label_score(needle: &str, name: &str) -> Option<TokenMatch> {
     })
 }
 
-/// Lowercase and collapse whitespace (TS `normalizeWhitespaceLower`).
+/// Lowercase and collapse whitespace.
 fn normalize(text: &str) -> String {
     text.to_lowercase()
         .split_whitespace()
@@ -453,8 +419,7 @@ mod tests {
 
     #[test]
     fn fuzzy_keeps_the_strict_ceiling() {
-        // A sprawling subsequence over a long name scores past the strict
-        // ceiling and rejects (TS `STRICT_FUZZY_MAX_TOKEN_SCORE`).
+        // A sprawling subsequence over a long name scores past the strict ceiling and rejects.
         let sprawled = SessionSearchText {
             name: "primary agent session worker running in the forest temple of doom".to_string(),
             ..targets()
@@ -472,12 +437,8 @@ mod tests {
 
     #[test]
     fn the_worst_token_tier_decides_multi_token_ranking() {
-        // The same two-token query against two records: one lands both
-        // tokens on the name (worst tier 3), the other pastes the id for
-        // one token (tier 0) but only fuzzy-matches the other (tier 4).
-        // Summing per-token scores would rank the id paste first; the
-        // record's rank follows its WORST token, so the all-name record
-        // wins.
+        // The same two-token query against two records: summing per-token scores would rank the
+        // id paste first; the record's rank follows its WORST token, so the all-name record wins.
         let strong = SessionSearchText {
             name: "gw x 01a0b6b3".to_string(),
             id: "ffff0000".to_string(),
@@ -501,10 +462,8 @@ mod tests {
 
     #[test]
     fn long_fuzzy_hits_stay_inside_their_tier() {
-        // A sprawling consecutive fuzzy match over a long name scores far
-        // below zero; the quality term is clamped inside one tier stride,
-        // so the fuzzy tier can never cross into the name-exact or
-        // identity ranges.
+        // A sprawling consecutive fuzzy match over a long name scores far below zero; the quality
+        // term is clamped inside one tier stride, so it can never cross into the name-exact range.
         let query = parse_search_query(&format!("{}q", "x".repeat(500)));
         let exact = SessionSearchText {
             name: format!("{}q", "x".repeat(500)),
@@ -529,9 +488,8 @@ mod tests {
 
     #[test]
     fn pathological_re_patterns_stop_at_the_backtrack_budget() {
-        // A catastrophic-backtracking pattern over a near-miss corpus
-        // stops at the budget and simply does not match — the keystroke
-        // rebuild can never stall on it.
+        // A catastrophic-backtracking pattern over a near-miss corpus stops at the budget and
+        // simply does not match — the keystroke rebuild can never stall on it.
         let near_miss = SessionSearchText {
             name: format!("{}b", "a".repeat(40)),
             id: "fff-fff".to_string(),
@@ -543,8 +501,8 @@ mod tests {
             score_search(&near_miss, &parsed).is_none(),
             "a blown backtrack budget matches nothing"
         );
-        // The budget does not narrow the feature set: lookarounds still
-        // run through the fancy engine and match.
+        // The budget does not narrow the feature set: lookarounds still run through the fancy
+        // engine and match.
         let lookahead = parse_search_query("re:gateway(?=worker)");
         assert!(score_search(&targets(), &lookahead).is_some());
     }

@@ -1,5 +1,4 @@
-//! The incident timeline report (TS `buildIncidentReport` and its
-//! aggregation/rendering helpers).
+//! The incident timeline report.
 
 use pa_types::incident::{
     collect_incident_events, collect_worker_pid_map, compute_incident_anomalies,
@@ -10,8 +9,6 @@ use std::io::IsTerminal as _;
 
 use super::time::format_incident_time;
 
-/// The resolved window and filters of one report (TS
-/// `IncidentReportOptions`).
 #[derive(Debug, Clone, Default)]
 pub(crate) struct IncidentReportOptions {
     pub(crate) since_ms: i64,
@@ -22,15 +19,13 @@ pub(crate) struct IncidentReportOptions {
     pub(crate) skipped_count: Option<usize>,
 }
 
-/// One rendered report (TS `IncidentReport`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct IncidentReport {
     pub(crate) text: String,
 }
 
-/// TS `colorizeSeverity` rides chalk (auto-disabled off-TTY and under
-/// `NO_COLOR`); the palette matches the TS: red for critical/error,
-/// yellow for warn, dim for info.
+/// Colorize by severity (auto-disabled off-TTY and under `NO_COLOR`):
+/// red for critical/error, yellow for warn, dim for info.
 fn colorize_severity(severity: IncidentSeverity, label: &str) -> String {
     match severity {
         IncidentSeverity::Critical | IncidentSeverity::Error => paint("31", label),
@@ -39,7 +34,6 @@ fn colorize_severity(severity: IncidentSeverity, label: &str) -> String {
     }
 }
 
-/// `chalk.dim`.
 fn dim(text: &str) -> String {
     paint("2", text)
 }
@@ -59,21 +53,18 @@ fn use_color() -> bool {
     std::env::var_os("NO_COLOR").is_none() && std::io::stdout().is_terminal()
 }
 
-/// One aggregated timeline row: identical events collapse to a count with
-/// their first and last timestamps (TS `AggregatedEvent`).
+/// One aggregated timeline row: identical events collapse to a count
+/// with their first and last timestamps.
 struct AggregatedEvent {
     first: IncidentEvent,
     last: IncidentEvent,
     count: usize,
-    /// The section-arrival index, breaking exact first-time ties the way
-    /// the TS `Map` insertion order does.
+    /// The section-arrival index, breaking exact first-time ties.
     arrival: usize,
 }
 
-/// Group identical events (`category|subject|summary`), keeping the first
-/// and last time and the repeat count, ordered by first timestamp (TS
-/// `aggregateIncidentEvents`; the arrival order breaks exact-time ties
-/// the way the TS `Map` insertion order does).
+/// Group identical events (`category|subject|summary`), keeping the first and
+/// last time and the repeat count, ordered by first timestamp.
 fn aggregate_incident_events(events: &[IncidentEvent]) -> Vec<AggregatedEvent> {
     let mut groups: HashMap<String, AggregatedEvent> = HashMap::new();
     for (arrival, incident) in events.iter().enumerate() {
@@ -111,21 +102,21 @@ fn aggregate_incident_events(events: &[IncidentEvent]) -> Vec<AggregatedEvent> {
     aggregated
 }
 
-/// True when the event names the session filter: session ids, worker ids,
-/// and quoted session names prefix-match in both directions (TS
-/// `sessionMatches`). An empty token (a missing session name) is a prefix
-/// of every value and must not match every session filter.
+/// True when the event names the session filter: session ids, worker
+/// ids, and quoted session names prefix-match in both directions. An
+/// empty token (a missing session name) is a prefix of every value and
+/// must not match every session filter.
 fn session_matches(incident: &IncidentEvent, session: &str) -> bool {
     incident.tokens.iter().any(|token| {
         !token.is_empty() && (token.starts_with(session) || session.starts_with(token))
     })
 }
 
-/// Build the full incident timeline text for a window: classified events
-/// are grouped into Supervisor events / Session anomalies / Recovery
-/// sections, repeated identical events are aggregated with counts, and
-/// per-subject stalls, error bursts, and event gaps are surfaced as
-/// anomalies (TS `buildIncidentReport`).
+/// Build the full incident timeline text for a window: classified
+/// events are grouped into Supervisor events / Session anomalies /
+/// Recovery sections, repeated identical events are aggregated with
+/// counts, and per-subject stalls, error bursts, and event gaps are
+/// surfaced as anomalies.
 pub(crate) fn build_incident_report(
     entries: &[IncidentLogEntry],
     options: &IncidentReportOptions,
