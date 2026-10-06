@@ -20,7 +20,7 @@ const MAX_EGRESS_POLICY_ENTRIES: usize = 256;
 
 /// The loopback hosts allowed with plain `http://` when the client opts in
 /// (TS `LOCAL_HOSTNAMES`; both IPv6 literal spellings).
-const LOCAL_HOSTNAMES: [&str; 4] = ["localhost", "127.0.0.1", "::1", "[::1]"];
+pub(crate) const LOCAL_HOSTNAMES: [&str; 4] = ["localhost", "127.0.0.1", "::1", "[::1]"];
 
 /// The create-name length cap in bytes (TS counts UTF-16 units; bytes are
 /// at least as strict for non-ASCII, which only tightens acceptance).
@@ -30,7 +30,7 @@ const MAX_NAME_BYTES: usize = 100;
 const MAX_LABEL_BYTES: usize = 256;
 
 /// Env/secret key pattern (TS `ENV_VAR_KEY_PATTERN`): `[A-Za-z_][A-Za-z0-9_]*`.
-fn is_env_var_key(key: &str) -> bool {
+pub(crate) fn is_env_var_key(key: &str) -> bool {
     let mut chars = key.chars();
     match chars.next() {
         Some(first) if first.is_ascii_alphabetic() || first == '_' => {}
@@ -40,7 +40,7 @@ fn is_env_var_key(key: &str) -> bool {
 }
 
 /// A platform URL path segment (TS `URL_SEGMENT_PATTERN`).
-fn is_url_segment(value: &str) -> bool {
+pub(crate) fn is_url_segment(value: &str) -> bool {
     let bytes = value.as_bytes();
     match bytes.first() {
         Some(first) if first.is_ascii_alphanumeric() => {}

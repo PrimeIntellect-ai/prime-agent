@@ -22,8 +22,9 @@ fn request(method: Method, url: String, body: Option<String>) -> TransportReques
             ("Content-Type".to_string(), "application/json".to_string()),
         ],
         url,
-        body,
-        timeout: Duration::from_secs(2),
+        body: body.map(String::into_bytes),
+        max_response_bytes: None,
+        timeout: Some(Duration::from_secs(2)),
     }
 }
 
@@ -139,9 +140,11 @@ async fn streamed_bodies_past_the_cap_fail_mid_read() {
         .await
         .unwrap_err();
     assert_eq!(error.code(), SandboxErrorCode::TooLarge);
+    // The cap is per-request now (TS applies per-call caps), so the
+    // message names the bound, not the JSON body.
     assert_eq!(
         error.to_string(),
-        "Sandbox response exceeds the 1024 byte JSON body limit"
+        "Sandbox response exceeds the 1024 byte limit"
     );
 }
 
