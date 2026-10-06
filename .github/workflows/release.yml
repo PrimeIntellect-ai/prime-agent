@@ -784,8 +784,11 @@ jobs:
           print(f"channel manifest {out.name}: {document['version']}, {len(rows)} artifacts")
           PY
       # THE R2 PUBLISH PHASE (the operator's distribution-model ruling: the
-      # user path is curl <domain>/install.sh and everything it reads comes
-      # from the same R2-backed base — nobody fetches a GitHub URL).
+      # channel — pointers, manifests, payloads, checksums — lives on the
+      # R2-backed base alone. The sh one-liner's route carries no GitHub
+      # URL; the Windows one-liner's entry script comes from the repo's raw
+      # copy, and that fetch is the only GitHub touch on any user path —
+      # everything either installer reads is R2-backed).
       #
       # THE SECURITY MODEL, in one block for every future reader:
       #   - SEPARATION: the build jobs (build-gnu/build-darwin) produce and
@@ -815,7 +818,7 @@ jobs:
       #     so the channel only ever advances forward.
       #   - AUDIT SURFACE: the GitHub release below still attaches every
       #     artifact (the TS order: the R2 publish first, GitHub second).
-      - name: Publish the R2 channel (the user path never touches GitHub)
+      - name: Publish the R2 channel (the channel serves no GitHub URL)
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -998,10 +1001,15 @@ jobs:
                   --endpoint-url "$R2_ENDPOINT_URL" \
                   --content-type text/plain \
                   --cache-control no-cache
-                # The stable installers (install.sh / install.ps1) move ONLY
-                # on a stable release — a beta cut never touches the stable
-                # channel's surface (the TS version serves installs until the
-                # first Rust stable release replaces it).
+                # The beta route also uploads the stable PowerShell render
+                # (install.ps1, the Windows entry point — the installer's
+                # Windows channel fallback rides the stable channel default).
+                # install.sh stays stable-only; a beta cut never overwrites it.
+                render_installer_ps1 stable
+                aws s3 cp /tmp/install-stable.ps1 "s3://${R2_BUCKET}/install.ps1" \
+                  --endpoint-url "$R2_ENDPOINT_URL" \
+                  --content-type text/plain \
+                  --cache-control no-cache
                 echo "beta channel advanced to ${RELEASE_VERSION} at ${INSTALL_BASE_URL}"
               fi
             fi

@@ -129,6 +129,7 @@ pub struct SessionEngineConfig {
     /// spawn provenance. `None` keeps the session off the ledger (no
     /// request ids on the wire).
     pub semantic_edges: Option<super::semantic_edges::SemanticEdgeIdentity>,
+    pub on_late_sent_agent_message: Option<crate::tools::ipython::LateSentAgentMessageHandler>,
 }
 
 /// An assembled, running session.
@@ -516,7 +517,10 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     if !tools.iter().any(|tool| tool.name() == "ipython") {
         let definition = crate::tools::ipython::create_ipython_tool_definition(
             &cwd.to_string_lossy(),
-            super::runtime_wiring::ipython_tool_options(provisioner.clone()),
+            super::runtime_wiring::ipython_tool_options(
+                provisioner.clone(),
+                config.on_late_sent_agent_message.clone(),
+            ),
         );
         tools.push(Arc::new(
             crate::session_engine::tool_bridge::ToolDefinitionBridge::new(definition),

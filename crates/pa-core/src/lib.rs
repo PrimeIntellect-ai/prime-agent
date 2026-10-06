@@ -61,9 +61,10 @@ pub use tools::edit::{
 
 // ipython tool: definition + kernel lifecycle seam (RLM bootstrap included).
 pub use tools::ipython::{
-    create_ipython_tool_definition, ExecuteResult, ExecuteStatus, IpythonKernelProvisioner,
-    IpythonToolOptions, IpythonToolUi, KernelAttachment, KernelBusyAfterInterruptError,
-    KernelErrorInfo, KernelExecError, KernelExecutor,
+    create_ipython_tool_definition, sent_agent_message_json, ExecuteResult, ExecuteStatus,
+    IpythonKernelProvisioner, IpythonToolOptions, IpythonToolUi, KernelAttachment,
+    KernelBusyAfterInterruptError, KernelErrorInfo, KernelExecError, KernelExecutor,
+    LateSentAgentMessageHandler,
 };
 pub use tools::rlm_bootstrap::{build_rlm_bootstrap_code, PythonSkillRuntimeInfo};
 // RLM kernel subsystem: persistent IPython kernel lifecycle.

@@ -85,6 +85,7 @@ impl SupervisorChildSessionsInner {
                 record.settled_status = Some("cancelled");
                 record.error = Some("Cancelled by user".to_string());
             }
+            self.emit_child_update(record).await;
             // Capture before the abort: the completed turns' usage (the
             // aborted turn's partial row folds nowhere — TS skips
             // error/aborted completions) must not die with the run.
@@ -165,6 +166,7 @@ impl SupervisorChildSessionsInner {
                 let record = record.lock().await;
                 self.remember_deleted_child(&record);
             }
+            self.emit_child_removal(record).await;
             self.children
                 .lock()
                 .await
@@ -369,6 +371,17 @@ fn ledger_child_records(
                 .parent()
                 .map(|dir| dir.to_string_lossy().into_owned())
                 .unwrap_or_default(),
+            model: display
+                .as_ref()
+                .and_then(|display| display.model.as_ref())
+                .and_then(|model| {
+                    Some(format!(
+                        "{}/{}",
+                        model.get("provider")?.as_str()?,
+                        model.get("modelId")?.as_str()?
+                    ))
+                })
+                .unwrap_or_default(),
             label: rlm_child_label(
                 display
                     .as_ref()
@@ -408,6 +421,7 @@ fn ledger_child_records(
             usage_watch_live: false,
             usage_rearm: false,
             emit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            last_emitted_status: None,
             rename_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         });
     }
