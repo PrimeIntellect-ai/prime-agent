@@ -358,7 +358,18 @@ async fn concurrent_spawns_prompt_exactly_once_across_a_worker_replacement() {
         let deadline = Instant::now() + Duration::from_secs(150);
         let content = loop {
             let content = std::fs::read_to_string(&session_file).unwrap_or_default();
-            if content.matches(&marker).count() == 1 {
+            let kickoff_rows = content
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .filter(|entry| {
+                    entry.get("type").and_then(Value::as_str) == Some("custom_message")
+                        && entry
+                            .get("content")
+                            .and_then(Value::as_str)
+                            .is_some_and(|text| text.contains(&marker))
+                })
+                .count();
+            if kickoff_rows == 1 {
                 break content;
             }
             if Instant::now() >= deadline {

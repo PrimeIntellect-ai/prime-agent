@@ -274,7 +274,7 @@ async fn session_end_then_resume_prewarms_and_revives_the_namespace() {
     let snapshot = artifact_dir.join("kernel-state.dill");
     assert!(
         snapshot.exists(),
-        "snapshot {snapshot:?} must exist after dispose"
+        "kernel-state.dill must exist in the session artifact dir after dispose"
     );
     drop(engine);
 
