@@ -18,6 +18,7 @@ import io
 import json
 import linecache
 import os
+import pickle
 import platform
 import select
 import signal
@@ -66,6 +67,9 @@ _RESTORE_SKIP = {"In", "Out", "get_ipython"}
 _last_snapshot_target: dict[str, Any] | None = None
 
 _protocol_fd: int = -1
+# The host's stderr before _setup_fds captures fd 2: the only channel that can
+# report a dropped protocol frame without feeding it back into the protocol.
+_host_stderr_fd: int = -1
 _write_lock = threading.Lock()
 _loop: asyncio.AbstractEventLoop | None = None
 _serve_task: asyncio.Task[Any] | None = None
@@ -114,8 +118,11 @@ def _send(event: dict[str, Any]) -> None:
         try:
             while view:
                 view = view[os.write(_protocol_fd, view) :]
-        except OSError:
-            pass
+        except OSError as err:
+            try:
+                os.write(_host_stderr_fd, f"rlm.repl: dropped protocol frame: {err}\n".encode())
+            except OSError:
+                pass
 
 
 def _check_payload(event: str, data: dict[str, Any]) -> None:
@@ -1060,6 +1067,31 @@ def _revive_with_live_globals(
     return rebound
 
 
+def _snapshot_unpickler(dill: Any) -> type:
+    """Unpickler that refuses to reopen a pickled raw fd number in this kernel.
+
+    dill serializes a pipe/socket-backed file as its fd NUMBER; restoring a
+    saved closed one reopens that number here and closes it again, killing
+    whatever owns the fd now (e.g. the event loop's self-pipe). The refusal
+    fails just that record; every other name still restores.
+    """
+    create_filehandle = dill._dill._create_filehandle
+
+    def refuse_raw_fd(name: Any, *args: Any) -> Any:
+        if isinstance(name, int):
+            raise pickle.UnpicklingError(
+                f"refusing to reopen raw file descriptor {name} from a snapshot"
+            )
+        return create_filehandle(name, *args)
+
+    class GuardedUnpickler(dill.Unpickler):
+        def find_class(self, module: str, name: str) -> Any:
+            target = super().find_class(module, name)
+            return refuse_raw_fd if target is create_filehandle else target
+
+    return GuardedUnpickler
+
+
 def _restore_state(
     ns: dict[str, Any],
     path: str,
@@ -1073,6 +1105,7 @@ def _restore_state(
         import dill
     except Exception as err:  # noqa: BLE001
         return {"error": f"dill unavailable: {err}"}
+    unpickler = _snapshot_unpickler(dill)
     try:
         with open(path, "rb") as fh:
             if fh.read(len(_SNAPSHOT_MAGIC)) == _SNAPSHOT_MAGIC:
@@ -1088,7 +1121,7 @@ def _restore_state(
             else:
                 # Legacy: one dill-pickled dict; old snapshot files must keep restoring.
                 fh.seek(0)
-                payload = dill.load(fh)
+                payload = unpickler(fh).load()
     except Exception as err:  # noqa: BLE001 - a corrupt snapshot yields an empty restore
         return {"error": f"load failed: {_safe_str(err)}"}
     if not isinstance(payload, dict):
@@ -1100,7 +1133,7 @@ def _restore_state(
         if name in _RESTORE_SKIP:
             continue
         try:
-            staged[name] = dill.loads(blob)
+            staged[name] = unpickler(io.BytesIO(blob)).load()
         except Exception as err:  # noqa: BLE001 - revive every other name regardless
             failed.append({"name": name, "reason": f"{type(err).__name__}: {_safe_str(err)[:200]}"})
     # Revive every staged name before parking: a failure must never abort the
@@ -1668,9 +1701,11 @@ _pump_err: _Pump
 
 def _setup_fds() -> int:
     """Reserve stdout for the protocol; route fds 1/2 through captured pipes."""
-    global _protocol_fd, _pump_out, _pump_err
+    global _protocol_fd, _pump_out, _pump_err, _host_stderr_fd
     _protocol_fd = os.dup(1)
     os.set_inheritable(_protocol_fd, False)
+    _host_stderr_fd = os.dup(2)
+    os.set_inheritable(_host_stderr_fd, False)
     out_r, out_w = os.pipe()
     err_r, err_w = os.pipe()
     os.dup2(out_w, 1)
