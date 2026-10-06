@@ -507,15 +507,39 @@ fn install_rust_sh_honors_the_uv_bin_dir_knob() {
         "a relative knob must be refused outright (a relative target in PATH guidance breaks every later shell)"
     );
     assert!(
+        text.contains("PRIME_AGENT_UV_BIN_DIR must not contain a colon"),
+        "the knob must refuse the PATH separator (a target with a colon corrupts every PATH export and prepend)"
+    );
+    assert!(
+        text.contains("uv_on_path()") && text.contains("uv_on_path_entry") && text.contains("[ -f \"${uv_on_path_entry}/${uv_name}\" ]"),
+        "the sh's uv-on-PATH check must SCAN PATH for an executable file itself: command -v also reports exported shell FUNCTIONS (and a bare-name result can hit a cwd decoy), which no child process can resolve"
+    );
+    assert!(
+        !text.contains("for uv_on_path_entry in $PATH"),
+        "the PATH split must be literal: an unquoted for-loop GLOB-expands a PATH entry like /tmp/glob-* into a different directory the child never searches"
+    );
+    assert!(
+        text.contains("uv_on_path_entry=\"${uv_on_path_rest%%:*}\""),
+        "the PATH entries must be split by parameter expansion alone (never globbed)"
+    );
+    assert!(
+        text.contains("uv_bin=\"$uv_on_path_bin\""),
+        "the sh's discovery must use the RESOLVED executable from the PATH scan, never command -v's bare-name output"
+    );
+    assert!(
+        !text.contains("uv_bin=\"$(command -v uv)\""),
+        "no bare command -v result may become uv_bin"
+    );
+    assert!(
         text.contains("|| { [ \"$uv_under_store\" = \"no\" ] && [ -x \"${HOME}/.local/bin/${uv_name}\" ]; }") ,
         "the 'uv found' and pre-warm gates must see a default-location uv only outside the store-alias shape"
     );
     assert!(
-        text.contains("if command -v uv >/dev/null 2>&1 \\\n   || { [ -n \"$uv_bin_dir\" ] && [ -x \"${uv_bin_dir}/${uv_name}\" ]; } \\\n   || { [ \"$uv_under_store\" = \"no\" ] && [ -x \"${HOME}/.local/bin/${uv_name}\" ]; }; then\n  step_start \"Preparing the Python kernel\""),
+        text.contains("if uv_on_path \\\n   || { [ -n \"$uv_bin_dir\" ] && [ -x \"${uv_bin_dir}/${uv_name}\" ]; } \\\n   || { [ \"$uv_under_store\" = \"no\" ] && [ -x \"${HOME}/.local/bin/${uv_name}\" ]; }; then\n  step_start \"Preparing the Python kernel\""),
         "the kernel pre-warm gate must agree with the 'uv found' gate (a default-location uv must actually warm the kernel, not just be reported found)"
     );
     assert!(
-        text.contains("! command -v uv >/dev/null 2>&1 && [ -n \"$uv_bin_dir\" ]"),
+        text.contains("! uv_on_path && [ -n \"$uv_bin_dir\" ]"),
         "the sh's pre-warm PATH prepend must run only when no uv already answers on PATH (never shadow a working system uv)"
     );
     assert!(
@@ -635,7 +659,7 @@ fn install_ps1_installs_uv_like_the_linux_installer() {
         .find("# --- the PATH add")
         .expect("the PATH-add section follows");
     let section = &text[section_start..section_end];
-    let markers: [(&str, &str); 8] = [
+    let markers: [(&str, &str); 11] = [
         (
             "the uv target knob (install-rust.sh's own PRIME_AGENT_UV_BIN_DIR parity: an operator-set dir wins - a packaged install keeps uv inside its own tree, the e2e harnesses point it at their scratch so a run never touches the shared ~/.local/bin; the knob validated early with the other knobs)",
             "if ($env:PRIME_AGENT_UV_BIN_DIR) { $uvInstallDir = $env:PRIME_AGENT_UV_BIN_DIR }",
@@ -643,6 +667,14 @@ fn install_ps1_installs_uv_like_the_linux_installer() {
         (
             "the default-location presence check (a uv that predates the knob at ~/.local/bin is still honored: no duplicate install)",
             "$uvDefaultExe = Join-Path (Join-Path $HOME '.local\\bin') 'uv.exe'",
+        ),
+        (
+            "the real-application PATH check (a PowerShell ALIAS or FUNCTION named uv must not count: no child process can resolve it)",
+            "$uvOnPath = [bool](Get-Command uv -CommandType Application -ErrorAction SilentlyContinue)",
+        ),
+        (
+            "the three-way usable-uv record (PATH, target, default - the reviewer's finding: a pre-existing uv at the knob target must serve the pre-warm)",
+            "$uvKnown = $uvOnPath -or $uvAtTarget -or $uvAtDefault",
         ),
         (
             "the astral installer fetch",
@@ -667,6 +699,10 @@ fn install_ps1_installs_uv_like_the_linux_installer() {
         (
             "the session PATH fix",
             "$env:PATH = \"$uvInstallDir;$env:PATH\"",
+        ),
+        (
+            "the pre-warm gate follows the three-way record",
+            "if ($uvKnown) {",
         ),
     ];
     let mut positions: Vec<usize> = Vec::new();
@@ -729,6 +765,10 @@ fn install_ps1_validates_the_uv_knob_before_any_side_effect() {
     assert!(
         !text.contains("[System.IO.Path]::IsPathRooted"),
         "the rooted-only check is gone: it accepts drive-relative spellings like C:uv-bin"
+    );
+    assert!(
+        text.contains("PRIME_AGENT_UV_BIN_DIR must not contain a semicolon"),
+        "the knob must refuse the PATH separator (a target carrying a semicolon corrupts the registry PATH append)"
     );
 }
 
@@ -928,6 +968,16 @@ fn install_ps1_passes_the_uv_installer_path_as_process_data() {
         "the child script must invoke the fetched installer through the handoff variable, never an embedded literal"
     );
     assert!(
+        section.contains(
+            "$childShell = if (Get-Command pwsh -CommandType Application -ErrorAction SilentlyContinue)"
+        ),
+        "the child-shell lookup must also be Application-restricted (a profile alias named pwsh has no Source to run)"
+    );
+    assert!(
+        section.contains("(Get-Process -Id $PID).Path"),
+        "the child-shell fallback must resolve to an ABSOLUTE executable (a bare 'powershell' can be intercepted by a caller alias or function)"
+    );
+    assert!(
         section.contains("$env:PRIME_AGENT_UV_INSTALLER = $uvInstallerPath"),
         "the parent must hand the installer path to the child through the environment"
     );
@@ -1012,7 +1062,7 @@ fn windows_install_e2e_gates_the_uv_install_on_a_fresh_runner() {
     .expect("read test_windows_install.ps1");
     assert!(
         harness.contains(
-            "$uvWasOnPath = [bool](Get-Command uv -ErrorAction SilentlyContinue) -or (Test-Path (Join-Path $HOME '.local\\bin\\uv.exe'))"
+            "$uvWasOnPath = [bool](Get-Command uv -CommandType Application -ErrorAction SilentlyContinue) -or (Test-Path (Join-Path $HOME '.local\\bin\\uv.exe'))"
         ),
         "the harness must record the uv pre-state before the install runs (the PATH and the ~/.local/bin places install.ps1 looks)"
     );

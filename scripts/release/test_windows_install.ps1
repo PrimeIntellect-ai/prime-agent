@@ -135,7 +135,7 @@ $server = Start-Process -FilePath $py -ArgumentList '-m','http.server','8123','-
 # The uv PRE-STATE still guards the parity gate below - install.ps1 skips
 # its uv branch when the machine already answers uv, so the gate runs
 # only against the fresh-runner contract.
-$uvWasOnPath = [bool](Get-Command uv -ErrorAction SilentlyContinue) -or (Test-Path (Join-Path $HOME '.local\bin\uv.exe'))
+$uvWasOnPath = [bool](Get-Command uv -CommandType Application -ErrorAction SilentlyContinue) -or (Test-Path (Join-Path $HOME '.local\bin\uv.exe'))
 # The kernel pre-warm's writes (the venv, uv's cache, uv's pythons) and the
 # uv install itself would land in the real user profile; the harness
 # steers all of them into its own scratch dir through the product's

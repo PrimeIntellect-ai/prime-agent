@@ -226,6 +226,9 @@ if (Test-Path $prefix -PathType Leaf) { Fail "the install prefix names an existi
 if ($env:PRIME_AGENT_UV_BIN_DIR -and (($env:PRIME_AGENT_UV_BIN_DIR -notmatch '^[a-zA-Z]:[\\/]') -and ($env:PRIME_AGENT_UV_BIN_DIR -notmatch '^\\\\[^\\\\]+\\[^\\\\]+'))) {
     Fail "PRIME_AGENT_UV_BIN_DIR must be a fully qualified absolute path (a drive-based or UNC path): $($env:PRIME_AGENT_UV_BIN_DIR)"
 }
+if ($env:PRIME_AGENT_UV_BIN_DIR -and $env:PRIME_AGENT_UV_BIN_DIR.Contains(';')) {
+    Fail "PRIME_AGENT_UV_BIN_DIR must not contain a semicolon (the Windows PATH separator): $($env:PRIME_AGENT_UV_BIN_DIR)"
+}
 
 # The channel files: the pointer (<base>/stable or <base>/beta) names the
 # version, the channel manifest (<base>/latest.json or <base>/beta.json)
@@ -682,7 +685,11 @@ $uvDefaultExe = Join-Path (Join-Path $HOME '.local\bin') 'uv.exe'
 # ~/.local/bin - the product's own ensure_uv searches PATH and
 # ~/.local/bin, so both pre-existing spellings are honored (no duplicate
 # install), and the pre-warm gate below follows the record.
-$uvOnPath = [bool](Get-Command uv -ErrorAction SilentlyContinue)
+# THE REAL-APPLICATION CHECK (the reviewer's finding): a bare Get-Command
+# also finds a PowerShell ALIAS or FUNCTION named uv in the caller's
+# session - which no child process can resolve - so only an Application
+# command (a real executable on PATH) counts.
+$uvOnPath = [bool](Get-Command uv -CommandType Application -ErrorAction SilentlyContinue)
 $uvAtTarget = Test-Path $uvExe -PathType Leaf
 $uvAtDefault = Test-Path $uvDefaultExe -PathType Leaf
 $uvKnown = $uvOnPath -or $uvAtTarget -or $uvAtDefault
@@ -711,7 +718,17 @@ if (-not $uvKnown) {
                 # shell with a process-scoped execution policy and its own
                 # silenced progress; the parent reads the child's exit as
                 # DATA, and the uv.exe FILE decides.
-                $childShell = if (Get-Command pwsh -ErrorAction SilentlyContinue) { (Get-Command pwsh).Source } else { 'powershell' }
+                $childShell = if (Get-Command pwsh -CommandType Application -ErrorAction SilentlyContinue) {
+                    (Get-Command pwsh -CommandType Application).Source
+                } elseif (Get-Command powershell -CommandType Application -ErrorAction SilentlyContinue) {
+                    (Get-Command powershell -CommandType Application).Source
+                } else {
+                    # The process we are already running under is a PowerShell:
+                    # its own executable is the honest absolute fallback (a
+                    # bare 'powershell' could be intercepted by a caller alias
+                    # or function).
+                    (Get-Process -Id $PID).Path
+                }
                 # THE PATH RIDES AS DATA (the reviewers' finding): the
                 # download dir sits under the caller's TEMP, and a profile
                 # path with an apostrophe in it would break the single-

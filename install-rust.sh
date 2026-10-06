@@ -1022,6 +1022,11 @@ if [ -n "${PRIME_AGENT_UV_BIN_DIR:-}" ]; then
     /*) ;;
     *) die "PRIME_AGENT_UV_BIN_DIR must be an absolute path: ${PRIME_AGENT_UV_BIN_DIR}" ;;
   esac
+  # THE PATH SEPARATOR (the reviewer's finding): a target containing a
+  # colon would corrupt every PATH export and prepend that carries it.
+  case "$uv_bin_dir" in
+    *:*) die "PRIME_AGENT_UV_BIN_DIR must not contain a colon: ${PRIME_AGENT_UV_BIN_DIR}" ;;
+  esac
 else
   uv_bin_dir="${HOME}/.local/bin"
   if [ "$uv_under_store" = "yes" ]; then
@@ -1051,10 +1056,39 @@ if [ "$uv_target_unsafe" = "yes" ]; then
   note "  here — the store is never written by this installer"
   uv_bin_dir=""
 fi
+# A REAL EXECUTABLE ON PATH (the reviewer's findings): a bare command -v
+# also reports exported shell FUNCTIONS (BASH_FUNC-style imports), and its
+# bare-name output can even hit a non-executable decoy file in the cwd -
+# neither is resolvable by a child process. So the check scans the PATH
+# entries itself for an EXECUTABLE file (with the platform's uv_name) and
+# never consults the shell's own function/alias resolution.
+uv_on_path() {
+  # The PATH split is PARAMETER EXPANSION ALONE (the reviewer's finding):
+  # an unquoted for-loop word-split GLOB-expands a PATH entry like
+  # /tmp/glob-* into a different directory the child never searches - a
+  # literal split cannot glob.
+  uv_on_path_rest="$PATH"
+  while [ -n "$uv_on_path_rest" ]; do
+    uv_on_path_entry="${uv_on_path_rest%%:*}"
+    if [ "$uv_on_path_entry" = "$uv_on_path_rest" ]; then
+      uv_on_path_rest=""
+    else
+      uv_on_path_rest="${uv_on_path_rest#*:}"
+    fi
+    [ -n "$uv_on_path_entry" ] || continue
+    # An executable FILE (never a searchable directory that merely shares
+    # the name).
+    [ -f "${uv_on_path_entry}/${uv_name}" ] || continue
+    [ -x "${uv_on_path_entry}/${uv_name}" ] || continue
+    uv_on_path_bin="${uv_on_path_entry}/${uv_name}"
+    return 0
+  done
+  return 1
+}
 uv_bin=""
 python_step="no"
-if command -v uv >/dev/null 2>&1; then
-  uv_bin="$(command -v uv)"
+if uv_on_path; then
+  uv_bin="$uv_on_path_bin"
 elif [ -x "${uv_bin_dir}/${uv_name}" ]; then
   uv_bin="${uv_bin_dir}/${uv_name}"
 elif [ -x "${HOME}/.local/bin/${uv_name}" ] && [ "$uv_under_store" = "no" ]; then
@@ -2929,11 +2963,11 @@ incoming_path="$PATH"
 # already answers on PATH - a working PATH uv is never shadowed by a stale
 # target file - and it serves the uv at the target (the product's ensure_uv
 # does not know the knob's dir).
-if ! command -v uv >/dev/null 2>&1 && [ -n "$uv_bin_dir" ] && [ "$uv_bin_dir" != "${HOME}/.local/bin" ]; then
+if ! uv_on_path && [ -n "$uv_bin_dir" ] && [ "$uv_bin_dir" != "${HOME}/.local/bin" ]; then
   PATH="${uv_bin_dir}:${PATH}"
   export PATH
 fi
-if command -v uv >/dev/null 2>&1 \
+if uv_on_path \
    || { [ -n "$uv_bin_dir" ] && [ -x "${uv_bin_dir}/${uv_name}" ]; } \
    || { [ "$uv_under_store" = "no" ] && [ -x "${HOME}/.local/bin/${uv_name}" ]; }; then
   say "uv found (the kernel venv's package manager)"
@@ -2977,7 +3011,7 @@ fi
 # kernel, not only be reported found (the product's ensure_uv finds
 # ~/.local/bin/uv by itself), and never in the store-alias shape (the
 # store is never written from this installer).
-if command -v uv >/dev/null 2>&1 \
+if uv_on_path \
    || { [ -n "$uv_bin_dir" ] && [ -x "${uv_bin_dir}/${uv_name}" ]; } \
    || { [ "$uv_under_store" = "no" ] && [ -x "${HOME}/.local/bin/${uv_name}" ]; }; then
   step_start "Preparing the Python kernel"
