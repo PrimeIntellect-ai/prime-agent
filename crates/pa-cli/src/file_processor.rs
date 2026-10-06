@@ -1,23 +1,15 @@
-//! `@file` argument expansion for the initial prompt, ported from
-//! `cli/file-processor.ts` (`processFileArguments`): each argument becomes
-//! either a `<file name>` text block or a base64 image attachment.
-//!
-//! The image path is the `utils/mime.ts` sniff (magic bytes, never the
-//! extension) plus the same 4.5MB inline limit TS enforces on the base64
-//! payload. TS resizes oversized images through its Photon converter; this
-//! build has no resize engine, so an oversized image under the auto-resize
-//! setting falls back to the converter-unavailable text TS emits
-//! (`[Image omitted: ...]`) instead of attaching an unusable payload. With
-//! auto-resize off, TS attaches the raw payload regardless of size, and so
-//! does this path.
+//! `@file` argument expansion for the initial prompt: each argument becomes
+//! either a `<file name>` text block or a base64 image attachment (the
+//! magic-byte sniff, never the extension, plus the same 4.5MB inline limit).
+//! No resize engine: an oversized image under auto-resize falls back to the
+//! converter-unavailable text (`[Image omitted: ...]`) TS emits.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use pa_agent::types::ImageContent;
 
-/// TS `DEFAULT_MAX_BYTES`: 4.5MB of base64 payload, headroom below the
-/// provider's 5MB limit.
+/// 4.5MB of base64 payload, headroom below the provider's 5MB limit.
 const DEFAULT_MAX_BYTES: usize = 4_500_000;
 
 /// The expanded first prompt: @file text blocks joined into one string,
@@ -28,18 +20,16 @@ pub struct ProcessedFiles {
     pub images: Vec<ImageContent>,
 }
 
-/// A file-argument failure: the exact stderr line TS prints before
-/// `process.exit(1)`.
+/// A file-argument failure: the exact stderr line printed before exit 1.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FileProcessingError {
     pub message: String,
 }
 
-/// Expand the `@file` arguments (TS `processFileArguments`): every
-/// argument resolves against the cwd (with the TS macOS filename
-/// variants), a missing file fails the run, an empty file is skipped, an
-/// image attaches as base64, and anything else embeds as a `<file name>`
-/// text block.
+/// Expand the `@file` arguments: every argument resolves against the
+/// cwd (with the TS macOS filename variants), a missing file fails the
+/// run, an empty file is skipped, an image attaches as base64, and
+/// anything else embeds as a `<file name>` text block.
 pub fn process_file_arguments(
     file_args: &[String],
     cwd: &Path,
@@ -72,9 +62,8 @@ pub fn process_file_arguments(
                 });
                 let _ = writeln!(processed.text, "<file name=\"{resolved}\"></file>");
             }
-            // Not an image: embed the content in a file block. Node's
-            // utf-8 read decodes invalid sequences lossily (U+FFFD), so
-            // binary non-image files embed instead of failing the run.
+            // Not an image: embed the content in a file block (Node's utf-8 read decodes
+            // invalid sequences lossily, so binary non-image files embed instead of failing).
             Ok(None) => {
                 let bytes = std::fs::read(&absolute_path).map_err(|error| FileProcessingError {
                     message: format!("Error: Could not read file {resolved}: {error}"),

@@ -1,25 +1,16 @@
-//! End-to-end fd-lifecycle audit against the real `pa-daemon` supervisor:
-//! spawn the supervisor, run create/prompt/kill session cycles, and sample
-//! `/proc/<pid>/fd` per cycle so any monotonically growing fd class in the
-//! supervisor (worker transports, journals, logs, event channels) is
-//! caught as a regression.
-// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
-// the full rationale).
-// Stack-resident futures by design on the daemon's hot paths; boxing the
-// call sites for a lint tick is a perf regression with zero correctness gain.
+//! End-to-end fd-lifecycle audit against the real `pa-daemon` supervisor: run
+//! create/prompt/kill session cycles and sample `/proc/<pid>/fd` per cycle so any
+//! monotonically growing fd class in the supervisor is caught as a regression.
+// Stack-resident futures by design; boxing for a lint tick is a perf regression.
 #![allow(clippy::large_futures)]
-// 64-bit-only targets; the narrowing casts sit at OS boundaries
-// (pid/fd/time/size) where the values are bounded by the kernel - the
-// dead-guard expect()s would add panic paths where silent wrap was
-// deliberate.
+// 64-bit-only targets; narrowing casts sit at bounded OS/protocol boundaries.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// The fn-length threshold is a style gate, not correctness; the structure
-// campaign owns the god-fn splits as a follow-up.
+// Fn length is a style gate, not correctness.
 #![allow(clippy::too_many_lines)]
 // API-shape opinions, not defects; the surfaces are deliberate.
 #![allow(
@@ -38,8 +29,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// Sample the open-fd set of a process: count plus one readlink target per
-/// fd. Returns an empty snapshot for a dead pid.
+/// Sample the open-fd set of a process (empty for a dead pid).
 fn fd_snapshot(pid: u32) -> Vec<String> {
     let dir = PathBuf::from(format!("/proc/{pid}/fd"));
     let mut targets = Vec::new();
@@ -103,10 +93,8 @@ fn spawn_daemon(mut launcher: Command, socket: &Path, agent_dir: &Path) -> Daemo
         .arg(agent_dir)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        // A supervisor killed at teardown must not leak its session workers
-        // into later test binaries: the worker's supervisor-lost exit (TS
-        // `exitIfSupervisorOrphanedForTooLong`) runs on this short window
-        // instead of the 5-minute default.
+        // A supervisor killed at teardown must not leak its session workers into later
+        // test binaries: the supervisor-lost exit runs here.
         .env(
             pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
             "15000",
@@ -231,15 +219,9 @@ fn wait_until(deadline: Duration, mut probe: impl FnMut() -> bool) {
 }
 
 const CYCLES: usize = 20;
-/// fds that may legitimately sit open on top of the steady state: the test
-/// client's own connection plus short-lived inflight work.
+/// fds that may legitimately sit open on top of the steady state.
 const FD_SLACK: usize = 6;
 
-/// The fd regression test: across a create/prompt/kill cycle set, the
-/// supervisor's open-fd count must stay at its steady baseline (its client
-/// connection, one transport per live worker, the listener, and files).
-/// A monotonically growing fd class here is an EMFILE factory under the
-/// supervisor's restart loops.
 #[test]
 fn supervisor_fd_count_stable_across_session_cycles() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -258,9 +240,8 @@ fn supervisor_fd_count_stable_across_session_cycles() {
     )
     .expect("write script");
 
-    // Warm-up cycle: the first launch may populate lazy caches (provider
-    // registries, journal files); the steady-state baseline is what the
-    // cycle set must hold.
+    // Warm-up cycle: the first launch may populate lazy caches; the steady-state
+    // baseline is what the cycle set must hold.
     let mut counts: Vec<usize> = Vec::new();
     for cycle in 0..=CYCLES {
         let create_id = format!("c{cycle}");
@@ -323,9 +304,8 @@ fn supervisor_fd_count_stable_across_session_cycles() {
         let killed = client.read_response(&format!("k{cycle}"));
         assert_eq!(killed["success"], true, "kill failed: {killed}");
 
-        // The kill settles asynchronously: the worker process exits and the
-        // roster/list drops the row. Only sample the supervisor once both
-        // are observed, so a slow reap cannot fake stability.
+        // The kill settles asynchronously: the worker exits and the roster drops the row;
+        // sample only once both are observed, so a slow reap cannot fake stability.
         wait_until(Duration::from_secs(10), || {
             fd_snapshot(pid).is_empty() || worker_pid(&agent_dir, &socket, &session_id).is_none()
         });
@@ -364,10 +344,6 @@ fn supervisor_fd_count_stable_across_session_cycles() {
     );
 }
 
-/// Per-turn fd stability inside one long-lived worker: the owner-facing
-/// symptom is a worker slowly filling its fd table across turns, then
-/// crashing with EMFILE into the supervisor's restart loop. Sample the
-/// worker's fds across many prompts on the same session.
 #[test]
 fn worker_fd_count_stable_across_prompts() {
     const PROMPTS: usize = 30;
@@ -457,9 +433,7 @@ fn worker_fd_count_stable_across_prompts() {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Worker fd table across connection churn (the EMFILE class)
-// ---------------------------------------------------------------------------
 
 /// Liveness that ignores zombies (an unreaped child keeps its /proc entry).
 fn process_alive(pid: u32) -> bool {
@@ -515,10 +489,8 @@ fn read_exact_timeout(stream: &mut UnixStream, buffer: &mut [u8], deadline: Inst
     }
 }
 
-/// A raw private-frame probe against a worker's own socket: connect, consume
-/// the hello frame, drop. The supervisor's liveness probes and direct
-/// clients (`get_direct_worker_transport`) do exactly this shape, and every
-/// peer delivery opens one.
+/// A raw private-frame probe against a worker's own socket: connect, consume the
+/// hello frame, drop — the exact shape of liveness probes and peer deliveries.
 fn probe_worker(socket: &Path) {
     let mut stream = UnixStream::connect(socket).expect("connect worker socket");
     stream
@@ -546,10 +518,6 @@ fn worker_socket_path(agent_dir: &Path, socket: &Path, worker_id: &str) -> PathB
     PathBuf::from(value["socketPath"].as_str().expect("socket path"))
 }
 
-/// One live worker keeps serving across open/close client connections: a
-/// worker whose fd table grows per connection dies of EMFILE after enough
-/// probes, direct clients, and peer deliveries (each agent message opens
-/// one). The per-connection event fan-out must die with the connection.
 #[test]
 fn worker_fd_table_stable_across_client_connection_churn() {
     const PROBES: usize = 15;
@@ -654,16 +622,11 @@ fn worker_fd_table_stable_across_client_connection_churn() {
     });
 }
 
-// ---------------------------------------------------------------------------
 // Restart loop: no orphan workers, stable fds, terminal cleanup
-// ---------------------------------------------------------------------------
 
-/// The supervisor's restart loop must not leak worker processes when the
-/// create replay keeps failing (a corrupt session store): each failed
-/// relaunch kills the worker it spawned, the failure budget is exhausted,
-/// the roster drops the session, and no orphan `pa-daemon` process is left
-/// holding its socket. This is the "failure 4/5 restart loop" shape from
-/// the owner-facing EMFILE report.
+/// The supervisor's restart loop must not leak worker processes when the create replay
+/// keeps failing (a corrupt session store): each failed relaunch kills the worker it
+/// spawned (the "failure 4/5 restart loop" shape from the EMFILE report).
 #[test]
 fn supervisor_restart_loop_leaves_no_orphan_workers() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -708,8 +671,7 @@ fn supervisor_restart_loop_leaves_no_orphan_workers() {
 
     let baseline = fd_snapshot(supervisor_pid);
 
-    // Corrupt the durable session file, then kill the worker: every create
-    // replay from here fails (SessionFile::open rejects the file).
+    // Corrupt the durable session file, then kill the worker: every create replay fails.
     std::fs::write(&session_file, "not valid jsonl\n").expect("corrupt session file");
     let _ = std::process::Command::new("kill")
         .args(["-9", &pid.to_string()])
@@ -725,8 +687,7 @@ fn supervisor_restart_loop_leaves_no_orphan_workers() {
             .is_some_and(std::vec::Vec::is_empty)
     });
 
-    // No orphan worker survives the loop: every spawned worker either
-    // served or was killed with its failed relaunch.
+    // No orphan worker survives the loop: each either served or was killed with its relaunch.
     std::thread::sleep(Duration::from_millis(500));
     let orphans = child_pids_of(supervisor_pid)
         .into_iter()
@@ -737,8 +698,7 @@ fn supervisor_restart_loop_leaves_no_orphan_workers() {
         "orphan worker processes survived the restart loop: {orphans:?}"
     );
 
-    // The supervisor's own fd table returns to its baseline: each failed
-    // relaunch cost one routed connection while it lived, none after.
+    // The supervisor's own fd table returns to baseline (each failed relaunch cost one connection).
     std::thread::sleep(Duration::from_millis(500));
     let final_fds = fd_snapshot(supervisor_pid);
     println!(

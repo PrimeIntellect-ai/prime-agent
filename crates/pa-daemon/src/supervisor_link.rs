@@ -1,7 +1,6 @@
 //! Worker -> supervisor link for cross-worker requests. Each command uses
 //! an independent JSONL socket so a long-running supervisor request cannot
 //! serialize roster and message admission behind its response.
-//! Requests are retried only when a write fails before the command is sent.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -18,10 +17,8 @@ use crate::protocol::{current_protocol_info, DaemonResponse};
 #[error("supervisor link request timed out")]
 struct LinkTimeout;
 
-/// Marker for write-phase failures: the command never reached the
-/// supervisor, so a transparent reconnect-and-retry is safe. The TS link
-/// gets the same property from its close listener (teardown before the
-/// next request reconnects); this link discovers death lazily instead.
+/// Marker for write-phase failures: the command never reached the supervisor, so a
+/// transparent reconnect-and-retry is safe.
 #[derive(Debug, thiserror::Error)]
 #[error("supervisor link write failed before the request was sent")]
 struct LinkWriteFailed;
@@ -34,11 +31,8 @@ struct LinkClient {
 }
 
 impl LinkClient {
-    /// Send one command envelope and read the line that answers its id.
-    /// Broadcast lines on the client socket are skipped; ids keep them
-    /// apart from the response this request waits for. A write failure is
-    /// tagged [`LinkWriteFailed`] (the command was not sent); everything
-    /// after the write is uncertain and surfaces as a plain error.
+    /// Send one command envelope and read the line that answers its id (broadcast lines
+    /// are skipped); a write failure is tagged [`LinkWriteFailed`].
     async fn request(&mut self, command: Value, timeout: Duration) -> Result<DaemonResponse> {
         let id = format!("link-{}", self.next_id);
         self.next_id += 1;
@@ -81,9 +75,8 @@ impl LinkClient {
     }
 }
 
-/// Supervisor connection endpoint for a daemon worker. Each request uses its
-/// own socket so a long-poll or slow worker cannot block a roster or message
-/// admission request behind the connection's read lock.
+/// Supervisor connection endpoint for a daemon worker: each request uses its own
+/// socket, so a slow worker cannot block roster or message admission.
 pub struct SupervisorLink {
     socket_path: PathBuf,
 }
@@ -94,21 +87,16 @@ impl SupervisorLink {
         Self { socket_path }
     }
 
-    /// The supervisor socket this link dials.
     #[must_use]
     pub fn socket_path(&self) -> &PathBuf {
         &self.socket_path
     }
 
-    /// Send one request over an independent connection. Once a command is
-    /// written it is never retried; only a failed write can reconnect once.
+    /// Send one request over an independent connection (a failed write reconnects once).
     ///
     /// # Errors
     ///
-    /// Returns an error when the connect fails, the deadline passes
-    /// before the response lands (a link timeout), or the command write
-    /// or response read fails (a failed write reconnects once, then
-    /// errors).
+    /// Returns an error when the connect fails, the deadline passes, or the write/read fails.
     pub async fn request(&self, command: Value, timeout: Duration) -> Result<DaemonResponse> {
         // Include connect and the supervisor hello in the caller's deadline:
         // a socket that accepts but never greets must not stall this request.
@@ -155,9 +143,7 @@ impl SupervisorLink {
     ///
     /// # Errors
     ///
-    /// Returns an error when the underlying request fails, or the
-    /// response reports failure (its error text, or "request failed"
-    /// when it carries none).
+    /// Returns an error when the request fails or the response reports failure.
     pub async fn request_success(&self, command: Value, timeout: Duration) -> Result<Value> {
         let response = self.request(command, timeout).await?;
         if !response.success {
@@ -260,8 +246,6 @@ mod tests {
         server.await.unwrap();
     }
 
-    /// The link round-trips one command against a JSONL echo server: hello
-    /// handshake, id-matched response, reconnect after a dead connection.
     #[tokio::test]
     async fn link_round_trips_against_an_echo_server() {
         let dir = tempfile::TempDir::new().unwrap();

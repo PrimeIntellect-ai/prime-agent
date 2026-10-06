@@ -1,34 +1,18 @@
-//! Session-archive e2e (roadmap: the sessions directory must not grow
-//! forever). Two flows against the real supervisor binary:
-//!
-//! 1. The boot sweep archives aged sessions into
-//!    `<agent-dir>/sessions-archive` (age rule: default 30 days), spares
-//!    fresh ones, spares a session pinned by an active scheduled job, and
-//!    the catalog no longer lists the archived rows.
-//! 2. An archived session resumes through the wake path: `send_message`
-//!    by selector restores the file into the sessions dir (the archived
-//!    lifecycle stays reachable via its resume selector, TS parity) and
-//!    the woken worker runs the turn against the mock provider.
-//!
-//! Unix-only e2e (`AF_UNIX` sockets): compiles to nothing elsewhere, like the
-//! other pa-daemon e2e verifiers.
-// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
-// the full rationale).
-// Stack-resident futures by design on the daemon's hot paths; boxing the
-// call sites for a lint tick is a perf regression with zero correctness gain.
+//! Session-archive e2e: the boot sweep archives aged sessions into
+//! `<agent-dir>/sessions-archive` (default 30 days), spares fresh and
+//! job-pinned ones, and the catalog excludes the archived rows; an archived
+//! session resumes through the wake path (TS parity).
+// Stack-resident futures by design on the daemon's hot paths.
 #![allow(clippy::large_futures)]
-// 64-bit-only targets; the narrowing casts sit at OS boundaries
-// (pid/fd/time/size) where the values are bounded by the kernel - the
-// dead-guard expect()s would add panic paths where silent wrap was
-// deliberate.
+// Narrowing casts sit at OS boundaries (pid/fd/time/size) where the kernel
+// bounds the values.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// The fn-length threshold is a style gate, not correctness; the structure
-// campaign owns the god-fn splits as a follow-up.
+// Style gate only, not correctness.
 #![allow(clippy::too_many_lines)]
 // API-shape opinions, not defects; the surfaces are deliberate.
 #![allow(
@@ -137,9 +121,8 @@ fn spawn_daemon(socket: &Path, agent_dir: &Path) -> Daemon {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         // A supervisor killed at teardown must not leak its session workers
-        // into later test binaries: the worker's supervisor-lost exit (TS
-        // `exitIfSupervisorOrphanedForTooLong`) runs on this short window
-        // instead of the 5-minute default.
+        // into later test binaries: the worker's supervisor-lost exit runs
+        // on this short window instead of the 5-minute default.
         .env(
             pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
             "15000",
@@ -225,7 +208,6 @@ impl Client {
     }
 }
 
-/// Poll a sync probe until it yields a value.
 fn wait_until<T>(deadline: Duration, mut probe: impl FnMut() -> Option<T>) -> T {
     let deadline = Instant::now() + deadline;
     loop {
@@ -237,7 +219,6 @@ fn wait_until<T>(deadline: Duration, mut probe: impl FnMut() -> Option<T>) -> T 
     }
 }
 
-/// A saved session fixture: header + name + one user message.
 fn write_fixture(sessions_dir: &Path, name: &str) -> String {
     let mut session = pa_daemon::session_store::SessionFile::create("/work", None, 0);
     let id = session.session_id().to_string();
@@ -259,8 +240,7 @@ fn age_days(path: &Path, days: u64) {
 }
 
 /// An active scheduled job pinning one session file (the disk analogue of
-/// the TS idle-eviction `hasRegisteredCronJob` guard): the sweep must never
-/// archive its target.
+/// TS `hasRegisteredCronJob`): the sweep must never archive its target.
 fn pin_with_scheduled_job(agent_dir: &Path, session_id: &str, session_file: &Path) {
     let partition = agent_dir.join("session-artifacts").join(session_id);
     std::fs::create_dir_all(&partition).expect("artifacts partition");
@@ -285,8 +265,6 @@ fn pin_with_scheduled_job(agent_dir: &Path, session_id: &str, session_file: &Pat
     .expect("write scheduled-jobs.json");
 }
 
-/// The saved-session catalog rows (the `list_saved_sessions` final
-/// response).
 fn saved_rows(client: &mut Client, id: &str, cwd: &Path) -> Vec<Value> {
     client.send_command(
         id,
@@ -302,8 +280,6 @@ fn saved_rows(client: &mut Client, id: &str, cwd: &Path) -> Vec<Value> {
     }
 }
 
-/// Assert the daemon log mentions one of `needles` (the rotating log for
-/// the supervisor socket under `<agent-dir>/logs`).
 fn log_mentions(agent_dir: &Path, needle: &str) -> bool {
     let Ok(entries) = std::fs::read_dir(agent_dir.join("logs")) else {
         return false;
@@ -325,8 +301,6 @@ fn boot_sweep_archives_aged_sessions_and_the_catalog_excludes_them() {
     let aged_two = write_fixture(&sessions, "aged-two");
     let fresh = write_fixture(&sessions, "fresh-one");
     let pinned = write_fixture(&sessions, "pinned-old");
-    // The default policy (30 days) retires both aged fixtures; the fresh
-    // one and the job-pinned one stay.
     age_days(&sessions.join(format!("{aged_one}.jsonl")), 40);
     age_days(&sessions.join(format!("{aged_two}.jsonl")), 40);
     age_days(&sessions.join(format!("{pinned}.jsonl")), 40);
@@ -341,8 +315,6 @@ fn boot_sweep_archives_aged_sessions_and_the_catalog_excludes_them() {
     let (mut client, hello) = Client::connect(&socket);
     assert_eq!(hello["type"], "daemon_hello");
 
-    // The boot sweep ran: the aged sessions moved into the archive, the
-    // fresh and the pinned ones stay live.
     let archive = agent_dir.join("sessions-archive");
     wait_until(Duration::from_secs(10), || {
         (archive.join(format!("{aged_one}.jsonl")).is_file()
@@ -365,12 +337,10 @@ fn boot_sweep_archives_aged_sessions_and_the_catalog_excludes_them() {
         "only the aged sessions archived"
     );
 
-    // Catalog integration: the archived rows no longer surface.
     let rows = saved_rows(&mut client, "l1", dir.path());
     let names: Vec<&str> = rows.iter().filter_map(|row| row["name"].as_str()).collect();
     assert_eq!(names, vec!["fresh-one", "pinned-old"], "rows: {rows:?}");
 
-    // The daemon logged the sweep.
     wait_until(Duration::from_secs(5), || {
         log_mentions(&agent_dir, "archived 2 session(s)").then_some(())
     });
@@ -407,7 +377,6 @@ fn an_archived_session_resumes_through_the_wake() {
     )
     .expect("write models.json");
 
-    // Phase 1: a live session runs one turn, then stops; its file stays.
     let socket = dir.path().join("daemon.sock");
     let first = spawn_daemon(&socket, &agent_dir);
     let session_id = {
@@ -459,8 +428,6 @@ fn an_archived_session_resumes_through_the_wake() {
     };
     drop(first);
 
-    // Phase 2: backdate the saved file past the default age rule and
-    // restart the supervisor; its boot sweep archives the session.
     let saved = sessions.join(format!("{session_id}.jsonl"));
     assert!(
         saved.is_file(),
@@ -480,9 +447,6 @@ fn an_archived_session_resumes_through_the_wake() {
     });
     assert!(!saved.is_file(), "aged session left the sessions dir");
 
-    // Phase 3: the resume. Sending by name falls back to the archive,
-    // restores the file into the sessions dir, wakes its worker, and the
-    // turn runs against the mock.
     client.send_command(
         "s1",
         &json!({ "type": "send_message", "targetActiveSessionId": "beta", "message": "wake up" }),
@@ -496,7 +460,6 @@ fn an_archived_session_resumes_through_the_wake() {
         .expect("woken active id")
         .to_string();
 
-    // The restored file is live again and the turn ran.
     wait_until(Duration::from_secs(10), || saved.is_file().then_some(()));
     wait_until(Duration::from_secs(30), || {
         client.send_command(

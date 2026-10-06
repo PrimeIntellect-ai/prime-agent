@@ -1,17 +1,13 @@
-//! The thinking-channel pins: a GLM-5.3-style response arrives either with
-//! its reasoning in `delta.reasoning_content` (the healthy envelope —
-//! the thinking block's signature is the field name) or with its
-//! reasoning merged into `delta.content` (the content-only envelope —
-//! no thinking block at all, the reasoning rides the text block). The
-//! stream maps whichever envelope the provider sends; these two pins
-//! document that BOTH assemblies are faithful, so stored rows whose
-//! reasoning rides the text block are the provider's envelope, not a
-//! local reclassification of a thinking stream.
+//! The thinking-channel pins: a GLM-5.3-style response arrives either with its reasoning in
+//! `delta.reasoning_content` (the healthy envelope — the thinking block's signature is the field
+//! name) or with its reasoning merged into `delta.content` (the content-only envelope — no thinking
+//! block at all). Both assemblies are faithful: a stored row's reasoning riding the text block is
+//! the provider's envelope, not a local reclassification.
 
 use super::*;
 
-/// The diagnosed session's model entry (the internal GLM-5.3 fast
-/// route: reasoning mandatory, catalog `reasoning: true`).
+/// The diagnosed session's model entry (the internal GLM-5.3 fast route: reasoning mandatory,
+/// catalog `reasoning: true`).
 fn glm_fast_model() -> Value {
     json!({
         "id": "internal/glm-5.3-fast",
@@ -26,8 +22,7 @@ fn glm_fast_model() -> Value {
     })
 }
 
-/// Stream one SSE body end-to-end, collecting every event plus the
-/// final assistant message.
+/// Stream one SSE body end-to-end, collecting every event plus the final assistant message.
 async fn stream_events(
     model: Value,
     body: String,
@@ -76,12 +71,9 @@ fn sse_body(chunks: &[Value]) -> String {
     body
 }
 
-/// THE CONTENT-ONLY ENVELOPE: the reasoning arrives ONLY inside `content`
-/// deltas — no `reasoning_content` delta — so the assembled message
-/// carries no thinking block and the text block holds the reasoning
-/// merged with the response. No thinking events fire: the stored rows
-/// this assembly produces are the store being faithful to the envelope,
-/// not a misclassification.
+/// THE CONTENT-ONLY ENVELOPE: the reasoning arrives ONLY inside `content` deltas — no
+/// `reasoning_content` delta — so the assembled message carries no thinking block and the text
+/// block holds the reasoning merged with the response.
 #[tokio::test]
 async fn reasoning_in_content_deltas_assembles_no_thinking_block() {
     let reasoning_prose = "The domain-flip PR (#3142) is green. The plan:\n1. Create the worktree.\n2. Start the rebase.\nActually — the smarter route: let me execute.";
@@ -148,10 +140,9 @@ async fn reasoning_in_content_deltas_assembles_no_thinking_block() {
     assert_eq!(message.usage.input, 244_064);
 }
 
-/// THE HEALTHY ENVELOPE: the reasoning arrives in `delta.reasoning_content`,
-/// the answer in `delta.content`, and the assembled message carries the
-/// thinking block whose signature is the field name (the wire shape the
-/// session rows' `thinkingSignature: "reasoning_content"` records),
+/// THE HEALTHY ENVELOPE: the reasoning arrives in `delta.reasoning_content`, the answer in
+/// `delta.content`, and the assembled message carries the thinking block whose signature is the
+/// field name (the wire shape the session rows' `thinkingSignature: "reasoning_content"` records),
 /// followed by the text block. Thinking events fire.
 #[tokio::test]
 async fn reasoning_content_deltas_assemble_the_thinking_block_with_the_field_signature() {

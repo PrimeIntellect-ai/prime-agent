@@ -1,12 +1,7 @@
-//! The composition root's provider auth flows behind the TUI's `/login`
-//! and `/logout` (TS `ProviderAuthFlows`): the provider catalog rows with
-//! their auth status, the API-key store, the MCP device flow, the Prime
-//! Inference terminal login (`prime_inference_login`), and the four
-//! subscription logins — the Codex Subscription login
-//! (`codex_subscription_login`) and the Anthropic, GitHub Copilot, and
-//! xAI logins (`subscription_login`: the PKCE callback flow, the device
-//! flows, the token exchanges, and the credential writes). The Prime
-//! browser logins (the RSA `auth_challenge` flow) are not ported yet.
+//! The provider auth flows behind the TUI's `/login` and `/logout` (TS
+//! `ProviderAuthFlows`): the provider catalog rows, the API-key store, the
+//! MCP device flow, the Prime Inference login, and the subscription logins;
+//! the Prime browser logins are not ported yet.
 
 use std::path::{Path, PathBuf};
 
@@ -20,8 +15,7 @@ use pa_tui::provider_auth::{
     ProviderWarningFuture,
 };
 
-/// The TS OAuth provider rows (`the TS AI library/oauth` registry): the
-/// subscription logins, every flow ported.
+/// The subscription login providers (every flow ported).
 const SUBSCRIPTION_PROVIDERS: [(&str, &str); 4] = [
     ("anthropic", "Anthropic (Claude Pro/Max)"),
     ("github-copilot", "GitHub Copilot"),
@@ -29,8 +23,7 @@ const SUBSCRIPTION_PROVIDERS: [(&str, &str); 4] = [
     ("xai", "xAI (Grok)"),
 ];
 
-/// TS `BUILT_IN_PROVIDER_DISPLAY_NAMES` (provider id -> display name):
-/// a known display name marks an API-key login provider.
+/// Provider id -> display name; a known display name marks an API-key login provider.
 const BUILT_IN_PROVIDER_DISPLAY_NAMES: &[(&str, &str)] = &[
     ("anthropic", "Anthropic"),
     ("amazon-bedrock", "Amazon Bedrock"),
@@ -73,7 +66,7 @@ const BUILT_IN_PROVIDER_DISPLAY_NAMES: &[(&str, &str)] = &[
 
 const PRIME_INFERENCE_PROVIDER_ID: &str = "prime-inference";
 
-/// The display name of a provider id (the TS map, else the id itself).
+/// The display name of a provider id (else the id itself).
 fn display_name(provider_id: &str) -> String {
     BUILT_IN_PROVIDER_DISPLAY_NAMES
         .iter()
@@ -81,8 +74,8 @@ fn display_name(provider_id: &str) -> String {
         .map_or_else(|| provider_id.to_string(), |(_, name)| name.to_string())
 }
 
-/// TS `isApiKeyLoginProvider`: the display-name map, or a provider the
-/// built-in model provider set does not know (custom models.json entries).
+/// The display-name map, or a provider the built-in model provider set does not know (custom
+/// models.json entries).
 fn is_api_key_login_provider(
     provider_id: &str,
     built_in_provider_ids: &std::collections::HashSet<String>,
@@ -96,9 +89,8 @@ fn is_api_key_login_provider(
     !built_in_provider_ids.contains(provider_id)
 }
 
-/// The provider's status indicator (TS `formatStatusIndicator` +
-/// `formatApiKeyStatusIndicator`): the stored credential's match, the env
-/// key, or the unconfigured hidden meta.
+/// The provider's status indicator: the stored credential's match, the env key, or the unconfigured
+/// hidden meta.
 fn status_indicator(
     credential: Option<&AuthCredential>,
     status: &AuthStatus,
@@ -114,8 +106,8 @@ fn status_indicator(
                 .unwrap_or_else(|| "expired".to_string()),
         });
     }
-    // A non-stored source: env keys and config mark api-key providers
-    // configured; subscription rows stay "unconfigured".
+    // A non-stored source: env keys and config mark api-key providers configured; subscription rows
+    // stay "unconfigured".
     if let Some(source) = status.source {
         if source != AuthSource::Stored {
             return match auth_type {
@@ -162,7 +154,6 @@ fn status_indicator(
     None
 }
 
-/// TS `formatApiKeyStatusIndicator`.
 fn api_key_source_label(source: AuthSource, label: Option<&str>) -> String {
     match source {
         AuthSource::Environment => {
@@ -177,7 +168,7 @@ fn api_key_source_label(source: AuthSource, label: Option<&str>) -> String {
     }
 }
 
-/// TS `compareAuthSelectorProviders`: oauth before api key, then by name.
+/// Oauth before api key, then by name.
 fn ts_row_order(a: &ProviderRow, b: &ProviderRow) -> std::cmp::Ordering {
     if a.auth_type != b.auth_type {
         return if a.auth_type == AuthType::Oauth {
@@ -189,9 +180,8 @@ fn ts_row_order(a: &ProviderRow, b: &ProviderRow) -> std::cmp::Ordering {
     a.name.cmp(&b.name)
 }
 
-/// TS `ANTHROPIC_SUBSCRIPTION_AUTH_WARNING` (#2645): subscription
-/// requests identify as Claude Code, which may violate Anthropic's
-/// terms; an API key avoids the risk.
+/// Subscription requests identify as Claude Code, which may violate Anthropic's terms; an API key
+/// avoids the risk (#2645).
 const ANTHROPIC_SUBSCRIPTION_AUTH_WARNING: &str = "Anthropic subscription auth is active. Usage draws from your plan limits, but Prime Agent identifies as Claude Code and this may violate Anthropic's terms — your account can be restricted or banned. An Anthropic API key avoids the risk. Manage usage at https://claude.ai/settings/usage.";
 
 /// The provider auth surface against one daemon's shared directories.
@@ -221,11 +211,8 @@ impl ProviderAuth {
         (credential, status)
     }
 
-    /// TS `getAnthropicSubscriptionAuthWarning` (#2645, blocking body):
-    /// the ban-risk warning applies when the stored Anthropic credential
-    /// is an OAuth login, or the resolved key is a subscription token
-    /// (`sk-ant-oat...` — the same prefix the provider layer treats as
-    /// OAuth). `None` = the auth is not a subscription.
+    /// The ban-risk warning (#2645) applies when the stored Anthropic credential
+    /// is an OAuth login or a subscription token (`sk-ant-oat...`). `None` = not one.
     fn anthropic_subscription_warning_blocking(&self) -> Option<&'static str> {
         let mut auth = self.auth_storage();
         if let Some(credential) = auth.get_all().credential("anthropic") {
@@ -248,48 +235,39 @@ impl ProviderAuthCommands for ProviderAuth {
     fn login_options(&self) -> ProviderRowsFuture {
         let provider = self.clone();
         Box::pin(async move {
-            // The row build locks the auth store and the MCP manager
-            // (blocking mutexes); keep them off the async workers.
+            // The row build locks the auth store and the MCP manager (blocking mutexes); keep them
+            // off the async workers.
             tokio::task::spawn_blocking(move || provider.login_rows_blocking())
                 .await
                 .expect("the row build task ran")
         })
     }
 
-    /// TS `getLogoutProviderOptions`: one row per stored credential,
-    /// sorted by name.
+    /// TS `getLogoutProviderOptions`: one row per stored credential, sorted by name.
     fn logout_options(&self) -> ProviderRowsFuture {
         let provider = self.clone();
         Box::pin(async move {
-            // The stored-credential list locks the auth store; keep it
-            // off the async workers.
             tokio::task::spawn_blocking(move || provider.logout_rows_blocking())
                 .await
                 .expect("the row build task ran")
         })
     }
 
-    /// TS `loginProvider`: the API-key store for prompted keys, the MCP
-    /// device flow for integrations; the panel-driven subscription and
-    /// Prime flows route through [`ProviderAuth::login_on_panel`].
+    /// The API-key store for prompted keys; the panel-driven flows route through
+    /// [`ProviderAuth::login_on_panel`].
     fn login(&self, provider: &ProviderRow, api_key: Option<&str>) -> ProviderAuthFuture {
         let provider_row = provider.clone();
         let agent_dir = self.agent_dir.clone();
         let api_key = api_key.map(str::to_string);
         Box::pin(async move {
-            // The auth-store writes and the MCP manager locks stay off
-            // the async workers.
             tokio::task::spawn_blocking(move || login_blocking(&provider_row, &agent_dir, api_key))
                 .await
                 .expect("the login task ran")
         })
     }
 
-    /// TS `loginProvider` for the panel-driven flows (the MCP OAuth
-    /// login, the Prime Inference login): the flow drives the inline
-    /// auth panel (progress lines, prompts, the team picker render in
-    /// the TUI; the oneshot replies answer the flow) and never touches
-    /// the terminal.
+    /// The panel-driven flows (the MCP OAuth login, the Prime Inference login):
+    /// the flow drives the inline auth panel and never touches the terminal.
     fn login_on_panel(
         &self,
         provider: &ProviderRow,
@@ -299,9 +277,8 @@ impl ProviderAuthCommands for ProviderAuth {
         let cwd = self.cwd.clone();
         let agent_dir = self.agent_dir.clone();
         Box::pin(async move {
-            // The auth-store writes, the MCP manager locks, and the
-            // panel round-trips stay off the async workers (a prompt's
-            // answer arrives from the TUI loop's thread).
+            // The panel round-trips stay off the async workers (a prompt's answer arrives from the
+            // TUI loop's thread).
             tokio::task::spawn_blocking(move || {
                 login_blocking_on_panel(&provider_row, cwd, agent_dir, panel)
             })
@@ -310,20 +287,13 @@ impl ProviderAuthCommands for ProviderAuth {
         })
     }
 
-    /// TS `getAnthropicSubscriptionAuthWarning` (#2645): the ban-risk
-    /// warning for an active Anthropic subscription auth, for the session
-    /// surface to show once per run. The store lock (and the key
-    /// resolution, which may run a `!command` credential) stay off the
-    /// async workers.
+    /// The ban-risk warning (#2645) for an active Anthropic subscription auth, for the session
+    /// surface to show once per run.
     fn anthropic_subscription_warning(&self) -> ProviderWarningFuture {
         let provider = self.clone();
         Box::pin(async move {
-            // The lookup is warning-only (TS ignores auth lookup failures
-            // the same way), so a hung `!command` credential must not pin
-            // the session surface: the TS resolution caps command
-            // execution at 10s (`execSyncHidden`/`spawnSyncHidden`
-            // `timeout: 10000`), and the check resolves no-warning at the
-            // same bound.
+            // The lookup is warning-only, so a hung `!command` credential must not
+            // pin the session surface: TS caps command execution at 10s.
             let lookup = tokio::task::spawn_blocking(move || {
                 provider.anthropic_subscription_warning_blocking()
             });
@@ -334,8 +304,7 @@ impl ProviderAuthCommands for ProviderAuth {
         })
     }
 
-    /// TS `runLogout`'s removal: the message matches the credential's
-    /// type; a missing credential is a no-op notice.
+    /// The message matches the credential's type; a missing credential is a no-op notice.
     fn logout(&self, provider: &ProviderRow) -> ProviderAuthFuture {
         let provider_row = provider.clone();
         let agent_dir = self.agent_dir.clone();
@@ -358,10 +327,8 @@ impl ProviderAuth {
         {
             let mut rows: Vec<ProviderRow> = Vec::new();
 
-            // The subscription OAuth rows (TS `getOAuthProviders`).
-            // Every flow is ported: the rows select and their logins
-            // run through the panel (the menu rule's unavailable
-            // marking stays for the surfaces a future row may lack).
+            // The subscription OAuth rows: every flow is ported, and the logins run through the
+            // panel.
             for (id, name) in SUBSCRIPTION_PROVIDERS {
                 let (credential, status) = provider.credential_status(id);
                 rows.push(ProviderRow {
@@ -375,8 +342,7 @@ impl ProviderAuth {
                 });
             }
 
-            // The API-key model providers (TS `isApiKeyLoginProvider` over
-            // the registry's provider set).
+            // The API-key model providers.
             let registry = ModelRegistry::create(
                 provider.auth_storage(),
                 provider.agent_dir.join("models.json"),
@@ -398,8 +364,7 @@ impl ProviderAuth {
                     continue;
                 }
                 let (credential, status) = provider.credential_status(&provider_id);
-                // Prime Inference logs in through the Prime flow, not a
-                // pasted key (TS `loginProvider`'s special case).
+                // Prime Inference logs in through the Prime flow, not a pasted key.
                 let flow = if provider_id == PRIME_INFERENCE_PROVIDER_ID {
                     AuthFlow::TerminalFlow
                 } else {
@@ -416,8 +381,8 @@ impl ProviderAuth {
                 });
             }
 
-            // TS sort: configured first, prime-inference first among them,
-            // then oauth before api key by name.
+            // Configured first, prime-inference first among them, then oauth before api key by
+            // name.
             rows.sort_by(|a, b| {
                 let configured = |row: &ProviderRow| {
                     matches!(
@@ -440,8 +405,7 @@ impl ProviderAuth {
         }
     }
 
-    /// The logout row build (blocking: the auth store lock stays off the
-    /// async workers).
+    /// The logout row build.
     fn logout_rows_blocking(self) -> Vec<ProviderRow> {
         let auth = self.auth_storage();
         let mut rows: Vec<ProviderRow> = Vec::new();
@@ -478,11 +442,8 @@ impl ProviderAuth {
                     label: "configured".to_string(),
                 }),
                 flow: AuthFlow::TerminalFlow,
-                // The stored-credential rows exist because the credential
-                // is there (TS `getProviderAuthStatus(id).configured`);
-                // credential removal always runs (an unavailable row's
-                // login never existed; its logout still removes the
-                // stored credential).
+                // The stored-credential rows exist because the credential is there; credential
+                // removal always runs.
                 configured: true,
                 available: true,
             });
@@ -492,23 +453,14 @@ impl ProviderAuth {
     }
 }
 
-/// The login flow body (blocking: the auth store and the MCP manager stay
-/// off the async workers). The panel-driven rows (the MCP OAuth logins,
-/// the Prime Inference login, the subscription logins) route to
-/// [`login_blocking_on_panel`]; this body serves the panel-prompted key
-/// store, and an OAuth row reaching it answers the silent cancel (the
-/// session routes the panel rows to the panel body).
+/// The login flow body for the panel-prompted key store; panel-driven rows route
+/// to [`login_blocking_on_panel`], and an OAuth row reaching it cancels silently.
 fn login_blocking(
     provider_row: &ProviderRow,
     agent_dir: &Path,
     api_key: Option<String>,
 ) -> ProviderAuthOutcome {
     if provider_row.auth_type == AuthType::Oauth {
-        // The panel-driven flows (the MCP logins, the Prime Inference
-        // login) run on the panel. An OAuth row reaching this
-        // non-panel body answers the silent cancel — the session
-        // routes the panel rows to the panel body, and no row dead-ends
-        // in an after-selection error wall.
         return ProviderAuthOutcome::Cancelled;
     }
     let Some(api_key) = api_key.filter(|key| !key.is_empty()) else {
@@ -535,12 +487,8 @@ fn login_blocking(
     ))
 }
 
-/// The login flow body for the panel-driven rows (the MCP OAuth logins,
-/// the Prime Inference login, the four subscription logins): blocking on
-/// the dedicated thread — the
-/// flow awaits its transport AND the panel's prompt/picker replies (the
-/// answers arrive from the TUI loop's thread), and the inline auth panel
-/// carries every surface the plain terminal used to.
+/// The login flow body for the panel-driven rows: the flow awaits its transport
+/// AND the panel's prompt/picker replies.
 fn login_blocking_on_panel(
     provider_row: &ProviderRow,
     cwd: PathBuf,
@@ -568,9 +516,7 @@ fn login_blocking_on_panel(
             ProviderAuthOutcome::Status(outcome)
         };
     }
-    // TS `loginProvider`'s prime-inference dispatch: the API-key flow
-    // (the browser challenge raced against the paste prompt, the whoami
-    // check, the team selection) rendered through the panel.
+    // The Prime Inference login.
     if provider_row.id == PRIME_INFERENCE_PROVIDER_ID {
         return tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -600,11 +546,7 @@ fn login_blocking_on_panel(
                 },
             );
     }
-    // The Codex Subscription login (TS `loginProvider`'s dispatch to
-    // the AI library's `openaiCodexOAuthProvider.login`): the browser
-    // authorization URL block, the manual paste racing the localhost
-    // callback, the token exchange, and the credential write, all
-    // through the inline auth panel (TS the login dialog).
+    // The Codex Subscription login.
     if provider_row.id == pa_core::auth::OPENAI_CODEX_PROVIDER_ID {
         return tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -628,11 +570,7 @@ fn login_blocking_on_panel(
                 },
             );
     }
-    // The Anthropic (Claude Pro/Max) login (TS `loginProvider`'s
-    // dispatch to the AI library's `anthropicOAuthProvider.login`):
-    // the PKCE authorization URL, the manual paste racing the localhost
-    // callback, the JSON token exchange, and the credential write, all
-    // through the inline auth panel.
+    // The Anthropic (Claude Pro/Max) login.
     if provider_row.id == pa_core::auth::ANTHROPIC_PROVIDER_ID {
         return tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -657,11 +595,7 @@ fn login_blocking_on_panel(
                 },
             );
     }
-    // The GitHub Copilot login (TS `loginProvider`'s dispatch to the AI
-    // library's `githubCopilotOAuthProvider.login`): the enterprise
-    // domain prompt, the device flow, the Copilot token exchange, the
-    // model-policy enabling, and the credential write, all through the
-    // inline auth panel.
+    // The GitHub Copilot login.
     if provider_row.id == pa_core::auth::GITHUB_COPILOT_PROVIDER_ID {
         return tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -686,10 +620,7 @@ fn login_blocking_on_panel(
                 },
             );
     }
-    // The xAI (Grok) login (TS `loginProvider`'s dispatch to the AI
-    // library's `xaiOAuthProvider.login`): the device flow, the token
-    // poll, and the credential write, all through the inline auth
-    // panel.
+    // The xAI (Grok) login.
     if provider_row.id == pa_core::auth::XAI_PROVIDER_ID {
         return tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -714,14 +645,10 @@ fn login_blocking_on_panel(
                 },
             );
     }
-    // Any other row that reaches the panel body answers the silent
-    // cancel (the session routes only the ported rows here — never an
-    // error wall).
+    // Any other row answers the silent cancel.
     ProviderAuthOutcome::Cancelled
 }
 
-/// The logout body (blocking: the auth store lock stays off the async
-/// workers).
 fn logout_blocking(provider_row: &ProviderRow, agent_dir: &Path) -> ProviderAuthOutcome {
     let mut auth = pa_core::auth::AuthStorage::create(agent_dir);
     if auth.get_all().get(&provider_row.id).is_none() {

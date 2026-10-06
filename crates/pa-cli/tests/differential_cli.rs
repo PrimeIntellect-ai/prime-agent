@@ -1,13 +1,5 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
-// by design on hot paths (boxing 130 fns is allocation-churn with zero
-// correctness gain); the fn-length threshold is a style gate, not
-// correctness (the harness fns are intentionally linear); 64-bit targets -
-// the narrowing sits at OS/protocol boundaries where the values are
-// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
-// guarded parses), and checked conversions would add panic paths where
-// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
-// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
-// dossier for the conductor).
+// large_futures: stack futures on hot paths by design. too_many_lines: style gate
+// only. Casts: 64-bit targets; narrowing sits at bounded OS/protocol boundaries.
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -18,27 +10,17 @@
 )]
 
 //! Differential CLI tests: run a corpus of invocations against both the
-//! installed TypeScript `prime-agent` binary (ground truth for parity) and the
-//! Rust `prime-agent` binary built by this crate, and assert matching exit
-//! codes, stdout, and stderr.
-//!
-//! Corpus policy: only invocations whose behavior is fully determined by the
-//! CLI surface itself (help/version output, argument validation errors, public
-//! command routing errors, MCP settings reads/writes). Invocations that reach
-//! the daemon, the model runtime, or the package network are excluded because
-//! their output depends on machine state or on crates that are not merged yet.
-//!
-//! The TS binary is located via `PA_TS_BINARY` or `prime-agent` on PATH; the
-//! test is skipped (not failed) when it is not installed. Each binary runs in
-//! its own sandbox HOME + cwd so stateful cases (mcp add) behave identically.
-//! Version numbers are normalized before comparison.
+//! installed TypeScript `prime-agent` binary (ground truth for parity) and
+//! the Rust binary, and assert matching exit codes, stdout, and stderr.
+//! Corpus policy: only invocations fully determined by the CLI surface
+//! itself (help/version, validation errors, routing errors, MCP settings
+//! reads/writes); the test is skipped when the TS binary is not installed.
 #![cfg(unix)]
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Each corpus case: (argv, needs per-binary sandbox HOME).
 const CORPUS: &[&[&str]] = &[
     // Help and version.
     &["--version"],
@@ -108,7 +90,7 @@ const CORPUS: &[&[&str]] = &[
     &["--list-models", "gpt"],
     &["--list-models=gpt"],
     // Daemon client connect failure against a socket that never exists: the
-    // full error text (socket + daemon log path) is deterministic.
+    // full error text is deterministic.
     &[
         "--daemon-socket",
         "/nonexistent-pa-daemon-differential.sock",
@@ -162,9 +144,8 @@ const CORPUS: &[&[&str]] = &[
     &["uninstall"],
     &["manage"],
     &["manage", "update"],
-    // Daemon discovery against an empty sandbox state root: fully
-    // deterministic output for both binaries (the sandbox TMPDIR keeps the
-    // OS census out of either root).
+    // Daemon discovery against an empty sandbox state root: deterministic
+    // output for both binaries.
     &["status"],
     &["status", "--json"],
     &["doctor"],
@@ -204,11 +185,9 @@ const CORPUS: &[&[&str]] = &[
     &["model"],
     &["model", "bogus"],
     &["model", "list", "x", "y"],
-    // Model catalog rows (`model list`): the full table plus search and
-    // no-match paths. These rows need provider auth visible to both
-    // binaries (PRIME_API_KEY on this box) so the catalog, not the
-    // no-models guidance, is what prints; PI_OFFLINE keeps the catalog
-    // deterministic (bundled, no network refresh).
+    // Model catalog rows (`model list`): these need provider auth visible to
+    // both binaries so the catalog, not the no-models guidance, prints;
+    // PI_OFFLINE keeps it deterministic (bundled, no network refresh).
     &["model", "list"],
     &["model", "list", "gpt"],
     &["model", "list", "claude"],
@@ -359,9 +338,8 @@ fn run(binary: &Path, args: &[&str], sandbox: &Path) -> InvocationOutput {
         // `shutdown --force` kills unrelated sockets (containment contract).
         .env("TMPDIR", sandbox.join("tmp"))
         // Isolate the socket dir the same way: daemon discovery (status,
-        // doctor, shutdown) must never see this box's real sockets under
-        // TMPDIR, and `shutdown --force` on the TS binary has no
-        // containment guard at all.
+        // doctor, shutdown) must never see this box's real sockets, and
+        // `shutdown --force` on the TS binary has no containment guard.
         .env("TMPDIR", sandbox.join("tmp"))
         .env("PI_OFFLINE", "1")
         .current_dir(sandbox.join("cwd"))
@@ -387,11 +365,9 @@ fn normalize(text: &str, sandbox_roots: &[&Path]) -> String {
     // Docs paths in login guidance resolve to each binary's own install dir
     // (package dir); compare the shape, not the installation location.
     text = normalize_docs_paths(&text);
-    // Rust-first commands the TS product has not adopted yet (the `prompt`
-    // dump, the telemetry switch, and the tailscale detection core): strip their
-    // help rows and re-align the `Commands:` list, so the rest of the command
-    // surface still compares equal. When the TS product adopts a command, drop
-    // it from `RUST_FIRST_COMMANDS`.
+    // Rust-first commands the TS product has not adopted yet; normalize their
+    // help rows out so the rest of the command surface still compares equal.
+    // When the TS product adopts a command, drop it from `RUST_FIRST_COMMANDS`.
     text = normalize_command_rows(&text);
     // `doctor` (human mode) prints a tailscale detection fact the TS binary
     // does not have yet; strip that line too.
@@ -639,9 +615,8 @@ fn exported_css_vars(html: &str) -> Vec<String> {
 }
 
 /// Differential parity for `session export`: the same fixture exported by
-/// the TS binary and the Rust binary prints the same success line and
-/// produces files carrying the same session data, the same theme CSS
-/// variables, and the same template scaffolding.
+/// both binaries prints the same success line and produces files carrying
+/// the same session data, theme CSS variables, and template scaffolding.
 #[test]
 fn differential_session_export_matches_ts_binary() {
     let Some(ts) = ts_binary() else {

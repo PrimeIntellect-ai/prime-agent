@@ -6,14 +6,14 @@ use super::{AgentsViewScope, Rollup, SelectionKey};
 use crate::agents_view_state::{summary_for_record, UnifiedRecord};
 use crate::subagents::{depth_consistent_binding, is_subagent_summary, summary_parent_keys};
 
-/// The record hierarchy (TS `UnifiedSessionIndex`): every record by its
-/// aliases, and each record's children by parent linkage.
+/// The record hierarchy: every record by its aliases, and each record's children by parent
+/// linkage.
 struct RecordIndex {
     by_key: HashMap<String, usize>,
     children_by_parent: HashMap<usize, Vec<usize>>,
 }
 
-/// Build the record hierarchy (TS `buildUnifiedSessionIndex`).
+/// Build the record hierarchy.
 fn build_record_index(records: &[UnifiedRecord]) -> RecordIndex {
     let mut by_key: HashMap<String, usize> = HashMap::new();
     for (index, record) in records.iter().enumerate() {
@@ -37,9 +37,8 @@ fn build_record_index(records: &[UnifiedRecord]) -> RecordIndex {
     }
 }
 
-/// The record one parent-reference key list resolves to (TS
-/// `findParentRecord`: daemon summary keys first, then the saved catalog's
-/// parent path).
+/// The record one parent-reference key list resolves to (daemon summary keys first, then the
+/// saved catalog's parent path).
 fn find_parent_index(
     records: &[UnifiedRecord],
     by_key: &HashMap<String, usize>,
@@ -58,8 +57,7 @@ fn find_parent_index(
         .filter(|parent| *parent != index)
 }
 
-/// The parent-reference keys of one record's daemon summary (the same
-/// order TS `getParentKeys` uses).
+/// The parent-reference keys of one record's daemon summary.
 fn parent_reference_keys(record: &UnifiedRecord) -> Vec<String> {
     record
         .daemon
@@ -89,10 +87,8 @@ fn parent_record_file(parent: &UnifiedRecord) -> Option<&str> {
         })
 }
 
-/// Whether `parent` sits exactly one level above `child`'s live summary:
-/// a spawned child's parent binding is depth-consistent (the parent is
-/// one level up); a fork's source binding sits at the SAME depth and is
-/// a sibling, never a parent.
+/// Whether `parent` sits exactly one level above `child`'s live summary: a fork's source binding
+/// sits at the SAME depth and is a sibling, never a parent.
 pub(super) fn depth_consistent_parent(daemon: &Value, parent: &UnifiedRecord) -> bool {
     let parent_depth = parent
         .daemon
@@ -109,12 +105,9 @@ pub(super) fn depth_consistent_parent(daemon: &Value, parent: &UnifiedRecord) ->
     depth_consistent_binding(daemon, parent_record_file(parent), parent_depth)
 }
 
-/// Whether `child` rolls up under `parent` (TS `isSubagentDescendantRecord`):
-/// agent lineage only — a branched/forked session links to its source but
-/// is a sibling chat, so it never nests or double-books totals. Resident
+/// Whether `child` rolls up under `parent`: agent lineage only — a branched/forked session links
+/// to its source but is a sibling chat, so it never nests or double-books totals. Resident
 /// children carry the subagent runtime kind; saved children go by depth.
-/// A live `top-level` runtime counts too when its opened file carries a
-/// spawn-consistent parent binding (the record index already links it).
 pub(super) fn is_subagent_descendant(child: &UnifiedRecord, parent: &UnifiedRecord) -> bool {
     if let Some(daemon) = &child.daemon {
         return is_subagent_summary(daemon) || depth_consistent_parent(daemon, parent);
@@ -141,9 +134,8 @@ pub(super) fn is_subagent_descendant(child: &UnifiedRecord, parent: &UnifiedReco
     child_depth > parent_depth
 }
 
-/// Roll costs and descendant counts over the whole hierarchy (TS
-/// `computeRecursiveRollups`), keyed by record identity so filters never
-/// change a row's totals.
+/// Roll costs and descendant counts over the whole hierarchy, keyed by record identity so
+/// filters never change a row's totals.
 pub fn compute_rollups(records: &[UnifiedRecord]) -> HashMap<String, Rollup> {
     let index = build_record_index(records);
     // Roots first, then breadth-first: the bottom-up pass below sees every
@@ -154,10 +146,8 @@ pub fn compute_rollups(records: &[UnifiedRecord]) -> HashMap<String, Rollup> {
         .filter(|(position, _)| find_parent_index(records, &index.by_key, *position).is_none())
         .map(|(position, _)| position)
         .collect();
-    // A growing `order` needs a re-evaluated bound: a `0..order.len()`
-    // range captures the roots' length once, and every depth-2+ descendant
-    // would silently drop out of the rollup walk (its cost vanishing from
-    // every ancestor's total).
+    // A growing `order` needs a re-evaluated bound: a `0..order.len()` range captures the roots'
+    // length once, and every depth-2+ descendant would silently drop out of the rollup walk.
     let mut slot = 0;
     while slot < order.len() {
         for child in index
@@ -195,10 +185,9 @@ pub fn compute_rollups(records: &[UnifiedRecord]) -> HashMap<String, Rollup> {
                     .and_then(Value::as_f64)
             })
             .unwrap_or(0.0);
-        // Deleted subagents keep no row, and their spend is already
-        // subtracted from the parent's own usage by the attribution
-        // entries: without this term a deletion erases the money from
-        // the subtree total (TS #2506's `computeRecursiveRollups`).
+        // Deleted subagents keep no row, and their spend is already subtracted from the
+        // parent's own usage by the attribution entries: without this term a deletion erases
+        // the money from the subtree total (TS #2506).
         let own_cost = records[*position]
             .daemon
             .as_ref()
@@ -215,10 +204,8 @@ pub fn compute_rollups(records: &[UnifiedRecord]) -> HashMap<String, Rollup> {
             })
             .unwrap_or(0.0)
             + deleted_descendants;
-        // `descendants` starts at the deleted-descendant bucket: the
-        // bucket is descendant spend, so the aggregate bills it even
-        // though no live child row carries it (a nested child's own
-        // bucket already rides that child's `cost`).
+        // `descendants` starts at the deleted-descendant bucket: the bucket is descendant spend,
+        // so the aggregate bills it even though no live child row carries it.
         let mut rollup = Rollup {
             cost: own_cost,
             descendants: deleted_descendants,
@@ -242,8 +229,7 @@ pub fn compute_rollups(records: &[UnifiedRecord]) -> HashMap<String, Rollup> {
         .collect()
 }
 
-/// The record a scope key resolves to (TS `findScopeRecord`: active id
-/// first, then session id).
+/// The record a scope key resolves to (active id first, then session id).
 fn scope_root_index(records: &[UnifiedRecord], scope: &AgentsViewScope) -> Option<usize> {
     if let Some(active) = &scope.active_session_id {
         if let Some(position) = records.iter().position(|record| {
@@ -265,10 +251,9 @@ fn scope_root_index(records: &[UnifiedRecord], scope: &AgentsViewScope) -> Optio
     })
 }
 
-/// Restrict records to the scoped root and every descendant (TS
-/// `scopeToSessionSubtree`; the root itself is included — row building
-/// excludes it from the visible roots). `None` when the scope root is not
-/// in the record set.
+/// Restrict records to the scoped root and every descendant (the root itself is included —
+/// row building excludes it from the visible roots). `None` when the scope root is not in the
+/// record set.
 #[must_use]
 pub fn scope_to_subtree(
     records: &[UnifiedRecord],
@@ -297,8 +282,7 @@ pub fn scope_to_subtree(
     )
 }
 
-/// Session ids of the scope root's own ancestors, root-most first (TS
-/// `getUnifiedSessionAncestorSessionIds`).
+/// Session ids of the scope root's own ancestors, root-most first.
 pub fn scope_ancestors(records: &[UnifiedRecord], scope: &AgentsViewScope) -> Vec<String> {
     let index = build_record_index(records);
     let Some(mut current) = scope_root_index(records, scope) else {
@@ -323,8 +307,7 @@ pub fn scope_ancestors(records: &[UnifiedRecord], scope: &AgentsViewScope) -> Ve
     ancestors
 }
 
-/// Whether the session has direct children on the record set (TS
-/// `hasUnifiedSessionChildren`).
+/// Whether the session has direct children on the record set.
 #[must_use]
 pub fn has_session_children(records: &[UnifiedRecord], key: &SelectionKey) -> bool {
     let index = build_record_index(records);

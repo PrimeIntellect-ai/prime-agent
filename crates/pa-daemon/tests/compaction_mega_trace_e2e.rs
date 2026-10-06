@@ -1,30 +1,16 @@
-//! The compaction phase-trace measurement harness: one threshold
-//! auto-compaction over a seeded ~50MB session, with
-//! `PA_COMPACTION_TRACE` capturing every phase boundary of the daemon's
-//! compaction pipeline and the client recording the wire arrival times of
-//! the compaction frames (the loader window a user sees).
-//!
-//! Measurement, not a behavioral contract: the run prints the phase
-//! table (trace deltas + wire gaps) and writes a JSON summary next to
-//! the trace. The behavioral assertions land with the completion-latency
-//! fix this measurement grounds.
-// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
-// the full rationale).
-// Stack-resident futures by design on the daemon's hot paths; boxing the
-// call sites for a lint tick is a perf regression with zero correctness gain.
+//! Compaction phase-trace measurement harness: one threshold auto-compaction
+//! over a seeded ~50MB session, `PA_COMPACTION_TRACE` capturing every phase
+//! boundary and the client recording the wire arrival times (the loader window
+//! a user sees). Measurement, not a behavioral contract; run with --ignored.
 #![allow(clippy::large_futures)]
-// 64-bit-only targets; the narrowing casts sit at OS boundaries
-// (pid/fd/time/size) where the values are bounded by the kernel - the
-// dead-guard expect()s would add panic paths where silent wrap was
-// deliberate.
+// 64-bit-only targets; the narrowing casts sit at bounded OS boundaries.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// The fn-length threshold is a style gate, not correctness; the structure
-// campaign owns the god-fn splits as a follow-up.
+// Fn length is a style gate, not correctness.
 #![allow(clippy::too_many_lines)]
 // API-shape opinions, not defects; the surfaces are deliberate.
 #![allow(
@@ -45,14 +31,12 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-/// One fattening assistant reply (the seeded session bulk).
 const FATTENING_TURNS: usize = 8;
 const FATTEN_REPLY_CHARS: usize = 6 * 1024 * 1024;
 
 struct Supervisor {
     child: Child,
-    // Spawn bookkeeping only: the daemon binds the socket path; the test
-    // drives the daemon through the client port, never this field.
+    // Spawn bookkeeping only: the test drives the daemon through the client port, never this field.
     #[allow(dead_code)]
     socket: PathBuf,
 }
@@ -64,10 +48,9 @@ impl Drop for Supervisor {
     }
 }
 
-/// An OpenAI-compatible SSE mock: every request is answered with the
-/// scripted reply; the crossing turn (request index `FATTENING_TURNS`
-/// plus one) reports the over-threshold usage so the post-turn
-/// threshold check fires a compaction over the fattened session.
+/// An OpenAI-compatible SSE mock: every request is answered with the scripted
+/// reply; the crossing turn (index `FATTENING_TURNS` plus one) reports the
+/// over-threshold usage so the threshold check fires a compaction.
 struct MegaMock {
     requests: Arc<Mutex<Vec<Value>>>,
     port: u16,
@@ -119,8 +102,6 @@ fn small_usage() -> Value {
     })
 }
 
-/// The crossing turn's reported usage: over the tiny reserve, so the
-/// settled turn's threshold check fires.
 fn crossing_usage() -> Value {
     json!({
         "prompt_tokens": 126_000, "completion_tokens": 10, "total_tokens": 126_010,
@@ -153,7 +134,6 @@ fn serve(mut stream: TcpStream, requests: &Arc<Mutex<Vec<Value>>>) -> std::io::R
         reader.read_exact(&mut body_bytes)?;
     }
     let body: Value = serde_json::from_slice(&body_bytes).unwrap_or(Value::Null);
-    // Classify before the request log takes the value.
     let is_turn_request = body
         .get("messages")
         .and_then(|m| m.as_array())
@@ -166,19 +146,13 @@ fn serve(mut stream: TcpStream, requests: &Arc<Mutex<Vec<Value>>>) -> std::io::R
         });
     let index = requests.lock().expect("mock lock").len();
     requests.lock().expect("mock lock").push(body);
-    // The crossing turn is the LAST turn request (the seed plus the
-    // fattening turns before it), not the nth request overall: the
-    // compact-trigger auto-refine review (after a compaction) makes
-    // its own model requests
-    // mid-run, and counting them would shift which request lands on the
-    // scripted index — a race that flipped the threshold arm between
-    // runs. Turn requests are identified by the agent's harness system
-    // prompt; every other request is answered small usage and never
-    // consumes a turn index.
+    // The crossing turn is the LAST turn request, not the nth request overall: the
+    // compact-trigger review makes its own model requests mid-run, and counting them
+    // would shift which request lands on the scripted index. Turn requests are identified
+    // by the harness system prompt; every other request answers small usage.
     let turn_index = {
         let guard = requests.lock().expect("mock lock");
-        // The current request is already pushed: the prior turns are the
-        // turn requests before it.
+        // The current request is already pushed: the prior turns are the turn requests before it.
         guard[..index]
             .iter()
             .filter(|request| {
@@ -235,8 +209,7 @@ fn serve(mut stream: TcpStream, requests: &Arc<Mutex<Vec<Value>>>) -> std::io::R
     )
 }
 
-// The child is reaped in Supervisor::drop (kill + wait); clippy's
-// zombie_processes cannot see the Drop guard from the spawn site.
+// The child is reaped in Supervisor::drop (kill + wait); the lint cannot see the Drop guard.
 #[allow(clippy::zombie_processes)]
 fn spawn_supervisor(socket: &Path, agent_dir: &Path, trace_path: &Path) -> Supervisor {
     std::fs::create_dir_all(agent_dir).expect("agent dir");
@@ -274,7 +247,6 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path, trace_path: &Path) -> Super
 struct TimedClient {
     reader: BufReader<std::os::unix::net::UnixStream>,
     writer: std::os::unix::net::UnixStream,
-    /// Every parked session event with its wire arrival time.
     events: Vec<(Value, Instant)>,
 }
 
@@ -327,8 +299,6 @@ impl TimedClient {
         }
     }
 
-    /// Read lines until the response for `id` arrives, parking broadcast
-    /// session events with their arrival times.
     fn read_response(&mut self, id: &str) -> Value {
         let deadline = Instant::now() + Duration::from_secs(600);
         loop {
@@ -344,7 +314,6 @@ impl TimedClient {
     }
 }
 
-/// Parse the trace lines into a (phase, elapsed micros) table.
 fn read_trace(path: &Path) -> Vec<(String, u128, Value)> {
     let content = std::fs::read_to_string(path).unwrap_or_default();
     content
@@ -360,8 +329,8 @@ fn read_trace(path: &Path) -> Vec<(String, u128, Value)> {
         .collect()
 }
 
-// Measurement harness, not a correctness test: seeds a ~50MB session
-// and prints the phase table; run explicitly with --ignored.
+// Measurement harness, not a correctness test: seeds a ~50MB session and
+// prints the phase table; run explicitly with --ignored.
 #[test]
 #[ignore = "measurement harness: seeds ~50MB and prints the phase table"]
 fn mega_session_threshold_compaction_phase_measurement() {
@@ -393,10 +362,8 @@ fn mega_session_threshold_compaction_phase_measurement() {
         .to_string(),
     )
     .expect("write models.json");
-    // Tiny reserve + tiny keep-recent: the crossing usage fires the
-    // threshold arm and the cut keeps almost nothing (the summarizer
-    // request carries nearly the whole fattened history — the worst
-    // case the operator's stall reports).
+    // Tiny reserve + tiny keep-recent: the crossing usage fires the threshold arm and
+    // the cut keeps almost nothing — the worst case the operator's stall reports.
     std::fs::write(
         agent_dir.join("settings.json"),
         json!({ "compaction": {"enabled": true, "reserveTokens": 500, "keepRecentTokens": 10} })
@@ -436,8 +403,8 @@ fn mega_session_threshold_compaction_phase_measurement() {
     let attached = client.read_response("a1");
     assert_eq!(attached["success"], true, "attach failed: {attached}");
 
-    // The seed turn (small usage): keeps the threshold quiet while the
-    // fattening turns grow the session.
+    // The seed turn (small usage): keeps the threshold quiet while the fattening turns grow the
+    // session.
     client.send_command(
         "p0",
         &json!({"type": "prompt_and_wait", "activeSessionId": session_id, "message": "seed turn"}),
@@ -445,8 +412,8 @@ fn mega_session_threshold_compaction_phase_measurement() {
     let seeded = client.read_response("p0");
     assert_eq!(seeded["success"], true, "seed prompt failed: {seeded}");
 
-    // Fatten the session: FATTENING_TURNS assistant replies of ~6MB each
-    // persist to the session file and ride the live context.
+    // Fatten the session: FATTENING_TURNS assistant replies of ~6MB each persist and ride the live
+    // context.
     for turn in 0..FATTENING_TURNS {
         let id = format!("f{turn}");
         client.send_command(
@@ -461,9 +428,8 @@ fn mega_session_threshold_compaction_phase_measurement() {
         assert_eq!(reply["success"], true, "fattening turn failed: {reply}");
     }
 
-    // The crossing turn: its reported usage crosses the seeded reserve,
-    // so the settled boundary runs the threshold auto-compaction over
-    // the fattened session.
+    // The crossing turn: its reported usage crosses the seeded reserve, so the
+    // settled boundary runs the threshold auto-compaction over the fattened session.
     let crossing_started = Instant::now();
     client.send_command(
         "px",
@@ -476,12 +442,9 @@ fn mega_session_threshold_compaction_phase_measurement() {
         "crossing prompt failed: {crossed}"
     );
 
-    // The compaction's summarizer call really reached the provider
-    // (past the seeded turns and the crossing turn): count the
-    // summarizer requests by their system prompt, not the raw total —
-    // the compact-trigger review round makes
-    // its own model calls, so the raw total no longer proves a
-    // compaction ran.
+    // The summarizer call really reached the provider: count summarizer requests by
+    // their system prompt, not the raw total (the compact-trigger review makes its
+    // own model calls).
     let summarizer_requests = {
         let bodies = mock.requests.lock().expect("mock lock");
         bodies
@@ -506,7 +469,6 @@ fn mega_session_threshold_compaction_phase_measurement() {
         "the compaction's summarizer request never arrived ({summarizer_requests})"
     );
 
-    // The trace table.
     let trace = read_trace(&trace_path);
     assert!(
         trace
@@ -523,7 +485,6 @@ fn mega_session_threshold_compaction_phase_measurement() {
         println!("PHASE {phase:>32} elapsed={elapsed:>9}us delta={delta:>9}us {detail}");
     }
 
-    // The wire view: the loader window a client sees.
     let mut loader_window = None;
     let mut notice_gap = None;
     for (index, (event, at)) in client.events.iter().enumerate() {
@@ -579,8 +540,8 @@ fn mega_session_threshold_compaction_phase_measurement() {
     std::fs::write(&summary_path, summary.to_string()).expect("write summary");
     println!("summary written: {}", summary_path.display());
     println!("trace file: {}", trace_path.display());
-    // The driver's artifact dir (the tempdir dies with the test): copy the
-    // trace + summary out when the harness asks for it.
+    // The driver's artifact dir (the tempdir dies with the test): copy the trace +
+    // summary out when the harness asks for it.
     if let Ok(out_dir) = std::env::var("PA_MEGA_OUT_DIR") {
         let out_dir = PathBuf::from(out_dir);
         std::fs::create_dir_all(&out_dir).expect("artifact dir");

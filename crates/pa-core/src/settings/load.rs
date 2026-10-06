@@ -62,11 +62,9 @@ const KNOWN_FIELDS: &[&str] = &[
     "requestTiming",
 ];
 
-/// Extract each known field independently; ignore fields whose JSON type does
-/// not match the Rust schema (the TS getters do the same check at access
-/// time). Unknown keys land in `extra`.
+/// Extract each known field independently; ignore fields whose JSON type does not match the Rust
+/// schema (the TS getters do the same check at access time). Unknown keys land in `extra`.
 pub fn from_value_lenient(value: &Value) -> Settings {
-    // Fast path: a clean strict parse.
     if let Ok(settings) = serde_json::from_value::<Settings>(value.clone()) {
         return settings;
     }
@@ -75,25 +73,22 @@ pub fn from_value_lenient(value: &Value) -> Settings {
     };
     let mut map = serde_json::Map::new();
     for (key, field) in obj {
-        // Re-parse per field: a bad-typed field drops out instead of failing
-        // the document.
+        // Re-parse per field: a bad-typed field drops out instead of failing the document.
         let mut single = serde_json::Map::new();
         single.insert(key.clone(), field.clone());
         let document = Value::Object(single);
         if let Ok(partial) = serde_json::from_value::<Settings>(document) {
-            // A wrong-typed known field survives as a raw value in `extra`
-            // (serde flatten falls back to the catch-all). Such a field must
-            // be dropped entirely: it behaves as unset. Genuine unknown keys
-            // keep flowing through `extra`.
+            // A wrong-typed known field survives as a raw value in `extra` (serde flatten falls
+            // back to the catch-all). Such a field must be dropped entirely: it behaves as unset.
+            // Genuine unknown keys keep flowing through `extra`.
             if KNOWN_FIELDS.contains(&key.as_str()) && partial.extra.contains_key(key) {
                 continue;
             }
             let merged = serde_json::to_value(partial).unwrap_or_default();
             if let Some(merged_obj) = merged.as_object() {
                 for (k, v) in merged_obj {
-                    // Partial serializations emit explicit nulls for every
-                    // unset field; a null must not erase a value collected
-                    // from an earlier partial.
+                    // Partial serializations emit explicit nulls for every unset field; a null must
+                    // not erase a value collected from an earlier partial.
                     if v.is_null() {
                         continue;
                     }
@@ -138,10 +133,6 @@ mod tests {
         assert_eq!(settings.rlm_max_depth, Some(4));
     }
 
-    /// A config that still carries the removed `extensions` resource key
-    /// (the dead TS-extension setting) loads without error: the key is no
-    /// longer part of the schema, so it survives in `extra` and nothing
-    /// consumes it - an upgrading user's settings file never fails.
     #[test]
     fn removed_extensions_key_loads_gracefully() {
         let value: Value = serde_json::json!({
@@ -157,8 +148,8 @@ mod tests {
         );
     }
 
-    /// TS #2462: a wrong-typed `requestTiming` behaves as unset (the
-    /// known-field registry entry), never a surviving raw value.
+    /// A wrong-typed `requestTiming` behaves as unset (the known-field
+    /// registry entry), never a surviving raw value.
     #[test]
     fn wrong_typed_request_timing_loads_as_none() {
         let value: Value = serde_json::json!({ "requestTiming": "yes" });

@@ -1,6 +1,6 @@
-//! The `/tree` selector surface: the bordered pane over the tree list, with
-//! its label-edit input and the post-selection "Summarize branch?" choice
-//! (TS `TreeSelectorComponent` + interactive-mode's navigate flow).
+//! The `/tree` selector surface: the bordered pane over the tree list,
+//! its label-edit input, and the post-selection "Summarize branch?"
+//! choice (TS `TreeSelectorComponent`).
 
 use crate::keybindings::KeybindingsManager;
 use crate::search_input::SearchInput;
@@ -16,14 +16,12 @@ use serde_json::Value;
 pub enum TreeSelectorAction {
     /// Nothing emitted; the view re-renders from the component state.
     None,
-    /// Navigate to the entry (the daemon `navigate_tree` call), with the
-    /// summarize choice resolved.
+    /// Navigate to the entry (the daemon `navigate_tree` call).
     Navigate {
         target_id: String,
         summarize: bool,
         custom_instructions: Option<String>,
     },
-    /// The selector closed (Escape on the list).
     Cancel,
     /// A label was saved: persist it (`set_session_entry_label`).
     LabelChange {
@@ -52,22 +50,19 @@ enum Mode {
     },
 }
 
-/// The summarize options, in order.
 const SUMMARIZE_OPTIONS: [&str; 3] = ["No summary", "Summarize", "Summarize with custom prompt"];
 
 /// The `/tree` selector.
 pub struct TreeSelector {
     list: TreeList,
     mode: Mode,
-    /// The `branchSummary.skipPrompt` setting: selecting a row navigates
+    /// The `branchSummary.skipPrompt` setting: select navigates
     /// directly with no summary instead of asking.
     skip_summarize_prompt: bool,
 }
 
 impl TreeSelector {
     /// Build the selector over the `get_session_tree` response data.
-    /// `skip_summarize_prompt` mirrors the `branchSummary.skipPrompt` setting
-    /// (the choice pass is skipped, defaulting to no summary).
     pub fn new(
         data: &Value,
         terminal_rows: u16,
@@ -95,20 +90,19 @@ impl TreeSelector {
         })
     }
 
-    /// The current leaf id (the caller needs it for the "already at this
-    /// point" no-op check).
+    /// The current leaf id (the caller's no-op check).
     #[must_use]
     pub fn current_leaf_id(&self) -> Option<&str> {
         self.list.current_leaf_id()
     }
 
-    /// Re-open helper (TS re-shows the selector with the same selection
-    /// after a cancelled branch summary): move the cursor to `entry_id`.
+    /// Re-open helper: after a cancelled branch summary, TS re-shows
+    /// the selector with the same selection.
     pub fn set_initial_selection(&mut self, entry_id: Option<&str>) {
         self.list.move_selection_to(entry_id);
     }
 
-    /// Apply a saved label locally (TS `updateNodeLabel`).
+    /// Apply a saved label locally.
     pub fn update_label(&mut self, entry_id: &str, label: Option<&str>) {
         self.list
             .update_node_label(entry_id, label.map(str::to_string), "");
@@ -131,7 +125,6 @@ impl TreeSelector {
             Mode::Tree => match self.list.handle_key(kb, id) {
                 TreeListAction::Select(target_id) => {
                     if self.skip_summarize_prompt {
-                        // The skip-prompt setting: navigate with no summary.
                         TreeSelectorAction::Navigate {
                             target_id,
                             summarize: false,
@@ -235,7 +228,7 @@ impl TreeSelector {
                         custom_instructions: (!instructions.is_empty()).then_some(instructions),
                     }
                 } else if kb.matches(id, "tui.select.cancel") {
-                    // A cancelled editor loops back to the choice (TS).
+                    // A cancelled editor loops back to the choice.
                     let target_id = target_id.clone();
                     self.mode = Mode::Summarize {
                         target_id,
@@ -252,30 +245,20 @@ impl TreeSelector {
         }
     }
 
-    /// The full pane (TS `TreeSelectorComponent.render`): spacers, borders,
-    /// title, hints, search line, the tree, and any active input.
+    /// The full pane.
     #[must_use]
     pub fn render(&self, theme: &Theme, width: usize, kb: &KeybindingsManager) -> Vec<Line> {
         let border = || vec![theme.fg_span(ThemeColor::Border, "─".repeat(width.max(1)))];
         let mut lines: Vec<Line> = Vec::new();
         lines.push(Vec::new());
         lines.push(border());
-        // TS `new Text("  Session Tree", 1, 0)`: the text plus its margin
-        // indent render as three leading spaces.
+        // The margin makes three leading spaces.
         lines.push(vec![crate::Span::raw("   Session Tree")]);
-        // TS composes the hints from `keyText` lookups: every key part is
-        // capitalized (`Shift+L`, `Ctrl+D`), and `TruncatedText` appends
-        // `...` when the line exceeds the pane width. The label, filter,
-        // cycle, and time keys render from the effective bindings, so a
-        // user `keybindings.json` override moves the hint with the
-        // handler; the move/page/fold arrows stay the literal glyphs TS
-        // renders (`^←/^→ or Alt+←/Alt+→`).
-        // Each derived cell keeps only its bound keys' labels (a
-        // multi-key binding names its first key, the crate's one-line
-        // grammar), an override that empties a binding drops that key,
-        // and a part whose every binding is empty drops its whole
-        // segment — the hint never shows a blank slot or an unlabelled
-        // action.
+        // The label, filter, cycle, and time keys render from the
+        // effective bindings (an override moves the hint with the
+        // handler); the arrows stay TS's literal glyphs. An emptied
+        // binding drops its key, and a part with every binding empty
+        // drops its whole segment.
         let first = |id: &str| {
             kb.first_key(id)
                 .map(|key| crate::keybindings::format_key_text(&key))
@@ -307,8 +290,7 @@ impl TreeSelector {
         if let Some(time) = first("app.tree.toggleLabelTimestamp") {
             parts.push(format!("{time}: label time"));
         }
-        // `TruncatedText` cuts the colored string and appends a plain
-        // `...` after the color reset.
+        // `TruncatedText` appends a plain `...` after the color reset.
         let hints_line = vec![theme.fg_span(ThemeColor::Muted, parts.join(" "))];
         if line_width(&hints_line) > width {
             let mut hints = truncate_line(&hints_line, width.saturating_sub(3), "");
@@ -317,8 +299,7 @@ impl TreeSelector {
         } else {
             lines.push(truncate_line(&hints_line, width, ""));
         }
-        // TS `SearchLine`: the two-space indent sits outside the muted
-        // escape.
+        // The two-space indent sits outside the muted escape.
         let query = self.list.search_query();
         let search: Line = if query.is_empty() {
             vec![
@@ -386,14 +367,8 @@ impl TreeSelector {
     }
 }
 
-/// The key pair every inner pane's bottom hint renders (the TS selector
-/// component's `keyHint` pair): each segment carries
-/// its binding's first effective key — `tui.select.cancel` defaults to
-/// two keys, and the one-line hint shows the primary, the crate's
-/// `key_hint` grammar — and a user override that empties a binding
-/// drops its segment, so the hint never advertises a default key the
-/// pane no longer takes. The action words name what the keys do on that
-/// pane.
+/// The key pair every inner pane's bottom hint renders: each segment
+/// carries its binding's first effective key.
 fn input_pane_hint(kb: &KeybindingsManager, confirm_action: &str, cancel_action: &str) -> String {
     let segments = [
         crate::menu_panel::key_hint(kb, &["tui.select.confirm"], confirm_action),
@@ -458,9 +433,8 @@ mod tests {
     use crate::theme::{ColorMode, Theme};
     use serde_json::{json, Value};
 
-    /// A selector over one visible user-message node (the default tree
-    /// filter hides settings-class entries, so the pane's fixtures ride
-    /// the same `wire_chain` user-message shape as the deep-tree tests).
+    /// A selector over one visible user-message node (the default filter
+    /// hides settings-class entries, so the fixtures use `wire_chain`).
     fn selector() -> TreeSelector {
         TreeSelector::new(&wire_chain(1), 40, false, FilterMode::Default)
             .expect("a selector over one node")
@@ -478,11 +452,6 @@ mod tests {
             .join("\n")
     }
 
-    /// The tree hint's label, filter, cycle, and time keys render from
-    /// the effective bindings (TS composes them from `keyText`): the
-    /// defaults match TS's stock string byte for byte, and a user
-    /// override moves the hint with the handler instead of leaving the
-    /// stale default behind.
     #[test]
     fn tree_hint_renders_the_effective_bindings() {
         let theme = Theme::builtin("prime", ColorMode::TrueColor);
@@ -510,13 +479,9 @@ mod tests {
         assert!(!text.contains("Shift+L: label"), "{text}");
     }
 
-    /// An override that empties a tree binding drops its key, and a
-    /// part whose every binding is empty drops its whole segment — the
-    /// hint never shows a blank slot or an unlabelled action.
     #[test]
     fn tree_hint_drops_unbound_keys_and_segments() {
         let theme = Theme::builtin("prime", ColorMode::TrueColor);
-        // One emptied filter drops its key from the key run.
         let mut cfg = crate::keybindings::KeybindingsConfig::new();
         cfg.insert("app.tree.filter.noTools".to_string(), Vec::new());
         let kb = KeybindingsManager::with_user_bindings(cfg);
@@ -526,7 +491,6 @@ mod tests {
             "the emptied filter leaves no blank slot: {text}"
         );
         assert!(!text.contains("//"), "no empty key slot: {text}");
-        // Both cycle keys emptied drops the cycle suffix.
         let mut cfg = crate::keybindings::KeybindingsConfig::new();
         for id in [
             "app.tree.filter.cycleForward",
@@ -541,8 +505,6 @@ mod tests {
             "the cycle suffix drops with its keys: {text}"
         );
         assert!(!text.contains("cycle"), "{text}");
-        // Every filter plus the label key emptied drops the whole
-        // filter and label segments; the time part stays.
         let mut cfg = crate::keybindings::KeybindingsConfig::new();
         for id in [
             "app.tree.filter.default",
@@ -561,12 +523,6 @@ mod tests {
         assert!(text.contains("Shift+T: label time"), "{text}");
     }
 
-    /// The summarize pane's select/back pair and the input panes'
-    /// save/cancel pair render from the effective bindings: each
-    /// segment carries its binding's FIRST key (tui.select.cancel
-    /// defaults to escape and ctrl+c; the one-line hint names the
-    /// primary), and an override that empties a binding drops its
-    /// segment instead of advertising the default key.
     #[test]
     fn inner_pane_hints_render_the_effective_bindings() {
         let theme = Theme::builtin("prime", ColorMode::TrueColor);
@@ -582,8 +538,6 @@ mod tests {
         sel.handle_key(&kb, "ctrl+m");
         let text = frame_text(&sel.render(&theme, 120, &kb));
         assert!(text.contains("  Ctrl+M select  Esc back"), "{text}");
-        // An emptied cancel binding drops the back segment: the hint
-        // keeps the confirm segment alone, never the default Esc.
         let mut cfg = crate::keybindings::KeybindingsConfig::new();
         cfg.insert("tui.select.cancel".to_string(), Vec::new());
         let kb = KeybindingsManager::with_user_bindings(cfg);
@@ -785,7 +739,7 @@ mod tests {
         })
     }
 
-    /// One cycle-only or cycle-plus-clean-roots payload, with `leaf` as
+    /// A cycle-only or cycle-plus-clean-roots payload, with `leaf` as
     /// the reported leaf.
     fn wire_parents(leaf: &str) -> Value {
         json!({
@@ -833,8 +787,6 @@ mod tests {
 
     #[test]
     fn empty_wire_tree_returns_none() {
-        // Empty data never opens the pane: the caller shows its
-        // "No entries in session" note instead.
         let empty = json!({ "flatNodes": [], "leafId": null });
         assert!(
             TreeSelector::new(&empty, 40, false, FilterMode::Default).is_none(),
@@ -850,8 +802,8 @@ mod tests {
     #[test]
     fn deep_wire_chain_opens_and_renders() {
         // The operator's crash input: a linear session tens of thousands
-        // of entries deep. Build, walk, and render all stay off the call
-        // stack, and the leaf stays selected through the whole depth.
+        // of entries deep — build, walk, and render stay off the call
+        // stack.
         let data = wire_chain(30_000);
         let selector =
             TreeSelector::new(&data, 24, false, FilterMode::Default).expect("deep chain opens");
@@ -882,8 +834,6 @@ mod tests {
 
     #[test]
     fn zero_terminal_rows_and_zero_width_render() {
-        // A zero-size terminal geometry must render, not panic: the pane
-        // clamps its border and truncates every row to the budget.
         let data = wire_chain(2);
         let selector = TreeSelector::new(&data, 0, false, FilterMode::Default)
             .expect("selector opens at zero terminal rows");
@@ -896,10 +846,6 @@ mod tests {
 
     #[test]
     fn parent_cycles_terminate() {
-        // A cycle with no root yields an empty tree (the caller's empty
-        // note); with a clean root present the pane opens, and a leaf
-        // inside the cycle ends the parent-chain walks instead of
-        // spinning.
         let cycle_only = json!({
             "flatNodes": [
                 {

@@ -1,30 +1,13 @@
-//! Browser launch for clicked hyperlinks (TS `tui.ts` `openHyperlink`'s
-//! platform table — darwin `open`, Windows `rundll32
-//! url.dll,FileProtocolHandler`, otherwise `xdg-open`).
-//!
-//! Terminals gate their native link handling while mouse reporting is
-//! active (Ghostty only refreshes link hover when reporting is off or
-//! shift is held), so clicks the TUI consumes must open their OSC 8
-//! targets themselves. pa-tui stays pa-types-only: this is the TUI
-//! package's own opener (the composition root's login flows carry theirs
-//! in pa-core), exactly like TS where tui.ts and the login dialog each
-//! build the same command table.
-//!
-//! The opener always resolves to an absolute path: `Command::new` would
-//! search the inherited `PATH` for a bare name, where a doctored
-//! environment could redirect a click into an arbitrary program, so the
-//! platform tables pin the system tool locations instead (macOS's `open`
-//! is fixed, the xdg-utils slots cover the mainstream Linux layouts, and
-//! a tool that is not there is a failed launch — never a `PATH` hunt).
-//! Windows's `rundll32.exe` runs as the program itself with the protocol
-//! handler and the URL as its arguments: passing the executable's own
-//! path as an argument would have `rundll32` load it as a DLL.
+//! Browser launch for clicked hyperlinks: darwin `open`, Windows
+//! `rundll32 url.dll,FileProtocolHandler`, otherwise `xdg-open` — the TUI opens them itself because
+//! terminals gate native link handling while mouse reporting is active. The opener always resolves
+//! to an absolute path: a bare name would search the inherited `PATH`.
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-/// The xdg-utils locations a desktop Linux carries `xdg-open` in (the
-/// fixed tool slots — searched in order, the first that exists wins).
+/// The fixed `xdg-open` tool slots — searched in order, the first that
+/// exists wins.
 #[cfg(all(unix, not(target_os = "macos")))]
 const XDG_OPEN_SLOTS: [&str; 3] = [
     "/usr/bin/xdg-open",
@@ -33,8 +16,7 @@ const XDG_OPEN_SLOTS: [&str; 3] = [
 ];
 
 /// The absolute opener path and its argument list for one URL, or `None`
-/// when the platform's tool is not installed (the one arm per compiled
-/// target).
+/// when the platform's tool is not installed.
 fn opener(url: &str) -> Option<(PathBuf, Vec<String>)> {
     #[cfg(target_os = "macos")]
     {
@@ -63,12 +45,9 @@ fn opener(url: &str) -> Option<(PathBuf, Vec<String>)> {
     }
 }
 
-/// Open `url` in the user's browser. Fire-and-forget like TS
-/// `openHyperlink` (`execFile` with a swallowed callback): the link
-/// stays visible in the transcript, so a failed launch (no desktop
-/// session, no opener) never fails the click. The child is reaped on a
-/// parked thread — TS's `execFile` waits for exit, and an unwaited spawn
-/// would leak one zombie per click in the long-running TUI.
+/// Open `url` in the user's browser. Fire-and-forget: a failed launch never fails the click.
+/// The child is reaped on a parked thread — an unwaited spawn would leak one zombie per click in
+/// the long-running TUI.
 pub(crate) fn open_in_browser(url: &str) {
     let Some((program, args)) = opener(url) else {
         return;

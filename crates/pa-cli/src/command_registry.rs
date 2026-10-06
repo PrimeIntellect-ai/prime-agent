@@ -1,8 +1,7 @@
-//! Command specs and help formatting, ported from `cli/command-registry.ts`.
+//! Command specs and help formatting.
 
 use crate::config::APP_NAME;
 
-/// A registered public command.
 #[derive(Debug, Clone)]
 pub struct CommandSpec {
     pub path: &'static [&'static str],
@@ -327,7 +326,6 @@ and prints the per-layer breakdown (cached static layers, then the dynamic tail)
 pub const REMOVED_COMMAND_NAMES: &[&str] =
     &["app", "daemon", "install", "manage", "remove", "uninstall"];
 
-/// The top-level public command names.
 pub fn public_command_names() -> Vec<&'static str> {
     COMMAND_SPECS
         .iter()
@@ -477,14 +475,12 @@ const TOP_LEVEL_OPTION_GROUPS: &[OptionGroup] = &[
     },
 ];
 
-/// Look up a command spec by its exact path.
 pub fn get_command_spec(path: &[&str]) -> Option<&'static CommandSpec> {
     COMMAND_SPECS.iter().find(|spec| {
         spec.path.len() == path.len() && spec.path.iter().zip(path).all(|(a, b)| a == b)
     })
 }
 
-/// The direct child command specs of a path.
 pub fn get_child_command_specs(path: &[&str]) -> Vec<&'static CommandSpec> {
     COMMAND_SPECS
         .iter()
@@ -517,9 +513,8 @@ pub fn is_help_command_request(path: &[&str]) -> bool {
     find_command_suggestion(path[path.len() - 1], &candidates).is_some()
 }
 
-/// Suggest the closest candidate command name. The edit-distance heuristic
-/// (`findSlashCommandSuggestion` in core/slash-commands.ts) is shared
-/// vocabulary: `pa_types::slash_commands`.
+/// Suggest the closest candidate command name (the shared edit-distance
+/// heuristic in `pa_types::slash_commands`).
 pub fn find_command_suggestion<'a>(input: &str, candidates: &[&'a str]) -> Option<&'a str> {
     pa_types::slash_commands::find_slash_command_suggestion(input, candidates)
 }
@@ -533,7 +528,7 @@ fn pad_end(value: &str, width: usize) -> String {
     }
 }
 
-/// The full `--help` output, mirroring `formatTopLevelHelp`.
+/// The full `--help` output.
 pub fn format_top_level_help() -> String {
     let commands: Vec<&CommandSpec> = COMMAND_SPECS
         .iter()
@@ -590,7 +585,7 @@ pub fn format_top_level_help() -> String {
     )
 }
 
-/// Per-command help output, mirroring `formatCommandHelp`.
+/// Per-command help output.
 pub fn format_command_help(path: &[&str]) -> Option<String> {
     let spec = get_command_spec(path)?;
     let children = get_child_command_specs(path);

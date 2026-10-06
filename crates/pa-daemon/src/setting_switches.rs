@@ -1,12 +1,8 @@
-//! The model/setting switches (protocol breadth wave b3): the worker arms
-//! for the daemon commands that flip live session settings — `cycle_model`,
-//! `set_scoped_models`, `cycle_thinking_level`, `set_service_tier`,
-//! `set_transport`, `set_steering_mode`, `set_follow_up_mode`,
-//! `set_auto_compaction`, `set_auto_retry`, `abort_retry` (TS daemon-mode
-//! cases). The wire
-//! contracts are TS-verbatim; the durable rows and settings defaults follow
-//! the same TS session methods the existing `set_model` /
-//! `set_thinking_level` arms port.
+//! The worker arms for the daemon commands that flip live session settings:
+//! `cycle_model`, `set_scoped_models`, `cycle_thinking_level`,
+//! `set_service_tier`, `set_transport`, `set_steering_mode`,
+//! `set_follow_up_mode`, `set_auto_compaction`, `set_auto_retry`, and
+//! `abort_retry`; the wire contracts are TS-verbatim.
 
 use serde_json::{json, Value};
 
@@ -16,13 +12,10 @@ use crate::engine::EngineModelSelection;
 use crate::protocol::{response_failure, response_success, DaemonResponse};
 use crate::worker::Worker;
 
-/// The queue-mode wire vocabulary (TS `AgentConnectionQueueMode`).
 const QUEUE_MODES: &[&str] = &["all", "one-at-a-time"];
 
-/// TS `supportsServiceTier` as the worker sees it: the engine's resolved
-/// model metadata (provider, api, id) against the shared pa-types
-/// eligibility fields. A session without a resolved model supports only
-/// the `default` tier, exactly like the TS `model == null` arm.
+/// Whether the engine's resolved model supports `tier`; a session without
+/// a resolved model supports only the `default` tier.
 pub(crate) fn engine_supports_service_tier(
     engine: &dyn crate::engine::SessionEngine,
     tier: ServiceTier,
@@ -38,9 +31,6 @@ pub(crate) fn engine_supports_service_tier(
                 tier,
             ))
         })
-        // A session without a resolved model still accepts `default` (TS
-        // `supportsServiceTier` answers the default tier true for any
-        // model, including none).
         .unwrap_or(tier == ServiceTier::Default)
 }
 
@@ -55,10 +45,8 @@ pub(crate) fn service_tier_wire_name(tier: ServiceTier) -> &'static str {
     }
 }
 
-/// TS `_getEffectiveServiceTier` (#2144's `clampServiceTier`): a tier the
-/// current model does not support degrades to `default`. An unset
-/// (`null`) preference passes through; `None` on the wire reads as `auto`
-/// (see [`service_tier_wire_name`]).
+/// A tier the current model does not support degrades to `default`; an
+/// unset preference passes through, and `None` on the wire reads as `auto`.
 pub(crate) fn effective_service_tier(
     tier: Option<ServiceTier>,
     engine: &dyn crate::engine::SessionEngine,
@@ -72,16 +60,15 @@ pub(crate) fn effective_service_tier(
 }
 
 impl Worker {
-    /// `cycle_model { direction? }` (TS `session.cycleModel`): cycle within
-    /// the scoped model list when one is set (each entry clamped to the
-    /// available catalog), else within the available catalog. Fewer than
-    /// two candidates answer success with `null` data, like TS.
+    /// `cycle_model { direction? }`: cycle within the scoped model list
+    /// when one is set (clamped to the catalog), else within the catalog; fewer
+    /// than two candidates answer success with `null` data.
     pub(crate) async fn handle_cycle_model(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("cycle_model") {
             return response;
         }
-        // Same serialization as `set_model`: the cycle's model switch and
-        // tier re-clamp run under the replacement gate.
+        // Same serialization as `set_model`: the switch and tier re-clamp
+        // run under the replacement gate.
         let _replacement_gate = self.replacement_gate.lock().await;
         let backward = payload.get("direction").and_then(Value::as_str) == Some("backward");
         let (scoped, current) = {
@@ -96,8 +83,7 @@ impl Worker {
                 }),
             )
         };
-        // The candidate list: scoped entries (available ones only), else
-        // the available catalog (TS `_cycleScopedModel` / `_cycleAvailableModel`).
+        // Candidates: scoped entries (available ones only), else the available catalog.
         let registry = crate::state_getters::worker_model_registry(&self.config.agent_dir);
         let available: Vec<pa_types::ai::Model> =
             registry.get_available().into_iter().cloned().collect();
@@ -130,7 +116,6 @@ impl Worker {
                 .collect()
         };
         if candidates.len() <= 1 {
-            // TS `result ?? null`: no cycle happened.
             return response_success(None, "cycle_model", Some(Value::Null));
         }
         let current_index = current
@@ -155,10 +140,8 @@ impl Worker {
         };
         let provider = next_model.provider.clone();
         let model_id = next_model.id.clone();
-        // The daemon model allowlist gate, before the switch attempt: an
-        // off-list candidate answers the cycle with the loud refusal (the
-        // engine's switch guard would also refuse it, but the response
-        // should say why) and emits the `model refused` event.
+        // The allowlist gate before the switch: an off-list candidate answers with the loud
+        // refusal (the engine would also refuse it, but the response should say why).
         {
             let selector = format!("{provider}/{model_id}");
             let cwd = {
@@ -168,9 +151,8 @@ impl Worker {
             let allowlist =
                 crate::model_allowlist::load(std::path::Path::new(&cwd), &self.config.agent_dir);
             if let Err(refusal) = crate::model_allowlist::assert_allowed(&allowlist, &selector) {
-                // The event rides the typed refusal only (the other seams'
-                // rule): a fail-closed unreadable-allowlist error is a
-                // settings problem, not an allowlist refusal.
+                // The event rides the typed refusal only: a fail-closed unreadable-allowlist
+                // error is a settings problem, not an allowlist refusal.
                 if refusal
                     .downcast_ref::<pa_core::models::ModelAllowlistRefusal>()
                     .is_some()
@@ -194,8 +176,7 @@ impl Worker {
             }) {
                 return None;
             }
-            // A scoped entry may pin the level for the switched-to model
-            // (TS `_getThinkingLevelForModelSwitch(next.thinkingLevel)`).
+            // A scoped entry may pin the switched-to model's level.
             if let Some(level) = scoped_thinking
                 .as_deref()
                 .and_then(pa_ai::models::thinking_level_from_str)
@@ -207,7 +188,6 @@ impl Worker {
             let cwd = {
                 let mut core = core.lock().unwrap();
                 if let Some(store) = core.store.as_mut() {
-                    // TS `appendModelChange` records every switch.
                     let _ = store.persist_entry(
                         "model_change",
                         json!({ "provider": provider, "modelId": model_id }),
@@ -215,7 +195,7 @@ impl Worker {
                 }
                 core.cwd.clone()
             };
-            // TS persists the default so the next session starts here.
+            // Persist the default so the next session starts here.
             let mut settings = pa_core::settings::SettingsManager::create(&cwd, &agent_dir);
             let _ = settings.set_default_model_and_provider(&provider, &model_id);
             Some(())
@@ -230,14 +210,10 @@ impl Worker {
                 None,
             );
         }
-        // The new model may not keep the priority tier (TS
-        // `_clampServiceTierForModel`): the clamp runs BEFORE the roster
-        // flush so the published snapshot carries the clamped tier with
-        // the switched-to model (never the previous model's tier).
+        // The new model may not keep the tier: the clamp runs BEFORE the roster
+        // flush so the published snapshot never carries the previous model's tier.
         self.clamp_service_tier_for_model();
-        // The cycled model (and any level the switch clamps) reaches the
-        // roster surfaces immediately: the TS `cycle_model` daemon handler
-        // schedules a roster flush after the switch, matching `set_model`.
+        // The cycled model must reach the roster surfaces immediately.
         self.push_roster_delta();
         let (thinking_level, service_tier) = {
             let core = self.core.lock().unwrap();
@@ -261,21 +237,12 @@ impl Worker {
         )
     }
 
-    /// Re-clamp the effective service tier for the engine's current model
-    /// (TS `_clampServiceTierForModel` on a model switch, #2144's
-    /// `clampServiceTier`): a preference the switched-to model does not
-    /// support degrades to `default`. The engine's request slot ALWAYS
-    /// follows the model switch (TS sets `agent.state.serviceTier` on
-    /// every switch — skipping the write would strand the slot on the
-    /// previous model's clamp after switching back to a capable model);
-    /// the `service_tier_changed` event fires only when the ACTIVE tier
-    /// moves. The stored preference keeps the requested tier, so switching
-    /// back to (or resuming on) a capable model re-applies it.
+    /// Re-clamp the effective tier for the current model: an unsupported
+    /// preference degrades to `default`, and the engine's request slot follows
+    /// the model switch; the event fires only when the ACTIVE tier moves.
     pub(crate) fn clamp_service_tier_for_model(&self) {
-        // The core preference/active pair and the engine's request slot move
-        // together under one lock: worker commands dispatch concurrently,
-        // so a model switch's clamp must never expose a window where the
-        // active tier and the provider target disagree.
+        // The preference/active pair and the engine's request slot move under one lock: concurrent
+        // commands must never see the active tier and the provider target disagree.
         let (changed, clamped) = {
             let mut core = self.core.lock().unwrap();
             let clamped = effective_service_tier(core.service_tier, self.engine.as_ref());
@@ -292,12 +259,8 @@ impl Worker {
         }
     }
 
-    /// The replacement sessions (`new_session` / `switch_session` /
-    /// `import_jsonl` / `fork`) re-seed the service tier like a create
-    /// (TS `createAgentSession` over the moved-to file): the file's
-    /// `service_tier_change` row when it has one, else the settings
-    /// default, then the active tier re-clamps against the restored
-    /// model (the clamp's configure + event contract).
+    /// Replacement sessions re-seed the tier like a create: the file's
+    /// `service_tier_change` row, else the settings default, then re-clamp.
     pub(crate) fn reseed_service_tier_for_replacement(&self) {
         let (restored, cwd) = {
             let core = self.core.lock().unwrap();
@@ -317,8 +280,7 @@ impl Worker {
         self.clamp_service_tier_for_model();
     }
 
-    /// `set_scoped_models { scopedModels }` (TS
-    /// `session.setScopedModels`): store the scoped model list the cycler
+    /// `set_scoped_models { scopedModels }`: store the scoped model list the cycler
     /// and the connection state surface.
     pub(crate) fn handle_set_scoped_models(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("set_scoped_models") {
@@ -367,15 +329,12 @@ impl Worker {
         response_success(None, "set_scoped_models", None)
     }
 
-    /// `cycle_thinking_level` (TS `session.cycleThinkingLevel`): models
-    /// without reasoning answer success with `null` data; reasoning models
-    /// cycle through their supported levels (the same durable-row and
-    /// settings flow as `set_thinking_level`).
+    /// `cycle_thinking_level`: reasoning models cycle their supported levels (the same flow as
+    /// `set_thinking_level`); models without reasoning answer success with `null` data.
     pub(crate) async fn handle_cycle_thinking_level(&self) -> DaemonResponse {
         if let Err(response) = self.require_created("cycle_thinking_level") {
             return response;
         }
-        // TS `supportsThinking()`: the model must support reasoning.
         let reasoning = self
             .engine
             .model_metadata()
@@ -395,7 +354,6 @@ impl Worker {
             .engine
             .effective_thinking_level()
             .unwrap_or_else(|| "off".to_string());
-        // TS: `indexOf` -1 cycles to the first level.
         let index = levels.iter().position(|level| *level == current);
         let next = match index {
             Some(index) => &levels[(index + 1) % levels.len()],
@@ -410,21 +368,14 @@ impl Worker {
         response_success(None, "cycle_thinking_level", Some(json!({ "level": next })))
     }
 
-    /// `set_service_tier { serviceTier }` (TS `session.setServiceTier`,
-    /// #2144 semantics): the preference and the durable `service_tier_change`
-    /// row keep the REQUESTED tier (only the active state clamps), so
-    /// switching to (or resuming on) a capable model re-applies it; the
-    /// settings default persists only when the model supports the tier; and
-    /// the `service_tier_changed` event follows an effective change. An
-    /// unchanged request answers success without side effects.
+    /// `set_service_tier { serviceTier }`: the preference and the durable row keep the
+    /// REQUESTED tier (only the active state clamps), so a capable model re-applies it.
     pub(crate) async fn handle_set_service_tier(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("set_service_tier") {
             return response;
         }
-        // Worker commands dispatch concurrently: the tier mutation runs
-        // under the replacement gate so a session swap's re-seed (TS
-        // `createAgentSession` reading the moved-to file) can never
-        // interleave with a user's in-flight tier change.
+        // The tier mutation runs under the replacement gate so a session swap's re-seed can never
+        // interleave with an in-flight tier change.
         let _replacement_gate = self.replacement_gate.lock().await;
         let Some(tier) = payload
             .get("serviceTier")
@@ -442,10 +393,8 @@ impl Worker {
         let effective = effective_service_tier(Some(tier), self.engine.as_ref()).unwrap_or(tier);
         let (preference_changed, effective_changed, cwd) = {
             let mut core = self.core.lock().unwrap();
-            // The engine's request slot moves under the SAME lock as the
-            // core publish (the clamp's contract): a concurrent turn must
-            // never read the new connection state while its provider
-            // target still carries the old tier.
+            // The engine's request slot moves under the SAME lock as the core publish:
+            // a concurrent turn must never read the new state with the old-tier target.
             self.engine.configure_service_tier(Some(effective));
             let preference = core.service_tier;
             let previous_active = core.active_service_tier;
@@ -456,9 +405,7 @@ impl Worker {
             let mut cwd = core.cwd.clone();
             if preference_changed {
                 if let Some(store) = core.store.as_mut() {
-                    // The same durable row the creation prefix writes (TS
-                    // `appendServiceTierChange(serviceTier)` — the
-                    // REQUESTED tier, not the clamped one).
+                    // The durable row keeps the REQUESTED tier, not the clamped one.
                     let _ =
                         store.persist_entry("service_tier_change", json!({ "serviceTier": tier }));
                 }
@@ -467,8 +414,7 @@ impl Worker {
             (preference_changed, effective_changed, cwd)
         };
         if preference_changed && engine_supports_service_tier(self.engine.as_ref(), tier) {
-            // TS persists the default only when the model supports the
-            // tier (#2144: `supportsServiceTier(this.model, serviceTier)`).
+            // Persist the default only when the model supports the tier.
             let mut settings =
                 pa_core::settings::SettingsManager::create(&cwd, &self.config.agent_dir);
             let _ = settings.set_default_service_tier(tier);
@@ -482,10 +428,8 @@ impl Worker {
         response_success(None, "set_service_tier", None)
     }
 
-    /// `set_transport { transport }` (TS `settingsManager.setTransport` +
-    /// `agent.transport`): persist the transport setting. The live stream
-    /// resolves transport per request from settings in this port, so the
-    /// persisted default is the whole switch.
+    /// `set_transport { transport }`: persist the transport setting; the live stream resolves
+    /// transport per request from settings, so the persisted default is the whole switch.
     pub(crate) fn handle_set_transport(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("set_transport") {
             return response;
@@ -519,9 +463,8 @@ impl Worker {
         response_success(None, "set_transport", None)
     }
 
-    /// `set_steering_mode` / `set_follow_up_mode { mode }` (TS
-    /// `session.setSteeringMode` / `setFollowUpMode`): the queue delivery
-    /// mode, persisted to settings and surfaced on the connection state.
+    /// `set_steering_mode` / `set_follow_up_mode { mode }`: the queue delivery mode, persisted
+    /// to settings and surfaced on the connection state.
     pub(crate) fn handle_set_queue_mode(&self, command: &str, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created(command) {
             return response;
@@ -566,11 +509,8 @@ impl Worker {
         if let Err(error) = persisted {
             return response_failure(None, command, &error.to_string(), None);
         }
-        // TS `session.setSteeringMode`/`setFollowUpMode` write the live
-        // agent's queue mode (`this.agent.steeringMode = mode`): the
-        // engine's agent-level queues drain per the new mode from the
-        // next boundary (the worker lane's delivery mode already carries
-        // the `core.steering_mode`/`core.follow_up_mode` update above).
+        // The live agent's queue mode is written here too: the engine's
+        // queues drain per the new mode from the next boundary.
         if command == "set_steering_mode" {
             self.engine.set_queue_modes(Some(mode), None);
         } else {
@@ -579,8 +519,7 @@ impl Worker {
         response_success(None, command, None)
     }
 
-    /// `set_auto_retry { enabled }` (TS `session.setAutoRetryEnabled`):
-    /// the provider retry policy reads the setting on every turn.
+    /// `set_auto_retry { enabled }`: the provider retry policy reads the setting on every turn.
     pub(crate) fn handle_set_auto_retry(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("set_auto_retry") {
             return response;
@@ -603,12 +542,8 @@ impl Worker {
         response_success(None, "set_auto_retry", None)
     }
 
-    /// `set_auto_compaction { enabled }` (TS `session.setAutoCompactionEnabled`
-    /// → `settingsManager.setCompactionEnabled`): the connection-state flag
-    /// and the settings value change together — TS's connection state reads
-    /// the settings manager, so the persisted write is the change and a
-    /// restarted session re-seeds its flag from it. A failed settings save
-    /// fails the command without flipping the flag.
+    /// `set_auto_compaction { enabled }`: the connection-state flag and the settings value
+    /// change together; a failed save fails the command without flipping the flag.
     pub(crate) fn handle_set_auto_compaction(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("set_auto_compaction") {
             return response;
@@ -628,9 +563,8 @@ impl Worker {
         response_success(None, "set_auto_compaction", None)
     }
 
-    /// `abort_retry` (TS `session.abortRetry`): stop an in-flight retry.
-    /// The turn's abort probe reads the flag (the retry wait loop polls
-    /// it); the next turn start clears it.
+    /// `abort_retry`: stop an in-flight retry; the turn's abort probe polls the flag and the
+    /// next turn start clears it.
     pub(crate) fn handle_abort_retry(&self) -> DaemonResponse {
         if let Err(response) = self.require_created("abort_retry") {
             return response;
@@ -671,11 +605,9 @@ mod tests {
         worker
     }
 
-    /// The connection state carries the settings-seeded switches: the TS
-    /// default service tier ("default", not the old hard-coded "auto")
-    /// and the queue modes. The steering default is "all" (every queued
-    /// steer co-delivers as ONE turn at the next tool-call boundary);
-    /// the follow-up default is "one-at-a-time".
+    /// The connection state carries the settings-seeded defaults: service tier "default"
+    /// (not "auto"), steering "all" (queued steers co-deliver as ONE turn),
+    /// follow-up "one-at-a-time".
     #[tokio::test]
     async fn connection_state_seeds_the_settings_switches() {
         let worker = created_worker().await;
@@ -700,8 +632,7 @@ mod tests {
         assert_eq!(data["scopedModels"], json!([]));
     }
 
-    /// A models.json fixture the registry reads (one provider with
-    /// `count` mock models, all auth-configured).
+    /// One provider with `count` mock models, all auth-configured.
     fn models_fixture(dir: &std::path::Path, count: usize) {
         std::fs::create_dir_all(dir.join("agent")).expect("agent dir");
         let models: Vec<Value> = (1..=count)
@@ -730,9 +661,6 @@ mod tests {
         .expect("write models.json");
     }
 
-    /// Two candidates on a session that cannot switch (the scripted
-    /// harness) fail with the `set_model` refusal; the response command
-    /// stays `cycle_model`.
     #[tokio::test]
     async fn cycle_model_on_a_non_switching_engine_fails_like_set_model() {
         let dir = std::env::temp_dir().join(format!("pa-worker-cm2-{}", uuid::Uuid::new_v4()));
@@ -757,11 +685,6 @@ mod tests {
         );
     }
 
-    /// `cycle_model` answers the daemon model-allowlist refusal with the
-    /// loud message (the refusal reason, not the generic non-switching
-    /// error) and never attempts the switch. The scoped list pins the
-    /// cycle to the two fixture models, so the next candidate is the
-    /// off-allowlist mock.
     #[tokio::test]
     async fn cycle_model_refuses_models_outside_the_allowlist() {
         let dir = std::env::temp_dir().join(format!("pa-worker-cm3-{}", uuid::Uuid::new_v4()));
@@ -810,19 +733,12 @@ mod tests {
         );
     }
 
-    /// The create's `models` config resolves into the session's scoped
-    /// list (TS main.ts:838-851: `config.models ?? enabledModels` →
-    /// `resolveModelScope`): the connection state carries the entries in
-    /// the request's order, a fresh session starts on the first scoped
-    /// model (no explicit model flags, TS main.ts:548-568), and a create
-    /// without `models` falls back to the settings `enabledModels`.
     #[tokio::test]
     async fn create_resolves_the_models_scope_for_the_session() {
         let dir = std::env::temp_dir().join(format!("pa-worker-scope-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         models_fixture(&dir, 2);
-        // The real engine (no script): the startup chain resolves the
-        // session's model against the registry.
+        // The real engine (no script) resolves the model against the registry.
         let mut config = worker_config(&dir);
         config.script = None;
         let worker = Arc::new(Worker::new(config, None));
@@ -860,19 +776,15 @@ mod tests {
             vec!["prime-inference/mock-2", "prime-inference/mock-1"],
             "the scope keeps the request's order: {data}"
         );
-        // No explicit model flags, a fresh session: the startup chain
-        // starts on the first scoped model.
+        // No explicit model flags: the startup chain starts on the first scoped model.
         assert_eq!(data["model"]["id"], "mock-2", "the state's model: {data}");
-        // The scoped entry's `:thinking` rides the picked startup model
-        // (TS main.ts:556-566; `--thinking` stays absent here).
+        // The scoped entry's `:thinking` rides the picked startup model (`--thinking` absent).
         assert_eq!(
             data["thinkingLevel"], "high",
             "the scoped entry's level set the startup thinking: {data}"
         );
 
-        // The settings `enabledModels` fallback (TS `config.models ??
-        // settingsManager.getEnabledModels()`): a create without
-        // `models` resolves the same way.
+        // Settings `enabledModels` fallback: a create without `models` resolves the same way.
         std::fs::write(
             dir.join("agent").join("settings.json"),
             json!({ "enabledModels": ["prime-inference/mock-1", "prime-inference/mock-2"] })
@@ -906,16 +818,6 @@ mod tests {
         );
     }
 
-    /// A fresh, file-backed `--models` create persists the SCOPED startup
-    /// pick in its creation prefix: the file's `model_change` and
-    /// `thinking_level_change` entries must resolve through the registered
-    /// scope (the scoped entry's `:thinking` level included), because a
-    /// resume, a worker respawn, and every session-file reader restore
-    /// from the file — an unscoped prefix would reopen the session on the
-    /// default model instead of the scoped one. The create also must not
-    /// treat its brand-new `sessionPath` as a continuing session (the
-    /// pre-create existence check the scope reads), or the scope would be
-    /// skipped for the startup model entirely.
     #[tokio::test]
     async fn a_fresh_scoped_create_persists_the_scoped_startup_pick_in_its_file() {
         let dir =
@@ -925,9 +827,8 @@ mod tests {
         let mut config = worker_config(&dir);
         config.script = None;
         let worker = Arc::new(Worker::new(config, None));
-        // A session path that does NOT exist yet: the fresh file-backed
-        // arm (the exact path class the review flagged — a post-create
-        // existence check would see the file this create just wrote).
+        // A session path that does NOT exist yet: a post-create existence check would see the
+        // file this create just wrote.
         let session_path = dir.join("fresh-scoped-session.jsonl");
         let created = worker
             .dispatch(
@@ -940,8 +841,7 @@ mod tests {
             )
             .await;
         assert!(created.success, "create failed: {created:?}");
-        // The live startup state starts scoped (the same pick the
-        // in-memory test pins): mock-2 with its `:high` entry.
+        // The live startup state starts scoped: mock-2 with its `:high` entry.
         let state = worker
             .dispatch(
                 "get_connection_state",
@@ -954,8 +854,6 @@ mod tests {
             data["thinkingLevel"], "high",
             "the state's thinking: {data}"
         );
-        // The FILE agrees: the creation prefix's entries carry the scoped
-        // pick, so the session restores scoped after a reopen or respawn.
         let file = std::fs::read_to_string(&session_path).expect("the session file");
         assert!(
             file.contains("\"type\":\"model_change\"")
@@ -970,8 +868,6 @@ mod tests {
         );
     }
 
-    /// `set_scoped_models` stores the list (visible on the connection
-    /// state) and rejects malformed entries with daemon-level failures.
     #[tokio::test]
     async fn set_scoped_models_stores_and_validates() {
         let worker = created_worker().await;
@@ -1010,8 +906,6 @@ mod tests {
         }
     }
 
-    /// `cycle_thinking_level` without a reasoning model answers success
-    /// with `null` data (TS `supportsThinking()`).
     #[tokio::test]
     async fn cycle_thinking_level_without_reasoning_answers_null() {
         let worker = created_worker().await;
@@ -1025,10 +919,8 @@ mod tests {
         assert_eq!(response.data, Some(Value::Null));
     }
 
-    /// `set_service_tier` records the durable row on change (the row keeps
-    /// the REQUESTED tier while an unsupported request clamps to `default`
-    /// in the active state — TS #2144), and an unchanged request records
-    /// nothing more.
+    /// The durable row keeps the REQUESTED tier while an unsupported request clamps to
+    /// `default` in the active state.
     #[tokio::test]
     async fn set_service_tier_records_the_durable_row() {
         let worker = created_worker().await;
@@ -1074,7 +966,6 @@ mod tests {
             rows.last().and_then(|row| row.get("serviceTier")),
             Some(&json!("priority"))
         );
-        // An unchanged request is a no-op success (no new row).
         let response = worker
             .dispatch(
                 "set_service_tier",
@@ -1083,8 +974,6 @@ mod tests {
             .await;
         assert!(response.success);
         assert_eq!(tier_rows(&worker).len(), baseline + 1);
-        // A `flex` preference clamps the same way (the scripted engine
-        // reports no model) and records its own requested tier.
         let response = worker
             .dispatch(
                 "set_service_tier",
@@ -1107,15 +996,10 @@ mod tests {
         assert!(!response.success);
     }
 
-    /// The replacement re-seed restores the moved-to file's tier
-    /// preference (else the settings default) and re-clamps the active
-    /// tier against the restored model (no model on the scripted engine:
-    /// the active tier degrades to `default`).
+    /// On the scripted engine (no model) the restored preference re-clamps the tier to `default`.
     #[tokio::test]
     async fn replacement_reseed_restores_the_tier_preference() {
         let worker = created_worker().await;
-        // No durable row and the settings default "default": the reseed
-        // keeps the default preference.
         worker.reseed_service_tier_for_replacement();
         let (preference, active) = {
             let core = worker.core.lock().unwrap();
@@ -1123,9 +1007,6 @@ mod tests {
         };
         assert_eq!(preference, Some(ServiceTier::Default));
         assert_eq!(active, Some(ServiceTier::Default));
-        // A moved-to file carrying its own tier row re-seeds the
-        // preference; the active tier still clamps against the
-        // model-less engine.
         {
             let mut core = worker.core.lock().unwrap();
             if let Some(store) = core.store.as_mut() {
@@ -1149,8 +1030,6 @@ mod tests {
         assert_eq!(state.data.expect("data")["serviceTier"], json!("default"));
     }
 
-    /// `set_transport` persists the settings value; an unknown transport
-    /// fails the command.
     #[tokio::test]
     async fn set_transport_persists_the_setting() {
         let dir = std::env::temp_dir().join(format!("pa-worker-tr-{}", uuid::Uuid::new_v4()));
@@ -1181,8 +1060,6 @@ mod tests {
         assert!(!response.success);
     }
 
-    /// The queue-mode switches update the connection state and reject the
-    /// values outside the TS vocabulary.
     #[tokio::test]
     async fn queue_mode_switches_update_the_state() {
         let worker = created_worker().await;
@@ -1221,7 +1098,6 @@ mod tests {
         }
     }
 
-    /// `set_auto_retry` persists the toggle the retry policy reads.
     #[tokio::test]
     async fn set_auto_retry_persists_the_toggle() {
         let dir = std::env::temp_dir().join(format!("pa-worker-ar-{}", uuid::Uuid::new_v4()));
@@ -1243,10 +1119,6 @@ mod tests {
         assert!(!policy.enabled);
     }
 
-    /// `set_auto_compaction` flips the connection-state flag and persists
-    /// the settings value; a session created afterwards re-seeds its flag
-    /// from the persisted toggle (TS: the connection state reads the
-    /// settings manager, so the value survives a daemon restart).
     #[tokio::test]
     async fn set_auto_compaction_persists_the_toggle() {
         let dir = std::env::temp_dir().join(format!("pa-worker-ac-{}", uuid::Uuid::new_v4()));
@@ -1286,8 +1158,7 @@ mod tests {
         );
         let settings = pa_core::settings::SettingsManager::create(&dir, dir.join("agent"));
         assert!(!settings.get_compaction_enabled());
-        // A restarted session on the same dirs re-seeds the flag from the
-        // persisted setting (the `create` settings-seeded switches).
+        // A restarted session re-seeds the flag from the persisted setting.
         let worker = Arc::new(Worker::new(worker_config(&dir), None));
         let created = worker
             .dispatch("create", &json!({ "noSession": true, "cwd": dir }))
@@ -1305,15 +1176,11 @@ mod tests {
         );
     }
 
-    /// A failed settings write fails the command and leaves the flag
-    /// unchanged (TS: the connection state is the settings value, so a
-    /// thrown save flips nothing).
     #[tokio::test]
     async fn set_auto_compaction_fails_without_flipping_on_a_failed_save() {
         let dir = std::env::temp_dir().join(format!("pa-worker-acf-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        // A file where the agent dir would be: the settings save cannot
-        // create agent/settings.json.
+        // A file where the agent dir would be: the settings save cannot create agent/settings.json.
         std::fs::write(dir.join("agent"), b"not a directory").unwrap();
         let worker = Arc::new(Worker::new(worker_config(&dir), None));
         let created = worker
@@ -1339,8 +1206,6 @@ mod tests {
         );
     }
 
-    /// `abort_retry` always answers success (TS aborts only an in-flight
-    /// retry; without one the command is still a success).
     #[tokio::test]
     async fn abort_retry_answers_success() {
         let worker = created_worker().await;

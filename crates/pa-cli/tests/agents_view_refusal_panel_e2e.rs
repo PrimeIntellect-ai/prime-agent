@@ -1,13 +1,6 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
-// by design on hot paths (boxing 130 fns is allocation-churn with zero
-// correctness gain); the fn-length threshold is a style gate, not
-// correctness (the harness fns are intentionally linear); 64-bit targets -
-// the narrowing sits at OS/protocol boundaries where the values are
-// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
-// guarded parses), and checked conversions would add panic paths where
-// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
-// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
-// dossier for the conductor).
+// large_futures: stack futures on hot paths by design. too_many_lines:
+// style gate only. Casts: 64-bit targets; narrowing sits at bounded
+// OS/protocol boundaries.
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -18,11 +11,9 @@
 )]
 
 //! End-to-end verifier for the agents view's refusal panel: a session
-//! open refused by a live foreign lease holder (the cross-product hold,
-//! the operator's case) hands back to the view with the multi-line
-//! refusal as its notice — and the view renders the panel with the full
-//! text, both ways out (the continue path and the take-over kill)
-//! visible and wrapped, never the one-line status truncation.
+//! open refused by a live foreign lease holder (the operator's case)
+//! surfaces as the multi-line notice panel with both ways out (the
+//! continue path and the take-over kill) visible and wrapped.
 #![cfg(unix)]
 
 use std::path::{Path, PathBuf};
@@ -85,8 +76,8 @@ fn spawn_daemon(socket: &Path, agent_dir: &Path) -> Daemon {
     panic!("supervisor socket never appeared");
 }
 
-/// A saved-session fixture: a version-3 header, a display name, and one
-/// exchange, so the agents view's catalog carries its row.
+/// A saved-session fixture: a version-3 header, a display name, and one exchange, so the agents
+/// view's catalog carries its row.
 fn write_fixture(dir: &Path, id: &str, name: &str) -> PathBuf {
     let path = dir.join(format!("{id}.jsonl"));
     let content = format!(
@@ -124,9 +115,8 @@ fn frame_text(frames: &[String]) -> String {
     frames.join("\n")
 }
 
-/// The refused open surfaces in the view as the notice panel with both
-/// ways out visible: the continue path and the take-over kill, wrapped
-/// and readable, dismissed by any key.
+/// The refused open surfaces as the notice panel with both ways out (continue and
+/// take-over kill), dismissed by any key.
 #[tokio::test]
 async fn the_refused_open_renders_both_ways_out_as_the_notice_panel() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -135,10 +125,8 @@ async fn the_refused_open_renders_both_ways_out_as_the_notice_panel() {
     std::fs::create_dir_all(&sessions).expect("sessions dir");
     let session_path = write_fixture(&sessions, "held-session", "held session");
 
-    // The foreign holder: this test process takes the runtime lease, the
-    // role the other product's daemon worker plays on the shared session
-    // store (the same recipe as the print-mode guard's foreign-holder
-    // test). The lease-enable env is consumed at the acquire itself.
+    // The foreign holder: this test process takes the runtime lease, the role the
+    // other product's daemon worker plays on the shared session store.
     std::env::set_var(pa_daemon::lease::SESSION_LEASES_ENABLED_ENV, "1");
     std::env::set_var(
         pa_daemon::lease::SESSION_LEASE_OWNER_ID_ENV,
@@ -152,8 +140,7 @@ async fn the_refused_open_renders_both_ways_out_as_the_notice_panel() {
 
     let daemon = spawn_daemon(&dir.path().join("daemon.sock"), &agent_dir);
 
-    // The refused open: the interactive run on the held file answers with
-    // the refusal and hands back to the agents view.
+    // The refused open hands back to the agents view.
     let options = pa_tui::interactive::InteractiveOptions {
         models: None,
         socket_path: daemon.socket.clone(),
@@ -219,8 +206,6 @@ async fn the_refused_open_renders_both_ways_out_as_the_notice_panel() {
         "the take-over way out: {notice}"
     );
 
-    // The panel: the full notice visible in the frame, both ways out
-    // included, then dismissed by one key.
     let open_plan = AgentsHeadlessPlan {
         steps: vec![
             AgentsStep::WaitSettle { timeout_ms: 2_000 },

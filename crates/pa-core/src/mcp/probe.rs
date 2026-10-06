@@ -1,11 +1,7 @@
-//! MCP connection verification: a real streamable-HTTP handshake
-//! (initialize -> tools/list) against the connection's endpoint (port of
-//! `packages/coding-agent/src/core/mcp/connection-probe.ts`).
-//!
-//! Health check only — the Python generic runtime performs all real
-//! execution. Error reporting uses fixed, safe categories: the endpoint
-//! URL, response bodies, and server-controlled text are untrusted and never
-//! appear in results.
+//! MCP connection verification: a real streamable-HTTP handshake (initialize ->
+//! tools/list) against the connection's endpoint. Health check only — the Python
+//! generic runtime performs all real execution; error reporting uses fixed, safe
+//! categories.
 
 use std::time::Duration;
 
@@ -24,9 +20,8 @@ pub type ProbeOutcome = Result<usize, &'static str>;
 /// The per-request timeout (TS default).
 const DEFAULT_TIMEOUT_MS: u64 = 15_000;
 
-/// The verification probe seam: hosts inject a fake in tests; the product
-/// path uses [`ReqwestMcpProbe`]. Dyn-compatible: the async surface is
-/// boxed once behind the [`McpEndpointProbe`] object type.
+/// The verification probe seam: hosts inject a fake in tests; the product path uses
+/// [`ReqwestMcpProbe`]..
 pub trait McpEndpointProbeImpl: Send + Sync {
     fn probe_dyn(
         &self,
@@ -50,9 +45,8 @@ impl McpEndpointProbe {
         Self(probe)
     }
 
-    /// Verify one endpoint with the bearer `token` (empty = no
-    /// Authorization header). A completed initialize + tools/list returns
-    /// the first page's tool count.
+    /// Verify one endpoint with the bearer `token` (empty = no Authorization header).
+    /// A completed initialize + tools/list returns the first page's tool count.
     pub async fn probe(&self, url: &str, token: &str) -> ProbeOutcome {
         self.0.probe_dyn(url, token).await
     }
@@ -181,16 +175,14 @@ fn parse_rpc_response(
     Ok(value)
 }
 
-/// The full handshake: initialize, the initialized notification, tools/list.
-/// Each step's session id feeds the next request; a rejected initialize
-/// (non-2xx or a JSON-RPC error) maps to the fixed categories.
+/// The full handshake: initialize, the initialized notification, tools/list. Each step's session id
+/// feeds the next request; a rejected initialize maps to the fixed categories.
 async fn probe_endpoint(
     client: &reqwest::Client,
     url: &str,
     token: &str,
     timeout: Duration,
 ) -> ProbeOutcome {
-    // initialize
     let initialize = rpc(
         "initialize",
         1,
@@ -217,7 +209,6 @@ async fn probe_endpoint(
     if response.get("error").is_some() {
         return Err(PROBE_ERROR_SERVER_REJECTED);
     }
-    // notifications/initialized
     let initialized = serde_json::json!({
         "jsonrpc": "2.0", "method": "notifications/initialized", "params": {}
     });
@@ -233,7 +224,6 @@ async fn probe_endpoint(
     if status == 401 || status == 403 {
         return Err(PROBE_ERROR_UNAUTHORIZED);
     }
-    // tools/list
     let list = rpc("tools/list", 2, &serde_json::json!({ "cursor": null }));
     let (status, _, value) =
         post_json_rpc(client, url, token, session_id.as_deref(), list, timeout).await?;

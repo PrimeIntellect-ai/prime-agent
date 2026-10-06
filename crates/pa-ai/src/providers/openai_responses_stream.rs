@@ -1,15 +1,7 @@
-//! `OpenAI` Responses stream event processor.
-//!
-//! Port of `processResponsesStream` from
-//! `packages/ai/src/providers/openai-responses-shared.ts`: output-item slots,
-//! reasoning summary/text deltas, refusal deltas, function-call argument
-//! accumulation, xai encrypted-reasoning merge, and usage accounting. Hook
-//! types and service-tier pricing live in
+//! `OpenAI` Responses stream event processor: hook types and service-tier pricing live in
 //! [`super::openai_responses_hooks`].
 //!
-//! Size note: `handle_event` is intentionally kept as one large function. It
-//! is a 1:1 port of the single `processResponsesStream` event match in
-//! `openai-responses-shared.ts`, and splitting its arms would break
+//! `handle_event` stays one large function: a 1:1 port of the TS event match, kept whole for
 //! traceability to the TS source.
 
 use std::collections::HashMap;
@@ -38,7 +30,6 @@ struct Slot {
     item: Value,
     /// Scratch for tool-call argument accumulation.
     partial_json: StreamingJsonAccumulator,
-    /// Assistant content index for this slot.
     content_index: usize,
 }
 
@@ -86,9 +77,8 @@ impl<'a> ResponsesStreamProcessor<'a> {
         }
     }
 
-    /// Process one parsed stream event. Errors mirror the TS thrown
-    /// `StreamFailureError`s.
-    // Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+    /// Process one parsed stream event. Errors mirror the TS thrown `StreamFailureError`s.
+    // Long by design: mirrors the provider's stream shape.
     #[allow(clippy::too_many_lines)]
     pub fn handle_event(&mut self, event: &Value) -> Result<(), ProviderError> {
         let event_type = event
@@ -901,9 +891,8 @@ impl<'a> ResponsesStreamProcessor<'a> {
         Ok(())
     }
 
-    /// Terminal stop reason of the message under construction (read through
-    /// the processor so error-path checks can run while the borrow of the
-    /// output message lives here).
+    /// Terminal stop reason of the message under construction (read through the processor so
+    /// error-path checks can run while the borrow of the output message lives here).
     pub fn stop_reason(&self) -> StopReason {
         self.output.stop_reason
     }
@@ -913,10 +902,9 @@ impl<'a> ResponsesStreamProcessor<'a> {
         self.output.stop_reason_raw.as_deref()
     }
 
-    /// Port of the TS catch settle: finalize tool-call blocks whose parsed
-    /// preview may lag the accumulated text under the growth throttle. The
-    /// outer providers call this on their error paths before the error event
-    /// carries the message.
+    /// The TS catch settle: finalize tool-call blocks whose parsed preview may lag the accumulated
+    /// text under the growth throttle. The outer providers call this on their error paths before
+    /// the error event carries the message.
     pub fn settle_partial_tool_calls(&mut self) {
         for slot in self.slots.values_mut() {
             let Some(parsed) = slot.partial_json.flush() else {

@@ -1,13 +1,6 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
-// by design on hot paths (boxing 130 fns is allocation-churn with zero
-// correctness gain); the fn-length threshold is a style gate, not
-// correctness (the harness fns are intentionally linear); 64-bit targets -
-// the narrowing sits at OS/protocol boundaries where the values are
-// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
-// guarded parses), and checked conversions would add panic paths where
-// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
-// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
-// dossier for the conductor).
+// large_futures: stack-resident futures on hot paths by design.
+// too_many_lines: style gate, not correctness. Casts: 64-bit targets;
+// narrowing sits at bounded OS/protocol boundaries.
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -17,10 +10,9 @@
     clippy::cast_precision_loss
 )]
 
-//! End-to-end print-runtime verification: the real binary, an isolated HOME,
-//! and the scripted faux provider (`PRIME_AGENT_FAUX_SCRIPT`) drive the complete
-//! pipeline — CLI parse, session assembly, agent loop, tool bridge seam, event
-//! emission, headless terminal selection — deterministically.
+//! End-to-end print-runtime verification: the real binary, an isolated
+//! HOME, and the scripted faux provider drive the complete pipeline from
+//! CLI parse to headless terminal selection, deterministically.
 
 use std::process::Command;
 
@@ -57,7 +49,6 @@ fn print_mode_multi_prompt_consumes_responses_in_order() {
     let script = serde_json::json!({ "responses": ["first answer", "second answer"] });
     let (stdout, _, code) = run(&["-p", "one", "two"], &script);
     assert_eq!(code, 0);
-    // The terminal result is the final response.
     assert_eq!(stdout, "second answer\n");
 }
 
@@ -71,7 +62,6 @@ fn print_mode_json_streams_ts_shaped_events() {
         .map(serde_json::from_str)
         .collect::<Result<_, _>>()
         .unwrap();
-    // Header first, then the loop lifecycle.
     assert_eq!(lines[0]["type"], "session");
     assert_eq!(lines[0]["version"], 3);
     assert!(lines[0]["timestamp"].is_string());
@@ -85,7 +75,6 @@ fn print_mode_json_streams_ts_shaped_events() {
     assert!(types.contains(&"message_start"));
     assert!(types.contains(&"message_end"));
     assert!(types.contains(&"turn_end"));
-    // The user message carries the prompt; the assistant carries the response.
     let user = lines
         .iter()
         .find(|line| line["type"] == "message_start" && line["message"]["role"] == "user")
@@ -97,7 +86,6 @@ fn print_mode_json_streams_ts_shaped_events() {
         .unwrap();
     assert_eq!(assistant["message"]["content"][0]["text"], "json answer");
     assert_eq!(assistant["message"]["stopReason"], "stop");
-    // The agent ends after the turn.
     assert_eq!(*types.last().unwrap(), "agent_end");
 }
 
@@ -111,9 +99,7 @@ fn print_mode_reports_provider_errors_as_exit_one() {
     assert!(!stderr.is_empty());
 }
 
-// ---------------------------------------------------------------------------
-// Session persistence (headless print sessions must land on disk)
-// ---------------------------------------------------------------------------
+// Session persistence (headless print sessions must land on disk).
 
 fn isolated_home() -> tempfile::TempDir {
     tempfile::TempDir::new().unwrap()
@@ -129,8 +115,7 @@ fn run_in_home(
         .args(args)
         .env("HOME", home)
         .env("PRIME_AGENT_FAUX_SCRIPT", script.to_string())
-        // Keep the isolated HOME authoritative: ambient agent/session dir
-        // overrides from the test environment must not leak in.
+        // Keep the isolated HOME authoritative: ambient dir overrides stay out.
         .env_remove("PRIME_AGENT_CODING_AGENT_DIR")
         .env_remove("PRIME_AGENT_SESSION_DIR")
         .env_remove("PRIME_AGENT_CODING_AGENT_SESSION_DIR")
@@ -181,7 +166,6 @@ fn print_mode_persists_a_session_file_by_default() {
     assert_eq!(files.len(), 1, "one session file, got {files:?}");
     let entries = read_entries(&files[0]);
 
-    // Header first, then the creation prefix, then user + assistant.
     let types: Vec<&str> = entries
         .iter()
         .map(|entry| entry["type"].as_str().unwrap_or_default())
@@ -202,7 +186,6 @@ fn print_mode_persists_a_session_file_by_default() {
         assistant["message"]["content"][0]["text"],
         "persisted answer"
     );
-    // The header records the run cwd (the isolated HOME).
     assert_eq!(entries[0]["cwd"], home.path().display().to_string());
 }
 
@@ -232,7 +215,7 @@ fn print_mode_resume_appends_to_the_same_session_file() {
         .to_string();
     let before = read_entries(&files[0]).len();
 
-    // A uuid-v7 prefix selects the saved session; the run continues it.
+    // A uuid-v7 prefix selects the saved session.
     let selector = &session_id[..8];
     let script = serde_json::json!({ "responses": ["second answer"] });
     let (stdout, stderr, code) = run_in_home(
@@ -292,15 +275,11 @@ fn print_mode_resume_unknown_selector_fails_with_browse_hint() {
     );
 }
 
-/// Headless regression for thinking-level resolution: `--thinking max` on a
-/// reasoning faux model (supported levels `off`..`high`) must persist the
-/// clamped effective level in the session JSONL — the same clamp the
-/// interactive daemon path now applies.
+/// `--thinking max` on a reasoning faux model must persist the clamped effective level.
 #[test]
 fn print_mode_thinking_max_persists_the_clamped_high_level() {
     let home = isolated_home();
-    // `reasoning: true` without a thinkingLevelMap: supported levels are
-    // off/minimal/low/medium/high, so max clamps up-to-down to high.
+    // No thinkingLevelMap: the supported levels end at high, so max clamps.
     let script = serde_json::json!({ "reasoning": true, "responses": ["clamped answer"] });
     let (stdout, stderr, code) =
         run_in_home(home.path(), &["-p", "--thinking", "max", "hello"], &script);
@@ -317,8 +296,7 @@ fn print_mode_thinking_max_persists_the_clamped_high_level() {
     assert_eq!(level["thinkingLevel"], "high");
 }
 
-/// The clamp also applies on the way down: a non-reasoning faux model maps
-/// any requested level to off.
+/// The clamp also applies on the way down: a non-reasoning model maps any requested level to off.
 #[test]
 fn print_mode_thinking_clamps_to_off_for_non_reasoning_models() {
     let home = isolated_home();
@@ -338,22 +316,17 @@ fn print_mode_thinking_clamps_to_off_for_non_reasoning_models() {
     assert_eq!(level["thinkingLevel"], "off");
 }
 
-// ---------------------------------------------------------------------------
-// Overflow compact-and-retry (TS `_checkCompaction` Case 1 in print mode)
-// ---------------------------------------------------------------------------
+// Overflow compact-and-retry (TS `_checkCompaction` Case 1 in print mode).
 
-/// Compaction settings into the isolated home's agent dir, resolved by the
-/// session engine at assembly time.
+/// Compaction settings into the isolated home's agent dir.
 fn write_compaction_settings(home: &std::path::Path, settings: &serde_json::Value) {
     let agent = home.join(".prime/agent");
     std::fs::create_dir_all(&agent).unwrap();
     std::fs::write(agent.join("settings.json"), settings.to_string()).unwrap();
 }
 
-/// The TS overflow error shape as a faux response entry (the `content`
-/// form carries the stop reason and error message through the print
-/// harness's script parser; `delayMs` paces the retried turn's timestamp
-/// past the compaction boundary, like a real provider round-trip).
+/// The TS overflow error shape; `delayMs` paces the retried turn's
+/// timestamp past the compaction boundary.
 fn overflow_error(delay_ms: u64) -> serde_json::Value {
     let mut entry = serde_json::json!({
         "content": [{ "type": "text", "text": "" }],
@@ -366,8 +339,7 @@ fn overflow_error(delay_ms: u64) -> serde_json::Value {
     entry
 }
 
-/// The compactable settings: the `keepRecentTokens` cut keeps ~10 tokens,
-/// so an overflow recovery with pre-cut history summarizes it.
+/// `keepRecentTokens` keeps ~10 tokens, so recovery with pre-cut history summarizes it.
 fn compactable_settings() -> serde_json::Value {
     serde_json::json!({
         "compaction": { "enabled": true, "reserveTokens": 1, "keepRecentTokens": 10 }
@@ -377,11 +349,9 @@ fn compactable_settings() -> serde_json::Value {
 /// The reported-overflow failure text (TS `_checkCompaction` verbatim).
 const OVERFLOW_RECOVERY_FAILED: &str = "Context overflow recovery failed after one compact-and-retry attempt. Try reducing context or switching to a larger-context model.";
 
-/// The full compact-and-retry cycle (verified against the TS binary with
-/// the same scripted provider): an overflow error drops the failed turn,
-/// runs one compaction, re-issues the turn, and the second overflow ends
-/// the run with the assistant error plus the reported failure row on
-/// stderr, exit 1.
+/// The full compact-and-retry cycle (verified against the TS binary): an
+/// overflow drops the failed turn, compacts once, re-issues, and the second
+/// overflow ends the run, exit 1.
 #[test]
 fn print_mode_overflow_compacts_retries_once_then_reports() {
     let home = isolated_home();
@@ -409,8 +379,6 @@ fn print_mode_overflow_compacts_retries_once_then_reports() {
         error_at < reported_at,
         "the primary error precedes the reported outcome row: {stderr}"
     );
-    // The durable surface: one compaction entry, one failed outcome row,
-    // and no re-added user message for the retried turn.
     let files = session_files(home.path());
     assert_eq!(files.len(), 1);
     let entries = read_entries(&files[0]);
@@ -420,7 +388,7 @@ fn print_mode_overflow_compacts_retries_once_then_reports() {
         .count();
     assert_eq!(compactions, 1, "one compaction entry");
     // A custom-row file entry flattens its payload: `customType` and the
-    // details sit at the top level of the JSONL line.
+    // details sit at the top level of the line.
     let outcome = entries
         .iter()
         .find(|entry| entry["customType"] == "compaction_outcome")
@@ -436,8 +404,7 @@ fn print_mode_overflow_compacts_retries_once_then_reports() {
     assert_eq!(users, 2, "the retry re-issued without re-adding the prompt");
 }
 
-/// The retry on the compacted context recovers the turn: the final answer
-/// prints normally, exit 0, and the compaction entry is durable.
+/// The retry on the compacted context recovers the turn (exit 0).
 #[test]
 fn print_mode_overflow_retry_recovers_the_turn() {
     let home = isolated_home();
@@ -474,9 +441,8 @@ fn print_mode_overflow_retry_recovers_the_turn() {
     );
 }
 
-/// A skipped overflow recovery (nothing compactable) surfaces the warning
-/// row on stderr and exits 0 — the TS text-mode contract where the dropped
-/// error turn leaves no primary answer (verified against the TS binary).
+/// A skipped recovery (nothing compactable) surfaces the warning row and
+/// exits 0 — the TS text-mode contract.
 #[test]
 fn print_mode_overflow_skip_surfaces_the_warning_row() {
     let home = isolated_home();
@@ -501,12 +467,9 @@ fn print_mode_overflow_skip_surfaces_the_warning_row() {
 }
 
 /// The json-mode event stream for the compact-and-retry cycle (verified
-/// against the TS binary's session events): the `compaction_start` /
-/// `compaction_end` pair with `reason: "overflow"` and `willRetry: true`,
-/// the retried turn without a new user message, and the reported failure
-/// surface — the outcome row's message pair, then the `compaction_end`
-/// failure. json mode keeps the TS exit contract (0 unless the autonomous
-/// gates or a thrown error decide otherwise).
+/// against the TS binary): the `compaction_start`/`compaction_end` pair with
+/// `willRetry: true`, the retried turn without a new user message,
+/// and the reported failure surface.
 #[test]
 fn print_mode_overflow_json_streams_the_compaction_events() {
     let home = isolated_home();
@@ -532,7 +495,6 @@ fn print_mode_overflow_json_streams_the_compaction_events() {
         .map(serde_json::from_str)
         .collect::<Result<_, _>>()
         .unwrap();
-    // The pair before the retried turn: start, then end with willRetry.
     let start_at = events
         .iter()
         .position(|event| event["type"] == "compaction_start" && event["reason"] == "overflow")
@@ -548,7 +510,6 @@ fn print_mode_overflow_json_streams_the_compaction_events() {
     assert!(start_at < success_at);
     assert_eq!(events[success_at]["result"]["summary"], "the summary");
     assert_eq!(events[success_at]["aborted"], false);
-    // The retried turn's overflow error settles after the compaction.
     let retried_error_at = events
         .iter()
         .rposition(|event| {
@@ -561,14 +522,11 @@ fn print_mode_overflow_json_streams_the_compaction_events() {
         success_at < retried_error_at,
         "the retried turn follows the compaction"
     );
-    // No user message was re-added for the retry.
     let users = events
         .iter()
         .filter(|event| event["type"] == "message_start" && event["message"]["role"] == "user")
         .count();
     assert_eq!(users, 2);
-    // The reported failure surface: the durable row's message pair, then
-    // the `compaction_end` failure with the TS text and no severity.
     let row_at = events
         .iter()
         .position(|event| {
@@ -608,9 +566,8 @@ fn print_mode_overflow_json_streams_the_compaction_events() {
 }
 
 /// The stale-overflow recovery across runs (the `--continue` shape,
-/// verified against the TS binary): a run with compaction disabled leaves
-/// the overflow error in the session; the resumed run's pre-turn arm
-/// compacts before the admitted prompt, which then answers normally.
+/// verified against the TS binary): the resumed run's pre-turn arm compacts
+/// the stale overflow before the admitted prompt.
 #[test]
 fn print_mode_stale_overflow_recovers_before_the_next_prompt_after_a_resume() {
     let home = isolated_home();
@@ -630,8 +587,7 @@ fn print_mode_stale_overflow_recovers_before_the_next_prompt_after_a_resume() {
     assert_eq!(code, 1, "stderr: {stderr}");
     assert!(stdout.is_empty());
 
-    // Run two: the resumed session with compaction enabled — the pre-turn
-    // arm compacts the stale overflow before the prompt runs.
+    // Run two: compaction enabled — the pre-turn arm compacts the stale overflow.
     write_compaction_settings(home.path(), &compactable_settings());
     let script = serde_json::json!({
         "responses": [
@@ -647,7 +603,6 @@ fn print_mode_stale_overflow_recovers_before_the_next_prompt_after_a_resume() {
     assert_eq!(code, 0, "stderr: {stderr}");
     assert_eq!(stdout, "recovered after the resume\n");
     assert!(stderr.is_empty(), "stderr: {stderr}");
-    // The recovery compaction is durable in the resumed session file.
     let files = session_files(home.path());
     assert_eq!(files.len(), 1, "the resume reuses the session file");
     let entries = read_entries(&files[0]);
@@ -658,15 +613,10 @@ fn print_mode_stale_overflow_recovers_before_the_next_prompt_after_a_resume() {
     assert_eq!(compactions, 1, "the pre-turn recovery compacted");
 }
 
-// ---------------------------------------------------------------------------
-// The json event stream's TS parity surface (message_update, harness
-// digest, threshold compaction; verified against the TS binary's print
-// json stream over the same scripted faux provider).
-// ---------------------------------------------------------------------------
+// The json event stream's TS parity surface (verified against the TS binary).
 
-/// The harness digest pair (TS commit-time injection): the fresh session's
-/// first turn streams the digest's `message_start`/`message_end` pair as a
-/// `custom` message between `turn_start` and the user message pair.
+/// The harness digest pair (TS commit-time injection): the first turn
+/// streams the digest pair between `turn_start` and the user pair.
 #[test]
 fn print_mode_json_streams_the_harness_digest_pair() {
     let home = isolated_home();
@@ -686,7 +636,6 @@ fn print_mode_json_streams_the_harness_digest_pair() {
                 && event["message"]["customType"] == "harness_digest"
         })
         .expect("the digest message_start event");
-    // The pair rides the first turn: after turn_start, before the user pair.
     let turn_start_at = events
         .iter()
         .position(|event| event["type"] == "turn_start")
@@ -696,8 +645,6 @@ fn print_mode_json_streams_the_harness_digest_pair() {
         .position(|event| event["type"] == "message_start" && event["message"]["role"] == "user")
         .expect("the user message pair");
     assert!(turn_start_at < digest_at && digest_at < user_at);
-    // The TS wire shape: the framed text content, display false, the raw
-    // digest in details.
     let digest = &events[digest_at]["message"];
     assert!(digest["content"].is_string());
     assert!(digest["content"]
@@ -714,7 +661,6 @@ fn print_mode_json_streams_the_harness_digest_pair() {
         .as_str()
         .unwrap()
         .contains("# Continual Harness State"));
-    // The end event carries the same message.
     let digest_end_at = events
         .iter()
         .position(|event| {
@@ -729,10 +675,8 @@ fn print_mode_json_streams_the_harness_digest_pair() {
     );
 }
 
-/// The streaming deltas (TS `message_update`): between the assistant's
-/// `message_start` and `message_end`, the wire carries the slim
-/// `assistantMessageEvent` deltas (`partial` never rides the wire) and the
-/// partial assistant message accumulating per delta.
+/// The streaming deltas (TS `message_update`): the wire carries the slim
+/// deltas (`partial` never rides the wire).
 #[test]
 fn print_mode_json_streams_the_message_update_deltas() {
     let home = isolated_home();
@@ -759,8 +703,6 @@ fn print_mode_json_streams_the_message_update_deltas() {
         .filter(|event| event["type"] == "message_update")
         .collect();
     assert!(!updates.is_empty(), "the stream carries the deltas");
-    // The delta protocol: text_start, text_delta..., text_end, each with
-    // the content index, and no nested `partial` copy on the wire.
     assert_eq!(updates[0]["assistantMessageEvent"]["type"], "text_start");
     let last = updates.last().unwrap();
     assert_eq!(last["assistantMessageEvent"]["type"], "text_end");
@@ -773,12 +715,9 @@ fn print_mode_json_streams_the_message_update_deltas() {
         assert!(update["assistantMessageEvent"].get("partial").is_none());
         assert_eq!(update["message"]["role"], "assistant");
     }
-    // The partial message accumulates: the first delta's message is the
-    // empty partial; the end delta carries the full text.
     assert_eq!(updates[0]["message"]["content"][0]["text"], "");
     assert_eq!(last["message"]["content"][0]["text"], "a streamed answer");
-    // The event field order matches the TS stream (`MessageUpdateEvent`:
-    // type, message, assistantMessageEvent) — the JSON map preserves
+    // The field order matches the TS stream — the JSON map preserves
     // insertion order, so this is the wire byte order.
     let keys: Vec<&str> = updates[0]
         .as_object()
@@ -790,9 +729,8 @@ fn print_mode_json_streams_the_message_update_deltas() {
 }
 
 /// The threshold compaction arm (TS `_checkCompaction` Case 3): a settled
-/// turn whose usage crosses the reserve headroom streams the
-/// `compaction_start`/`compaction_end` pair with the `threshold` reason,
-/// the client-facing result, and `willRetry: false`.
+/// turn crossing the reserve headroom streams the `compaction_start`/
+/// `compaction_end` pair with the `threshold` reason.
 #[test]
 fn print_mode_json_streams_the_threshold_compaction_pair() {
     let home = isolated_home();
@@ -802,11 +740,9 @@ fn print_mode_json_streams_the_threshold_compaction_pair() {
             "compaction": { "enabled": true, "reserveTokens": 1, "keepRecentTokens": 10 }
         }),
     );
-    // A small context window so the crossing turn exceeds the threshold:
-    // the ~8.1k seed turn stays below the combined input+output ceiling
-    // (24k window - 4_096 output budget - 4_096 headroom floor = 15_808),
-    // and the ~12k-token crossing turn pushes the context past it (the
-    // faux provider estimates usage from the serialized context).
+    // A small context window: the ~8.1k seed turn stays below the 15_808
+    // ceiling (24k - 4_096 output - 4_096 headroom), and the ~12k-token
+    // crossing turn pushes past it.
     let script = serde_json::json!({
         "contextWindow": 24000,
         "responses": [
@@ -836,8 +772,6 @@ fn print_mode_json_streams_the_threshold_compaction_pair() {
         events[start_at],
         serde_json::json!({ "type": "compaction_start", "reason": "threshold" })
     );
-    // The pair fires at the crossing turn's settled boundary (TS
-    // `agent_end` order): after the second run ends, with no third run.
     let last_agent_end = events
         .iter()
         .rposition(|event| event["type"] == "agent_end")
@@ -864,7 +798,6 @@ fn print_mode_json_streams_the_threshold_compaction_pair() {
     assert_eq!(events[end_at]["aborted"], false);
     assert_eq!(events[end_at]["willRetry"], false);
     assert!(events[end_at].get("errorMessage").is_none());
-    // The compaction entry is durable.
     let files = session_files(home.path());
     assert_eq!(files.len(), 1);
     let entries = read_entries(&files[0]);
@@ -874,8 +807,7 @@ fn print_mode_json_streams_the_threshold_compaction_pair() {
     );
 }
 
-/// Run the binary in the isolated HOME but a different working directory
-/// (a "different project" for session-cwd resolution).
+/// Run the binary in the isolated HOME but a different working directory.
 fn run_in_home_cwd(
     home: &std::path::Path,
     cwd: &std::path::Path,
@@ -902,9 +834,8 @@ fn run_in_home_cwd(
 }
 
 /// TS `createSessionManager`'s fork arm: `--fork <selector>` copies the
-/// source session into a NEW session file (TS `SessionManager.forkFrom`),
-/// the run continues the copy — the source keeps its rows untouched — and
-/// the fork header parents at the source.
+/// source session into a NEW file (TS `SessionManager.forkFrom`), the run
+/// continues the copy, and the fork header parents at the source.
 #[test]
 fn print_mode_fork_copies_the_session_into_a_new_file() {
     let home = isolated_home();
@@ -928,7 +859,6 @@ fn print_mode_fork_copies_the_session_into_a_new_file() {
     assert_eq!(code, 0, "stderr: {stderr}");
     assert_eq!(stdout, "second answer\n");
 
-    // A new session file; the source is untouched.
     let after = session_files(home.path());
     assert_eq!(after.len(), 2, "fork creates a new session file");
     let fork = after
@@ -943,13 +873,11 @@ fn print_mode_fork_copies_the_session_into_a_new_file() {
         "the source keeps its rows untouched"
     );
     let fork_entries = read_entries(fork);
-    // Fresh header: new id, the source path as parentSession.
     assert_ne!(fork_entries[0]["id"], session_id.as_str());
     assert_eq!(
         fork_entries[0]["parentSession"],
         source.display().to_string()
     );
-    // The copied branch answers the follow-up.
     let texts: Vec<&str> = fork_entries
         .iter()
         .filter(|entry| entry["type"] == "message")
@@ -960,9 +888,8 @@ fn print_mode_fork_copies_the_session_into_a_new_file() {
     assert!(texts.contains(&"second answer"));
 }
 
-/// `--fork` is the cross-project path: a session saved under another
-/// project's cwd forks into the CURRENT one (the TS GLOBAL resolution
-/// arm), while `--resume` still refuses it with the fork hint.
+/// `--fork` is the cross-project path: another project's session forks
+/// into the CURRENT cwd (the TS GLOBAL arm); `--resume` refuses it.
 #[test]
 fn print_mode_fork_imports_a_global_session_into_this_cwd() {
     let home = isolated_home();
@@ -980,7 +907,6 @@ fn print_mode_fork_imports_a_global_session_into_this_cwd() {
         .to_string();
     let selector = session_id[..8].to_string();
 
-    // The same session is GLOBAL for the other project: resume refuses.
     let script = serde_json::json!({ "responses": ["no"] });
     let (stdout, stderr, code) = run_in_home_cwd(
         home.path(),
@@ -998,7 +924,6 @@ fn print_mode_fork_imports_a_global_session_into_this_cwd() {
     );
     assert!(stderr.contains(&format!("Pass --fork {selector}")));
 
-    // ...and --fork imports it into this cwd.
     let script = serde_json::json!({ "responses": ["forked into the project"] });
     let (stdout, stderr, code) = run_in_home_cwd(
         home.path(),
@@ -1033,14 +958,12 @@ fn print_mode_fork_imports_a_global_session_into_this_cwd() {
     assert!(texts.contains(&"continue here"));
 }
 
-/// TS `forkFrom`'s failure contract on the CLI: an empty source file
-/// errors with the TS message instead of silently starting fresh, and
-/// `--fork` still refuses its conflicting flags.
+/// TS `forkFrom`'s failure contract: an empty source file errors with the
+/// TS message, and `--fork` still refuses its conflicting flags.
 #[test]
 fn print_mode_fork_rejects_empty_sources_and_conflicting_flags() {
     let home = isolated_home();
-    // An empty session file, addressed by path (TS forkFrom's empty
-    // source error).
+    // An empty session file, addressed by path.
     let sessions = home.path().join(".prime/agent/sessions");
     std::fs::create_dir_all(&sessions).expect("sessions dir");
     let empty = sessions.join("empty-session.jsonl");
@@ -1077,7 +1000,6 @@ fn print_mode_fork_rejects_empty_sources_and_conflicting_flags() {
         stderr.contains("--fork cannot be combined with --resume"),
         "stderr: {stderr}"
     );
-    // No fork file materialized for the refused runs.
     assert!(
         session_files(home.path()).is_empty() || {
             let files = session_files(home.path());

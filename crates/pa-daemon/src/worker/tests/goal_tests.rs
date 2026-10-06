@@ -1,8 +1,7 @@
-//! Goal continuation and compact-mint e2e tests (moved with their concerns).
+//! Goal continuation and compact-mint e2e tests.
 use super::*;
 
-/// A scripted goal session's dispatch worker (the goal section feeds
-/// `goal_state_value` and the post-compaction mint).
+/// A scripted goal session's dispatch worker.
 async fn goal_dispatch_worker(goal: serde_json::Value) -> std::sync::Arc<Worker> {
     let dir = std::env::temp_dir().join(format!("pa-worker-goal-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -31,15 +30,7 @@ async fn goal_dispatch_worker(goal: serde_json::Value) -> std::sync::Arc<Worker>
     worker
 }
 
-/// TS `compact()`'s `didCompact` + active-goal branch: a successful
-/// compact on a session with an active goal mints the owed goal
-/// continuation (`resumeQueuedWork()`'s
-/// `_maybeResumeGoalContinuationAfterRlmWork` — the minted follow-up
-/// with the goal-context row), clears the queued-input suspension, and
-/// the scheduled continue drives the turn: the continuation runs
-/// (agent rows on the wire), the queue drains, and the session is
-/// admitted for plain prompts again (the resume site crossed the #234
-/// suspension gate).
+/// TS `compact()`'s active-goal branch: a successful compact mints the owed continuation.
 #[tokio::test]
 async fn compact_with_active_goal_schedules_the_continue() {
     let worker = goal_dispatch_worker(json!({
@@ -58,9 +49,8 @@ async fn compact_with_active_goal_schedules_the_continue() {
     let idle = worker.dispatch("wait_for_idle", &json!({})).await;
     assert!(idle.success, "never went idle: {idle:?}");
     let events = session_events_since(&mut subscription);
-    // The mint's `goal_update` surfaces at the moment the state
-    // changed, then the continuation turn: the goal-context custom row
-    // plus its model turn (the scripted engine's rows).
+    // The mint's `goal_update` surfaces first, then the continuation
+    // turn: the goal-context custom row plus its model turn.
     let goal_updates: Vec<&Value> = events
         .iter()
         .filter(|event| event.get("type").and_then(Value::as_str) == Some("goal_update"))
@@ -96,10 +86,6 @@ async fn compact_with_active_goal_schedules_the_continue() {
     assert!(plain.success, "still suspended: {plain:?}");
 }
 
-/// Queued work parked at compact time owns the continue (TS's `||=`
-/// sets the owed-continuation flag only when the agent has NO queued
-/// messages): no fresh goal continuation is minted, the resume site
-/// releases the parked work, and the parked turn runs instead.
 #[tokio::test]
 async fn compact_with_active_goal_and_parked_work_skips_the_mint() {
     let worker = goal_dispatch_worker(json!({
@@ -135,8 +121,6 @@ async fn compact_with_active_goal_and_parked_work_skips_the_mint() {
     let idle = worker.dispatch("wait_for_idle", &json!({})).await;
     assert!(idle.success, "never went idle: {idle:?}");
     let events = session_events_since(&mut subscription);
-    // The parked item's turn ran (its user row), not a minted
-    // continuation (no goal_context row, no goal_update).
     assert!(
         events.iter().any(|event| {
             event.get("type").and_then(Value::as_str) == Some("message_start")
@@ -160,9 +144,6 @@ async fn compact_with_active_goal_and_parked_work_skips_the_mint() {
     );
 }
 
-/// Only an ACTIVE goal schedules the continue (TS checks
-/// `this._goalState.status === "active"`): a paused goal leaves the
-/// post-compact suspension set and mints nothing.
 #[tokio::test]
 async fn compact_with_paused_goal_never_continues() {
     let worker = goal_dispatch_worker(json!({
@@ -278,9 +259,6 @@ async fn goal_turn_end_loop_runs_to_completion() {
                  environment (the bootstrapped kernel venv, or uv on PATH to build it): {failure:?}"
         );
     }
-    // Each minted continuation ran as a queued follow-up turn: the
-    // start row plus two continuation rows (the completion turn is the
-    // second continuation's turn).
     let goal_rows: Vec<&Value> = events
         .iter()
         .filter(|event| {
@@ -292,9 +270,6 @@ async fn goal_turn_end_loop_runs_to_completion() {
     assert_eq!(goal_rows[0]["message"]["details"]["kind"], "continuation");
     assert_eq!(goal_rows[1]["message"]["details"]["continuationsUsed"], 1);
     assert_eq!(goal_rows[2]["message"]["details"]["continuationsUsed"], 2);
-    // The model turns all settled: the start turn, two continuation
-    // turns, and the completing tool-call turn's own assistant
-    // segments ride the wire as assistant rows.
     let assistant_rows = events
         .iter()
         .filter(|event| {
@@ -303,8 +278,8 @@ async fn goal_turn_end_loop_runs_to_completion() {
         })
         .count();
     assert!(assistant_rows >= 4, "events: {events:?}");
-    // The goal state settled complete (the kernel completion through
-    // the worker's host handlers), with the loop's counts on the books.
+    // The goal state settled complete through the worker's host
+    // handlers.
     let complete_update = events
         .iter()
         .rev()
@@ -322,8 +297,6 @@ async fn goal_turn_end_loop_runs_to_completion() {
         complete_update["goal"]["tokensUsed"].as_u64().unwrap_or(0) > 0,
         "usage accounting ran: {complete_update:?}"
     );
-    // The completion's boundary mints nothing: the queue is empty and
-    // a plain prompt is admitted again.
     let queue = worker
         .dispatch(
             "get_queue",
@@ -343,11 +316,6 @@ async fn goal_turn_end_loop_runs_to_completion() {
     assert!(plain.success, "a post-goal prompt failed: {plain:?}");
 }
 
-/// The pause withdraws the queued minted continuation (TS
-/// `_pauseGoal` -> `_clearQueuedGoalContexts`): a prompt arriving right
-/// after the goal start runs within a turn or two of the loop, the
-/// pause purges the queued goal-context turn, and the loop goes quiet
-/// (the f18 battery's pause pattern).
 #[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
 #[tokio::test]
 async fn goal_pause_withdraws_the_queued_continuation() {
@@ -404,8 +372,6 @@ async fn goal_pause_withdraws_the_queued_continuation() {
     assert!(idle.success, "the loop never went quiet: {idle:?}");
     let goal = worker.engine.goal_state_value();
     assert_eq!(goal["status"], "paused", "goal state: {goal}");
-    // A settled paused goal consumed at most the start turn and one
-    // continuation turn's worth of slots.
     assert!(
         goal["continuationsUsed"].as_u64().unwrap_or(0) <= 2,
         "the pause never withdrew the loop: {goal}"
@@ -413,9 +379,7 @@ async fn goal_pause_withdraws_the_queued_continuation() {
 }
 
 /// A scripted goal session's dispatch worker with a durable session
-/// file (the `noSession` create keeps everything in memory; this
-/// variant lands the store on disk so the `thread_goal_state` mirror
-/// is observable).
+/// file, so the `thread_goal_state` mirror is observable.
 async fn goal_dispatch_worker_with_store(
     goal: serde_json::Value,
 ) -> (std::sync::Arc<Worker>, PathBuf) {
@@ -469,11 +433,7 @@ fn thread_goal_state_rows(path: &std::path::Path) -> Vec<Value> {
         .collect()
 }
 
-/// A goal-state change announced mid-turn (TS `_setGoalState` ->
-/// `_emitGoalUpdate`) mirrors into the worker session file as a
-/// `thread_goal_state` custom row: the engine's in-memory branch is
-/// not the durable store, so the mirror is what a recovery rebuild
-/// replays.
+/// The mirror row is what a recovery rebuild replays.
 #[tokio::test]
 async fn goal_update_events_mirror_the_durable_goal_row() {
     let (worker, file) = goal_dispatch_worker_with_store(json!({
@@ -505,10 +465,7 @@ async fn goal_update_events_mirror_the_durable_goal_row() {
     assert_eq!(rows[0]["data"]["continuationsUsed"], 2);
 }
 
-/// The post-compaction mint's state change (the compact branch runs
-/// outside a turn) persists its `thread_goal_state` row before the
-/// `goal_update` announcement, so the continuation count survives a
-/// worker crash mid-goal.
+/// The mint persists its row before the `goal_update`, so the count survives a crash.
 #[tokio::test]
 async fn compact_mint_persists_the_goal_state_row() {
     let (worker, file) = goal_dispatch_worker_with_store(json!({

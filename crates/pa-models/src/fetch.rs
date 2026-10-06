@@ -1,16 +1,4 @@
 //! The unauthenticated catalog fetch layer.
-//!
-//! Ported from `readJsonResponse` + `CatalogCache.refresh` request handling in
-//! `model-catalog-cache.ts`:
-//! - unauthenticated GET, headers `accept: application/json`,
-//!   `cache-control: no-cache`, `If-None-Match: <etag>` when cached;
-//! - 5 s hard timeout;
-//! - 8 MiB response cap enforced through content-length AND a streaming
-//!   byte count;
-//! - redirects refused: a moved catalog must be a client change
-//!   (`redirect: "error"` in the TS reference);
-//! - `304 Not Modified` keeps the snapshot (caller reuses the cached
-//!   payload and updates `fetchedAt`).
 
 use std::time::Duration;
 
@@ -24,13 +12,11 @@ pub const MODEL_CATALOG_URL: &str =
 pub const MCP_SERVICE_CATALOG_URL: &str =
     "https://raw.githubusercontent.com/PrimeIntellect-ai/prime-agent-catalog/main/plugins/catalog.v2.json";
 
-/// Hard per-request timeout for catalog fetches.
 pub const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Hard response size cap for catalog fetches (8 MiB).
 pub const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
-/// Failure of a catalog HTTP request (`CatalogRequestError` in the TS).
+/// Failure of a catalog HTTP request.
 #[derive(Debug, Error)]
 pub enum FetchError {
     /// Non-success status (the response was not read).
@@ -78,7 +64,6 @@ impl Default for CatalogFetcher {
 }
 
 impl CatalogFetcher {
-    /// The production client: 5 s timeout, no redirects, 8 MiB cap.
     #[must_use]
     pub fn new() -> Self {
         Self::with_limits(FETCH_TIMEOUT, MAX_RESPONSE_BYTES)
@@ -107,10 +92,9 @@ impl CatalogFetcher {
     ///
     /// # Errors
     ///
-    /// Returns `FetchError::Transport` on request failure, refused
-    /// redirects (any 3xx besides 304), or a body over the byte cap;
-    /// `FetchError::Status` on any other non-2xx status (304 returns
-    /// `Ok(FetchOutcome::NotModified)`).
+    /// Returns `FetchError::Transport` on request failure, refused redirects
+    /// (any 3xx besides 304), or a body over the byte cap; `FetchError::Status`
+    /// on any other non-2xx status (304 returns `Ok(FetchOutcome::NotModified)`).
     pub async fn fetch(&self, url: &str, etag: Option<&str>) -> Result<FetchOutcome, FetchError> {
         self.fetch_with(url, etag, &[]).await
     }
@@ -120,10 +104,9 @@ impl CatalogFetcher {
     ///
     /// # Errors
     ///
-    /// Returns `FetchError::Transport` on request failure, refused
-    /// redirects (any 3xx besides 304), or a body over the byte cap;
-    /// `FetchError::Status` on any other non-2xx status (304 returns
-    /// `Ok(FetchOutcome::NotModified)`).
+    /// Returns `FetchError::Transport` on request failure, refused redirects
+    /// (any 3xx besides 304), or a body over the byte cap; `FetchError::Status`
+    /// on any other non-2xx status (304 returns `Ok(FetchOutcome::NotModified)`).
     pub async fn fetch_with(
         &self,
         url: &str,

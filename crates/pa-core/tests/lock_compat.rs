@@ -1,6 +1,4 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28) - this target's own
-// crate root: the same bounded-boundary disposition as src/lib.rs
-// (large_futures/too_many_lines/the cast family; details there).
+// Pedantic-gate dispositions as src/lib.rs (large_futures/too_many_lines/casts).
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -10,13 +8,10 @@
     clippy::cast_precision_loss
 )]
 
-//! Lock-artifact compatibility through the production call sites: the auth
-//! and settings backends must leave exactly the lock artifacts the TS
-//! product's `proper-lockfile` convention defines - an empty DIRECTORY at
-//! `{file}.lock` that a holder removes on release, a crashed holder leaves
-//! stale, and a contender judges for staleness before reclaiming. A regular
-//! FILE at the lock path is a pre-compat Rust artifact; this side heals it
-//! instead of dying on it (`ENOTDIR`, the TS failure mode).
+//! Lock-artifact compatibility through the production call sites: the backends must leave the TS
+//! `proper-lockfile` artifacts — an empty DIRECTORY at `{file}.lock` (a holder removes it on
+//! release, a crashed holder leaves it stale, a contender judges staleness) — and heal a pre-compat
+//! regular FILE at the lock path (`ENOTDIR`).
 #![cfg(unix)]
 
 use std::path::Path;
@@ -32,8 +27,7 @@ fn lock_path(file: &Path) -> std::path::PathBuf {
     pa_core::platform::LockDir::path_for(file)
 }
 
-/// Set a path's mtime far in the past, the way a crashed holder's artifact
-/// looks after a while.
+/// Set a path's mtime far in the past, the way a crashed holder's artifact looks after a while.
 fn age(path: &Path) {
     use std::os::unix::ffi::OsStrExt;
     let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("path to cstring");
@@ -46,8 +40,7 @@ fn age(path: &Path) {
     assert_eq!(result, 0, "aging {}", path.display());
 }
 
-/// Hold a pre-compat flock on the artifact FILE the way the legacy Rust
-/// builds did.
+/// Hold a pre-compat flock on the artifact FILE the way the legacy Rust builds did.
 struct Flock {
     file: std::fs::File,
 }
@@ -125,8 +118,6 @@ fn settings_write_reports_contention_on_a_live_lock_directory() {
             .contains("Failed to acquire settings lock"),
         "contention surfaces as a lock error: {error}"
     );
-    // The failed write left no artifact and no changes, and the contender
-    // left the live lock alone.
     assert!(!settings.exists());
     assert!(lock_path(&settings).exists(), "the live lock is intact");
     drop(guard);
