@@ -296,7 +296,7 @@ fn threshold_compaction_stays_on_the_session_provider_after_a_resolution_drift()
     assert_eq!(keys.len() as u64, registration.call_count());
     assert!(
         keys.iter().all(|key| key.as_deref() == Some("sk-faux")),
-        "every call followed the live target's key: {keys:?}"
+        "every call followed the live target's key"
     );
     assert!(matches!(
         crossing_events.last(),

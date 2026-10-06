@@ -4895,8 +4895,7 @@ async fn tui_bare_launch_opens_a_fresh_session_when_a_newer_saved_one_exists_for
     );
     assert!(
         !poisoned_id.starts_with(&outcome.session_id),
-        "the fresh session has its own id: {} vs {poisoned_id}",
-        outcome.session_id
+        "the fresh session has its own id"
     );
     // The saved file is byte-identical: no reopen, no append, no resume.
     let after = std::fs::read_to_string(&poisoned_path).expect("read poisoned session back");
