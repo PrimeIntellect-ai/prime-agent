@@ -1,12 +1,10 @@
-//! The session-stats unit battery: the counts, the kept-region
-//! messages, the context usage, and the cost.
+//! The session-stats unit battery: the counts, the kept-region messages, the context usage,
+//! and the cost.
 
 use super::*;
 
-/// The captured-attribution fixture end to end: `get_session_stats`
-/// reports the folded (attributed) totals — cost $0 → $0.0089957,
-/// input 2690 → 52898 — while `totalTokens` stays 23032 (the
-/// aggregate keeps the row's context size, not a sum).
+/// The captured-attribution fixture end to end: the folded totals — cost
+/// $0 → $0.0089957, input 2690 → 52898 — `totalTokens` stays 23032.
 #[test]
 fn captured_attribution_fixture_stats_count_the_fold() {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -95,9 +93,7 @@ fn entry_with_usage(total_tokens: u64) -> (&'static str, Value) {
     )
 }
 
-/// A ghost-parent gap (one lost append) must not zero the token
-/// totals: the usage accounting bridges the gap, while the context
-/// estimate stays on the strict branch (the model-facing truth).
+/// The usage accounting bridges the gap; the context estimate stays on the strict branch.
 #[test]
 fn ghost_gap_does_not_zero_the_token_totals() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -245,36 +241,25 @@ fn aborted_assistant_usage_is_skipped() {
         entry_with_usage(128),
     ]);
     let stats = session_stats(&store, Some(1000));
-    // The aborted turn still counts as an assistant message, but only
-    // the valid usage anchors the estimate.
+    // The aborted turn still counts as an assistant message, but only the valid usage
+    // anchors the estimate.
     assert_eq!(stats["assistantMessages"], 2);
-    // Token totals sum every assistant usage, aborted or not (TS
-    // getSessionStats does not filter on stopReason).
+    // Token totals sum every assistant usage, aborted or not (TS `getSessionStats` does not
+    // filter on stopReason).
     assert_eq!(stats["tokens"]["total"], 17);
     assert_eq!(stats["contextUsage"]["tokens"], 128);
 }
 
-/// The compaction boundary against the windowed reader, on a minimal
-/// synthetic compacted session (real transcripts are never committed;
-/// the `#[ignore]` test below re-verifies against the local capture).
-/// The pre-cut ancestry, the kept rows that precede the compaction
-/// entry in file order, the summarizer's own usage riding the
-/// compaction entry, and the post-compaction tail all pin their own
-/// numbers, and the parent chain stays intact from leaf to root so the
-/// windowed reader serves a real window that retains only the kept
-/// region - the parity claim is non-trivial: the windowed store never
-/// loads the pre-cut ancestry and must still report the same active
+/// The compaction boundary against the windowed reader: the windowed store
+/// never loads the pre-cut ancestry and must still report the same active
 /// numbers as the full store.
 #[test]
 fn compaction_boundary_serves_the_windowed_reader() {
     let dir = tempfile::TempDir::new().unwrap();
     let path = dir.path().join("windowed-boundary.jsonl");
     let usage = |input: u64, output: u64, cache_read: u64, total: u64, cost: f64| {
-        // The full `UsageCost` shape: the typed `FileEntry::Compaction`
-        // payload parses `usage` (the fixture's rows must deserialize
-        // in the window walk), and the cost struct requires every
-        // field — a bare `{ "total": ... }` fails the payload parse and
-        // the boundary never forms.
+        // The full `UsageCost` shape: a bare `{ "total": ... }` fails the
+        // payload parse and the boundary never forms.
         json!({
             "input": input, "output": output, "cacheRead": cache_read,
             "cacheWrite": 0, "totalTokens": total,
@@ -314,9 +299,8 @@ fn compaction_boundary_serves_the_windowed_reader() {
         assistant("a1", Some("u1"), usage(1000, 200, 5000, 6200, 0.75)),
         user("u2", Some("a1")),
         assistant("a2", Some("u2"), usage(800, 150, 3000, 3950, 1.25)),
-        // The kept region starts at u3 (firstKeptEntryId); the kept
-        // rows precede the compaction entry in file order, as in a
-        // real compacted file.
+        // The kept region starts at u3 (firstKeptEntryId); the kept rows precede the
+        // compaction entry in file order, as in a real compacted file.
         user("u3", Some("a2")),
         assistant("a3", Some("u3"), usage(600, 120, 2000, 2720, 0.25)),
         json!({
@@ -361,20 +345,15 @@ fn compaction_boundary_serves_the_windowed_reader() {
         },
     });
     assert_eq!(session_stats(&full, Some(1_000)), expected);
-    // The windowed store (retained region) and the full store walk the
-    // same kept region and must serve identical active numbers.
+    // The windowed store (retained region) and the full store walk the same kept region:
+    // identical active numbers.
     assert_eq!(session_stats(&windowed, Some(1_000)), expected);
 }
 
-/// The audit's captured devbox session (TS-written, sanitized: content
-/// stripped; ids, parentIds, timestamps, roles, usage, and the
-/// compaction row verbatim): one compaction at the audit-captured
-/// boundary where the pre-cut ancestry carries 952 assistant turns /
-/// $0.2900872 / 154,979,520 cacheRead that TS drops from the active
-/// stats, and the kept region is the 2622 turns / $3.921395 TS
-/// reports post-compaction. Real captured transcripts are never
-/// committed; point `PA_ACTIVE_STATS_CAPTURED_FIXTURE` at a local
-/// copy to run it.
+/// The audit's captured devbox session (sanitized): the pre-cut ancestry is
+/// spend TS drops from the active stats; the kept region is what TS reports
+/// post-compaction. Point `PA_ACTIVE_STATS_CAPTURED_FIXTURE` at a local copy
+/// to run it (real captures are never committed).
 #[test]
 #[ignore = "set PA_ACTIVE_STATS_CAPTURED_FIXTURE to the captured session path"]
 fn captured_compaction_boundary_matches_ts_active_stats() {
@@ -410,22 +389,14 @@ fn captured_compaction_boundary_matches_ts_active_stats() {
         },
     });
     assert_eq!(session_stats(&full, Some(200_000)), expected);
-    // The windowed store (retained region) and the full store walk the
-    // same kept region and must serve identical active numbers.
+    // The windowed store (retained region) and the full store walk the same kept region:
+    // identical active numbers.
     assert_eq!(session_stats(&windowed, Some(200_000)), expected);
 }
 
-/// The compaction boundary in miniature: the pre-cut ancestry is spend
-/// the active stats must not report; the kept region — kept rows
-/// before the compaction entry and a ghost-parent row whose parent
-/// was minted but never persisted — is what they must. The
-/// side-question FORK (cm1/a4, chained from the same compaction row
-/// the active line continues from) is spend the RELOADED active list
-/// does not hold: TS `buildSessionContext` walks the leaf-to-root
-/// path only, so a branch moved away from (and the forks it left
-/// behind) stay out of the stats — their spend survives on the
-/// whole-file surfaces (the saved rows, `/context`). The
-/// summarizer's own usage rides the compaction entry and stays out.
+/// The compaction boundary in miniature: kept rows plus a ghost-parent row
+/// are what the active stats report; the side-question FORK is spend the
+/// reloaded list drops (it survives on whole-file surfaces).
 #[test]
 fn compaction_boundary_drops_the_pre_cut_ancestry() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -459,9 +430,8 @@ fn compaction_boundary_drops_the_pre_cut_ancestry() {
         assistant("a1", Some("u1"), 0.125),
         user("u2", Some("a1")),
         assistant("a2", Some("u2"), 0.25),
-        // The kept region starts at u3 (firstKeptEntryId); the kept
-        // rows precede the compaction entry in file order, as in a
-        // real compacted file.
+        // The kept region starts at u3 (firstKeptEntryId); the kept rows precede the
+        // compaction entry in file order, as in a real compacted file.
         user("u3", Some("a2")),
         assistant("a3", Some("u3"), 0.25),
         json!({
@@ -487,9 +457,8 @@ fn compaction_boundary_drops_the_pre_cut_ancestry() {
     std::fs::write(&path, format!("{}\n", lines.join("\n"))).unwrap();
     let full = SessionFile::open(&path).unwrap();
     let windowed = SessionFile::open_windowed(&path).unwrap();
-    // The ghost parent dangles the windowed reader's chain-following,
-    // so it falls back to the full reader: both stores must still
-    // serve the same kept-region numbers.
+    // The ghost parent dangles the windowed reader's chain-following, so it falls back
+    // to the full reader: both stores still serve the same kept-region numbers.
     assert!(windowed.window.is_none());
     let expected = json!({
         "sessionFile": path.display().to_string(),
@@ -501,19 +470,16 @@ fn compaction_boundary_drops_the_pre_cut_ancestry() {
         "totalMessages": 6,
         "tokens": { "input": 30, "output": 15, "cacheRead": 0, "cacheWrite": 0, "total": 45 },
         "cost": 1.0,
-        // The strict branch truncates at the ghost parent, so the
-        // context estimate anchors on the last row alone.
+        // The strict branch truncates at the ghost parent, so the context estimate anchors on
+        // the last row alone.
         "contextUsage": { "tokens": 15, "contextWindow": 1000, "percent": 1.5 },
     });
     assert_eq!(session_stats(&full, Some(1000)), expected);
     assert_eq!(session_stats(&windowed, Some(1000)), expected);
 }
 
-/// A compaction written on an ABANDONED branch never bounds the
-/// active list: TS `buildSessionContext` records the last compaction
-/// along its leaf-to-root path only, so the active line keeps its own
-/// full history (and the fork's rows — including its compaction and
-/// the fork's post-compaction spend — stay out of the active stats).
+/// TS `buildSessionContext` records the last compaction along its leaf-to-root path only,
+/// so the active line keeps its own full history.
 #[test]
 fn an_abandoned_branchs_compaction_never_bounds_the_active_list() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -547,9 +513,8 @@ fn an_abandoned_branchs_compaction_never_bounds_the_active_list() {
         assistant("a1", Some("u1"), 0.25),
         user("u2", Some("a1")),
         assistant("a2", Some("u2"), 0.25),
-        // An abandoned fork off u2: its rows AND its compaction sit in
-        // the file AFTER the fork point but BEFORE the active line
-        // continues.
+        // An abandoned fork off u2: its rows AND its compaction sit in the file AFTER the fork
+        // point but BEFORE the active line continues.
         user("x1", Some("a2")),
         assistant("x2", Some("x1"), 0.25),
         json!({
@@ -578,9 +543,8 @@ fn an_abandoned_branchs_compaction_never_bounds_the_active_list() {
     .unwrap();
     let store = SessionFile::open(&path).unwrap();
     let stats = session_stats(&store, None);
-    // The active branch keeps its own full history — the abandoned
-    // fork's compaction does not bound it (a file-order walk would
-    // drop u1..a2 from the "kept region" and count the fork's rows).
+    // The active branch keeps its own full history — the abandoned fork's compaction does
+    // not bound it.
     assert_eq!(stats["userMessages"], json!(3));
     assert_eq!(stats["assistantMessages"], json!(3));
     assert_eq!(stats["totalMessages"], json!(6));

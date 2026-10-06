@@ -1,9 +1,6 @@
-//! Python-side preview analysis: the python half of
-//! `packages/coding-agent/src/core/tools/code-preview.ts`.
-//!
-//! Covers `previewPythonCode`/`previewIpythonCode` and their statement
-//! scanner. Split from the bash-side preview module for module-size
-//! hygiene; behavior matches the TS source.
+//! Python-side preview analysis: `previewPythonCode`/
+//! `previewIpythonCode` and their statement scanner. Behavior matches the
+//! TS source.
 
 use super::bash::re_once;
 use super::bash::{
@@ -277,9 +274,8 @@ fn is_unsupported_escape_char(ch: char) -> bool {
     )
 }
 
-/// Walk a python string-literal body from just after the opening delimiter,
-/// following python's escape rules (in raw strings backslash-quote never
-/// closes). Offsets index bytes into `code`.
+/// Walk a python string-literal body from just after the opening delimiter, following python's
+/// escape rules (in raw strings backslash-quote never closes). Offsets index bytes into `code`.
 fn scan_python_string_literal(
     code: &str,
     start: usize,
@@ -344,9 +340,8 @@ fn scan_python_string_literal(
 ///
 /// # Panics
 ///
-/// Cannot panic for any valid `code`: the `expect` guards the scanner
-/// invariant that the loop only ever advances to a char start (whole
-/// chars, escapes, or quote delimiters).
+/// Cannot panic for any valid `code`: the loop only ever advances to a
+/// char start.
 pub fn python_statement_lines(code: &str) -> Vec<String> {
     let mut lines: Vec<String> = code.split('\n').map(String::from).collect();
     let mut line = 0usize;

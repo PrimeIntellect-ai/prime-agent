@@ -1,16 +1,9 @@
-//! Key identifiers and matching, ported from `packages/tui/src/keys.ts`.
-//!
-//! Input arrives as crossterm events; we map them to the same string key ids
-//! the TS product uses ("ctrl+c", "shift+enter", "alt+left", ...) so
-//! `KeybindingsManager` matching behaves identically.
-//!
-//! The TS decode matrix (`matchesKey`/`parseKey`) runs on raw byte strings,
-//! which carry the encoding (kitty CSI-u vs legacy text) as evidence. This
-//! layer sees crossterm's parsed events, where some encodings fold to the
-//! same event; the mode-aware mappings follow TS where the kitty protocol
-//! flag disambiguates, and the irreducible folds are documented divergences
-//! (see `ctrl_char_id`, the term-enhanced-keys
-//! rows).
+//! Key identifiers and matching, ported from `packages/tui/src/keys.ts`. Input arrives as crossterm
+//! events; we map them to the same string key ids the TS product uses ("ctrl+c", "shift+enter",
+//! "alt+left", ...) so `KeybindingsManager` matching behaves identically. crossterm's parsed events
+//! fold some encodings TS disambiguates on raw bytes; the mode-aware mappings follow TS where the
+//! kitty protocol flag disambiguates, and the irreducible folds are documented divergences (see
+//! `ctrl_char_id`, the term-enhanced-keys rows).
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::crossterm::event as ct;
@@ -25,14 +18,11 @@ pub fn key_event_to_id(key: &KeyEvent) -> Option<KeyId> {
             return None;
         }
     }
-    // TS ids support super/hyper/meta combos (keys.ts
-    // formatKeyNameWithModifiers) but no TS keybinding binds one, so a
-    // TS-keyed binding never matches them. The prompt-editor keybind lane
-    // (2026-09-24, documented divergence) binds the macOS Cmd keys: the
-    // kitty protocol delivers them as the SUPER modifier, so a
-    // SUPER-modified key resolves to its `super+<key>` id — anything
-    // unbound still matches nothing. HYPER/META stay undecoded: no
-    // binding names one and terminals never deliver the bits on their own.
+    // TS ids support super/hyper/meta combos but no TS keybinding binds one, so a TS-keyed
+    // binding never matches them. The prompt-editor keybind lane (2026-09-24, documented
+    // divergence) binds the macOS Cmd keys: the kitty protocol delivers them as the SUPER
+    // modifier, so a SUPER-modified key resolves to its `super+<key>` id. HYPER/META stay
+    // undecoded: no binding names one and terminals never deliver the bits on their own.
     if key
         .modifiers
         .intersects(KeyModifiers::HYPER | KeyModifiers::META)
@@ -49,10 +39,8 @@ pub fn key_event_to_id(key: &KeyEvent) -> Option<KeyId> {
                 return Some(ctrl_char_id(c, alt, shift, super_key));
             }
             if super_key {
-                // The plain-super identity (macOS Cmd with the kitty
-                // protocol delivering it): `super+a` select-all and
-                // `super+z` undo style bindings, with shift/alt kept when
-                // the terminal sent them.
+                // The plain-super identity (macOS Cmd with kitty delivering it): `super+a`
+                // select-all and `super+z` undo style bindings.
                 let shift_prefix = if shift || c.is_ascii_uppercase() {
                     "shift+"
                 } else {
@@ -71,36 +59,28 @@ pub fn key_event_to_id(key: &KeyEvent) -> Option<KeyId> {
                 if c == ' ' {
                     return Some("alt+space".into());
                 }
-                // rxvt-family alt+arrow encodings (TS `LEGACY_SEQUENCE_KEY_IDS`,
-                // keys.ts:460: those terminals send ESC p/n/b/f for
-                // Option+Up/Down/Left/Right, and TS parseKey maps the byte
-                // sequence before its alt+letter fallback). crossterm folds
-                // the bytes into the same Char+ALT event a real alt+letter
-                // press produces, so the mapping is mode-aware: only while
-                // the kitty protocol is inactive (a kitty terminal reports
-                // alt+letter natively, which TS also keeps as alt+letter).
-                // The word-motion defaults carry alt+b/alt+f alongside
-                // alt+left/alt+right, so the visible behavior is unchanged.
+                // rxvt-family alt+arrow encodings (TS `LEGACY_SEQUENCE_KEY_IDS`): those terminals
+                // send ESC p/n/b/f for Option+Up/Down/Left/Right, and TS parseKey maps the byte
+                // sequence before its alt+letter fallback. crossterm folds the bytes into the same
+                // Char+ALT event a real alt+letter press produces, so the mapping is mode-aware:
+                // only while the kitty protocol is inactive. The word-motion defaults carry
+                // alt+b/alt+f alongside, so the visible behavior is unchanged.
                 if !crate::enhanced_keys::kitty_active() {
                     match c {
                         'p' => return Some("alt+up".into()),
                         'n' => return Some("alt+down".into()),
                         'b' => return Some("alt+left".into()),
                         'f' => return Some("alt+right".into()),
-                        // ESC + uppercase is the rxvt alt+shift+arrow encoding
-                        // (TS keys.ts `!_kittyProtocolActive && data ===
-                        // "\x1bB"` in the left/right cases): crossterm folds
-                        // it into the SHIFT+ALT uppercase event, which TS
-                        // matches as the bare arrow identity only.
+                        // ESC + uppercase is the rxvt alt+shift+arrow encoding: TS matches the
+                        // SHIFT+ALT uppercase event as the bare arrow identity only.
                         'B' if shift => return Some("alt+left".into()),
                         'F' if shift => return Some("alt+right".into()),
                         _ => {}
                     }
                 }
-                // Shift+alt+letter: the CSI-u alternate resolves to the
-                // produced uppercase char with SHIFT cleared, and a legacy
-                // ESC+uppercase carries the SHIFT bit — both are the
-                // TS `shift+alt+<letter>` identity (formatParsedKey).
+                // Shift+alt+letter: the CSI-u alternate resolves to the produced uppercase
+                // char with SHIFT cleared, and a legacy ESC+uppercase carries the SHIFT bit —
+                // both are the TS `shift+alt+<letter>` identity.
                 let prefix = if shift || c.is_ascii_uppercase() {
                     "shift+alt+"
                 } else {
@@ -122,9 +102,8 @@ pub fn key_event_to_id(key: &KeyEvent) -> Option<KeyId> {
                 });
             }
             if c == ' ' {
-                // TS parseKey maps the raw space to the `space` key id
-                // (keys.ts:1280) — the printable decoders (`decode_printable`)
-                // map it back for text surfaces.
+                // parseKey maps the raw space to the `space` key id; the printable
+                // decoders (`decode_printable`) map it back for text surfaces.
                 if shift {
                     return Some("shift+space".into());
                 }
@@ -133,9 +112,8 @@ pub fn key_event_to_id(key: &KeyEvent) -> Option<KeyId> {
             return Some(c.to_string());
         }
         KeyCode::Enter => {
-            // The super prefix keeps Cmd-modified keys their own identity
-            // (unbound combos match nothing instead of falling through to
-            // the bare action and submitting).
+            // The super prefix keeps Cmd-modified keys their own identity (unbound combos
+            // match nothing instead of falling through to the bare action and submitting).
             if super_key {
                 let mut s = String::new();
                 if shift {
@@ -213,9 +191,9 @@ pub fn key_event_to_id(key: &KeyEvent) -> Option<KeyId> {
                 });
             }
             if alt {
-                // The merged meta-wrapped `ESC ESC [ Z` (Option+Shift+Tab with
-                // option-as-meta): TS's double-ESC branch strips alt and
-                // matches the rest, so the wrapped identity keeps the ALT.
+                // The merged meta-wrapped `ESC ESC [ Z` (Option+Shift+Tab with option-as-meta):
+                // TS's double-ESC branch strips alt and matches the rest, so the wrapped
+                // identity keeps the ALT.
                 return Some("shift+alt+tab".into());
             }
             return Some("shift+tab".into());
@@ -238,22 +216,16 @@ pub fn key_event_to_id(key: &KeyEvent) -> Option<KeyId> {
 
 /// The ctrl-modified character identities (TS parseKey/formatParsedKey):
 ///
-/// - Shift+ctrl/alt+letter: the kitty CSI-u shifted alternate resolves to
-///   the produced uppercase char with SHIFT cleared by crossterm's parser,
-///   and the no-alternate form keeps the SHIFT bit; both report the TS
-///   `shift+ctrl+<letter>` identity (the bound `shift+ctrl+o` tree filter).
-/// - Raw LF: crossterm parses it as Ctrl+J because the app runs raw mode.
-///   TS maps `\n` to shift+enter while the kitty protocol is active
-///   (Ghostty's `shift+enter=text:\n` mapping) and to enter otherwise
-///   (a legacy LF is an Enter). A real Ctrl+J under kitty is the same
-///   crossterm event as Ghostty's mapping, so it inserts the newline
-///   (TS leaves the CSI-u Ctrl+J unbound — documented divergence).
-/// - The xterm 0x1c-0x1f control-byte complement: crossterm folds it into
-///   `Char('4'..='7') + CTRL`, but TS keeps the literal ids (`\x1c` is
-///   "ctrl+\\", `\x1d` is "ctrl+]", `\x1f` is "ctrl+-"; `ctrl+]` and
-///   `ctrl+-` are bound in the editor). The remap stays legacy-only:
-///   under the kitty protocol the same Char+CTRL events are the real
-///   CSI-u ctrl+digit keys.
+/// - Shift+ctrl/alt+letter: the kitty CSI-u shifted alternate resolves to the produced uppercase
+///   char with SHIFT cleared by crossterm's parser, the no-alternate form keeps the SHIFT bit; both
+///   report the TS `shift+ctrl+<letter>` identity.
+/// - Raw LF: crossterm parses it as Ctrl+J because the app runs raw mode. TS maps `\n` to
+///   shift+enter while the kitty protocol is active (Ghostty's `shift+enter=text:\n` mapping)
+///   and to enter otherwise. A real Ctrl+J under kitty inserts the newline (TS leaves the CSI-u
+///   Ctrl+J unbound — documented divergence).
+/// - The xterm 0x1c-0x1f control-byte complement: crossterm folds it into `Char('4'..='7') + CTRL`,
+///   but TS keeps the literal ids (`\x1d` is "ctrl+]", `\x1f` is "ctrl+-"); the remap stays
+///   legacy-only, because under kitty the same events are the real CSI-u ctrl+digit keys.
 fn ctrl_char_id(c: char, alt: bool, shift: bool, super_key: bool) -> String {
     let lower = c.to_ascii_lowercase();
     let shifted = shift || c.is_ascii_uppercase();
@@ -310,8 +282,8 @@ fn modified_name(name: &str, ctrl: bool, alt: bool, shift: bool, super_key: bool
     s
 }
 
-/// Repeated escape presses arrive as separate events; TS splits combined data.
-/// Kept for API parity with CustomEditor.splitRepeatedKeybinding.
+/// Repeated escape presses arrive as separate events; TS splits combined data. Kept for
+/// API parity with CustomEditor.splitRepeatedKeybinding.
 #[must_use]
 pub fn split_repeated(data: &[KeyId], keybinding_id: &str) -> Option<Vec<KeyId>> {
     let hits: Vec<KeyId> = data
@@ -331,17 +303,14 @@ mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-    /// Shift-modified printables must reach the editor as their produced
-    /// character. The kitty protocol's `report alternate keys` flag makes
-    /// the terminal carry the shifted character (`shift+=` arrives as
-    /// `CSI 61:43;2u`), and crossterm's CSI-u parser resolves it to
-    /// `Char('+')` with SHIFT cleared before this layer sees the event.
+    /// Shift-modified printables must reach the editor as their produced character: the kitty
+    /// `report alternate keys` flag carries the shifted character (`shift+=` arrives as `CSI
+    /// 61:43;2u`), and crossterm's CSI-u parser resolves it to `Char('+')` with SHIFT cleared.
     #[test]
     fn shifted_printables_map_to_the_produced_character() {
-        // (produced char, the CSI-u alternate form a kitty terminal sends):
-        // shift+1 `CSI 49:33;2u`, shift+/ `CSI 47:63;2u`,
-        // shift+' `CSI 39:34;2u`, shift+= `CSI 61:43;2u`,
-        // shift+; `CSI 59:58;2u` — the full dogfooded range.
+        // (produced char, the CSI-u alternate form a kitty terminal sends): shift+1
+        // `CSI 49:33;2u`, shift+/ `CSI 47:63;2u`, shift+' `CSI 39:34;2u`, shift+=
+        // `CSI 61:43;2u`, shift+; `CSI 59:58;2u`.
         let range = [
             ('!', "49:33"),
             ('?', "47:63"),
@@ -360,19 +329,15 @@ mod tests {
         }
     }
 
-    /// A kitty CSI-u event WITHOUT the shifted alternate (`CSI 61;2u` —
-    /// no `report alternate keys`) arrives as the base key plus SHIFT;
-    /// the id keeps the base character (TS `decodeKittyPrintable` falls
-    /// back to the reported codepoint the same way).
+    /// A kitty CSI-u event WITHOUT the shifted alternate (`CSI 61;2u`) arrives as the base key plus
+    /// SHIFT; the id keeps the base character (TS `decodeKittyPrintable` does the same).
     #[test]
     fn shift_modified_base_key_keeps_the_base_character() {
         let event = KeyEvent::new(KeyCode::Char('='), KeyModifiers::SHIFT);
         assert_eq!(key_event_to_id(&event).as_deref(), Some("="));
     }
 
-    /// The shifted range inserts through the editor: each event decodes to
-    /// the produced character and lands in the buffer (the dogfood class —
-    /// a shifted key that produced NOTHING — regresses here).
+    /// The shifted range inserts through the editor: each event decodes to the produced character.
     #[test]
     fn editor_inserts_the_full_shifted_range() {
         let mut editor = crate::editor::Editor::new();
@@ -392,9 +357,8 @@ mod tests {
         assert_eq!(editor.get_text(), "+!?\":");
     }
 
-    /// The kitty event-type matrix (keys.ts:505): a repeat behaves as a
-    /// press, a release is dropped — `CSI 97;1:2u` and `CSI 97;1:3u` are
-    /// the crossterm kinds Repeat/Release.
+    /// The kitty event-type matrix: a repeat behaves as a press, a release is dropped —
+    /// `CSI 97;1:2u` and `CSI 97;1:3u` are the crossterm kinds Repeat/Release.
     #[test]
     fn kitty_repeats_press_and_releases_are_dropped() {
         let press = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
@@ -411,8 +375,7 @@ mod tests {
         assert_eq!(key_event_to_id(&press).as_deref(), Some("a"));
         assert_eq!(key_event_to_id(&repeat).as_deref(), Some("a"));
         assert_eq!(key_event_to_id(&release), None);
-        // The dedicated key classes too (arrows and function keys carry
-        // the event type the same way: `CSI 1;1:3A`, `CSI 3;1:3~`).
+        // The dedicated key classes (arrows and function keys carry the event type the same way).
         let up_release =
             KeyEvent::new_with_kind(KeyCode::Up, KeyModifiers::NONE, ct::KeyEventKind::Release);
         let delete_release = KeyEvent::new_with_kind(
@@ -424,12 +387,9 @@ mod tests {
         assert_eq!(key_event_to_id(&delete_release), None);
     }
 
-    /// The shift+ctrl/alt+letter kitty identities (keys.ts:788): the CSI-u
-    /// alternate resolves to the produced uppercase char with SHIFT
-    /// cleared (`shift+ctrl+o` arrives as Char('O')+CTRL), and the
-    /// no-alternate form keeps the SHIFT bit (`CSI 111;5u` is
-    /// Char('o')+CTRL+SHIFT). Both report `shift+ctrl+o` — the bound
-    /// tree-filter id — and never fold into the wrong `ctrl+o`.
+    /// The shift+ctrl/alt+letter kitty identities: the CSI-u alternate resolves to the
+    /// produced uppercase char with SHIFT cleared, the no-alternate form keeps the SHIFT
+    /// bit. Both report `shift+ctrl+o` — never the wrong `ctrl+o`.
     #[test]
     fn shift_ctrl_and_alt_letters_report_the_shifted_identity() {
         // `CSI 111:79;5u` (alternate form): SHIFT consumed by crossterm.
@@ -447,21 +407,18 @@ mod tests {
         // A plain ctrl+letter keeps its id.
         let ctrl_o = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL);
         assert_eq!(key_event_to_id(&ctrl_o).as_deref(), Some("ctrl+o"));
-        // Legacy ESC+uppercase carries the SHIFT bit: `\x1bA` is
-        // shift+alt+a, TS parity (never plain "alt+a").
+        // Legacy ESC+uppercase carries the SHIFT bit: `\x1bA` is shift+alt+a, TS parity
+        // (never plain "alt+a").
         let esc_a = KeyEvent::new(KeyCode::Char('A'), KeyModifiers::ALT | KeyModifiers::SHIFT);
         assert_eq!(key_event_to_id(&esc_a).as_deref(), Some("shift+alt+a"));
     }
 
-    /// The bound editor keys that live on xterm's 0x1c-0x1f control-byte
-    /// complement (keys.ts parseKey: `\x1d` -> "ctrl+]", `\x1f` ->
-    /// "ctrl+-"): crossterm folds the bytes into Char('4'..='7')+CTRL,
-    /// so the legacy ids are restored when the kitty protocol is not
-    /// active; under kitty the same events are the real ctrl+digit keys.
+    /// The bound editor keys on xterm's 0x1c-0x1f control-byte complement (TS parseKey: `\x1d` ->
+    /// "ctrl+]", `\x1f` -> "ctrl+-"): crossterm folds the bytes into Char('4'..='7')+CTRL, so the
+    /// legacy ids are restored when the kitty protocol is not active.
     #[test]
     fn legacy_control_byte_complement_keeps_the_literal_ids() {
-        // The kitty flag is process-global: serialize through the
-        // enhanced-keys module's state lock pattern.
+        // The kitty flag is process-global: serialize through the enhanced-keys state lock pattern.
         let _guard = crate::enhanced_keys::TEST_STATE_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -472,17 +429,15 @@ mod tests {
         assert_eq!(key_event_to_id(&ctrl_underscore).as_deref(), Some("ctrl+-"));
         let ctrl_backslash = KeyEvent::new(KeyCode::Char('4'), KeyModifiers::CONTROL);
         assert_eq!(key_event_to_id(&ctrl_backslash).as_deref(), Some("ctrl+\\"));
-        // Under the kitty protocol the same event is the real ctrl+digit
-        // (`CSI 53;5u`), which TS leaves on the digit id.
+        // Under the kitty protocol the same event is the real ctrl+digit (`CSI 53;5u`),
+        // which TS leaves on the digit id.
         crate::enhanced_keys::set_kitty_active_for_tests(true);
         assert_eq!(key_event_to_id(&ctrl_bracket).as_deref(), Some("ctrl+5"));
         crate::enhanced_keys::set_kitty_active_for_tests(false);
     }
 
-    /// The LF mapping is kitty-mode-aware (keys.ts parseKey): raw LF is
-    /// crossterm's Ctrl+J because the app runs raw mode. TS maps it to
-    /// shift+enter under kitty (Ghostty's `shift+enter=text:\n`) and to
-    /// enter in legacy mode (a legacy LF is an Enter).
+    /// The LF mapping is kitty-mode-aware (TS parseKey): shift+enter under kitty, enter in legacy
+    /// mode.
     #[test]
     fn raw_lf_maps_by_kitty_mode() {
         let _guard = crate::enhanced_keys::TEST_STATE_LOCK
@@ -501,11 +456,9 @@ mod tests {
         assert_eq!(key_event_to_id(&ctrl_alt_j).as_deref(), Some("ctrl+alt+j"));
     }
 
-    /// The shift-modified Enter maps to the `shift+enter` id (the
-    /// operator's 2026-09-24 directive: Shift+Enter inserts a newline,
-    /// never submits): a kitty terminal's `CSI 13;2u` parses to
-    /// Enter+SHIFT, and the editor's `tui.input.newLine` binding
-    /// consumes the id.
+    /// The shift-modified Enter maps to the `shift+enter` id (the operator's 2026-09-24 directive:
+    /// Shift+Enter inserts a newline, never submits): a kitty terminal's `CSI 13;2u` parses to
+    /// Enter+SHIFT, and the editor's `tui.input.newLine` binding consumes the id.
     #[test]
     fn shift_modified_enter_maps_to_the_newline_id() {
         let shift_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
@@ -518,10 +471,9 @@ mod tests {
         assert!(!kb.matches("shift+enter", "tui.input.submit"));
     }
 
-    /// Super-modified SPECIAL keys keep their super identity (Bugbot
-    /// round-1 fix): an unbound Cmd combo must match nothing instead of
-    /// falling through to the bare action — Cmd+Enter submitting the
-    /// prompt or Cmd+Backspace deleting a character would be surprising.
+    /// Super-modified SPECIAL keys keep their super identity (Bugbot round-1 fix): an unbound Cmd
+    /// combo must match nothing instead of falling through to the bare action — Cmd+Enter
+    /// submitting the prompt or Cmd+Backspace deleting a character would be surprising.
     #[test]
     fn super_modified_special_keys_keep_their_identity() {
         let _guard = crate::enhanced_keys::TEST_STATE_LOCK
@@ -572,20 +524,16 @@ mod tests {
         }
     }
 
-    /// Shift+tab keeps its TS id (`\x1b[Z` -> "shift+tab"; crossterm
-    /// calls it `BackTab`) even though no keybinding binds it.
+    /// Shift+tab keeps its TS id (`\x1b[Z` -> "shift+tab"; crossterm calls it `BackTab`)
+    /// even though no keybinding binds it.
     #[test]
     fn backtab_reports_shift_tab() {
         let backtab = KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE);
         assert_eq!(key_event_to_id(&backtab).as_deref(), Some("shift+tab"));
     }
 
-    /// rxvt-family alt+arrow encodings (TS `LEGACY_SEQUENCE_KEY_IDS`,
-    /// keys.ts:460): those terminals send ESC p/n/b/f for
-    /// Option+Up/Down/Left/Right, and TS parseKey maps the byte sequence
-    /// BEFORE its alt+letter fallback. crossterm folds the bytes into the
-    /// same Char+ALT event a real alt+letter press produces, so the
-    /// mapping is mode-aware (kitty terminals report alt+letter natively).
+    /// rxvt-family alt+arrow encodings (TS `LEGACY_SEQUENCE_KEY_IDS`): the mapping is mode-aware
+    /// (kitty terminals report alt+letter natively).
     #[test]
     fn rxvt_alt_arrow_folds_map_to_arrows_outside_kitty() {
         let _guard = crate::enhanced_keys::TEST_STATE_LOCK
@@ -612,9 +560,8 @@ mod tests {
             key_event_to_id(&alt('f', false)).as_deref(),
             Some("alt+right")
         );
-        // ESC + uppercase (\x1bB / \x1bF): TS matches these ONLY as the
-        // bare arrow (keys.ts left/right cases); a real alt+shift+letter
-        // press folds into the same event on legacy terminals.
+        // ESC + uppercase (\x1bB / \x1bF): TS matches these ONLY as the bare arrow; a
+        // real alt+shift+letter press folds into the same event on legacy terminals.
         assert_eq!(
             key_event_to_id(&alt('B', true)).as_deref(),
             Some("alt+left")
@@ -623,8 +570,7 @@ mod tests {
             key_event_to_id(&alt('F', true)).as_deref(),
             Some("alt+right")
         );
-        // Other uppercase folds keep the TS shift+alt+letter identity (TS
-        // matches nothing for them).
+        // Other uppercase folds keep the TS shift+alt+letter identity (TS matches nothing).
         assert_eq!(
             key_event_to_id(&alt('D', true)).as_deref(),
             Some("shift+alt+d")
@@ -640,9 +586,8 @@ mod tests {
         crate::enhanced_keys::set_kitty_active_for_tests(false);
     }
 
-    /// The merged meta-wrapped `ESC ESC [ Z` (Option+Shift+Tab with
-    /// option-as-meta) arrives as ALT+BackTab: the id keeps the ALT (TS's
-    /// double-ESC branch strips alt and matches `\x1b[Z` as shift+tab).
+    /// The merged meta-wrapped `ESC ESC [ Z` arrives as ALT+BackTab: the id keeps the ALT
+    /// (TS's double-ESC branch strips alt and matches `\x1b[Z` as shift+tab).
     #[test]
     fn backtab_keeps_the_alt_identity() {
         let plain = KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE);
@@ -651,10 +596,9 @@ mod tests {
         assert_eq!(key_event_to_id(&wrapped).as_deref(), Some("shift+alt+tab"));
     }
 
-    /// The macOS Cmd keys arrive as the SUPER modifier under the kitty
-    /// protocol (prompt-editor-keybinds): every identity keeps its `super+`
-    /// prefix so the Cmd bindings (undo/redo, select-all, line and doc
-    /// jumps, cut/copy) match — an unbound one still matches nothing.
+    /// The macOS Cmd keys arrive as the SUPER modifier under the kitty protocol
+    /// (prompt-editor-keybinds): every identity keeps its `super+` prefix so the Cmd bindings
+    /// match.
     #[test]
     fn super_modified_keys_decode_to_super_ids() {
         let cases = [
@@ -665,10 +609,8 @@ mod tests {
                 "Cmd+Z undo",
             ),
             (
-                // A kitty terminal reports Cmd+Shift+Z through the shifted
-                // alternate: crossterm resolves it to Char('Z') with SHIFT
-                // cleared, so the id carries the shift from the produced
-                // character.
+                // A kitty terminal reports Cmd+Shift+Z through the shifted alternate: crossterm
+                // resolves it to Char('Z') with SHIFT cleared, so the id carries the shift.
                 KeyCode::Char('Z'),
                 KeyModifiers::SUPER,
                 "shift+super+z",
@@ -720,8 +662,7 @@ mod tests {
         assert!(kb.matches("super+z", "tui.editor.undo"));
         assert!(kb.matches("ctrl+shift+z", "tui.editor.redo"));
         assert!(kb.matches("shift+super+z", "tui.editor.redo"));
-        // A ctrl+super combo (Cmd+Ctrl+Shift+Z) is its own identity: it
-        // matches nothing (no binding names all three modifiers).
+        // A ctrl+super combo (Cmd+Ctrl+Shift+Z) is its own identity: it matches nothing.
         assert!(!kb.matches("shift+ctrl+super+z", "tui.editor.redo"));
         assert!(kb.matches("super+a", "tui.editor.selectAll"));
         assert!(kb.matches("super+left", "tui.editor.cursorLineStart"));

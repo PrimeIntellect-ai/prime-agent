@@ -1,41 +1,11 @@
-//! Replacement-flow kernel lifecycle e2e (TS parity ruling per flow).
+//! Replacement-flow kernel lifecycle e2e (TS parity ruling per flow): every
+//! whole-runtime replacement flow (`new_session`/`switch_session`/`import_fromJsonl`/
+//! `fork`) disposes the old kernel and boots the fresh session's kernel COLD; tree moves
+//! (`navigate_tree`) are NOT replacements — the kernel stays WARM. A missing switch target
+//! fails at the prepare, never tearing the live session down.
 //!
-//! TS ground truth (`AgentSessionRuntime`): the whole-runtime replacement
-//! flows - `newSession` / `switchSession` / `importFromJsonl` / `fork` -
-//! all run `teardownForReplacement` -> `teardownCurrent` ->
-//! `session.disposeAsync()`: the old session's kernel disposes (a final
-//! namespace snapshot flush, then the `python -m rlm.repl` process exits)
-//! and a FRESH runtime builds onto the replacement file, whose kernel
-//! starts cold (the prewarm fires again; the namespace is empty unless
-//! the moved-to session carries its own snapshot). The tree moves
-//! (`navigateTree`) are NOT replacements: TS rebuilds the branch context
-//! in place on the live session and the kernel stays warm.
-//!
-//! Verified per flow against a live kernel process:
-//!
-//! 1. `new_session`: the old kernel process dies, a new one boots (the
-//!    replacement prewarm), and the new session's namespace is COLD (a
-//!    variable set before the replacement is gone).
-//! 2. `switch_session`: same dispose+cold ruling on a prepared target -
-//!    and a MISSING target never tears the live session down (the
-//!    prepare precedes the teardown; the kernel survives the failed
-//!    switch, exactly like the TS `releaseUncommittedLease` fallthrough).
-//! 3. `fork`: same dispose+cold ruling (TS `createBranchedSession` copies
-//!    no kernel state; the fork's kernel is a fresh process).
-//! 4. `navigate_tree`: the SAME kernel process stays alive and its
-//!    namespace is WARM (the variable set before the move is still
-//!    there) - the kernel must not be torn down on a tree move.
-//! 5. `switch_session` onto a session file with another recorded cwd:
-//!    the rebuilt runtime's kernel-resident tools run in the TARGET
-//!    session's cwd (TS `createRuntime({ cwd:
-//!    sessionManager.getCwd() })`) - the post-switch kernel's
-//!    `os.getcwd()` is the switched-to session's directory.
-//!
-//! The kernel Python is ambient product state (the auto-bootstrapped kernel
-//! venv); like the other live-kernel verifiers, these tests skip (with a
-//! note) on machines without a live install. The process-table scans diff
-//! against a baseline snapshot, so ambient kernels (other agent sessions
-//! on the same box) never interfere.
+//! The process-table scans diff against a baseline snapshot, so ambient kernels never
+//! interfere; tests skip (with a note) on machines without a live kernel install.
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -123,11 +93,8 @@ fn await_new_kernel(baseline: &[u32], budget: Duration) -> Vec<u32> {
     }
 }
 
-/// Poll until the old kernel pids are gone AND a fresh kernel exists: a
-/// replacement flow disposed the old session's kernel and its fresh
-/// session prewarmed a new one. The new kernel may boot before the old
-/// one finishes its final snapshot flush, so any ordering passes - only
-/// the end state (old gone, new alive) is the contract.
+/// Poll until the old kernel pids are gone AND a fresh kernel exists (any ordering
+/// passes - the end state is the contract).
 fn await_kernel_turnover(baseline: &[u32], old: &[u32], budget: Duration) -> Vec<u32> {
     let deadline = Instant::now() + budget;
     loop {
@@ -282,11 +249,8 @@ impl Client {
     }
 }
 
-/// One turn's ipython cell: writes `receipt` under the receipts dir with
-/// the cell's verdict, after setting (first turn) or probing (second
-/// turn) the `marker` variable. The first turn seeds `marker = "warm"`;
-/// the probe records `"warm"` when the variable survived into the
-/// session's kernel and `"cold"` when the kernel started fresh.
+/// One turn's ipython cell: writes `receipt` with the cell's verdict, after setting (first
+/// turn) or probing (second turn) the `marker` variable ("warm" = it survived, "cold" = fresh).
 fn receipt_path(dir: &Path, name: &str) -> PathBuf {
     let receipts = dir.join("receipts");
     std::fs::create_dir_all(&receipts).expect("receipts dir");
@@ -311,10 +275,8 @@ fn probe_cell(dir: &Path, name: &str) -> String {
     )
 }
 
-/// A faux script whose turns run one ipython cell each: turn 1 seeds the
-/// marker, turn 2 probes it. The engine's queued responses span the
-/// replacement (the worker keeps its engine), so the second turn runs
-/// whatever kernel the moved-to session owns.
+/// A faux script whose turns run one ipython cell each: turn 1 seeds the marker,
+/// turn 2 probes it, on whatever kernel the moved-to session owns.
 fn write_faux_script(dir: &Path) -> PathBuf {
     let script = dir.join("faux.json");
     std::fs::write(
@@ -342,8 +304,7 @@ fn write_faux_script(dir: &Path) -> PathBuf {
     script
 }
 
-/// Create a session on the supervisor and run one scripted turn
-/// (prompt + idle wait). Returns the active session id.
+/// Create a session on the supervisor and run one scripted turn (prompt + idle wait).
 fn create_session(client: &mut Client, dir: &Path, script: &Path, id: &str) -> String {
     let sessions_dir = dir.join("sessions");
     std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
@@ -390,8 +351,7 @@ fn await_receipt(dir: &Path, name: &str) -> String {
     await_receipt_text(&receipt_path(dir, name))
 }
 
-/// Poll for a kernel cell's receipt content (the cwd rebind verifier
-/// reads the full path the cell wrote).
+/// Poll for a kernel cell's receipt content.
 fn await_receipt_text(receipt: &Path) -> String {
     let deadline = Instant::now() + Duration::from_mins(1);
     loop {
@@ -421,11 +381,7 @@ fn first_user_entry_id(client: &mut Client, session_id: &str, id: &str) -> Strin
         .to_string()
 }
 
-/// `new_session` (TS `AgentSessionRuntime.newSession` ->
-/// `teardownForReplacement`): the old session's kernel process dies with
-/// the session, the replacement session's kernel prewarm boots a fresh
-/// process, and the fresh kernel's namespace is COLD - a variable set in
-/// the old session's kernel does not survive into the new session.
+/// `new_session` (TS `teardownForReplacement`): the old kernel dies, the fresh kernel is COLD.
 #[test]
 fn new_session_disposes_the_kernel_and_starts_cold() {
     let Some(kernel_python) = kernel_python() else {
@@ -465,11 +421,8 @@ fn new_session_disposes_the_kernel_and_starts_cold() {
     );
 }
 
-/// `switch_session` (TS `AgentSessionRuntime.switchSession` ->
-/// `teardownForReplacement`): a prepared target replaces the runtime -
-/// the old kernel dies, the fresh one boots cold. A MISSING target is a
-/// prepare failure: no teardown runs, so the live session's kernel
-/// survives the failed switch untouched.
+/// `switch_session` (TS `teardownForReplacement`): a prepared target replaces the runtime
+/// (cold); a MISSING target fails at the prepare, leaving the live kernel untouched.
 #[test]
 fn switch_session_disposes_the_kernel_and_a_failed_target_keeps_it() {
     let Some(kernel_python) = kernel_python() else {
@@ -491,8 +444,7 @@ fn switch_session_disposes_the_kernel_and_a_failed_target_keeps_it() {
     let first = await_new_kernel(&baseline, Duration::from_mins(2));
     assert_eq!(await_receipt(dir.path(), "seed"), "seeded");
 
-    // A missing switch target fails at the prepare: the live session and
-    // its kernel stay untouched (no teardown on a failed prepare).
+    // A missing switch target fails at the prepare: the live session stays untouched.
     client.send_command(
         "s1",
         &json!({
@@ -515,8 +467,7 @@ fn switch_session_disposes_the_kernel_and_a_failed_target_keeps_it() {
     );
     await_same_kernels(&baseline, &first, Duration::from_secs(30));
 
-    // A prepared target replaces the runtime: kernel turnover + cold
-    // namespace on the switched-to session.
+    // A prepared target replaces the runtime: kernel turnover + cold namespace.
     let target = dir.path().join("sessions").join("switch-target.jsonl");
     std::fs::write(
         &target,
@@ -553,10 +504,7 @@ fn switch_session_disposes_the_kernel_and_a_failed_target_keeps_it() {
     );
 }
 
-/// `fork` (TS `AgentSessionRuntime.fork` -> `teardownForReplacement`):
-/// the forked session is a whole-runtime replacement - the old kernel
-/// dies, the fork's kernel boots cold (TS `createBranchedSession` copies
-/// no kernel state).
+/// `fork` (TS `teardownForReplacement`): a whole-runtime replacement; the fork's kernel boots cold.
 #[test]
 fn fork_disposes_the_kernel_and_starts_cold() {
     let Some(kernel_python) = kernel_python() else {
@@ -578,8 +526,7 @@ fn fork_disposes_the_kernel_and_starts_cold() {
     let first = await_new_kernel(&baseline, Duration::from_mins(2));
     assert_eq!(await_receipt(dir.path(), "seed"), "seeded");
 
-    // Fork before the first user message: the fork's branch is empty and
-    // the runtime is replaced wholesale.
+    // Fork before the first user message: the fork's branch is empty.
     let entry_id = first_user_entry_id(&mut client, &session_id, "f0");
     client.send_command(
         "f1",
@@ -607,11 +554,8 @@ fn fork_disposes_the_kernel_and_starts_cold() {
     );
 }
 
-/// The switch cwd rebind (TS `switchSession` -> `createRuntime({ cwd:
-/// sessionManager.getCwd() })`): the rebuilt runtime's kernel-resident
-/// tools run in the TARGET session's recorded cwd - the post-switch
-/// kernel's `os.getcwd()` is the switched-to session's working directory,
-/// not the worker's original one.
+/// The switch cwd rebind (TS `createRuntime({ cwd: sessionManager.getCwd() })`): the
+/// post-switch kernel's `os.getcwd()` is the switched-to session's working directory.
 #[test]
 fn switch_session_rebinds_the_kernel_cwd_onto_the_target_session() {
     let Some(kernel_python) = kernel_python() else {
@@ -703,8 +647,7 @@ fn switch_session_rebinds_the_kernel_cwd_onto_the_target_session() {
         "switch_session failed: {switched}"
     );
 
-    // The post-switch turn runs the cell on the rebuilt session's kernel:
-    // the cwd the tools see is the target session's recorded cwd.
+    // The post-switch turn runs the cell on the rebuilt kernel: the cwd is the target's.
     run_turn(&mut client, &session_id, "print the cwd", "t1");
     let observed = await_receipt_text(&receipt);
     assert_eq!(
@@ -714,9 +657,8 @@ fn switch_session_rebinds_the_kernel_cwd_onto_the_target_session() {
     );
 }
 
-/// `navigate_tree` (TS `AgentSession.navigateTree`): a tree move is NOT
-/// a runtime replacement - the SAME kernel process stays alive and its
-/// namespace is WARM (the marker set before the move survives it).
+/// `navigate_tree` (TS `AgentSession.navigateTree`): a tree move is NOT a runtime replacement;
+/// the namespace stays WARM (the marker set before the move survives it).
 #[test]
 fn navigate_tree_keeps_the_kernel_warm() {
     let Some(kernel_python) = kernel_python() else {

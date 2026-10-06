@@ -64,7 +64,7 @@ async fn prompt_persists_user_and_assistant() {
 async fn a_skill_command_prompt_expands_into_the_skill_block() {
     // TS `_expandSkillCommand`: a `/skill:<name> [args]` submission
     // persists as the `<skill>` block plus the argument text; the
-    // renderer parses that block back out (TS `parseSkillBlock`).
+    // renderer parses that block back out.
     let mut session = scripted_session().await;
     let dir = tempfile::tempdir().unwrap();
     let file_path = dir.path().join("SKILL.md");
@@ -133,9 +133,9 @@ async fn an_unknown_skill_command_passes_through() {
     assert_eq!(user_text, "/skill:missing do a thing");
 }
 
-/// A scripted session wired like the engine wires production sessions:
-/// the engine-level `convert_to_llm` plus a harness-digest context, so
-/// the deferred first-turn digest rides the first prompt.
+/// A scripted session wired like production: the engine-level
+/// `convert_to_llm` plus a harness-digest context, so the deferred
+/// first-turn digest rides the first prompt.
 async fn digest_session(provider: Arc<ScriptedProvider>) -> (AgentSession, tempfile::TempDir) {
     let tmp = tempfile::tempdir().unwrap();
     let harness = crate::session_engine::harness_digest::HarnessDigestContext {
@@ -175,9 +175,8 @@ async fn digest_session_with_harness(
     .unwrap()
 }
 
-/// A resumed session over the entries of a prior session (the engine's
-/// resume wiring: the loop context is the converted built context, the
-/// manager adopts the same entries).
+/// A resumed session over the entries of a prior session (converted
+/// loop context, adopted manager).
 async fn resumed_digest_session(
     entries: Vec<FileEntry>,
     harness: crate::session_engine::harness_digest::HarnessDigestContext,
@@ -231,11 +230,9 @@ async fn loop_digest_rows(session: &AgentSession) -> Vec<(String, Option<String>
         .collect()
 }
 
-/// TS #2400 + #2394 at the resume boundary: unchanged harness state
-/// does not re-deliver a digest that drifted query terms made look
-/// stale (the state fingerprint matches), and a state change
-/// re-delivers exactly one digest, replacing the superseded copy
-/// instead of stacking.
+/// TS #2400 + #2394 at the resume boundary: unchanged state does not
+/// re-deliver a drifted-looking digest; a state change re-delivers
+/// exactly one, replacing the superseded copy.
 #[tokio::test]
 async fn resume_dedupes_by_state_fingerprint_and_replaces_stale_digests() {
     let tmp = tempfile::tempdir().unwrap();
@@ -319,10 +316,10 @@ async fn resume_dedupes_by_state_fingerprint_and_replaces_stale_digests() {
         panic!("the persisted digest row carries its state fingerprint");
     };
 
-    // Resume over the same entries (converted loop context, adopted
-    // manager): the fresh render ranks `alpha_relevant` first because
-    // the context's task signal mentions it, so only the state
-    // fingerprint can dedupe. The unchanged state must NOT re-deliver.
+    // Resume over the same entries: the fresh render ranks
+    // `alpha_relevant` first (the context's task signal mentions it),
+    // so only the state fingerprint can dedupe. The unchanged state must
+    // NOT re-deliver.
     let resumed = resumed_digest_session(entries.clone(), harness.clone()).await;
     let rows = loop_digest_rows(&resumed).await;
     assert_eq!(
@@ -370,10 +367,9 @@ async fn resume_dedupes_by_state_fingerprint_and_replaces_stale_digests() {
         "the delivered custom row carries its state fingerprint"
     );
     assert!(rows[0].0.contains("Resume test memory"));
-    // The delivered row persisted with its fingerprint. The persisted
-    // transcript keeps every copy (TS #2394: the newest digest remains
-    // authoritative), so the retained row plus the fresh one ride the
-    // file while the live context carries exactly one.
+    // The persisted transcript keeps every copy (TS #2394: the newest
+    // digest remains authoritative), so the file holds both while the
+    // live context carries exactly one.
     let persisted: Vec<String> = refreshed
         .entries()
         .await
@@ -463,8 +459,8 @@ async fn prompt_rides_digest_row_into_the_run() {
     session.agent().wait_for_idle().await;
 
     // The run's agent_end carries the digest custom row with the turn's
-    // prompt messages (TS parity: the digest rides `agent_end.messages`).
-    // The lock snapshots the captured events and never crosses an await.
+    // prompt messages (TS parity). The lock snapshots the captured
+    // events and never crosses an await.
     let (end_messages, kinds) = {
         let captured = events.lock().unwrap();
         let Some(AgentEvent::AgentEnd { messages }) = captured
@@ -545,7 +541,6 @@ async fn prompt_rides_digest_row_into_the_run() {
     let calls = provider.calls();
     assert_eq!(calls.len(), 2);
     assert_eq!(user_text(calls[1].messages.last().unwrap()), "again");
-    // The second run's agent_end carries no digest row.
     let second_end_roles: Vec<String> = {
         let captured = events.lock().unwrap();
         captured
@@ -575,12 +570,9 @@ async fn prompt_rides_digest_row_into_the_run() {
     assert_eq!(digest_rows, 1);
 }
 
-/// An injected custom message admits as the turn's prompt (TS
-/// `_promptInjectedMessage` -> `agent.prompt([customMessage])`): the
-/// transcript and the loop context hold ONE representation of the
-/// turn — the custom row, appended once by the loop's `message_end`
-/// — and the provider request carries the row's user-role view (the
-/// loop-boundary conversion), never a duplicate user message.
+/// The transcript and the loop context hold ONE representation of the
+/// turn (the custom row, appended once), never a duplicate user
+/// message.
 #[tokio::test]
 async fn prompt_injected_message_persists_one_custom_row() {
     let provider = Arc::new(ScriptedProvider::new(test_model()));
@@ -603,10 +595,9 @@ async fn prompt_injected_message_persists_one_custom_row() {
     session.agent().wait_for_idle().await;
 
     // The provider request carries the notice text as its user-role
-    // view — once, with no duplicate user message (TS `convertToLlm`
-    // at the loop boundary). The first-turn harness digest rides
-    // ahead of it (TS commit-time injection), exactly like a plain
-    // prompt's request.
+    // view — once, with no duplicate user message. The first-turn
+    // harness digest rides ahead of it, exactly like a plain prompt's
+    // request.
     let calls = provider.calls();
     assert_eq!(calls.len(), 1);
     let user_texts: Vec<String> = calls[0]
@@ -655,17 +646,12 @@ async fn prompt_injected_message_persists_one_custom_row() {
     );
 }
 
-/// A delivered agent message's custom row produces the byte-identical
-/// provider context to the plain-prompt delivery (TS
-/// `acceptAgentMessagePrompt`: the custom message replaces the turn's
-/// user row while its prompt content still runs the model). The
-/// comparison covers the whole request - system prompt, tools, and
+/// The comparison covers the whole request - system prompt, tools, and
 /// every message row - with only the per-run timestamps normalized.
 #[tokio::test]
 async fn an_agent_message_custom_row_matches_the_plain_prompt_context() {
     let prompt = "[agent-message from child:research-lane]\n\nthe research is done";
 
-    // The plain delivery: the prompt text as the accepted user row.
     let plain_provider = Arc::new(ScriptedProvider::new(test_model()));
     plain_provider.push_text_turn("ack");
     let (plain_session, _plain_tmp) = digest_session(Arc::clone(&plain_provider)).await;
@@ -711,9 +697,8 @@ async fn an_agent_message_custom_row_matches_the_plain_prompt_context() {
     );
 }
 
-/// The provider request with the per-run message timestamps zeroed
-/// (each delivery mints its own runtime stamp; every other byte is
-/// compared).
+/// The provider request with the per-run timestamps zeroed (every
+/// other byte is compared).
 fn normalized_context(context: &pa_agent::stream::LlmContext) -> serde_json::Value {
     let mut value = serde_json::to_value(context).unwrap();
     for message in value["messages"].as_array_mut().unwrap() {
@@ -866,7 +851,6 @@ fn ts_toolresult_entry_round_trips() {
     assert!(!tool_result.is_error);
     assert_eq!(base.id.clone().unwrap_or_default().len(), 8);
     assert_eq!(base.parent_id.as_deref(), Some("8902561b"));
-    // The ipython `details` block survives the round trip intact.
     assert_eq!(
         tool_result.details,
         Some(serde_json::json!({
@@ -877,7 +861,6 @@ fn ts_toolresult_entry_round_trips() {
             "kernelRestarted": false
         }))
     );
-    // Re-serialization is byte-identical (stable wire shape).
     let serialized = serde_json::to_value(&entry).unwrap();
     assert_eq!(serialized, golden);
 }
@@ -982,7 +965,6 @@ async fn run_boundaries_record_git_state() {
         .await
         .unwrap();
 
-    // The run starts on a newer commit than the header captured.
     let second_sha = commit(repo.path(), "second");
     engine.prompt("hi", PromptOptions::default()).await.unwrap();
     engine.agent().wait_for_idle().await;

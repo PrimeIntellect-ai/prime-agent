@@ -1,9 +1,6 @@
-//! ACP MCP server admission: the wire-shape validation port of the TS
-//! `resolveAcpMcpServers` (modes/acp/acp-mcp.ts) plus the tool-name
-//! derivation checks from `acpMcpToolNames` (core/tools/acp-mcp.ts).
-//!
-//! Transport-level contract: validation failures are ACP `invalid params`
-//! errors with a `reason` payload; admission failures (tool-name
+//! ACP MCP server admission: the wire-shape validation port plus the
+//! tool-name derivation checks. Validation failures are ACP `invalid
+//! params` errors with a `reason` payload; admission failures (tool-name
 //! conflicts, ownership fencing) are internal errors carrying the raw
 //! message, like the TS connection.
 
@@ -110,10 +107,9 @@ fn entries(
     Ok(result)
 }
 
-/// The SDK zod entry filter (`vecSkipError(zMcpServer)`): entries that
-/// do not match the `McpServer` union are silently DROPPED before the
-/// handler sees them. Required fields are strict; unknown keys (including
-/// `type` on stdio entries) are stripped by the schema.
+/// The SDK zod entry filter (`vecSkipError(zMcpServer)`): entries that do
+/// not match the `McpServer` union are silently DROPPED. Required fields are
+/// strict; unknown keys (including `type` on stdio entries) are stripped.
 fn parse_wire(server: &Value) -> Option<WireServer> {
     let object = server.as_object()?;
     let name = object.get("name")?.as_str()?.to_string();
@@ -194,8 +190,6 @@ struct ParsedUrl {
 }
 
 /// Minimal URL split for the admission checks: scheme, credentials, rest.
-/// Handles exactly what the TS checks read — `url.protocol`,
-/// `url.username`, and `url.password`.
 fn parse_url(url: &str) -> Option<ParsedUrl> {
     let (scheme, rest) = url.split_once(':')?;
     if scheme.is_empty()
@@ -226,8 +220,6 @@ pub fn resolve_acp_mcp_servers(
     let mut names: HashSet<String> = HashSet::new();
     let mut resolved = Vec::new();
     for server in servers {
-        // Schema-invalid entries are dropped before validation (SDK
-        // `vecSkipError`): admission never reports them.
         let Some(parsed) = parse_wire(server) else {
             continue;
         };
@@ -296,9 +288,9 @@ fn normalize_url(url: &str) -> String {
     }
 }
 
-/// The tool names an ACP MCP server adds (TS `acpMcpToolNames`):
-/// `mcp_list_tools_<name>` and `mcp_call_<name>` per server. Names that
-/// pass admission but overflow the tool-name limit fail here.
+/// The tool names an ACP MCP server adds: `mcp_list_tools_<name>` and
+/// `mcp_call_<name>` per server. Names that pass admission but overflow
+/// the tool-name limit fail here.
 pub fn acp_mcp_tool_names(servers: &[AcpMcpServerConfig]) -> Result<Vec<String>, String> {
     let mut names = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();

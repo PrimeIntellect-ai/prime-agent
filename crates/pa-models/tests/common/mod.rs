@@ -43,17 +43,14 @@ impl MockServer {
         }
     }
 
-    /// The URL for a request path.
     pub fn url(&self, path: &str) -> String {
         format!("http://127.0.0.1:{}{path}", self.port)
     }
 
-    /// Every recorded request head so far.
     pub fn recorded_requests(&self) -> Vec<String> {
         self.requests.lock().unwrap().clone()
     }
 
-    /// How many requests the server has seen.
     pub fn request_count(&self) -> usize {
         self.requests.lock().unwrap().len()
     }

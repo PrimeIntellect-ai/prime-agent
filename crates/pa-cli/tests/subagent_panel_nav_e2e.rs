@@ -1,13 +1,6 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
-// by design on hot paths (boxing 130 fns is allocation-churn with zero
-// correctness gain); the fn-length threshold is a style gate, not
-// correctness (the harness fns are intentionally linear); 64-bit targets -
-// the narrowing sits at OS/protocol boundaries where the values are
-// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
-// guarded parses), and checked conversions would add panic paths where
-// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
-// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
-// dossier for the conductor).
+// large_futures: stack-resident futures on hot paths by design.
+// too_many_lines: style gate, not correctness. Casts: 64-bit targets;
+// narrowing sits at bounded OS/protocol boundaries.
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -17,13 +10,10 @@
     clippy::cast_precision_loss
 )]
 
-//! End-to-end verifier for the subagent panel's keyboard path from the main
-//! chat (Kevin's live-dogfood ruling, TS parity): the attached session with a
-//! ledger-seeded child renders the subagent summary box; Down at the end of
-//! the prompt hands the focus to the panel (the unfocused `↓ select` hint
-//! flips to `Enter/→ open`); Enter opens the scoped agents view listing the
-//! child; Enter drills into the child's transcript (the ancestor carry); and
-//! the agents-back key returns from the child to the agents view.
+//! End-to-end verifier for the subagent panel's keyboard path from the
+//! main chat (Kevin's live-dogfood ruling, TS parity): Down focuses the
+//! panel, Enter opens the scoped agents view, Enter drills into the
+//! child, and the agents-back key returns.
 #![cfg(unix)]
 
 use std::fmt::Write as _;
@@ -110,12 +100,8 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
         command.env_remove(var);
     }
     // The daemon's default sessions dir must stay the agent dir under the
-    // tempdir: an ambient `PRIME_AGENT_SESSION_DIR` (every agent-session
-    // shell on the fleet box exports one) would otherwise become the
-    // daemon's default session dir, so `rlm_spawn_ledger_for(None)`
-    // resolves the family ledger against the foreign dir and the seeded
-    // family never registers (the same env hygiene the sibling e2e
-    // spawns pin: ambient overrides must not leak in).
+    // tempdir: an ambient `PRIME_AGENT_SESSION_DIR` would resolve the family
+    // ledger against the foreign dir, so the seeded family never registers.
     command.env_remove("PRIME_AGENT_SESSION_DIR");
     command.env_remove("PRIME_AGENT_CODING_AGENT_SESSION_DIR");
     command.env(
@@ -133,9 +119,8 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
     panic!("supervisor socket never appeared");
 }
 
-/// One saved-session fixture: a session header whose `parentSession` and
-/// `rlmDepth` give the catalog the subagent linkage, a display name, and a
-/// user/assistant exchange.
+/// One saved-session fixture: a header with the subagent linkage
+/// (`parentSession`, `rlmDepth`), a display name, and an exchange.
 fn write_fixture(
     dir: &Path,
     id: &str,
@@ -267,9 +252,8 @@ async fn down_arrow_focuses_the_dock_and_enter_opens_the_scoped_agents_view() {
     std::fs::create_dir_all(&session_dir).expect("session dir");
     let supervisor = spawn_supervisor(dir.path());
 
-    // The family fixture: a parent with a transcript, and a child under it
-    // (the linkage the ledger edge carries, with the child's own exchange
-    // for its transcript frames).
+    // The family fixture: a parent with a transcript, and a child under
+    // it (the linkage the ledger edge carries).
     let parent_path = write_fixture(
         &session_dir,
         "panel-nav-parent",
@@ -286,9 +270,8 @@ async fn down_arrow_focuses_the_dock_and_enter_opens_the_scoped_agents_view() {
         1,
         &[("do the work", "work complete alpha")],
     );
-    // The durable spawn edge: the roster surfaces the child as the parent's
-    // passive descendant (the `roster_subscribe` seed walks it), so the
-    // attached parent renders the subagent summary box from the real daemon.
+    // The durable spawn edge: the roster surfaces the child as the
+    // parent's passive descendant, so the parent renders the summary box.
     let ledger = pa_daemon::rlm_ledger::RlmSpawnLedger::new(&agent_dir, &session_dir, |_m| {});
     ledger
         .append_spawn(&pa_daemon::rlm_ledger::RlmSpawnInput {
@@ -300,10 +283,8 @@ async fn down_arrow_focuses_the_dock_and_enter_opens_the_scoped_agents_view() {
         })
         .expect("append spawn edge");
 
-    // Run 1 — the attached parent's main chat: Down at the end of the empty
-    // prompt focuses the activity dock, and Enter opens the scoped agents
-    // view DIRECTLY (the operator's direct-navigation redesign — the
-    // grouped activity panel is gone, no intermediate step).
+    // Run 1 — the attached parent: Down focuses the dock, and Enter
+    // opens the scoped agents view directly (no grouped panel).
     let parent_options = session_options(
         &supervisor.socket,
         &session_dir,
@@ -332,20 +313,15 @@ async fn down_arrow_focuses_the_dock_and_enter_opens_the_scoped_agents_view() {
             .await
             .expect("parent session run");
 
-    // The dock renders at attach as the one-line activity row (unfocused,
-    // hint-free by design; Enter is the direct launcher). The subagents
-    // segment reads `\u{25c6} N subagents` — one consolidated item (the
-    // operator's 2026-09-25 consolidation), the running count riding
-    // the label in the dock's color: the passivated child is finished,
-    // so the count reads zero — the dock stays mounted and selectable
-    // because the child remains browsable history.
+    // The dock renders at attach as the one-line activity row (unfocused;
+    // Enter is the direct launcher). The consolidated subagents segment
+    // reads zero (the passivated child is finished) and stays mounted —
+    // the child remains browsable history.
     let attached = first_frame_of(&parent_run.frames, "subagent");
     assert!(
         attached.contains("\u{25c6} 0 subagents"),
         "the unfocused dock shows the consolidated subagents segment:\n{attached}"
     );
-    // The single Enter opened the scoped agents view directly: no
-    // grouped panel frame ever renders.
     assert!(
         !parent_run
             .frames
@@ -362,8 +338,7 @@ async fn down_arrow_focuses_the_dock_and_enter_opens_the_scoped_agents_view() {
         .clone()
         .expect("the open came from the dock's direct navigation (scoped)");
 
-    // Run 2 — the scoped agents view: the child lists as the root's direct
-    // child, and Enter drills into its transcript.
+    // Run 2 — the scoped agents view: Enter drills into the child.
     let view_options = AgentsViewOptions {
         socket_path: supervisor.socket.clone(),
         cwd: PathBuf::from("/tmp"),
@@ -408,10 +383,8 @@ async fn down_arrow_focuses_the_dock_and_enter_opens_the_scoped_agents_view() {
         Some(SessionSelection::Resume(child_path.clone())),
         "Enter on the child row opened the child's transcript"
     );
-    // The scoped view lists the child as a top-level row (the scope root is
-    // excluded from its own subtree), so the open carries no ancestor
-    // expansion chain — the return re-entry lands back in the scope frame
-    // (TS `openSelected` on a direct scoped child).
+    // The scope root is excluded from its own subtree, so a direct
+    // scoped child carries no expansion ancestors (TS `openSelected`).
     assert!(
         view.expanded_ancestors.is_empty(),
         "a direct scoped child carries no expansion ancestors: {:?}",
@@ -419,9 +392,7 @@ async fn down_arrow_focuses_the_dock_and_enter_opens_the_scoped_agents_view() {
     );
     assert_eq!(view.opened_rlm_depth, Some(1), "the child's rlmDepth");
 
-    // Run 3 — the child's transcript: its rows render with the `depth 1`
-    // tray label, and the agents-back key returns to the agents view (the
-    // TS escape path back from the nested transcript).
+    // Run 3 — the child's transcript: the agents-back key returns to the agents view.
     let child_options = session_options(
         &supervisor.socket,
         &session_dir,
@@ -467,7 +438,7 @@ async fn the_title_bills_a_passive_subagents_spend() {
     let supervisor = spawn_supervisor(dir.path());
 
     // The family fixture: the parent and its ledger-linked child, each
-    // with one billed assistant turn (the parent $1.00, the child $0.30).
+    // with one billed turn ($1.00 / $0.30).
     let parent_path = write_fixture(
         &session_dir,
         "title-bill-parent",
@@ -491,9 +462,8 @@ async fn the_title_bills_a_passive_subagents_spend() {
         append_billed_turn(path, id, input, output, cost);
     }
 
-    // The durable spawn edge: the roster surfaces the child as the
-    // parent's passive descendant, so the attached parent's title rolls
-    // the child's spend up from the real daemon's seeded row.
+    // The durable spawn edge: the title rolls the child's spend up from
+    // the real daemon's seeded row.
     let ledger = pa_daemon::rlm_ledger::RlmSpawnLedger::new(&agent_dir, &session_dir, |_m| {});
     ledger
         .append_spawn(&pa_daemon::rlm_ledger::RlmSpawnInput {
@@ -526,9 +496,7 @@ async fn the_title_bills_a_passive_subagents_spend() {
     let run = pa_tui::interactive::run_interactive(options, UiMode::Headless(plan))
         .await
         .expect("parent session run");
-    // The top bar row (render_top_bar): the chat name plus one cost span,
-    // the family rollup - the parent's own $1.00 plus the passive child's
-    // $0.30 - with no split.
+    // The top bar row: the chat name plus the family rollup, with no split.
     let top_bar = frame_of(&run.frames, "$1.30")
         .lines()
         .next()

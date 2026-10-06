@@ -1,20 +1,8 @@
-//! Daemon-side session slash-command execution: bridge the pa-core
-//! executor to the worker engine contract. `run_prompt` parses the four
-//! session commands before admission — they never reach the model loop —
-//! executes them against the engine's session, and translates the durable
-//! rows into engine events (the worker persists and broadcasts them).
-//!
-//! `/compact` runs with the full TS event pair: the echo row and
-//! `compaction_start` go out before the summarizer runs, the settled
-//! `compaction_end` (result, or the skip/failure message with its
-//! severity) after — so attached clients always see the compaction
-//! start and its outcome (TS `_executeSelectedSessionCommand` order,
-//! then `AgentSession.compact`'s events).
-//!
-//! This is the spin fix for session commands: previously a session command
-//! admitted through `run_turn` would wait for an `AgentStart` that never
-//! arrives. Parsing before admission keeps the wait loop reachable only
-//! for real turns.
+//! Daemon-side session slash-command execution: `run_prompt` parses the four
+//! session commands before admission — they never reach the model loop, and
+//! a command admitted through `run_turn` would wait for an `AgentStart` that
+//! never arrives (the spin fix). `/compact` emits the echo row and
+//! `compaction_start` before the summarizer, the settled `compaction_end` after.
 
 use pa_core::session_engine::session_commands::{
     session_command_echo_row, session_command_failure_row, SessionCommandExecution,
@@ -35,8 +23,7 @@ pub(crate) fn run_session_command(
     emit: &mut dyn FnMut(EngineEvent) -> bool,
 ) -> Option<SessionCommandExecution> {
     let is_compact = command.name == "compact";
-    // The durable echo row goes out before execution (TS
-    // `_executeSelectedSessionCommand` records the attempted command
+    // The durable echo row goes out before execution (TS records the attempted command
     // before the queue runs it).
     if !emit(EngineEvent::CustomMessage(custom_message_value(
         &session_command_echo_row(command),
@@ -53,9 +40,8 @@ pub(crate) fn run_session_command(
     }
     let execution = match engine.execute_session_command(command) {
         Ok(execution) => execution,
-        // Pre-execution failures (model resolution, session build) still
-        // record the attempted command as a failure result row (the echo
-        // row above already went out).
+        // Pre-execution failures (model resolution, session build) still record the
+        // attempted command as a failure result row (the echo row above already went out).
         Err(error) => {
             let error = format!("{error:#}");
             let execution = SessionCommandExecution {
@@ -78,11 +64,9 @@ pub(crate) fn run_session_command(
             return Some(execution);
         }
     };
-    // The post-compaction kernel notice goes out between the compaction
-    // start and its settled end (TS `_syncKernelStateAfterCompaction` runs
-    // inside `_performCompaction`, so the `message_start`/`message_end`
-    // pair precedes `compaction_end` on the wire); the worker persists
-    // the row with the event.
+    // The post-compaction kernel notice goes out between the compaction start
+    // and its settled end (the `message_start`/`message_end` pair precedes
+    // `compaction_end` on the wire); the worker persists the row with the event.
     if let Some(message) = execution
         .compaction
         .as_ref()
@@ -92,16 +76,13 @@ pub(crate) fn run_session_command(
             return None;
         }
     }
-    // The settled `compaction_end` precedes any failure result row (TS
-    // `compact()` emits the event before the queued-command catch arm
-    // appends `Command failed: ...`).
+    // The settled `compaction_end` precedes any failure result row (TS `compact()` emits
+    // the event before the queued-command catch arm appends `Command failed: ...`).
     if is_compact && !emit_compact_end(command, &execution, emit) {
         return None;
     }
     // `/autonomous` (either flip): the previous run's owed continuations
-    // clear (TS `_handleAutonomousSlashCommand`: the off branch drops the
-    // queued and held turns, the on branch resets the run state; the
-    // durable status row follows with the new state).
+    // clear; the durable status row follows with the new state.
     if command.name == "autonomous" {
         engine.clear_autonomous_continuations();
     }
@@ -135,10 +116,9 @@ fn compact_custom_instructions(command: &SessionSlashCommand) -> Option<String> 
     (!args.is_empty()).then(|| args.to_string())
 }
 
-/// The settled `compaction_end` event for one `/compact` execution (TS
-/// `AgentSession.compact`'s end event): success carries the client-facing
-/// `CompactionResult`; a skip carries its message with warning severity; a
-/// failure carries `Compaction failed: <message>` with error severity.
+/// The settled `compaction_end` event for one `/compact` execution: success
+/// carries the client-facing `CompactionResult`; a skip carries its message with
+/// warning severity; a failure carries `Compaction failed: <message>` with error severity.
 fn emit_compact_end(
     command: &SessionSlashCommand,
     execution: &SessionCommandExecution,
@@ -147,8 +127,8 @@ fn emit_compact_end(
     let custom_instructions = compact_custom_instructions(command);
     let (entry, event) = if let Some(compaction) = &execution.compaction {
         let entry = serde_json::to_value(&compaction.entry).unwrap_or(serde_json::Value::Null);
-        // The client-facing result is the TS `CompactionResult` wire shape
-        // (`_performCompaction`'s return, details included).
+        // The client-facing result is the TS `CompactionResult` wire shape (details
+        // included).
         let result =
             crate::compaction::compaction_result_value(&compaction.result, &compaction.entry);
         (
@@ -172,8 +152,8 @@ fn emit_compact_end(
             ),
         )
     } else {
-        // A failure (or a pre-execution error): `execution.error` carries
-        // the raw message; the TS event prefixes `Compaction failed: `.
+        // A failure (or a pre-execution error): `execution.error` carries the raw
+        // message; the TS event prefixes `Compaction failed: `.
         let error = execution
             .error
             .as_deref()
@@ -199,8 +179,7 @@ pub(crate) fn parse_prompt_session_command(text: &str) -> Option<SessionSlashCom
 }
 
 /// One durable row in its wire message form (`role: "custom"`): the shape
-/// `message_start`/`message_end` pairs carry and TS sessions keep in
-/// `agent.state.messages`.
+/// `message_start`/`message_end` pairs carry and TS sessions keep in `agent.state.messages`.
 pub(crate) fn custom_message_value(
     message: &pa_types::session::CustomMessage,
 ) -> serde_json::Value {

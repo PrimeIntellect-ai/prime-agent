@@ -1,10 +1,8 @@
-//! Append-only session store on disk.
-//!
-//! Port of the session-file layout of `core/session-manager.ts`: one JSONL file
-//! per session under `<agent-dir>/sessions/<uuid>.jsonl`, first line is the
-//! `session` header, entries form a parent-id chain (tree). Layout compatibility
-//! with the TS product is load-bearing: TUI reattach, checkpoint/resume, and
-//! external tooling read the same files.
+//! Append-only session store on disk: one JSONL file per session under
+//! `<agent-dir>/sessions/<uuid>.jsonl`, first line is the `session` header,
+//! entries form a parent-id chain (tree). Layout compatibility with the TS
+//! product is load-bearing: TUI reattach, checkpoint/resume, and external
+//! tooling read the same files.
 
 use anyhow::{anyhow, Context, Result};
 use pa_types::ai::Usage;
@@ -13,8 +11,7 @@ use serde_json::{json, Map, Value};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs;
-// `BufRead` re-exports to the session-store children through this facade
-// (the split children import it via `super`).
+// `BufRead` re-exports to the session-store children through this facade.
 #[allow(unused_imports)]
 use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
@@ -30,22 +27,13 @@ mod stream_tests;
 #[path = "session_store_window_tests.rs"]
 mod window_tests;
 
-// The index concern (the entry-chain index maintenance: the push-side
-// by_id/leaf_id bookkeeping, the child-usage attribution folds, and the
-// entry-id mint) moved to the child module at the same tree position
-// (session_store::index); the facade re-imports keep the bare-path callers
-// in scope (the read/write arms and the stream equivalence tests).
+// The index concern lives in session_store::index; the facade re-imports keep the callers in scope.
 mod index;
 
 use index::fold_child_usage_attributions;
 pub(crate) use index::new_entry_id;
 
-// The read arm (the file-IO load surface: the streamed and windowed
-// opens, the bounded header-only readers, the file-layout helpers, and the
-// in-memory create) moved to the child module at the same tree position
-// (session_store::read); the facade re-exports keep the crate paths
-// stable (session_scan.rs, rlm_ledger.rs, session_archive.rs,
-// agent_engine/model.rs, worker/tests.rs).
+// The read arm lives in session_store::read; the facade re-exports keep the crate paths stable.
 mod read;
 
 pub use read::{
@@ -56,38 +44,22 @@ pub(crate) use read::{
     parse_session_header_line, read_first_line_bounded, read_first_line_bounded_from,
 };
 
-// The write arm (the in-memory append family, the atomic full-file
-// rewrite, the durable persist paths, and the store lease discipline that
-// serializes writers onto the file) moved to the child module at the same
-// tree position (session_store::write); the facade re-export keeps the
-// header-line API path stable for the rewrite arm and the unit battery.
+// The write arm lives in session_store::write; the facade re-export keeps the API path stable.
 mod write;
 
 pub use write::session_header_line;
 
-// The loaded-session view (the branch walks, the window/settings reads,
-// the compacted message fold and its scalars, and the wire-shape message
-// helpers) moved to the child module at the same tree position
-// (session_store::view); the facade bindings keep the bare-path callers in
-// scope (the read arm's windowed open, the info scan's state fold, and the
-// test children).
+// The loaded-session view lives in session_store::view; the facade bindings keep callers in scope.
 mod view;
 
 use view::{message_text, normalize_state_status};
 
-// The message-role helper's remaining bare-path callers are the test
-// children; the binding rides the test builds only.
+// The message-role helper's remaining bare-path callers are the test children; the binding
+// rides the test builds only.
 #[cfg(test)]
 use view::message_role;
 
-// The per-file info scan (the resumable listing fold: the generation
-// identity, the LRU-bounded scan-state cache, the resumed line fold, and
-// the derived SessionInfo) moved to the child module at the same tree
-// position (session_store::info); the facade re-exports keep the crate
-// paths stable (rlm_roster.rs, session_catalog.rs, scheduling_catalog.rs,
-// saved_session_commands.rs, session_scan.rs, messaging.rs, revival_gate.rs,
-// scheduled_jobs.rs, stop_cleanup.rs, supervisor/sessions.rs), and the
-// test-scoped binding keeps the scan internals' test callers in scope.
+// The per-file info scan lives in session_store::info; the facade re-exports keep the paths stable.
 mod info;
 
 // The persisted scan-state sidecar.
@@ -107,16 +79,13 @@ pub use info::{
 };
 pub(crate) use info_sidecar::persist_info_sidecar;
 
-// The inline unit battery moved to the child module at the same tree
-// position (session_store::tests); its use-super glob keeps resolving
-// through the facade's bindings and the wire types.
+// The inline unit battery lives in session_store::tests.
 #[cfg(test)]
 mod tests;
 
 pub use pa_types::session::SessionHeader;
 
-/// The roster scan lives in `session_scan` (the bounded-header reshape of
-/// the listing loop); re-exported for the listing call sites.
+/// The roster scan lives in `session_scan`; re-exported for the listing call sites.
 pub use crate::session_scan::list_sessions;
 
 /// One stored entry: message lifecycle, bookkeeping, or a custom record.
@@ -134,10 +103,8 @@ pub struct SessionEntry {
     pub fields: Value,
 }
 
-/// The windowed message sequence's summary scalars (TS
-/// `summaryForActiveSession`): the newest message timestamp and the
-/// window's message count. Produced by
-/// [`SessionFile::scan_message_scalars`] without materializing the fold.
+/// The windowed sequence's summary scalars (newest timestamp, message count),
+/// from [`SessionFile::scan_message_scalars`] without materializing the fold.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub struct MessageWindowScalars {
     /// The timestamp of the last windowed message that carries one (the
@@ -177,16 +144,12 @@ pub(crate) struct SessionWindow {
     has_service_tier: bool,
     model: Option<(String, String)>,
     /// The model in effect at the retained-window boundary (the newest
-    /// `model_change` in the discarded prefix): the per-model usage fold's
-    /// timeline seed — `model` above is the leaf's model, not the
-    /// boundary's.
+    /// `model_change` in the discarded prefix): the per-model fold's timeline seed.
     boundary_model: Option<(String, String)>,
     thinking_level: String,
     service_tier: Option<pa_types::ai::ServiceTier>,
     retained_ids: std::collections::HashSet<String>,
-    /// The discarded prefix's on-chain spend (attribution-folded — the
-    /// window walk's older-path stats): the active stats add it when no
-    /// compaction bounds the region (the prefix rows are in the kept
-    /// region then — a window is a load optimization, not session state).
+    /// The discarded prefix's on-chain spend (attribution-folded): added by the
+    /// active stats when no compaction bounds the region.
     pub(crate) older_path_stats: pa_core::session::window::WindowStats,
 }

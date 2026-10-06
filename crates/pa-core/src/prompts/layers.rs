@@ -1,24 +1,11 @@
-//! Static system-prompt layers: human-editable markdown files assembled into
-//! the cache-stable prefix of the prompt. The layers are, in order:
-//!
-//! 1. `core.md` — the harness description and the full programmatic-tool API
-//!    surface (one tool: `ipython`; everything else lives in the REPL).
-//! 2. `usage.md` — mandatory usage rules.
-//! 3. `opinionated.md` — style and engineering guidelines users may override.
-//! 4. `per_model.md` — the per-model instruction map (blocks keyed by model
-//!    selector patterns; shipped empty, the mechanism is live).
-//!
-//! Layer files must never contain session-specific values: the cached
-//! prefix ends where the dynamic tail (`system_prompt.rs`) begins, and the
-//! cache-safety guard test pins that boundary.
+//! Static system-prompt layers: `core.md`, `usage.md`, `opinionated.md`,
+//! and `per_model.md` (shipped empty, mechanism live), assembled into the
+//! cache-stable prefix. Layers must never contain session-specific values
+//! (the cache-safety guard test pins the boundary).
 
-/// The core harness layer (file `layers/core.md`).
 pub const CORE_LAYER: &str = include_str!("layers/core.md");
-/// The mandatory usage layer (file `layers/usage.md`).
 pub const USAGE_LAYER: &str = include_str!("layers/usage.md");
-/// The opinionated guidelines layer (file `layers/opinionated.md`).
 pub const OPINIONATED_LAYER: &str = include_str!("layers/opinionated.md");
-/// The per-model instruction map (file `layers/per_model.md`).
 pub const PER_MODEL_MAP: &str = include_str!("layers/per_model.md");
 
 /// Layer names, in assembly order, for breakdown rendering.
@@ -47,14 +34,12 @@ pub struct PerModelBlock {
 
 /// Parse the per-model map. Blocks are delimited by
 /// `<!-- pa:model: <patterns> -->` ... `<!-- /pa:model -->`; whitespace-only
-/// blocks are ignored. Everything outside blocks (the format documentation)
-/// is not prompt content.
+/// blocks are ignored. Everything outside blocks is not prompt content.
 pub fn parse_per_model_blocks(map: &str) -> Vec<PerModelBlock> {
     const OPEN: &str = "<!-- pa:model:";
     const CLOSE: &str = "<!-- /pa:model -->";
-    // Documentation comments (anything that is not a pa:model block) are
-    // not prompt content; drop them before scanning for blocks so prose
-    // examples cannot smuggle in markers.
+    // Documentation comments are not prompt content; drop them before
+    // scanning for blocks so prose examples cannot smuggle in markers.
     let map = strip_documentation_comments(map);
     let mut blocks = Vec::new();
     let mut rest = map.as_str();
@@ -205,7 +190,6 @@ mod tests {
         assert!(prefix.starts_with("# prime-agent harness"));
         assert!(prefix.contains("The following are mandatory rules"));
         assert!(prefix.contains("guidelines to agents have been shown"));
-        // Exact composition: the three constant layers, no per-model text.
         assert_eq!(
             prefix,
             format!(

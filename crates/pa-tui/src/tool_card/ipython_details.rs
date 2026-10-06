@@ -1,9 +1,7 @@
-//! Parsing of ipython execution `details` for the cell card, a port of the
-//! data-reading half of TS `ipython-cell.ts`: the details record
-//! (structured stdout/stderr/result/error fields), the background-shell
-//! handle repr, literal shell launches, and the edit-confirmation and
-//! agent-message-receipt suppressions that keep already-summarized output
-//! off the cell rows.
+//! Parsing of ipython execution `details` for the cell card: the
+//! details record, the background-shell handle repr, literal shell
+//! launches, and the edit-confirmation and agent-message-receipt
+//! suppressions.
 
 use serde_json::Value;
 
@@ -174,12 +172,10 @@ pub(crate) fn is_edit_confirmation(text: Option<&str>, diffs: &[Value]) -> bool 
     })
 }
 
-/// One parsed sent agent message (TS `SentAgentMessageDisplay`): the body
-/// text, whether the receipt is `delivered` (vs `queued`), and the
-/// counterpart agent's display name (TS `formatAgentMessageParticipant`
-/// with the `"sent"` direction: name, then active session id, session id,
-/// then `unknown`; the `to <role>` prefix and the role word fold into the
-/// viewer-relative arrow — the operator's 2026-09-25 directive).
+/// One parsed sent agent message (TS `SentAgentMessageDisplay`): the
+/// body text, `delivered` vs `queued`, and the counterpart's display
+/// name (name, then active session id, session id, then `unknown`; the
+/// viewer-relative arrow is the operator's 2026-09-25 directive).
 pub(crate) struct SentAgentMessage {
     pub(crate) message: String,
     pub(crate) delivered: bool,
@@ -209,9 +205,8 @@ pub(crate) fn parse_sent_agent_message(value: &Value) -> Option<SentAgentMessage
     })
 }
 
-/// True when `text` is the `agent_message.send` receipt dict for one of the
-/// sent messages already summarized above the output (TS
-/// `isAgentMessageReceipt`).
+/// True when `text` is the `agent_message.send` receipt dict for one of
+/// the sent messages already summarized above the output.
 pub(crate) fn is_agent_message_receipt(text: Option<&str>, messages: &[Value]) -> bool {
     let Some(text) = text else {
         return false;
@@ -231,7 +226,7 @@ pub(crate) fn is_agent_message_receipt(text: Option<&str>, messages: &[Value]) -
 
 /// A background shell launched by the cell (TS `readBackgroundShellHandle`:
 /// the result is a `<BashHandle pid=... running|exit_code=N command=...>`
-/// repr and the cell launches that literal command).
+/// repr).
 pub(crate) struct BackgroundShell {
     pub(crate) exit_code: Option<i64>,
 }
@@ -326,7 +321,6 @@ mod tests {
 
     #[test]
     fn parse_sent_agent_message_shapes() {
-        // The delivered receipt with a full target and role.
         let delivered = parse_sent_agent_message(&serde_json::json!({
             "id": "agentmsg_1",
             "message": "Ping.",
@@ -338,8 +332,6 @@ mod tests {
         assert!(delivered.delivered);
         assert_eq!(delivered.message, "Ping.");
         assert_eq!(delivered.counterpart, "Worker");
-        // Name -> active session id -> session id -> unknown (TS
-        // `formatAgentMessageParticipant` fallback order).
         let by_active = parse_sent_agent_message(&serde_json::json!({
             "id": "agentmsg_2",
             "message": "Ping.",
@@ -365,7 +357,6 @@ mod tests {
         }))
         .expect("missing target falls back to unknown");
         assert_eq!(unknown.counterpart, "unknown");
-        // A missing message renders nothing.
         assert!(parse_sent_agent_message(&serde_json::json!({
             "id": "agentmsg_5",
             "deliveryStatus": "delivered",

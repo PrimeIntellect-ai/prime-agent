@@ -1,7 +1,6 @@
-//! Streaming one assistant response (TS `streamAssistantResponse`): context
-//! transform, LLM-bound message conversion, the model stream event loop, and
-//! the aborted-message finalize path. Section of the port of
-//! `packages/agent/src/agent-loop.ts`.
+//! Streaming one assistant response: context transform, LLM-bound message
+//! conversion, the model stream event loop, and the aborted-message
+//! finalize path.
 
 use std::sync::Arc;
 
@@ -12,11 +11,6 @@ use crate::types::{AgentContext, AgentEvent, AgentMessage, AssistantMessage};
 use super::abort::{create_aborted_assistant_message, race_with_abort};
 use super::{AgentEventSink, AgentLoopConfig};
 
-// ---------------------------------------------------------------------------
-// Streaming one assistant response
-// ---------------------------------------------------------------------------
-
-/// Port of `streamAssistantResponse`.
 pub(crate) async fn stream_assistant_response(
     context: &mut AgentContext,
     config: &AgentLoopConfig,
@@ -76,9 +70,8 @@ pub(crate) async fn stream_assistant_response(
     }
 }
 
-/// Inner body of `streamAssistantResponse` (the TS `try` block).
-// Direct port of the TS `try` block; refactoring is out of scope for this
-// zero-behavior-change sweep.
+/// Inner body of `streamAssistantResponse`.
+// Direct port of the TS `try` block.
 #[allow(clippy::too_many_lines)]
 async fn stream_assistant_response_inner(
     context: &mut AgentContext,
@@ -145,10 +138,9 @@ async fn stream_assistant_response_inner(
         service_tier: config.service_tier,
         api_key: resolved_api_key,
         signal: signal.cloned().unwrap_or_default(),
-        // The TS loop config extends `SimpleStreamOptions`, so its own
-        // `onPayload`/`onResponse` ride every stream call; the Rust loop
-        // config carries no hooks yet, and the request-timing seam wrapper
-        // composes them per request at the `StreamFn` boundary instead.
+        // The TS loop config's `onPayload`/`onResponse` ride every stream
+        // call; the Rust request-timing seam composes them per request at
+        // the `StreamFn` boundary instead.
         on_payload: None,
         on_response: None,
         headers: None,
@@ -234,8 +226,7 @@ async fn stream_assistant_response_inner(
     }
 
     // Stream ended without a terminal event: resolve the final message (TS
-    // awaits `response.result()` here too; a stream that ends cleanly always
-    // pushed done/error first).
+    // awaits `response.result()` here too).
     let final_message = race_with_abort(response.result(), signal).await?;
     if *added_partial {
         *context.messages.last_mut().unwrap() = AgentMessage::from(final_message.clone());

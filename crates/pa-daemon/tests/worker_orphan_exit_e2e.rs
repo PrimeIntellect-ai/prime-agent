@@ -1,10 +1,7 @@
-//! Worker orphan-exit e2e (TS `exitIfSupervisorOrphanedForTooLong`
-//! parity): a session worker whose supervisor socket never answers must
-//! exit on the supervisor-lost window instead of lingering forever, and a
-//! worker whose supervisor is reachable must survive the same window.
-//! Leaked workers from earlier e2e suites starve later test binaries on
-//! the shared mission box, so the exit is load-bearing for test hygiene
-//! too (the pa-daemon/pa-cli spawn helpers arm it with a short window).
+//! Worker orphan-exit e2e (TS `exitIfSupervisorOrphanedForTooLong` parity):
+//! a session worker whose supervisor socket never answers must exit on the
+//! supervisor-lost window, and a worker whose supervisor is reachable must
+//! survive the same window.
 #![cfg(unix)]
 
 use std::os::unix::net::UnixListener;
@@ -12,7 +9,6 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// Kill a leftover worker at scope exit (the control case ends alive).
 struct WorkerGuard {
     child: Child,
 }
@@ -24,9 +20,9 @@ impl Drop for WorkerGuard {
     }
 }
 
-/// Spawn the real `pa-daemon worker` binary under a supervisor socket it
-/// must monitor, with the supervisor-lost exit window at zero (exit at the
-/// first availability check that cannot connect).
+/// The real `pa-daemon worker` under a supervisor socket it must monitor,
+/// with the lost-exit window at zero (exit at the first availability check
+/// that cannot connect).
 fn spawn_worker(dir: &Path, supervisor_socket: &Path) -> WorkerGuard {
     std::fs::create_dir_all(dir.join("agent")).expect("agent dir");
     let child = Command::new(env!("CARGO_BIN_EXE_pa-daemon"))
@@ -62,8 +58,6 @@ fn spawn_worker(dir: &Path, supervisor_socket: &Path) -> WorkerGuard {
     WorkerGuard { child }
 }
 
-/// Wait until the worker's socket file appears (the worker booted and
-/// bound it).
 fn wait_worker_socket(socket: &Path) {
     let deadline = Instant::now() + Duration::from_secs(15);
     while !socket.exists() {
@@ -72,8 +66,6 @@ fn wait_worker_socket(socket: &Path) {
     }
 }
 
-/// Wait for the child to exit on its own within `budget`; false when it is
-/// still running at the deadline.
 fn wait_exit(child: &mut Child, budget: Duration) -> bool {
     let deadline = Instant::now() + budget;
     loop {
@@ -91,13 +83,10 @@ fn wait_exit(child: &mut Child, budget: Duration) -> bool {
 #[test]
 fn orphaned_worker_exits_when_the_supervisor_socket_never_answers() {
     let dir = tempfile::TempDir::new().expect("temp dir");
-    // A supervisor socket nobody ever bound: the worker's availability
-    // checks can never connect.
+    // A supervisor socket nobody ever bound.
     let supervisor_socket = dir.path().join("never-bound-supervisor.sock");
     let mut worker = spawn_worker(dir.path(), &supervisor_socket);
     wait_worker_socket(&dir.path().join("worker.sock"));
-    // The first availability check (1.5s after boot) sees the unreachable
-    // socket and the zero window exits the worker.
     assert!(
         wait_exit(&mut worker.child, Duration::from_secs(15)),
         "the orphaned worker exited on the supervisor-lost window"

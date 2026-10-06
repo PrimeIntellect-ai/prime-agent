@@ -1,25 +1,8 @@
-//! The child-side half of RLM usage attribution: reading one child's
-//! session rows and splitting the assistant usage into per-origin
-//! batches (TS `rlmChildUsageOrigin` + the `pendingChildUsage` buckets).
+//! The child-side half of RLM usage attribution: splitting one child's
+//! session rows into per-origin batches (the engine-side producer owns the rest).
 //!
-//! Pure functions over [`crate::session_store::SessionEntry`] slices so
-//! the registry's emit sites (`rlm_children.rs`) stay small: given the
-//! child's parsed rows and the per-child attribution cursor, produce the
-//! delta batches and the next cursor. The engine-side producer
-//! (pa-core `session_engine::rlm_usage`) owns the target row, the
-//! aggregate math, and the durable append.
-//!
-//! Origin labels: TS reads the child's live message list
-//! and walks back to the nearest preceding user or agent-session custom
-//! message — the spawn prompt is a custom row with `details.id
-//! "spawn:<id>"`, so its completions label `spawn_task`. The Rust daemon
-//! prompts children through the plain prompt path, so the task prompt
-//! lands as the child file's first user row; that row labels
-//! `spawn_task`, later user rows `direct_user`. Agent-message deliveries
-//! persist as `custom_message` rows (`customType "agent_message"`), so
-//! they label `agent_message` exactly like TS. Completions with stop
-//! reason `error` or `aborted` fold nowhere (TS
-//! `agent-session.ts`'s `message_end` filter).
+//! Origin labels: the task prompt is the first user row (`spawn_task`); later
+//! user rows are `direct_user`; `error`/`aborted` fold nowhere.
 
 use pa_types::ai::Usage;
 use pa_types::session::ChildUsageOrigin;
@@ -42,10 +25,8 @@ fn first_user_row(entries: &[SessionEntry]) -> Option<usize> {
     entries.iter().position(|entry| message_role(entry, "user"))
 }
 
-/// TS `rlmChildUsageOrigin`: the nearest preceding user or
-/// agent-session message row labels a completion's origin. Non-agent
-/// custom rows and plain user rows (after the task prompt) label
-/// `direct_user`, exactly like the TS walk's fallback arm.
+/// The nearest preceding user or agent-session message row labels a completion's origin; non-agent
+/// custom rows and plain user rows (after the task prompt) label `direct_user`.
 fn child_usage_origin(
     entries: &[SessionEntry],
     task_prompt_row: Option<usize>,
@@ -85,9 +66,8 @@ fn child_usage_origin(
     ChildUsageOrigin::DirectUser
 }
 
-/// One child assistant row's foldable usage: `message` rows with the
-/// assistant role and a non-error, non-aborted stop reason (TS folds the
-/// child's `message_end` completions only).
+/// One child assistant row's foldable usage: `message` rows with the assistant role and a
+/// non-error, non-aborted stop reason (TS folds the child's `message_end` completions only).
 fn assistant_usage(entry: &SessionEntry) -> Option<Usage> {
     if entry.type_ != "message" {
         return None;
@@ -110,11 +90,8 @@ fn assistant_usage(entry: &SessionEntry) -> Option<Usage> {
         .and_then(|usage| serde_json::from_value(usage).ok())
 }
 
-/// The per-origin usage delta of rows `[from..]`, in first-seen origin
-/// order (TS `pendingChildUsage` Map order), plus the next cursor: every
-/// parsed row is consumed, attributed or not, so the walk never
-/// rescans. Batches left empty by a from-row gap (a child still before
-/// its first completion) advance the cursor the same way.
+/// The per-origin usage delta of rows `[from..]`, in first-seen origin order, plus the next cursor:
+/// every parsed row is consumed, attributed or not, so the walk never rescans.
 pub(crate) fn child_usage_batches(
     entries: &[SessionEntry],
     from: usize,
@@ -160,8 +137,7 @@ mod tests {
     }
 
     /// One assistant message row; `stop_reason` defaults to `toolUse`
-    /// (completions mid-run), and the usage block is a real captured
-    /// shape.
+    /// (completions mid-run), the usage block a real captured shape.
     fn assistant_row(id: &str, usage: &Value, stop_reason: &str) -> SessionEntry {
         row(
             "message",
@@ -191,12 +167,10 @@ mod tests {
     }
 
     /// The origin walk over a real child-file shape: the first user row is
-    /// the task prompt (TS labels the spawn message `spawn_task`), an
-    /// agent-message custom row relabels the origin, a later user row is
-    /// a direct user prompt, and an aborted completion folds nowhere (TS
-    /// `agent-session.ts` skips `error`/`aborted` completions). The
-    /// captured numbers verify the `spawn_task` batch: 50,208 input +
-    /// 2,929 output, $0.0089957.
+    /// the task prompt, an agent-message custom row relabels the origin,
+    /// a later user row is a direct user prompt, and an aborted
+    /// completion folds nowhere. The captured numbers verify the
+    /// `spawn_task` batch: 50,208 input + 2,929 output, $0.0089957.
     #[test]
     fn origin_walk_and_cursor_over_a_child_file() {
         let entries = vec![
@@ -229,19 +203,15 @@ mod tests {
                 ChildUsageOrigin::DirectUser
             ]
         );
-        // The captured spawn_task batch.
         let (origin, usage) = &batches[0];
         assert_eq!(*origin, ChildUsageOrigin::SpawnTask);
         assert_eq!(usage.input, 50_208);
         assert_eq!(usage.output, 2_929);
         assert!((usage.cost.total.as_f64() - 0.008_995_7).abs() < 1e-9);
-        // The agent-message batch folded its turn's usage.
         let (_, agent_usage) = &batches[1];
         assert_eq!(agent_usage.input, 1_000);
-        // The aborted completion folded nowhere.
         assert!(batches.iter().all(|(_, usage)| usage.input != 999));
 
-        // From the cursor: nothing re-batches (no double billing).
         let (again, cursor_again) = child_usage_batches(&entries, cursor);
         assert!(again.is_empty());
         assert_eq!(cursor_again, entries.len());
@@ -263,8 +233,7 @@ mod tests {
     }
 
     /// The usage fold itself: rows accumulate per origin across the walk
-    /// (two `spawn_task` completions sum their fields, TS
-    /// `addAssistantUsage`).
+    /// (two `spawn_task` completions sum their fields).
     #[test]
     fn batches_sum_across_completions_of_one_origin() {
         let entries = vec![

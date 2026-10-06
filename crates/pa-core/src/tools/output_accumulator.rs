@@ -1,6 +1,4 @@
 //! Bounded-memory streaming output accumulator with temp-file spill.
-//!
-//! Port of `packages/coding-agent/src/core/tools/output-accumulator.ts`.
 
 use std::fs::File;
 use std::io::Write;
@@ -149,10 +147,9 @@ fn decode_utf8_char(buf: &[u8]) -> Decoded {
     Decoded::Char(len)
 }
 
-/// One spill lifecycle with exactly two terminal states: a COMPLETE file whose
-/// path `finalize()` resolves, or a DEGRADED spill (failure at open, write, or
-/// final flush) whose path is never advertised. `finalize()` never fails; the
-/// caller keeps its bounded in-memory tail either way.
+/// One spill lifecycle with exactly two terminal states: a COMPLETE file whose path `finalize()`
+/// resolves, or a DEGRADED spill (failure at open, write, or final flush) whose path is never
+/// advertised. `finalize()` never fails; the caller keeps its bounded in-memory tail either way.
 pub struct OutputSpill {
     prefix: String,
     path: Option<PathBuf>,
@@ -244,11 +241,9 @@ impl Default for OutputSpill {
     }
 }
 
-/// Incrementally tracks streaming output with bounded memory.
-///
-/// Appends decode chunks with a streaming UTF-8 decoder, keeps only a decoded
-/// tail for display snapshots, and opens a temp file when the full output needs
-/// to be preserved.
+/// Incrementally tracks streaming output with bounded memory: appends decode chunks
+/// with a streaming UTF-8 decoder, keeps only a decoded tail for display snapshots,
+/// and opens a temp file when the full output needs to be preserved.
 pub struct OutputAccumulator {
     max_lines: usize,
     max_bytes: usize,
@@ -359,9 +354,8 @@ impl OutputAccumulator {
         self.spill.finalize().await;
     }
 
-    /// Synchronous settle of the spill (same terminal states as
-    /// [`Self::close_temp_file`]); safe to call while holding the accumulator
-    /// lock across no awaits.
+    /// Synchronous settle of the spill (same terminal states as [`Self::close_temp_file`]); safe to
+    /// call while holding the accumulator lock across no awaits.
     pub fn close_temp_file_sync(&mut self) {
         self.spill.finalize_sync();
     }

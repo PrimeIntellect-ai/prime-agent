@@ -1,10 +1,7 @@
-//! Kernel Python environment bootstrap: the public entry point
-//! [`ensure_kernel_python`] resolves (and on first run builds) the venv that
-//! runs `python -m rlm.repl`, deduplicating concurrent bootstraps; the venv
-//! and version-file machinery lives in [`venv`], the runtime bootstrap code
-//! injected into each kernel in [`runtime_code`].
-//!
-//! Ported from `core/kernel/bootstrap.ts`.
+//! Kernel Python environment bootstrap: the public entry point [`ensure_kernel_python`]
+//! resolves (and on first run builds) the venv that runs `python -m rlm.repl`,
+//! deduplicating concurrent bootstraps; the venv and version-file machinery lives in
+//! [`venv`], the runtime bootstrap code in [`runtime_code`].
 
 pub(crate) mod dir_lock;
 mod disk_memo;
@@ -108,10 +105,8 @@ fn format_bootstrap_failure(error: &anyhow::Error) -> anyhow::Error {
          An interrupted runtime upgrade needs network once more, so re-run this while online. \
          Set PRIME_AGENT_KERNEL_PYTHON to a Python with a current prime-agent-runtime and default Python packages installed to skip auto-bootstrap."
     );
-    // The packaged exe-adjacent sidecar is the kernel runtime source; when it
-    // is missing everywhere (packaged layout and source checkout), name it:
-    // a registry fallback then has no local runtime to fall back from, and
-    // the raw install error alone is not actionable.
+    // The packaged exe-adjacent sidecar is the kernel runtime source; when it is missing everywhere
+    // (packaged layout and source checkout), name it.
     if venv::packaged_runtime_dir().is_none() {
         let package = venv::package_dir();
         let _ = write!(message,
@@ -135,16 +130,11 @@ static IN_FLIGHT: Mutex<InFlightBootstrap> = Mutex::new(None);
 ///
 /// # Errors
 ///
-/// Returns an error when the `PRIME_AGENT_KERNEL_PYTHON` override points to
-/// a Python missing the kernel runtime or default packages, when a writable
-/// venv directory cannot be resolved, or when the kernel venv bootstrap or
-/// its skill sync fails (the failure is formatted with remediation hints,
-/// including a missing packaged runtime directory).
+/// Returns an error when the override Python is invalid or the venv bootstrap fails.
 ///
 /// # Panics
 ///
-/// The in-flight promise stores its outcome under the same lock that takes
-/// it, so the internal `expect` on the stored outcome is unreachable.
+/// The in-flight promise stores its outcome under the same lock, so the `expect` is unreachable.
 pub async fn ensure_kernel_python(options: EnsureKernelPythonOptions) -> anyhow::Result<PathBuf> {
     let python_skills = normalize_python_skills(&options.python_skills);
     let key = [
@@ -270,7 +260,3 @@ async fn ensure_kernel_python_uncached(
     options.report("✓ ready");
     result.map_err(|error| format_bootstrap_failure(&error))
 }
-
-// ---------------------------------------------------------------------------
-// Runtime bootstrap code (from core/tools/ipython.ts)
-// ---------------------------------------------------------------------------

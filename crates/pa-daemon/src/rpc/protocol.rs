@@ -1,18 +1,11 @@
 //! The RPC protocol wire types: the JSONL commands the TS `modes/rpc`
-//! surface accepts on stdin and the responses and errors it answers on
-//! stdout (`rpc-types.ts`).
-//!
-//! Loose-shape like the TS handler: an unknown `type` answers the
-//! `Unknown command` error; a frame that is not an object with a string
-//! `type` answers the `parse` error. Response `data` distinguishes an
-//! absent key (TS `success(id, command)`) from a JSON `null` (TS
-//! `success(id, command, null)`), which the TS client library treats
-//! differently (`cycle_model`'s no-second-model answer).
+//! surface accepts on stdin and the responses it answers on stdout.
+//! Response `data` distinguishes an absent key (TS `success(id, command)`)
+//! from a JSON `null`, which the TS client treats differently.
 
 use serde_json::{json, Map, Value};
 
-/// The RPC response data channel: absent (key omitted) or present
-/// (possibly JSON null).
+/// The RPC response data channel: absent (key omitted) or present (possibly JSON null).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ResponseData {
     Absent,
@@ -25,9 +18,8 @@ impl From<Value> for ResponseData {
     }
 }
 
-/// A success response in the TS key order (`id`, `type`, `command`,
-/// `success`, `data`): `id` and `data` are omitted when absent, exactly
-/// like the TS object literals under `JSON.stringify`.
+/// A success response in the TS key order (`id`, `type`, `command`, `success`, `data`): `id` and
+/// `data` are omitted when absent, exactly like the TS object literals under `JSON.stringify`.
 #[must_use]
 pub fn success(id: Option<&Value>, command: &str, data: ResponseData) -> Value {
     let mut object = Map::new();
@@ -43,8 +35,7 @@ pub fn success(id: Option<&Value>, command: &str, data: ResponseData) -> Value {
     Value::Object(object)
 }
 
-/// An error response: `id` echoed when the command carried one, the
-/// TS error text under `error`.
+/// An error response: `id` echoed when the command carried one, the TS error text under `error`.
 #[must_use]
 pub fn error(id: Option<&Value>, command: &str, message: &str) -> Value {
     let mut object = Map::new();
@@ -71,13 +62,11 @@ pub struct RpcCommand {
 #[derive(Debug, Clone)]
 pub enum ParsedLine {
     Command(RpcCommand),
-    /// The frame failed the JSON or shape parse: the protocol error
-    /// response to answer with.
+    /// The frame failed the JSON or shape parse: the protocol error response to answer with.
     ParseError(Value),
 }
 
-/// Parse one stdin line the way `runRpcModeWithConnectionInternal`'s
-/// `handleInputLine` does.
+/// Parse one stdin line the way the TS `handleInputLine` does.
 #[must_use]
 pub fn parse_line(line: &str) -> ParsedLine {
     let trimmed = line.trim();
@@ -115,9 +104,8 @@ pub fn parse_line(line: &str) -> ParsedLine {
     })
 }
 
-/// The image attachment of a prompt-family command (TS `ImageContent`:
-/// `{type: "image", data, mimeType}`); entries without payload data or
-/// a mime type are dropped, not failed.
+/// The image attachment of a prompt-family command (TS `ImageContent`: `{type: "image", data,
+/// mimeType}`); entries without payload data or a mime type are dropped, not failed.
 pub fn command_images(payload: &Value) -> Vec<pa_agent::types::ImageContent> {
     let Some(images) = payload.get("images").and_then(Value::as_array) else {
         return Vec::new();

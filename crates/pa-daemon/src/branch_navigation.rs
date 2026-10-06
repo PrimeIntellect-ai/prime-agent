@@ -1,9 +1,7 @@
 //! Session-tree navigation commands: the worker-side handlers for
 //! `get_session_tree`, `get_user_messages_for_forking`,
 //! `set_session_entry_label`, `navigate_tree`, `fork`, and
-//! `abort_branch_summary`. Port of the matching daemon-mode cases; the
-//! tree store operations live in [`crate::session_tree`], the branch-summary
-//! model call in the engine ([`SessionEngine::run_branch_summary`]).
+//! `abort_branch_summary`; the store operations live in [`crate::session_tree`].
 
 use std::sync::{Arc, Mutex};
 
@@ -17,10 +15,8 @@ use crate::session_tree;
 use crate::worker::{SessionCore, Worker};
 use pa_agent::abort::AbortController;
 
-/// One completed abandoned-branch summary to persist: the text, its usage
-/// block, its file-operation details, and the model the summary call
-/// served on (TS #2411's auxiliary routing — `None` keeps the timeline
-/// attribution).
+/// One completed abandoned-branch summary to persist: the text, its usage block, its
+/// file-op details, and the model the summary served on (`None` keeps the attribution).
 type PendingBranchSummary = (
     String,
     Option<Value>,
@@ -132,17 +128,9 @@ impl TreeNavigation {
         }
     }
 
-    /// `navigate_tree`: move the session leaf onto a tree node, optionally
-    /// summarizing the abandoned branch first (TS `_navigateTree`). The
-    /// response carries `editorText` when the target was a user message or
-    /// custom message (the text re-enters the input bar).
-    /// `navigate_tree` (TS `AgentSession.navigateTree`): a tree move is
-    /// NOT a runtime replacement - TS rebuilds the branch context in
-    /// place on the live session (`agent.state.messages =
-    /// sessionContext.messages`), so the kernel stays warm: same process,
-    /// same namespace. No teardown runs here (the replacement ruling in
-    /// `session_navigation` covers `fork`, the only tree flow that
-    /// replaces the runtime).
+    /// `navigate_tree`: move the session leaf onto a tree node, optionally summarizing the
+    /// abandoned branch first (TS `_navigateTree`). A tree move is NOT a runtime replacement:
+    /// the kernel stays warm (`fork` is the only teardown flow).
     pub(crate) async fn navigate_tree(&self, payload: &Value) -> DaemonResponse {
         let target_id = payload
             .get("targetId")
@@ -158,8 +146,7 @@ impl TreeNavigation {
             .and_then(Value::as_str)
             .map(str::to_string);
 
-        // Snapshot the tree state under one lock pass; the model call below
-        // runs without holding it.
+        // Snapshot the tree state under one lock pass; the model call below runs without it.
         let (target, old_leaf, entries) = {
             let core = self.core.lock().unwrap();
             let Some(store) = core.store.as_ref() else {
@@ -190,11 +177,9 @@ impl TreeNavigation {
         // `acquireQueuedWorkPause` + `waitForIdle`).
         self.wait_turn_end().await;
 
-        // Where the leaf lands, and what text returns to the editor.
         let (new_leaf, editor_text) = navigation_point(&target);
 
-        // The abandoned-branch summary (TS `generateBranchSummary` over
-        // `collectEntriesForBranchSummary`).
+        // The abandoned-branch summary (TS `generateBranchSummary`).
         let mut summary: Option<PendingBranchSummary> = None;
         let replace_instructions =
             payload.get("replaceInstructions").and_then(Value::as_bool) == Some(true);
@@ -266,10 +251,7 @@ impl TreeNavigation {
             }
         }
 
-        // Move the leaf and persist the summary entry, then rebuild the
-        // engine context onto the moved branch. A created summary entry
-        // means the navigation rebuilds the context across a
-        // compaction-style cut (TS `Boolean(summaryText)`).
+        // Move the leaf and persist the summary entry, then rebuild the engine context.
         let summarized = summary.is_some();
         let (branch_entries, summary_entry) = {
             let mut core = self.core.lock().unwrap();
@@ -323,10 +305,8 @@ impl TreeNavigation {
             }
             (store.branch_file_entries(), summary_entry)
         };
-        // TS `Boolean(summaryText)`: a created summary entry means the
-        // navigation rebuilt the context across a compaction-style cut
-        // (the same timeline — the goal's accounting is monotonic); a
-        // plain move is time travel and reloads faithfully.
+        // TS `Boolean(summaryText)`: a created summary entry means the navigation rebuilt
+        // the context across a compaction-style cut; a plain move reloads faithfully.
         let goal_reload = if summarized {
             pa_core::session_engine::goal_driver::GoalBranchReload::SameTimeline
         } else {
@@ -346,16 +326,9 @@ impl TreeNavigation {
         response_success(None, "navigate_tree", Some(data))
     }
 
-    /// `fork`'s prepare phase (TS `AgentSessionRuntime.fork` before its
-    /// `teardownForReplacement`): settle the running turn first (the
-    /// branch copy below reads the store; a turn must not append entries
-    /// mid-copy), resolve the fork point, and copy the active path up to
-    /// the target into the new session file. `position: "before"`
-    /// (default) forks from a user message with its text returned as
-    /// `selectedText`; `"at"` keeps the path through the entry itself. A
-    /// failed prepare never tears the live session down (the TS entry
-    /// errors answer before the runtime teardown), so the live kernel
-    /// and any in-flight work stay untouched.
+    /// `fork`'s prepare phase: settle the running turn first (the branch copy reads the
+    /// store), resolve the fork point, and copy the active path into the new session file.
+    /// A failed prepare never tears the live session down.
     #[allow(clippy::result_large_err)]
     pub(crate) async fn prepare_fork(
         &self,
@@ -366,8 +339,7 @@ impl TreeNavigation {
             .and_then(Value::as_str)
             .unwrap_or_default();
         let position = payload.get("position").and_then(Value::as_str);
-        // A fork interrupts the running turn first, like the TS runtime's
-        // replacement lease path.
+        // A fork interrupts the running turn first, like the TS replacement lease path.
         self.wait_turn_end().await;
 
         let (target_leaf, selected_text, store, cwd) = {
@@ -406,8 +378,8 @@ impl TreeNavigation {
 
         let forked = match target_leaf.as_deref() {
             None => {
-                // Fork at the root: a fresh empty session (TS `newSession`
-                // with the source as parent).
+                // Fork at the root: a fresh empty session (TS `newSession` with
+                // the source as parent).
                 let mut forked = SessionFile::create(
                     &cwd,
                     store.path.to_str().map(str::to_string).as_deref(),
@@ -454,19 +426,15 @@ impl TreeNavigation {
         Ok((forked, selected_text))
     }
 
-    /// `fork`'s swap phase (TS `buildAndApplyReplacement`): the store,
-    /// the engine's session file, and the rebuilt context move onto the
-    /// prepared fork file. The worker runs its replacement teardown
-    /// between the prepare and this swap, so the parked context lands on
-    /// the fresh, unbuilt session and its first build adopts the fork's
-    /// branch.
+    /// `fork`'s swap phase (TS `buildAndApplyReplacement`): the store, the engine's session
+    /// file, and the rebuilt context move onto the prepared fork file; the teardown runs
+    /// between the prepare and this swap.
     pub(crate) async fn replace_with_fork(&self, forked: SessionFile) -> Result<(), String> {
         let branch_entries = forked.branch_file_entries();
         let new_path = forked.path.clone();
         // Prime the fork store's usage fold before it enters the core: the
         // summaries the swap's roster pushes read resume from this cache
-        // and fold only the appended tail (off the runtime, like the
-        // create prime; an empty path fails fast).
+        // and fold only the appended tail.
         let primed = new_path.clone();
         let _ =
             tokio::task::spawn_blocking(move || crate::session_store::read_session_info(&primed))
@@ -480,18 +448,12 @@ impl TreeNavigation {
         // and the runtime.
         let _ = tokio::task::spawn_blocking(move || drop(previous)).await;
         self.engine.set_session_file(new_path.clone());
-        // TS re-restores the forked session's saved model at its runtime
-        // recreation (`createRuntime` -> `createAgentSession`): the fork
-        // resolves to the model its own file pins, not the previous
-        // session's (an explicit flag still wins inside). No pre-read
-        // context here: the replacement flow keeps its file-read shape
-        // (the create-path reuse is the measured cut; the replacement
-        // paths' own walls are unmeasured).
+        // TS re-restores the forked session's saved model: the fork resolves to the model its
+        // own file pins (an explicit flag still wins inside).
         self.engine.restore_session_model(&new_path, None).await;
-        // A replacement flow retires the runtime first, so the rebuild
-        // parks on the fresh, unbuilt session: its first build seeds the
-        // goal state from the moved branch's own rows (the TS
-        // constructor's `_loadPersistedGoalState`), faithful semantics.
+        // A replacement flow retires the runtime first, so the rebuild parks on
+        // the fresh, unbuilt session: its first build seeds the goal state from
+        // the moved branch's own rows (TS `_loadPersistedGoalState`).
         rebuild_engine_context(
             &self.engine,
             branch_entries,
@@ -508,10 +470,8 @@ impl TreeNavigation {
                 let mut core = self.core.lock().unwrap();
                 if core.busy {
                     core.abort_requested = true;
-                    // The interrupted turn's aborted row stays off the wire
-                    // and out of the store (TS's navigation path never
-                    // surfaces one — the compact-style teardown shape; the
-                    // gate's aborted-row exception stays closed).
+                    // The interrupted turn's aborted row stays off the wire and out of the
+                    // store (TS's navigation path never surfaces one).
                     core.suppress_aborted_row = true;
                     true
                 } else {
@@ -521,9 +481,8 @@ impl TreeNavigation {
             if !busy {
                 break;
             }
-            // The interrupt-and-settle loop, like the compaction flow's:
-            // the engine abort cancels the in-flight fetch now (TS
-            // `requestAbort` -> `agent.abort()`).
+            // The interrupt-and-settle loop: the engine abort cancels the in-flight fetch now
+            // (TS `requestAbort` -> `agent.abort()`).
             self.engine.abort_in_flight_turn();
             let _ = tokio::time::timeout(
                 std::time::Duration::from_millis(50),
@@ -531,19 +490,14 @@ impl TreeNavigation {
             )
             .await;
         }
-        // The interrupted turn settled; the suppression owns only that
-        // drain window.
+        // The interrupted turn settled; the suppression owns only that drain window.
         self.core.lock().unwrap().suppress_aborted_row = false;
     }
 }
 
-/// Rebuild the engine's live context onto the moved branch. The engine
-/// method is synchronous and may ride its own runtime (the
-/// `run_compaction` pattern), so it runs on a blocking thread — never on
-/// the worker's async dispatcher (a `block_on` there panics). The goal
-/// reload rule rides the rebuild (TS `_reloadGoalStateFromBranch`'s
-/// `monotonicTokens`: a summary context rebuild continues the same
-/// timeline, a plain branch move keeps faithful branch semantics).
+/// Rebuild the engine's live context onto the moved branch. The engine method
+/// is synchronous and may ride its own runtime, so it runs on a blocking thread
+/// — never on the worker's async dispatcher (a `block_on` there panics).
 async fn rebuild_engine_context(
     engine: &std::sync::Arc<dyn crate::engine::SessionEngine>,
     branch_entries: Vec<pa_types::session::FileEntry>,
@@ -556,9 +510,8 @@ async fn rebuild_engine_context(
         .map_err(|error| format!("{error:#}"))
 }
 
-/// Where a navigation lands (TS `_navigateTreeUnderPause`): a user message
-/// or custom message target re-enters its text in the editor with the leaf
-/// at its parent; every other target keeps its own id.
+/// Where a navigation lands (TS `_navigateTreeUnderPause`): a user/custom message target
+/// re-enters its text with the leaf at its parent; others keep their own id.
 fn navigation_point(target: &SessionEntry) -> (Option<String>, Option<String>) {
     if let Some(text) = session_tree::user_entry_text(target) {
         return (target.parent_id.clone(), Some(text));
@@ -588,22 +541,16 @@ fn custom_message_text(entry: &SessionEntry) -> Option<String> {
 }
 
 impl Worker {
-    /// `fork` (TS `AgentSessionRuntime.fork`): a whole-runtime
-    /// replacement - prepare the fork file (the branch copy), retire the
-    /// live runtime (the kernel disposes; the fresh session's kernel
-    /// starts cold), swap the store, and prewarm the replacement session.
-    /// The tree moves (`navigate_tree`) are the contrast ruling: TS
-    /// rebuilds the branch context in place on the live session and never
-    /// runs this teardown, so the kernel stays warm there.
+    /// `fork` (TS `AgentSessionRuntime.fork`): a whole-runtime replacement — prepare the
+    /// fork file, retire the live runtime, swap the store, prewarm the replacement.
+    /// Tree moves (`navigate_tree`) never run this teardown.
     pub(crate) async fn handle_fork(&self, payload: &Value) -> DaemonResponse {
         let (forked, selected_text) = match self.tree_navigation.prepare_fork(payload).await {
             Ok(prepared) => prepared,
             Err(response) => return response,
         };
-        // One replacement at a time: the fork's teardown, swap, restore,
-        // and rebuild share the replacement gate with the other
-        // whole-session replacements (a fork racing a `switch_session`
-        // interleaves the same way two switches do).
+        // One replacement at a time: the fork's teardown, swap, restore, and rebuild share
+        // the replacement gate with the other whole-session replacements.
         let _replacement_gate = self.replacement_gate.lock().await;
         if let Err(error) = self.teardown_for_replacement().await {
             return response_failure(None, "fork", &format!("{error:#}"), None);
@@ -621,11 +568,8 @@ impl Worker {
                 self.reseed_service_tier_for_replacement();
                 self.bind_scheduled_jobs().await;
                 self.prewarm_replacement_session();
-                // The fork swap is a whole-session replacement too: the
-                // fresh session's summary row ships to the subscribed
-                // surfaces (the title's cost folds it in
-                // `update_subagent_summary` on arrival), never waiting
-                // for the next turn.
+                // The fork swap is a whole-session replacement too: the fresh summary ships
+                // immediately.
                 self.push_roster_delta();
                 // The pane reporter re-reports for the forked session
                 // (the TS replacement arm: the old instance went silent

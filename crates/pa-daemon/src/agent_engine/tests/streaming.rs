@@ -1,9 +1,8 @@
 //! The streaming tests (prompt content, live assistant updates, the final message).
 use super::*;
 
-/// A prompt with images records the attachments as multimodal content
-/// blocks after the text (TS prompt admission), even when the model
-/// turn itself cannot run.
+/// Images ride as multimodal blocks after the text, even when the model
+/// turn cannot run.
 #[test]
 fn prompt_images_ride_the_user_message_content() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -49,10 +48,9 @@ fn assistant_updates_stream_live_while_the_turn_runs() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::TempDir::new().unwrap();
-    // A paced script: 40 short words at 100 tokens/second streams for
-    // roughly 0.4s wall time. If the engine buffered events until the turn
+    // A paced script: if the engine buffered events until the turn
     // settled, every update would share one emit timestamp; live
-    // forwarding spreads them across the stream.
+    // forwarding spreads them.
     let words = (0..40).fold(String::new(), |mut words, i| {
         use std::fmt::Write;
         write!(words, "w{i} ").expect("write to String");
@@ -124,8 +122,7 @@ fn assistant_updates_stream_live_while_the_turn_runs() {
         last.checked_sub(first).unwrap() >= std::time::Duration::from_millis(200),
         "updates must spread across the stream, got {first:?}..{last:?}"
     );
-    // Content grows monotonically: every update carries the full partial
-    // message, so lengths never regress.
+    // Content grows monotonically: every update carries the full partial.
     let lengths: Vec<usize> = updates.iter().map(|(_, len)| *len).collect();
     let mut monotonic = lengths.clone();
     monotonic.sort_unstable();
@@ -141,7 +138,6 @@ fn agent_engine_streams_updates_and_final_message() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::TempDir::new().unwrap();
-    // Scoped env: the faux seam is process-global; keep the test isolated.
     let engine = AgentSessionEngine::new(AgentEngineConfig {
         cwd: dir.path().to_path_buf(),
         agent_dir: dir.path().join("agent"),
@@ -175,7 +171,6 @@ fn agent_engine_streams_updates_and_final_message() {
             true
         },
     );
-    // User message, streamed updates, final message, done.
     assert!(matches!(&events[0], EngineEvent::UserMessage(_)));
     assert!(events
         .iter()

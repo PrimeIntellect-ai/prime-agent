@@ -1,17 +1,6 @@
-//! The built-in subscription providers' OAuth integration (TS the auth
-//! storage delegates to the AI library's oauth registry): the stored
-//! `openai-codex`, `anthropic`, `github-copilot`, and `xai`
-//! credentials refresh at their token endpoints when they expire.
-//! Every other provider serves its access token until expiry (no
-//! refresh flow exists for it), so refresh answers `None` and
-//! resolution keeps the stored credential for a later explicit
-//! re-login.
-//!
-//! The [`OAuthIntegration`] seam is synchronous by contract (it runs
-//! under the storage's file lock), so the refresh runs on its own
-//! short-lived thread with a private runtime — the same bridge the MCP
-//! integration uses. Refreshes are rare: token expiry, once per hour at
-//! worst.
+//! The built-in subscription providers' OAuth integration: the stored `openai-codex`, `anthropic`,
+//! `github-copilot`, and `xai` credentials refresh at their token endpoints when they expire; every
+//! other provider serves its access token until expiry.
 
 use std::sync::Arc;
 
@@ -22,12 +11,11 @@ use pa_ai::oauth::{
 
 use crate::auth::types::{AuthCredential, AuthStorageData};
 
-/// The Codex Subscription provider id (the wire identifiers the TS
-/// product registers; branding never renames a provider id).
+/// The Codex Subscription provider id (a wire identifier; branding
+/// never renames a provider id).
 pub const OPENAI_CODEX_PROVIDER_ID: &str = "openai-codex";
 /// The Anthropic (Claude Pro/Max) subscription provider id.
 pub const ANTHROPIC_PROVIDER_ID: &str = "anthropic";
-/// The GitHub Copilot subscription provider id.
 pub const GITHUB_COPILOT_PROVIDER_ID: &str = "github-copilot";
 /// The xAI (Grok) subscription provider id.
 pub const XAI_PROVIDER_ID: &str = "xai";
@@ -46,7 +34,6 @@ impl Default for ProviderOAuth {
 }
 
 impl ProviderOAuth {
-    /// The production transports.
     #[must_use]
     pub fn new() -> Self {
         ProviderOAuth {
@@ -63,8 +50,7 @@ impl ProviderOAuth {
         }
     }
 
-    /// A fixed Codex transport, the production provider transport (the
-    /// codex-only flows' tests).
+    /// A fixed Codex transport plus the production provider transport.
     pub fn with_http(http: Arc<dyn CodexHttp>) -> Self {
         ProviderOAuth {
             http,
@@ -73,8 +59,7 @@ impl ProviderOAuth {
     }
 
     /// Refresh one expired credential off the async runtime (the
-    /// `AuthStorage` seam is synchronous by contract). Each
-    /// subscription provider's refresh resolves through its own flow.
+    /// `AuthStorage` seam is synchronous by contract).
     fn refresh_blocking(
         &self,
         provider_id: &str,
@@ -139,9 +124,8 @@ impl ProviderOAuth {
                         })
                     }
                     GITHUB_COPILOT_PROVIDER_ID => {
-                        // The stored GitHub token exchanges for a fresh
-                        // Copilot token; the enterprise domain rides the
-                        // credential (TS `enterpriseUrl`).
+                        // The stored GitHub token exchanges for a fresh Copilot token; the
+                        // enterprise domain rides the credential.
                         let credentials = runtime
                             .block_on(refresh_github_copilot_token(
                                 provider_http.as_ref(),
@@ -259,8 +243,8 @@ mod tests {
         }
     }
 
-    /// One fake access token carrying the account id (the flow never
-    /// verifies a signature, like the TS decode).
+    /// One fake access token carrying the account id (no signature
+    /// verified, like the TS decode).
     fn account_jwt(account_id: &str) -> String {
         use base64::Engine as _;
         let segment = |value: &serde_json::Value| {
@@ -321,9 +305,7 @@ mod tests {
         }
     }
 
-    /// The scripted endpoints for the four subscription refreshes (the
-    /// codex token endpoint, the Anthropic platform, the enterprise
-    /// Copilot token endpoint, and the xAI token endpoint).
+    /// The scripted endpoints for the four subscription refreshes.
     fn integrations() -> std::sync::Arc<ProviderOAuth> {
         let mut codex = HashMap::new();
         codex.insert(
@@ -397,8 +379,6 @@ mod tests {
             .get_api_key(OPENAI_CODEX_PROVIDER_ID)
             .expect("the refreshed access token resolves");
         assert_eq!(api_key, account_jwt("acct-2"));
-        // The refreshed credential persisted: the account id rode along
-        // (TS stores the fresh login's `accountId`).
         let stored = auth.get_all().credential(OPENAI_CODEX_PROVIDER_ID).unwrap();
         let AuthCredential::Oauth {
             access,
@@ -460,8 +440,8 @@ mod tests {
         else {
             panic!("the stored credential is OAuth");
         };
-        // The GitHub token stays the refresh source and the enterprise
-        // domain rides the credential (TS `enterpriseUrl`).
+        // The GitHub token stays the refresh source; the enterprise
+        // domain rides the credential.
         assert_eq!(refresh.as_deref(), Some("gh-old"));
         assert_eq!(enterprise_url.as_deref(), Some("company.ghe.com"));
         assert!(expires > 1, "the fresh expiry landed");
@@ -488,8 +468,7 @@ mod tests {
 
     #[test]
     fn a_failed_refresh_keeps_the_stored_credential() {
-        // Nothing scripted: the refresh fails and resolution skips the
-        // provider, keeping the stored credential for a later retry.
+        // Nothing scripted: the refresh fails, the stored credential stays.
         let mut auth = crate::auth::AuthStorage::in_memory_without_env(
             &{
                 let mut data = crate::auth::types::AuthStorageData::default();
@@ -512,9 +491,6 @@ mod tests {
 
     #[test]
     fn non_subscription_providers_do_not_refresh() {
-        // A stored OAuth credential for a provider outside the four
-        // subscription ids never refreshes: resolution stays absent and
-        // the credential stays.
         let mut auth = storage_with_credential("other-oauth", &expired_credential("other-oauth"));
         assert_eq!(auth.get_api_key("other-oauth"), None);
         assert!(auth.get_all().credential("other-oauth").is_some());
@@ -522,8 +498,6 @@ mod tests {
 
     #[test]
     fn an_unexpired_credential_serves_without_a_refresh() {
-        // A credential in its validity window resolves its access token
-        // directly; no token request fires.
         let unexpired = AuthCredential::Oauth {
             access: "live-access".to_string(),
             refresh: Some("r".to_string()),

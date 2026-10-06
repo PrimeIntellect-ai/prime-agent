@@ -1,11 +1,7 @@
 //! marked's GFM inline autolink rules (marked 18.0.7, the TS markdown
-//! tokenizer), ported verbatim so bare URLs and angle-form links tokenize
-//! exactly like the TS renderer: after every other inline construct fails,
-//! marked tries `autolink` (`<scheme:...>` / `<email>`) and then `url`
-//! (bare `http(s)://`, `ftp://`, `www.`, and email shapes, the latter only
-//! outside a link label - marked's `state.inLink` guard). A match becomes a
-//! link token whose text is the visible label and whose href feeds the OSC
-//! 8 wrap (`markdown.ts` `case "link"`).
+//! tokenizer), ported verbatim: after every other inline construct fails, marked tries
+//! `autolink` (`<scheme:...>` / `<email>`) then `url` (bare `http(s)://`, `ftp://`, `www.`,
+//! and email shapes, the latter only outside a link label).
 
 use std::sync::LazyLock;
 
@@ -29,20 +25,17 @@ static BARE: LazyLock<Regex> = LazyLock::new(|| {
     .expect("static url regex")
 });
 
-/// `rules.inline._backpedal`: trailing-punctuation trim. Balanced paren
-/// groups survive; a punctuation run may only be consumed when it does not
-/// end the string (the `(?!$)` guard), so the tokenizer's fixpoint loop
-/// peels a trailing run one character per pass.
+/// `rules.inline._backpedal`: trailing-punctuation trim. Balanced paren groups survive;
+/// a punctuation run may only be consumed when it does not end the string (the `(?!$)`
+/// guard), so the tokenizer's fixpoint loop peels a trailing run one character per pass.
 static BACKPEDAL: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?:[^?!.,:;*_'"~()&]+|\([^)]*\)|&(?![a-zA-Z0-9]+;$)|[?!.,:;*_'"~)]+(?!$))+"#)
         .expect("static backpedal regex")
 });
 
-/// One autolink match: the visible label, the href marked puts on the
-/// token (before `markdown.ts` normalizes it with `new URL()`), and the
-/// raw text the lexer consumes for it (`markdown.ts` advances by
-/// `token.raw`; for bare urls that is the backpedaled match, so a trimmed
-/// trailing punctuation run stays in the text stream).
+/// One autolink match: the visible label, the href marked puts on the token (before
+/// `new URL()` normalization), and the raw text the lexer consumes for it (for bare urls
+/// the backpedaled match, so a trimmed trailing punctuation run stays in the text stream).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AutolinkToken {
     pub raw: String,
@@ -63,10 +56,9 @@ pub(crate) fn angle_token(src: &str) -> Option<AutolinkToken> {
     Some(AutolinkToken { raw, text, href })
 }
 
-/// The gfm `url` rule: bare protocol links, `www.` links (href gains a
-/// `http://` scheme), and bare emails (href gains `mailto:`). The url/www
-/// branch runs the `_backpedal` fixpoint loop; the email branch needs none
-/// (its domain grammar cannot end on punctuation).
+/// The gfm `url` rule: bare protocol links, `www.` links (href gains a `http://` scheme),
+/// and bare emails (href gains `mailto:`). The url/www branch runs the backpedal fixpoint;
+/// the email branch needs none (its domain grammar cannot end on punctuation).
 pub(crate) fn bare_token(src: &str) -> Option<AutolinkToken> {
     let caps = BARE.captures(src).ok().flatten()?;
     if caps.get(2).is_some() {
@@ -80,11 +72,9 @@ pub(crate) fn bare_token(src: &str) -> Option<AutolinkToken> {
     }
     let scheme = caps.get(1)?.as_str().to_string();
     let matched = caps.get(0)?.as_str();
-    // marked's fixpoint (`do .. while r !== t[0]`) re-executed on the
-    // shrunk match; the loop here walks the same steps as (start, end)
-    // ranges over the one matched slice instead of re-copying the string
-    // each pass, so a long trailing-punctuation run peels without an
-    // allocation per peeled character.
+    // The loop walks marked's fixpoint as (start, end) ranges over the one matched slice
+    // instead of re-copying the string each pass, so a long trailing-punctuation run peels
+    // without an allocation per peeled character.
     let mut start = 0;
     let mut end = matched.len();
     while let Ok(Some(m)) = BACKPEDAL.find(&matched[start..end]) {
@@ -107,14 +97,9 @@ pub(crate) fn bare_token(src: &str) -> Option<AutolinkToken> {
     })
 }
 
-/// Cheap per-position gate for the gfm `url` rule: the rule can only match
-/// when its literal prefix is present at the position - the schemes
-/// case-insensitive (marked's `[hH][tT][tT][pP][sS]?` protocol classes),
-/// `www.` literal - or, for the email alternative, when a local-part run
-/// leads directly to an `@`. Both tests are bounded char scans with no
-/// string copy and no regex, so a plain-text stream full of
-/// candidate-shaped starts (every `h` of `history history ...`) stays
-/// linear instead of re-copying the remaining text once per position.
+/// Cheap per-position gate for the gfm `url` rule: the rule can only match when its
+/// literal prefix is present (a scheme case-insensitive, the `www.` literal) or a
+/// local-part run leads directly to an `@`. Both tests are bounded char scans.
 pub(crate) fn bare_candidate(bytes: &[char], i: usize, line_has_at: bool) -> bool {
     for (prefix, ci) in [
         ("https://", true),
@@ -127,11 +112,8 @@ pub(crate) fn bare_candidate(bytes: &[char], i: usize, line_has_at: bool) -> boo
         }
     }
     if line_has_at && (i == 0 || !is_local_part(bytes[i - 1])) {
-        // Only the first character of a local-part run can start an email
-        // match (the local-part grammar ends at the `@`, so a mid-run
-        // start faces the identical `@` and domain and cannot succeed
-        // where the run start failed), and one scan per run keeps a long
-        // local-part run linear instead of quadratic.
+        // Only the first character of a local-part run can start an email match, and one
+        // scan per run keeps a long local-part run linear instead of quadratic.
         let mut j = i;
         while j < bytes.len() && is_local_part(bytes[j]) {
             j += 1;

@@ -1,10 +1,7 @@
-//! JSONL daemon client for the interactive UI.
-//!
-//! Connects to the supervisor's client socket, performs the `daemon_hello`
-//! handshake, sends `type: "command"` envelopes, and matches responses by
-//! envelope id. Frames that are not responses (session events, list progress,
-//! closing notices) are forwarded to the caller through an event channel, so
-//! the UI loop can render live session state while requests are in flight.
+//! JSONL daemon client for the interactive UI: connect, `daemon_hello`
+//! handshake, `type: "command"` envelopes matched by envelope id.
+//! Non-response frames (session events, list progress, closing notices)
+//! are forwarded through an event channel so the UI can render live state.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -36,108 +33,75 @@ pub use errors::{
     is_update_restarting_rejection, rejected_provider_unauthenticated, RequestRejected,
 };
 
-/// Default response timeout (TS `DEFAULT_DAEMON_REQUEST_TIMEOUT_MS`).
 pub const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 30_000;
 /// Requests whose completion is bounded by the turn itself
-/// (`prompt_and_wait`, `wait_for_idle`) use the supervisor's long route
-/// timeout so a long turn cannot expire the request.
+/// (`prompt_and_wait`, `wait_for_idle`) — a long turn cannot expire them.
 pub const LONG_RUNNING_REQUEST_TIMEOUT_MS: u64 = 600_000;
 const CONNECT_TIMEOUT_MS: u64 = 3_000;
 /// Hello handshake budget. A daemon loading a very large session can take
 /// well over the 3s TS default to greet.
 const HELLO_TIMEOUT_MS: u64 = 15_000;
-/// Connect attempts before a connect/handshake failure surfaces (the
-/// fatal error paths the operator hit: "Timed out after 15000ms waiting
-/// for the Prime Agent daemon handshake" exited their TUI on the FIRST
-/// miss at box load). A loaded or restarting daemon usually greets within
-/// the retry window; the caller's error path only runs after the last
-/// attempt.
+/// Connect attempts before a connect/handshake failure surfaces: the
+/// caller's error path only runs after the last attempt.
 pub(crate) const CONNECT_ATTEMPTS: u32 = 3;
 /// The first retry's backoff; each further attempt doubles it.
 const CONNECT_RETRY_BACKOFF_MS: u64 = 1_000;
 
-/// A non-response frame forwarded to the UI event loop. Payloads that are
-/// owned by the session engine stay raw JSON (`Value`) so the client keeps
-/// working across schema revisions.
 /// The update resume contract of a `daemon_closing` frame (spec §10.1).
 #[derive(Debug, Clone)]
 pub struct DaemonClosingUpdate {
     pub update_id: String,
     pub est_seconds: u64,
-    /// The stopped sessions `[{sessionId, name}]`: what the client can
-    /// reattach to by durable id after the restart.
+    /// The stopped sessions `[{sessionId, name}]`: reattach targets after the restart.
     pub sessions: Vec<Value>,
 }
 
 #[derive(Debug, Clone)]
 pub enum DaemonClientEvent {
-    /// `session_event`: one streamed agent/turn event for an attached
-    /// session. The frame's `meta.sequence` (the worker's monotonic
-    /// event counter — the same counter the attach cursor rides) rides
-    /// along: the cross-view layout handoff's stash keys the LATEST
-    /// sequence the run has seen (`view::handoff`), so a turn during
-    /// the run advances the stash's key to the value the next attach
-    /// reports instead of the run's own stale attach sequence.
+    /// `session_event`: one streamed event, with the frame's
+    /// `meta.sequence` (the worker's monotonic counter).
     SessionEvent {
         active_session_id: String,
         event: Value,
         meta_sequence: u64,
     },
-    /// `session_closed`: the attached session stopped existing.
     SessionClosed {
         active_session_id: String,
         reason: String,
     },
-    /// The direct worker link for `active_session_id` died (the worker
-    /// process exited). TS `handleTransportClose` with a direct-transport
-    /// loss: "a direct-transport loss is never itself a session loss" —
-    /// the UI re-attaches through the supervisor, which respawns the
-    /// worker and hands out a fresh peer ticket.
+    /// The direct worker link died: never itself a session loss — the UI
+    /// re-attaches through the supervisor, which respawns the worker.
     DirectLinkLost { active_session_id: String },
-    /// `session_list_item` progress frame of `list_saved_sessions`: one
-    /// saved row as the scan streams it (newest first), tagged with the
-    /// request id it belongs to (TS's connection routes the stream to
-    /// the originating `listDaemonSavedSessions` callbacks; the agents
-    /// view applies only the frames of its own in-flight fetch).
+    /// `session_list_item` progress frame: one saved row as the scan streams it, tagged with its
+    /// request id.
     SessionListItem { session: Value, request_id: String },
     /// `session_list_progress` progress frame of `list_saved_sessions`.
     SessionListProgress { loaded: u64, total: u64 },
-    /// `daemon_closing`: the supervisor is going down. An update restart
-    /// carries the resume contract (spec §10.1): the client keeps its UI
-    /// mounted and reconnects instead of exiting.
+    /// `daemon_closing`: the supervisor is going down — keep the UI mounted
+    /// and reconnect (the update resume contract, spec §10.1).
     DaemonClosing {
         reason: String,
         update: Option<DaemonClosingUpdate>,
     },
-    /// `side_question_event`: one streamed side-question run (the `/btw`
-    /// pane tracks the run by its id).
+    /// `side_question_event`: one streamed side-question run (the `/btw` pane tracks it by id).
     SideQuestionEvent {
         active_session_id: String,
         event: Value,
     },
-    /// `roster_update`: live roster deltas for subscribers (the agents
-    /// view): changed entries upsert by agent id, `removed` deletes, and
-    /// `resync` replaces the whole roster.
+    /// `roster_update`: live roster deltas — changed entries upsert by agent
+    /// id, `removed` deletes, `resync` replaces the whole roster.
     RosterUpdate {
         changed: Vec<Value>,
         removed: Vec<String>,
         resync: bool,
     },
-    /// `heartbeats_changed`: the daemon-global broadcast every client sees
-    /// when the heartbeat catalog changes (TS `broadcastGlobal`). The
-    /// session view refreshes its open `/heartbeats` picker on it.
+    /// `heartbeats_changed`: the daemon-global broadcast when the heartbeat catalog changes.
     HeartbeatsChanged,
     /// `model_catalog_changed`: a background daemon-side catalog refresh
-    /// changed the served snapshot (the Rust-only no-stall picker-open
-    /// extension; TS has no counterpart event — it awaits the refresh on
-    /// the request path). Every client re-fetches instantly; an open
-    /// `/model` picker folds the fresh catalog through its stable update
-    /// path.
+    /// changed the served snapshot. Rust-only extension (no TS counterpart).
     ModelCatalogChanged,
-    /// `session_binding`: the supervisor rebound a session to a new active
-    /// id (a worker replacement) and the id this client holds is
-    /// superseded. The session view re-attaches to the current id so its
-    /// event routing follows the session.
+    /// `session_binding`: the supervisor rebound a session to a new active id; the view
+    /// re-attaches.
     SessionBinding {
         previous_active_session_id: String,
         active_session_id: String,
@@ -267,9 +231,8 @@ pub(crate) fn client_event_from_value(value: &Value) -> Option<DaemonClientEvent
 #[derive(Default)]
 pub(crate) struct Shared {
     /// Pending requests keyed by envelope id. `Ok` is a daemon answer
-    /// (including a `success: false` refusal); `Err` is a transport
-    /// failure — the two must stay distinguishable, because a refusal is
-    /// recoverable UI data while a dead connection is fatal.
+    /// (including a refusal); `Err` is a transport failure — a refusal is
+    /// recoverable UI data, a dead connection is fatal.
     pending: Mutex<HashMap<String, oneshot::Sender<Result<DaemonResponse, anyhow::Error>>>>,
 }
 
@@ -282,18 +245,8 @@ impl Shared {
     }
 
     /// Fail every pending request whose id starts with `prefix` with a
-    /// transport error: the connection that carried them died.
-    ///
-    /// This is what keeps a dead supervisor or worker from leaving the UI
-    /// waiting out the full request timeout — the exit-hang class of bugs:
-    /// the abort was accepted, but the client then hung on a request whose
-    /// socket peer was already gone. The reader task of each connection
-    /// calls this when its socket closes (supervisor reader fails the
-    /// `daemon_`-routed requests, a direct worker pump the `direct_` ones,
-    /// so a live link keeps serving its own in-flight requests). The
-    /// failure resolves on the `Err` half of the channel — never as a
-    /// synthetic response — so a dead connection can never be mistaken
-    /// for a daemon refusal.
+    /// transport error: the connection that carried them died. The failure
+    /// resolves on the `Err` half — never a synthetic response.
     pub(crate) fn fail_pending(&self, prefix: &str, error: &str) {
         let mut pending = self.pending.lock().unwrap();
         let dead: Vec<String> = pending
@@ -312,10 +265,6 @@ impl Shared {
 /// A live connection to the daemon supervisor socket, optionally upgraded
 /// with a direct worker link (session-plane commands and events go straight
 /// to the session process; the supervisor stays the control plane).
-///
-/// Cheap to clone: clones share the same socket, pending-request table, and
-/// direct link, so a background request (the Ctrl+C abort) races a live
-/// client exactly.
 #[derive(Clone)]
 pub struct DaemonClient {
     socket_path: PathBuf,
@@ -326,8 +275,7 @@ pub struct DaemonClient {
     next_request_id: Arc<AtomicU64>,
     shared: Arc<Shared>,
     writer: mpsc::UnboundedSender<String>,
-    /// Direct-transport state (retained event sender + live worker link),
-    /// one pointer so this struct stays small.
+    /// Direct-transport state (retained event sender + live worker link).
     direct: std::sync::Arc<crate::direct_transport::DirectState>,
     /// The supervisor reader's death watch (see `reader_dead`).
     reader_dead_rx: tokio::sync::watch::Receiver<bool>,
@@ -335,14 +283,12 @@ pub struct DaemonClient {
 
 impl DaemonClient {
     /// Connect to `socket_path`, complete the hello handshake, and return the
-    /// client plus the event receiver. The event receiver must be polled or
-    /// the reader task stalls once the channel's buffer fills.
+    /// client plus the event receiver (the receiver must be polled or the
+    /// reader task stalls once the channel's buffer fills).
     ///
     /// # Errors
     ///
-    /// Returns `Err` when the transport connect times out or fails, the
-    /// hello handshake times out or the connection closes first, or the
-    /// daemon speaks an unknown protocol.
+    /// Returns `Err` on a connect or hello failure, timeout, or unknown protocol.
     pub async fn connect(
         socket_path: &Path,
     ) -> Result<(Self, mpsc::UnboundedReceiver<DaemonClientEvent>)> {
@@ -368,11 +314,9 @@ impl DaemonClient {
         let (line_tx, mut line_rx) = mpsc::unbounded_channel::<String>();
         let (event_tx, event_rx) = mpsc::unbounded_channel::<DaemonClientEvent>();
         let retained_event_tx = event_tx.clone();
-        // The supervisor reader's death signal: the retained event sender
-        // keeps the event channel open after the reader exits (direct
-        // reader pumps may still feed it), so a channel close can never
-        // observe a supervisor socket loss — the watch is the observable
-        // signal the UI loop arms its reconnect driver on.
+        // The supervisor reader's death signal: the retained event sender keeps
+        // the event channel open after the reader exits, so a channel close can
+        // never observe a supervisor socket loss.
         let (reader_dead_tx, reader_dead_rx) = tokio::sync::watch::channel(false);
         let (hello_tx, hello_rx) = oneshot::channel::<Value>();
         let shared = Arc::new(Shared {
@@ -393,10 +337,8 @@ impl DaemonClient {
             let _ = writer.shutdown().await;
         });
 
-        // Reader task: dispatch every inbound line. The handle is kept so
-        // the handshake-failure paths can abort it: a daemon that accepts
-        // the socket but never greets must not leave a blocked reader task
-        // (and its socket halves) behind per retry attempt.
+        // Reader task: dispatch every inbound line; the handle is kept so
+        // handshake-failure paths can abort it.
         let reader_task = tokio::spawn(async move {
             let mut reader = BufReader::new(reader_half);
             let mut line = String::new();
@@ -434,16 +376,14 @@ impl DaemonClient {
                     }
                 }
             }
-            // The supervisor socket closed: every supervisor-routed request
-            // in flight fails now instead of riding out its timeout, and
-            // the death watch wakes the UI loop's reconnect driver.
+            // The supervisor socket closed: pending requests fail now and the death watch wakes the
+            // reconnect driver.
             let _ = reader_dead_tx.send(true);
             reader_shared.fail_pending("daemon_", "the daemon connection closed");
         });
 
         // Hello handshake: the supervisor sends daemon_hello immediately on
-        // connect (TS `waitForHello`). Every failure path aborts the
-        // blocked reader task so a failed attempt leaks no socket halves.
+        // connect (TS `waitForHello`).
         let hello = tokio::time::timeout(Duration::from_millis(HELLO_TIMEOUT_MS), hello_rx)
             .await
             .map_err(|_| {
@@ -473,7 +413,7 @@ impl DaemonClient {
                 protocol.name
             ));
         }
-        // Envelope protocol version: the shared minimum (TS `request`).
+        // Envelope protocol version: the shared minimum.
         let version = protocol.version.min(DAEMON_PROTOCOL_VERSION);
 
         Ok((
@@ -497,11 +437,8 @@ impl DaemonClient {
         ))
     }
 
-    /// A fresh receiver for the supervisor reader's death watch: fires
-    /// (`true`) when the supervisor socket's reader task ends — a daemon
-    /// hiccup the UI loop's reconnect driver observes (the event channel
-    /// itself stays open: the retained sender keeps it alive for direct
-    /// reader pumps). Poll it with `watch::Receiver::changed`.
+    /// A fresh receiver for the supervisor reader's death watch: fires when
+    /// the reader task ends. Poll it with `watch::Receiver::changed`.
     #[must_use]
     pub fn reader_dead(&self) -> tokio::sync::watch::Receiver<bool> {
         self.reader_dead_rx.clone()
@@ -512,18 +449,12 @@ impl DaemonClient {
         &self.socket_path
     }
 
-    /// [`Self::connect`] with bounded retries and doubling backoff: a
-    /// missed hello (a loaded daemon mid-fanout, a supervisor coming up
-    /// after a restart) is a hiccup, not a fatal condition — the one-shot
-    /// connect cost the operator their TUI twice on 2026-09-24 ("Timed
-    /// out after 15000ms waiting for the Prime Agent daemon handshake").
-    /// The caller's error path (fatal exit or view fallback) only runs
-    /// after the last attempt.
+    /// [`Self::connect`] with bounded retries and doubling backoff: a missed
+    /// hello is a hiccup, not a fatal condition.
     ///
     /// # Errors
     ///
-    /// Returns the last attempt's [`Self::connect`] error once the
-    /// bounded retries are exhausted.
+    /// Returns the last attempt's [`Self::connect`] error.
     pub async fn connect_with_retry(
         socket_path: &Path,
     ) -> Result<(Self, mpsc::UnboundedReceiver<DaemonClientEvent>)> {
@@ -549,8 +480,7 @@ impl DaemonClient {
         &self.protocol
     }
 
-    /// The full `daemon_hello` frame the supervisor sent on connect.
-    /// Whether the daemon's `daemon_hello` advertised `capability` (TS
+    /// Whether the daemon advertised `capability` (TS
     /// `supportsServerCapability`): capability-gated commands fall back to
     /// their older shape without it.
     pub fn supports_server_capability(&self, capability: &str) -> bool {
@@ -574,9 +504,7 @@ impl DaemonClient {
     ///
     /// # Errors
     ///
-    /// Returns `Err` like [`Self::request_with_timeout`]: the frame
-    /// cannot be sent, the connection dies before the response, or the
-    /// command-class timeout elapses.
+    /// Returns `Err` like [`Self::request_with_timeout`].
     pub async fn request(&self, command: DaemonCommand) -> Result<DaemonResponse> {
         let timeout_ms = match &command {
             DaemonCommand::PromptAndWait { .. } | DaemonCommand::WaitForIdle { .. } => {
@@ -587,21 +515,16 @@ impl DaemonClient {
         self.request_with_timeout(command, timeout_ms).await
     }
 
-    /// Send one command envelope and wait up to `timeout_ms` for the response.
-    ///
-    /// Session-plane commands for the direct link's session go straight to
-    /// the session worker socket; everything else goes to the supervisor.
-    /// A direct link that died before the request was written falls back to
-    /// the supervisor (the request never reached the worker); a request that
-    /// was sent and timed out surfaces the error instead of retrying, so a
-    /// prompt can never execute twice.
+    /// Session-plane commands for the direct link's session go straight to the
+    /// session worker socket; everything else goes to the supervisor. A dead
+    /// link before the write falls back to the supervisor; a sent request that
+    /// times out surfaces the error instead of retrying, so a prompt can never
+    /// execute twice.
     ///
     /// # Errors
     ///
-    /// Returns `Err` when the frame cannot be written (the connection is
-    /// closed), the reader dies before resolving, or the timeout elapses;
-    /// a direct frame that never reached the worker falls back to the
-    /// supervisor instead of failing.
+    /// Returns `Err` when the frame cannot be written, the reader dies, or
+    /// the timeout elapses.
     pub async fn request_with_timeout(
         &self,
         command: DaemonCommand,
@@ -615,9 +538,8 @@ impl DaemonClient {
             match self.request_direct(&link, &command, &id, timeout_ms).await {
                 Ok(response) => return Ok(response),
                 Err(DirectRequestError::NotSent) => {
-                    // The link was dead before the frame was queued; the
-                    // request never reached the worker, so supervisor
-                    // routing is safe.
+                    // The link was dead before the frame was queued, so
+                    // supervisor routing is safe.
                     self.direct.drop_link();
                 }
                 Err(DirectRequestError::Wait(error)) => return Err(error),
@@ -628,15 +550,12 @@ impl DaemonClient {
 
     /// Send one command envelope to the supervisor, bypassing any direct
     /// worker link, and require `success: true`. The supervisor-owned arms
-    /// (`abort_compaction`) must reach the supervisor even when a direct
-    /// link serves the session: the direct link IS the wedged worker in
-    /// the case the supervisor arm exists for.
+    /// (`abort_compaction`) must reach the supervisor even when a direct link
+    /// serves the session: the direct link IS the wedged worker in that case.
     ///
     /// # Errors
     ///
-    /// Returns `Err` when the supervisor request fails or times out, or
-    /// the response carries `success: false` (the daemon error string
-    /// surfaces).
+    /// Returns `Err` when the request fails or times out, or carries `success: false`.
     pub async fn request_ok_via_supervisor(&self, command: DaemonCommand) -> Result<Value> {
         let name = command_type_debug(&command);
         let response = self
@@ -660,10 +579,8 @@ impl DaemonClient {
             .await
     }
 
-    /// The refusal for a supervisor reader that already ended: its
-    /// close-time failure pass has run (or is imminent), so nothing can
-    /// ever answer a request registered now — TS `requestWire` refuses
-    /// a destroyed socket the same way.
+    /// The refusal for a supervisor reader that already ended: nothing can
+    /// ever answer a request registered now.
     fn dead_reader_error(&self) -> anyhow::Error {
         anyhow!(
             "the daemon connection is closed. Socket: {}.",
@@ -672,24 +589,18 @@ impl DaemonClient {
     }
 
     /// One JSONL envelope on the supervisor connection, under the caller's
-    /// own envelope id: the streamed `session_list_item` frames of
-    /// `list_saved_sessions` carry it, so the caller can attribute the
-    /// catalog stream to its own fetch (TS's connection routes the
-    /// stream to the originating `listDaemonSavedSessions` callbacks).
-    /// The id must start with `daemon_` - the supervisor reader's
-    /// socket-close failure pass filters by that prefix.
+    /// own envelope id (the streamed `session_list_item` frames carry
+    /// it). The id must start with `daemon_` — the socket-close failure
+    /// sweep filters by that prefix.
     ///
     /// # Errors
     ///
-    /// Returns `Err` when the envelope cannot be serialized, the writer
-    /// send fails (the connection is already closed), the supervisor
-    /// reader has already died (nothing can ever resolve the request),
-    /// the reader task dies before resolving, or the timeout elapses.
+    /// Returns `Err` when the envelope cannot be serialized or sent, the
+    /// reader has died, or the timeout elapses.
     ///
     /// # Panics
     ///
-    /// Panics when the shared pending-request mutex is poisoned (a
-    /// thread panicked while holding it).
+    /// Panics when the shared pending-request mutex is poisoned.
     pub async fn request_supervisor_with_id(
         &self,
         command: DaemonCommand,
@@ -710,13 +621,9 @@ impl DaemonClient {
         let line = serde_json::to_string(&envelope)?;
         let (tx, rx) = oneshot::channel::<Result<DaemonResponse>>();
         self.shared.pending.lock().unwrap().insert(id.clone(), tx);
-        // The reader runs on another worker: it can die (and run its
-        // failure sweep) between the entry check and this registration,
-        // and the writer channel outlives the reader's EOF — an entry
-        // the sweep missed would ride the caller's whole timeout.
-        // Re-check after inserting: a death the sweep already served
-        // resolves the oneshot on the Err half, a death it missed is
-        // caught here.
+        // The reader runs on another worker: it can die (and run its failure
+        // sweep) between the entry check and this registration. Re-check after
+        // inserting — a death it missed is caught here.
         if *self.reader_dead_rx.borrow() {
             self.shared.pending.lock().unwrap().remove(&id);
             return Err(self.dead_reader_error());
@@ -725,7 +632,6 @@ impl DaemonClient {
             .send(line)
             .map_err(|_| anyhow!("the daemon connection is closed"))?;
         match tokio::time::timeout(Duration::from_millis(timeout_ms), rx).await {
-            // The daemon answered (its response says whether it was happy).
             Ok(Ok(result)) => result,
             // The reader task died before resolving this request: the
             // connection was already gone.
@@ -748,16 +654,13 @@ impl DaemonClient {
     ///
     /// # Errors
     ///
-    /// Returns `Err` when [`Self::request`] fails or the response
-    /// carries `success: false` (the daemon error string surfaces).
+    /// Returns `Err` when [`Self::request`] fails or the response carries `success: false`.
     pub async fn request_ok(&self, command: DaemonCommand) -> Result<Value> {
         let name = command_type_debug(&command);
         let response = self.request(command).await?;
         response_data_or_error(&name, response)
     }
 
-    /// Whether a session-plane command for the direct link's session may
-    /// travel over the direct link (TS `servesDirect`).
     /// The live direct link that may serve `command` (TS `servesDirect`):
     /// the command must be session-plane and address the link's session.
     fn direct_link_for(&self, command: &DaemonCommand) -> Option<DirectLink> {
@@ -807,7 +710,6 @@ impl DaemonClient {
             return Err(DirectRequestError::NotSent);
         }
         match tokio::time::timeout(Duration::from_millis(timeout_ms), reply_rx).await {
-            // The worker answered (its response says whether it was happy).
             Ok(Ok(Ok(response))) => Ok(response),
             // The worker link died: a transport failure, never a refusal.
             Ok(Ok(Err(error))) => Err(DirectRequestError::Wait(error)),
@@ -825,11 +727,10 @@ impl DaemonClient {
         }
     }
 
-    /// The wire payload for a direct session command: the command itself,
+    /// The wire payload for a direct session command: the command itself
     /// stamped with this client's id (the supervisor stamps it on the routed
-    /// path) and, for attach, the slim-snapshot capability set the
-    /// supervisor's routed attach uses, so both paths return identical
-    /// attach results.
+    /// path) and, for attach, the same slim-snapshot capability set, so both
+    /// paths return identical attach results.
     fn direct_command_payload(&self, command: &DaemonCommand) -> Result<Value> {
         let mut payload = serde_json::to_value(command)?;
         if let Some(object) = payload.as_object_mut() {
@@ -850,25 +751,17 @@ impl DaemonClient {
         self.direct.session_id()
     }
 
-    /// Drop the direct link and keep plain supervisor routing (TS
-    /// `fallbackToSupervisor`).
+    /// Drop the direct link and keep plain supervisor routing.
     pub fn drop_direct(&self) {
         self.direct.drop_link();
     }
 
     /// Upgrade this connection with a direct worker link for
-    /// `active_session_id` (TS `createDaemonSessionTransport`): request a
-    /// ticket from the supervisor, validate it, connect to the worker
-    /// socket, and authenticate with the single-use grant. Every failure
-    /// returns `Ok(false)` and leaves the plain supervisor connection in
-    /// place.
+    /// `active_session_id`.
     ///
     /// # Errors
     ///
-    /// Never returns `Err`: every failure path (an unsupported
-    /// supervisor, a failed or refused ticket request, an invalid
-    /// ticket, or a failed worker connect) returns `Ok(false)` and keeps
-    /// the plain supervisor connection.
+    /// Never returns `Err`: every failure path returns `Ok(false)`.
     pub async fn upgrade_direct(&self, active_session_id: &str) -> Result<bool> {
         if !supervisor_supports_direct(&self.hello) {
             return Ok(false);
@@ -918,13 +811,9 @@ impl DaemonClient {
         let _ = self.writer.send(String::new());
     }
 
-    /// Dispose the connection outright: like [`Self::close`], but the
-    /// writer sender is DROPPED too (a replacement dummy takes its
-    /// place), so the writer task finishes its queue, shuts the socket's
-    /// write half down, and the reader EOFs — a half-attached client is
-    /// never left running through the reconnect window. The failure
-    /// paths that replace an installed client use this (the plain
-    /// `close` keeps the writer alive for teardown-order cases).
+    /// Dispose the connection outright: like [`Self::close`], but the writer
+    /// sender is DROPPED too — a half-attached client never survives the
+    /// reconnect window.
     pub fn hard_close(&mut self) {
         self.direct.take_event_sender();
         self.drop_direct();

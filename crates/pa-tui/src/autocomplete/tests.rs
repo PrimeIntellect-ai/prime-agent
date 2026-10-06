@@ -83,9 +83,7 @@ fn hidden_commands_drop_rows_from_the_menu() {
     );
 }
 
-/// `/update` is VISIBLE in autocomplete: the fast filter is the only
-/// hidden-command policy (model eligibility), and the update command
-/// never enters it — the migration path stays discoverable.
+/// `/update` stays VISIBLE: the fast filter is the only hidden-command policy.
 #[test]
 fn update_lists_in_the_menu_under_every_hidden_set() {
     let mut provider = provider("/tmp");
@@ -95,8 +93,6 @@ fn update_lists_in_the_menu_under_every_hidden_set() {
         items.iter().any(|item| item.value == "update"),
         "update lists by default: {items:?}"
     );
-    // The live surface's only hidden set (the /fast model filter)
-    // never contains the update command.
     provider.set_hidden_commands(std::collections::HashSet::from(["fast".to_string()]));
     let visible = provider.get_suggestions(&["/up".to_string()], 0, 3, false);
     let items = ready(visible).items;
@@ -106,10 +102,8 @@ fn update_lists_in_the_menu_under_every_hidden_set() {
     );
 }
 
-/// TS #2144 `getServiceTierCompletions`: the `/tier` argument position
-/// offers the injected items, filtered by the typed term, with the
-/// current tier marked in the description; other commands fall
-/// through to path completion.
+/// The `/tier` argument position offers the injected items, filtered by the typed term,
+/// with the current tier marked; other commands fall through to path completion.
 #[test]
 fn tier_argument_completions_list_filter_and_mark_current() {
     let mut provider = provider("/tmp");
@@ -153,8 +147,7 @@ fn tier_argument_completions_list_filter_and_mark_current() {
             .collect::<Vec<_>>(),
         ["priority"]
     );
-    // A term with no match answers nothing (TS `getSuggestions` null
-    // at argument positions).
+    // A term with no match answers nothing.
     assert!(provider
         .get_suggestions(&["/tier zz".to_string()], 0, 8, false)
         .is_none());
@@ -206,12 +199,8 @@ fn path_completion_lists_directories_first() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Dot entries list only for an explicit dot-prefix anchor (the
-/// operator's 2026-09-25 directive): a directory browse (`./`, `src/`,
-/// `..`, the empty root prefix) must not surface the cwd's dotfiles —
-/// the old forced pass listed the whole cwd and a `.claude` directory
-/// rode first — while a typed dot prefix (`.h`, `./.cl`) still
-/// completes hidden paths.
+/// Dot entries list only for an explicit dot-prefix anchor (operator ruling 2026-09-25):
+/// a directory browse never surfaces the cwd's dotfiles.
 #[test]
 fn dotfiles_list_only_for_a_dot_prefix_anchor() {
     let outer = tempfile::TempDir::new().expect("temp dir");
@@ -236,33 +225,24 @@ fn dotfiles_list_only_for_a_dot_prefix_anchor() {
         ["./src/", "./main.rs"],
         "the cwd browse hides the dot entries"
     );
-    // The explicit `src/` browse and the empty-prefix forced pass are
-    // the same class of listing.
     assert_eq!(values("src/"), ["src/module.rs"]);
     assert_eq!(values(""), ["src/", "main.rs"]);
-    // A bare `.` is the dot-name browse (the bash `.`-then-Tab): the
-    // dot entries list. A bare `..` searches a `..` filename prefix
-    // (TS basename parity), so nothing matches and no menu opens.
+    // A bare `.` is the dot-name browse; a bare `..` searches a `..`
+    // filename prefix, so nothing matches.
     assert_eq!(values("."), [".claude/", ".hidden"]);
     assert!(provider
         .get_suggestions(&["..".to_string()], 0, 2, true)
         .is_none());
-    // A typed dot prefix is the explicit hidden-path browse: dot
-    // entries list again.
     assert_eq!(values("./.cl"), ["./.claude/"]);
     assert_eq!(values(".h"), [".hidden"]);
     // A trailing `.` after a separator is the same explicit dot-name
-    // browse (`src/.`, `~/.` are the natural next keystrokes after a
-    // directory browse when completing a hidden name).
+    // browse.
     assert_eq!(values("src/."), ["src/.local"]);
     assert_eq!(values("./."), ["./.claude/", "./.hidden"]);
 }
 
-/// The `@` fuzzy file search (the ported fd walk): nested matches list
-/// with fd's semantics — hidden entries included, `.git` pruned —
-/// the scoped `@src/par` form walks `src` and keeps the typed scope
-/// in the display, and applying a file item leaves the trailing
-/// space the TS `@` branch adds.
+/// Nested matches list with fd's semantics, the scoped form keeps the typed scope in the
+/// display, and applying a file item leaves the trailing space.
 #[test]
 fn at_prefix_lists_nested_fuzzy_matches() {
     let outer = tempfile::TempDir::new().expect("temp dir");
@@ -339,16 +319,13 @@ fn render_uses_the_menu_panel_grammar() {
     let lines = state.render(&theme(), 60);
     let text = |line: &Line| -> String { line.iter().map(|s| s.content.as_str()).collect() };
     let rendered: Vec<String> = lines.iter().map(text).collect();
-    // The selected row carries the menu marker and the selection band
-    // spans the row (padded to the full width).
+    // The selected row carries the menu marker; the selection band
+    // spans the row.
     assert!(rendered[0].starts_with("\u{203a} cmd0"));
     assert_eq!(rendered[0].chars().count(), 60);
-    // The argument hint rides the row's right-aligned trailing cluster.
     assert!(rendered.iter().any(|l| l.ends_with("[arg]")));
-    // The shared scroll status row (the menu panel's `(n/m)`), not the
-    // old directional `↑ N more` form.
+    // The shared scroll status row, not a directional form.
     assert!(rendered.iter().any(|l| l.trim() == "(1/7)"));
-    // The selected item's description block under the list.
     assert!(rendered.iter().any(|l| l.contains("description 0")));
 }
 
@@ -360,11 +337,7 @@ fn empty_items_render_the_shared_no_match_row() {
     assert_eq!(text, "  No matching commands");
 }
 
-/// Every overlay row clamps to the render width: the menu rows pad to
-/// it and the status rows (scroll indicator, no-match) truncate to
-/// it, so a narrow dropdown never emits a row wider than its dock (the
-/// overlay renders the rows straight into the editor dock, and an
-/// unclamped `(n/m)` would overwrite the adjacent terminal cells).
+/// An unclamped `(n/m)` would overwrite the adjacent terminal cells.
 #[test]
 fn narrow_renders_never_exceed_the_frame_width() {
     let mut described = item("cmd0");
@@ -439,8 +412,7 @@ fn provider_with_skill(base: &str) -> CombinedAutocompleteProvider {
 
 #[test]
 fn skill_commands_list_after_the_builtins() {
-    // TS `createBaseAutocompleteProvider`: the skill commands follow
-    // the builtin commands in the provider's list.
+    // The skill commands follow the builtin commands in the list.
     let provider = provider_with_skill("/tmp");
     let items = provider.slash_suggestions("/");
     assert!(items.len() > SlashCommandRegistry::builtin().all().len());
@@ -457,8 +429,8 @@ fn skill_commands_list_after_the_builtins() {
 
 #[test]
 fn skill_commands_suggest_for_the_typed_prefix_and_inline_references() {
-    // TS autocomplete.test.ts: a `/skill:brain` prefix suggests the
-    // skill command, and a mid-line reference suggests it too.
+    // A `/skill:brain` prefix suggests the skill command, and a
+    // mid-line reference does too.
     let provider = provider_with_skill("/tmp");
     let items = provider.slash_suggestions("/skill:brain");
     let values: Vec<&str> = items.iter().map(|item| item.value.as_str()).collect();
@@ -478,10 +450,9 @@ fn skill_commands_suggest_for_the_typed_prefix_and_inline_references() {
 
 #[test]
 fn skill_command_completes_into_the_argument_position() {
-    // A skill invocation always wants the user's request text (a bare
-    // submission would expand into the protocol with no task), so the
+    // A skill invocation always wants the request text, so the
     // completion lands in the argument position: the trailing space
-    // stays and the cursor sits after it, ready for the request.
+    // stays and the cursor sits after it.
     let provider = provider_with_skill("/tmp");
     let item = item("skill:brainstorm");
     let result = provider.apply_slash_completion(
@@ -497,10 +468,8 @@ fn skill_command_completes_into_the_argument_position() {
 
 #[test]
 fn skill_completions_apply_through_the_slash_path() {
-    // TS `applyCompletion` finds skill items over the whole command
-    // list, so a menu-confirmed skill keeps the leading `/` and stays
-    // a command submission (the file path would drop it) — landing in
-    // the argument position like the direct slash completion.
+    // A menu-confirmed skill keeps the leading `/` and stays a command
+    // submission (the file path would drop it).
     let provider = provider_with_skill("/tmp");
     let item = item("skill:brainstorm");
     let result =
@@ -511,8 +480,7 @@ fn skill_completions_apply_through_the_slash_path() {
 
 #[test]
 fn command_catalog_parse_keeps_skills_and_source_labels() {
-    // TS `connectionCommands.filter(source === "skill")` + the
-    // `getAutocompleteSourceLabel` ladder.
+    // Only `skill`-source commands list, through the source ladder.
     let response = serde_json::json!({
         "commands": [
             {
@@ -549,12 +517,10 @@ fn command_catalog_parse_keeps_skills_and_source_labels() {
         Some("#project:npm:@prime/skill-pack")
     );
     assert_eq!(entries[2].source_tag.as_deref(), Some("#temporary"));
-    // Prompt-template entries are a different surface: they stay out.
-    // A malformed or empty response yields no entries.
+    // Prompt-template entries stay out; a malformed response yields
+    // no entries.
     assert!(skill_command_entries(&serde_json::json!({})).is_empty());
     assert!(skill_command_entries(&serde_json::json!({"commands": []})).is_empty());
-    // Every skill entry advertises its argument (the hint plus the
-    // argument position), never a bare command.
     for entry in &entries {
         assert!(
             entry.takes_argument,
@@ -596,14 +562,13 @@ fn source_tag_ladder_matches_ts() {
         autocomplete_source_label(&source_info("npm:@scope/pack", Some("user"))).as_deref(),
         Some("#user:npm:@scope/pack")
     );
-    // No sourceInfo at all: no tag.
     assert!(autocomplete_source_label(&serde_json::Value::Null).is_none());
 }
 
 #[test]
 fn render_shows_the_source_tag_as_a_trailing_segment() {
-    // TS select-list renders the sourceTag after the argument hint;
-    // the menu grammar renders both as muted trailing segments.
+    // The source tag renders after the argument hint, both muted
+    // trailing segments.
     let mut described = item("skill:web-search");
     described.description = Some("Search Google".to_string());
     described.source_tag = Some("#user".to_string());

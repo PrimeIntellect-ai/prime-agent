@@ -72,8 +72,7 @@ fn registry(agent_dir: &Path) -> SupervisorChildSessions {
 }
 
 /// A child session file: the task prompt (first user row) plus the
-/// captured completion (50,208 input + 2,929 output, $0.0089957 — the
-/// branch-verified TS fixture row's child usage).
+/// captured completion (the branch-verified TS fixture row's child usage).
 fn child_file(dir: &Path) -> PathBuf {
     let path = dir.join("child.jsonl");
     std::fs::write(
@@ -88,9 +87,6 @@ fn child_file(dir: &Path) -> PathBuf {
     path
 }
 
-/// One emit reads the child's rows past the cursor, delivers the
-/// per-origin report, and consumes the rows; a second emit delivers
-/// nothing (no double billing).
 #[tokio::test]
 async fn emit_reads_once_and_advances_the_cursor() {
     let tmp = tempfile::tempdir().unwrap();
@@ -114,15 +110,12 @@ async fn emit_reads_once_and_advances_the_cursor() {
     let consumed = record.lock().await.attributed_rows;
     assert!(consumed.is_some_and(|rows| rows > 0));
 
-    // The cursor consumed the rows: nothing re-delivers.
     sessions.inner.emit_child_usage(&record).await;
     let reports = sink.0.lock().expect("reports lock").clone();
     assert_eq!(reports.len(), 1);
     assert_eq!(record.lock().await.attributed_rows, consumed);
 }
 
-/// Without a wired sink nothing is read or consumed: the rows stay
-/// attributable once the producer is wired.
 #[tokio::test]
 async fn emit_without_a_sink_consumes_nothing() {
     let tmp = tempfile::tempdir().unwrap();
@@ -134,9 +127,6 @@ async fn emit_without_a_sink_consumes_nothing() {
     assert_eq!(record.lock().await.attributed_rows, Some(0));
 }
 
-/// A record without a session file (the test seam's shape) observes
-/// nothing, and a missing file is a silent no-op (the child may not
-/// have materialized its file yet).
 #[tokio::test]
 async fn emit_tolerates_missing_and_absent_files() {
     let tmp = tempfile::tempdir().unwrap();

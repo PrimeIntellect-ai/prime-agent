@@ -1,82 +1,35 @@
 //! The boot-revival ownership gate: whether a dead worker's descriptor
-//! may be relaunched at a supervisor boot. #2584's busy-evidence filter
-//! answered "did the journal prove live work?"; this gate answers "is that
-//! proof still a genuine interruption THIS boot must heal?" — a stopped
-//! or already-condemned session must never come back as an active worker
-//! through the daemon's own automatic paths (the zombie-resurrection
-//! fix): a client reopen is the only legitimate way back.
-//!
-//! Four vetoes, in check order:
-//!
-//! 1. The give-up verdict. A descriptor the supervisor marked `failed`
-//!    (the 6-consecutive-failure cap) carries durable intent: this
-//!    supervisor already tried and gave up on reviving it. A later boot
-//!    re-runs that verdict, never the relaunch — otherwise every boot
-//!    re-storms the same dead slots (the 12:00→17:07 recurrence on the
-//!    rust-agent box).
-//! 2. The stop lifecycle's archived belt (#2592). A session whose durable
-//!    state is `archived` was stopped on purpose; the belt is the stop's
-//!    durable half. No automatic path may flip it back to `active` —
-//!    revival would erase the stop and re-register a dead session as a
-//!    live worker.
-//! 3. A live session lease. The runtime lease is the one ownership record
-//!    every daemon sharing the agent dir can read; a live holder (this
-//!    daemon's own surviving process, or another daemon's worker — the
-//!    two-daemons-one-store fleet) owns the session file. Spawning a
-//!    rival worker over it would either fail on the lease (the 6-strike
-//!    storm) or, without leases enabled, double-serve the file.
-//! 4. Stale busy evidence. A `busy` recovery record is interrupted-work
-//!    proof only while it is recent: the crash window is minutes, not
-//!    hours. A record older than
-//!    [`REVIVAL_BUSY_EVIDENCE_MAX_AGE_MS`] is residue of an era that
-//!    already ended, and a timestamp dated beyond
-//!    [`REVIVAL_CLOCK_SKEW_MS`] into the future is not freshness proof
-//!    either (clock rollback must not zero the age) — uncertainty
-//!    never revives. The stale evidence that caused the boot storms was
-//!    five-hour-old journals (a prior crash/restore whose workers went
-//!    on to die or be stopped). Update-kept roster rows are exempt: the
-//!    roster is this update's own point-in-time intent, so its busy
-//!    journals are not the evidence being trusted.
+//! may be relaunched at a supervisor boot (#2584, #2592) — a stopped
+//! session must never come back through the daemon's automatic paths.
+//! Four vetoes in check order (see [`RevivalVeto`]; kept roster rows exempt).
 
 use std::path::Path;
 
 use pa_types::daemon::{DaemonWorkerDescriptor, DaemonWorkerLifecycle};
 
-/// How long a `busy` recovery record still proves interrupted live work.
-/// Genuine interruption is minutes old (a crash-restart or the update
-/// window); the stale evidence that caused the boot storms was hours old.
-/// Beyond the bound the session stays down and reopens through the next
-/// client create — the same recovery TS gives every dead worker.
+/// How long a `busy` recovery record still proves interrupted live work;
+/// beyond the bound the session reopens through the next client create.
 pub(crate) const REVIVAL_BUSY_EVIDENCE_MAX_AGE_MS: u64 = 30 * 60 * 1000;
 
 /// Freshness tolerates only this much wall-clock skew between the
-/// journal's writer and the boot reading it (two daemons on one shared
-/// agent dir can disagree slightly). A timestamp further in the
-/// future is not freshness proof: a clock rollback or a far-future
-/// stamp must not zero the age through `saturating_sub` — uncertainty
-/// never revives.
+/// journal's writer and the boot reading it. A far-future stamp must
+/// not zero the age through `saturating_sub` — uncertainty never revives.
 pub(crate) const REVIVAL_CLOCK_SKEW_MS: u64 = 60 * 1000;
 
-/// One veto against relaunching a dead descriptor, with the park's log
-/// reason (the adoption telemetry stays counts-only; the reason lives in
-/// the daemon log).
+/// One veto against relaunching a dead descriptor, with the park's log reason.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RevivalVeto {
     /// The supervisor already gave up on this worker (`lifecycle: failed`):
-    /// the give-up verdict is durable — a later boot re-runs it, never the
-    /// relaunch.
+    /// the give-up verdict is durable — a later boot re-runs it, never the relaunch.
     GaveUp,
     /// The session's durable state is `archived`: the stop lifecycle's belt
-    /// (#2592) is durable stop intent — no automatic path may flip it back
-    /// active.
+    /// (#2592) is durable stop intent — no automatic path may flip it back active.
     SessionArchived,
-    /// A live lease holds the session file: another worker process (this
-    /// daemon's or another daemon's, on a shared agent dir) owns the
-    /// session — one owning daemon, one owning worker.
+    /// A live lease holds the session file: another worker process (this daemon's or another
+    /// daemon's, on a shared agent dir) owns the session — one owning daemon, one owning worker.
     LiveLeaseHeld { pid: u32 },
-    /// The newest `busy` record predates the freshness bound: the evidence
-    /// of interrupted work is residue of an era that already ended, not a
-    /// crash this boot must heal.
+    /// The newest `busy` record predates the freshness bound: the evidence of interrupted work is
+    /// residue of an era that already ended, not a crash this boot must heal.
     StaleBusyEvidence { recorded_at: String },
 }
 
@@ -102,11 +55,9 @@ impl RevivalVeto {
 }
 
 /// Whether a boot may relaunch one dead descriptor. `kept_by_update` is
-/// the update roster's kept set (its rows revive on the update's own
-/// intent, exempt from the freshness bound); `busy_recorded_at` is the
-/// newest `busy` record's timestamp when the journal proves live work
-/// (a kept row may carry `None` — its revival does not rest on the
-/// journal).
+/// the update roster's kept set (exempt from the freshness bound);
+/// `busy_recorded_at` is the newest `busy` record's timestamp when the
+/// journal proves live work (a kept row may carry `None`).
 pub(crate) fn revival_veto(
     agent_dir: &Path,
     descriptor: &DaemonWorkerDescriptor,
@@ -128,7 +79,7 @@ pub(crate) fn revival_veto(
     if !kept_by_update {
         // The busy-evidence path: the journal's proof must be fresh. A
         // missing timestamp cannot prove freshness — uncertainty must not
-        // revive a session (the same philosophy as `read_interrupted`).
+        // revive a session.
         let recorded_at = busy_recorded_at?;
         let now = crate::util::now_ms();
         let fresh = crate::util::iso_to_unix_ms(recorded_at).is_some_and(|at| {
@@ -144,10 +95,8 @@ pub(crate) fn revival_veto(
     None
 }
 
-/// The session file's durable state is the archived belt (#2592's stop
-/// lifecycle): a state that cannot be read does not prove a stop, so it
-/// does not veto (a missing or unreadable file leaves the belt unknown —
-/// the create replay's own load decides there).
+/// The session file's durable state is the archived belt: an unreadable
+/// state does not prove a stop, so it does not veto (the create replay's own load decides there).
 fn session_is_archived(session_file: &Path) -> bool {
     crate::session_store::read_session_info(session_file)
         .and_then(|info| info.state)
@@ -234,8 +183,7 @@ mod tests {
     #[test]
     fn stale_busy_evidence_vetoes_the_revival() {
         let file = session_file(Some("active"));
-        // The captured storm shape: a busy record written five hours
-        // before the boot (the 12:00-era restore era read at 17:07).
+        // The storm shape: a busy record written five hours before the boot.
         let recorded_at = iso_from_unix_ms(now_ms() - 5 * 60 * 60 * 1000);
         let agent_dir = agent_dir();
         let veto = revival_veto(
@@ -317,8 +265,7 @@ mod tests {
 
     #[test]
     fn the_archived_belt_vetoes_even_fresh_busy_evidence() {
-        // The captured zombie shape: a stopped session (archived at
-        // 15:57) whose journal still holds a busy record.
+        // The zombie shape: a stopped session whose journal still holds a busy record.
         let file = session_file(Some("archived"));
         let recorded_at = iso_from_unix_ms(now_ms());
         let agent_dir = agent_dir();

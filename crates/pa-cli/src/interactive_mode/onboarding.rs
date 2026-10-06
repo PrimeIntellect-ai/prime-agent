@@ -1,16 +1,10 @@
-//! The first-run onboarding concern (moved with its concern): the
-//! startup-model probe over the findInitialModel chain, the settings
-//! sink behind the pa-tui onboarding trait, and the startup task
-//! assembly the interactive launch mounts.
+//! The first-run onboarding concern: the startup-model probe, the settings sink
+//! behind the pa-tui onboarding trait, and the startup task assembly.
 
 use super::{PathBuf, Result, RunOptions};
 
-/// The startup-model resolution inputs (TS `findInitialModel`'s chain),
-/// captured at task construction: the onboarding flow re-resolves the
-/// model state at its own boundaries — the branch (TS
-/// `isOnboardingModelReady` at flow start) and the completion gate (TS
-/// re-reads `getOnboardingState` before `markOnboardingShown`) — because
-/// the flow's own sign-in can change the answer.
+/// The startup-model resolution inputs, captured at task construction: the flow
+/// re-resolves the model state at its own boundaries (its sign-in can change it).
 #[derive(Clone)]
 pub(super) struct StartupModelProbe {
     pub(super) cwd: PathBuf,
@@ -27,16 +21,14 @@ pub(super) struct StartupModelProbe {
 }
 
 impl StartupModelProbe {
-    /// The resolution (TS `findInitialModel` + `isOnboardingModelReady`):
-    /// the startup model, and whether it carries configured auth.
+    /// The startup model, and whether it carries configured auth.
     fn resolve(&self) -> (Option<pa_types::ai::Model>, bool) {
         let settings = pa_core::settings::SettingsManager::create(&self.cwd, &self.agent_dir);
         let auth = pa_core::auth::AuthStorage::create(&self.agent_dir);
         let mut registry =
             pa_core::models::ModelRegistry::create(auth, self.agent_dir.join("models.json"));
         // Sync resolution on a fresh registry must adopt the on-disk private
-        // authorization cache before `get_available` (same rule as the daemon
-        // create path).
+        // authorization cache before `get_available`.
         registry.load_private_authorization_from_cache();
         let all: Vec<pa_types::ai::Model> = registry.get_all().to_vec();
         let available: Vec<pa_types::ai::Model> =
@@ -64,15 +56,9 @@ impl StartupModelProbe {
         (startup_model, ready)
     }
 
-    /// The completion telemetry's category columns (TS
-    /// `captureOnboardingCompleted`): the resolved startup model's
-    /// provider category and the credential source's auth category.
-    /// The storage's status candidates cover stored, environment, and
-    /// stale credentials; a model the storage cannot explain is ready
-    /// through a models.json provider key (the registry's request-auth
-    /// resolves it) or the `--api-key` flag (a runtime key the daemon
-    /// installs — the flag is the client's evidence). Best-effort — a
-    /// resolution failure reports the unknown columns.
+    /// The completion telemetry's category columns: the resolved startup model's
+    /// provider category and the credential source's auth category. A model the
+    /// storage cannot explain is ready through a models.json key or `--api-key`.
     fn telemetry_categories(&self) -> (String, String) {
         use pa_core::auth::AuthSource;
         let Some(model) = self.resolve().0 else {
@@ -84,8 +70,7 @@ impl StartupModelProbe {
         let status = auth.get_auth_status(&model.provider);
         let credential = auth.get_all().credential(&model.provider);
         let auth_category = match status.source {
-            // TS `telemetryAuthCategory`: the stored credential reports
-            // its type.
+            // The stored credential reports its type.
             Some(AuthSource::Stored) => credential.as_ref().map_or_else(
                 || "stored".to_string(),
                 |credential| credential.credential_type().to_string(),
@@ -99,10 +84,8 @@ impl StartupModelProbe {
             Some(AuthSource::Fallback) => "fallback".to_string(),
             Some(AuthSource::Stale) => "stale".to_string(),
             None => {
-                // The `--api-key` flag rides as a runtime key the daemon
-                // installs; the registry's request-auth resolves a
-                // models.json provider key only when one actually
-                // resolves (`ok` alone is not evidence of a key).
+                // The `--api-key` flag rides as a runtime key the daemon installs; a
+                // models.json provider key counts only when one actually resolves.
                 if self.api_key.is_some() {
                     "runtime_api_key".to_string()
                 } else {
@@ -126,24 +109,21 @@ impl StartupModelProbe {
     }
 }
 
-/// Persistence for the first-run onboarding answers: the global settings
-/// file (TS `setAgentTracesEnabled` / `markOnboardingShown` + flush).
+/// Persistence for the first-run onboarding answers: the global
+/// settings file.
 pub(super) struct SettingsOnboardingSink {
     pub(super) cwd: PathBuf,
     pub(super) agent_dir: PathBuf,
     /// When the onboarding task was created: the `onboarding completed`
-    /// duration measures sink creation to completion (the TUI starts the
-    /// flow right away; a fresh home answers the question, a home with a
-    /// standing choice completes silently).
+    /// duration measures sink creation to completion.
     pub(super) created_at: std::time::Instant,
-    /// The flow's `onboarding_id` (#2117): pairs the `onboarding stage`
-    /// events and the `onboarding completed` enrichment.
+    /// The flow's `onboarding_id`: pairs the `onboarding stage` events and the
+    /// `onboarding completed` enrichment.
     pub(super) onboarding_id: String,
     /// Whether the `ready` stage already fired (the mount-time snapshot);
     /// a mid-flow sign-in's completion-time readiness emits it then, once.
     pub(super) ready_emitted: std::sync::atomic::AtomicBool,
-    /// The startup-model probe (the completion telemetry's category
-    /// columns: the resolved startup model and its auth source).
+    /// The startup-model probe for the completion telemetry's columns.
     pub(super) probe: StartupModelProbe,
     /// The success outcome was reported (the completion marker ran).
     pub(super) completion_reported: std::sync::atomic::AtomicBool,
@@ -281,16 +261,11 @@ impl pa_tui::interactive::OnboardingSink for SettingsOnboardingSink {
     }
 }
 
-/// TS `shouldRunOnboarding`: first launch is defined by the settings flag
-/// alone — credentials found on disk (a Prime CLI token, an API key in
-/// the environment) never skip the flow, they only make the sign-in step
-/// instant. The task carries the startup model state (the resolved model
-/// is TS `getCurrentModel` at flow time; the readiness probe decides the
-/// branch and gates the completion marker), and the provider auth surface
-/// the full flow signs in through. The startup model follows the TS
-/// `findInitialModel` chain — explicit flags, the `--models` scope, the
-/// saved settings default, the featured default, the first available
-/// model.
+/// First launch is defined by the settings flag alone — credentials found on
+/// disk never skip the flow, they only make the sign-in step instant. The task
+/// carries the startup model state (the readiness probe decides the branch and
+/// gates the completion marker) and the provider auth surface the full flow
+/// signs in through.
 pub(super) fn onboarding_task(
     options: &RunOptions,
     provider_auth: Option<pa_tui::provider_auth::ProviderAuthCommandsHandle>,
@@ -319,14 +294,10 @@ pub(super) fn onboarding_task(
     let (current_model, model_ready_now) = probe.resolve();
     let readiness_probe = probe.clone();
     let onboarding_id = uuid::Uuid::new_v4().to_string();
-    // `onboarding stage` (v2, #2117): the flow's REAL stages only - the
-    // Rust onboarding is the first-run trace question, so `entry` fires
-    // when the task mounts and `ready` once the startup model resolved
-    // with configured auth (the flow's credential gate); no invented
-    // provider-selection or login steps. The records return to the caller
-    // because THIS call runs before the interactive runtime exists (a
-    // `TelemetryClient` spawned here is inert and the events would drop);
-    // `run_interactive_mode` emits them inside its runtime.
+    // `onboarding stage` (v2): the flow's REAL stages only — `entry` when the
+    // task mounts, `ready` once the startup model resolved with configured
+    // auth; no invented provider-selection or login steps. The records return to
+    // the caller because THIS call runs before the interactive runtime exists.
     let mount_ready = model_ready_now;
     let pending_stages = if crate::mode::telemetry_disabled(&settings) {
         Vec::new()

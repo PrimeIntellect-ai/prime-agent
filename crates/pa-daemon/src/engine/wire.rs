@@ -1,7 +1,6 @@
-//! The engine wire types (moved with their concern): the prompt records,
-//! the event stream shape, the goal-continuation + bash-notice plumbing,
-//! the RLM session identity, and the compaction/branch-summary/
-//! side-question records with their status consts.
+//! The engine wire types: the prompt records, the event stream shape, the
+//! goal-continuation + bash-notice plumbing, the RLM session identity, and
+//! the compaction/branch-summary/side-question records.
 use super::{json, json_round_trip, Arc, SideQuestionTurn, Value};
 
 /// One user prompt accepted by the engine.
@@ -14,15 +13,12 @@ pub struct PromptRequest {
     pub source: String,
     pub agent_message_id: Option<String>,
     /// An injected custom row (wire `role: "custom"`) that replaces the
-    /// accepted user message for this turn: the turn persists and renders
-    /// the custom row, then runs the model on `message` (TS injected-prompt
-    /// turns: RLM child terminal notices).
+    /// accepted user message for this turn: the row persists and renders,
+    /// the model runs on `message`.
     pub custom_message: Option<Value>,
-    /// Co-delivered user rows of a batched turn (TS
-    /// `_startPreparedTurnActions`): the queue's batched actions ride the
-    /// same run as the primary message. Each row is accepted (persisted
-    /// and rendered) in order ahead of the model turn, and the loop
-    /// context carries every row as one `agent.prompt` message list.
+    /// Co-delivered user rows of a batched turn: each row is accepted
+    /// (persisted and rendered) in order ahead of the model turn, and the
+    /// loop context carries every row as one `agent.prompt` message list.
     pub batch: Vec<PromptBatchRow>,
 }
 
@@ -33,15 +29,9 @@ pub struct PromptBatchRow {
     pub images: Vec<pa_agent::types::ImageContent>,
 }
 
-/// The saved session context TS `createAgentSession` reads off the session's
-/// already-loaded entries (`sessionManager.buildSessionContext()` plus
-/// `getBranch().some(...)` — sdk.ts): the `(provider, model)` the file pins
-/// and the thinking level present only when the file carries a
-/// `thinking_level_change` row (TS `hasThinkingEntry`). A caller that already
-/// holds the opened store passes the pre-read context to
-/// [`SessionEngine::restore_session_model`] so the restore never re-opens the
-/// session file; `None` reads the file (the port's windowed fallback for
-/// callers without an open store).
+/// The saved session context read off a session's already-loaded entries:
+/// the `(provider, model)` the file pins, and the thinking level only
+/// when the file carries a `thinking_level_change` row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SavedSessionContext {
     pub(crate) model: Option<(String, String)>,
@@ -50,8 +40,7 @@ pub struct SavedSessionContext {
 
 /// Explicit model selection from a session's create config (the wire
 /// `provider`/`model`/`apiKey`/`thinking` fields). `None` fields keep the
-/// engine's current selection, mirroring the TS runtime-config merge
-/// semantics.
+/// engine's current selection.
 #[derive(Debug, Clone, Default)]
 pub struct EngineModelSelection {
     pub provider: Option<String>,
@@ -69,23 +58,19 @@ pub struct EngineModelSelection {
 pub enum EngineEvent {
     /// The user message that was accepted (recorded into the session store).
     UserMessage(Value),
-    /// An assistant message update (streaming); the message is the loop's
-    /// shared snapshot ([`AssistantSnapshot`]: wire form at frame build),
-    /// plus the provider stream event that produced it (the TS wire
-    /// carries `assistantMessageEvent` so clients can track activity).
+    /// An assistant message update (streaming): the loop's shared
+    /// [`AssistantSnapshot`] plus the provider stream event that produced it.
     AssistantUpdate {
         message: AssistantSnapshot,
         stream_event: Option<Value>,
     },
     /// The final assistant message (recorded into the session store).
     AssistantMessage(Value),
-    /// A tool call started executing.
     ToolExecutionStart {
         tool_call_id: String,
         tool_name: String,
         args: Value,
     },
-    /// A tool produced a partial result while still executing.
     ToolExecutionUpdate {
         tool_call_id: String,
         partial_result: Value,
@@ -97,29 +82,20 @@ pub enum EngineEvent {
         is_error: bool,
     },
     /// A tool-result message (wire `role: "toolResult"`): recorded into the
-    /// session store and framed to clients as a `message_start` +
-    /// `message_end` pair, matching the TS session's loop-event forwarding.
+    /// session store, framed to clients as a `message_start` + `message_end` pair.
     ToolResultMessage(Value),
-    /// A turn of the model loop started (TS wire `turn_start`; the loop
-    /// emits it for every turn after the first, so the worker's own
-    /// run-opening `turn_start` stays the first turn's frame).
+    /// A turn of the model loop started: emitted for every turn after the
+    /// first — the worker's own run-opening `turn_start` is the first turn's.
     TurnStart,
-    /// A turn of the model loop ended (TS wire `turn_end`): the terminal
-    /// assistant message plus the turn's tool-result messages, in the
-    /// session wire shapes. Emitted for every settled turn — aborts and
-    /// provider errors included (the aborted/error assistant row with
-    /// empty tool results), like the TS session's loop-event forwarding.
-    /// The rows themselves persist and broadcast through their own events;
-    /// this frame carries only the terminal payload.
+    /// A turn of the model loop ended: the terminal assistant message plus
+    /// the turn's tool-result messages, in the session wire shapes; emitted
+    /// for every settled turn, aborts and provider errors included.
     TurnEnd {
         message: Value,
         tool_results: Vec<Value>,
     },
-    /// An agent run started (TS wire `agent_start`). The loop emits one per
-    /// agent run — retried and continued runs included — but the worker's
-    /// own run-opening `agent_start` frame is the first run's, so the
-    /// engine forwards only the later runs' frames (a boundary frame
-    /// already passed in the item).
+    /// An agent run started, one per run (retries included): the engine
+    /// forwards only the later runs' (the worker's frame opens the first run).
     AgentStart,
     /// An agent run ended (TS wire `agent_end`): the run's whole message
     /// set in the session wire shapes — the prompt rows (the harness digest
@@ -133,9 +109,7 @@ pub enum EngineEvent {
         messages: Vec<Value>,
     },
     /// A durable custom message (wire `role: "custom"`): recorded into the
-    /// session store and shown to attached clients. Emitted as a
-    /// `message_start` + `message_end` pair, matching the TS session's
-    /// `_emit` for custom rows.
+    /// session store, framed to clients as a `message_start` + `message_end` pair.
     CustomMessage(Value),
     /// A compaction run started (TS `compaction_start` wire event); the
     /// payload is the complete event. Emitted before the summarizer runs so
@@ -153,13 +127,8 @@ pub enum EngineEvent {
     },
     /// The prompt completed (successfully or not).
     Done(std::result::Result<(), String>),
-    /// The prompt settled as aborted: the run was aborted before an
-    /// assistant message was produced (a user abort or suspension).
-    /// Every consumer treats it like `Done(Err(..))` — the wire frames
-    /// carry the abort error — except the settle classification, which
-    /// must not read the (spoofable) error text: an aborted run is not
-    /// a provider failure (the scheduled-fire hook backs off on the
-    /// one, not the other).
+    /// The prompt settled as aborted: like `Done(Err(..))`, except an
+    /// aborted run is not a provider failure (spoofable text).
     DoneAborted,
     /// `goal_update`: the session goal state changed (TS wire event; the
     /// ACP adapter surfaces it as the namespaced `_meta.goal` update).
@@ -180,8 +149,7 @@ pub enum EngineEvent {
         reason: pa_core::session_engine::auto_retry::RetryStartReason,
     },
     /// `auto_retry_end`: the retry loop settled. `restored_model` is the
-    /// `"provider/model-id"` primary restored after a failover switch
-    /// succeeded.
+    /// `"provider/model-id"` primary restored after a failover switch.
     AutoRetryEnd {
         success: bool,
         attempt: u32,
@@ -226,10 +194,8 @@ pub(crate) fn session_wire_value(agent_message: &pa_agent::types::AgentMessage) 
         pa_agent::types::AgentMessage::Standard(LoopMessage::ToolResult(tool_result)) => {
             pa_types::session::AgentMessage::ToolResult(json_round_trip(tool_result)?)
         }
-        // A custom row (the harness digest, a goal-context row): the
-        // payload is the session-shape custom message and the wire form is
-        // the tagged session message — the payload plus the row's role
-        // (TS `agent_end.messages` carries custom rows in this shape).
+        // A custom row: the payload is the session-shape custom message and
+        // the wire form is the tagged session message (payload plus role).
         pa_agent::types::AgentMessage::Custom(custom) => {
             let mut value = custom.payload.clone();
             let object = value.as_object_mut()?;
@@ -242,60 +208,38 @@ pub(crate) fn session_wire_value(agent_message: &pa_agent::types::AgentMessage) 
     serde_json::to_value(&session_message).ok()
 }
 
-/// The post-compaction goal continuation (TS `compact()`'s `didCompact` +
-/// active-goal branch: `resumeQueuedWork()` ->
-/// `_maybeResumeGoalContinuationAfterRlmWork` mints the owed
-/// continuation, and `_schedulePostCompactionContinue()` drives it): the
-/// follow-up turn to admit — the continuation prompt text with the
-/// durable goal-context row as the injected custom message — plus the
-/// `goal_update` payload for the mint's state change when it moved the
-/// engine's published baseline (TS `_setGoalState` -> `_emitGoalUpdate`).
+/// The post-compaction goal continuation: the follow-up turn to admit
+/// (continuation text + goal-context custom row) plus its `goal_update`.
 #[derive(Debug, Clone)]
 pub struct GoalContinuation {
-    /// The continuation turn request (TS `_createPreparedTurnAction`
-    /// "followUp": the normalized continuation text, the goal-context
-    /// custom message, `resumeIfIdle: true`).
+    /// The continuation turn request: the normalized continuation text,
+    /// the goal-context custom message, `resumeIfIdle: true`.
     pub request: PromptRequest,
     /// The `goal_update` event's `goal` payload, `None` when an
     /// unchanged state stays silent.
     pub goal_update: Option<Value>,
-    /// This mint's own pending-continuation guard handle, captured under
-    /// the driver lock at the mint: the admission and drop surfaces
-    /// release exactly the mint's guard, never whichever handle the
-    /// engine's mutable mirror currently holds (a stale task from before
-    /// a core rebuild must not clear a replacement session's guard).
-    /// `None` when the item armed no guard (the budget steer mints no
-    /// continuation slot).
+    /// This mint's own pending-continuation guard handle: releases name
+    /// exactly the mint's guard, never the mutable mirror.
     pub pending_handle: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
-/// The goal-driven work a settled run boundary owes: TS
-/// `_shouldStopAfterTurn`'s budget arm and `_getGoalContinuationMessages`
-/// at the agent loop's natural turn end. Each variant carries the minted
-/// turn as a [`GoalContinuation`] (the request plus the `goal_update`
-/// payload for the mint's state change).
+/// The goal-driven work a settled run boundary owes. Each variant
+/// carries the minted turn as a [`GoalContinuation`].
 #[derive(Debug, Clone)]
 pub enum GoalTurnEndWork {
     /// The token budget was crossed this run: the budget-limit wrap-up
-    /// steer (TS queues it on the steering schedule with
-    /// `resumeIfIdle: true`, so the run ends and the steer drives the
-    /// wrap-up turn).
+    /// steer, queued with `resumeIfIdle: true`.
     BudgetLimitSteer(GoalContinuation),
-    /// The continuation context turn for an active goal (TS's queued
-    /// `followUp` admission, the follow-up lane).
+    /// The continuation context turn for an active goal (the follow-up lane).
     Continuation(GoalContinuation),
 }
 
-/// The worker's session-input probe (TS `queuedActionCount > 0` plus the
-/// queued-input suspension): `true` while queued user work or a held
-/// suspension owns the next turn boundary, so the goal mint defers.
+/// The worker's session-input probe: `true` while queued user work or a
+/// held suspension owns the next turn boundary, so the goal mint defers.
 pub type SessionInputProbe = std::sync::Arc<dyn Fn() -> bool + Send + Sync>;
 
 /// One detached kernel bash completion (the `bash.completed` host
-/// request): the finished command's identity and exit code. The worker
-/// queue admission turns it into the woken turn (TS
-/// `createAsyncBashCompletionHostHandler` ->
-/// `_promptInjectedMessage(..., { resumeIfIdle: true })`).
+/// request): the finished command's identity and exit code.
 #[derive(Debug, Clone)]
 pub struct BashCompletionNotice {
     pub pid: u32,
@@ -308,9 +252,7 @@ pub struct BashCompletionNotice {
 pub type BashCompletionSink = std::sync::Arc<dyn Fn(BashCompletionNotice) + Send + Sync>;
 
 /// The kernel read a finished command's result before its notice
-/// delivered (the `bash.consumed` host request): the queued notice is
-/// stale and must withdraw (TS
-/// `_withdrawAsyncBashCompletionNotice`).
+/// delivered (the `bash.consumed` host request): the queued notice is stale.
 #[derive(Debug, Clone)]
 pub struct BashConsumedNotice {
     pub pid: u32,
@@ -320,17 +262,12 @@ pub struct BashConsumedNotice {
 /// The queue-withdrawal seam for a consumed notice.
 pub type BashConsumedSink = std::sync::Arc<dyn Fn(BashConsumedNotice) + Send + Sync>;
 
-/// The worker's goal admission sink: the turn runner's queue lanes admit
-/// a minted goal follow-up (the steering lane for the budget steer, the
-/// follow-up lane for the continuation), the `goal_update` surfaces at
-/// the moment the state changed, and the runner wakes.
+/// The worker's goal admission sink: the queue lanes admit a minted goal
+/// follow-up, the `goal_update` surfaces, and the runner wakes.
 pub type GoalAdmissionSink = std::sync::Arc<dyn Fn(GoalTurnEndWork) + Send + Sync>;
 
-/// RLM recursion identity carried by a session's create command: the
-/// session's depth in the recursion tree, its bound, its working directory
-/// and persistence ids, and the default thinking level children inherit.
-/// Engines hosting RLM children seed their child registry from it; engines
-/// without children (the scripted harness) accept and ignore it.
+/// RLM recursion identity carried by a session's create command: depth,
+/// bound, cwd, persistence ids, and the children's default thinking level.
 #[derive(Debug, Clone, Default)]
 pub struct RlmSessionIdentity {
     pub rlm_depth: u32,
@@ -340,9 +277,7 @@ pub struct RlmSessionIdentity {
     pub session_file: Option<String>,
     pub thinking: Option<String>,
     /// Verification seam: children of this session spawn with a scripted
-    /// engine file (the TS child runtime inherits the parent's
-    /// `sessionConfig`; the harness analog carries the create's
-    /// `childScript` down the recursion). Product sessions carry `None`.
+    /// engine file. Product sessions carry `None`.
     pub child_script: Option<String>,
     /// The session's semantic-edge spawn origin (TS
     /// `semanticParentSessionId` + `semanticSpawnedByRequestId`, carried
@@ -388,8 +323,7 @@ pub struct CompactionRequest {
 }
 
 /// The completed compaction: the wire `CompactionResult` plus the
-/// summarizer usage (persisted on the compaction entry, never on the wire
-/// response, mirroring the TS `CompactionResult`/entry split).
+/// summarizer usage (persisted on the entry, never on the wire response).
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompactionRun {
     /// TS `CompactionResult`: summary, firstKeptEntryId, tokensBefore,
@@ -397,16 +331,11 @@ pub struct CompactionRun {
     pub result: Value,
     /// Usage billed by the summarizer call(s), for the persisted entry.
     pub usage: Option<Value>,
-    /// The full durable `compaction` record (TS `CompactionEntry`:
-    /// details, fromHook, customInstructions, usage, and the harness
-    /// digest snapshot), serialized from the engine's compaction entry.
-    /// Null for scripted engines (a test seam with no real entry).
+    /// The full durable `compaction` record; null for scripted engines
+    /// (a test seam with no real entry).
     pub entry: Value,
-    /// The post-compaction `ipython_state` notice in its wire message form
-    /// (`role: "custom"`) when the engine's kernel was running (TS
-    /// `_syncKernelStateAfterCompaction`): already durable in the engine
-    /// session and the live context; the worker persists it to the session
-    /// store and broadcasts its `message_start`/`message_end` pair.
+    /// The post-compaction `ipython_state` notice (`role: "custom"`) when
+    /// the engine's kernel was running.
     pub ipython_state: Option<Value>,
 }
 
@@ -414,10 +343,9 @@ pub struct CompactionRun {
 /// "Compaction cancelled", or failure).
 #[derive(Debug, Clone, PartialEq)]
 pub enum CompactionOutcome {
-    /// Compacted; the run carries the result and entry usage. Boxed: the
-    /// run's insertion-ordered JSON maps (`preserve_order`, wire parity)
-    /// would make this variant dwarf the skip/abort/fail variants
-    /// (`large_enum_variant`).
+    /// Compacted; the run carries the result and entry usage. Boxed:
+    /// the run's insertion-ordered JSON maps (`preserve_order`, wire
+    /// parity) would dwarf the other variants (`large_enum_variant`).
     Compacted { run: Box<CompactionRun> },
     /// Nothing to compact (TS `CompactionSkippedError`); the string is the
     /// user-facing skip message.
@@ -446,9 +374,8 @@ pub struct BranchSummaryRun {
     pub summary: String,
     pub usage: Option<Value>,
     pub details: Option<Value>,
-    /// The model that served the call (`provider`, `modelId`) when the
-    /// scripted response or the live engine names one: persisted on the
-    /// `branch_summary` entry for the per-model cost fold.
+    /// The model that served the call (`provider`, `modelId`), persisted
+    /// on the `branch_summary` entry for the per-model cost fold.
     pub model: Option<(String, String)>,
 }
 
@@ -484,13 +411,13 @@ pub enum SideQuestionOutcome {
     Failed { answer: String, error: String },
 }
 
-/// Wire form of one side-question status (TS `SideQuestionStatus`).
+/// Wire form of one side-question status.
 pub const SIDE_QUESTION_STATUS_RUNNING: &str = "running";
 pub const SIDE_QUESTION_STATUS_COMPLETE: &str = "complete";
 pub const SIDE_QUESTION_STATUS_CANCELLED: &str = "cancelled";
 pub const SIDE_QUESTION_STATUS_ERROR: &str = "error";
 
-/// Wire form of one side-question event (TS `SideQuestionEvent`).
+/// Wire form of one side-question event.
 #[must_use]
 pub fn side_question_event_value(
     request: &SideQuestionRequest,
@@ -511,7 +438,7 @@ pub fn side_question_event_value(
 }
 
 impl SideQuestionOutcome {
-    /// The TS wire status of this outcome.
+    /// The wire status of this outcome.
     #[must_use]
     pub fn status_str(&self) -> &'static str {
         match self {

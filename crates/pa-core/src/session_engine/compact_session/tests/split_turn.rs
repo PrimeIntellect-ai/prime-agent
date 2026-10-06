@@ -1,7 +1,6 @@
-//! Compact-session tests, the split-turn family (moved with their
-//! concerns): the mid-turn cut's two summarizer calls and merged
-//! turn context, the injected-custom-turn whole-turn cut, and the
-//! no-history prefix-only arm.
+//! Compact-session tests, the split-turn family: the mid-turn cut's
+//! two summarizer calls and merged turn context, the injected-custom-
+//! turn whole-turn cut, and the no-history prefix-only arm.
 use super::*;
 
 use std::sync::Arc;
@@ -73,8 +72,7 @@ async fn split_turn_compaction_runs_two_summarizer_calls_and_merges_the_turn_con
         .expect("entry id")
         .to_string();
 
-    // Scripted summaries: each factory call records its request and
-    // answers with its scripted response, so both wire calls are
+    // Each factory call records its request, so both wire calls are
     // captured regardless of issue order.
     let seen: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>> = std::sync::Arc::default();
     let make_step = |response: &'static str| {
@@ -122,7 +120,6 @@ async fn split_turn_compaction_runs_two_summarizer_calls_and_merges_the_turn_con
     let CompactOutcome::Ran(run) = outcome else {
         panic!("expected the compaction to run");
     };
-    // Two wire calls: the history checkpoint and the turn prefix.
     assert_eq!(registration.call_count(), 2);
     let calls = seen.lock().unwrap().clone();
     assert_eq!(calls.len(), 2);
@@ -145,7 +142,6 @@ async fn split_turn_compaction_runs_two_summarizer_calls_and_merges_the_turn_con
         .ends_with("Be concise. Focus on what's needed to understand the kept suffix."));
     assert!(!prefix_request.contains("checkpoint summary"));
     assert_eq!(prefix_response, "the turn prefix summary");
-    // The merged summary: history, the split marker, the turn context.
     assert_eq!(
         run.result.summary,
         "the history summary\n\n---\n\n**Turn Context (split turn):**\n\nthe turn prefix summary"
@@ -178,7 +174,6 @@ async fn split_turn_compaction_runs_two_summarizer_calls_and_merges_the_turn_con
     assert_eq!(run.result.usage, Some(expected));
     assert_eq!(run.entry.usage, run.result.usage);
     assert_eq!(run.entry.summary, run.result.summary);
-    // The persisted durable row is the full merged entry.
     let persisted = session
         .get_entries()
         .iter()
@@ -192,16 +187,9 @@ async fn split_turn_compaction_runs_two_summarizer_calls_and_merges_the_turn_con
     registration.unregister();
 }
 
-/// The injected-turn representation drives the compaction walk (the
-/// f7 goal-continue differential's shape): a session whose last turn
-/// is an injected custom row — ONE representation, the goal-context
-/// row, with no duplicate user message — compacts with a whole-turn
-/// cut (a single history call, the whole goal turn kept). The
-/// double-represented shape the fix removes (the custom row PLUS a
-/// user message with the same text, the pre-fix engine branch) shifts
-/// the keep-recent crossing and lands the cut mid-turn: a split-turn
-/// compaction with an extra turn-prefix summarizer call — the
-/// short-session compact TS never makes.
+/// A session whose last turn is an injected custom row — ONE representation, no
+/// duplicate user message — compacts with a whole-turn cut; the double-represented
+/// shape lands mid-turn.
 #[tokio::test]
 async fn injected_custom_turn_cuts_whole_turns_the_double_row_splits() {
     let registration = faux_registration();
@@ -271,8 +259,8 @@ async fn injected_custom_turn_cuts_whole_turns_the_double_row_splits() {
         ..Default::default()
     };
 
-    // ONE representation (the fixed engine branch): the goal turn is
-    // the custom row plus its reply.
+    // ONE representation: the goal turn is the custom row plus its
+    // reply.
     session.append_message(user("seed turn")).unwrap();
     session.append_message(reply("seed reply")).unwrap();
     let kept_goal_row_id = goal_row(&mut session).unwrap();
@@ -296,8 +284,6 @@ async fn injected_custom_turn_cuts_whole_turns_the_double_row_splits() {
     let CompactOutcome::Ran(run) = outcome else {
         panic!("expected the compaction to run");
     };
-    // Whole-turn cut: one history call, no turn-prefix call, the
-    // entire goal turn (custom row plus reply) kept.
     assert_eq!(
         registration.call_count(),
         1,
@@ -314,15 +300,10 @@ async fn injected_custom_turn_cuts_whole_turns_the_double_row_splits() {
         summary = run.result.summary
     );
 
-    // The double-represented shape the fix removes (the pre-fix
-    // engine branch): the custom row PLUS a user message with the
-    // same text. The extra user row shifts the keep-recent crossing
-    // and the pull-back lands the cut mid-turn — the extra
-    // turn-prefix call TS never makes (the f7 goal-continue split).
+    // The double-represented shape: the custom row PLUS a user message with
+    // the same text — the extra row lands the cut mid-turn.
     let calls_before = registration.call_count();
     seen.lock().unwrap().clear();
-    // Two calls in the doubled shape (history plus the extra
-    // turn-prefix summarizer the double row forces).
     registration.set_responses(vec![
         record_summary(seen.clone()),
         record_summary(seen.clone()),
@@ -373,11 +354,8 @@ async fn injected_custom_turn_cuts_whole_turns_the_double_row_splits() {
     registration.unregister();
 }
 
-/// A split turn with no history to summarize makes only the
-/// turn-prefix wire call and stands the literal "No prior history."
-/// in for the history half (TS
-/// `Promise.resolve({ summary: "No prior history." })` — no history
-/// wire call), billing only the prefix call.
+/// A split turn with no history makes only the turn-prefix wire call and
+/// stands in the literal "No prior history." for the history half.
 #[tokio::test]
 async fn split_turn_without_history_makes_only_the_prefix_call() {
     let registration = faux_registration();
@@ -473,19 +451,16 @@ async fn split_turn_without_history_makes_only_the_prefix_call() {
     let CompactOutcome::Ran(run) = outcome else {
         panic!("expected the compaction to run");
     };
-    // One wire call: only the turn-prefix summary was requested.
     assert_eq!(registration.call_count(), 1);
     let requests = seen.lock().unwrap().clone();
     assert_eq!(requests.len(), 1);
     assert!(requests[0].contains("[User]: big turn"));
     assert!(requests[0].contains("PREFIX of a turn that was too large to keep"));
-    // The merged summary stands the literal in for the history half.
     assert_eq!(
         run.result.summary,
         "No prior history.\n\n---\n\n**Turn Context (split turn):**\n\nthe turn prefix summary"
     );
     assert_eq!(run.result.first_kept_entry_id, kept_id);
-    // Only the prefix call billed.
     let est = |text: &str| (text.chars().count() as f64 / 4.0).ceil() as u64;
     let prompt = format!(
         "system:{}\n\nuser:{}",

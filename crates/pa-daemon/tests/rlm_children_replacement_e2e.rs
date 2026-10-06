@@ -1,55 +1,18 @@
-//! RLM children lifecycle on parent runtime replacement: the TS ruling
-//! e2e (the #237 flagged divergence, left to the rlm-children surface).
-//!
-//! TS ground truth (`packages/coding-agent/src/core/agent-session-runtime.ts`
-//! and `modes/daemon/daemon-mode.ts`): every whole-runtime replacement flow
-//! (`newSession` / `switchSession` / `fork` / `importFromJsonl`) runs
-//! `teardownForReplacement` -> `teardownCurrent`, which disposes the
-//! session's kernel FIRST and then `disposeHostedSubagentRuntimes` - the
-//! daemon host's `disposeRlmSubagentRuntimes` runs
-//! `closeChildSessions(parentState, "replaced")`. So TS CLOSES the RLM
-//! children at a parent replacement: they are archived, aborted, and
-//! disposed with the parent runtime, the replacement session's roster
-//! starts empty, and the close is a plain stop (no ledger tombstone; the
-//! spawn edge and the passive roster row survive). `rlm.create_session`
-//! root sessions are not parent-linked and SURVIVE the replacement.
-//!
-//! The Rust redesign hosts each child as its own supervisor-owned worker,
-//! so the close ports as a signal through the supervisor: the worker's
-//! replacement teardown (and `kill`/`shutdown`, TS
-//! `closeSessionOnce`'s cascade) stops every tracked child session.
-//!
-//! Verified end to end against a real supervisor, a real parent worker
-//! session whose kernel cell spawns the child through the product
-//! `rlm.spawn` surface, and a scripted child worker kept mid-run:
-//!
-//! 1. `new_session` closes the spawned child: the supervisor roster drops
-//!    it, its session file archives, the parent's `get_rlm_children` wire
-//!    surface reads empty, and the replacement session's kernel
-//!    `rlm.list_subagents()` returns an empty roster.
-//! 2. `new_session` KEEPS an `rlm.create_session` depth-0 root session
-//!    running: the close touches parent-linked children only.
-//!
-//! The parent's kernel Python is ambient product state; like the other
-//! live-kernel verifiers these tests skip (with a note) on machines
-//! without a live install.
-// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
-// the full rationale).
-// Stack-resident futures by design on the daemon's hot paths; boxing the
-// call sites for a lint tick is a perf regression with zero correctness gain.
+//! RLM children lifecycle on parent runtime replacement (the #237 flagged
+//! TS divergence): TS `teardownForReplacement` closes the parent-linked RLM
+//! children and the replacement session's roster starts empty;
+//! `rlm.create_session` root sessions are not parent-linked and survive.
+// Stack-resident futures by design on the daemon's hot paths.
 #![allow(clippy::large_futures)]
-// 64-bit-only targets; the narrowing casts sit at OS boundaries
-// (pid/fd/time/size) where the values are bounded by the kernel - the
-// dead-guard expect()s would add panic paths where silent wrap was
-// deliberate.
+// Narrowing casts sit at OS boundaries (pid/fd/time/size) where the kernel
+// bounds the values.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// The fn-length threshold is a style gate, not correctness; the structure
-// campaign owns the god-fn splits as a follow-up.
+// Style gate only, not correctness.
 #![allow(clippy::too_many_lines)]
 // API-shape opinions, not defects; the surfaces are deliberate.
 #![allow(
@@ -93,16 +56,14 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path, kernel_python: &Path) -> Da
         .arg("--agent-dir")
         .arg(agent_dir)
         .env("PRIME_AGENT_KERNEL_PYTHON", kernel_python)
-        // Hermetic agent dir: the ambient environment exports a real
-        // agent dir; point every fallback at the test sandbox instead.
+        // Hermetic agent dir: the ambient environment exports a real one.
         .env("PRIME_AGENT_CODING_AGENT_DIR", agent_dir)
         .env_remove("PRIME_API_KEY")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         // A supervisor killed at teardown must not leak its session workers
-        // into later test binaries: the worker's supervisor-lost exit (TS
-        // `exitIfSupervisorOrphanedForTooLong`) runs on this short window
-        // instead of the 5-minute default.
+        // into later test binaries: the worker's supervisor-lost exit runs
+        // on this short window instead of the 5-minute default.
         .env(
             pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
             "15000",
@@ -152,7 +113,6 @@ fn wait_socket_ready(socket: &Path) {
     }
 }
 
-/// JSONL supervisor client (command envelopes, id-matched responses).
 struct Client {
     reader: BufReader<UnixStream>,
     writer: UnixStream,
@@ -217,7 +177,6 @@ impl Client {
     }
 }
 
-/// Poll until a condition over the supervisor client yields a value.
 fn wait_until<T>(
     client: &mut Client,
     budget: Duration,
@@ -233,7 +192,6 @@ fn wait_until<T>(
     }
 }
 
-/// The supervisor roster's session summaries (the `list` wire surface).
 fn roster_summaries(client: &mut Client, id: &str) -> Vec<Value> {
     client.send_command(id, &json!({ "type": "list" }));
     let list = client.read_response(id);
@@ -244,7 +202,6 @@ fn roster_summaries(client: &mut Client, id: &str) -> Vec<Value> {
         .expect("sessions array")
 }
 
-/// The parent's tracked-children wire surface (`get_rlm_children`).
 fn rlm_children_rows(client: &mut Client, id: &str, parent: &str) -> Vec<Value> {
     client.send_command(
         id,
@@ -261,7 +218,6 @@ fn rlm_children_rows(client: &mut Client, id: &str, parent: &str) -> Vec<Value> 
         .expect("children array")
 }
 
-/// Run one turn (prompt + idle wait) on the session.
 fn run_turn(client: &mut Client, session_id: &str, message: &str, id: &str) {
     client.send_command(
         id,
@@ -278,7 +234,6 @@ fn run_turn(client: &mut Client, session_id: &str, message: &str, id: &str) {
     assert_eq!(idle["success"], true, "wait_for_idle failed: {idle}");
 }
 
-/// Poll for a kernel cell's receipt content (the cell writes its verdict).
 fn await_receipt(receipt: &Path) -> String {
     let deadline = Instant::now() + Duration::from_mins(1);
     loop {
@@ -294,8 +249,7 @@ fn await_receipt(receipt: &Path) -> String {
     }
 }
 
-/// The kernel cell of the spawn turn: spawn one RLM child through the
-/// product `rlm.spawn` surface and record its child id.
+/// The kernel cell: spawn one RLM child through the product `rlm.spawn` surface.
 fn spawn_cell(receipt: &Path, error_receipt: &Path) -> String {
     format!(
         "import json, traceback\ntry:\n    handle = await rlm.spawn(\"run the lane task\", name=\"kid\")\n    open({receipt:?}, \"w\").write(json.dumps({{\"rlm_child_id\": handle.rlm_child_id}}))\n    print(handle.rlm_child_id)\nexcept Exception:\n    open({error_receipt:?}, \"w\").write(traceback.format_exc())\n    raise",
@@ -304,8 +258,8 @@ fn spawn_cell(receipt: &Path, error_receipt: &Path) -> String {
     )
 }
 
-/// The kernel cell of the probe turn: the replacement session's
-/// `rlm.list_subagents()` roster, recorded verbatim.
+/// The kernel cell: the replacement session's `rlm.list_subagents()` roster,
+/// recorded verbatim.
 fn roster_cell(receipt: &Path, error_receipt: &Path) -> String {
     format!(
         "import inspect, traceback\ntry:\n    roster = rlm.list_subagents()\n    if inspect.isawaitable(roster):\n        roster = await roster\n    open({receipt:?}, \"w\").write(repr(roster))\n    print(repr(roster))\nexcept Exception:\n    open({error_receipt:?}, \"w\").write(traceback.format_exc())\n    raise",
@@ -334,9 +288,8 @@ fn create_session_cell(receipt: &Path, error_receipt: &Path) -> String {
     )
 }
 
-/// The child's scripted engine: one held response keeps its task turn
-/// running while the replacement fires, so the close lands on a live
-/// child (TS closes running children - abort, archive, dispose).
+/// One held response keeps the child's task turn running while the
+/// replacement fires, so the close lands on a live child.
 fn write_child_script(dir: &Path) -> PathBuf {
     let script = dir.join("child.json");
     std::fs::write(
@@ -356,7 +309,6 @@ fn write_child_script(dir: &Path) -> PathBuf {
     script
 }
 
-/// The parent's faux script whose turns run the spawn/roster cells.
 fn write_parent_script(dir: &Path, first_cell: &str, probe_cell: &str) -> PathBuf {
     let script = dir.join("parent.json");
     std::fs::write(
@@ -380,10 +332,8 @@ fn write_parent_script(dir: &Path, first_cell: &str, probe_cell: &str) -> PathBu
     script
 }
 
-/// Create a scripted parent session through the supervisor. The create's
-/// `childScript` (the harness seam mirroring the TS child runtime's
-/// inherited `sessionConfig`) makes every `rlm.spawn` child a scripted
-/// worker.
+/// The create's `childScript` harness seam makes every `rlm.spawn` child a
+/// scripted worker.
 fn create_parent(
     client: &mut Client,
     dir: &Path,
@@ -413,14 +363,6 @@ fn create_parent(
     created["data"].clone()
 }
 
-/// `new_session` (TS `AgentSessionRuntime.newSession` ->
-/// `teardownForReplacement` -> `teardownCurrent` ->
-/// `disposeHostedSubagentRuntimes` -> `closeChildSessions(parent,
-/// "replaced")`): a spawned RLM child is supervisor-backed, so the close
-/// ports as a stop through the supervisor. The child's observable state
-/// after the replacement: gone from the supervisor roster, its session
-/// file archived, the parent's wire roster empty, and the replacement
-/// session's kernel `rlm.list_subagents()` reading an empty roster.
 #[test]
 fn new_session_closes_the_spawned_child_and_empties_the_roster() {
     let Some(kernel_python) = kernel_python() else {
@@ -462,8 +404,6 @@ fn new_session_closes_the_spawned_child_and_empties_the_roster() {
         .to_string();
     let parent_session_id = parent["sessionId"].as_str().expect("parent session id");
 
-    // Turn 1: the kernel cell spawns the child through the parent's own
-    // registry (the `rlm.spawn` host surface).
     run_turn(&mut client, &parent_id, "spawn the kid", "t1");
     let spawned: Value =
         serde_json::from_str(&await_receipt(&spawn_receipt)).expect("spawn receipt json");
@@ -481,8 +421,6 @@ fn new_session_closes_the_spawned_child_and_empties_the_roster() {
         std::fs::read_to_string(&spawn_error).unwrap_or_default()
     );
 
-    // The child runs: its worker session is resident in the supervisor and
-    // tracked in the parent's registry (the surface the close drains).
     let child_row = wait_until(&mut client, Duration::from_mins(1), |client| {
         let rows = rlm_children_rows(client, "g1", &parent_id);
         rows.into_iter()
@@ -499,7 +437,6 @@ fn new_session_closes_the_spawned_child_and_empties_the_roster() {
         .expect("child active session id")
         .to_string();
 
-    // The replacement (TS disposes the runtime, then the hosted children).
     client.send_command(
         "n1",
         &json!({ "type": "new_session", "activeSessionId": parent_id }),
@@ -507,7 +444,6 @@ fn new_session_closes_the_spawned_child_and_empties_the_roster() {
     let replaced = client.read_response("n1");
     assert_eq!(replaced["success"], true, "new_session failed: {replaced}");
 
-    // The child's observable state after: closed with the parent.
     wait_until(&mut client, Duration::from_mins(1), |client| {
         let summaries = roster_summaries(client, "l2");
         summaries
@@ -520,8 +456,8 @@ fn new_session_closes_the_spawned_child_and_empties_the_roster() {
         rows.is_empty(),
         "the replacement session's roster must start empty: {rows:?}"
     );
-    // The close is a plain stop (TS `closeSessionOnce("replaced")`
-    // archives the child session): the child's session file records it.
+    // TS `closeSessionOnce("replaced")` archives the child session: its
+    // session file records it.
     let child_session_file = {
         let child_dir = agent_dir
             .join("session-artifacts")
@@ -542,8 +478,6 @@ fn new_session_closes_the_spawned_child_and_empties_the_roster() {
         "the closed child's session must be archived: {child_session}"
     );
 
-    // The model-facing surface agrees: the replacement session's kernel
-    // reads an empty roster.
     run_turn(&mut client, &parent_id, "probe the roster", "t2");
     assert!(
         !roster_error.exists(),
@@ -557,11 +491,8 @@ fn new_session_closes_the_spawned_child_and_empties_the_roster() {
     );
 }
 
-/// `rlm.create_session` depth-0 root sessions are NOT parent-linked (TS
-/// `createRlmRootSession` builds a root `ActiveSessionState` with no
-/// `parentActiveSessionId`), so `closeChildSessions` never matches them:
-/// a created root session survives the parent's replacement, while the
-/// parent's own child registry still reads empty.
+/// `rlm.create_session` root sessions are NOT parent-linked, so
+/// `closeChildSessions` never matches them.
 #[test]
 fn new_session_keeps_a_created_root_session_running() {
     let Some(kernel_python) = kernel_python() else {
@@ -600,7 +531,6 @@ fn new_session_keeps_a_created_root_session_running() {
         .expect("parent active session id")
         .to_string();
 
-    // Turn 1: the kernel cell creates the depth-0 root session.
     run_turn(&mut client, &parent_id, "create the root session", "t1");
     let created: Value =
         serde_json::from_str(&await_receipt(&create_receipt)).expect("create receipt json");
@@ -619,7 +549,6 @@ fn new_session_keeps_a_created_root_session_running() {
             .find(|summary| summary["sessionName"] == json!("rootkid"))
     });
 
-    // The replacement closes the parent's children only.
     client.send_command(
         "n1",
         &json!({ "type": "new_session", "activeSessionId": parent_id }),
@@ -631,8 +560,6 @@ fn new_session_keeps_a_created_root_session_running() {
         rows.is_empty(),
         "the replacement session's roster must start empty: {rows:?}"
     );
-    // The created root session is still resident and running: the close
-    // touches parent-linked children only (TS `getChildActiveSessionStates`).
     let survivor = wait_until(&mut client, Duration::from_secs(30), |client| {
         roster_summaries(client, "l2")
             .into_iter()
