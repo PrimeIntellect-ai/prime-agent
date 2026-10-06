@@ -745,7 +745,7 @@ const CHECKPOINT_TRANSACTION_VERSION: u32 = 1;
 ///
 /// Returns an error when the records cannot be canonicalized.
 fn checkpoint_transaction_digest(
-    verdict: &Option<WorkerRecoveryRecord>,
+    verdict: Option<&WorkerRecoveryRecord>,
     snapshot: &WorkerQueueSnapshotRecord,
     cloud_admission: Option<&CloudInboxAdmissionRecord>,
 ) -> Result<String> {
@@ -979,7 +979,7 @@ fn classify_journal_line(line: &str) -> ScannedLine {
                 return ScannedLine::UnsupportedVersion;
             }
             if checkpoint_transaction_digest(
-                &transaction.verdict,
+                transaction.verdict.as_ref(),
                 &transaction.snapshot,
                 transaction.cloud_admission.as_ref(),
             )
@@ -1610,7 +1610,7 @@ impl WorkerRecoveryJournal {
                 verdict: record.clone(),
                 snapshot: snapshot.clone(),
                 cloud_admission: admission.clone(),
-                digest: checkpoint_transaction_digest(&record, &snapshot, admission.as_ref())?,
+                digest: checkpoint_transaction_digest(record.as_ref(), &snapshot, admission.as_ref())?,
             };
             self.append_cloud_transaction(&transaction)?;
         } else {
