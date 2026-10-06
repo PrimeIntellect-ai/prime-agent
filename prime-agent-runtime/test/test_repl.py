@@ -703,6 +703,101 @@ class ReplTest(unittest.TestCase):
             self.assertEqual(one(events, "result")["text"], "42")
             self.assertEqual(fresh.shutdown(), 0)
 
+    def test_snapshot_skips_off_cell_bash_handles(self):
+        # A handle created outside any cell (here: a plain thread) carries no
+        # unpicklable cell-task reference, so dill would happily persist its
+        # pipe fds; restoring a saved fd number reopens (and closes) it in the
+        # new kernel, killing whatever owns the fd there.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "kernel-state.dill")
+            manifest_path = os.path.join(tmp, "kernel-state.json")
+            setup = (
+                "import threading\n"
+                "from rlm import bash\n"
+                "hs = []\n"
+                "t = threading.Thread(target=lambda: hs.append(bash('echo done-h1')))\n"
+                "t.start()\n"
+                "t.join()\n"
+                "h1 = hs[0]\n"
+                "await h1\n"
+                "del t\n"
+                "keep = 1\n"
+            )
+            self.assertEqual(one(self.repl.execute("s1", setup), "done")["status"], "ok")
+            self.repl.send(
+                {"type": "snapshot", "id": "s2", "path": path, "manifest_path": manifest_path}
+            )
+            done = one(self.repl.until_done("s2"), "done")
+            self.assertEqual(done["status"], "ok")
+            skipped = {entry["name"]: entry["reason"] for entry in done["skipped"]}
+            self.assertEqual(sorted(skipped), ["h1", "hs"])
+            for reason in skipped.values():
+                self.assertIn("live process handle", reason)
+            self.assertIn("keep", done["saved"])
+
+    @unittest.skipIf(os.name == "nt", "pickled raw fd numbers are a POSIX landmine")
+    def test_restore_refuses_to_reopen_pickled_raw_fds(self):
+        # dill serializes a pipe-backed file as its raw fd NUMBER; restoring a
+        # saved closed one reopens that number in the new kernel and closes it
+        # again, killing whatever owns the fd now (the event loop's self-pipe).
+        import dill
+
+        sys.path.insert(0, SRC)
+        self.addCleanup(sys.path.remove, SRC)
+        from rlm import repl as repl_module
+
+        fresh = ReplProcess()
+        self.addCleanup(fresh.close)
+        fresh.ready()
+        # The loop's self-pipe READ end is the wakeup fd the selector waits on:
+        # reopening its number from a snapshot and closing it parks the kernel
+        # in select forever (nothing left can wake the loop).
+        events = fresh.execute(
+            "fd", "import asyncio\nasyncio.get_running_loop()._ssock.fileno()"
+        )
+        fd = int(one(events, "result")["text"])
+
+        class Landmine:
+            def __reduce__(self):
+                # The exact reconstructor dill saves for a closed pipe-backed
+                # file: name is the fd NUMBER.
+                return (dill._dill._create_filehandle, (fd, "rb", 0, True, open, False, 0, b""))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "kernel-state.dill")
+            manifest_path = os.path.join(tmp, "kernel-state.json")
+            result = repl_module._snapshot_state(
+                {"boom": Landmine(), "keep": 7},
+                path,
+                manifest_path,
+                repl_module.DEFAULT_SNAPSHOT_MAX_BYTES,
+                repl_module.DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES,
+                False,
+            )
+            self.assertEqual(result["saved"], ["boom", "keep"])
+
+            fresh.send({"type": "restore", "id": "r1", "path": path})
+            done = one(fresh.until_done("r1"), "done")
+            self.assertEqual(done["status"], "ok")
+            failed = {entry["name"]: entry["reason"] for entry in done["failed"]}
+            self.assertIn(f"refusing to reopen raw file descriptor {fd}", failed["boom"])
+            self.assertEqual(done["restored"], ["keep"])
+            # The bare await parks the loop with no timer of its own: only a
+            # live self-pipe wakeup can resolve it, and if the guard regressed
+            # the request would never be served at all (the harness's read
+            # timeout bounds that failure).
+            probe = (
+                "import asyncio, threading\n"
+                "loop = asyncio.get_running_loop()\n"
+                "fut = loop.create_future()\n"
+                "threading.Timer(0.3, lambda: loop.call_soon_threadsafe(\n"
+                "    lambda: fut.done() or fut.set_result('woken'))).start()\n"
+                "await fut\n"
+            )
+            events = fresh.execute("wakeup-probe", probe)
+            self.assertEqual(one(events, "done")["status"], "ok")
+            self.assertEqual(one(events, "result")["text"], "'woken'")
+
     def test_stdin_eof_flushes_final_snapshot(self):
         # Host death (EOF, no shutdown request) must persist the namespace
         # tail that postdates the last explicit snapshot.
@@ -2346,24 +2441,30 @@ class RestoreApplyShieldTest(unittest.TestCase):
                 signal.raise_signal(signal.SIGINT)
 
     def test_sigint_during_staging_leaves_namespace_unchanged(self):
-        import dill
-
+        from rlm import repl as repl_module
         from rlm.repl import _restore_state
 
-        real_loads = dill.loads
         calls = {"n": 0}
 
-        def loads_then_sigint(blob):
-            calls["n"] += 1
-            if calls["n"] == 2:
-                # Synchronous SIGINT mid-deserialize: nothing may have touched ns yet.
-                signal.raise_signal(signal.SIGINT)
-            return real_loads(blob)
+        real_unpickler = repl_module._snapshot_unpickler
+
+        def unpickler_then_sigint(dill):
+            guarded = real_unpickler(dill)
+
+            class SigintOnSecondLoad(guarded):
+                def load(self):
+                    calls["n"] += 1
+                    if calls["n"] == 2:
+                        # Synchronous SIGINT mid-deserialize: nothing may have touched ns yet.
+                        signal.raise_signal(signal.SIGINT)
+                    return super().load()
+
+            return SigintOnSecondLoad
 
         with tempfile.TemporaryDirectory() as tmp:
             path = self._write_snapshot(tmp, {"a": 1, "b": 2})
             ns = {"a": "old", "unrelated": "keep"}
-            with mock.patch.object(dill, "loads", loads_then_sigint):
+            with mock.patch.object(repl_module, "_snapshot_unpickler", unpickler_then_sigint):
                 with self.assertRaises(KeyboardInterrupt):
                     _restore_state(ns, path)
         # The old namespace is byte-identical: no partial old/new mixture.
