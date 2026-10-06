@@ -1,0 +1,1 @@
+- A turn whose cell reads the result of a background `bash(...)` handle no longer stops silently after that tool call: the session keeps working instead of sitting idle until the next message.
