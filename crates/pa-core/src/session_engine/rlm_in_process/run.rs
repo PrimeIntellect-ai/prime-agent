@@ -733,7 +733,7 @@ pub(super) fn rename(
                         )
                     }
                 })?;
-                if record.closed_by_parent {
+                if record.is_closed().await {
                     anyhow::bail!(
                         "rlm.rename can only rename the current session or one of its direct children"
                     );
@@ -753,9 +753,7 @@ pub(super) fn rename(
                     .lock()
                     .await
                     .append_session_info(&name)
-                    .map_err(|error| {
-                        anyhow::anyhow!("persist RLM child session name: {error}")
-                    })?;
+                    .map_err(|error| anyhow::anyhow!("persist RLM child session name: {error}"))?;
                 record.set_session_name(name.clone());
                 Ok(name)
             }

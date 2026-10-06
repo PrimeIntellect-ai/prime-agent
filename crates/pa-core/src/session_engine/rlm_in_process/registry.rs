@@ -524,7 +524,7 @@ impl DeletedChild {
     pub(crate) fn collect_result(&self) -> RlmChildResult {
         RlmChildResult {
             rlm_child_id: self.rlm_child_id.clone(),
-            session_name: Some(self.session_name()),
+            session_name: Some(self.session_name.clone()),
             session_dir: Some(self.session_dir.clone()),
             status: "cancelled",
             settled: true,
