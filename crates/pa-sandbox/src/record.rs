@@ -6,8 +6,6 @@
 //! the SDK and backend). A malformed body is a typed `invalid_response`
 //! error, never a silent default.
 
-#![cfg_attr(test, allow(clippy::float_cmp))]
-
 use crate::error::SandboxError;
 use crate::types::{Sandbox, SandboxStatus};
 use serde::Deserialize;
@@ -95,8 +93,8 @@ pub(crate) fn parse_sandbox(value: serde_json::Value) -> Result<Sandbox, Sandbox
     ] {
         require_non_empty(value, field)?;
     }
-    if !(0..=i64::from(u32::MAX)).contains(&raw.gpu_count) {
-        return Err(SandboxError::invalid_response(
+    let gpu_count = u32::try_from(raw.gpu_count).map_err(|_| {
+        SandboxError::invalid_response(
             "Sandbox response field gpuCount must be a non-negative integer",
         )
     })?;
@@ -108,9 +106,7 @@ pub(crate) fn parse_sandbox(value: serde_json::Value) -> Result<Sandbox, Sandbox
         cpu_cores: raw.cpu_cores,
         memory_gb: raw.memory_gb,
         disk_size_gb: raw.disk_size_gb,
-        gpu_count: u32::try_from(raw.gpu_count).map_err(|_| {
-            SandboxError::invalid_response("Sandbox response field gpuCount must be a uint32")
-        })?,
+        gpu_count,
         gpu_type: raw.gpu_type,
         vm: raw.vm,
         network_allowlist: raw.network_allowlist,
