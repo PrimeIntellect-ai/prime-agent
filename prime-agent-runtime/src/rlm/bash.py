@@ -23,7 +23,7 @@ from collections import deque
 from collections.abc import Callable, Collection, Generator
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import Any, NamedTuple, cast
+from typing import Any, NamedTuple, NoReturn, cast
 
 from . import _winjob
 
@@ -970,6 +970,12 @@ class BashHandle:
                 self._awaited_by_creating_cell = True
             if completed:
                 self._note_result_consumed(current_task)
+
+    def __reduce__(self) -> NoReturn:
+        # Reviving a handle would resurrect a stale pid and raw fd numbers: dill
+        # restores the pickled pipe by reopening its fd number in the new kernel
+        # (and closing it), so a snapshot must never persist a live handle.
+        raise TypeError("cannot pickle 'BashHandle' object: live process handle")
 
     def __repr__(self) -> str:
         state = f"exit_code={self._result.exit_code}" if self._result else "running"
