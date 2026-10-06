@@ -1,6 +1,5 @@
-//! The refinement executor: plan a refinement (rollback or LLM pass), re-read
-//! the harness store, apply the proposal, and record the result. Port of the
-//! planRefinement/refineHarness/reviewAutoRefine half of refinement.ts.
+//! The refinement executor: plan a refinement (rollback or LLM pass), re-read the harness store,
+//! apply the proposal, and record the result.
 
 use super::planner::{
     apply_refinement_proposal, parse_proposal, refinement_request, rollback_proposal, ApplyOptions,
@@ -14,7 +13,6 @@ use super::{
 use pa_types::ai::AssistantMessage;
 use pa_types::session::AgentMessage;
 
-/// `/refine` request options.
 #[derive(Debug, Default, Clone)]
 pub struct RefineOptions {
     pub global: bool,
@@ -87,7 +85,6 @@ pub fn overview_for_prompt(state: &HarnessState) -> String {
     lines.join("\n")
 }
 
-/// Prior-refinement-history section for the refine prompt.
 #[must_use]
 pub fn history_for_prompt(history: &[RefinementResult]) -> String {
     if history.is_empty() {
@@ -128,10 +125,8 @@ pub fn history_for_prompt(history: &[RefinementResult]) -> String {
 }
 
 /// Model-call seam (test seam over pa-ai completion): takes the request
-/// model (output budget pre-clamped), the call's system prompt (TS sends
-/// the review-gate prompt for the auto-refine review and the `/refine`
-/// subsystem prompt for the plan), and the user prompt, returns the
-/// reply text.
+/// model (output budget pre-clamped), the call's system prompt, and the
+/// user prompt; returns the reply text.
 pub type RefinerFn = Box<
     dyn FnOnce(
             pa_types::ai::Model,
@@ -142,7 +137,6 @@ pub type RefinerFn = Box<
         > + Send,
 >;
 
-/// Merge global and session histories into one prompt context.
 #[must_use]
 pub fn merge_refinement_result_history(
     global: &[RefinementResult],
@@ -165,6 +159,7 @@ fn kind_name(kind: RefinementKind) -> &'static str {
         RefinementKind::Memory => "memory",
         RefinementKind::Skill => "skill",
         RefinementKind::Subagent => "subagent",
+        RefinementKind::Factory => "factory",
     }
 }
 
@@ -173,6 +168,7 @@ fn kind_value(name: &str) -> RefinementKind {
         "prompt" => RefinementKind::Prompt,
         "memory" => RefinementKind::Memory,
         "skill" => RefinementKind::Skill,
+        "factory" => RefinementKind::Factory,
         _ => RefinementKind::Subagent,
     }
 }
@@ -194,11 +190,7 @@ fn conversation_text(messages: &[AgentMessage], cap: usize) -> String {
 ///
 /// # Errors
 ///
-/// Returns an error when a requested rollback id is not in the refinement
-/// history, when building the refinement request fails because the prompt
-/// leaves no output-token room in the model's context window, when the
-/// refinement call itself fails, or when its reply cannot be parsed into
-/// a proposal.
+/// Error on an unknown rollback id, a failed request build or LLM call, or an unparseable reply.
 pub async fn plan_refinement(
     messages: &[AgentMessage],
     state: &HarnessState,
@@ -287,12 +279,19 @@ fn assistant_text(reply: &AssistantMessage) -> String {
         .join("\n")
 }
 
-/// Apply a plan to the (re-read) harness state.
+/// Apply a plan to the (re-read) harness state. `factory_enabled` is the
+/// `factory.enabled` opt-in (default off), resolved by the caller
+/// immediately before this call — after the planning request — so the
+/// synchronous apply always decides on the current setting, never a
+/// pre-request snapshot: while it is off, factory create/update edits
+/// refuse with the one disabled message, the same gate the kernel-side
+/// factory writers raise.
 pub fn apply_refinement_plan(
     state: &mut HarnessState,
     plan: RefinementPlan,
     options: &RefineOptions,
     baseline_state: Option<HarnessState>,
+    factory_enabled: bool,
 ) -> RefinementResult {
     let scope = plan.rollback_scope.unwrap_or(if options.global {
         HarnessScope::Global
@@ -307,11 +306,11 @@ pub fn apply_refinement_plan(
             rollback_of: plan.rollback_of,
             scope: Some(scope),
             baseline_state,
+            factory_enabled,
         },
     )
 }
 
-/// The auto-refine review verdict.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct AutoRefineReview {
     pub should_refine: bool,
@@ -319,7 +318,6 @@ pub struct AutoRefineReview {
     pub instructions: Option<String>,
 }
 
-/// Context for an auto-refine review checkpoint.
 pub struct AutoRefineReviewContext {
     pub reason: String,
     pub turns_since_last_review: u32,
@@ -346,8 +344,7 @@ fn parse_auto_refine_review(text: &str) -> anyhow::Result<AutoRefineReview> {
 ///
 /// # Errors
 ///
-/// Returns an error when the review request cannot be built, the LLM call
-/// fails, or its reply cannot be parsed into a review.
+/// Error on a failed request build or LLM call, or an unparseable reply.
 pub async fn review_auto_refine(
     messages: &[AgentMessage],
     state: &HarnessState,
@@ -424,9 +421,6 @@ mod tests {
         })
     }
 
-    /// The two refiner calls carry their own system prompts (TS sends the
-    /// review-gate prompt for the auto-refine review, the `/refine`
-    /// subsystem prompt for the plan).
     #[tokio::test]
     async fn review_and_plan_carry_their_own_system_prompts() {
         let model = test_model();
@@ -460,7 +454,6 @@ mod tests {
             *review_systems.lock().unwrap(),
             vec![AUTO_REFINE_REVIEW_SYSTEM_PROMPT]
         );
-        // The plan seam likewise.
         let plan_systems: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>> =
             std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let plan_recorder = std::sync::Arc::clone(&plan_systems);
@@ -543,7 +536,6 @@ mod tests {
         .unwrap();
         assert_eq!(plan.proposal.summary, "note it");
         assert_eq!(plan.proposal.edits.len(), 1);
-        // Rollback path finds the target and builds the inverse proposal.
         let mut history_state = state.clone();
         let result = apply_refinement_proposal(
             &mut history_state,
@@ -556,6 +548,7 @@ mod tests {
                 rollback_of: None,
                 scope: Some(HarnessScope::Local),
                 baseline_state: None,
+                factory_enabled: false,
             },
         );
         let rollback = plan_refinement(
@@ -573,7 +566,6 @@ mod tests {
         .unwrap();
         assert_eq!(rollback.rollback_of.as_deref(), Some("refine_target"));
         assert_eq!(rollback.proposal.edits.len(), 0); // the seeded result applied no edits, so nothing inverts
-                                                      // Unknown rollback target errors.
         let missing = plan_refinement(
             &[],
             &state,
@@ -644,6 +636,7 @@ mod tests {
             },
             context_window: 100_000,
             max_tokens: 8_000,
+            max_tokens_explicit: false,
             featured: None,
             headers: None,
             compat: None,

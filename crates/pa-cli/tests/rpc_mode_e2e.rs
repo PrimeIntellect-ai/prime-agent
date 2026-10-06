@@ -1,13 +1,6 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
-// by design on hot paths (boxing 130 fns is allocation-churn with zero
-// correctness gain); the fn-length threshold is a style gate, not
-// correctness (the harness fns are intentionally linear); 64-bit targets -
-// the narrowing sits at OS/protocol boundaries where the values are
-// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
-// guarded parses), and checked conversions would add panic paths where
-// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
-// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
-// dossier for the conductor).
+// large_futures: stack-resident futures on hot paths by design.
+// too_many_lines: style gate, not correctness. Casts: 64-bit targets;
+// narrowing sits at bounded OS/protocol boundaries.
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -19,11 +12,8 @@
 
 //! End-to-end RPC-mode verification: the real binary serves the TS
 //! `modes/rpc` JSONL command surface over stdio, driven by the scripted
-//! faux provider. Covers the protocol contract (response shapes, parse
-//! and unknown-command errors, prompt-response event ordering), the core
-//! command set (state, model/thinking, queue modes, compaction, session
-//! tree, name/stats), the TS in-process daemon-mode errors, and the
-//! lifecycle (stdin close settles and exits 0).
+//! faux provider: protocol contract, core command set, daemon-mode
+//! errors, and the stdin-close lifecycle.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, Command, Stdio};
@@ -32,23 +22,17 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-/// The child plus the tempdir it runs in: the tempdir must outlive the
-/// child process (its cwd), so it is held on the struct.
+/// The child plus the tempdir it runs in (it must outlive the child's cwd).
 struct RpcChild {
     child: Child,
-    /// `Some` while the pipe is open: the EOF tests take it (the drop
-    /// closes the child's stdin).
+    /// `Some` while the pipe is open: the EOF tests take it (closing stdin).
     stdin: Option<std::process::ChildStdin>,
     lines: Receiver<String>,
     next_id: u64,
-    /// Held so the child's cwd directory outlives the process; dropping
-    /// the tempdir deletes it and the child's `current_dir` fails (the
-    /// lease tests also read the agent dir off it).
+    /// The lease tests also read the agent dir off it.
     home: tempfile::TempDir,
     spawn_stderr: Option<std::process::ChildStderr>,
-    /// Drain the child's stderr AFTER the Drop kills and reaps it (a
-    /// read on a live pipe blocks until exit; the sibling ACP harness
-    /// reads post-kill).
+    /// Drain the child's stderr AFTER the Drop kills and reaps it (a live pipe blocks).
     drain_stderr_on_drop: bool,
 }
 
@@ -57,10 +41,8 @@ impl RpcChild {
         Self::spawn_seeded(args, script, None)
     }
 
-    /// Spawn with a seeded `models.json` (the registry catalog the
-    /// available/set-model surfaces compose: the faux provider needs its
-    /// provider entry + key to pass the registry's configured-auth gate,
-    /// the same shape the daemon harness seeds).
+    /// Spawn with a seeded `models.json`: the faux provider needs its
+    /// provider entry + key to pass the registry's configured-auth gate.
     fn spawn_seeded(args: &[&str], script: &Value, models: Option<Value>) -> RpcChild {
         let home = tempfile::TempDir::new().unwrap();
         if let Some(models) = models {
@@ -125,8 +107,7 @@ impl RpcChild {
         id
     }
 
-    /// Read frames until the response `id` answers; returns the response
-    /// with the events seen before it, in order.
+    /// Read frames until the response `id` answers, returning the events seen before it.
     fn wait_response(&mut self, id: &str, timeout: Duration) -> (Value, Vec<Value>) {
         let deadline = Instant::now() + timeout;
         let mut events = Vec::new();
@@ -156,8 +137,7 @@ impl RpcChild {
         }
     }
 
-    /// Read frames until one event of `event_type` arrives (the
-    /// event-gated wait: never a fixed sleep).
+    /// Read frames until one event of `event_type` arrives (event-gated).
     fn wait_event(&mut self, event_type: &str, timeout: Duration) -> Value {
         let deadline = Instant::now() + timeout;
         loop {
@@ -189,23 +169,18 @@ impl RpcChild {
         response
     }
 
-    /// Log the child's stderr once the Drop reaps it (a live read would
-    /// block until exit; the drain moves to the post-kill site like the
-    /// sibling ACP harness).
+    /// Arm the Drop-side stderr drain.
     fn drain_stderr(&mut self) {
         self.drain_stderr_on_drop = true;
     }
 
-    /// The agent dir the child runs with (the harness seeds
-    /// `PRIME_AGENT_CODING_AGENT_DIR` here): the lease owner records
-    /// live under its `session-leases` tree.
+    /// The agent dir the child runs with; the lease owner records live under `session-leases`.
     fn agent_dir(&self) -> std::path::PathBuf {
         self.home.path().join("agent")
     }
 }
 
-/// The session files holding a runtime lease right now (the owner
-/// records the fresh/fork paths acquire before the engine can write).
+/// The session files holding a runtime lease right now.
 fn leased_session_files(agent_dir: &std::path::Path) -> Vec<String> {
     let mut leased = Vec::new();
     let Ok(entries) = std::fs::read_dir(agent_dir.join("session-leases")) else {
@@ -225,9 +200,7 @@ fn leased_session_files(agent_dir: &std::path::Path) -> Vec<String> {
     leased
 }
 
-/// Canonical-path comparison (the owner record stores the canonical
-/// path; the test-side strings come from the same tree, but symlinks on
-/// the host must not mask the match).
+/// Canonical-path comparison: host symlinks must not mask the match.
 fn is_leased(leased: &[String], session_file: &str) -> bool {
     let session_file = std::path::Path::new(session_file);
     leased.iter().any(|leased| {
@@ -257,8 +230,6 @@ fn turn_script(steps: &Value) -> Value {
     json!({ "responses": steps })
 }
 
-/// The mode answers `get_state` for a fresh session: the TS
-/// `RpcSessionState` fields, an idle queue projection, and no goal.
 #[test]
 fn rpc_get_state_answers_the_fresh_session() {
     let mut client = RpcChild::spawn(
@@ -288,9 +259,7 @@ fn rpc_get_state_answers_the_fresh_session() {
     client.drain_stderr();
 }
 
-/// The prompt response precedes the turn's stream events (TS
-/// `promptResponsePending` buffering), and the turn settles with the
-/// full agent-event sequence.
+/// The prompt response precedes the turn's stream events (TS `promptResponsePending` buffering).
 #[test]
 fn rpc_prompt_streams_events_after_the_response() {
     let mut client = RpcChild::spawn(
@@ -308,11 +277,8 @@ fn rpc_prompt_streams_events_after_the_response() {
         before.is_empty(),
         "the prompt response precedes every turn event: {before:?}"
     );
-    // The turn's frames arrive after the response, in the loop's order.
-    // The first-turn harness digest rides ahead as its own custom row
-    // (the port's in-context digest), so the first `message_start` may
-    // be the digest row's: the reply's start is the first ASSISTANT
-    // one.
+    // The harness digest rides ahead as its own row, so the reply starts
+    // at the first ASSISTANT `message_start`.
     let deadline = Instant::now() + TIMEOUT;
     loop {
         let frame = client.wait_event("message_start", TIMEOUT);
@@ -331,16 +297,13 @@ fn rpc_prompt_streams_events_after_the_response() {
     client.drain_stderr();
 }
 
-/// A malformed line and an unknown command answer the TS protocol
-/// errors (the `parse` command name and the `Unknown command` text).
 #[test]
 fn rpc_parse_and_unknown_command_errors() {
     let mut client = RpcChild::spawn(
         &["--mode", "rpc", "--no-session"],
         &turn_script(&json!(["unused"])),
     );
-    // A non-object line answers the parse error (no id to match on, so
-    // match the command name).
+    // No id to match on, so match the command name.
     client.send(&json!("not an object"));
     let deadline = Instant::now() + TIMEOUT;
     let parse_error = loop {
@@ -376,11 +339,8 @@ fn rpc_parse_and_unknown_command_errors() {
     client.drain_stderr();
 }
 
-/// Steer and follow-up queue behind a running turn; abort settles it
-/// and parks the rows; the next prompt's run folds the parked steer
-/// into its own turn and delivers the follow-up as its second turn
-/// (TS `runLoop`'s run-start steering poll and post-turn follow-up
-/// poll over the parked queues).
+/// Steer and follow-up queue behind a running turn; abort parks them; the next
+/// prompt's run folds the steer and delivers the follow-up (TS `runLoop`).
 #[test]
 fn rpc_steer_and_follow_up_queue_then_abort() {
     let script = json!({
@@ -391,34 +351,20 @@ fn rpc_steer_and_follow_up_queue_then_abort() {
         ],
     });
     let mut client = RpcChild::spawn(&["--mode", "rpc", "--no-session"], &script);
-    // Arm the stderr drain up front: the Drop prints the child's stderr
-    // when the test fails (a runtime-side panic or error line would
-    // otherwise vanish with the pipe).
+    // Arm the stderr drain up front: a panic line would otherwise vanish with the pipe.
     client.drain_stderr();
-    // One-at-a-time steering (the settings default is "all": a steer
-    // mid-turn folds into the RUNNING request instead of queueing, so
-    // the queue projections this test observes need the deterministic
-    // mode first — TS `setSteeringMode("one-at-a-time")`).
+    // The settings default is "all"; this test needs "one-at-a-time" (TS `setSteeringMode`).
     let mode = client.request(&json!({ "type": "set_steering_mode", "mode": "one-at-a-time" }));
     assert_eq!(mode["success"], true, "the mode is set: {mode}");
     let response = client.request(&json!({ "type": "prompt", "message": "go" }));
     assert_eq!(response["success"], true);
-    // The response fires once the turn's run registers (TS
-    // `preflightResult` — the admission-time contract), so from here
-    // the turn is mid-LLM-call: the faux delayMs holds the stream
-    // closed for 5000ms, and the run-start steering poll (the fold
-    // window) already closed before the response. 1000ms in, both
-    // queued rows sit in the queues — nothing polls them until the
-    // turn ends.
+    // The response fires at admission (TS `preflightResult`): the turn is mid-LLM-call here.
     std::thread::sleep(Duration::from_millis(1000));
     let steer = client.request(&json!({ "type": "steer", "message": "steer this" }));
     assert_eq!(steer["success"], true, "steer queues: {steer}");
     let follow_up = client.request(&json!({ "type": "follow_up", "message": "fu this" }));
     assert_eq!(follow_up["success"], true);
     let state = client.request(&json!({ "type": "get_state" }));
-    // The turn runs past its response (the admission returned at run
-    // start; the faux delay still holds the stream closed) and both
-    // rows queue behind it.
     assert_eq!(
         state["data"]["isStreaming"], true,
         "the turn is still running past the prompt response: {state}"
@@ -435,11 +381,7 @@ fn rpc_steer_and_follow_up_queue_then_abort() {
     let abort_id = client.command(&json!({ "type": "abort" }));
     let (aborted, before_abort) = client.wait_response(&abort_id, TIMEOUT);
     assert_eq!(aborted["success"], true);
-    // The abort settles the running turn on its own task: the settle's
-    // `agent_end` can land on the wire before or after the abort
-    // response (the TS single-threaded reference always orders the
-    // response first; the async port does not guarantee it) — accept
-    // either ordering; an `agent_end` the response read consumed counts.
+    // The settle's `agent_end` can land before or after the abort response (no ordering guarantee).
     if !before_abort
         .iter()
         .any(|frame| frame.get("type").and_then(Value::as_str) == Some("agent_end"))
@@ -451,15 +393,8 @@ fn rpc_steer_and_follow_up_queue_then_abort() {
         parked["data"]["sessionActions"]["queuedCount"], 2,
         "the abort parks the queued rows: {parked}"
     );
-    // The next prompt resumes delivery and its run FOLDS the parked
-    // rows (TS `runLoop`, agent-loop.ts): the run-start steering poll
-    // folds the parked steer into the prompt's own turn's input
-    // (`skip_initial=false` — the TS loop folds anything queued before
-    // the turn starts), and the run's post-turn follow-up poll
-    // delivers the parked follow-up as the run's second turn. One run,
-    // two turns: the prompt's turn answers on the second script step,
-    // the follow-up turn on the third, and the single `agent_end`
-    // carries the whole folded run.
+    // The next prompt's run folds the parked rows (TS `runLoop`): one run,
+    // two turns, one `agent_end`.
     let second = client.request(&json!({ "type": "prompt", "message": "continue" }));
     assert_eq!(second["success"], true);
     let end = client.wait_event("agent_end", TIMEOUT);
@@ -495,16 +430,11 @@ fn rpc_steer_and_follow_up_queue_then_abort() {
     client.drain_stderr();
 }
 
-/// `set_thinking_level` applies and emits `thinking_level_changed`;
-/// `cycle_thinking_level` steps through the supported levels (the faux
-/// reasoning model).
 #[test]
 fn rpc_thinking_level_set_and_cycle() {
     let script = json!({ "responses": ["unused"], "reasoning": true });
     let mut client = RpcChild::spawn(&["--mode", "rpc", "--no-session"], &script);
-    // The changed event lands BEFORE the response (the handler publishes
-    // during the command): assert it among the pre-response frames
-    // instead of waiting for a later copy that never comes.
+    // The changed event lands BEFORE the response: assert it among the pre-response frames.
     let id = client.command(&json!({ "type": "set_thinking_level", "level": "high" }));
     let (response, before) = client.wait_response(&id, TIMEOUT);
     assert_eq!(response["success"], true, "the response: {response}");
@@ -539,8 +469,6 @@ fn rpc_thinking_level_set_and_cycle() {
     client.drain_stderr();
 }
 
-/// `compact` on a fresh session answers the TS skip error, with the
-/// compaction frames around it.
 #[test]
 fn rpc_compact_answers_the_ts_skip_error() {
     let mut client = RpcChild::spawn(
@@ -571,8 +499,6 @@ fn rpc_compact_answers_the_ts_skip_error() {
     client.drain_stderr();
 }
 
-/// The daemon-mode families answer the exact TS in-process errors; the
-/// list/get commands answer their TS empty shapes.
 #[test]
 fn rpc_daemon_mode_families_answer_the_ts_inprocess_semantics() {
     let mut client = RpcChild::spawn(
@@ -609,16 +535,13 @@ fn rpc_daemon_mode_families_answer_the_ts_inprocess_semantics() {
     client.drain_stderr();
 }
 
-/// `set_session_name` persists the name and emits
-/// `session_info_changed`; an empty name answers the TS error.
 #[test]
 fn rpc_set_session_name_round_trip() {
     let mut client = RpcChild::spawn(
         &["--mode", "rpc", "--no-session"],
         &turn_script(&json!(["unused"])),
     );
-    // The changed event lands BEFORE the response: assert it among the
-    // pre-response frames (a later wait would never see a copy).
+    // The changed event lands BEFORE the response: assert it among the pre-response frames.
     let id = client.command(&json!({ "type": "set_session_name", "name": "  my session  " }));
     let (response, before) = client.wait_response(&id, TIMEOUT);
     assert_eq!(response["success"], true, "the response: {response}");
@@ -636,9 +559,7 @@ fn rpc_set_session_name_round_trip() {
     client.drain_stderr();
 }
 
-/// `get_fork_messages` lists the user rows; `fork` branches the session
-/// at the entry's parent leaf and moves the connection onto the fork
-/// (the persisted session-file path).
+/// `fork` branches at the entry's parent leaf and moves the connection onto the fork's file.
 #[test]
 fn rpc_fork_messages_and_fork_swap() {
     let script = turn_script(&json!(["one", "two"]));
@@ -678,7 +599,6 @@ fn rpc_fork_messages_and_fork_swap() {
     client.drain_stderr();
 }
 
-/// `new_session` replaces the runtime with a fresh session.
 #[test]
 fn rpc_new_session_swaps_the_engine() {
     let script = turn_script(&json!(["one", "unused"]));
@@ -698,14 +618,8 @@ fn rpc_new_session_swaps_the_engine() {
     client.drain_stderr();
 }
 
-/// `get_available_models` answers the refreshed catalog (the faux
-/// registration's model).
 #[test]
 fn rpc_get_available_models_lists_the_catalog() {
-    // The registry composes models.json: the faux provider needs its
-    // provider entry (api + key + model) to pass the configured-auth
-    // gate the available catalog filters on (the daemon harness seeds
-    // the same shape).
     let mut client = RpcChild::spawn_seeded(
         &["--mode", "rpc", "--no-session"],
         &turn_script(&json!(["unused"])),
@@ -735,7 +649,6 @@ fn rpc_get_available_models_lists_the_catalog() {
     client.drain_stderr();
 }
 
-/// Stdin close settles the running turn and exits 0 (TS `onInputEnd`).
 #[test]
 fn rpc_eof_settles_and_exits_zero() {
     let script = json!({
@@ -748,7 +661,6 @@ fn rpc_eof_settles_and_exits_zero() {
     let response = client.request(&json!({ "type": "prompt", "message": "go" }));
     assert_eq!(response["success"], true);
     client.wait_event("message_start", TIMEOUT);
-    // Close stdin mid-turn: the child settles the turn and exits 0.
     drop(client.stdin.take());
     let wait_status = client
         .child
@@ -761,8 +673,6 @@ fn rpc_eof_settles_and_exits_zero() {
     client.spawn_stderr = None;
 }
 
-/// The stats command answers the TS `SessionStats` shape over the live
-/// messages.
 #[test]
 fn rpc_get_session_stats_answers_the_ts_shape() {
     let script = turn_script(&json!(["one"]));
@@ -785,17 +695,14 @@ fn rpc_get_session_stats_answers_the_ts_shape() {
     client.drain_stderr();
 }
 
-/// The mode must never surface the pre-port stub message: `--mode rpc`
-/// answers the protocol, so the misleading missing-subsystem line is
-/// gone (the regression test for the S5 stub).
+/// Regression test: `--mode rpc` must never print the missing-subsystem stub.
 #[test]
 fn rpc_mode_never_prints_the_missing_subsystem_stub() {
     let mut client = RpcChild::spawn(
         &["--mode", "rpc", "--no-session"],
         &turn_script(&json!(["unused"])),
     );
-    // Any answered command proves the transport is live; the stub would
-    // exit 1 immediately with the misleading error on stderr/stdout.
+    // Any answered command proves the transport is live (the stub exited 1).
     let response = client.request(&json!({ "type": "get_state" }));
     assert_eq!(response["success"], true);
     drop(client.stdin.take());
@@ -807,10 +714,7 @@ fn rpc_mode_never_prints_the_missing_subsystem_stub() {
     client.spawn_stderr = None;
 }
 
-/// A fresh persisted session leases its eagerly selected file before
-/// the engine can write it (the UNGATED runtime acquire — the env-gated
-/// test helper answered `None` in production and left fresh sessions
-/// unleased): the owner record exists while the engine is live.
+/// A fresh persisted session leases its file before the engine can write it.
 #[test]
 fn rpc_fresh_sessions_lease_their_files() {
     let mut client = RpcChild::spawn(&["--mode", "rpc"], &turn_script(&json!(["one"])));
@@ -836,9 +740,7 @@ fn rpc_fresh_sessions_lease_their_files() {
     client.spawn_stderr = None;
 }
 
-/// The `--fork` copy leases its materialized file before the engine
-/// writes it: another process resuming the new file can never become a
-/// second writer while this engine appends (the source is only read).
+/// The `--fork` copy leases its materialized file before the engine writes it.
 #[test]
 fn rpc_fork_leases_the_materialized_file() {
     let mut source = RpcChild::spawn(&["--mode", "rpc"], &turn_script(&json!(["one"])));
@@ -885,11 +787,7 @@ fn rpc_fork_leases_the_materialized_file() {
     forked.spawn_stderr = None;
 }
 
-/// A FAILED whole-session replacement never strands the live session's
-/// queued work: the running turn's post-turn steering fold drains the
-/// parked row while the settle waits the turn out, and the re-armed
-/// pump covers the rest (the pre-settle epoch bump retired the old
-/// pump; the failure never owned the rows).
+/// A FAILED whole-session replacement never strands the queued work: the post-turn fold drains it.
 #[test]
 fn rpc_failed_replacement_restarts_the_queue_pump() {
     let script = json!({ "responses": [
@@ -900,15 +798,9 @@ fn rpc_failed_replacement_restarts_the_queue_pump() {
     let response = client.request(&json!({ "type": "prompt", "message": "go" }));
     assert_eq!(response["success"], true);
     client.wait_event("message_start", TIMEOUT);
-    // The steer parks behind the running turn.
     let steer = client.request(&json!({ "type": "steer", "message": "steer me" }));
     assert_eq!(steer["success"], true, "the steer queues: {steer}");
-    // The switch fails its assembly AFTER the settle: the crafted
-    // header stores a cwd that no longer exists (a merely missing file
-    // lazily opens as a new session instead), so the factory's
-    // missing-cwd guard refuses deterministically. The replacement
-    // retired the pump, the assembly failed, and the restart must hand
-    // the parked rows back to a live pump.
+    // The crafted header stores a gone cwd, so the switch fails deterministically.
     let bad_file = client.agent_dir().join("bad-cwd-session.jsonl");
     std::fs::write(
         &bad_file,
@@ -934,12 +826,7 @@ fn rpc_failed_replacement_restarts_the_queue_pump() {
         error.contains("Stored session working directory does not exist"),
         "the failure is the crafted stale cwd, not an unrelated refusal: {failed}"
     );
-    // The parked row must still deliver: the running turn's post-turn
-    // steering fold drains it while the settle waits the turn out (its
-    // agent_end lands BEFORE the switch's error response), or the
-    // re-armed pump delivers after the failure — either order is the
-    // contract, a failed replacement never strands the live session's
-    // queued work.
+    // The parked row must still deliver: the fold drains it or the pump delivers after the failure.
     let steer_answer_landed = |frame: &Value| {
         if frame.get("type").and_then(Value::as_str) != Some("agent_end") {
             return false;
@@ -982,10 +869,7 @@ fn rpc_failed_replacement_restarts_the_queue_pump() {
     }
 }
 
-/// A signal exit during an in-flight whole-session replacement must not
-/// queue behind the replacement's settle: the shutdown broadcast aborts
-/// the running turn, the replacement refuses, and the 143 exit fires
-/// long before the stalled model call would finish.
+/// The 143 exit must not queue behind the replacement's settle.
 #[test]
 fn rpc_sigterm_during_replacement_exits_promptly() {
     let script = json!({ "responses": [ { "text": "slow", "delayMs": 30_000 } ] });
@@ -993,8 +877,7 @@ fn rpc_sigterm_during_replacement_exits_promptly() {
     let response = client.request(&json!({ "type": "prompt", "message": "go" }));
     assert_eq!(response["success"], true);
     client.wait_event("message_start", TIMEOUT);
-    // The replacement queues behind the running turn's settle; SIGTERM
-    // must cut through both.
+    // The replacement queues behind the settle; SIGTERM must cut through both.
     client.send(&json!({ "type": "new_session", "id": "t-replace" }));
     let wait_status = std::process::Command::new("kill")
         .arg("-TERM")
@@ -1002,8 +885,7 @@ fn rpc_sigterm_during_replacement_exits_promptly() {
         .status()
         .expect("send SIGTERM");
     assert!(wait_status.success(), "the SIGTERM dispatch succeeded");
-    // Event-gated wait: the stdout pipe closes exactly when the child
-    // exits — well inside the faux turn's 30s hold.
+    // Event-gated wait: the pipe closes exactly when the child exits.
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         match client.lines.recv_timeout(Duration::from_millis(500)) {
@@ -1022,13 +904,8 @@ fn rpc_sigterm_during_replacement_exits_promptly() {
     client.spawn_stderr = None;
 }
 
-/// A deterministic large session fixture in the corpus row schema (the
-/// bench generator's exact row shapes: the session header, the base
-/// harness-digest rows, then user -> assistant(tool call) -> toolResult
-/// turns with digest rows every 20 turns, and the final marker pair). A
-/// resumable session whose compaction's pre-summarizer CPU span is
-/// data-scaled — the same property the canonical 10MiB bench fixture
-/// has, sized for the compaction-visibility oracles.
+/// A deterministic large session fixture (header, harness-digest, user/assistant/
+/// toolResult turns, final marker pair) sized to scale the pre-summarizer CPU span.
 fn write_corpus_fixture(path: &std::path::Path, size_mib: usize) {
     let home = path.parent().unwrap().parent().unwrap();
     let mut rows: Vec<Value> = Vec::new();
@@ -1068,8 +945,7 @@ fn write_corpus_fixture(path: &std::path::Path, size_mib: usize) {
         );
         rows.push(row);
     }
-    // ~40KB of assistant text per turn keeps the fixture at `size_mib`
-    // MiB over a few hundred turns (the bench corpus's per-turn scale).
+    // ~40KB of assistant text per turn keeps the fixture at `size_mib` MiB.
     let paragraph = "Latency tools daemon terminal kernel parity settle memory viewport \
                      streaming cadence corpus sentinel transcript snapshot roster. "
         .repeat(10);
@@ -1198,10 +1074,7 @@ fn write_corpus_fixture(path: &std::path::Path, size_mib: usize) {
     std::fs::write(path, text).unwrap();
 }
 
-/// One timestamped RPC child for the compaction-visibility oracles: the
-/// reader records each frame with the `Instant` its read chunk arrived,
-/// so a frame's client-visibility time is the pipe-arrival time, not a
-/// later poll (the same arrival-accurate rule the bench frame pump has).
+/// One timestamped RPC child: each frame records the `Instant` its chunk arrived.
 struct TimedRpcChild {
     child: std::process::Child,
     stdin: std::process::ChildStdin,
@@ -1209,8 +1082,7 @@ struct TimedRpcChild {
     /// Held while the reader is deferred (the stalled-reader oracle).
     pending_stdout: Option<std::process::ChildStdout>,
     next_id: u64,
-    /// Held so the tempdir (the child's cwd) outlives the child process:
-    /// the Drop reaps the child before the field drops.
+    /// Held so the tempdir (the child's cwd) outlives the child: Drop reaps first.
     _home: tempfile::TempDir,
 }
 
@@ -1221,9 +1093,7 @@ impl TimedRpcChild {
         child
     }
 
-    /// Spawn with the reader thread deferred: the stalled-reader oracle
-    /// holds the child's stdout pipe unread (a full pipe blocks the
-    /// writer task mid-write) until `begin_reading` starts the drain.
+    /// Spawn with the reader deferred (stdout held unread until `begin_reading`).
     fn spawn_stalled(fixture: &std::path::Path, script: &Value) -> TimedRpcChild {
         let home = tempfile::TempDir::new().unwrap();
         let bin = env!("CARGO_BIN_EXE_prime-agent");
@@ -1241,10 +1111,7 @@ impl TimedRpcChild {
         let stdin = child.stdin.take().expect("stdin piped");
         let stdout = child.stdout.take().expect("stdout piped");
         let stderr = child.stderr.take().expect("stderr piped");
-        // The child's stderr must drain for the trial's lifetime: a
-        // piped-but-undrained stderr fills its 64KB pipe and the child
-        // blocks on its next log write, wedging the very path the test
-        // measures.
+        // The child's stderr must drain: an undrained pipe fills and blocks its next log write.
         std::thread::spawn(move || {
             use std::io::Read;
             let mut sink = [0u8; 8192];
@@ -1261,8 +1128,6 @@ impl TimedRpcChild {
         }
     }
 
-    /// Start the deferred reader thread (the stalled-reader oracle holds
-    /// it back until the stall window closes).
     fn begin_reading(&mut self) {
         let (tx, frames) = std::sync::mpsc::channel();
         let stdout = self.pending_stdout.take().expect("reader started once");
@@ -1313,8 +1178,7 @@ impl TimedRpcChild {
         (id, sent)
     }
 
-    /// Read frames until `id`'s response, returning the events seen
-    /// before it, each with its arrival instant.
+    /// Read frames until `id`'s response, with the events before it and their instants.
     fn wait_response(&mut self, id: &str, timeout: Duration) -> (Value, Vec<(Instant, Value)>) {
         let deadline = Instant::now() + timeout;
         let mut events = Vec::new();
@@ -1349,27 +1213,17 @@ impl Drop for TimedRpcChild {
     }
 }
 
-/// The compaction's `compaction_start` frame reaches the client BEFORE
-/// the compaction pipeline runs (the served-path oracle): the handler
-/// flushes the queued frame before entering the pre-summarizer CPU span
-/// (digest capture, cut scan, token estimation, details extraction) —
-/// a span that runs to the summarizer's `await` without an executor
-/// yield, so without the flush the queued frame strands behind it and
-/// the client sees the compaction start only when the span ends. TS
-/// writes stdout frames synchronously at the emit, so the flush is the
-/// TS-parity shape, and the oracle bites from both sides: the start must
-/// arrive inside the flush budget, and the pipeline after it must be a
-/// span an unflushed frame would have straggled behind.
+/// The `compaction_start` frame must reach the client BEFORE the pipeline runs:
+/// the pre-summarizer CPU span runs without a yield, so without the flush the
+/// frame strands (TS writes stdout synchronously at the emit: the flush is parity).
 #[test]
 fn rpc_compact_flushes_the_start_frame_before_the_pipeline() {
     let home = tempfile::TempDir::new().unwrap();
     let fixture = home.path().join("sess").join("fixture.jsonl");
     write_corpus_fixture(&fixture, 10);
     let script = json!({
-        // The faux harness's response budget is finite (repeat-last is a
-        // daemon-seam key the CLI harness ignores): the split-turn cut
-        // makes two concurrent summarizer calls, so the script queues
-        // one response each.
+        // The split-turn cut makes two concurrent summarizer calls; the
+        // script queues one response each.
         "responses": [
             { "text": "corpus history summary: the scale corpus ran" },
             { "text": "corpus turn-prefix summary: the final marker" },
@@ -1410,17 +1264,13 @@ fn rpc_compact_flushes_the_start_frame_before_the_pipeline() {
     );
     let cs_ms = start_at.duration_since(sent).as_secs_f64() * 1000.0;
     let start_to_end_ms = end_at.duration_since(start_at).as_secs_f64() * 1000.0;
-    // The flush: the start frame is visible to the client immediately
-    // (a pipe write, microseconds) — well before the pre-summarizer span
-    // (tens of milliseconds at this session size) could strand it.
+    // The flush budget: a pipe write lands in microseconds; the span is tens of milliseconds here.
     assert!(
         cs_ms < 20.0,
         "compaction_start arrived {cs_ms:.1}ms after the command: \
          the queued frame stranded behind the pre-summarizer span"
     );
-    // Anti-vacuity: the span after the start frame is exactly the
-    // stranding window — a session too small to strand a frame would
-    // make the assert above vacuous.
+    // Anti-vacuity: a session too small to strand a frame would make the assert above vacuous.
     assert!(
         start_to_end_ms > 20.0,
         "the compaction span after the start frame was only \
@@ -1428,50 +1278,27 @@ fn rpc_compact_flushes_the_start_frame_before_the_pipeline() {
     );
 }
 
-/// The flush is bounded against a stalled reader: with the client's
-/// pipe full (an unread multi-MiB `get_state` response) the writer task
-/// blocks mid-write, and the compaction must still complete — the
-/// budget expires, the command proceeds, and every frame flows once the
-/// reader drains. An unbounded drain would wedge the compaction behind
-/// the reader forever (TS never blocks a command on the reader).
+/// The flush is bounded against a stalled reader: with the pipe full the writer
+/// blocks mid-write and the compaction must still complete.
 #[test]
 fn rpc_compact_flush_is_bounded_against_a_stalled_reader() {
     let home = tempfile::TempDir::new().unwrap();
     let fixture = home.path().join("sess").join("fixture.jsonl");
     write_corpus_fixture(&fixture, 10);
     let script = json!({
-        // The faux harness's response budget is finite (repeat-last is a
-        // daemon-seam key the CLI harness ignores): the split-turn cut
-        // makes two concurrent summarizer calls, so the script queues
-        // one response each.
+        // The split-turn cut makes two concurrent summarizer calls; the
+        // script queues one response each.
         "responses": [
             { "text": "corpus history summary: the scale corpus ran" },
             { "text": "corpus turn-prefix summary: the final marker" },
         ],
     });
     let mut client = TimedRpcChild::spawn_stalled(&fixture, &script);
-    // No reader thread touches stdout: the get_messages response (the
-    // session's whole serialized context, well over the pipe capacity)
-    // fills the pipe and the writer task blocks mid-write — `pending`
-    // stays nonzero through the compaction, so its start-frame flush can
-    // only retire by hitting the budget.
+    // No reader touches stdout: the response fills the pipe, so the flush retires at the budget.
     let (messages, _) = client.command(&json!({ "type": "get_messages" }));
     let (id, _) = client.command(&json!({ "type": "compact" }));
-    // The compaction must run BEHIND the stalled pipe: the budget
-    // expired (50ms) instead of waiting the reader out, so the durable
-    // compaction row lands in the session file while no reader drains
-    // the child. The row's appearance IS the readiness signal (polled,
-    // never a fixed sleep): an unbounded drain would still be spinning
-    // in its wait loop — no row ever lands while the reader is
-    // stalled, and the poll deadline fails right here.
-    // The compaction runs BEHIND the stalled pipe: the budget expired
-    // (50ms) instead of waiting the reader out, so the durable
-    // compaction row lands in the session file while no reader drains
-    // the child. An unbounded drain would still be spinning in its wait
-    // loop — no row ever lands while the reader is stalled, and the
-    // poll deadline fails right here. (The row's landing time varies
-    // with the pipe-stall CPU contention, hence the poll instead of a
-    // fixed sleep.)
+    // The compaction runs BEHIND the stalled pipe: the durable row's appearance IS
+    // the readiness signal (polled, never a fixed sleep).
     let row_deadline = Instant::now() + Duration::from_secs(4);
     let mut compacted_behind_the_stall = false;
     while Instant::now() < row_deadline {
@@ -1490,36 +1317,23 @@ fn rpc_compact_flush_is_bounded_against_a_stalled_reader() {
         "the compaction never ran behind the stalled reader: the flush \
          wedged the command on the reader"
     );
-    // The stall drains now: every held frame flows, the compact's
-    // response is among them, and the child never wedged.
+    // The stall drains now: every held frame flows, the compact's response among them.
     let _ = messages;
     client.begin_reading();
     let (response, _) = client.wait_response(&id, TIMEOUT);
     assert_eq!(response["success"], true, "the response: {response}");
 }
 
-/// The prompt-admitted `/compact`'s compaction frames ride the
-/// prompt-response buffer and publish AFTER the prompt's response (TS
-/// `promptResponsePending`: `outputConnectionEvent` buffers connection
-/// events while a prompt is pending; `handleInputLine`'s `finally`
-/// disarms and flushes them) — the port's buffered seam is the TS wire
-/// order, so NO early flush belongs on this path (the direct `compact`
-/// command's flush lives in its own handler, where no prompt buffer
-/// stands between the frame and the writer). The oracle pins the
-/// contract by ARRIVAL POSITION: the prompt response precedes
-/// `compaction_start`, which precedes `compaction_end` — an early
-/// publish (routing the frame past the buffer) or a late flush reorders
-/// the wire and fails the positions.
+/// The prompt-admitted `/compact`'s frames ride the prompt-response buffer (TS
+/// `promptResponsePending`) and publish AFTER the response.
 #[test]
 fn rpc_prompt_admitted_compact_frames_flush_after_the_response() {
     let home = tempfile::TempDir::new().unwrap();
     let fixture = home.path().join("sess").join("fixture.jsonl");
     write_corpus_fixture(&fixture, 10);
     let script = json!({
-        // The faux harness's response budget is finite (repeat-last is a
-        // daemon-seam key the CLI harness ignores): the split-turn cut
-        // makes two concurrent summarizer calls, so the script queues
-        // one response each.
+        // The split-turn cut makes two concurrent summarizer calls; the
+        // script queues one response each.
         "responses": [
             { "text": "corpus history summary: the scale corpus ran" },
             { "text": "corpus turn-prefix summary: the final marker" },
@@ -1527,9 +1341,7 @@ fn rpc_prompt_admitted_compact_frames_flush_after_the_response() {
     });
     let mut client = TimedRpcChild::spawn(&fixture, &script);
     let (id, _) = client.command(&json!({ "type": "prompt", "message": "/compact" }));
-    // Collect every frame until the prompt's response AND both
-    // compaction frames have arrived (the buffered frames flush at the
-    // handler's end, so they land right after the response).
+    // Collect every frame until the response and both compaction frames arrive.
     let deadline = Instant::now() + TIMEOUT;
     let mut seen: Vec<Value> = Vec::new();
     loop {

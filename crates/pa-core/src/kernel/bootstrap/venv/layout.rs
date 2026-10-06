@@ -1,4 +1,4 @@
-//! The venv dir-layout concern (moved with its concern): the override-aware
+//! The venv dir-layout concern: the override-aware
 //! kernel venv dir, the writable-dir fallback, and the interpreter path.
 
 use super::{anyhow, Path, PathBuf};

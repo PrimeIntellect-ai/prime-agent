@@ -60,14 +60,9 @@ pub(super) fn salvage_command_type(line: &str) -> Option<String> {
 }
 
 impl Supervisor {
-    /// `prepare_update_restart`: accept or poll the prepare transaction.
-    ///
-    /// The RPC contract: a new `updateId` starts the transaction and waits
-    /// for the mutation drain, then reports `fenced`; a repeat with the same
-    /// id reports the current state (the poll never extends the budget); a
-    /// different id is refused (the coordinator maps the refusal to `Join`).
-    /// Any failure aborts the transaction - rollback is the default, the
-    /// supervisor returns to `Serving`, and nothing is left half-prepared.
+    /// `prepare_update_restart`: a new `updateId` starts the transaction, waits for the
+    /// mutation drain, and reports `fenced`; a repeat reports the current state; a
+    /// different id is refused. Any failure aborts — nothing left half-prepared.
     pub(super) async fn handle_prepare_update_restart(
         self: &Arc<Self>,
         command_id: &str,
@@ -131,10 +126,9 @@ impl Supervisor {
                 }
                 match self.update_prepare.drain_complete(&update_id) {
                     PrepareOp::Applied(_) => {
-                        // Fenced: snapshot every resident worker, assemble
-                        // the roster, write the prepared artifacts (fsync),
-                        // and reach Prepared - all inside the remaining
-                        // prepare budget (spec §5, slice 3).
+                        // Fenced: snapshot every resident, assemble the roster, write the
+                        // prepared artifacts (fsync), and reach Prepared inside the remaining
+                        // budget (spec §5).
                         match self
                             .complete_update_prepare(
                                 &update_id,
@@ -173,12 +167,9 @@ impl Supervisor {
         }
     }
 
-    /// The snapshot phase of the prepare transaction (spec §5
-    /// `Fenced -> Snapshotted -> Prepared`): collect every resident
-    /// worker's `update_snapshot`, assemble the roster (spec §8), write
-    /// `prepared/<update-id>/{roster,marker}.json` durably, and arm the
-    /// marker self-expiry. Runs within the remaining hard prepare budget;
-    /// any failure aborts the whole transaction (the caller rolls back).
+    /// The prepare transaction's snapshot phase (spec §5 `Fenced -> Snapshotted -> Prepared`):
+    /// collect every resident's `update_snapshot`, assemble the roster (spec §8), write
+    /// the prepared artifacts durably, and arm the marker self-expiry. Any failure aborts.
     async fn complete_update_prepare(
         self: &Arc<Self>,
         update_id: &UpdateId,
@@ -197,9 +188,8 @@ impl Supervisor {
             };
             let connected = resident.cmd_tx.lock().await.is_some();
             if self.is_stopping(resident) || !connected {
-                // TS #2515: the refusal names the blocking session
-                // (`sessionFile`, else the root active session id) so the
-                // message ties the refused prepare to a specific session.
+                // TS #2515: the refusal names the blocking session (`sessionFile`, else the
+                // root active session id).
                 let descriptor = resident.descriptor.lock().await;
                 let session = descriptor
                     .session_file
@@ -297,14 +287,10 @@ impl Supervisor {
         }))
     }
 
-    /// `commit_update_restart` (spec §5 `Prepared -> Stopping`): consume the
-    /// prepared transaction and stop every worker gracefully within its
-    /// budget. All workers stopped - the supervisor exits for the update
-    /// (slice 4's coordinator takes over; descriptors survive on disk for
-    /// the new supervisor's create-or-adopt restore). Any refusal
-    /// ABANDONS the update: the supervisor returns to `Serving`, refused
-    /// sessions keep running untouched, and the already-stopped workers
-    /// relaunch (invariant I3 - never a kill).
+    /// `commit_update_restart` (spec §5 `Prepared -> Stopping`): stop every worker gracefully
+    /// in budget; all stopped — the supervisor exits for the update (descriptors survive
+    /// for the successor). Any refusal ABANDONS: back to `Serving`, refused sessions keep
+    /// running, already-stopped workers relaunch (invariant I3 - never a kill).
     pub(super) async fn handle_commit_update_restart(
         self: &Arc<Self>,
         command_id: &str,
@@ -376,11 +362,9 @@ impl Supervisor {
                                 }
                             }
                             WorkerStopVerdict::Refused => {
-                                // Restore normal supervision: the stop
-                                // request may still land late, in which case
-                                // the monitor treats the exit as a crash
-                                // and relaunches with backoff - the session
-                                // file is the truth either way.
+                                // Restore normal supervision: the stop request may still land late,
+                                // in which case the monitor treats the exit as a crash and
+                                // relaunches with backoff (the session file is the truth).
                                 resident.intentional_stop.store(false, Ordering::SeqCst);
                             }
                         }
@@ -404,11 +388,9 @@ impl Supervisor {
                 self.log_line(&format!(
                     "update {update_id}: all {stopped} worker(s) stopped; exiting for the update"
                 ));
-                // Spec §10.1: every client learns the update resume
-                // contract BEFORE the sockets close - the close frame is an
-                // instruction (reattach by durable id after the restart),
-                // not an error. `estSeconds` is the successor boot + restore
-                // window from the update budget.
+                // Spec §10.1: every client learns the update resume contract BEFORE the
+                // sockets close - the close frame is an instruction (reattach by durable id
+                // after the restart), not an error.
                 let mut sessions: Vec<Value> = Vec::new();
                 for resident in &residents {
                     let descriptor = resident.descriptor.lock().await;
@@ -448,10 +430,9 @@ impl Supervisor {
                 let _ = self
                     .events
                     .send((ClientRouting::Broadcast, std::sync::Arc::new(closing)));
-                // The response is written before the accept loop exits (the
-                // write path is the dispatch channel; the 100ms drain only
-                // orders the exit behind it - the coordinator's Booting
-                // phase recovers a lost ack by design).
+                // The response is written before the accept loop exits; the 100ms drain only
+                // orders the exit behind it — the coordinator's Booting phase recovers a lost
+                // ack by design.
                 let supervisor = Arc::clone(self);
                 tokio::spawn(async move {
                     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -473,17 +454,13 @@ impl Supervisor {
         }
     }
 
-    /// The update's exit path (spec §5 Stopping, all workers exited): set
-    /// the shutdown flag so the monitors stand down and the accept loop
-    /// falls out, but KEEP the worker descriptors on disk - the new
-    /// supervisor's create-or-adopt restore (spec §6/§8) relaunches the
-    /// workers from them. Contrast `begin_shutdown`, which deletes
-    /// descriptors for a terminal stop.
+    /// The update's exit path (spec §5 Stopping): set the shutdown flag, but KEEP the worker
+    /// descriptors on disk — the successor's restore relaunches from them. Contrast
+    /// `begin_shutdown`, which deletes descriptors for a terminal stop.
     fn exit_for_update(self: &Arc<Self>) {
-        // The update exit is already complete: publish the accept-loop exit
-        // before the general shutdown gate, so a client disconnect can never
-        // observe the transient `shutting_down && !accept_exit` window and
-        // mistake the update restart for a terminal stop pass.
+        // Publish the accept-loop exit before the general shutdown gate, so a client
+        // disconnect never observes the transient `shutting_down && !accept_exit` window
+        // and mistakes the update restart for a terminal stop pass.
         self.accept_exit.store(true, Ordering::SeqCst);
         self.shutting_down.store(true, Ordering::SeqCst);
         self.shutdown_notify.notify_one();
@@ -516,23 +493,21 @@ impl Supervisor {
         crate::update_prepare::prepared_dir(&self.options.agent_dir, &socket_hash, update_id)
     }
 
-    /// Update-prepare watchdog (spec §5): the deadline and the marker
-    /// self-expiry are re-checked on a timer, so a coordinator that dies
-    /// mid-prepare can never wedge the supervisor - every state has a
-    /// watchdog exit (invariant I1).
+    /// Update-prepare watchdog (spec §5): aborts a transaction whose
+    /// deadline or marker self-expiry passes even when no command arrives
+    /// to re-check, so a coordinator that dies mid-prepare can never wedge
+    /// the supervisor (invariant I1). Parks with no timer while no update
+    /// is in flight.
     pub(super) async fn update_prepare_watchdog(self: Arc<Self>) {
         loop {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            if let Some(abort) = self.update_prepare.abort_if_expired(util::now_ms()) {
-                self.finish_update_abort(&abort);
-            }
+            let abort = self.update_prepare.wait_for_expiry().await;
+            self.finish_update_abort(&abort);
         }
     }
 }
 
-/// TS #2515 `prepareUpdateRestartFenced`'s resident-worker refusal: the
-/// message names the blocking session, so the refused prepare ties to a
-/// specific session instead of a bare worker id.
+/// TS #2515 `prepareUpdateRestartFenced`'s refusal: the message names the blocking
+/// session, so the refused prepare ties to a specific session.
 fn update_prepare_resident_refusal(worker_id: &str, state: &str, session: &str) -> String {
     format!(
         "Cannot prepare update restart while resident worker {worker_id} is {state} (session {session})"
@@ -543,10 +518,6 @@ fn update_prepare_resident_refusal(worker_id: &str, state: &str, session: &str) 
 mod tests {
     use super::*;
 
-    /// TS #2515: the resident-worker prepare refusal names the blocking
-    /// session — `sessionFile` when the descriptor carries one, else the
-    /// root active session id — so the refused prepare ties to a session
-    /// the user can look at, not a bare worker id.
     #[test]
     fn update_prepare_refusal_names_the_blocking_session() {
         assert_eq!(

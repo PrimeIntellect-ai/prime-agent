@@ -1,4 +1,4 @@
-//! Prompt-image parsing tests (the queue concern's test mod).
+//! Prompt-image parsing tests.
 use super::*;
 use serde_json::json;
 
@@ -43,9 +43,7 @@ fn test_worker() -> Arc<Worker> {
     Arc::new(Worker::new(config, None))
 }
 
-/// A `prompt` command with wire images queues the attachments with the
-/// message (they ride the queue item into the engine as multimodal
-/// user content).
+/// The attachments ride the queue item into the engine as multimodal user content.
 #[tokio::test]
 async fn prompt_with_images_queues_the_images_with_the_message() {
     let worker = test_worker();
@@ -86,4 +84,9 @@ async fn prompt_with_images_queues_the_images_with_the_message() {
         }],
         "the attachment rides the queue item"
     );
+    // A prompt with neither text nor images stays rejected (this port's
+    // guard; the TS worker has no empty check).
+    let rejected = worker.dispatch("prompt", &json!({ "message": "" })).await;
+    assert!(!rejected.success);
+    assert_eq!(rejected.error.as_deref(), Some("Prompt cannot be empty"));
 }

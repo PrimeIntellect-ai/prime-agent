@@ -1,5 +1,5 @@
-//! `SessionManager`: the stateful session writer. Port of the class half of
-//! core/session-manager.ts (create/new/append/persist, crash repair, index).
+//! `SessionManager`: the stateful session writer (create/new/append/persist,
+//! crash repair, index).
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -13,19 +13,9 @@ use pa_types::session::{
 use super::tree::SessionTree;
 use super::{migrate_to_current_version, parse_session_entries, CURRENT_SESSION_VERSION};
 
-// The inline unit battery moved to the child module at the same tree
-// position (session::manager::tests); its use-super glob keeps resolving
-// through the facade bindings and re-exports (the session_store stage-1
-// precedent).
 #[cfg(test)]
 mod tests;
 
-// The append concern (the append family: messages, retained variants,
-// changes, compactions, customs, child-usage attributions, session
-// info/state - and the leaf/label mutators) moved to the child module at
-// the same tree position (session::manager::append); every member keeps
-// its pub/pub(crate) level (manager_ext.rs + the daemon callers resolve
-// through the type). ZERO bumps.
 mod append;
 
 // The persist concern (the entry index, the rewrite/flush/notify plumbing,
@@ -39,63 +29,26 @@ mod append;
 mod persist;
 use persist::atomic_write;
 
-// The queries concern (the derived state + accessor arm: the active
-// context/history snapshot, the branch scans, the window-backed reads,
-// and the getters) moved to the child module at the same tree position
-// (session::manager::queries); every member keeps its pub level and the
-// facade binding below serves the child super:: paths (active_context:
-// SessionContext + build_session_context).
 mod queries;
 use super::{build_session_context, SessionContext};
 
-// The lifecycle concern (the constructors, the open/fork/new/materialize/
-// adopt arm, and the fork branch-copy helpers) moved to the child module
-// at the same tree position (session::manager::lifecycle); every member
-// keeps its pub level (external callers resolve through the type), the
-// child resolves the facade re-exports/bindings via its use-super glob,
-// and the `use super::window;` module binding serves the childrens
-// super::window:: paths (open_windowed, adopt_window,
-// set_append_ownership).
 mod lifecycle;
 use super::window;
 
-// The id + timestamp mint (the session id minters, the session file
-// path, and the ISO-8601 timestamps) moved to the child module at the
-// same tree position (session::manager::ids); the re-exports keep the
-// pub API paths stable (format_iso 8 + format_iso_now 5 external callers;
-// get_session_file_path has zero external callers - the re-export keeps
-// the path stable and avoids dead-code lint churn, the session_store
-// find_most_recent_session_for_cwd precedent) and the pub(super)
-// bindings keep the constructors' + the append arm's bare calls in scope.
+// `get_session_file_path` has zero external callers; the re-export keeps
+// the pub path stable and avoids dead-code churn.
 mod ids;
 use ids::{create_session_id, generate_id};
 pub use ids::{format_iso, format_iso_now, get_session_file_path};
 
-// The header + rlm-depth concern (the first-line header read and the
-// RLM depth resolution) moved to the child module at the same tree
-// position (session::manager::header); the re-export keeps the pub API
-// path stable (discovery.rs) and the pub(super) bindings keep the
-// constructors' bare calls in scope (set_session_file, new_session,
-// fork_from, materialize_session_file).
 mod header;
 pub use header::read_session_header;
 use header::{is_valid_rlm_depth, resolve_session_rlm_depth, root_rlm_depth_from_env};
 
-// The git-context concern (the quiet git probes and the header capture)
-// moved to the child module at the same tree position
-// (session::manager::git); the re-export keeps the pub API path stable
-// (manager_ext.rs + the git-context integration tests) and the
-// constructors bare calls.
 mod git;
 pub use git::capture_git_context;
 
-// The crash-repair + load concern (the serialized entry wire, the
-// bounded damage scan, the torn-tail repair, and the header-validating
-// load) moved to the child module at the same tree position
-// (session::manager::repair); the re-export keeps the pub API path stable
-// (zero external callers - the find_most_recent_session_for_cwd
-// precedent) and the bindings keep the bare-path callers in scope (the
-// persist/append write arms + the test child).
+// The re-export has zero external callers; it keeps the pub path stable.
 mod repair;
 pub use repair::load_entries_from_file;
 use repair::serialize_entry;
@@ -121,7 +74,6 @@ pub(crate) use notices::fault_hooks;
 /// A persist observer; must not break session writes (panics are contained).
 pub type SessionPersistListener = Box<dyn Fn(&Path) + Send + Sync>;
 
-/// Options for creating a new session.
 #[derive(Default)]
 pub struct NewSessionOptions {
     pub id: Option<String>,
@@ -129,7 +81,6 @@ pub struct NewSessionOptions {
     pub rlm_depth: Option<u64>,
 }
 
-/// The stateful session writer/reader.
 // The mirrored TS API shape is deliberate (the booleans are the
 // product's own surface, not a refactor target).
 #[allow(clippy::struct_excessive_bools)]
@@ -166,12 +117,10 @@ pub struct SessionManager {
     notice_append_fault: bool,
 }
 
-/// The refine transcript's consumed artifacts: the conversation
-/// message rows (sequence order) and the in-session refinement
-/// history (the audit scan's output). Both are small next to the full
-/// entry set — the rows refine reads — so extracting them directly
-/// spares the owned copy of every entry a historical snapshot would
-/// materialize.
+/// The refine transcript's consumed artifacts: the conversation message
+/// rows (sequence order) and the in-session refinement history (the audit
+/// scan's output). Extracting them directly spares an owned copy of every
+/// entry.
 #[derive(Debug, Default)]
 pub struct RefineTranscriptParts {
     pub messages: Vec<AgentMessage>,

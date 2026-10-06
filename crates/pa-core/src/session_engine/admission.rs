@@ -10,8 +10,7 @@ impl AgentSession {
     ///
     /// # Errors
     ///
-    /// Returns the underlying prompt admission error (see
-    /// [`AgentSession::prompt_with_images`]).
+    /// The underlying prompt admission error (see [`AgentSession::prompt_with_images`]).
     pub async fn prompt(
         &self,
         text: &str,
@@ -65,9 +64,8 @@ impl AgentSession {
     ///
     /// # Errors
     ///
-    /// Returns an error when the session is already busy, when the pending
-    /// digest row cannot be captured, or when the agent rejects the
-    /// injected prompt.
+    /// Error when the session is busy, the digest capture fails, or the
+    /// agent rejects the prompt.
     pub async fn prompt_injected_message(
         &self,
         message: &pa_types::session::CustomMessage,
@@ -138,10 +136,8 @@ impl AgentSession {
     ///
     /// # Errors
     ///
-    /// Returns an error when the prompt fails validation, the session is
-    /// busy under its admission rule, or the agent rejects the turn (with
-    /// [`PromptOptions::return_after_accepted`], a rejection after the run
-    /// registers rides the events instead of this result).
+    /// Error when the prompt fails validation, the session is busy, or the
+    /// agent rejects the turn.
     pub async fn prompt_with_images(
         &self,
         text: &str,
@@ -149,8 +145,7 @@ impl AgentSession {
         options: PromptOptions,
     ) -> anyhow::Result<PromptOutcome> {
         let expand = options.expand_prompt_templates.unwrap_or(true);
-        // TS `_finishSubmissionNormalization` order: skill commands expand
-        // first (`/skill:<name>` into its `<skill>` block), prompt templates
+        // TS `_finishSubmissionNormalization` order: skill commands expand first, prompt templates
         // second; both are gated by the same policy flag.
         let (normalized, used_skill) = if expand {
             let (skill_expanded, used_skill) =
@@ -169,28 +164,17 @@ impl AgentSession {
         let admission = self.terminal_admission.lock().await;
         let state = self.agent.state().await;
         let busy = state.is_streaming;
-        // The `skill used` adoption event reports from the admission seam:
-        // an admitted user turn whose text IS a skill block reports once,
-        // with how the invocation arrived (a fresh admission, or a queued
-        // steering/follow-up submission). A pre-expanded block (the daemon
-        // emits the accepted row before admission) reports here too — the
-        // block parse carries the skill identity.
-        if let Some(skill) = used_skill.or_else(|| {
-            pa_types::skill_blocks::parse_skill_block(&normalized)
-                .and_then(|block| self.skills.iter().find(|skill| skill.name == block.name))
-        }) {
+        // The `skill_use_count` session counter counts at the admission
+        // seam: an admitted user turn whose text IS a skill block counts
+        // once. A pre-expanded block (the daemon emits the accepted row
+        // before admission) counts here too — the block parse carries the
+        // skill identity.
+        let skill_used = used_skill.is_some()
+            || pa_types::skill_blocks::parse_skill_block(&normalized)
+                .is_some_and(|block| self.skills.iter().any(|skill| skill.name == block.name));
+        if skill_used {
             if let Some(telemetry) = &self.skill_telemetry {
-                let source = if busy {
-                    match options.streaming_behavior {
-                        Some(StreamingBehavior::Steer) => "steer",
-                        // The busy-without-behavior case errors below; the
-                        // queued label is the honest fallback.
-                        Some(StreamingBehavior::FollowUp) | None => "follow_up",
-                    }
-                } else {
-                    "prompt"
-                };
-                telemetry.note_skill_used(&skill.name, skill.kind_label(), source);
+                telemetry.note_skill_used();
             }
         }
         if busy && options.streaming_behavior.is_none() {
@@ -198,10 +182,9 @@ impl AgentSession {
                 "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message."
             );
         }
-        // User messages persist through the loop's `message_end` event (the
-        // persistence subscription in `from_session_arc`), matching the TS
-        // reference: `_processAgentEvent` is the only appendMessage path for
-        // user prompts. Appending here as well would double-persist.
+        // User messages persist through the loop's `message_end` event
+        // (matching TS `_processAgentEvent`); appending here too would
+        // double-persist.
 
         if busy {
             let message = user_prompt_message(&normalized, &images);
@@ -211,28 +194,25 @@ impl AgentSession {
                 None => unreachable!("busy without a streaming behavior errors above"),
             }
         } else {
-            // The dispatch-time image-model routing decision (TS
-            // `_imageModelOverrideForTurns` at commit): an image-attaching
-            // batch routes to the host's configured image model or fails
-            // with the actionable refusal, never silently downgrading the
-            // images to placeholders.
+            // The dispatch-time image-model routing decision: an
+            // image-attaching batch routes to the host's configured image
+            // model or fails with the actionable refusal, never silently
+            // downgrading the images to placeholders.
             self.apply_image_model_routing(&images, &options.batch)
                 .await?;
-            // The turn's prompt messages (TS preparedMessages): the deferred
-            // first-turn harness digest rides first when one is due, so the
-            // loop streams its message pair ahead of the user prompt and
-            // carries it on `agent_end` (TS commit-time injection).
+            // The turn's prompt messages: the deferred first-turn harness
+            // digest rides first when one is due, streamed ahead of the user
+            // prompt and carried on `agent_end`.
             let mut prompt_messages = Vec::new();
             if let Some(digest_row) = self.pending_digest_prompt_row().await? {
                 prompt_messages.push(digest_row);
             }
             prompt_messages.extend(self.take_next_turn_rows().await);
             prompt_messages.push(user_prompt_message(&normalized, &images));
-            // The batched co-delivery rows (TS `_startPreparedTurnActions`'s
-            // `turns.flatMap(records)`): each batched action contributes its
-            // user row after the primary, through the same admission
-            // normalization (TS normalizes each submission at queue time;
-            // this engine normalizes every row at the shared admission).
+            // Each batched action contributes its user row after the
+            // primary, through the same admission normalization (TS
+            // normalizes each submission at queue time; this engine
+            // normalizes every row at the shared admission).
             for row in &options.batch {
                 let row_text = if expand {
                     let (skill_expanded, _) =
@@ -288,9 +268,8 @@ impl AgentSession {
         Ok(PromptOutcome::Prompt)
     }
 
-    /// Queue one custom row for the next admitted turn (TS
-    /// `_pendingNextTurnMessages.push`): the row rides the turn's prompt
-    /// messages ahead of the prompt's own user row.
+    /// Queue one custom row for the next admitted turn: the row rides the
+    /// turn's prompt messages ahead of the prompt's own user row.
     pub fn queue_next_turn_row(&self, message: pa_types::session::CustomMessage) {
         self.pending_next_turn_rows
             .lock()
@@ -298,13 +277,10 @@ impl AgentSession {
             .push(message);
     }
 
-    /// Adopt a shared next-turn mailbox (the engine's restore-notice
-    /// seam): rows a kernel boot already parked before the session existed
-    /// merge in, and later pushes land in the same queue the next admitted
-    /// turn drains. The kernel provisioner outlives the construction order
-    /// (its restore fires from a background boot), so the notice needs a
-    /// mailbox shared across the build boundary rather than a callback
-    /// bound to a session that does not exist yet.
+    /// Adopt a shared next-turn mailbox (the engine's restore-notice seam):
+    /// rows a kernel boot parked before the session existed merge in, and
+    /// later pushes land in the same queue: the kernel provisioner outlives
+    /// the construction order, so the mailbox must cross the build boundary.
     pub fn adopt_next_turn_rows(
         &mut self,
         shared: std::sync::Arc<std::sync::Mutex<Vec<pa_types::session::CustomMessage>>>,
@@ -328,9 +304,8 @@ impl AgentSession {
         self.pending_next_turn_rows = shared;
     }
 
-    /// Drain the queued next-turn rows (TS `_takePendingNextTurnMessages`):
-    /// the admitting turn owns them; an empty take leaves nothing for later
-    /// turns.
+    /// Drain the queued next-turn rows: the admitting turn owns them; an
+    /// empty take leaves nothing for later turns.
     pub fn take_next_turn_rows(
         &self,
     ) -> impl std::future::Future<Output = Vec<pa_agent::types::AgentMessage>> {

@@ -1,9 +1,5 @@
-//! The composition root's `/traces` state and engine (TS
-//! `getAgentTracesEnabled` / `setAgentTracesEnabled`,
-//! `getPrimeAgentTraceCredential`, and `core/agent-traces.ts`'s upload
-//! arms): the settings flag, the resolved credential, the session
-//! preview, the one-shot upload, the upload-all sweep, and the terminal
-//! Prime Agent Traces login.
+//! The `/traces` state and engine: the settings flag, the resolved credential,
+//! the session preview, the one-shot upload, and the upload-all sweep.
 
 use std::path::{Path, PathBuf};
 
@@ -19,7 +15,6 @@ use pa_tui::traces::{
     TraceUploadReport, TracesCommands, TracesFuture,
 };
 
-/// The trace-sharing state against one daemon's shared directories.
 #[derive(Clone)]
 pub struct ClientTraces {
     cwd: PathBuf,
@@ -45,8 +40,6 @@ impl ClientTraces {
         trace_credential(&self.agent_dir).map(|credential| credential.label)
     }
 
-    /// TS `uploadCurrentTraceOnce` → `uploadAgentTraceFile` (the one-shot
-    /// arm with `requireEnabled: false`, `reloadConfig: false`).
     async fn upload_once(&self, session_file: Option<&str>) -> TraceUploadReport {
         let http = pa_core::agent_traces::ReqwestTraceHttp;
         let session_file = session_file.map(PathBuf::from);
@@ -70,8 +63,7 @@ impl ClientTraces {
     }
 }
 
-/// The engine result mapped to the TUI outcome (the fields the TS
-/// formatter reads).
+/// The engine result mapped to the TUI outcome.
 fn map_upload_result(result: TraceUploadResult) -> TraceUploadOutcome {
     match result {
         TraceUploadResult::Uploaded { bytes_stored, .. } => {
@@ -99,7 +91,6 @@ fn map_upload_result(result: TraceUploadResult) -> TraceUploadOutcome {
     }
 }
 
-/// The engine preview mapped to the TUI outcome.
 fn map_preview_result(result: TracePreviewResult) -> TracePreviewOutcome {
     match result {
         TracePreviewResult::Ready(data) => TracePreviewOutcome::Ready(Box::new(TracePreviewInfo {
@@ -153,7 +144,6 @@ impl TracesCommands for ClientTraces {
         })
     }
 
-    /// TS `previewCurrentTrace` → `previewAgentTraceFile`.
     fn preview(&self, session_file: Option<&str>) -> TracesFuture<TracePreviewOutcome> {
         let session_file = session_file.map(str::to_string);
         Box::pin(async move {
@@ -163,16 +153,14 @@ impl TracesCommands for ClientTraces {
         })
     }
 
-    /// TS `uploadCurrentTraceOnce` → `uploadAgentTraceFile`.
     fn upload_current(&self, session_file: Option<&str>) -> TracesFuture<TraceUploadReport> {
         let provider = self.clone();
         let session_file = session_file.map(str::to_string);
         Box::pin(async move { provider.upload_once(session_file.as_deref()).await })
     }
 
-    /// TS `uploadAllTraces` → `uploadAllAgentTraces`: the spawned sweep
-    /// (progress through the note channel, cancellation through the
-    /// handle bridged into the engine's abort).
+    /// The spawned sweep: progress through the note channel, cancellation through
+    /// the handle bridged into the engine's abort.
     fn upload_all(
         &self,
         session_dir: Option<&str>,
@@ -185,7 +173,6 @@ impl TracesCommands for ClientTraces {
         Box::pin(async move {
             let http = pa_core::agent_traces::ReqwestTraceHttp;
             let engine_cancel = EngineCancel::new();
-            // The TUI handle bridges into the engine's abort.
             let bridge = {
                 let tui_handle = cancel.clone();
                 let engine_handle = engine_cancel.clone();
@@ -238,9 +225,8 @@ impl TracesCommands for ClientTraces {
         })
     }
 
-    /// TS `runPrimeAgentTracesLogin`: the login flow against the inline
-    /// auth panel (the TUI mounts it; the panel channel carries the
-    /// flow's surfaces and the settled outcome).
+    /// The login flow against the inline auth panel; the panel channel
+    /// carries the flow's surfaces and the settled outcome.
     fn login(&self, panel: pa_tui::auth_panel::AuthPanelHandle) -> TracesFuture<TraceLoginOutcome> {
         let agent_dir = self.agent_dir.clone();
         Box::pin(async move { crate::traces_login::run_traces_login(&agent_dir, panel).await })
@@ -277,8 +263,7 @@ mod tests {
             .set_enabled(true)
             .await
             .expect("the opt-in write persists");
-        // A fresh manager over the same directories reads the write (TS
-        // reloads settings before reporting the flag).
+        // A fresh manager over the same directories reads the write.
         let traces = ClientTraces::new("/tmp", agent.clone());
         assert!(traces.enabled().await);
     }
@@ -294,7 +279,6 @@ mod tests {
         let (_dir, agent) = temp_agent_dir();
         let traces = ClientTraces::new("/tmp", agent.clone());
         assert_eq!(traces.credential().await, None);
-        // A stored prime-inference key is the fallback credential.
         let mut auth = pa_core::auth::AuthStorage::create(&agent);
         auth.set(
             "prime-inference",
@@ -307,7 +291,6 @@ mod tests {
             traces.credential().await.as_deref(),
             Some("Prime Inference credential")
         );
-        // The dedicated traces key wins over the inference fallback.
         auth.set(
             "prime-agent-traces",
             pa_core::auth::AuthCredential::ApiKey {
@@ -319,7 +302,6 @@ mod tests {
             traces.credential().await.as_deref(),
             Some("Prime Agent Traces credential")
         );
-        // The traces env key wins over everything.
         std::env::set_var("PRIME_AGENT_TRACES_API_KEY", "env-key");
         assert_eq!(
             traces.credential().await.as_deref(),

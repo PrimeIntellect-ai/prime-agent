@@ -1,6 +1,5 @@
-//! The lifecycle concern (moved with its concern): the constructors,
-//! the open/fork/new/materialize/adopt arm, and the fork's branch-copy
-//! helpers (TS SessionManager.forkFrom).
+//! The lifecycle concern: the constructors, the open/fork/new/materialize/
+//! adopt arm, and the fork's branch-copy helpers.
 
 #[cfg(test)]
 use super::repair::repair_jsonl_damage;
@@ -11,11 +10,10 @@ use super::{
     NewSessionOptions, Path, PathBuf, SessionHeader, SessionManager, CURRENT_SESSION_VERSION,
 };
 
-/// The fork's branch copy (TS `forkFrom`'s entry loop): drop the source
-/// header and its `git_state` rows, re-linking any child whose parent was a
-/// dropped row to the nearest kept ancestor. Re-parented entries round-trip
-/// through their own JSON (TS `{ ...entry, parentId }`) so every other field
-/// stays verbatim.
+/// The fork's branch copy: drop the source header and its `git_state` rows,
+/// re-linking any child whose parent was dropped to the nearest kept
+/// ancestor. Re-parented entries round-trip through their own JSON; other
+/// fields stay verbatim.
 fn forked_branch_entries(entries: Vec<FileEntry>) -> Vec<FileEntry> {
     // git_state rows describe the source repo; the fork reports its own.
     let mut dropped_parent: HashMap<String, Option<String>> = HashMap::new();
@@ -26,11 +24,9 @@ fn forked_branch_entries(entries: Vec<FileEntry>) -> Vec<FileEntry> {
             }
         }
     }
-    // Resolve each dropped id to its nearest kept ancestor lazily — TS's
-    // `liveParent`, memoized over the ACYCLIC walks: a parent chain shared
-    // by many children costs one walk total. Cycles (malformed git_state
-    // rows) stay per-child: their terminal depends on the walk's start, so
-    // memoizing them would make the outcome depend on map iteration order.
+    // Resolve each dropped id to its nearest kept ancestor lazily (memoized
+    // over the ACYCLIC walks only): a cycle's terminal depends on the walk's
+    // start, so memoizing one would make the outcome depend on map order.
     let mut resolved: HashMap<String, Option<String>> = HashMap::new();
     entries
         .into_iter()
@@ -39,8 +35,7 @@ fn forked_branch_entries(entries: Vec<FileEntry>) -> Vec<FileEntry> {
             let parent = entry.parent_id().map(str::to_string);
             let live = match &parent {
                 // A dropped parent re-links to its resolved kept ancestor
-                // (which may be None, re-rooting the entry); a kept parent
-                // stays.
+                // (possibly None, re-rooting); a kept parent stays.
                 Some(id) if dropped_parent.contains_key(id) => {
                     resolve_dropped_ancestor(&dropped_parent, &mut resolved, id)
                 }
@@ -66,11 +61,7 @@ fn forked_branch_entries(entries: Vec<FileEntry>) -> Vec<FileEntry> {
 
 /// The nearest kept ancestor for one dropped `git_state` row: walk the
 /// dropped parents until an id that survives the fork (or a null parent),
-/// memoizing every ACYCLIC node the walk passed so shared chains resolve
-/// once. A cycle (malformed `git_state` rows parenting at each other) stops
-/// at the first repeated id WITHOUT memoizing: the terminal depends on the
-/// walk's start, so caching it would make the outcome depend on which
-/// child resolves first.
+/// memoizing the ACYCLIC nodes; a cycle stops at the first repeated id.
 fn resolve_dropped_ancestor(
     dropped_parent: &HashMap<String, Option<String>>,
     resolved: &mut HashMap<String, Option<String>>,
@@ -88,8 +79,7 @@ fn resolve_dropped_ancestor(
             return answer;
         }
         if !seen.insert(id.clone()) {
-            // The first repeated id of THIS walk — the outcome for this
-            // child, memoized for no one else.
+            // The first repeated id of THIS walk — memoized for no one else.
             return Some(id.clone());
         }
         if let Some(next) = dropped_parent.get(id.as_str()) {
@@ -103,8 +93,7 @@ fn resolve_dropped_ancestor(
             return answer;
         }
     }
-    // The chain ends at a null parent: every node on it re-links to the
-    // root.
+    // The chain ends at a null parent: every node on it re-links to the root.
     for node in path {
         resolved.insert(node, None);
     }
@@ -151,22 +140,18 @@ impl SessionManager {
         manager
     }
 
-    /// Create a persisted manager rooted at `session_dir`.
     #[must_use]
     pub fn persisted(cwd: &Path, session_dir: &Path) -> Self {
         Self::new_with(cwd.to_path_buf(), session_dir.to_path_buf(), None, true)
     }
 
-    /// Create an in-memory (non-persisted) manager.
     #[must_use]
     pub fn in_memory(cwd: &Path) -> Self {
         Self::new_with(cwd.to_path_buf(), cwd.to_path_buf(), None, false)
     }
 
-    /// Create an in-memory (non-persisted) manager pinned to a session's
-    /// own directory: the daemon worker owns the durable file and mirrors
-    /// the entries, but the session's identity (its directory, the local
-    /// harness state's home) stays the session's own.
+    /// Create an in-memory manager pinned to a session's own directory: the
+    /// session's identity (its directory, the local harness state's home) stays its own.
     #[must_use]
     pub fn in_memory_in_session_dir(cwd: &Path, session_dir: &Path) -> Self {
         let mut manager = Self::new_with(cwd.to_path_buf(), session_dir.to_path_buf(), None, false);
@@ -174,11 +159,8 @@ impl SessionManager {
         manager
     }
 
-    /// Whether the manager carries a session directory of its own: a
-    /// fresh in-memory manager holds only the cwd fallback, while every
-    /// session-backed manager (persisted, or the daemon's mirrored
-    /// engine session) does. Session-owned artifacts (the local harness
-    /// state) need it.
+    /// Whether the manager carries a session directory of its own:
+    /// session-owned artifacts (the local harness state) need it.
     #[must_use]
     pub fn has_session_dir(&self) -> bool {
         self.session_dir_backed
@@ -195,28 +177,22 @@ impl SessionManager {
         )
     }
 
-    /// TS `SessionManager.forkFrom`: copy a source session file into a
-    /// fresh session under `target_cwd`, parented at the source. The
-    /// source's `git_state` entries are dropped — they describe the source
-    /// repo, and the fork must report its own target context — with their
-    /// children re-linked to the nearest kept ancestor (TS `liveParent`).
-    /// The new header carries the source path as `parentSession`, the
-    /// resolved RLM depth, and the TARGET cwd's git context.
+    /// Copy a source session file into a fresh session under `target_cwd`,
+    /// parented at the source; the new header carries the source path as
+    /// `parentSession`, the resolved RLM depth, and the TARGET cwd's git context.
     ///
     /// # Errors
     ///
-    /// Returns a human-readable error string when the source session file is
-    /// not a regular file, is empty or invalid, has no header, or when the
-    /// forked session file cannot be flushed.
+    /// Error when the source is not a regular file, is empty or invalid, or
+    /// the flush fails.
     pub fn fork_from(
         source_path: &Path,
         target_cwd: &Path,
         session_dir: &Path,
     ) -> Result<Self, String> {
-        // A non-regular source (a FIFO or a device) blocks the copy's read
-        // until a writer appears; the fork reads regular files, so reject
-        // the rest up front. A missing path falls through to the
-        // empty-or-invalid contract (TS loadEntriesFromFile).
+        // A non-regular source (a FIFO or a device) would block the copy's
+        // read until a writer appears; a missing path falls through to the
+        // empty-or-invalid contract.
         if let Ok(metadata) = std::fs::metadata(source_path) {
             if !metadata.is_file() {
                 return Err(format!(
@@ -225,9 +201,8 @@ impl SessionManager {
                 ));
             }
         }
-        // Read-only: repairing would REWRITE the source (dropping a torn
-        // row mid-append into a live file); the copy just skips a torn
-        // tail like TS's `loadEntriesFromFile` (read + parse, no repair).
+        // Read-only: repairing would REWRITE the source (dropping a torn row
+        // mid-append); the copy skips a torn tail like TS `loadEntriesFromFile`.
         let mut entries = load_entries_from_file(source_path, false);
         if entries.is_empty() {
             return Err(format!(
@@ -251,9 +226,8 @@ impl SessionManager {
         let rlm_depth = resolve_session_rlm_depth(&source_header, source_path);
 
         let mut forked = Self::persisted(target_cwd, session_dir);
-        // A fresh unique id + header (TS `createUniqueSessionFileTarget`):
-        // the fork's git context is captured from the TARGET cwd, and the
-        // source rides along as `parentSession`.
+        // A fresh unique id + header: the fork's git context comes from the
+        // TARGET cwd, and the source rides along as `parentSession`.
         forked.new_session(&NewSessionOptions {
             id: None,
             parent_session: Some(source_path.display().to_string()),
@@ -261,20 +235,15 @@ impl SessionManager {
         });
         let branch = forked_branch_entries(entries);
         // The copied rows' assistant entries keep the append path durable
-        // from the first new entry (TS writes the whole fork synchronously):
-        // one predicate for the durable-append rule.
+        // from the first new entry: one predicate for the durable-append rule.
         forked.refresh_has_assistant_entry(&branch);
         forked.adopt_entries(branch);
         forked.flush_now().map_err(|error| error.to_string())?;
         Ok(forked)
     }
 
-    /// Open only the compacted active window off the async executor. Use
-    /// `active_context` until `ensure_full_history` completes before accessing
-    /// historical entries, navigation, or exporting.
-    ///
-    /// Production windowed managers come from [`Self::adopt_window`]; this
-    /// constructor serves the window tests.
+    /// Open only the compacted active window off the async executor; use
+    /// `active_context` until `ensure_full_history` completes.
     ///
     /// # Errors
     ///
@@ -302,30 +271,20 @@ impl SessionManager {
             manager.session_file = Some(path);
             manager.persist = true;
             manager.session_dir_backed = true;
-            // The production adoption path: one-copy move (the test
-            // constructor rides the same detach semantics the daemon's
-            // engine uses).
+            // The production adoption path: the test constructor rides the
+            // same detach semantics the daemon's engine uses.
             manager.adopt_window(window);
             Ok(manager)
         })
         .await?
     }
-    /// Adopt a verified read-only window into an externally persisted manager.
-    /// The adopted file is complete and appendable (the window's boundary
-    /// proves real message history), so the manager joins with the same
-    /// durable-append invariants the test constructor installs: rows go
-    /// straight to disk — never deferred behind the bootstrap rule, whose
-    /// `flushed = false` would later send `flush_now` into the
-    /// window-failing rewrite path.
+    /// Adopt a verified read-only window into an externally persisted
+    /// manager: rows go straight to disk, never deferred behind the
+    /// bootstrap rule.
     pub fn adopt_window(&mut self, mut window: super::window::WindowedSessionStore) {
-        // One-copy adoption: the walk's parsed trees move in (no `to_vec`
-        // clone), and the raw JSONL lines drop here — the file itself is the
-        // durable raw copy, and a second resident typed copy plus the raw
-        // lines measured ~29.5MiB of wire-equivalent duplication on the
-        // 10MiB canonical fixture (worker-rss census, 2026-09-26). The
-        // window stays attached for its snapshot/settings/metadata state;
-        // `active_context` walks `file_entries` with the window's settings
-        // overlay, so the served context is unchanged.
+        // One-copy adoption: the parsed trees move in (no `to_vec` clone); the
+        // window stays attached for its snapshot/settings/metadata state, and
+        // `active_context` walks `file_entries` with the window's settings overlay.
         let (entries, _raw_entries) = window.take_retained();
         self.file_entries = entries;
         self.build_index();
@@ -336,11 +295,9 @@ impl SessionManager {
     }
 
     /// Whether this manager's durable appends may certify the window cache
-    /// incrementally. Only a caller holding this session's runtime lease may
-    /// raise it (exactly one writer per lease; the lease's release flushes the
-    /// certified snapshot to the sidecar), and every other manager keeps the
-    /// unleased default that evicts the live snapshot instead of extending a
-    /// certification it cannot guarantee.
+    /// incrementally: only a lease holder may raise it (exactly one writer
+    /// per lease); every other manager evicts the live snapshot instead of
+    /// extending a certification it cannot guarantee.
     pub fn set_append_ownership(&mut self, ownership: super::window::AppendOwnership) {
         self.append_ownership = ownership;
     }
@@ -348,8 +305,7 @@ impl SessionManager {
     ///
     /// # Panics
     ///
-    /// The `unwrap` on the session file path is guarded by the existence
-    /// check right above it, so it cannot fail.
+    /// The `unwrap` on the session file path is guarded by the existence check above.
     pub fn set_session_file(
         &mut self,
         session_file: PathBuf,
@@ -363,7 +319,6 @@ impl SessionManager {
                 preloaded_entries.unwrap_or_else(|| load_entries_from_file(&path, self.persist));
             self.refresh_has_assistant_entry(&entries);
 
-            // Empty or corrupted (no valid header): truncate and start fresh.
             if entries.is_empty() {
                 let explicit_path = path;
                 self.new_session(&NewSessionOptions::default());
@@ -403,17 +358,16 @@ impl SessionManager {
     ///
     /// # Panics
     ///
-    /// Panics when an explicit session id is requested while persisting and
-    /// a session file for that id already exists.
+    /// Panics when an explicit session id is requested while persisting and that id's file exists.
     pub fn new_session(&mut self, options: &NewSessionOptions) -> Option<PathBuf> {
         let mut session_id = options.id.clone().unwrap_or_else(create_session_id);
         let mut session_file: Option<PathBuf> = None;
         if self.persist {
-            if options.id.is_some() {
-                let candidate = get_session_file_path(&self.session_dir, &session_id);
+            if let Some(id) = &options.id {
+                let candidate = get_session_file_path(&self.session_dir, id);
                 assert!(
                     !candidate.exists(),
-                    "Session file already exists for id \"{session_id}\": {}",
+                    "Session file already exists for id \"{id}\": {}",
                     candidate.display()
                 );
                 session_file = Some(candidate);
@@ -473,8 +427,7 @@ impl SessionManager {
     ///
     /// # Panics
     ///
-    /// Asserts that the manager holds no windowed store: hydrate the full
-    /// session history first.
+    /// Asserts that the manager holds no windowed store: hydrate the full session history first.
     pub fn materialize_session_file(&mut self, session_dir: Option<PathBuf>) -> PathBuf {
         assert!(
             self.window.is_none(),
@@ -535,11 +488,9 @@ impl SessionManager {
         self.flushed = true;
         target
     }
-    /// Adopt a durable branch as this session's entries (TS
-    /// `createBranchedSession`'s in-memory case, and the engine's
-    /// post-navigation context rebuild): keeps the header, replaces every
-    /// entry with the given chain, and re-indexes so the leaf is the last
-    /// adopted entry. In-memory only — the caller owns any persistence.
+    /// Adopt a durable branch as this session's entries: keeps the header,
+    /// replaces every entry with the given chain, and re-indexes so the leaf
+    /// is the last adopted entry. In-memory only — the caller owns persistence.
     pub fn adopt_entries(&mut self, entries: Vec<FileEntry>) {
         // The caller supplies the complete selected branch after explicit navigation.
         self.window = None;

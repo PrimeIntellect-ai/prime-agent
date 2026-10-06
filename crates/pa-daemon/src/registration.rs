@@ -1,12 +1,7 @@
-//! Worker -> supervisor self-registration link.
-//!
-//! Each session worker registers itself with the supervisor on boot and
-//! re-registers whenever the supervisor connection returns. A supervisor
-//! restart must not lose sessions: workers keep running and serving their
-//! own clients, and the supervisor's roster is rebuilt from their
-//! re-registrations. The registration connection doubles as the worker's
-//! liveness watch on the supervisor socket - when it drops, this loop
-//! reconnects with exponential backoff and re-presents the same identity.
+//! Worker -> supervisor self-registration link. Each session worker
+//! registers itself on boot and re-registers whenever the connection
+//! returns, so a supervisor restart rebuilds its roster without losing
+//! sessions. The registration connection doubles as the liveness watch.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -24,27 +19,17 @@ use pa_types::platform::transport::{
     connect_transport, AsyncReadHalf, AsyncWriteHalf, TransportStream,
 };
 
-/// The supervisor's definitive rejection of a registration (`Supervisor::
-/// adopt_registered_worker`'s unknown-worker error, the TS string): the
-/// supervisor has no descriptor for this worker, so no daemon will ever
-/// adopt or route to the process again. The registration loop treats it as
-/// terminal instead of retrying forever — the worker retires (the graceful
-/// self-exit `crate::supervisor_lost` documents as the refused-registration
-/// self-heal) so it stops holding its session lease against every future
-/// resume while staying invisible to the roster.
+/// The supervisor's definitive rejection of a registration: no daemon
+/// will ever adopt or route to the process again — the worker retires.
 pub(crate) const UNKNOWN_SESSION_WORKER_PREFIX: &str = "Unknown session worker";
 
 /// Whether a registration failure is the definitive unknown-worker
-/// rejection (no supervisor owns this identity) rather than a transient
-/// one (a shut-down supervisor, an unreachable socket) the loop must
-/// outlive with backoff.
+/// rejection rather than a transient one.
 fn is_definitive_rejection(message: &str) -> bool {
     message.contains(UNKNOWN_SESSION_WORKER_PREFIX)
 }
 
-/// Backoff between failed registration attempts, mirroring the supervisor's
-/// worker-restart backoff: 250ms base, doubling, capped at 30s. Resets after
-/// one successful registration.
+/// Backoff between failed registration attempts, mirroring the worker-restart backoff.
 const BASE_BACKOFF_MS: u64 = 250;
 const MAX_BACKOFF_MS: u64 = 30_000;
 const CONNECT_TIMEOUT_MS: u64 = 1_000;
@@ -63,10 +48,8 @@ pub enum RegistrationSignal {
 pub struct RegistrationHandle {
     session_id: Arc<std::sync::Mutex<Option<String>>>,
     tx: mpsc::UnboundedSender<RegistrationSignal>,
-    /// Set when the supervisor definitively rejected this worker's
-    /// identity: the worker runtime watches it to retire (the graceful
-    /// self-exit releasing the session lease) instead of serving on with
-    /// no daemon able to reach it.
+    /// Set when the supervisor definitively rejected this worker's identity: the worker runtime
+    /// watches it to retire instead of serving on with no daemon able to reach it.
     retired: Arc<tokio::sync::Notify>,
 }
 
@@ -75,8 +58,7 @@ impl RegistrationHandle {
     ///
     /// # Panics
     ///
-    /// Panics when the session-id mutex is poisoned (a holder panicked
-    /// while holding the lock).
+    /// Panics when the session-id mutex is poisoned.
     pub fn notify_session_created(&self, session_id: String) {
         *self.session_id.lock().unwrap() = Some(session_id.clone());
         let _ = self
@@ -84,17 +66,14 @@ impl RegistrationHandle {
             .send(RegistrationSignal::SessionCreated { session_id });
     }
 
-    /// Resolve once the supervisor definitively rejected this worker's
-    /// identity (the unknown-worker verdict): no supervisor can ever adopt
-    /// or route to this process again, so the worker must retire.
+    /// Resolve once the supervisor definitively rejected this identity.
     pub async fn retired(&self) {
         self.retired.notified().await;
     }
 }
 
 /// The registration identity a worker presents: its supervisor-issued
-/// bootstrap identity (active session id, token) plus where its own socket
-/// lives. Stable across supervisor restarts.
+/// bootstrap identity plus where its own socket lives (stable across supervisor restarts).
 #[derive(Debug, Clone)]
 struct Identity {
     active_session_id: String,
@@ -103,10 +82,8 @@ struct Identity {
     token: String,
 }
 
-/// Start the registration loop for a worker spawned under a supervisor.
-/// Returns `None` when the worker has no supervisor socket (a standalone
-/// worker run directly by a test or user); such a worker has nobody to
-/// register with.
+/// Start the registration loop for a worker spawned under a supervisor;
+/// `None` when the worker has no supervisor socket.
 #[must_use]
 pub fn start(config: &WorkerConfig) -> Option<RegistrationHandle> {
     if config.supervisor_socket_path.as_os_str().is_empty() {
@@ -142,8 +119,8 @@ struct RegistrationTask {
     supervisor_socket_path: PathBuf,
     identity: Identity,
     session_id: Arc<std::sync::Mutex<Option<String>>>,
-    /// Shared with the handle: set once the supervisor's rejection of this
-    /// identity is definitive, so the worker runtime can retire.
+    /// Shared with the handle: set once the supervisor's rejection of
+    /// this identity is definitive, so the worker runtime can retire.
     retired: Arc<tokio::sync::Notify>,
     signals: mpsc::UnboundedReceiver<RegistrationSignal>,
 }
@@ -153,14 +130,8 @@ fn current_session_id(session_id: &Arc<std::sync::Mutex<Option<String>>>) -> Opt
 }
 
 impl RegistrationTask {
-    /// Register, hold the connection open as the liveness watch, and repeat
-    /// with backoff for as long as the worker lives. The one terminal exit:
-    /// the supervisor's definitive unknown-worker rejection — on the initial
-    /// registration or the in-place `SessionCreated` re-registration — its
-    /// descriptor for this identity is gone, so no daemon will ever adopt
-    /// the process again, and a worker that kept retrying would hold its
-    /// session lease forever while staying invisible to every roster (the
-    /// refused-registration self-heal retires it instead).
+    /// Register, hold the connection open as the liveness watch, and repeat with backoff for as
+    /// long as the worker lives. The one terminal exit: the definitive unknown-worker rejection.
     async fn run(mut self) {
         let mut backoff = BASE_BACKOFF_MS;
         loop {
@@ -169,13 +140,9 @@ impl RegistrationTask {
                 Ok((reader, writer)) => {
                     backoff = BASE_BACKOFF_MS;
                     if let Err(error) = self.hold_connection(reader, writer).await {
-                        // The in-place `SessionCreated` re-registration runs
-                        // on this connection, so its refusal carries the
-                        // same terminal verdict as the initial one: retire
-                        // instead of retrying against a supervisor that
-                        // holds no descriptor for this identity (a worker
-                        // that kept retrying would hold its session lease
-                        // forever while staying invisible to every roster).
+                        // The in-place `SessionCreated` re-registration
+                        // runs on this connection, so its refusal carries
+                        // the same terminal verdict as the initial one.
                         let message = format!("{error:#}");
                         if is_definitive_rejection(&message) {
                             debug_log(&format!(
@@ -231,7 +198,6 @@ impl RegistrationTask {
         Ok((reader, write_half))
     }
 
-    /// Send one registration envelope and await its response.
     async fn send_register(
         &self,
         reader: &mut BufReader<Box<dyn AsyncReadHalf>>,
@@ -286,10 +252,8 @@ impl RegistrationTask {
         }
     }
 
-    /// Hold the registration connection open as the liveness watch: the
-    /// connection's death is what triggers re-registration. Ends when the
-    /// supervisor closes the socket or the runtime signals a session-id
-    /// update (re-registered in place on the same connection).
+    /// Hold the registration connection open as the liveness watch (its
+    /// death triggers re-registration); ends on close or a session-id signal.
     async fn hold_connection(
         &mut self,
         mut reader: BufReader<Box<dyn AsyncReadHalf>>,
@@ -324,7 +288,6 @@ impl RegistrationTask {
     }
 }
 
-/// Read one JSONL line from the supervisor connection.
 async fn read_line(reader: &mut BufReader<Box<dyn AsyncReadHalf>>) -> Result<Value> {
     let mut line = String::new();
     let read = reader.read_line(&mut line).await?;
@@ -351,8 +314,7 @@ mod tests {
     use pa_types::platform::transport::{bind_transport, TransportStream};
 
     /// Only the supervisor's unknown-worker verdict is definitive: the
-    /// transient failures (a shutting-down supervisor, an unreachable
-    /// socket, a timed-out response) stay retryable, and the loop's own
+    /// transient failures stay retryable, and the loop's own
     /// "registration rejected" wrap still exposes the verdict inside it.
     #[test]
     fn only_the_unknown_worker_verdict_is_definitive() {
@@ -436,7 +398,6 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(300)).await;
 
         let listener = bind_transport(&supervisor_socket).await.expect("bind");
-        // First registration: full identity, no session id yet.
         let stream = tokio::time::timeout(Duration::from_secs(5), listener.accept())
             .await
             .expect("registration within bounded window")
@@ -501,12 +462,7 @@ mod tests {
     }
 
     /// A definitive rejection on the HELD connection retires too: the
-    /// in-place `SessionCreated` re-registration can carry the unknown-
-    /// worker verdict (the supervisor lost this identity between the
-    /// initial registration and the session's creation), and the terminal
-    /// handling does not depend on which attempt the refusal rides —
-    /// retiring there as well keeps the refused worker from retrying
-    /// forever against a supervisor that will never adopt it.
+    /// in-place `SessionCreated` re-registration can carry the unknown-worker verdict.
     #[tokio::test]
     async fn a_definitive_rejection_on_the_held_connection_retires() {
         let dir = tempfile::TempDir::new().expect("temp dir");
@@ -560,11 +516,6 @@ mod tests {
         assert!(late.is_err(), "a retired registration never retries");
     }
 
-    /// The definitive rejection retires the worker: a supervisor that
-    /// answers `worker_register` with the unknown-worker error ends the
-    /// retry loop (the `retired` signal resolves) and no further
-    /// registration arrives — a transient rejection (a shutting-down
-    /// supervisor) keeps the loop retrying instead.
     #[tokio::test]
     async fn a_definitive_rejection_retires_and_a_transient_one_retries() {
         let dir = tempfile::TempDir::new().expect("temp dir");

@@ -1,6 +1,6 @@
-//! The persist concern (moved with its concern): the entry index, the
-//! rewrite/flush/notify plumbing, the durable append arm, and the atomic
-//! session-file write (TS writeFileAtomicSync).
+//! The persist concern: the entry index, the rewrite/flush/notify plumbing,
+//! the durable append arm, and the atomic session-file write
+//! (TS `writeFileAtomicSync`).
 
 use super::{
     serialize_entry, AgentMessage, FileEntry, Path, PathBuf, SessionManager,
@@ -104,9 +104,8 @@ impl SessionManager {
     ///
     /// # Errors
     ///
-    /// Returns the underlying I/O error when the session file rewrite
-    /// fails; unpersisted or already-flushed managers succeed without
-    /// touching the disk.
+    /// I/O error when the session file rewrite fails; unpersisted or
+    /// already-flushed managers never touch the disk.
     pub fn flush_now(&mut self) -> std::io::Result<()> {
         if !self.persist || self.session_file.is_none() {
             return Ok(());
@@ -155,20 +154,11 @@ impl SessionManager {
     }
 }
 
-/// Atomic session-file write: private temp + fsync + rename onto the
-/// destination (the `writeFileAtomicSync` shape; the win32 destination-busy
-/// retry rides along in `rename_onto`).
-///
-/// The fsync is the port's deliberate session durability strengthening, not
-/// TS parity: the TS session rewrites and repairs pass no `fsync` option
-/// (session-manager.ts `_rewriteFile`/`_repairTornTail`), and the port
-/// instead promises that a row the append path made durable
-/// (`window::append_cached`'s per-row sync) is never regressed by the
-/// rewrite that replaces it — a non-synced rename onto the destination can
-/// zero the file on a hard crash, the window TS tolerates through
-/// repair-on-open. Disclosed in the atomic-write durability audit: the
-/// session family keeps its fsync; every other `atomic_write` family site
-/// is TS-default (no fsync).
+/// Atomic session-file write: private temp + fsync + rename (the
+/// `writeFileAtomicSync` shape; the win32 destination-busy retry rides
+/// along in `rename_onto`). The fsync is deliberate (TS passes none; a
+/// non-synced rename can zero the file on a hard crash); other sites are
+/// TS-default.
 pub(super) fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
     let temp = PathBuf::from(format!("{}.tmp{}", path.display(), std::process::id()));
     {

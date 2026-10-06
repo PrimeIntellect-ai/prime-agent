@@ -1,27 +1,19 @@
-//! Session supervisor, worker processes, and wire protocol for Prime Agent.
-//!
-//! Ported from the TypeScript daemon: `modes/daemon/*`, `modes/session-worker/*`,
-//! `core/session-manager.ts`, and `core/session-lease.ts`. The supervisor hosts
-//! no sessions: it spawns one worker process per active session, supervises
-//! restarts with backoff, and routes clients. Sessions persist as append-only
-//! JSONL under `<agent-dir>/sessions/` using the same layout as the TS product.
-// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
-// the full rationale).
+//! Session supervisor, worker processes, and wire protocol for Prime Agent:
+//! the supervisor spawns one worker process per active session, supervises
+//! restarts with backoff, and routes clients; sessions persist as
+//! append-only JSONL in the same layout as the TS product.
 // Stack-resident futures by design on the daemon's hot paths; boxing the
-// call sites for a lint tick is a perf regression with zero correctness gain.
+// call sites for a lint tick is a perf regression.
 #![allow(clippy::large_futures)]
 // 64-bit-only targets; the narrowing casts sit at OS boundaries
-// (pid/fd/time/size) where the values are bounded by the kernel - the
-// dead-guard expect()s would add panic paths where silent wrap was
-// deliberate.
+// (pid/fd/time/size) where the values are bounded by the kernel.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// The fn-length threshold is a style gate, not correctness; the structure
-// campaign owns the god-fn splits as a follow-up.
+// The fn-length threshold is a style gate, not correctness.
 #![allow(clippy::too_many_lines)]
 // API-shape opinions, not defects; the surfaces are deliberate.
 #![allow(
@@ -53,9 +45,11 @@ pub(crate) mod context_tree_children;
 pub(crate) mod create_reuse;
 pub mod descriptor;
 pub mod engine;
+pub(crate) mod factory_activity;
 pub mod framing;
 mod goal_continuation;
 pub(crate) mod goal_state_persist;
+pub(crate) mod herdr;
 pub mod hold_refusal;
 pub(crate) mod image_route;
 pub mod input_pause_lease;
@@ -128,3 +122,6 @@ pub(crate) mod user_bash;
 pub mod util;
 pub mod worker;
 pub(crate) mod worker_stderr;
+
+#[cfg(test)]
+pub(crate) mod test_support;

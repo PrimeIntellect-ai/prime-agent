@@ -1,10 +1,8 @@
-//! Click-to-place-caret (TS `editor.ts`'s `placeCursorFromClick` and
-//! `snapCursorOffset`): a plain click on one of the editor's visible
-//! content rows places the caret at the clicked cell. The click's row
-//! indexes the rendered layout (the visible window), its column maps
-//! through the row's layout chunk into the source line, and grapheme
-//! segments snap by their visible-width midpoint — a click past the
-//! middle of a wide cell or an atomic paste marker lands after it.
+//! Click-to-place-caret: a plain click on one of the editor's visible
+//! content rows places the caret at the clicked cell — the row indexes
+//! the rendered layout, the column maps through the row's layout chunk
+//! into the source line, and grapheme segments snap by their
+//! visible-width midpoint.
 
 use super::{Editor, Segment};
 use crate::width::str_width;
@@ -125,7 +123,6 @@ mod tests {
     #[test]
     fn a_click_before_a_wide_cell_snaps_in_front_of_it() {
         let mut editor = editor("日本語 x");
-        // `日` covers columns 0-1: the left edge snaps in front.
         editor.place_cursor_from_click(40, 0, 0);
         assert_eq!(editor.get_cursor(), (0, 0));
     }
@@ -133,8 +130,6 @@ mod tests {
     #[test]
     fn a_click_past_a_wide_cells_midpoint_snaps_after_it() {
         let mut editor = editor("日本語 x");
-        // Column 1 is `日`'s midpoint: the caret lands after it, and
-        // column 2 falls on `本`'s left edge (in front of it).
         editor.place_cursor_from_click(40, 0, 1);
         assert_eq!(editor.get_cursor(), (0, 1));
         editor.place_cursor_from_click(40, 0, 2);
@@ -143,9 +138,6 @@ mod tests {
 
     #[test]
     fn a_click_on_a_wrapped_row_places_the_caret_at_the_wrap_point() {
-        // One long word hard-wraps at exactly the content width, so the
-        // second row renders the continuation chunk: its column 0 is the
-        // source line's column 10.
         let mut editor = editor("aaaaaaaaaabbbbbbbbbb");
         editor.place_cursor_from_click(10, 1, 0);
         assert_eq!(editor.get_cursor(), (0, 10));
@@ -156,8 +148,6 @@ mod tests {
     #[test]
     fn a_click_cancels_a_shift_arrow_selection() {
         let mut editor = editor("hello world");
-        // Shift+right extends the selection: the anchor sits at the
-        // line's start with the caret after `h`.
         editor.set_cursor_for_tests(0, 0);
         editor.handle_input("shift+right");
         assert!(editor.selection_range().is_some(), "the selection opened");

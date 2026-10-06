@@ -15,8 +15,8 @@ use super::{
     DEFAULT_RLM_EXTRA_PACKAGES,
 };
 
-// The concern children (cut with their concerns; the flows + the shared
-// record stay in the composition root).
+// The concern children (the flows + the shared record stay in the
+// composition root).
 mod layout;
 mod probe;
 mod runtime_source;
@@ -29,10 +29,11 @@ pub(crate) use layout::{expand_home, resolve_writable_kernel_venv_dir};
 pub use layout::{kernel_venv_dir, kernel_venv_python};
 pub use probe::invalidate_runtime_probe_cache;
 #[cfg(test)]
-use probe::{
-    clear_in_process_probe_memo_for_tests, installed_package_dir, installed_rlm_dir,
-    lock_probe_memo, runtime_probe_key,
-};
+use probe::{installed_rlm_dir, lock_probe_memo, runtime_probe_key};
+// The memo-clear helper and the live-probe package-dir walk exist only behind
+// the unix tests (see their gates in probe.rs and tests.rs).
+#[cfg(all(test, unix))]
+use probe::{clear_in_process_probe_memo_for_tests, installed_package_dir};
 pub(crate) use probe::{
     has_prime_agent_runtime, missing_python_skill_import_labels, missing_rlm_extra_import_labels,
 };
@@ -162,11 +163,8 @@ pub(crate) async fn bootstrap_venv(
     .await
 }
 
-/// Install/refresh the editable Python skills recorded in the version file.
-/// The version file is a shared cache, not a per-session manifest: records
-/// from other sessions carry over, and only skills missing or changed are
-/// installed. Per-skill failures warn and continue: one broken skill must
-/// not cost the kernel.
+/// Install/refresh the editable Python skills recorded in the version file. Only skills missing or
+/// changed are installed. Per-skill failures warn and continue.
 pub(crate) async fn sync_python_skills(
     uv: &str,
     venv: &Path,
@@ -176,11 +174,8 @@ pub(crate) async fn sync_python_skills(
     options: &EnsureKernelPythonOptions,
 ) -> anyhow::Result<()> {
     let version = read_bootstrap_version(venv);
-    // Previously installed skills still present on disk: their records carry
-    // over so sessions with different skill sets share one venv cache
-    // instead of forcing reinstalls of each other's skills. Records for
-    // skills whose package path disappeared (a retired release dir, a
-    // deleted project) cannot serve a future install and are dropped.
+    // Previously installed skills still present on disk: their records carry over so
+    // sessions with different skill sets share one venv cache.
     let current_python_skills: HashMap<String, BootstrapPythonSkill> = version
         .as_ref()
         .and_then(|v| v.python_skills.clone())
@@ -203,12 +198,9 @@ pub(crate) async fn sync_python_skills(
         missing.push(skill);
     }
     if !missing.is_empty() {
-        // One uv invocation installs the whole batch of missing skills: a
-        // fresh kernel bootstrap otherwise pays one process plus build-backend
-        // startup per metadata-only editable install (measured: nine serial
-        // installs ~1.9s, one batched invocation ~0.4s, warm uv cache). A
-        // batch failure falls back to the per-skill loop so one broken skill
-        // still costs only its own warning and never blocks the rest.
+        // One uv invocation installs the whole batch of missing skills: a fresh bootstrap otherwise
+        // pays one process plus build-backend startup per install. A batch failure falls back to
+        // the per-skill loop.
         let mut install_args = vec![
             "pip".to_string(),
             "install".to_string(),

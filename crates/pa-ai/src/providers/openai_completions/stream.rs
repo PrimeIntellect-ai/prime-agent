@@ -1,7 +1,5 @@
-//! `OpenAI` Completions streaming core.
-//! Section of the port of `packages/ai/src/providers/openai-completions.ts`:
-//! chunk-driven block state (`text/thinking/toolcalls/reasoning_details`), SSE
-//! decoding, and the provider stream function.
+//! `OpenAI` Completions streaming core: chunk-driven block state
+//! (`text/thinking/toolcalls/reasoning_details`), SSE decoding, and the provider stream function.
 
 use std::collections::HashMap;
 
@@ -31,7 +29,9 @@ use crate::utils_inner::json_parse::{
     parse_json_with_repair, parse_streaming_json, StreamingJsonAccumulator,
 };
 use crate::utils_inner::sse::{ServerSentEvent, SseDecoder};
-use crate::utils_inner::stream_failure::{record_stream_failure, ProviderError};
+use crate::utils_inner::stream_failure::{
+    record_stream_failure, stream_drop_failure, OpenStreamBlock, ProviderError,
+};
 
 struct StreamingState {
     output: AssistantMessage,
@@ -44,6 +44,10 @@ struct StreamingState {
     next_reasoning_details_index: u64,
     reasoning_details_block: Option<usize>,
     response_service_tier: Option<String>,
+    /// The stop signal arrived in a chunk (`choices[0].finish_reason`).
+    saw_finish_reason: bool,
+    /// The SSE terminal marker (`data: [DONE]`) arrived.
+    saw_done_marker: bool,
 }
 
 impl StreamingState {
@@ -59,6 +63,8 @@ impl StreamingState {
             next_reasoning_details_index: 0,
             reasoning_details_block: None,
             response_service_tier: None,
+            saw_finish_reason: false,
+            saw_done_marker: false,
         }
     }
 
@@ -194,7 +200,7 @@ fn finish_blocks(state: &mut StreamingState, writer: &AssistantMessageEventWrite
 }
 
 /// Handle one parsed SSE chunk. Returns the chunk value for testability.
-// Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+// Long by design: mirrors the provider's stream shape.
 #[allow(clippy::too_many_lines)]
 fn handle_chunk(
     chunk: &Value,
@@ -246,6 +252,7 @@ fn handle_chunk(
     }
 
     if let Some(finish_reason) = choice.get("finish_reason").and_then(|value| value.as_str()) {
+        state.saw_finish_reason = true;
         let (stop_reason, error_message) = map_stop_reason(finish_reason);
         state.output.stop_reason = stop_reason;
         if error_message.is_some() {
@@ -257,7 +264,6 @@ fn handle_chunk(
         return;
     };
 
-    // Text content.
     if let Some(content) = delta.get("content").and_then(|value| value.as_str()) {
         if !content.is_empty() {
             let index = state.ensure_text_block(writer);
@@ -272,9 +278,8 @@ fn handle_chunk(
         }
     }
 
-    // Some endpoints return reasoning in reasoning_content (llama.cpp),
-    // or reasoning (other openai compatible endpoints). Use the first
-    // non-empty reasoning field to avoid duplication.
+    // Some endpoints return reasoning in reasoning_content (llama.cpp), or reasoning (other openai
+    // compatible endpoints). Use the first non-empty reasoning field to avoid duplication.
     let mut found_reasoning_field: Option<(&str, &str)> = None;
     for field in REASONING_FIELDS {
         if let Some(value) = delta.get(field).and_then(|value| value.as_str()) {
@@ -296,7 +301,6 @@ fn handle_chunk(
         });
     }
 
-    // Tool calls.
     if let Some(tool_calls) = delta.get("tool_calls").and_then(|value| value.as_array()) {
         for tool_call in tool_calls {
             let stream_index = tool_call.get("index").and_then(serde_json::Value::as_u64);
@@ -398,8 +402,8 @@ fn handle_chunk(
                 }
             }
         }
-        // The signature is encoded once at stream end (and on the error path)
-        // by `encode_reasoning_details_signature`, not per delta (TS PR #2783).
+        // The signature is encoded once at stream end (and on the error path) by
+        // `encode_reasoning_details_signature`, not per delta.
         if !state.reasoning_details_by_index.is_empty() && state.reasoning_details_block.is_none() {
             state
                 .output
@@ -420,9 +424,8 @@ fn handle_chunk(
     }
 }
 
-/// Port of the TS `encodeReasoningDetailsSignature`: encode the merged
-/// reasoning-details signature once at stream end and on the error path,
-/// instead of on every `reasoning_details` delta.
+/// Encode the merged reasoning-details signature once at stream end and on the error path, not on
+/// every `reasoning_details` delta (TS `encodeReasoningDetailsSignature`).
 fn encode_reasoning_details_signature(state: &mut StreamingState) {
     let Some(block_index) = state.reasoning_details_block else {
         return;
@@ -438,8 +441,8 @@ fn encode_reasoning_details_signature(state: &mut StreamingState) {
     }
 }
 
-/// Port of the TS catch settle: finalize tool-call blocks whose parsed
-/// preview may lag the accumulated text under the growth throttle.
+/// Port of the TS catch settle: finalize tool-call blocks whose parsed preview may lag the
+/// accumulated text under the growth throttle.
 fn settle_partial_tool_calls(state: &mut StreamingState) {
     for (index, accumulator) in &mut state.tool_call_partial_args {
         let Some(AssistantContent::ToolCall(block)) = state.output.content.get_mut(*index) else {
@@ -464,7 +467,6 @@ fn error_to_message(error: &ProviderError) -> String {
     message
 }
 
-/// Port of `streamOpenAICompletions`.
 pub fn stream_openai_completions(
     model: &Model,
     context: &Context,
@@ -525,7 +527,7 @@ pub fn stream_openai_completions(
     reader
 }
 
-// Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+// Long by design: mirrors the provider's stream shape.
 #[allow(clippy::too_many_lines)]
 async fn run_stream(
     model: &Model,
@@ -605,18 +607,15 @@ async fn run_stream(
         on_response(
             crate::types::ProviderResponse {
                 status: response.status,
-                // Collected into the ordered map: the hook payload can
-                // serialize, and the HTTP header arrival order is not a
-                // stable serialization order.
                 headers: response.headers.clone().into_iter().collect(),
             },
             model,
         );
     }
 
-    // The TS provider goes through the `openai` SDK, which throws on every
-    // non-OK status (2xx only) and whose `APIError` message the provider
-    // surfaces verbatim as the assistant message's error message.
+    // The TS provider goes through the `openai` SDK, which throws on every non-OK status (2xx only)
+    // and whose `APIError` message the provider surfaces verbatim as the assistant message's error
+    // message.
     if !(200..300).contains(&response.status) {
         let body = response.read_all_text().await.unwrap_or_default();
         return Err(openai_http_error(
@@ -637,9 +636,8 @@ async fn run_stream(
             Ok(Some(chunk)) => chunk,
             Ok(None) => break,
             Err(error) => {
-                // TS catch: encode the reasoning-details signature, then
-                // settle the partial tool calls before the error event
-                // carries the message (TS PR #2783).
+                // TS catch: encode the reasoning-details signature, then settle the partial tool
+                // calls before the error event carries the message.
                 encode_reasoning_details_signature(&mut state);
                 settle_partial_tool_calls(&mut state);
                 *output = state.output;
@@ -648,14 +646,27 @@ async fn run_stream(
         };
         let events = decoder.push_text(&chunk);
         for event in &events {
+            if mark_done_marker(event, &mut state) {
+                // A held-open body past [DONE] never EOFs; the marker
+                // ends the stream.
+                break;
+            }
             if let Some(chunk) = parse_sse_event_data(event) {
                 handle_chunk(&chunk, model, cache_write_cost, &mut state, writer);
             }
         }
+        if state.saw_done_marker {
+            break;
+        }
     }
-    for event in decoder.finish() {
-        if let Some(chunk) = parse_sse_event_data(&event) {
-            handle_chunk(&chunk, model, cache_write_cost, &mut state, writer);
+    if !state.saw_done_marker {
+        for event in decoder.finish() {
+            if mark_done_marker(&event, &mut state) {
+                continue;
+            }
+            if let Some(chunk) = parse_sse_event_data(&event) {
+                handle_chunk(&chunk, model, cache_write_cost, &mut state, writer);
+            }
         }
     }
     // The multiplier table is OpenAI's own; gateways price tiers per endpoint
@@ -690,14 +701,52 @@ async fn run_stream(
                 .unwrap_or_else(|| "Provider returned an error stop reason".to_string()),
         ));
     }
+    // The drop: the provider ended the stream without its terminal marker —
+    // no stop signal (`finish_reason`), no `[DONE]`, no error frame. A
+    // healthy completion always carries one; an end without one means the
+    // response was cut off mid-flight, so the turn must not settle as a
+    // completed (partial or empty) message. Classified as the retryable
+    // `stream_drop` failure: the auto-retry arms re-issue the same request,
+    // and the exhaustion discloses instead of the silent empty turn.
+    if !state.saw_finish_reason && !state.saw_done_marker {
+        return Err(ProviderError::StreamFailure(stream_drop_failure(
+            open_stream_block(output),
+        )));
+    }
 
     Ok(())
+}
+
+/// Record the SSE terminal marker (`data: [DONE]`); `true` when the event
+/// carried it.
+fn mark_done_marker(event: &ServerSentEvent, state: &mut StreamingState) -> bool {
+    if event.data.trim() == "[DONE]" {
+        state.saw_done_marker = true;
+        true
+    } else {
+        false
+    }
+}
+
+/// The block a dropped stream was inside when the connection ended.
+fn open_stream_block(output: &AssistantMessage) -> OpenStreamBlock {
+    match output.content.last() {
+        Some(AssistantContent::Thinking(_)) => OpenStreamBlock::Thinking,
+        Some(AssistantContent::Text(_)) => OpenStreamBlock::Text,
+        Some(AssistantContent::ToolCall(_)) => OpenStreamBlock::ToolCall,
+        None => OpenStreamBlock::None,
+    }
 }
 
 /// Parse the JSON payload of an SSE event; `None` for `[DONE]` and comments.
 #[cfg(test)]
 #[path = "stream_bench.rs"]
 mod stream_bench;
+
+/// The stream-drop pins (the SSE fixtures that end without a stop signal).
+#[cfg(test)]
+#[path = "stream_drop.rs"]
+mod stream_drop;
 
 fn parse_sse_event_data(event: &ServerSentEvent) -> Option<Value> {
     if event.data.trim() == "[DONE]" {
@@ -714,6 +763,18 @@ mod tests {
     use super::*;
     use std::net::SocketAddr;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[path = "stream_pins.rs"]
+    mod stream_pins;
+
+    // The #755 output-budget wire pins (the captured request bodies).
+    #[path = "stream_max_tokens.rs"]
+    mod stream_max_tokens;
+
+    // The wire-level pins (the request head on the wire) live in their
+    // own child module with this file's test harness.
+    #[path = "stream_wire.rs"]
+    mod stream_wire;
 
     /// Serve one SSE response body for the provider's POST and return the
     /// bound address.
@@ -733,8 +794,7 @@ mod tests {
         addr
     }
 
-    /// Run the provider stream against the SSE body and return the final
-    /// assistant message.
+    /// Run the provider stream against the SSE body and return the final assistant message.
     async fn stream_final_message(mut model: Value, body: String) -> AssistantMessage {
         let addr = serve_sse(body).await;
         model["baseUrl"] = json!(format!("http://{addr}"));
@@ -777,9 +837,8 @@ mod tests {
         })
     }
 
-    // Captured chat-completions chunk shapes: OpenAI echoes `service_tier` on
-    // the chunks that served the request; the final usage-only chunk carries
-    // the token accounting.
+    // Captured chat-completions chunk shapes: OpenAI echoes `service_tier` on the chunks that
+    // served the request; the final usage-only chunk carries the token accounting.
     const TIERED_CONTENT_CHUNK: &str = "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-5.5\",\"service_tier\":\"priority\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hi\"},\"finish_reason\":null}]}\n\n";
     const USAGE_CHUNK: &str = "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-5.5\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1000000,\"completion_tokens\":1000000,\"total_tokens\":2000000,\"prompt_tokens_details\":{\"cached_tokens\":0}}}\n\n";
     const DONE: &str = "data: [DONE]\n\n";
@@ -790,8 +849,8 @@ mod tests {
         format!("{content}{usage}{DONE}")
     }
 
-    // Captured OpenRouter chunk shapes: the gateway echoes the upstream
-    // model and tier, and reports billing in the final usage chunk.
+    // Captured OpenRouter chunk shapes: the gateway echoes the upstream model and tier, and reports
+    // billing in the final usage chunk.
     fn openrouter_sse(usage_fields: &str) -> String {
         let content = "data: {\"id\":\"gen-01\",\"object\":\"chat.completion.chunk\",\"model\":\"anthropic/claude-fable-5\",\"service_tier\":\"priority\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hi\"}}]}\n\n";
         let usage = format!("data: {{\"id\":\"gen-01\",\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{{\"prompt_tokens\":50000,\"completion_tokens\":50000,\"total_tokens\":100000,\"prompt_tokens_details\":{{\"cached_tokens\":0}}{usage_fields}}}}}\n\n");
@@ -841,8 +900,6 @@ mod tests {
     async fn gateway_service_tier_not_applied_to_openrouter() {
         let model = completions_model("anthropic/claude-fable-5", "openrouter", 0.5, 0.5);
         let message = stream_final_message(model, openrouter_sse("")).await;
-        // The tier multiplier table is OpenAI's own; gateways price their
-        // tiers per endpoint, so the catalog estimate stands.
         assert!((message.usage.cost.input.as_f64() - 0.025).abs() < 1e-9);
         assert!((message.usage.cost.output.as_f64() - 0.025).abs() < 1e-9);
         assert!((message.usage.cost.total.as_f64() - 0.05).abs() < 1e-9);

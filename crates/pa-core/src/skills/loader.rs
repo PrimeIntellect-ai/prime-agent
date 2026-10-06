@@ -1,4 +1,4 @@
-//! Skill loading from all configured locations. Port of loadSkills in skills.ts.
+//! Skill loading from all configured locations.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -23,7 +23,7 @@ pub struct LoadSkillsResult {
     pub diagnostics: Vec<ResourceDiagnostic>,
 }
 
-/// Agent-side config dir name (TS `CONFIG_DIR_NAME`).
+/// Agent-side config dir name.
 pub const CONFIG_DIR_NAME: &str = ".prime/agent";
 
 fn normalize_path(input: &str) -> PathBuf {
@@ -68,10 +68,9 @@ fn is_under_path(target: &Path, root: &Path) -> bool {
 /// Load skills from all configured locations.
 #[must_use]
 pub fn load_skills(options: &LoadSkillsOptions) -> LoadSkillsResult {
-    // TS keeps a JS `Map` (insertion-ordered): skills list in load order
-    // (first-wins collisions), so the prompt inventory and the `skill:`
-    // command enumeration are deterministic. The vector preserves that
-    // order; the name index answers the collision lookup.
+    // TS keeps a JS `Map` (insertion-ordered): skills list in load order (first-wins collisions),
+    // so the prompt inventory and the `skill:` command enumeration are deterministic. The vector
+    // preserves that order; the name index answers the collision lookup.
     let mut skills: Vec<Skill> = Vec::new();
     let mut name_winner: HashMap<String, PathBuf> = HashMap::new();
     let mut real_path_set: HashSet<PathBuf> = HashSet::new();

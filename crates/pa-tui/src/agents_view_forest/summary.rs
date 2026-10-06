@@ -10,12 +10,11 @@ fn get_str<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
         .filter(|s| !s.is_empty())
 }
 
-/// The model column text: the bare model id plus `:level` when a thinking
-/// level is active ("off" reads as noise and stays bare).
+/// The model column text: the bare model id plus `:level` when a thinking level is active
+/// ("off" reads as noise and stays bare).
 pub(crate) fn session_model(summary: &Value) -> String {
-    // Live workers publish the model object with `id` (the engine's
-    // `model_metadata`); seeded roster rows and saved-session rows carry
-    // `modelId` (the persisted selector). Both read as the full model id.
+    // Live workers publish the model object with `id`; seeded roster rows and saved-session
+    // rows carry `modelId` (the persisted selector). Both read as the full model id.
     let Some(id) = get_str(summary, "model").or_else(|| {
         summary
             .get("model")
@@ -57,29 +56,6 @@ pub fn session_title(summary: &Value) -> String {
     "Untitled agent".to_string()
 }
 
-/// Whether a summary is a spawned subagent (TS `isSubagentSummary`): the
-/// runtime kind decides when present; summaries from daemons that predate
-/// it still carry subagent linkage and never surface as top-level agents.
-pub(crate) fn is_subagent_summary(summary: &Value) -> bool {
-    match summary.get("runtimeKind").and_then(Value::as_str) {
-        Some(kind) => kind == "subagent",
-        None => [
-            "rlmChildId",
-            "rlmParentNodeId",
-            "parentActiveSessionId",
-            "parentSessionId",
-            "parentSessionPath",
-        ]
-        .iter()
-        .any(|field| {
-            summary
-                .get(*field)
-                .and_then(Value::as_str)
-                .is_some_and(|value| !value.is_empty())
-        }),
-    }
-}
-
 /// The stable row identity of one summary (TS `getAgentsViewSummaryIdentity`):
 /// the roster-qualified child id for subagents, else file, active, session.
 #[must_use]
@@ -105,7 +81,7 @@ pub fn summary_identity(summary: &Value) -> String {
     format!("session:{}", get("sessionId").unwrap_or_default())
 }
 
-/// The selection key of one summary (TS `getAgentsViewSelectionKey`).
+/// The selection key of one summary.
 #[must_use]
 pub fn selection_key(summary: &Value) -> SelectionKey {
     let get = |field: &str| {

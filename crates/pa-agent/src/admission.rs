@@ -268,6 +268,7 @@ mod tests {
             cost: crate::types::UsageCost::default(),
             context_window: 200_000,
             max_tokens: 8_192,
+            max_tokens_explicit: false,
         }
     }
 

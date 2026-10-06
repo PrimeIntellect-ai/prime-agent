@@ -1,8 +1,6 @@
 //! pa-core platform wall: every OS-specific behavior behind small traits in
-//! cfg-gated modules (MISSION.md, Windows-readiness).
-//!
-//! Unix and Windows implementations live behind the same signatures.
-//! Call sites in the session engine never branch on `cfg` themselves.
+//! cfg-gated modules. Unix and Windows implementations live behind the same
+//! signatures; session-engine call sites never branch on `cfg` themselves.
 
 pub mod browser;
 pub mod lock_dir;
@@ -21,9 +19,8 @@ pub use process::{
 };
 pub use sync_dir::sync_dir;
 // The rename-onto-destination primitive (bounded win32 destination-busy
-// retry, TS `renameOntoSync`) lives in pa-telemetry - the bottom crate every
-// persist owner (pa-telemetry install id, pa-core, pa-daemon) already
-// depends on. Re-exported so the platform wall stays the engine's single
-// platform entry.
+// retry) lives in pa-telemetry — the bottom crate every persist owner
+// already depends on; re-exported so the platform wall stays the engine's
+// single platform entry.
 pub use pa_telemetry::rename_onto;
 pub use shell::{get_shell_config, resolve_kernel_bash_shell, ShellConfig};

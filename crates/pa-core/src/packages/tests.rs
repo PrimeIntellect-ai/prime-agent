@@ -1,6 +1,5 @@
-//! Integration tests for npm and git package flows against local fixtures:
-//! a bash "npm" shim (no network) and a bare git repo cloned over the
-//! filesystem. These exercise the real child-process sequences the CLI runs.
+//! npm/git package flows against local fixtures: a bash "npm" shim (no
+//! network) and a bare git repo cloned over the filesystem.
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -119,7 +118,6 @@ impl Sandbox {
         std::fs::create_dir_all(&agent_dir).unwrap();
         let root = dir.path().to_path_buf();
         let npm_shim = write_npm_shim(&root);
-        // Configure the settings file with the shim as the npm command.
         std::fs::write(
             agent_dir.join("settings.json"),
             serde_json::to_string_pretty(&serde_json::json!({
@@ -165,7 +163,6 @@ fn npm_install_list_remove_flow() {
         .expect("shim installs into its global root");
     assert!(installed.join("package.json").exists());
 
-    // Duplicate install is a settings no-op.
     assert!(!manager.add_source_to_settings("npm:fake-pkg@2.0.0", UserOrProject::User));
     assert_eq!(manager.list_configured_packages().len(), 1);
 
@@ -203,7 +200,6 @@ fn npm_update_reinstalls_moved_versions() {
     manager
         .install_and_persist("npm:fake-pkg", UserOrProject::User)
         .unwrap();
-    // Bump the latest version the shim reports.
     let version_file = sandbox
         .npm_shim
         .with_file_name("fixtures")
@@ -264,7 +260,7 @@ fn git_clone_update_remove_flow() {
     assert!(installed.join("package.json").exists());
     assert!(sandbox.agent_dir.join("git").join(".gitignore").exists());
 
-    // Move main in the work clone, then update: fetch + reset land the change.
+    // Move main in the work clone; the update's fetch + reset lands it.
     std::fs::write(work.join("skills.md"), "v2 content").unwrap();
     run_git(&work, &["add", "."]);
     run_git(&work, &["commit", "-qm", "v2"]);
@@ -279,7 +275,6 @@ fn git_clone_update_remove_flow() {
     .unwrap();
     assert!(installed.join("skills.md").exists());
 
-    // A second update with no upstream movement is a no-op.
     super::git::update_git(
         &source,
         SourceScope::User,
@@ -289,7 +284,6 @@ fn git_clone_update_remove_flow() {
     )
     .unwrap();
 
-    // Remove prunes the checkout and the now-empty parents, keeping .gitignore.
     super::git::remove_git(&source, SourceScope::User, &sandbox.cwd, &sandbox.agent_dir).unwrap();
     assert!(!installed.exists());
     assert!(!installed.parent().unwrap().exists());
@@ -302,7 +296,6 @@ fn git_ref_checkout_installs_the_pinned_revision() {
     let sandbox = Sandbox::new("git-ref");
     let dir_root = sandbox.root.clone();
     let (bare, work) = make_bare_repo(&dir_root);
-    // Tag the initial commit, then move main.
     run_git(&work, &["tag", "v1"]);
     std::fs::write(work.join("skills.md"), "moved").unwrap();
     run_git(&work, &["add", "."]);

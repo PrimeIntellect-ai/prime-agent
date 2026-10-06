@@ -1,26 +1,7 @@
-//! The daemon incident classifier, shared by the incident CLI (pa-cli,
-//! TS `src/cli/incident.ts`) and the agents-view incident notices (pa-tui,
-//! TS `src/modes/agents-view/incident-notices.ts`).
-//!
-//! The classifier reconstructs what the daemon did during a time window
-//! from its diagnostic logs, so an operator does not have to grep hundreds
-//! of raw log lines by hand. The primary source is the shared structured
-//! log (`~/.prime/agent/logs/agent.jsonl`, one JSON object per line,
-//! written by the `coding-agent.daemon-supervisor`, `coding-agent.daemon`,
-//! and `ai.provider` components). When that file is missing or
-//! unreadable, the incident CLI falls back to the newest per-daemon log
-//! (`~/.prime/agent/logs/<socket>.<hash>.log`, plain-text lines).
-//!
-//! Message shapes below match the strings the supervisor and session
-//! worker actually emit (the `DaemonSupervisor.log` / `DaemonMode.log`
-//! call sites). Unknown warning lines fall through to a generic per-line
-//! summary so new log messages degrade to a readable timeline instead of
-//! disappearing.
-//!
-//! This module is the classifier only: log-file discovery, the `--since`
-//! / `--until` window CLI parsing, and report rendering belong to pa-cli;
-//! the notice polling, rotation-safe incremental reads, and dismissal
-//! horizons belong to pa-tui's `incident_notices`.
+//! The daemon incident classifier, shared by the incident CLI (pa-cli) and the agents-view incident
+//! notices (pa-tui): reconstructs what the daemon did from its diagnostic logs (`agent.jsonl`,
+//! per-daemon logs as fallback); unknown lines fall through to a generic summary. Log discovery and
+//! rendering belong to pa-cli; notice polling to pa-tui.
 
 mod anomaly;
 mod classify;
@@ -38,8 +19,7 @@ pub use parse::{parse_incident_daemon_log_line, parse_incident_log_line, timesta
 
 use std::collections::HashSet;
 
-/// One severity band of a classified incident event (TS
-/// `IncidentSeverity`).
+/// One severity band of a classified incident event (TS `IncidentSeverity`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IncidentSeverity {
     Critical,
@@ -62,8 +42,7 @@ impl IncidentSeverity {
 }
 
 impl IncidentSeverity {
-    /// The severity ordering (TS `SEVERITY_RANK`: critical 3 > error 2 >
-    /// warn 1 > info 0).
+    /// The severity ordering (TS `SEVERITY_RANK`).
     #[must_use]
     pub fn rank(self) -> u8 {
         match self {
@@ -128,32 +107,25 @@ pub struct IncidentEvent {
     pub tokens: Vec<String>,
 }
 
-/// A command-timeout stall is repeated command timeouts close together,
-/// like the burst window; timeouts further apart than this never merge
-/// into one stall, whatever the report window is (TS
-/// `TIMEOUT_STALL_WINDOW_MS`). The agents-view dismissal horizon derives
-/// from the same bound via [`latest_incident_stall_timeout_by_subject`].
+/// Timeouts further apart than this never merge into one stall, whatever the report window is (TS
+/// `TIMEOUT_STALL_WINDOW_MS`); the agents-view dismissal horizon derives from the same bound via
+/// [`latest_incident_stall_timeout_by_subject`].
 pub const TIMEOUT_STALL_WINDOW_MS: i64 = 30 * 60 * 1000;
 
-/// A stall is also flagged as an event gap once this much time passes
-/// between one session subject's events (TS `STALL_GAP_MS`).
+/// A stall is also flagged as an event gap once this much time passes between one subject's
+/// events.
 pub(crate) const STALL_GAP_MS: i64 = 10 * 60 * 1000;
 
-/// A burst is several warnings/errors close together (TS
-/// `ERROR_BURST_THRESHOLD`); isolated failures far apart are not one
-/// incident.
+/// A burst is several warnings/errors close together (TS `ERROR_BURST_THRESHOLD`).
 pub(crate) const ERROR_BURST_THRESHOLD: usize = 3;
 
-/// Only events within this window of each other form a burst (TS
-/// `ERROR_BURST_WINDOW_MS`); three isolated warnings days apart in a long
-/// window are not one.
+/// Only events within this window of each other form a burst (TS `ERROR_BURST_WINDOW_MS`).
 pub(crate) const ERROR_BURST_WINDOW_MS: i64 = 10 * 60 * 1000;
 
 /// Per-line summary truncation bound (TS `SUMMARY_TRUNCATION`).
 pub(crate) const SUMMARY_TRUNCATION: usize = 120;
 
-/// Operation kinds shown in a recovery breakdown (TS
-/// `RECOVERY_BREAKDOWN_LIMIT`).
+/// Operation kinds shown in a recovery breakdown (TS `RECOVERY_BREAKDOWN_LIMIT`).
 pub(crate) const RECOVERY_BREAKDOWN_LIMIT: usize = 4;
 
 /// Event classes whose repeats form an error burst (TS `BURST_CLASSES`).
@@ -163,8 +135,7 @@ pub(crate) fn burst_classes() -> &'static HashSet<&'static str> {
     &CLASSES
 }
 
-/// Event classes the classifier dedupes across the structured log and the
-/// worker stderr forward (TS `LIFECYCLE_CLASSES`).
+/// Event classes deduped across the structured log and the worker stderr forward.
 pub(crate) fn lifecycle_classes() -> &'static HashSet<&'static str> {
     static CLASSES: std::sync::LazyLock<HashSet<&'static str>> = std::sync::LazyLock::new(|| {
         HashSet::from([
@@ -182,8 +153,7 @@ pub(crate) fn first_line(text: &str) -> &str {
     text.split('\n').next().unwrap_or("").trim()
 }
 
-/// Truncate to `max` visible characters with an ellipsis (TS
-/// `truncateText`).
+/// Truncate to `max` visible characters with an ellipsis (TS `truncateText`).
 pub(crate) fn truncate_text(text: &str, max: usize) -> String {
     let trimmed = text.trim();
     if trimmed.chars().count() <= max {
@@ -193,8 +163,7 @@ pub(crate) fn truncate_text(text: &str, max: usize) -> String {
     format!("{cut}...")
 }
 
-/// Strip a leading `Error:` prefix and its whitespace (TS `errorMessage`
-/// replaces `/^Error:\s*/`).
+/// Strip a leading `Error:` prefix and its whitespace (TS `errorMessage`).
 pub(crate) fn error_message(message: &str) -> &str {
     if let Some(rest) = message.strip_prefix("Error:") {
         rest.trim_start()

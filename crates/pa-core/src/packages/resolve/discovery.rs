@@ -1,7 +1,7 @@
 //! Filesystem collectors for resource discovery: recursive file collection
 //! under `.gitignore`/`.ignore`/`.fdignore` rules, skill-entry scanning with
-//! the `SKILL.md` stopping rule, extension/prompt/theme auto-discovery, the
-//! `.agents/skills` ancestor scan, and the extension entry-point resolution.
+//! the `SKILL.md` stopping rule, prompt/theme auto-discovery, and the
+//! `.agents/skills` ancestor scan.
 
 use std::path::{Path, PathBuf};
 
@@ -149,10 +149,10 @@ impl IgnoreMatcher {
     }
 }
 
-/// Prepare one ignore-file line for the root-relative matcher: comments drop,
-/// `!`/`\!` negation/escape prefixes and leading `/` anchors normalize, and
-/// nested-directory patterns get their directory prefix. Returns the
-/// negation-prefixed pattern (or `None` for blank/comment lines).
+/// Prepare one ignore-file line for the root-relative matcher: comments
+/// drop, `!`/`\!` negation/escape prefixes and leading `/` anchors
+/// normalize, and nested-directory patterns get their directory prefix
+/// (returns the negation-prefixed pattern, `None` for blank/comment).
 fn prefix_ignore_pattern(line: &str, prefix: &str) -> Option<String> {
     let trimmed = line.trim();
     if trimmed.is_empty() {
@@ -189,7 +189,6 @@ fn prefix_ignore_pattern(line: &str, prefix: &str) -> Option<String> {
 /// File-name suffixes recognized per resource type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FileKind {
-    Extension,
     Markdown,
     Json,
 }
@@ -206,7 +205,6 @@ fn extension_is(name: &str, wanted: &[&str]) -> bool {
 impl FileKind {
     fn matches(self, name: &str) -> bool {
         match self {
-            FileKind::Extension => extension_is(name, &["ts", "js"]),
             FileKind::Markdown => extension_is(name, &["md"]),
             FileKind::Json => extension_is(name, &["json"]),
         }
@@ -357,76 +355,6 @@ fn collect_top_level_files(dir: &Path, kind: FileKind) -> Vec<PathBuf> {
     entries
 }
 
-/// Extension entry points for a package directory: the `pi.extensions`
-/// manifest entries when present, otherwise `index.ts`/`index.js`.
-/// `None` when the directory exposes no extension entry point.
-pub(crate) fn resolve_extension_entries(dir: &Path) -> Option<Vec<PathBuf>> {
-    let package_json = dir.join("package.json");
-    if package_json.exists() {
-        let manifest = read_pi_manifest_file(&package_json);
-        let entries = manifest
-            .as_ref()
-            .and_then(|manifest| manifest.extensions.as_ref())
-            .map(std::vec::Vec::as_slice)
-            .unwrap_or_default();
-        if !entries.is_empty() {
-            let mut resolved: Vec<PathBuf> = Vec::new();
-            for extension in entries {
-                let path = lexical_join(dir, extension);
-                if path.exists() {
-                    resolved.push(path);
-                }
-            }
-            if !resolved.is_empty() {
-                return Some(resolved);
-            }
-        }
-    }
-
-    let ts_entry = dir.join("index.ts");
-    if ts_entry.exists() {
-        return Some(vec![ts_entry]);
-    }
-    let js_entry = dir.join("index.js");
-    if js_entry.exists() {
-        return Some(vec![js_entry]);
-    }
-    None
-}
-
-/// Auto-discovery of extension entry points under a directory: the root's
-/// own entry points, otherwise every top-level `.ts`/`.js` file plus each
-/// subdirectory's entry points.
-pub(crate) fn collect_auto_extension_entries(dir: &Path) -> Vec<PathBuf> {
-    let mut entries = Vec::new();
-    if !dir.exists() {
-        return entries;
-    }
-    if let Some(root_entries) = resolve_extension_entries(dir) {
-        return root_entries;
-    }
-    let mut matcher = IgnoreMatcher::new();
-    matcher.add_rules(dir, dir);
-    for entry in read_entries_sorted(dir) {
-        if entry.name.starts_with('.') || is_node_modules(&entry.name, true) {
-            continue;
-        }
-        let (is_dir, is_file) = classify(&entry.path);
-        let rel_path = path_relative(dir, &entry.path);
-        if matcher.ignores(&rel_path, is_dir) {
-            continue;
-        }
-        if !is_dir && is_file && FileKind::Extension.matches(&entry.name) {
-            entries.push(entry.path);
-        } else if is_dir {
-            if let Some(resolved) = resolve_extension_entries(&entry.path) {
-                entries.extend(resolved);
-            }
-        }
-    }
-    entries
-}
-
 /// The `pi` manifest in a package's `package.json` (parse failures are no
 /// manifest, per the TS product).
 pub(crate) fn read_pi_manifest(package_root: &Path) -> Option<super::PiManifest> {
@@ -442,7 +370,6 @@ fn read_pi_manifest_file(package_json: &Path) -> Option<super::PiManifest> {
     let value: serde_json::Value = serde_json::from_str(&content).ok()?;
     let pi = value.get("pi")?.as_object()?;
     Some(super::PiManifest {
-        extensions: string_array(pi.get("extensions")),
         skills: string_array(pi.get("skills")),
         prompts: string_array(pi.get("prompts")),
         themes: string_array(pi.get("themes")),
@@ -463,22 +390,16 @@ fn string_array(value: Option<&serde_json::Value>) -> Option<Vec<String>> {
 }
 
 /// Collect resource files from a directory by kind: skills use the
-/// skill-entry scanner, extensions the entry-point discovery, others
-/// recursive file collection.
+/// skill-entry scanner, others recursive file collection.
 pub(crate) fn collect_resource_files(
     dir: &Path,
     resource_type: super::ResourceType,
 ) -> Vec<PathBuf> {
     match resource_type {
         super::ResourceType::Skills => collect_skill_entries(dir, SkillDiscoveryMode::Pi),
-        super::ResourceType::Extensions => collect_auto_extension_entries(dir),
         super::ResourceType::Prompts => collect_files(dir, FileKind::Markdown),
         super::ResourceType::Themes => collect_files(dir, FileKind::Json),
     }
-}
-
-fn lexical_join(base: &Path, input: &str) -> PathBuf {
-    super::super::source::lexical_resolve(base, input)
 }
 
 /// Find the nearest ancestor containing a `.git` entry.

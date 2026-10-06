@@ -49,6 +49,7 @@ pub(super) fn child_run(route: &str, socket: PathBuf) {
                     keybindings: options.keybindings.clone(),
                     show_hardware_cursor: false,
                     incident_notice_state: None,
+                    create_config: serde_json::json!({}),
                 };
                 let view_run = run_agents_view(view_options, AgentsViewUiMode::Terminal, None)
                     .await
@@ -84,6 +85,7 @@ pub(super) fn child_run(route: &str, socket: PathBuf) {
                     keybindings: options.keybindings.clone(),
                     show_hardware_cursor: false,
                     incident_notice_state: None,
+                    create_config: serde_json::json!({}),
                 };
                 let view_run = run_agents_view(view_options, AgentsViewUiMode::Terminal, None)
                     .await
@@ -177,8 +179,6 @@ fn replay_stream() -> pa_tui::session::JsonlSessionStream {
     pa_tui::session::JsonlSessionStream::from_path(&path).expect("replay stream")
 }
 
-/// The route matrix: every route runs once on the probed path and the
-/// parity exit runs once more on the known-terminal path (the direct
 use pa_tui::agents_view::{run_agents_view, AgentsViewOptions, AgentsViewUiMode};
 use pa_tui::interactive::{
     run_interactive, InteractiveOptions, ModelSelection, SessionSelection, UiMode,

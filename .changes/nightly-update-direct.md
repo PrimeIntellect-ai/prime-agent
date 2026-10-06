@@ -1,0 +1,1 @@
+- Nightly updates download the nightly installer directly instead of going through the stable installer first.
