@@ -74,7 +74,7 @@ fn parent_worker_token(agent_dir: &Path, active_session_id: &str) -> String {
             return token.to_string();
         }
     }
-    panic!("parent worker descriptor not found for {active_session_id}");
+    panic!("parent worker descriptor not found");
 }
 
 fn spawn_supervisor(socket: &Path, agent_dir: &Path, kernel_python: &Path) -> Daemon {

@@ -153,6 +153,90 @@ async fn handshake_channel_stays_private_until_auth_answers() {
     );
 }
 
+/// A tombstoned stop's entire silent-peer authentication uses the strict
+/// one-second budget, closes both transport halves, and drops its pending slot.
+#[tokio::test]
+async fn silent_peer_stop_auth_closes_socket_without_leaving_pending() {
+    run_silent_peer_auth(false).await;
+}
+
+#[tokio::test]
+async fn cancelled_auth_closes_socket_without_leaving_pending() {
+    run_silent_peer_auth(true).await;
+}
+
+async fn run_silent_peer_auth(cancel_connect: bool) {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let socket_path = dir.path().join("worker.sock");
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let supervisor = Arc::new(
+        Supervisor::new(SupervisorOptions {
+            tcp_port: None,
+            tcp_bind_host: None,
+            remote_agent_mesh: None,
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir,
+        })
+        .expect("supervisor"),
+    );
+    let descriptor: DaemonWorkerDescriptor = serde_json::from_value(json!({
+        "version": 2, "workerId": "w-silent", "pid": 4242,
+        "socketPath": socket_path.to_string_lossy(),
+        "recoveryJournalPath": "/tmp/none.jsonl", "supervisorSocketPath": "/tmp/none.sock",
+        "authenticationToken": "silent-token", "rootActiveSessionId": "none",
+        "createdAt": "2026-09-23T00:00:00Z", "updatedAt": "2026-09-23T00:00:00Z",
+        "lifecycle": "ready", "createCommand": {}, "consecutiveFailures": 0,
+    }))
+    .expect("descriptor");
+    let resident = ResidentWorker::new(
+        "w-silent".to_string(),
+        descriptor,
+        dir.path().join("w-silent.json"),
+    );
+    let listener = bind_fake_worker(&socket_path).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(150);
+    let connect = {
+        let supervisor = Arc::clone(&supervisor);
+        let resident = Arc::clone(&resident);
+        tokio::spawn(async move {
+            supervisor
+                .connect_worker_for_stop(&resident, deadline)
+                .await
+        })
+    };
+    let mut fake = accept_fake_worker(listener).await;
+    let frame = read_supervisor_frame(&mut fake).await;
+    assert_eq!(frame.header.get("commandType"), Some(&json!("worker_auth")));
+    if cancel_connect {
+        connect.abort();
+        assert!(connect.await.is_err(), "connect future must be cancelled");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !resident.pending.lock().await.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelled auth pending cleanup");
+    } else {
+        let result = tokio::time::timeout(Duration::from_secs(1), connect)
+            .await
+            .expect("strict deadline")
+            .expect("join");
+        assert!(result.is_err(), "silent peer must time out");
+    }
+    assert!(
+        resident.pending.lock().await.is_empty(),
+        "auth pending slot must be cleared"
+    );
+    let mut reader = PrivateFrameReader::new(&mut fake.read_half, DEFAULT_PRIVATE_FRAME_LIMITS);
+    let closed = tokio::time::timeout(Duration::from_secs(1), reader.read_frame())
+        .await
+        .expect("peer must close promptly")
+        .expect("clean EOF");
+    assert!(closed.is_none(), "failed auth must close the socket");
+}
+
 /// A registration that lands mid-handshake must not kill the launch:
 /// the registration's roster refresh routes onto its own authenticated
 /// channel once the handshake installs it, while the handshake's
