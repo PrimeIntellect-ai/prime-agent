@@ -491,12 +491,28 @@ fn install_rust_sh_honors_the_uv_bin_dir_knob() {
         "the knob must be documented in the header's Configuration block"
     );
     assert!(
-        text.contains("elif [ -x \"${HOME}/.local/bin/uv\" ]"),
-        "the sh's uv discovery must still fall back to the canonical ~/.local/bin/uv when the knob redirects the target (no duplicate install)"
+        text.contains("elif [ -x \"${HOME}/.local/bin/${uv_name}\" ] && [ \"$uv_under_store\" = \"no\" ]"),
+        "the sh's uv discovery must fall back to the canonical ~/.local/bin uv when the knob redirects the target (no duplicate install) - but NEVER in the store-alias shape (a uv inside the shared store must not carry uv's python writes back into it)"
     );
     assert!(
-        text.contains("|| [ -x \"${HOME}/.local/bin/uv\" ]"),
-        "the sh's pre-warm 'uv found' gate must also see a default-location uv when the knob redirects the target"
+        text.contains("uv_name=\"uv\"") && text.contains("uv_name=\"uv.exe\""),
+        "the sh's uv probes must use the platform executable name (uv.exe on Windows - the Git Bash route probes real Windows files)"
+    );
+    assert!(
+        !text.contains("[ -x \"${uv_bin_dir}/uv\" ]"),
+        "every target probe must use the platform uv name, never a bare /uv (uv.exe misses on Windows)"
+    );
+    assert!(
+        text.contains("case \"$uv_bin_dir\" in\n    /*) ;;\n    *) die \"PRIME_AGENT_UV_BIN_DIR must be an absolute path: ${PRIME_AGENT_UV_BIN_DIR}\" ;;\n  esac"),
+        "a relative knob must be refused outright (a relative target in PATH guidance breaks every later shell)"
+    );
+    assert!(
+        text.contains("|| { [ \"$uv_under_store\" = \"no\" ] && [ -x \"${HOME}/.local/bin/${uv_name}\" ]; }") ,
+        "the 'uv found' and pre-warm gates must see a default-location uv only outside the store-alias shape"
+    );
+    assert!(
+        text.contains("if command -v uv >/dev/null 2>&1 \\\n   || { [ -n \"$uv_bin_dir\" ] && [ -x \"${uv_bin_dir}/${uv_name}\" ]; } \\\n   || { [ \"$uv_under_store\" = \"no\" ] && [ -x \"${HOME}/.local/bin/${uv_name}\" ]; }; then\n  step_start \"Preparing the Python kernel\""),
+        "the kernel pre-warm gate must agree with the 'uv found' gate (a default-location uv must actually warm the kernel, not just be reported found)"
     );
     assert!(
         text.contains("! command -v uv >/dev/null 2>&1 && [ -n \"$uv_bin_dir\" ]"),
@@ -621,8 +637,8 @@ fn install_ps1_installs_uv_like_the_linux_installer() {
     let section = &text[section_start..section_end];
     let markers: [(&str, &str); 8] = [
         (
-            "the uv target knob (install-rust.sh's own PRIME_AGENT_UV_BIN_DIR parity: an operator-set dir wins - a packaged install keeps uv inside its own tree, the e2e harnesses point it at their scratch so a run never touches the shared ~/.local/bin)",
-            "$uvInstallDir = if ($env:PRIME_AGENT_UV_BIN_DIR) { $env:PRIME_AGENT_UV_BIN_DIR } else { Join-Path $HOME '.local\\bin' }",
+            "the uv target knob (install-rust.sh's own PRIME_AGENT_UV_BIN_DIR parity: an operator-set dir wins - a packaged install keeps uv inside its own tree, the e2e harnesses point it at their scratch so a run never touches the shared ~/.local/bin; the knob validated early with the other knobs)",
+            "if ($env:PRIME_AGENT_UV_BIN_DIR) { $uvInstallDir = $env:PRIME_AGENT_UV_BIN_DIR }",
         ),
         (
             "the default-location presence check (a uv that predates the knob at ~/.local/bin is still honored: no duplicate install)",
@@ -679,6 +695,40 @@ fn install_ps1_installs_uv_like_the_linux_installer() {
     assert!(
         section.contains("could not install uv; the kernel pre-warm was skipped"),
         "the honest offline note names what was skipped"
+    );
+}
+
+/// The uv target knob validates EARLY and FULLY QUALIFIED (the reviewer's
+/// findings): the check runs with the other knobs, BEFORE the daemon stop,
+/// the payload publish, and the launcher swap (a late refusal would leave
+/// a half-applied install the catch cannot roll back), and it demands a
+/// drive-based or UNC path - a rooted-only check accepts drive-relative
+/// spellings like C:uv-bin that resolve against the CURRENT directory in
+/// later shells.
+#[test]
+fn install_ps1_validates_the_uv_knob_before_any_side_effect() {
+    let text = std::fs::read_to_string(repo_root().join("install.ps1")).expect("read install.ps1");
+    let validation_at = text
+        .find("PRIME_AGENT_UV_BIN_DIR must be a fully qualified absolute path")
+        .expect("the fully-qualified validation message exists");
+    let stage_at = text
+        .find("$stage = Join-Path (Join-Path $prefix 'share')")
+        .expect("the publish stage exists");
+    assert!(
+        validation_at < stage_at,
+        "the knob validation must fail before the publish stage (a late refusal leaves a half-applied install)"
+    );
+    assert!(
+        text.contains("PRIME_AGENT_UV_BIN_DIR -notmatch '^[a-zA-Z]:[\\\\/]'"),
+        "the validation demands a drive-based spelling (drive + separator)"
+    );
+    assert!(
+        text.contains("-notmatch '^\\\\\\\\[^\\\\\\\\]+\\\\[^\\\\\\\\]+'"),
+        "the validation demands a UNC spelling WITH its server and share (an incomplete lead-in or a server without a share must not reach publication)"
+    );
+    assert!(
+        !text.contains("[System.IO.Path]::IsPathRooted"),
+        "the rooted-only check is gone: it accepts drive-relative spellings like C:uv-bin"
     );
 }
 

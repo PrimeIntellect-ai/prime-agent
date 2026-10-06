@@ -214,6 +214,19 @@ if (@('stable', 'beta') -notcontains $channel) { Fail "unknown release channel: 
 # a directory path, not an existing FILE.
 if (Test-Path $prefix -PathType Leaf) { Fail "the install prefix names an existing file: $prefix" }
 
+# THE UV TARGET KNOB VALIDATES EARLY (the reviewer's finding): a bad value
+# must fail BEFORE any side effect - the daemon stop, the payload publish,
+# and the launcher swap all happen below, and a late refusal would leave
+# a half-applied install. The target must be FULLY QUALIFIED (a
+# drive-based or UNC path WITH its server and share): a rooted-only check
+# accepts drive-relative
+# spellings like C:uv-bin or \uv-bin, which resolve against the CURRENT
+# directory in later shells - the exact break this check exists to
+# prevent.
+if ($env:PRIME_AGENT_UV_BIN_DIR -and (($env:PRIME_AGENT_UV_BIN_DIR -notmatch '^[a-zA-Z]:[\\/]') -and ($env:PRIME_AGENT_UV_BIN_DIR -notmatch '^\\\\[^\\\\]+\\[^\\\\]+'))) {
+    Fail "PRIME_AGENT_UV_BIN_DIR must be a fully qualified absolute path (a drive-based or UNC path): $($env:PRIME_AGENT_UV_BIN_DIR)"
+}
+
 # The channel files: the pointer (<base>/stable or <base>/beta) names the
 # version, the channel manifest (<base>/latest.json or <base>/beta.json)
 # the rows; the version resolution below reads the pair per channel.
@@ -658,7 +671,10 @@ exec "$(dirname "$0")/../share/prime-agent/prime-agent.exe" "$@"
 # the e2e harnesses point it at their scratch dir so a run never touches
 # the shared ~/.local/bin); without the knob the canonical ~/.local/bin is
 # the target (where the product's ensure_uv also looks).
-$uvInstallDir = if ($env:PRIME_AGENT_UV_BIN_DIR) { $env:PRIME_AGENT_UV_BIN_DIR } else { Join-Path $HOME '.local\bin' }
+$uvInstallDir = Join-Path $HOME '.local\bin'
+# The knob's fully-qualified validation ran early with the other knobs
+# (before any side effect - see the validation block in the knobs section).
+if ($env:PRIME_AGENT_UV_BIN_DIR) { $uvInstallDir = $env:PRIME_AGENT_UV_BIN_DIR }
 $uvExe = Join-Path $uvInstallDir 'uv.exe'
 $uvDefaultExe = Join-Path (Join-Path $HOME '.local\bin') 'uv.exe'
 # THE THREE-WAY LOOKUP (the reviewer's finding): a usable uv is one on

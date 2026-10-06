@@ -993,23 +993,37 @@ physical_path() {
 }
 uv_store_root="$(physical_path "${HOME}/.prime/agent")"
 uv_default_root="$(physical_path "${HOME}/.local")"
+# The store-alias detection runs FIRST so the discovery guards below can
+# read it in every branch (a uv found INSIDE the shared store must never
+# carry uv's own python writes back into it).
+uv_under_store="no"
+case "${uv_default_root}/" in
+  "${uv_store_root}/"*) uv_under_store="yes" ;;
+esac
+# THE PLATFORM EXECUTABLE NAME (the reviewer's finding): the Git Bash
+# route probes real Windows files - uv.exe, not uv.
+uv_name="uv"
+if [ "$WINDOWS" = "yes" ]; then uv_name="uv.exe"; fi
 # THE UV TARGET KNOB (the ps1's own PRIME_AGENT_UV_BIN_DIR): an operator-
 # set dir wins (a packaged install keeps uv inside its own tree, the e2e
 # harnesses point it at their scratch dir so a run never touches the
 # shared ~/.local/bin). The Windows C:\ spelling reaches this script
 # through the env - it normalizes exactly like PRIME_AGENT_RUST_PREFIX
-# (cygpath); a POSIX spelling passes through untouched.
+# (cygpath); a POSIX spelling passes through untouched. A RELATIVE knob
+# is refused (the reviewer's finding): a relative target would ride PATH
+# guidance into every later shell, which resolves it from its own working
+# directory - an absolute target is the only honest contract.
 if [ -n "${PRIME_AGENT_UV_BIN_DIR:-}" ]; then
   uv_bin_dir="${PRIME_AGENT_UV_BIN_DIR}"
   if [ "$WINDOWS" = "yes" ] && command -v cygpath >/dev/null 2>&1; then
     uv_bin_dir="$(cygpath -u "$uv_bin_dir")" || die "PRIME_AGENT_UV_BIN_DIR could not be resolved to a POSIX path: ${PRIME_AGENT_UV_BIN_DIR}"
   fi
+  case "$uv_bin_dir" in
+    /*) ;;
+    *) die "PRIME_AGENT_UV_BIN_DIR must be an absolute path: ${PRIME_AGENT_UV_BIN_DIR}" ;;
+  esac
 else
   uv_bin_dir="${HOME}/.local/bin"
-  uv_under_store="no"
-  case "${uv_default_root}/" in
-    "${uv_store_root}/"*) uv_under_store="yes" ;;
-  esac
   if [ "$uv_under_store" = "yes" ]; then
     uv_bin_dir="${PREFIX}/bin"
     say "uv target: ${HOME}/.local resolves inside the shared session store;"
@@ -1041,14 +1055,18 @@ uv_bin=""
 python_step="no"
 if command -v uv >/dev/null 2>&1; then
   uv_bin="$(command -v uv)"
-elif [ -x "${uv_bin_dir}/uv" ]; then
-  uv_bin="${uv_bin_dir}/uv"
-elif [ -x "${HOME}/.local/bin/uv" ]; then
+elif [ -x "${uv_bin_dir}/${uv_name}" ]; then
+  uv_bin="${uv_bin_dir}/${uv_name}"
+elif [ -x "${HOME}/.local/bin/${uv_name}" ] && [ "$uv_under_store" = "no" ]; then
   # THE CANONICAL-LOCATION FALLBACK (the reviewer's finding): the knob
   # redirects the INSTALL target, not the discovery - a usable uv at the
   # canonical ~/.local/bin still serves this install (no duplicate
-  # download into the knob's dir).
-  uv_bin="${HOME}/.local/bin/uv"
+  # download into the knob's dir). THE STORE-ALIAS GUARD (the reviewer's
+  # finding): under the ~/.local-alias-into-the-store shape that uv IS
+  # inside the shared store - selecting it would carry uv's own python
+  # writes back into the store, so the fallback refuses it and the flow
+  # installs payload-adjacent instead.
+  uv_bin="${HOME}/.local/bin/${uv_name}"
 else
   # The fetch and the script run are checked SEPARATELY: a plain
   # `curl | sh` pipeline reports the script's status, so a dead network
@@ -1075,8 +1093,8 @@ else
           https://astral.sh/uv/install.sh)" \
        && printf '%s\n' "$uv_install_out" \
           | env -u UV_UNMANAGED_INSTALL UV_INSTALL_DIR="$uv_bin_dir" sh >/dev/null 2>&1 \
-       && [ -x "${uv_bin_dir}/uv" ]; then
-      uv_bin="${uv_bin_dir}/uv"
+       && [ -x "${uv_bin_dir}/${uv_name}" ]; then
+      uv_bin="${uv_bin_dir}/${uv_name}"
     else
       say "the uv install failed; falling back to a system python3"
     fi
@@ -2916,8 +2934,8 @@ if ! command -v uv >/dev/null 2>&1 && [ -n "$uv_bin_dir" ] && [ "$uv_bin_dir" !=
   export PATH
 fi
 if command -v uv >/dev/null 2>&1 \
-   || { [ -n "$uv_bin_dir" ] && [ -x "${uv_bin_dir}/uv" ]; } \
-   || [ -x "${HOME}/.local/bin/uv" ]; then
+   || { [ -n "$uv_bin_dir" ] && [ -x "${uv_bin_dir}/${uv_name}" ]; } \
+   || { [ "$uv_under_store" = "no" ] && [ -x "${HOME}/.local/bin/${uv_name}" ]; }; then
   say "uv found (the kernel venv's package manager)"
 else
   if [ -n "$uv_bin_dir" ]; then
@@ -2940,11 +2958,11 @@ else
           https://astral.sh/uv/install.sh)" \
      && printf '%s\n' "$curl_out" \
         | env -u UV_UNMANAGED_INSTALL UV_INSTALL_DIR="$uv_bin_dir" sh >&3 2>&1; then
-    if [ -x "${uv_bin_dir}/uv" ]; then
+    if [ -x "${uv_bin_dir}/${uv_name}" ]; then
       step_ok "uv installed"
     else
       step_fail "Installing uv"
-      note "! The uv installer reported success but ${uv_bin_dir}/uv is missing; the"
+      note "! The uv installer reported success but ${uv_bin_dir}/${uv_name} is missing; the"
       note "  first session may need to install uv itself."
     fi
   else
@@ -2954,8 +2972,14 @@ else
     todo "curl -LsSf https://astral.sh/uv/install.sh | sh"
   fi
 fi
+# THE PRE-WARM GATE (the reviewer's finding): it must agree with the
+# 'uv found' gate above - a default-location uv must actually WARM the
+# kernel, not only be reported found (the product's ensure_uv finds
+# ~/.local/bin/uv by itself), and never in the store-alias shape (the
+# store is never written from this installer).
 if command -v uv >/dev/null 2>&1 \
-   || { [ -n "$uv_bin_dir" ] && [ -x "${uv_bin_dir}/uv" ]; }; then
+   || { [ -n "$uv_bin_dir" ] && [ -x "${uv_bin_dir}/${uv_name}" ]; } \
+   || { [ "$uv_under_store" = "no" ] && [ -x "${HOME}/.local/bin/${uv_name}" ]; }; then
   step_start "Preparing the Python kernel"
   if bootstrap_out="$("$launcher" --prime-agent-bootstrap 2>&1)"; then
     step_ok "Kernel ready"
