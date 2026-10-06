@@ -736,10 +736,16 @@ impl LockDir {
 
     /// The stored mtime after the probe write - the recorded half of the
     /// acquisition identity. A read-back failure unwinds the acquisition
-    /// (never an unverified artifact).
+    /// WITHOUT touching the path: a failed stat means the artifact is no
+    /// longer verifiably ours at the path (a stalled creator's fresh
+    /// directory can be stale-reclaimed and replaced in the stat-to-remove
+    /// window), so an unconditional `remove_dir` there could delete a
+    /// successor's live lock and let a third process acquire the path
+    /// under it. The unverified artifact goes to the protocol's own
+    /// staleness sweep instead - the same discipline as the abandoned
+    /// artifact (macroscope's read-back finding).
     fn read_back_probe(path: &Path) -> io::Result<Option<(i64, i64)>> {
         let Some(stored) = Self::observed_mtime(path) else {
-            let _ = fs::remove_dir(path);
             return Err(io::Error::other(format!(
                 "the lock directory at {} cannot be stat'ed",
                 path.display()
