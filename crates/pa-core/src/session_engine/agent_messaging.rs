@@ -1,7 +1,5 @@
 //! Agent messaging and observation host requests: validation helpers, message
 //! ids and prompts, controller traits, and kernel host-handler registration.
-//! Port of core/agent-messages.ts (validation/prompt half) and
-//! core/agent-observe.ts.
 
 use std::future::Future;
 
@@ -10,26 +8,22 @@ use serde_json::{json, Value};
 use crate::kernel::shared::{host_handler, HostRequestHandlers};
 
 pub const AGENT_MESSAGE_CUSTOM_TYPE: &str = "agent_message";
-/// TS `AGENT_MESSAGE_RECEIVED_PREVIEW_LABEL`: the queue-strip preview label
-/// for a delivered agent message (`queuedAgentMessagePreview` renders
-/// "<label>: <details.message>").
+/// The queue-strip preview label for a delivered agent message
+/// (`queuedAgentMessagePreview` renders "<label>: <details.message>").
 pub const AGENT_MESSAGE_RECEIVED_PREVIEW_LABEL: &str = "Agent message received";
 pub const AGENT_MESSAGE_SOURCE: &str = "agent_message";
 pub const AGENT_MESSAGE_ID_PREFIX: &str = "agentmsg_";
 pub const DEFAULT_AGENT_MESSAGE_MAX_CHARS: usize = 16_384;
 pub const DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION: usize = 20;
-/// The per-sender token bucket capacity (TS
-/// `DEFAULT_AGENT_MESSAGE_RATE_LIMIT_CAPACITY`): three deliveries burst
-/// before the refill paces them.
+/// The per-sender token bucket capacity: three deliveries burst before
+/// the refill paces them.
 pub const DEFAULT_AGENT_MESSAGE_RATE_LIMIT_CAPACITY: usize = 3;
-/// One rate-limit token per sender per this window (TS
-/// `DEFAULT_AGENT_MESSAGE_RATE_LIMIT_REFILL_MS`).
+/// One rate-limit token per sender per this window.
 pub const DEFAULT_AGENT_MESSAGE_RATE_LIMIT_REFILL_MS: u64 = 1_000;
 
 pub const AGENT_OBSERVE_PREVIEW_MAX_CHARS: usize = 240;
 pub const AGENT_OBSERVE_IMPORT_NAME: &str = "agent_observe";
 
-/// Family relationships between agents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentFamilyRelationship {
     Parent,
@@ -64,7 +58,6 @@ impl AgentFamilyRelationship {
     }
 }
 
-/// Delivery status for a sent agent message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentMessageDeliveryStatus {
     Delivered,
@@ -93,7 +86,6 @@ pub struct AgentMessageSendInput {
     pub receiver_role: Option<AgentFamilyRelationship>,
 }
 
-/// The receipt returned after sending an agent message.
 #[derive(Debug, Clone)]
 pub struct AgentMessageReceipt {
     pub id: String,
@@ -114,21 +106,19 @@ pub struct AgentMessageReceipt {
     pub digest_at: Option<String>,
 }
 
-/// One addressable family member (TS `AgentFamilyMember`): a parent,
-/// sibling, or child of this session, keyed by a routable target selector.
+/// One addressable family member: a parent, sibling, or child of this
+/// session, keyed by a routable target selector.
 #[derive(Debug, Clone)]
 pub struct AgentFamilyMember {
     pub relationship: AgentFamilyRelationship,
-    /// The target selector the controller can deliver to (session id for
-    /// local family members, the active session id for peers served by
-    /// another worker).
+    /// The target selector the controller can deliver to: the session id for
+    /// local family members, the active session id for peers on another worker.
     pub id: String,
     pub name: Option<String>,
-    /// Extra selector forms that resolve to this same member (empty for
-    /// the TS shape). The supervisor-backed controller lists a child's
-    /// RLM child id and persisted session id here so every identifier the
-    /// roster exposes addresses the child, while broadcast sends stay
-    /// one-per-member.
+    /// Extra selector forms that resolve to this same member: the
+    /// supervisor-backed controller lists a child's RLM child id and
+    /// persisted session id here, so every roster identifier addresses the
+    /// child while broadcast sends stay one-per-member.
     pub aliases: Vec<String>,
 }
 
@@ -139,7 +129,6 @@ impl AgentFamilyMember {
         self.name.as_deref().unwrap_or(&self.id)
     }
 
-    /// Whether `selector` addresses this member by name, id, or alias.
     fn matches_selector(&self, selector: &str) -> bool {
         self.member_name() == selector
             || self.id == selector
@@ -149,8 +138,8 @@ impl AgentFamilyMember {
 
 /// The controller the daemon supplies for `agent_message.*` requests.
 pub trait AgentMessageController: Send + Sync {
-    /// The addressable family (TS `controller.family()`): the parent,
-    /// siblings, and children of this session, excluding the session itself.
+    /// The addressable family: the parent, siblings, and children of this
+    /// session, excluding the session itself.
     fn family(&self) -> impl Future<Output = anyhow::Result<Vec<AgentFamilyMember>>> + Send;
     fn send_agent_message(
         &self,
@@ -181,8 +170,7 @@ pub fn is_agent_session_message_id(id: Option<&str>) -> bool {
 ///
 /// # Errors
 ///
-/// Returns an error when the message is empty after trimming or longer
-/// than the default message limit.
+/// Error when the message is empty after trimming or longer than the default limit.
 pub fn normalize_agent_session_message(message: &str) -> anyhow::Result<String> {
     normalize_agent_session_message_limited(message, DEFAULT_AGENT_MESSAGE_MAX_CHARS)
 }
@@ -192,8 +180,7 @@ pub fn normalize_agent_session_message(message: &str) -> anyhow::Result<String> 
 ///
 /// # Errors
 ///
-/// Returns an error when the message is empty after trimming or longer
-/// than `max_chars`.
+/// Error when the message is empty after trimming or longer than `max_chars`.
 pub fn normalize_agent_session_message_limited(
     message: &str,
     max_chars: usize,
@@ -216,8 +203,7 @@ pub fn normalize_agent_session_message_limited(
 ///
 /// # Errors
 ///
-/// Returns an error when the target is empty after trimming or names the
-/// broadcast wildcard.
+/// Error when the target is empty after trimming or names the broadcast wildcard.
 pub fn assert_direct_agent_message_target(target: &str) -> anyhow::Result<String> {
     let normalized = target.trim();
     if normalized.is_empty() {
@@ -236,8 +222,7 @@ pub fn assert_direct_agent_message_target(target: &str) -> anyhow::Result<String
 ///
 /// # Errors
 ///
-/// Returns an error when the target's unfinished action count has reached
-/// the pending-work limit.
+/// Error when the target's unfinished action count has reached the pending-work limit.
 pub fn assert_agent_message_queue_capacity(
     unfinished_action_count: usize,
     max_pending: usize,
@@ -252,8 +237,7 @@ pub fn assert_agent_message_queue_capacity(
 
 /// Names interpolated into a `[<kind> ...]` header line must not carry the
 /// characters that delimit the header itself (brackets, newlines, commas,
-/// or the relationship separator ":"): runs of those collapse into one
-/// space, then the value trims (TS `sanitizeMessageHeaderValue`).
+/// or ":"): runs of those collapse into one space, then the value trims.
 pub(crate) fn sanitize_message_header_value(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     let mut pending_space = false;
@@ -288,30 +272,25 @@ pub fn create_agent_session_message_prompt(payload: &AgentMessagePromptPayload) 
     format!("[agent-message from {sender}]\n\n{}", payload.message)
 }
 
-/// The receiving side's custom-row inputs (TS
-/// `AgentSessionMessagePayload` at `createAgentSessionMessage` time).
+/// The receiving side's custom-row inputs.
 #[derive(Debug, Clone)]
 pub struct AgentSessionMessageRowPayload<'a> {
     pub id: &'a str,
-    /// The rendered prompt (TS stores `createAgentSessionMessagePrompt`'s
-    /// output as the row `content`; the model context reads it).
+    /// The rendered prompt (stored as the row `content`; the model context
+    /// reads it).
     pub prompt: &'a str,
-    /// The raw delivered body (TS `details.message`).
+    /// The raw delivered body.
     pub message: &'a str,
-    /// The sender endpoint (TS `details.from`).
     pub from: &'a Value,
     pub from_relationship: Option<AgentFamilyRelationship>,
-    /// The receiver endpoint (TS `details.target`).
     pub target: &'a Value,
-    /// Unix timestamp in milliseconds (TS `Date.now()`).
+    /// Unix timestamp in milliseconds.
     pub timestamp: u64,
 }
 
-/// TS `createAgentSessionMessage`: the `role: "custom"` agent-message row
-/// the receiving session's transcript holds. `content` is the rendered
-/// prompt, so the turn's model context (the loop-boundary user-role
-/// conversion of the custom row) matches the plain-prompt delivery, while
-/// the details carry the identity the `agent_message` UI reads.
+/// The `role: "custom"` agent-message row the receiving session's transcript
+/// holds (TS `createAgentSessionMessage`): `content` is the rendered prompt,
+/// so the turn's model context matches the plain-prompt delivery.
 #[must_use]
 pub fn create_agent_session_message_row(payload: &AgentSessionMessageRowPayload<'_>) -> Value {
     let mut details = serde_json::Map::new();
@@ -408,8 +387,7 @@ fn receipt_value(receipt: &AgentMessageReceipt) -> Value {
 /// Register `agent_message.*` handlers onto a handler map. The `send`
 /// contract matches the kernel skill: role/addressed sends carry
 /// `receiver_role`/`receiver_name`, and `target: "all"` is the broadcast
-/// form. Positional targets other than `"all"` are rejected exactly like
-/// the TS handler.
+/// form; other positional targets are rejected.
 pub fn register_agent_message_host_handlers<C: AgentMessageController + 'static>(
     controller: std::sync::Arc<C>,
     handlers: &mut HostRequestHandlers,
@@ -554,15 +532,8 @@ pub fn register_agent_message_host_handlers<C: AgentMessageController + 'static>
     );
 }
 
-// ---------------------------------------------------------------------------
-// Agent observation
-// ---------------------------------------------------------------------------
-
-/// The family lifecycle status every observation row carries (TS #2493
-/// `AgentFamilyStatus`, the roster's `AgentRosterStatus`): `running` while
-// The observe half (TS agent-observe.ts) lives in the child module
-// (agent_messaging::observe); the pub use re-exports keep every external
-// agent_messaging:: path stable (the pa-daemon importers).
+// The observe half lives in the child module; the pub use re-exports keep
+// every external agent_messaging:: path stable.
 mod observe;
 pub use observe::{
     create_agent_observe_message_preview, normalize_observe_limit, normalize_observe_max_chars,
@@ -570,7 +541,5 @@ pub use observe::{
     AgentObserveController, AgentObserveMessagePreview, AgentObserveSummary,
 };
 
-// The unit battery lives in the child module (agent_messaging::tests);
-// its use-super glob resolves through this facade's bindings and re-exports.
 #[cfg(test)]
 mod tests;

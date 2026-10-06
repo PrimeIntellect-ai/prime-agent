@@ -1,32 +1,25 @@
-//! The `/mcp` view's parity harness (TS `ServiceCatalogPickerComponent`):
-//! renders the fixture frames the TS side (the read-only checkout's own
-//! component, driven through tsx) produces for the same input, so the
-//! two can be diffed line-for-line. Takes the fixture JSON path, the
-//! viewport rows, the render width, and a key sequence (space-separated
-//! key ids, "-" for none); prints one trimmed frame line per stdout
-//! line. Test/evidence tooling — never linked into the product.
-// Pedantic-gate exceptions (every other pedantic warning in this crate is
-// fixed in place; each exception carries its one-line justification):
-// - the casts: terminal-layout arithmetic narrows structurally bounded
-//   values (screen coordinates, byte counts, timestamps); guarded
-//   conversions would add panic paths the bounds guarantee away.
+//! The `/mcp` view's parity harness: renders the fixture frames the TS side produces
+//! for the same input, so the two can be diffed line-for-line. Test/evidence tooling —
+//! never linked into the product.
+// Casts: terminal-layout arithmetic narrows structurally bounded values (screen
+// coordinates, byte counts, timestamps); guarded conversions would add panic paths the
+// bounds guarantee away.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// - the render routes are flat tables (one arm per route); splitting them
-//   would add indirection without changing the flow.
+// Style gate only: flat render tables split cleanly per route.
 #![allow(clippy::too_many_lines)]
-// - widget state structs carry independent flag bits; a nested struct
-//   would add indirection without changing the shape.
+// Style gate only: independent flag bits; a nested struct adds indirection without changing
+// the shape.
 #![allow(clippy::struct_excessive_bools, clippy::fn_params_excessive_bools)]
-// - the futures are bounded by the surface's lifetime; boxing them would
-//   add an allocation to the steady-state loop.
+// The futures are bounded by the surface's lifetime; boxing them would add an allocation to
+// the steady-state loop.
 #![allow(clippy::large_futures)]
-// - the wrappers preserve a uniform Result-returning API surface; unwrap
-//   removals would ripple through the callers without changing behavior.
+// The wrappers preserve a uniform Result-returning API surface; unwrap removals would ripple
+// through the callers without changing behavior.
 #![allow(clippy::unnecessary_wraps)]
 
 use std::io::Read as _;

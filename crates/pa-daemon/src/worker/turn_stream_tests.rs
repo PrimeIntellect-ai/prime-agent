@@ -1,15 +1,12 @@
-//! The turn runner's stream tests (moved with the turn concern).
+//! The turn runner's stream tests.
 use super::*;
 use crate::engine::{
     CompactionOutcome, CompactionRequest, PromptRequest, SessionEngine, SideQuestionOutcome,
     SideQuestionRequest,
 };
 
-// The families moved to child modules at the same tree position
-// (turn_stream_tests::{queue,feed,broadcast,burst,park}); the shared
-// fixtures stay here (burst_runner, turn_session_events, positions_of)
-// - every family drives them, and the children reach them + the worker
-// namespace through `use super::*`.
+// The shared fixtures stay here; the child modules reach them
+// through `use super::*`.
 mod abort_idle_race;
 mod broadcast;
 mod burst;
@@ -18,9 +15,7 @@ mod interleave;
 mod park;
 mod queue;
 
-/// A minimal turn runner over a fresh session core: exactly what
-/// `run_turn` touches (the store stays `None`, the roster push is a
-/// no-op link, no supervisor socket).
+/// A minimal turn runner over a fresh session core: exactly what `run_turn` touches.
 fn burst_runner(engine: Arc<dyn SessionEngine>) -> TurnRunner {
     let core = Arc::new(Mutex::new(SessionCore {
         active_session_id: "burst-session".to_string(),
@@ -131,11 +126,9 @@ fn positions_of(events: &[Value], frame_type: &str) -> Vec<usize> {
         .collect()
 }
 
-// The abort gate's arm semantics (the fallback closer's silence
-// association), pinned on the wire: a scripted engine replays the
-// sighting frames through the worker's own gated emit with the flag
-// preset (`run_turn` driven directly - the pickup's delivery-scoped
-// clear never ran), so the final-emit race is deterministic.
+// The abort gate's arm semantics, pinned on the wire: `run_turn` driven
+// directly (the pickup's delivery-scoped clear never ran), so the final-emit
+// race is deterministic.
 struct GateProbeEngine {
     frames: Vec<EngineEvent>,
 }
@@ -196,8 +189,8 @@ impl SessionEngine for GateProbeEngine {
     }
 }
 
-/// One gated sighting battery: the scripted frames through the worker's
-/// turn with the abort flag (and the suppressed-row class) preset.
+/// One gated sighting battery: the scripted frames through the worker's turn with
+/// the abort flag (and the suppressed-row class) preset.
 async fn gate_sighting_events(
     frames: Vec<EngineEvent>,
     abort_requested: bool,
@@ -241,12 +234,8 @@ async fn gate_sighting_events(
     events
 }
 
-/// The finding's final-emit race, made deterministic: an abort flag
-/// sighting on the trailing `Done` of a run that completed on its own
-/// (the session-command / pre-model-failure shape - no aborted outcome,
-/// no suppressed row) must not arm the fallback's silence: the closer
-/// still pairs the run's opening `agent_start` (TS: an abort of a
-/// finished run no-ops).
+/// A sighting on the trailing `Done` of a self-completed run must not arm the
+/// fallback's silence — the closer still pairs the run's `agent_start`.
 #[tokio::test]
 async fn a_late_abort_sighting_on_a_completed_runs_done_keeps_the_fallback_closer() {
     let events = gate_sighting_events(vec![EngineEvent::Done(Ok(()))], true, false).await;
@@ -264,10 +253,8 @@ async fn a_late_abort_sighting_on_a_completed_runs_done_keeps_the_fallback_close
     );
 }
 
-/// The admission consult's settle: `DoneAborted` with no engine
-/// `agent_end` - the aborted-outcome carrier arms the silence, the
-/// suppressed-run wire shape holds (no synthesized closer for the
-/// aborted turn).
+/// `DoneAborted` with no engine `agent_end`: the aborted-outcome carrier arms the
+/// silence.
 #[tokio::test]
 async fn done_aborted_arms_the_fallback_silence() {
     let events = gate_sighting_events(vec![EngineEvent::DoneAborted], true, false).await;
@@ -277,11 +264,8 @@ async fn done_aborted_arms_the_fallback_silence() {
     );
 }
 
-/// The suppressed-row class (the compact path's detached run): a settle
-/// frame that would forward on a plain flag sighting (the closer test's
-/// shape) drops when `suppress_aborted_row` is set - the arm is what the
-/// assertion discriminates on, not the flag: without the suppress term
-/// the same `ToolResultMessage` reaches the wire as its message pair.
+/// A settle frame that would forward on a plain flag sighting drops when
+/// `suppress_aborted_row` is set.
 #[tokio::test]
 async fn the_suppressed_row_sighting_drops_and_arms_the_silence() {
     let events = gate_sighting_events(

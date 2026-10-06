@@ -1,7 +1,6 @@
 //! RLM heartbeat operations: the agent-owned heartbeat jobs created and
 //! managed through the rlm-heartbeat kernel skill (list/create/update/delete
 //! plus session-teardown cancellation).
-//! Section of the port of the `AgentCronJobStore` half of core/cron-jobs.ts.
 
 use uuid::Uuid;
 
@@ -46,9 +45,7 @@ impl AgentCronJobStore {
     ///
     /// # Errors
     ///
-    /// Returns an error when the schedule text cannot be parsed, when the
-    /// schedule is not recurring, or when the heartbeat instruction is
-    /// empty.
+    /// Returns an error when the schedule is invalid or not recurring.
     pub fn create_rlm_heartbeat(
         &self,
         input: &CreateAgentCronJobInput,
@@ -94,14 +91,11 @@ impl AgentCronJobStore {
         Ok(job)
     }
 
-    /// Apply label, prompt, schedule, status, or delivery-mode updates to an
-    /// RLM heartbeat job. Returns `Ok(None)` when no matching job exists.
+    /// Applyupdates to an RLM heartbeat job. `Ok(None)` when no matching job exists.
     ///
     /// # Errors
     ///
-    /// Returns an error when a matching job exists but the update was
-    /// rejected because the new instruction is empty or the new schedule is
-    /// invalid or not recurring.
+    /// Returns an error when a matching job exists but the update was rejected.
     #[allow(clippy::too_many_arguments)]
     pub fn update_rlm_heartbeat(
         &self,
@@ -267,7 +261,6 @@ mod tests {
         rlm_input.source = Some("rlm_heartbeat".to_string());
         let rlm = store.create_rlm_heartbeat(&rlm_input).unwrap();
         assert_eq!(store.list_rlm_heartbeats("live-1", false).len(), 1);
-        // Pause via update.
         let paused = store
             .update_rlm_heartbeat(
                 "live-1",
@@ -281,7 +274,6 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(paused.status, JobStatus::Paused);
-        // Resume recomputes the next run.
         let resumed = store
             .update_rlm_heartbeat(
                 "live-1",
@@ -295,12 +287,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(resumed.status, JobStatus::Active);
-        // Delete cancels.
         let deleted = store
             .delete_rlm_heartbeat("live-1", &rlm.id, now + 3)
             .unwrap();
         assert_eq!(deleted.status, JobStatus::Cancelled);
-        // Session teardown cancels all.
         let second = store.create_rlm_heartbeat(&rlm_input).unwrap();
         let cancelled = store.cancel_rlm_heartbeats_for_session("live-1", now + 4);
         assert_eq!(cancelled.len(), 1);

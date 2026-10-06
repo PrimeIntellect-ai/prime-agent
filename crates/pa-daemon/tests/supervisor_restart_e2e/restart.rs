@@ -15,8 +15,8 @@ fn supervisor_kill9_restart_sessions_re_register_and_survive() {
     let (mut client, hello) = Client::connect(&socket);
     assert_eq!(hello["type"], "daemon_hello");
 
-    // Three scripted sessions, each with a slow first turn (streaming while
-    // the supervisor dies) and a second turn for the post-restart attach.
+    // Each session has a slow first turn (streaming while the supervisor
+    // dies) and a second turn for the post-restart attach.
     let mut sessions = Vec::new();
     for index in 0..3 {
         let script_path = dir.path().join(format!("script-{index}.json"));
@@ -55,7 +55,6 @@ fn supervisor_kill9_restart_sessions_re_register_and_survive() {
         assert_eq!(attached["success"], true, "attach {index} failed");
         sessions.push(session_id);
     }
-    // Three worker children, one per session.
     let deadline = Instant::now() + Duration::from_secs(10);
     let worker_pids = loop {
         let children = child_pids_of(supervisor_pid);
@@ -67,7 +66,6 @@ fn supervisor_kill9_restart_sessions_re_register_and_survive() {
     };
     assert_eq!(worker_pids.len(), 3, "one worker per session");
 
-    // Start all three turns; they stream while the supervisor is killed.
     let mut turn_lines: std::collections::VecDeque<Value> = std::collections::VecDeque::new();
     for (index, session_id) in sessions.iter().enumerate() {
         client.send_command(
@@ -100,8 +98,8 @@ fn supervisor_kill9_restart_sessions_re_register_and_survive() {
         descriptors.push(load_worker_descriptor(&agent_dir, &socket, session_id));
     }
 
-    // Workers alive, sockets accepting, and the in-flight turns complete
-    // while no supervisor exists (direct worker connections).
+    // The in-flight turns complete while no supervisor exists (direct
+    // worker connections).
     std::thread::sleep(Duration::from_millis(1600));
     for (descriptor, index) in descriptors.iter().zip(0..3) {
         assert!(
@@ -133,12 +131,10 @@ fn supervisor_kill9_restart_sessions_re_register_and_survive() {
         );
     }
 
-    // Restart the supervisor on the same socket path.
     let restart_before = pa_daemon::util::now_iso();
     let mut daemon2 = spawn_supervisor(&socket, &agent_dir);
     wait_socket_ready(&socket);
 
-    // All three workers re-register within a bounded window.
     let log_path = pa_daemon::paths::daemon_log_path(&socket, &agent_dir);
     let deadline = Instant::now() + Duration::from_secs(15);
     let registered = loop {
@@ -163,7 +159,6 @@ fn supervisor_kill9_restart_sessions_re_register_and_survive() {
         "the same three identities re-registered"
     );
 
-    // The roster is rebuilt: list shows the sessions again.
     let (mut client2, _hello) = Client::connect(&socket);
     client2.send_command("list1", &json!({ "type": "list" }));
     let list = client2.read_response("list1");
@@ -178,7 +173,6 @@ fn supervisor_kill9_restart_sessions_re_register_and_survive() {
     expected.sort();
     assert_eq!(distinct(listed_ids), expected);
 
-    // Attach to one session through the rebuilt roster and complete a turn.
     let target = &sessions[1];
     client2.send_command(
         "a1",
@@ -214,7 +208,6 @@ fn supervisor_kill9_restart_sessions_re_register_and_survive() {
     };
     assert_eq!(answer, "turn-2-1", "scripted turn completed post-restart");
 
-    // Shutdown takes the restarted supervisor and its adopted workers down.
     client2.send_command("sd", &json!({ "type": "shutdown" }));
     let shutdown = client2.read_response("sd");
     assert_eq!(shutdown["success"], true, "shutdown failed: {shutdown}");

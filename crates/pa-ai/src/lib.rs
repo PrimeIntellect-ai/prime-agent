@@ -1,20 +1,10 @@
 //! Provider APIs and model registry for Prime Agent.
 //!
-//! Rust port of the TypeScript `packages/ai` reference implementation. The
-//! wire/domain types live in `pa-types` and are re-exported from [`types`];
-//! everything else here is provider machinery.
+//! The wire/domain types live in `pa-types` (the only dependency, one-way) and are re-exported
+//! from [`types`]; per-provider internals are `pub(crate)`.
 //!
-//! ## Ownership
-//! One owned area: providers, model registry, streaming. `pa-types` is the only
-//! dependency (one-way). Per-provider internals are `pub(crate)`; the public
-//! surface is the streaming facade ([`stream`]/[`complete`]/[`stream_simple`]/
-//! [`complete_simple`]), the [`Provider`] trait and [`ProviderRegistry`], the
-//! faux provider for tests/tooling, model helpers, env-key resolution, and the
-//! overflow / stream-failure / JSON-repair utilities consumed by the agent
-//! layer.
-//!
-//! Wire-shape enums mirror the TS tagged unions 1:1, so `large_enum_variant`
-//! and `result_large_err` are allowed crate-wide rather than boxing payloads.
+//! Wire-shape enums mirror the TS tagged unions 1:1, so `large_enum_variant` and
+//! `result_large_err` are allowed crate-wide rather than boxing payloads.
 #![allow(clippy::large_enum_variant, clippy::result_large_err)]
 
 pub mod env_api_keys;
@@ -34,10 +24,8 @@ mod prime_inference_differential_test;
 pub use event_stream::{AssistantMessageEventExt, AssistantMessageEventStream};
 pub use providers::faux;
 
-/// Codex WebSocket session debugging and cleanup surface
-/// (`getOpenAICodexWebSocketDebugStats`,
-/// `resetOpenAICodexWebSocketDebugStats`,
-/// `closeOpenAICodexWebSocketSessions` in the TS reference).
+/// Codex WebSocket session debugging and cleanup surface (TS
+/// `getOpenAICodexWebSocketDebugStats` and its reset/close siblings).
 pub mod codex_debug {
     pub use crate::providers::openai_codex_responses::session::{
         close_websocket_sessions, get_debug_stats as get_websocket_debug_stats,
@@ -50,10 +38,9 @@ pub use stream::{complete, complete_simple, stream, stream_simple};
 
 // Cross-crate surface consumed by the agent layer (pa-ai owned).
 pub mod utils {
-    //! Overflow detection, stream-failure classification, JSON repair parsing,
-    //! and structured diagnostics — the parts of the TS `utils/` the agent
-    //! layer calls. SSE decoding, HTTP plumbing, hashing, and logging are
-    //! crate-internal.
+    //! Overflow detection, stream-failure classification, JSON repair
+    //! parsing, and structured diagnostics. SSE decoding, HTTP plumbing,
+    //! hashing, and logging are crate-internal.
     pub use crate::utils_inner::diagnostics;
     pub use crate::utils_inner::json_parse;
     pub use crate::utils_inner::overflow;

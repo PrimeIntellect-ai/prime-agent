@@ -1,6 +1,4 @@
 //! Shared constants, result shapes, and host-bridge types for the kernel layer.
-//!
-//! Ported from `core/kernel/shared.ts`.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -53,10 +51,8 @@ pub const FACTIVITY_SETTLE_TIMEOUT_MS: u64 = 5_000;
 pub const MAX_KERNEL_STDERR_LOG_BYTES: u64 = 5 * 1024 * 1024;
 pub const KERNEL_STDERR_LOG_BUDGET_MARKER: &str = "[stderr log budget exhausted]\n";
 
-/// Hard ceiling on a single attachment's base64 payload, a defensive guard
-/// against a runaway direct display emit. The `attach-image` skill caps its own
-/// images well under this, so a skill-produced attachment is never dropped
-/// here — only a non-skill emit can hit this.
+/// Hard ceiling on a single attachment's base64 payload, a defensive guard against a runaway direct
+/// display emit. The `attach-image` skill caps its own images well under this.
 pub const MAX_ATTACHMENT_DATA_CHARS: usize = 10_000_000;
 
 /// MIME tag the `edit` skill emits diff payloads under.
@@ -104,9 +100,8 @@ pub enum StreamName {
 /// Callback receiving streamed output chunks as they arrive.
 pub type StreamCallback = Arc<dyn Fn(&str, StreamName) + Send + Sync>;
 
-/// Fires when the kernel's last live background `bash()` handle settles
-/// (its activity track empties or the kernel tears down), so owed
-/// continuations can resume (TS `KernelManagerOptions.onBackgroundWorkSettled`).
+/// Fires when the kernel's last live background `bash()` handle settles, so owed continuations can
+/// resume.
 pub type BackgroundWorkSettledCallback = Arc<dyn Fn() + Send + Sync>;
 
 /// Callback receiving an agent message sent late by the kernel.
@@ -345,9 +340,8 @@ pub struct KernelManagerOptions {
     pub session_id: Option<String>,
     pub host_handlers: HostRequestHandlers,
     pub python_skills: Vec<KernelPythonSkill>,
-    /// Fires when the last live background `bash()` handle settles (its
-    /// activity track empties or the kernel tears down), so owed
-    /// continuations can resume.
+    /// Fires when the last live background `bash()` handle settles (its activity
+    /// track empties or the kernel tears down), so owed continuations can resume.
     pub on_background_work_settled: Option<BackgroundWorkSettledCallback>,
     /// Persist/revive the user namespace across kernel restarts and session resume.
     pub snapshot: Option<KernelSnapshotConfig>,
@@ -384,10 +378,8 @@ pub fn parse_diff_display(payload: &Value) -> Option<KernelDiffDisplay> {
     })
 }
 
-/// Parse an [`ATTACHMENT_DISPLAY_MIME`] payload. Malformed payloads are
-/// tolerantly ignored (`None`); a well-formed payload exceeding
-/// [`MAX_ATTACHMENT_DATA_CHARS`] is reported as [`AttachmentParse::Oversized`]
-/// so the caller can fail the cell loudly rather than silently dropping the image.
+/// Parse an [`ATTACHMENT_DISPLAY_MIME`] payload. Malformed payloads are tolerantly ignored;
+/// [`MAX_ATTACHMENT_DATA_CHARS`] is reported as [`AttachmentParse::Oversized`].
 pub fn parse_attachment_display(
     payload: &Value,
 ) -> Option<Result<KernelAttachment, AttachmentOversized>> {

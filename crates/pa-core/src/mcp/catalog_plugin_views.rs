@@ -1,9 +1,5 @@
-//! Cards for the service-catalog view: the shared projection of resolved
-//! catalog services and user-declared MCP servers (port of the view half of
-//! `packages/coding-agent/src/core/mcp/service-catalog.ts`:
-//! `buildPluginViews`, `buildConnectionViews`, search/filter/paging).
-//! Pure data assembly over the auth snapshot and connection records; no
-//! secrets ever leave this module.
+//! Cards for the service-catalog view: the shared projection of resolved catalog services and
+//! user-declared MCP servers. No secrets ever leave this module.
 
 use std::collections::HashMap;
 
@@ -20,18 +16,13 @@ use super::connection_store::McpConnectionRecord;
 use super::service_catalog::{DescriptorTransport, McpServiceDescriptor};
 use super::McpServerConfig;
 
-/// The pinned-definition hint (TS `service-catalog.ts:1081,1102`): shown
-/// when a connection record outlives its catalog entry. The claim "the
-/// catalog source is unavailable" is honest only when a validated remote
-/// catalog snapshot is in hand — TS always has one (the compiled catalog
-/// in the deployed release, the fetch lane's last-good cache or the
-/// packaged bundle on main), so it never claims absence it cannot prove;
-/// without a snapshot the pin keeps the connection manageable but makes
-/// no source-unavailable claim.
+/// The pinned-definition hint: shown when a connection record outlives its catalog entry. The claim
+/// "the catalog source is unavailable" is honest only when a validated remote catalog snapshot is
+/// in hand — unlike TS, which always has one.
 pub(crate) const PINNED_FROM_RECORD_HINT: &str =
     "This service's catalog source is unavailable; its connection keeps the pinned definition.";
 
-/// One card for the service-catalog view (TS `McpPluginView`).
+/// One card for the service-catalog view.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpPluginView {
@@ -49,9 +40,7 @@ pub struct McpPluginView {
     pub source: ViewSource,
     /// Kernel dispatch ids; empty unless credentials make dispatch possible.
     pub connection_ids: Vec<String>,
-    /// View-only marker: this row opens the inline paste panel (a
-    /// requires-setup token service with credential fields). Never a
-    /// connected/verified claim.
+    /// View-only marker: this row opens the inline paste panel. Never a connected/verified claim.
     pub paste_token: Option<bool>,
     /// Catalog metadata aliases (searchable; never runtime claims).
     pub aliases: Option<Vec<String>>,
@@ -83,12 +72,8 @@ pub struct BuildViewsInputs<'a> {
     pub user_servers: Option<&'a HashMap<String, McpServerConfig>>,
     pub credentials: &'a SnapshotCredentials,
     pub records: &'a HashMap<String, McpConnectionRecord>,
-    /// A validated remote catalog snapshot is in hand (the fetch lane's
-    /// last-good cache or the packaged bundle): the pinned-definition hint
-    /// claims the service left the catalog, so it renders only when a
-    /// snapshot can PROVE that. Without one (the fetch never ran, failed,
-    /// or the bundle is missing) the pin keeps the connection manageable
-    /// but stays silent.
+    /// A validated remote catalog snapshot is in hand: the pinned-definition hint renders only when
+    /// a snapshot can PROVE the service left the catalog.
     pub catalog_available: bool,
 }
 
@@ -416,10 +401,8 @@ fn user_server_view(
     }
 }
 
-/// Cards for the service-catalog view (TS `buildPluginViews`): the resolved
-/// services plus user-declared servers, deduplicated per id (a user entry
-/// owns its id unless the service is a legacy builtin — dead shadows are
-/// dropped), sorted connected-first then label, then id.
+/// Cards for the service-catalog view: the resolved services plus user-declared servers, sorted
+/// connected-first then label, then id.
 pub fn build_plugin_views(inputs: &BuildViewsInputs<'_>) -> Vec<McpPluginView> {
     let reserved: std::collections::HashSet<&str> = inputs
         .services
@@ -473,10 +456,8 @@ pub fn build_plugin_views(inputs: &BuildViewsInputs<'_>) -> Vec<McpPluginView> {
     views
 }
 
-/// One row of the kernel connection inventory (TS `McpConnectionView`): the
-/// dispatch id `mcp.config` / `mcp.list_tools` / `mcp.call_tool` address,
-/// with its honestly-computed status. `setup_required` never appears — it
-/// maps to `not_connected` in the inventory rows.
+/// One row of the kernel connection inventory (TS `McpConnectionView`): the dispatch id
+/// `mcp.config` / `mcp.list_tools` / `mcp.call_tool` address. `setup_required` never appears.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpConnectionView {
@@ -546,10 +527,8 @@ impl AcpServerRow {
     }
 }
 
-/// The kernel connection inventory (TS `buildConnectionViews`): one row per
-/// dispatchable account of every service and user-declared server (the same
-/// centralized status the plugin cards compute), plus the session-scoped ACP
-/// servers a catalog/user id does not already shadow. Sorted by connectionId.
+/// The kernel connection inventory (TS `buildConnectionViews`): one row per dispatchable account,
+/// plus the session-scoped ACP servers a catalog/user id does not already shadow.
 pub fn build_connection_views(
     inputs: &BuildViewsInputs<'_>,
     acp_servers: &[AcpServerRow],
@@ -594,9 +573,8 @@ pub fn build_connection_views(
             }
             continue;
         }
-        // One inventory row per account, each with the SAME centralized,
-        // honestly-computed status (credential binding + expiry + record) —
-        // never a raw record.status that could claim a stale Connected.
+        // One inventory row per account, each with the SAME centralized, honestly-computed status
+        // (credential binding) — never a raw record.status that could claim a stale Connected.
         for account in account_states_for(service, inputs.credentials, inputs.records) {
             connected.insert(account.connection_id.clone());
             let label = if account.connection_id == service.service_id {
@@ -672,8 +650,7 @@ pub fn build_connection_views(
     views
 }
 
-/// Filter the plugin cards by an exact connection status (TS
-/// `filterPluginViewsByStatus`).
+/// Filter the plugin cards by an exact connection status.
 pub fn filter_plugin_views_by_status(views: &[McpPluginView], status: &str) -> Vec<McpPluginView> {
     views
         .iter()
@@ -682,9 +659,8 @@ pub fn filter_plugin_views_by_status(views: &[McpPluginView], status: &str) -> V
         .collect()
 }
 
-/// Search the plugin cards by service ids, labels, aliases, account ids,
-/// descriptions, categories, publishers, and docs URLs (TS
-/// `searchPluginViews`); the page is bounded by `limit`.
+/// Search the plugin cards by service ids, labels, aliases, account ids, descriptions, categories,
+/// publishers, and docs URLs.
 pub fn search_plugin_views(
     views: &[McpPluginView],
     query: &str,
@@ -719,8 +695,7 @@ pub fn search_plugin_views(
     matches
 }
 
-/// Decode one page cursor (TS `decodePluginCursor`): digits only, `None`
-/// for the first page.
+/// Decode one page cursor: digits only, `None` for the first page.
 pub fn decode_plugin_cursor(cursor: Option<&str>) -> Result<usize, String> {
     let Some(cursor) = cursor else {
         return Ok(0);
@@ -736,12 +711,10 @@ pub fn decode_plugin_cursor(cursor: Option<&str>) -> Result<usize, String> {
         .map_err(|_| "mcp.list_plugins received an invalid cursor".to_string())
 }
 
-/// Slice one bounded page out of the plugin cards (TS `pagePluginViews`).
+/// Slice one bounded page out of the plugin cards.
 ///
-/// A cursor at or past the end yields an empty page and no continuation —
-/// the TS float-arithmetic outcome for any oversized cursor, which `usize`
-/// addition would otherwise overflow on (`cursor + limit` panics checked
-/// builds and wraps in release to a bogus low cursor).
+/// A cursor at or past the end yields an empty page and no continuation — the TS float-arithmetic
+/// outcome.
 pub fn page_plugin_views(
     views: &[McpPluginView],
     cursor: usize,
@@ -836,11 +809,8 @@ mod connection_view_tests {
         SnapshotCredentials::empty()
     }
 
-    /// The TS `buildConnectionViews` contract: one row per dispatchable
-    /// account (the verified record wins), user-declared stdio servers get
-    /// rows, unshadowed ACP servers get rows, a legacy-builtin shadow (a
-    /// conflicting user entry) surfaces as an error row, and the whole
-    /// inventory sorts by connectionId.
+    /// The contract: one row per dispatchable account (the verified record wins), a legacy-builtin
+    /// shadow surfaces as an error row.
     #[test]
     fn connection_views_cover_accounts_user_and_acp_rows() {
         let services = vec![
@@ -849,7 +819,6 @@ mod connection_view_tests {
         ];
         let mut records = HashMap::new();
         records.insert("alpha".to_string(), connected_record("alpha", "alpha"));
-        // A per-account record: its own dispatchable row.
         records.insert("alpha-2".to_string(), connected_record("alpha-2", "alpha"));
         let mut user_servers = HashMap::new();
         user_servers.insert(
@@ -866,8 +835,6 @@ mod connection_view_tests {
                 call_timeout_ms: None,
             },
         );
-        // A conflicting user entry shadowing the legacy builtin: the
-        // inventory reports the ownership error row, not a dispatchable id.
         user_servers.insert(
             "linear".to_string(),
             McpServerConfig::Http {
@@ -910,16 +877,12 @@ mod connection_view_tests {
         assert_eq!(alpha.transport, "http");
         assert_eq!(alpha.source, ViewSource::Catalog);
         assert_eq!(alpha.service_id.as_deref(), Some("alpha"));
-        // The per-account row carries the account-suffixed label.
         let alpha_two = &views[1];
         assert_eq!(alpha_two.label, "alpha (alpha-2)");
         assert_eq!(alpha_two.status, McpConnectionStatus::Connected);
-        // The conflicted legacy builtin: an error row with the hint, never a
-        // dispatchable connection id beyond the id itself.
         let shadow = views.iter().find(|v| v.connection_id == "linear").unwrap();
         assert_eq!(shadow.status, McpConnectionStatus::Error);
         assert!(shadow.setup_hint.is_some());
-        // The user stdio server reports connected with its transport.
         let local = views
             .iter()
             .find(|v| v.connection_id == "local-tool")
@@ -927,7 +890,6 @@ mod connection_view_tests {
         assert_eq!(local.status, McpConnectionStatus::Connected);
         assert_eq!(local.transport, "stdio");
         assert_eq!(local.source, ViewSource::User);
-        // The ACP server joins as its own connected row.
         let acp = views
             .iter()
             .find(|v| v.connection_id == "session-tool")
@@ -937,8 +899,7 @@ mod connection_view_tests {
     }
 
     /// An oversized cursor pages to an empty page with NO continuation
-    /// instead of overflowing `cursor + limit` (the TS float outcome; the
-    /// registered Macroscope finding on the review of the first push).
+    /// instead of overflowing `cursor + limit` (the TS float outcome).
     #[test]
     fn oversized_cursor_yields_empty_page_without_overflow() {
         let views: Vec<McpPluginView> = (0..4)
@@ -967,7 +928,6 @@ mod connection_view_tests {
         let (page, next) = page_plugin_views(&views, 0, 2);
         assert_eq!(page.len(), 2);
         assert_eq!(next.as_deref(), Some("2"));
-        // A cursor past the end (incl. usize::MAX): empty page, no cursor.
         for cursor in [views.len(), usize::MAX] {
             let (page, next) = page_plugin_views(&views, cursor, 50);
             assert!(page.is_empty(), "cursor {cursor} must page empty");

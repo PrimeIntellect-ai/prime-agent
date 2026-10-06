@@ -1,7 +1,6 @@
-//! Candidate staging (spec §4 `Downloading`/`Staged`): stream the release
-//! archive with a live sha256 digest, extract it into
-//! `releases/<version>-<platform>-<sha256>/`, and write the installer
-//! metadata (`install.rs` validates it on every later read).
+//! Candidate staging (spec §4 `Downloading`/`Staged`): stream the release archive with a
+//! live sha256 digest, extract it into `releases/<version>-<platform>-<sha256>/`, and
+//! write the installer metadata (`install.rs` validates it on every later read).
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -16,7 +15,6 @@ use super::install::{current_platform_alias, RELEASE_ASSETS};
 /// budget shared by all attempts (default 300 s, 3 attempts).
 #[derive(Debug, Clone, Copy)]
 pub struct DownloadBudget {
-    /// Overall wall-clock budget across all attempts.
     pub total_ms: u64,
     pub attempts: u32,
 }
@@ -27,9 +25,7 @@ pub struct DownloadBudget {
 ///
 /// # Errors
 ///
-/// Returns the last attempt's error when every download attempt fails;
-/// when the wall-clock budget expires before an attempt runs, the
-/// budget-expiry error replaces it.
+/// Returns the last attempt's error when every download attempt fails.
 pub async fn download_archive(
     url: &str,
     expected_sha256: &str,
@@ -102,14 +98,11 @@ fn hex(bytes: &[u8]) -> String {
     })
 }
 
-/// The staging scratch prefix under `releases/`: a staging directory is
-/// renamed into its final release name only after the payload validates,
-/// so a crash can never leave a partial directory under a release name
-/// (and the boot-time `.stage-*` sweep below never sees a live one).
+/// The staging scratch prefix under `releases/`: renamed into the final release name
+/// only after the payload validates, so a crash never leaves a partial release.
 const STAGING_PREFIX: &str = ".stage-";
 
-/// Remove leftover staging scratch from interrupted installs (staging
-/// directories are never a release; the rename into place is atomic).
+/// Remove leftover staging scratch from interrupted installs.
 fn sweep_staging(releases: &Path) {
     let Ok(entries) = std::fs::read_dir(releases) else {
         return;
@@ -122,22 +115,15 @@ fn sweep_staging(releases: &Path) {
     }
 }
 
-/// The `--version` probe of a release binary (TS `native-update.ts` runs
-/// the same probe with a 10 s timeout). The binary's own report is the
-/// version the release layout must carry: a directory whose name claims a
-/// different version is an inconsistent installation, never a candidate.
-/// The probe is resource-bounded in both directions: a timed-out or
-/// over-long-writing child is killed (`kill_on_drop`, plus the explicit
-/// kill once the read bound is hit), and stdout is read to a bounded
-/// length, so a payload binary that hangs or streams cannot exhaust the
-/// updater.
+/// The `--version` probe of a release binary: the binary's own report is
+/// the version the release layout must carry, and the probe is
+/// resource-bounded (a hung child is killed; stdout is read to a bounded
+/// length) so a payload binary cannot exhaust the updater.
 ///
 /// # Errors
 ///
-/// Returns an error when the probe child cannot be spawned, exposes no
-/// stdout pipe, times out or overruns its bounds, or exits without
-/// success. A successful probe returns the trimmed stdout verbatim:
-/// empty output and non-version text are `Ok`, not errors.
+/// Returns an error when the probe fails or exits without success; empty
+/// output and non-version text are `Ok`, not errors.
 pub async fn binary_reported_version(exe: &Path) -> Result<String> {
     const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
     const MAX_VERSION_OUTPUT: usize = 512;
@@ -193,22 +179,14 @@ pub async fn binary_reported_version(exe: &Path) -> Result<String> {
 }
 
 /// Extract the verified archive into
-/// `releases/<version>-<platform>-<sha256>/` under the install root and
-/// write the installer metadata (`.archive-sha256`, `.install-source`).
-/// The payload is unpacked into staging scratch and renamed into place
-/// only after it validates, so a crash never leaves a partial directory
-/// under the release name, and an existing release with the same name is
-/// re-validated before reuse: a damaged or foreign staging is never
-/// silently reactivated. Returns the release directory (spec §7: the
-/// candidate is created at `Downloading`/`Staged` and never removed by the
-/// update flow).
+/// Extract the verified archive into
+/// `releases/<version>-<platform>-<sha256>/` and write the installer
+/// metadata. An existing release with the same name is re-validated before
+/// reuse: a damaged or foreign staging is never silently reactivated.
 ///
 /// # Errors
 ///
-/// Returns an error when the existing release fails re-validation, the
-/// staging scratch cannot be created, the archive's digest no longer
-/// matches after extraction, the unpack fails, or the staged tree cannot
-/// be renamed or fsynced into place.
+/// Returns an error when re-validation, digest re-verification, or the rename into place fails.
 pub fn stage_archive(
     archive: &Path,
     archive_sha256: &str,
@@ -225,9 +203,8 @@ pub fn stage_archive(
     }
     let staging = fresh_staging(root)?;
     let staged = unpack_archive_into(archive, &staging).and_then(|()| {
-        // The archive could change on disk between the download's
-        // verification and the extract; re-verify the digest of the file
-        // that was actually unpacked.
+        // The archive could change on disk between the download's verification and the
+        // extract; re-verify the digest of the file that was actually unpacked.
         let observed = file_digest(archive)?;
         if observed != archive_sha256 {
             anyhow::bail!(
@@ -258,24 +235,14 @@ fn file_digest(path: &Path) -> Result<String> {
 }
 
 /// The manual/direct install (`prime-agent update --archive`): stage a
-/// locally-built release payload — a payload directory or a release
-/// archive — into `releases/<version>-<platform>-<sha256>/` and return the
-/// release directory with the version the payload binary reports. The
-/// version always comes from the payload binary's `--version` output
-/// (never a hand-typed string), and the release name's digest is the
-/// canonical digest of the STAGED tree (computed after the copy or
-/// extract, so the digest names exactly the bytes that were staged). The
-/// payload is copied into staging scratch, fsynced, and renamed into
-/// place: a manual install can never write over a running binary (the
-/// in-place `cp` class of corrupted installs) and a crash can never leave
-/// a partial release under its final name.
+/// The manual/direct install (`prime-agent update --archive`): stage a
+/// locally-built payload (directory or archive) into
+/// `releases/<version>-<platform>-<sha256>/`, its name the digest of the
+/// STAGED tree; a manual install can never write over a running binary.
 ///
 /// # Errors
 ///
-/// Returns an error when the payload path cannot be resolved or is not a
-/// directory or regular file, when the staging scratch cannot be created,
-/// when the payload's `--version` probe fails, when the copy fails its
-/// digest check, or when the staged tree cannot be renamed into place.
+/// Returns an error for a bad payload, a failed version probe, or a rename failure.
 pub async fn stage_local_payload(
     payload: &Path,
     root: &Path,
@@ -310,8 +277,6 @@ pub async fn stage_local_payload(
         "{version}-{platform}-{digest}",
         platform = current_platform_alias()
     ));
-    // Byte-identical re-staging reuses the validated release; the
-    // operator's --source is authoritative for future updates.
     match existing_release(&candidate, &digest) {
         Ok(Some(existing)) => {
             let _ = std::fs::remove_dir_all(&staging);
@@ -345,8 +310,7 @@ fn update_install_source(release_dir: &Path, install_source: &str) -> Result<()>
 }
 
 /// Copy or extract the payload into staging scratch, check the release
-/// assets, and probe the binary's `--version` (the version a release
-/// claims is the one its binary reports — never a hand-typed string).
+/// assets, and probe the binary's `--version`.
 async fn stage_payload_version(payload: &Path, staging: &Path) -> Result<String> {
     if payload.is_dir() {
         copy_payload_tree(payload, staging)?;
@@ -372,10 +336,8 @@ async fn stage_payload_version(payload: &Path, staging: &Path) -> Result<String>
     Ok(version)
 }
 
-/// A previously staged release with this name, re-validated: the digest
-/// names the directory so byte-identical re-staging is a no-op, but only
-/// after the existing payload re-validates — a damaged staging must never
-/// be reused.
+/// A previously staged release with this name, re-validated: a damaged
+/// staging must never be reused.
 fn existing_release(release_dir: &Path, archive_sha256: &str) -> Result<Option<PathBuf>> {
     if !release_dir.exists() {
         return Ok(None);
@@ -389,7 +351,6 @@ fn existing_release(release_dir: &Path, archive_sha256: &str) -> Result<Option<P
     Ok(Some(release_dir.to_path_buf()))
 }
 
-/// A fresh staging scratch directory under `releases/`.
 fn fresh_staging(root: &Path) -> Result<PathBuf> {
     let releases = root.join("releases");
     std::fs::create_dir_all(&releases).with_context(|| format!("create {}", releases.display()))?;
@@ -399,9 +360,8 @@ fn fresh_staging(root: &Path) -> Result<PathBuf> {
     Ok(staging)
 }
 
-/// Unpack a release archive at the staging root (the tar crate rejects
-/// absolute paths and `..` components by default; entries unpack at the
-/// archive root).
+/// Unpack a release archive at the staging root (the tar crate rejects absolute
+/// paths and `..` components by default; entries unpack at the archive root).
 fn unpack_archive_into(archive: &Path, staging: &Path) -> Result<()> {
     let file =
         std::fs::File::open(archive).with_context(|| format!("open {}", archive.display()))?;
@@ -411,9 +371,8 @@ fn unpack_archive_into(archive: &Path, staging: &Path) -> Result<()> {
         .with_context(|| format!("extract the release into {}", staging.display()))
 }
 
-/// fsync a staged payload tree (files, then directories deepest-first) so
-/// the rename into place can never expose a release whose data did not
-/// survive a crash.
+/// fsync a staged payload tree (files, then directories deepest-first) so the
+/// rename into place can never expose a release whose data did not survive a crash.
 fn sync_release_tree(root: &Path) -> Result<()> {
     fn walk(directory: &Path, directories: &mut Vec<PathBuf>) -> Result<()> {
         for entry in
@@ -439,9 +398,8 @@ fn sync_release_tree(root: &Path) -> Result<()> {
     super::install::sync_directory(root)
 }
 
-/// Validate a staged payload, write the installer metadata, make the
-/// binary executable, fsync the tree, and rename it into its release
-/// name (the atomic staging boundary).
+/// Validate a staged payload, write the installer metadata, and rename it into
+/// its release name (the atomic staging boundary).
 fn finish_staging(
     staging: &Path,
     release_dir: &Path,
@@ -469,13 +427,8 @@ fn finish_staging(
     Ok(())
 }
 
-/// The canonical digest of a staged payload tree: the sha256 over every
-/// entry's contents (streamed, so memory stays bounded), chained with each
-/// entry's archive-relative path in its OS-native byte form and its
-/// permission mode — so identical byte content under different names or
-/// permission bits never reuses an earlier release. Deterministic across
-/// machines: a re-staged identical payload always lands on the same
-/// release name.
+/// The canonical digest of a staged payload tree — identical bytes under different
+/// names or permission bits never reuse a release.
 fn release_tree_digest(dir: &Path) -> Result<String> {
     let mut entries: Vec<(Vec<u8>, PathBuf)> = Vec::new();
     collect_payload_entries(dir, &[], &mut entries)?;
@@ -548,10 +501,8 @@ fn collect_payload_entries(
     Ok(())
 }
 
-/// Copy a payload directory into staging scratch (never over a release):
-/// regular files copy with their mode, symlinks re-link to the same
-/// target. The source stays untouched — the only in-place mutation this
-/// flow performs is the atomic rename of the staging directory itself.
+/// Copy a payload directory into staging scratch (never over a release): regular
+/// files copy with their mode, symlinks re-link; the source stays untouched.
 fn copy_payload_tree(from: &Path, to: &Path) -> Result<()> {
     for entry in std::fs::read_dir(from).with_context(|| format!("read {}", from.display()))? {
         let entry = entry?;
@@ -648,10 +599,8 @@ mod tests {
             std::fs::read_to_string(release_dir.join(".archive-sha256")).unwrap(),
             sha
         );
-        // Re-staging the same digest is a no-op.
         let again = stage_archive(&archive, &sha, &root, "0.2.0", "https://example.com").unwrap();
         assert_eq!(again, release_dir);
-        // No staging scratch is left behind.
         let releases = root.join("releases");
         for entry in std::fs::read_dir(&releases).unwrap() {
             let name = entry.unwrap().file_name().to_string_lossy().to_string();
@@ -667,12 +616,9 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let release_dir =
             stage_archive(&archive, &sha, &root, "0.2.0", "https://example.com").unwrap();
-        // A damaged release with the same name is refused, never silently
-        // reactivated.
         std::fs::remove_file(release_dir.join("README.md")).unwrap();
         let error = stage_archive(&archive, &sha, &root, "0.2.0", "https://example.com");
         assert!(error.is_err());
-        // A foreign digest recorded in the name is refused too.
         std::fs::write(release_dir.join("README.md"), "payload").unwrap();
         std::fs::write(release_dir.join(".archive-sha256"), format!("{sha}0")).unwrap();
         assert!(stage_archive(&archive, &sha, &root, "0.2.0", "https://example.com").is_err());
@@ -714,8 +660,6 @@ mod tests {
             "releases/9.9.9-{platform}-{digest}",
             platform = current_platform_alias()
         )));
-        // The version came from the binary probe; the metadata the install
-        // layout validates is in place.
         assert_eq!(
             std::fs::read_to_string(release_dir.join(".archive-sha256")).unwrap(),
             digest
@@ -724,14 +668,12 @@ mod tests {
             std::fs::read_to_string(release_dir.join(".install-source")).unwrap(),
             "https://example.com/tree/abc"
         );
-        // Re-staging the same payload reuses the validated release.
         let (again, again_version) =
             stage_local_payload(&payload, &root, "https://example.com/tree/abc")
                 .await
                 .unwrap();
         assert_eq!(again, release_dir);
         assert_eq!(again_version, "9.9.9");
-        // A reused release follows the operator's current install source.
         let (reused, _) =
             stage_local_payload(&payload, &root, "https://mirror.example.com/tree/def")
                 .await
@@ -741,7 +683,6 @@ mod tests {
             std::fs::read_to_string(reused.join(".install-source")).unwrap(),
             "https://mirror.example.com/tree/def"
         );
-        // A changed payload stages under a different name (a new digest).
         std::fs::write(payload.join("README.md"), "changed").unwrap();
         let (changed, _) =
             stage_local_payload(&payload, &root, "https://mirror.example.com/tree/def")
@@ -761,8 +702,6 @@ mod tests {
         let (first, _) = stage_local_payload(&payload, &root, "https://example.com")
             .await
             .unwrap();
-        // The same bytes with a different executable bit are a different
-        // payload: the digest must not reuse the earlier release.
         let helper = payload.join("README.md");
         let mut permissions = std::fs::metadata(&helper).unwrap().permissions();
         permissions.set_mode(permissions.mode() | 0o111);
@@ -773,9 +712,8 @@ mod tests {
         assert_ne!(second, first);
     }
 
-    /// A release archive whose `prime-agent` is an executable script
-    /// reporting a fixed version (the probe path a real binary takes).
-    /// Unix only: its callers are the unix symlink/exec probe tests.
+    /// A release archive whose `prime-agent` is an executable script reporting a fixed
+    /// version. Unix only: its callers are the unix symlink/exec probe tests.
     #[cfg(unix)]
     fn fixture_versioned_archive(dir: &Path, name: &str, version: &str) -> (PathBuf, String) {
         let payload = fixture_payload(dir, "archive-staging", version);
@@ -803,10 +741,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (archive, _archive_file_sha) =
             fixture_versioned_archive(dir.path(), "candidate.tar.gz", "1.2.3");
-        // The release name's digest is the canonical digest of the STAGED
-        // tree (the extracted archive content), not the archive file's own
-        // sha256 — the archive fixture above carries the same content as
-        // this payload tree, so their tree digests are equal.
+        // The release name's digest is the STAGED tree's canonical digest, not the archive
+        // file's sha256 — the fixtures carry the same content, so their tree digests are equal.
         let extracted = fixture_payload(dir.path(), "extracted", "1.2.3");
         let expected_digest = release_tree_digest(&extracted).unwrap();
         let root = dir.path().join("install-root");
@@ -829,8 +765,6 @@ mod tests {
     #[tokio::test]
     async fn refuses_a_local_payload_without_a_release_version() {
         let dir = tempfile::tempdir().unwrap();
-        // A "binary" that prints garbage: the release name embeds the
-        // version, so an unparseable report is refused at staging.
         let payload = fixture_payload(dir.path(), "payload", "not a version");
         let root = dir.path().join("install-root");
         std::fs::create_dir_all(&root).unwrap();
@@ -855,9 +789,8 @@ mod tests {
         );
     }
 
-    /// Serve one archive download from a fake local release endpoint and
-    /// return the endpoint's base URL plus a channel carrying the request
-    /// head. No fixed ports: the listener binds `127.0.0.1:0`.
+    /// Serve one archive download from a fake local release endpoint and return the
+    /// endpoint's base URL plus a channel carrying the request head.
     async fn fake_release_endpoint(
         body: Vec<u8>,
     ) -> (String, tokio::sync::oneshot::Receiver<String>) {
@@ -907,8 +840,6 @@ mod tests {
             attempts: 1,
         };
         let destination_name = "update.tar.gz";
-        // The verified download lands the exact payload bytes at the
-        // destination and identifies the release updater.
         {
             let (base_url, head_rx) = fake_release_endpoint(payload.clone()).await;
             let dir = tempfile::tempdir().unwrap();
@@ -933,8 +864,6 @@ mod tests {
                 "the request identifies the release updater: {head}"
             );
         }
-        // A digest mismatch refuses the payload: nothing lands, and no
-        // partial artifact stays behind.
         {
             let (base_url, _) = fake_release_endpoint(payload).await;
             let dir = tempfile::tempdir().unwrap();

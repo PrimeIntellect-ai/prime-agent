@@ -1,4 +1,4 @@
-//! Agent engine tests (moved with their concerns).
+//! Agent engine tests.
 /// The faux provider registry is process-global; faux-driven tests must
 /// not register concurrently (each registration replaces the queue).
 #[cfg(test)]
@@ -7,10 +7,6 @@ pub(crate) static FAUX_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new((
 use super::*;
 use serde_json::Map;
 
-// The test families: each child holds its battery and its family-local
-// fixtures; the shared faux harness (the lock, admission, and the
-// event-collection helpers below) stays here for every family and for
-// the sibling test modules that reach them through this path.
 mod abort;
 mod autonomous;
 mod compaction;
@@ -44,8 +40,7 @@ fn bare_engine(dir: &std::path::Path) -> AgentSessionEngine {
     .unwrap()
 }
 
-/// A settings.json with an explicit compaction reserve (the f14 battery
-/// shape: `reserveTokens` set so a seeded usage crosses the headroom).
+/// A settings.json with an explicit compaction reserve (the f14 battery shape).
 fn write_compaction_settings(dir: &std::path::Path, reserve_tokens: u64) {
     std::fs::create_dir_all(dir.join("agent")).unwrap();
     std::fs::write(
@@ -116,11 +111,10 @@ pub(crate) fn faux_engine_with_settings(
     (engine, dir)
 }
 
-/// The goal-admission collector: installs the turn-end seam (a probe
-/// reporting no queued input plus a sink capturing minted work) on an
-/// engine built without a worker. The collector's push IS the admission
-/// for the harness: the driver's pending-continuation guard releases at
-/// the sink exactly like the worker's queue lane does.
+/// The goal-admission collector: installs the turn-end seam (probe +
+/// capturing sink) on an engine without a worker. The push IS the
+/// admission: the pending-continuation guard releases at the sink
+/// like the worker's queue lane does.
 pub(crate) fn goal_admission_collector(
     engine: &std::sync::Arc<AgentSessionEngine>,
 ) -> std::sync::Arc<std::sync::Mutex<Vec<crate::engine::GoalTurnEndWork>>> {
@@ -131,9 +125,8 @@ pub(crate) fn goal_admission_collector(
     engine.set_goal_admission(
         std::sync::Arc::new(|| false),
         std::sync::Arc::new(move |work| {
-            // The item's OWN handle (cloned before the push takes the
-            // work): the release names this mint's guard, never the
-            // mutable mirror.
+            // The item's OWN handle (cloned before the push): the
+            // release names this mint's guard, never the mirror.
             let pending_handle = match &work {
                 crate::engine::GoalTurnEndWork::Continuation(item) => item.pending_handle.clone(),
                 crate::engine::GoalTurnEndWork::BudgetLimitSteer(item) => {
@@ -184,9 +177,8 @@ pub(crate) fn outcome_row_in_entries(engine: &AgentSessionEngine) -> bool {
     })
 }
 
-/// The live loop context carries the outcome row (TS
-/// `agent.state.messages.push`); the loop's converter keeps it out of
-/// the provider request.
+/// The live loop context carries the outcome row; the converter keeps it out of the provider
+/// request.
 pub(crate) fn outcome_row_in_live_context(engine: &AgentSessionEngine) -> bool {
     let guard = engine.session.blocking_lock();
     let Some(core) = guard.as_deref() else {
@@ -201,8 +193,7 @@ pub(crate) fn outcome_row_in_live_context(engine: &AgentSessionEngine) -> bool {
     })
 }
 
-/// The engine session's durable entry chain carries a compaction
-/// entry (an aborted run must never commit one).
+/// The entry chain carries a compaction entry (an aborted run must never commit one).
 pub(crate) fn compaction_entry_in_entries(engine: &AgentSessionEngine) -> bool {
     let guard = engine.session.blocking_lock();
     let Some(core) = guard.as_deref() else {
@@ -219,8 +210,7 @@ pub(crate) fn compaction_entry_in_entries(engine: &AgentSessionEngine) -> bool {
 }
 
 /// Admit one prompt on a parked thread, sharing its events; `started`
-/// flips on the first compaction start event so the caller can abort
-/// the run mid-flight. Returns the join handle.
+/// flips on the first compaction start event. Returns the join handle.
 pub(crate) fn admit_parked(
     engine: &std::sync::Arc<AgentSessionEngine>,
     message: String,
@@ -254,8 +244,7 @@ pub(crate) fn admit_parked(
     })
 }
 
-/// Wait until the parked admission's compaction started (a deadline
-/// instead of a hang when the run never reaches the summarizer).
+/// Wait until the parked admission's compaction started (deadline-bounded).
 pub(crate) fn wait_for_compaction_start(started: &std::sync::atomic::AtomicBool) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     while !started.load(std::sync::atomic::Ordering::SeqCst) {
@@ -267,9 +256,8 @@ pub(crate) fn wait_for_compaction_start(started: &std::sync::atomic::AtomicBool)
     }
 }
 
-/// The aborted `compaction_end` event for a cancelled auto compaction:
-/// `aborted` with no `errorMessage`, no `errorSeverity`, and no
-/// `result` (TS `_endCompactionUnsuccessfully`'s `{ aborted: true }`).
+/// The aborted `compaction_end` event: `aborted` with no
+/// `errorMessage`, `errorSeverity`, or `result`.
 pub(crate) fn assert_cancelled_end_event(
     events: &[EngineEvent],
     expected_reason: &str,
@@ -321,8 +309,7 @@ pub(crate) fn assert_cancelled_end_event(
     );
 }
 
-/// A driver loop test harness: faux script + collected events. Holds the
-/// faux lock while the engine runs.
+/// A driver loop test harness: faux script + collected events, holding the faux lock.
 #[cfg(test)]
 fn run_prompts(
     script: &serde_json::Value,

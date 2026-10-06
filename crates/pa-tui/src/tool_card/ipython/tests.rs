@@ -116,9 +116,6 @@ fn expanded_error_cell_shows_traceback() {
 
 #[test]
 fn sent_agent_messages_render_below_the_code() {
-    // TS `renderSentAgentMessages`: the receipt summary renders below
-    // the code with a blank separator, the body opens up in the
-    // expanded view.
     let details = json!({
         "status": "ok",
         "durationMs": 3,
@@ -164,17 +161,14 @@ fn sent_agent_messages_render_below_the_code() {
     );
     assert_eq!(flat[summary + 1], " \u{2570}\u{2500} Ping.");
     assert_eq!(flat[summary + 2], "    Then report back.");
-    // The summary carries no body preview and no receipt metadata.
     assert!(!flat.iter().any(|row| row.contains("agentmsg_1")));
     assert!(!flat.iter().any(|row| row.contains("deliveryStatus")));
 }
 
 #[test]
 fn sent_agent_message_receipts_share_the_viewer_relative_arrow() {
-    // Both receipt kinds (delivered and queued) render the same shared
-    // `Agent message` label with the outgoing `↑` arrow (the operator's
-    // 2026-09-25 directive); the counterpart falls back name -> active
-    // session id -> session id -> unknown.
+    // Both receipt kinds render the shared `Agent message` label with
+    // the outgoing `↑` arrow (the operator's 2026-09-25 directive).
     for delivery in ["delivered", "queued"] {
         let details = json!({
             "status": "ok",
@@ -210,7 +204,6 @@ fn sent_agent_message_receipts_share_the_viewer_relative_arrow() {
         "got: {}",
         text_of(&lines[1])
     );
-    // Malformed entries render nothing.
     let details = json!({
         "status": "ok",
         "sentAgentMessages": [{ "id": "agentmsg_4" }, { "message": 1 }],

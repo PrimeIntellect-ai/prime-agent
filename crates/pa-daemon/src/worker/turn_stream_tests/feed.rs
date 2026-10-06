@@ -1,16 +1,8 @@
-//! The live supervisor-feed family (moved with its concern): the
-//! waiting-prompt settle order and the roster's live tool-activity
-//! wire indicator, with the fake supervisor link + live-feed runner
-//! fixtures (unix).
+//! The live supervisor-feed family: the waiting-prompt settle order
+//! and the roster's live tool-activity wire indicator (unix).
 use super::*;
 
-/// The waiting prompt resolves only after the turn fully unwinds (TS
-/// `promptAndWait` settles the completion after the whole turn settle):
-/// the `done` waiter fires after the idle flip and the queue projection,
-/// so a client's follow-up request never lands in the pre-idle window
-/// where the suspension gate would queue it behind the suspension
-/// instead of rejecting it (the f7 suspension sequence's post-abort
-/// prompt hung exactly there).
+/// The `done` waiter fires after the idle flip and queue projection, never pre-idle.
 #[tokio::test]
 async fn the_waiting_prompt_resolves_only_after_the_turn_settles() {
     let engine: Arc<dyn SessionEngine> = Arc::new(
@@ -113,9 +105,8 @@ fn fake_supervisor(
     (recorded, server)
 }
 
-/// A turn runner whose roster pushes and activity watcher ship to a
-/// live supervisor link (the burst runner keeps them disabled). Unix
-/// only: its one caller is the unix socket-harness test below.
+/// A turn runner whose roster pushes ship to a live supervisor link
+/// (the burst runner keeps them disabled). Unix only.
 #[cfg(unix)]
 fn live_feed_runner(engine: Arc<dyn SessionEngine>, socket: std::path::PathBuf) -> TurnRunner {
     let core = Arc::new(Mutex::new(SessionCore::test_core(None, "/tmp".to_string())));
@@ -166,9 +157,7 @@ fn live_feed_runner(engine: Arc<dyn SessionEngine>, socket: std::path::PathBuf) 
 
 /// The waiting/executing indicator over the wire: a working session's
 /// roster deltas carry live `isRunningTools` transitions while the
-/// tool executes (mid-turn pushes, not a static turn-start snapshot)
-/// and end idle once the turn settles (TS `observeRosterEvent` +
-/// `ROSTER_SESSION_EVENT_TRIGGERS` + `scheduleRosterFlush`).
+/// tool executes and end idle once the turn settles.
 #[cfg(unix)]
 #[tokio::test]
 async fn roster_feed_publishes_live_tool_activity() {
@@ -269,9 +258,8 @@ async fn roster_feed_publishes_live_tool_activity() {
             .any(|summary| summary["isRunningTools"] == json!(true)),
         "the tool execution never showed in the feed: {summaries:?}"
     );
-    // The post-tool intermediate state (streaming, no tools in flight)
-    // is not asserted: the coalescer may collapse it into the turn's
-    // next flush — the feed's contract is the mid-tool live state and
-    // the settled idle row, both asserted above.
+    // The post-tool intermediate state is not asserted: the coalescer may
+    // collapse it — the feed's contract is the mid-tool live state and the
+    // settled idle row.
     server.abort();
 }

@@ -1,8 +1,6 @@
-//! The `AuthStorage` unit battery (moved with its concern): the candidate
-//! memo + staleness machinery, the runtime/stored/environment/fallback
-//! precedence, the OAuth refresh contract, and the Prime Inference
-//! credential + team writes (the hermetic `ScriptedEnv` seam against the
-//! ambient env).
+//! The `AuthStorage` unit battery: the candidate memo + staleness
+//! machinery, the resolution precedence, the OAuth refresh contract, and
+//! the Prime Inference credential + team writes (hermetic `ScriptedEnv`).
 
 use super::*;
 
@@ -45,8 +43,8 @@ fn storage_with_env(data: &serde_json::Value, env: ScriptedEnv) -> AuthStorage {
 
 #[test]
 fn runtime_override_wins() {
-    // Non-prime provider: runtime beats stored; ambient env of the test
-    // process cannot interfere (stored outranks env for these).
+    // Non-prime provider: runtime beats stored; stored outranks env,
+    // so ambient env cannot interfere.
     let mut auth = storage_with(&serde_json::json!({
         "anthropic": { "type": "api_key", "key": "stored-key" }
     }));
@@ -66,11 +64,9 @@ fn stale_marking_skips_source_and_clears() {
         "prime-inference": { "type": "api_key", "key": "sk-stale" }
     }));
     assert!(auth.mark_auth_stale("prime-inference"));
-    // The stored credential is now skipped.
     assert_eq!(auth.get_api_key("prime-inference"), None);
     let status = auth.get_auth_status("prime-inference");
     assert_eq!(status.source, Some(AuthSource::Stale));
-    // Explicit clear re-enables it.
     auth.clear_auth_stale("prime-inference");
     assert_eq!(
         auth.get_api_key("prime-inference").as_deref(),
@@ -80,11 +76,8 @@ fn stale_marking_skips_source_and_clears() {
 
 #[test]
 fn candidate_memos_supersede_exactly_when_material_changes() {
-    // The memo is keyed by the hashed material itself (TS #2479's
-    // `authCandidateMemos`): a changed env value must re-resolve to the
-    // new fingerprint, so a stale marking from the old value never gates
-    // the new one, and the same value keeps serving the same
-    // resolution.
+    // The memo is keyed by the hashed material: a changed env value re-resolves to
+    // the new fingerprint, so a stale marking of the old value never gates the new one.
     let mut auth = storage_with_env(
         &serde_json::json!({}),
         ScriptedEnv(HashMap::from([(
@@ -99,9 +92,7 @@ fn candidate_memos_supersede_exactly_when_material_changes() {
         None,
         "the marked value is gated"
     );
-    // A changed value changes the memo key: the rebuilt candidate's
-    // value fingerprint differs from the stale token's, so the new
-    // value resolves.
+    // A changed value changes the memo key, so the new value resolves.
     auth.env_credentials = Arc::new(ScriptedEnv(HashMap::from([(
         "ANTHROPIC_API_KEY".to_string(),
         "sk-two".to_string(),
@@ -119,9 +110,8 @@ fn candidate_memos_supersede_exactly_when_material_changes() {
     assert_eq!(auth.get_api_key("anthropic"), None);
     auth.clear_auth_stale("anthropic");
     assert_eq!(auth.get_api_key("anthropic").as_deref(), Some("sk-one"));
-    // The stored arm: replacing the credential changes the hashed
-    // material, so a stale marking of the old key never gates the new
-    // one.
+    // The stored arm: a replaced credential changes the hashed material,
+    // so the old stale marking never gates it.
     let mut auth = storage_with(&serde_json::json!({
         "anthropic": { "type": "api_key", "key": "sk-old" }
     }));
@@ -176,7 +166,6 @@ fn command_keys_resolve() {
 
 #[test]
 fn env_key_priority_for_prime_inference() {
-    // prime-inference prefers the environment over stored.
     let mut auth = storage_with_env(
         &serde_json::json!({
             "prime-inference": { "type": "api_key", "key": "stored-key" }
@@ -210,7 +199,6 @@ fn provider_headers_team_selection() {
             "primeTeam": { "teamId": "team-1", "name": "Team 1" }
         }
     }));
-    // Stored team selection surfaces as the team header.
     let headers = auth
         .get_provider_headers(PRIME_INFERENCE_PROVIDER_ID)
         .unwrap();
@@ -218,11 +206,9 @@ fn provider_headers_team_selection() {
         headers.get("X-Prime-Team-ID").map(String::as_str),
         Some("team-1")
     );
-    // Other providers have no headers.
     assert!(auth.get_provider_headers("anthropic").is_none());
-    // The stored team survives an ambient environment key (the dogfood
-    // box posture): PRIME_API_KEY supplies the key, the stored login's
-    // team still scopes the header.
+    // The stored team survives an ambient environment key: PRIME_API_KEY
+    // supplies the key, the stored login's team still scopes the header.
     let mut auth = storage_with_env(
         &serde_json::json!({
             "prime-inference": {
@@ -303,7 +289,6 @@ fn team(id: &str, name: &str) -> PrimeTeamCredential {
 #[test]
 fn prime_inference_key_writes_follow_the_ts_assignment_rules() {
     let mut auth = storage_with(&serde_json::json!({}));
-    // A team write binds the team to the key.
     auth.set_prime_inference_api_key("sk-1", PrimeTeamAssignment::Team(team("1", "Team 1")));
     assert_eq!(
         auth.get_all().credential(PRIME_INFERENCE_PROVIDER_ID),
@@ -340,17 +325,15 @@ fn prime_inference_key_writes_follow_the_ts_assignment_rules() {
             prime_team: None,
         })
     );
-    // The write clears a stale marking on the stored source (TS
-    // `clearStaleAuthSource`).
+    // The write clears a stale marking on the stored source.
     assert!(auth.mark_auth_stale(PRIME_INFERENCE_PROVIDER_ID));
     auth.set_prime_inference_api_key("sk-3", PrimeTeamAssignment::PersonalAccount);
     assert_eq!(
         auth.get_api_key(PRIME_INFERENCE_PROVIDER_ID).as_deref(),
         Some("sk-3")
     );
-    // The stored document carries the TS wire shape: the personal
-    // account persists `primeTeam: null` (TS writes the key
-    // explicitly), never an omitted field.
+    // The TS wire shape: the personal account persists `primeTeam:
+    // null`, never an omitted field.
     let stored = auth.get_all();
     let credential = stored
         .get(PRIME_INFERENCE_PROVIDER_ID)
@@ -363,11 +346,8 @@ fn prime_inference_key_writes_follow_the_ts_assignment_rules() {
 #[test]
 fn prime_inference_team_selection_rebinds_only_the_stored_key() {
     let mut auth = storage_with(&serde_json::json!({}));
-    // Without a stored credential the selection is a no-op.
     auth.set_prime_inference_team_selection(Some(team("1", "Team 1")), None);
     assert_eq!(auth.get_all().get(PRIME_INFERENCE_PROVIDER_ID), None);
-    // With the key it rebinds the team; the key must match when the
-    // caller pins it.
     auth.set_prime_inference_api_key("sk-1", PrimeTeamAssignment::PersonalAccount);
     auth.set_prime_inference_team_selection(Some(team("1", "Team 1")), Some("sk-1"));
     assert_eq!(
@@ -389,7 +369,6 @@ fn prime_inference_team_selection_rebinds_only_the_stored_key() {
         auth.get_prime_inference_team_selection(),
         StoredPrimeTeam::PersonalAccount
     );
-    // A non-api-key credential is never rebound.
     let mut auth = storage_with(&serde_json::json!({
         "prime-inference": {
             "type": "oauth", "access": "a", "refresh": null, "expires": 1
@@ -402,8 +381,7 @@ fn prime_inference_team_selection_rebinds_only_the_stored_key() {
     );
 }
 
-/// A backend that serves reads but fails every write (the locked
-/// write erroring before the reload, storage.rs's failure arm).
+/// A backend that serves reads but fails every write.
 struct WriteFailingBackend(std::sync::Mutex<Option<String>>);
 
 impl AuthStorageBackend for WriteFailingBackend {
@@ -422,18 +400,16 @@ impl AuthStorageBackend for WriteFailingBackend {
 
 #[test]
 fn a_failed_prime_inference_key_write_keeps_the_stale_marking() {
-    // TS: `setPrimeInferenceApiKey` throws before
-    // `clearStaleAuthSource`, so a failed replacement never re-enables
-    // the server-rejected credential.
+    // TS: `setPrimeInferenceApiKey` throws before `clearStaleAuthSource`,
+    // so a failed replacement never re-enables the server-rejected credential.
     let mut auth = AuthStorage::from_storage(
         Arc::new(WriteFailingBackend(std::sync::Mutex::new(Some(
             r#"{"prime-inference": {"type": "api_key", "key": "sk-rejected"}}"#.to_string(),
         )))),
         Arc::new(NoOAuth),
     );
-    // The scripted empty env keeps the stored credential the active
-    // source (an ambient PRIME_API_KEY would outrank it for
-    // prime-inference and change what `mark_auth_stale` marks).
+    // The scripted empty env keeps the stored credential the active source
+    // (an ambient PRIME_API_KEY would outrank it).
     auth.env_credentials = Arc::new(ScriptedEnv(HashMap::new()));
     assert!(auth.mark_auth_stale(PRIME_INFERENCE_PROVIDER_ID));
     auth.set_prime_inference_api_key("sk-new", PrimeTeamAssignment::PersonalAccount);
@@ -441,8 +417,6 @@ fn a_failed_prime_inference_key_write_keeps_the_stale_marking() {
         !auth.drain_errors().is_empty(),
         "the failed write surfaces its error"
     );
-    // The rejected credential stays stale: the failed replacement
-    // did not re-enable it.
     assert_eq!(
         auth.get_auth_status(PRIME_INFERENCE_PROVIDER_ID).source,
         Some(AuthSource::Stale)
@@ -452,13 +426,11 @@ fn a_failed_prime_inference_key_write_keeps_the_stale_marking() {
 
 #[test]
 fn prime_inference_team_selection_reads_follow_the_ts_tri_state() {
-    // No credential: no selection.
     let auth = storage_with(&serde_json::json!({}));
     assert_eq!(
         auth.get_prime_inference_team_selection(),
         StoredPrimeTeam::NotSelected
     );
-    // A stored team selection reads back.
     let auth = storage_with(&serde_json::json!({
         "prime-inference": {
             "type": "api_key",
@@ -470,7 +442,6 @@ fn prime_inference_team_selection_reads_follow_the_ts_tri_state() {
         auth.get_prime_inference_team_selection(),
         StoredPrimeTeam::Team(team("team-1", "Team 1"))
     );
-    // A stored personal account reads back.
     let auth = storage_with(&serde_json::json!({
         "prime-inference": {
             "type": "api_key", "key": "pi-key", "primeTeam": null
@@ -480,8 +451,6 @@ fn prime_inference_team_selection_reads_follow_the_ts_tri_state() {
         auth.get_prime_inference_team_selection(),
         StoredPrimeTeam::PersonalAccount
     );
-    // PRIME_TEAM_ID hides the stored selection (the env pin owns the
-    // team).
     let auth = storage_with_env(
         &serde_json::json!({
             "prime-inference": {
@@ -497,10 +466,7 @@ fn prime_inference_team_selection_reads_follow_the_ts_tri_state() {
         auth.get_prime_inference_team_selection(),
         StoredPrimeTeam::NotSelected
     );
-    // An environment key (the active source for prime-inference) does
-    // NOT hide the stored selection: the stored primeTeam survives the
-    // override (fleet P5, the dogfood daemon posture — no PRIME_TEAM_ID
-    // pin needed).
+    // An environment key does NOT hide the stored selection.
     let auth = storage_with_env(
         &serde_json::json!({
             "prime-inference": {
@@ -518,7 +484,7 @@ fn prime_inference_team_selection_reads_follow_the_ts_tri_state() {
         auth.get_prime_inference_team_selection(),
         StoredPrimeTeam::Team(team("team-1", "Team 1"))
     );
-    // A runtime override (the active source) does not hide it either.
+    // A runtime override does not hide it either.
     let mut auth = storage_with(&serde_json::json!({
         "prime-inference": {
             "type": "api_key",
@@ -533,9 +499,8 @@ fn prime_inference_team_selection_reads_follow_the_ts_tri_state() {
     );
 }
 
-/// A scripted OAuth integration for the refresh-flow tests: counts
-/// refresh calls, optionally delays inside the fetch, and serves a
-/// fixed fresh credential.
+/// A scripted OAuth integration for the refresh-flow tests: counts refresh calls,
+/// optionally delays inside the fetch, and serves a fixed fresh credential.
 struct CountingOAuth {
     calls: std::sync::atomic::AtomicUsize,
     delay_ms: u64,
@@ -637,10 +602,8 @@ fn an_unexpired_oauth_credential_serves_without_a_fetch() {
 
 #[test]
 fn the_token_fetch_holds_no_document_lock_and_a_peer_write_keeps_its_fresher_credential() {
-    // The fetch runs outside every lock: a locked writer lands
-    // mid-fetch, and the write phase keeps the peer's fresher
-    // credential instead of overwriting it with this attempt's own
-    // fetched token.
+    // The fetch runs outside every lock: a locked writer lands mid-fetch, and the
+    // write phase keeps the peer's fresher credential.
     let oauth = Arc::new(CountingOAuth {
         calls: std::sync::atomic::AtomicUsize::new(0),
         delay_ms: 120,
@@ -696,9 +659,8 @@ fn the_token_fetch_holds_no_document_lock_and_a_peer_write_keeps_its_fresher_cre
 
 #[test]
 fn a_second_refresh_joins_the_first_flight_instead_of_fetching_again() {
-    // Two resolutions of the same expired provider race: the flight
-    // gate serializes them, and the second serves the first's fresh
-    // credential without spending its own token fetch.
+    // Two resolutions race: the flight gate serializes them, and the
+    // second serves the first's fresh credential.
     let oauth = Arc::new(CountingOAuth {
         calls: std::sync::atomic::AtomicUsize::new(0),
         delay_ms: 80,

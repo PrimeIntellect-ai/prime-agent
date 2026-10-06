@@ -1,30 +1,16 @@
-//! End-to-end verifier for the queued-input delivery projection: a busy
-//! session parks steering/follow-up prompts, the runner drains them one
-//! item per turn, and every pickup must reach attached clients as a
+//! Queued-input delivery projection: pickups reach attached clients as a
 //! `session_action_update` BEFORE the delivered item's turn starts (TS
-//! `_pumpSessionInputs` emits the queue update at the action's
-//! `preparing` transition). A delivered message that stays in the
-//! projection for the duration of its own turn renders as a stale
-//! queue strip row (dogfood P0: the steered message sends but still
-//! shows in the queue), and a queued edit addressed against the stale
-//! row is rejected as `rejected` even though the user sees it parked.
-// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
-// the full rationale).
-// Stack-resident futures by design on the daemon's hot paths; boxing the
-// call sites for a lint tick is a perf regression with zero correctness gain.
+//! `_pumpSessionInputs` emits at the action's `preparing` transition); a
+//! delivered message still projected renders as a stale strip row (dogfood P0).
 #![allow(clippy::large_futures)]
-// 64-bit-only targets; the narrowing casts sit at OS boundaries
-// (pid/fd/time/size) where the values are bounded by the kernel - the
-// dead-guard expect()s would add panic paths where silent wrap was
-// deliberate.
+// 64-bit-only targets; the narrowing casts sit at bounded OS boundaries.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// The fn-length threshold is a style gate, not correctness; the structure
-// campaign owns the god-fn splits as a follow-up.
+// Fn length is a style gate, not correctness.
 #![allow(clippy::too_many_lines)]
 // API-shape opinions, not defects; the surfaces are deliberate.
 #![allow(
@@ -45,21 +31,11 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-/// Per-request answer delay: the mock holds each response so the test can
-/// park more prompts behind the busy turn and watch the pickup projection
-/// while the delivered item's turn is still running. The gated busy turn
-/// (below) does not wait on this clock: its answer parks until the test
-/// releases the hold, so the parked-lane setup survives any load.
+/// Per-request answer delay: holds each response so prompts park behind the busy turn.
 const ANSWER_DELAY_MS: u64 = 1200;
 
-/// The busy-turn hold: the mock parks the gated turn's answer until the
-/// test releases it. The answer clock alone is a wall-clock race: under
-/// battery load the busy turn can settle before every queue admission
-/// landed, and the runner legitimately delivered the parked-at-pickup
-/// prefix (TS `_pumpSessionInputs` batches `queuedActions(first.delivery)`,
-/// what is parked AT the boundary), so the full parked-lane projection
-/// the setup asserts never existed. Holding the answer makes the
-/// "park behind a busy turn" setup deterministic under any scheduler load.
+/// The busy-turn hold: the gated turn's answer parks until released — a wall-clock answer
+/// is a race, so holding makes the parked-lane setup deterministic.
 #[derive(Default)]
 struct HoldGate {
     state: Mutex<HoldState>,
@@ -71,8 +47,8 @@ struct HoldGate {
 struct HoldState {
     /// The gated busy turn's prompt text; `None` gates nothing.
     marker: Option<String>,
-    /// The gated turn's model request reached the mock (the turn is
-    /// streaming, so admissions behind it park deterministically).
+    /// The gated turn's model request reached the mock (the turn is streaming, so admissions park
+    /// deterministically).
     request_arrived: bool,
     released: bool,
 }
@@ -87,7 +63,6 @@ impl HoldGate {
         state.released = false;
     }
 
-    /// Wait until the gated turn's model request reaches the mock.
     fn wait_request(&self) {
         let deadline = Instant::now() + Duration::from_secs(30);
         let mut state = self.state.lock().expect("hold lock");
@@ -104,15 +79,13 @@ impl HoldGate {
         }
     }
 
-    /// Release the gated turn's answer.
     fn release(&self) {
         let mut state = self.state.lock().expect("hold lock");
         state.released = true;
         self.released.notify_all();
     }
 
-    /// Serve side: mark the gated turn's arrival and hold its answer until
-    /// released. Returns whether this request is the gated turn.
+    /// Serve side: mark the gated turn's arrival and hold its answer until released.
     fn observe(&self, last_user: &str) -> bool {
         let mut state = self.state.lock().expect("hold lock");
         if state.marker.as_deref() != Some(last_user) {
@@ -140,12 +113,9 @@ impl Drop for Supervisor {
     }
 }
 
-/// A mock OpenAI-completions provider: request N (1-based) sleeps, then
-/// answers `answer N` over SSE, so each turn's transcript row names its
-/// request and the delivery order is observable in the user messages.
+/// Request N (1-based) sleeps, then answers `answer N` over SSE.
 struct DelayedMock {
     requests: Arc<Mutex<usize>>,
-    /// One excerpt per request, in order (the last user message text).
     bodies: Arc<Mutex<Vec<String>>>,
     /// The gated busy turn (see [`HoldGate`]).
     hold: Arc<HoldGate>,
@@ -189,7 +159,6 @@ impl DelayedMock {
         *self.requests.lock().expect("mock lock")
     }
 
-    /// The last user message of every request, in request order.
     fn request_log(&self) -> Vec<String> {
         self.bodies.lock().expect("mock lock").clone()
     }
@@ -200,13 +169,12 @@ impl DelayedMock {
         self.hold.arm(text);
     }
 
-    /// Wait for the gated turn's model request: the busy turn is
-    /// streaming, so prompts sent next park behind it deterministically.
+    /// Wait for the gated turn's model request: the busy turn is streaming, so prompts park behind
+    /// it deterministically.
     fn wait_busy_turn_request(&self) {
         self.hold.wait_request();
     }
 
-    /// Release the gated turn's answer.
     fn release_busy_turn(&self) {
         self.hold.release();
     }
@@ -253,11 +221,8 @@ fn serve(
         reader.read_exact(&mut body_bytes)?;
     }
     let body: Value = serde_json::from_slice(&body_bytes).unwrap_or(Value::Null);
-    // The gated busy turn: its answer parks until the test releases the
-    // hold (the full parked lane was observed while the turn was busy).
-    // The gate matches the prompt TEXT, so extract it from the last
-    // user message whether the provider payload carries it as a plain
-    // string or as text parts.
+    // The gate matches the prompt TEXT: extract it from the last user message,
+    // plain string or text parts.
     let marker_text = body["messages"]
         .as_array()
         .and_then(|messages| {
@@ -503,8 +468,8 @@ fn setup(name: &str) -> (tempfile::TempDir, DelayedMock, Supervisor, Client, Str
     (dir, mock, supervisor, client, session_id)
 }
 
-/// One queued prompt (the TUI submit path): `streamingBehavior` picks the
-/// lane, `queueIfBusy` parks it behind the running turn.
+/// One queued prompt (the TUI submit path): `streamingBehavior` picks the lane, `queueIfBusy`
+/// parks it.
 fn queued_prompt(session_id: &str, message: &str, behavior: &str) -> Value {
     json!({
         "type": "prompt",
@@ -515,10 +480,7 @@ fn queued_prompt(session_id: &str, message: &str, behavior: &str) -> Value {
     })
 }
 
-/// Drain until the projection with the given lane contents arrives (a
-/// bounded wait: under a loaded runner the first drain window can close
-/// between the worker's projection emits, and the parked-lane assert must
-/// observe the full projection rather than race it).
+/// Drain until the projection with the given lane contents arrives (a bounded wait).
 fn wait_for_projection(
     client: &mut Client,
     steering: &[&str],
@@ -540,7 +502,6 @@ fn wait_for_projection(
     }
 }
 
-/// Every `session_action_update` event with the given lane contents.
 fn action_updates_with(events: &[Value], steering: &[&str], follow_ups: &[&str]) -> Vec<usize> {
     let expected = json!({ "steering": steering, "followUps": follow_ups });
     events
@@ -559,9 +520,8 @@ fn action_updates_with(events: &[Value], steering: &[&str], follow_ups: &[&str])
 fn queue_pickup_projection_reaches_clients_before_the_delivered_turn_starts() {
     let (_dir, mock, _supervisor, mut client, session_id) = setup("queue-pickup");
 
-    // Turn one runs (the mock HOLDS its answer until the parked lane was
-    // observed, so the busy window holds under any load), and three
-    // prompts park behind it: two steers and one follow-up.
+    // Turn one holds its answer until the parked lane is observed; three prompts
+    // park behind it: two steers, one follow-up.
     mock.hold_busy_turn("turn one");
     let started = client.send(
         "p1",
@@ -578,7 +538,6 @@ fn queue_pickup_projection_reaches_clients_before_the_delivered_turn_starts() {
         let response = client.send(id, &queued_prompt(&session_id, message, behavior));
         assert_eq!(response["success"], true, "{id} failed: {response}");
     }
-    // The parked projection reaches attached clients.
     let parked = wait_for_projection(
         &mut client,
         &["steer A", "steer B"],
@@ -590,13 +549,11 @@ fn queue_pickup_projection_reaches_clients_before_the_delivered_turn_starts() {
         "the parked queue must project as session_action_update, events: {:?}",
         event_types(&client.events)
     );
-    // The parked lane was observed while the busy turn still held its
-    // answer; release it and watch the boundary drain the lane.
+    // The parked lane was observed while the busy turn held its answer; release it and watch the
+    // boundary drain.
     mock.release_busy_turn();
 
-    // Everything drains: three model requests (turn one + the steers'
-    // ONE batched turn — the product default co-delivers the parked
-    // steering prefix, Kevin's batch spec — + the follow-up's own turn).
+    // Everything drains: three requests (turn one + the steers' batched turn + the follow-up's).
     let deadline = Instant::now() + Duration::from_mins(1);
     while Instant::now() < deadline {
         if mock.count() >= 3 {
@@ -612,8 +569,6 @@ fn queue_pickup_projection_reaches_clients_before_the_delivered_turn_starts() {
         mock.request_log()
     );
 
-    // Delivery order: steering lane first (both steers as the one batched
-    // turn), the follow-up lane behind it.
     let user_messages: Vec<String> = client
         .events
         .iter()
@@ -635,12 +590,8 @@ fn queue_pickup_projection_reaches_clients_before_the_delivered_turn_starts() {
         "the queue drains in lane order, one item per turn"
     );
 
-    // The pickup projection: the delivered batch leaves the queue
-    // projection BEFORE its turn starts (TS emits at the `preparing`
-    // transition). A delivered message that stays projected for the whole
-    // turn renders as a stale strip row and poisons browse-edit addresses.
-    // Under the batched default BOTH steers leave the projection in the
-    // one pickup update ahead of the one batched turn.
+    // The delivered batch leaves the projection BEFORE its turn starts (TS emits at the
+    // `preparing` transition); under the batched default BOTH steers leave in one pickup.
     let agent_starts: Vec<usize> = client
         .events
         .iter()
@@ -675,13 +626,8 @@ fn queue_pickup_projection_reaches_clients_before_the_delivered_turn_starts() {
 fn multi_item_queue_delivers_every_item_in_lane_order() {
     let (_dir, mock, _supervisor, mut client, session_id) = setup("queue-multi");
 
-    // A busy turn with a full parked lane: three steers and three
-    // follow-ups behind it (dogfood: the queue appeared to accept only
-    // one message). The mock HOLDS the busy turn's answer until the
-    // six-item lane was observed, so the parked window holds under any
-    // load (a wall-clock answer delay flakes full batteries: the turn
-    // settled mid-admissions and the runner legitimately drained the
-    // parked-at-pickup prefix before the full projection existed).
+    // Three steers and three follow-ups park behind the busy turn (dogfood: the queue
+    // appeared to accept only one); the mock HOLDS the answer until the lane was observed.
     mock.hold_busy_turn("turn zero");
     let started = client.send(
         "p1",
@@ -710,13 +656,10 @@ fn multi_item_queue_delivers_every_item_in_lane_order() {
     let actions = &client.events[parked[0]]["actions"];
     assert_eq!(actions["queuedCount"], 6, "queuedCount counts both lanes");
 
-    // The six-item lane was observed while the busy turn still held its
-    // answer; release it so the boundary drains deterministically.
+    // The six-item lane was observed while the busy turn held its answer; release it.
     mock.release_busy_turn();
 
-    // Five turns run: the starter, the three steers' ONE batched turn
-    // (the product default co-delivers the parked steering prefix,
-    // Kevin's batch spec), then the follow-ups one per turn behind it.
+    // Five turns run: the starter, the steers' ONE batched turn, then the follow-ups one per turn.
     let deadline = Instant::now() + Duration::from_secs(90);
     while Instant::now() < deadline {
         if mock.count() >= 5 {
@@ -761,14 +704,8 @@ fn multi_item_queue_delivers_every_item_in_lane_order() {
     );
 }
 
-/// TS #2063 (RES-1306): a queue-visible delivery's active action rides
-/// the turn through its phases at the moments a client renders them —
-/// `preparing` projects at pickup (before the turn's first row; the
-/// queued strip shows it as the "Starting" row), `committing` at the
-/// turn's first row (the prompt becomes visible in the conversation, the
-/// boundary TS drops the Starting row at: the commit fence), `running`
-/// at the turn's first assistant frame — and the settle's projection
-/// carries no active action.
+/// TS #2063 (RES-1306): a queue-visible delivery's active action rides the turn through
+/// its client-rendered phases; the settle's projection carries no active action.
 #[test]
 fn queue_delivery_projects_the_active_action_phases_around_the_turn() {
     let (_dir, mock, _supervisor, mut client, session_id) = setup("active-action-phases");
@@ -785,11 +722,9 @@ fn queue_delivery_projects_the_active_action_phases_around_the_turn() {
     assert_eq!(parked["success"], true, "follow-up failed: {parked}");
     // The parked lane projects while the busy turn still holds.
     wait_for_projection(&mut client, &[], &["follow C"], "parked lane");
-    // Release: the busy turn settles and the follow-up's turn runs.
     mock.release_busy_turn();
-    // Readiness wait for the follow-up's turn to reach the mock (the
-    // second request): the drain window is the poll interval, so the
-    // wait observes the request rather than sleeping blind.
+    // Readiness wait for the follow-up's turn to reach the mock: the wait observes
+    // the request rather than sleeping blind.
     let deadline = Instant::now() + Duration::from_secs(30);
     while mock.count() < 2 {
         client.drain_events(Duration::from_millis(200));
@@ -806,11 +741,8 @@ fn queue_delivery_projects_the_active_action_phases_around_the_turn() {
         "turn one, then follow C's turn: {:?}",
         mock.request_log()
     );
-    // The settle's projection (empty lanes, no active action) lands right
-    // after the turn's unwind frames — an observable readiness wait, not
-    // a fixed quiet window: the runner's post-turn work can outlast any
-    // fixed drain under load, and the parked-lane projections before the
-    // delivery (non-empty lanes) never match this shape.
+    // The settle's projection (empty lanes, no active action) is the readiness shape,
+    // not a fixed quiet window (post-turn work can outlast any drain).
     let deadline = Instant::now() + Duration::from_secs(30);
     let settled_index = loop {
         client.drain_events(Duration::from_millis(400));
@@ -851,8 +783,6 @@ fn queue_delivery_projects_the_active_action_phases_around_the_turn() {
     let phase_at = |index: usize, phase: &str| {
         events[index]["actions"]["active"]["phase"].as_str() == Some(phase)
     };
-    // The `preparing` projection of follow C's delivery, before the turn
-    // starts: the strip's "Starting" row must land before the prompt row.
     let preparing = action_updates
         .iter()
         .copied()
@@ -873,9 +803,7 @@ fn queue_delivery_projects_the_active_action_phases_around_the_turn() {
         "the pickup projection precedes the delivered turn's start (events: {:?})",
         event_types(events)
     );
-    // The turn's first row is the accepted prompt; the `committing`
-    // projection lands after it (the Starting row drops as the prompt
-    // becomes visible in the conversation).
+    // The `committing` projection lands after the turn's first row.
     let user_row = events
         .iter()
         .enumerate()
@@ -900,8 +828,6 @@ fn queue_delivery_projects_the_active_action_phases_around_the_turn() {
         "preparing precedes the accepted row, committing follows it (events: {:?})",
         event_types(events)
     );
-    // The `running` projection lands after the turn's first assistant
-    // frame, and the settle's projection carries no active action.
     let assistant_row = events
         .iter()
         .enumerate()
@@ -922,8 +848,6 @@ fn queue_delivery_projects_the_active_action_phases_around_the_turn() {
         "running follows the turn's first assistant frame (events: {:?})",
         event_types(events)
     );
-    // The settle's projection is the delivery's last queue frame: the
-    // empty-lane, no-active-action shape the readiness wait found.
     assert_eq!(
         action_updates.last(),
         Some(&settled_index),

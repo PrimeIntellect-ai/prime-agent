@@ -1,4 +1,4 @@
-//! Queue lane priority, snapshot, and arming tests (moved with their concerns).
+//! Queue lane priority, snapshot, and arming tests.
 use super::*;
 
 fn priority_test_item(message: &str, policy: TurnPolicy) -> QueuedItem {
@@ -313,10 +313,8 @@ fn queue_snapshot_round_trips_through_the_recovery_journal() {
     std::fs::create_dir_all(&dir).unwrap();
     let journal_path = dir.join("recovery.jsonl");
     let mut journal = WorkerRecoveryJournal::open(&journal_path).unwrap();
-    // A parked heartbeat rides the journal with its full delivery row
-    // (labeled preview, injected custom row, queue key), so a respawned
-    // worker restores the heartbeat component instead of a plain user
-    // message.
+    // A parked heartbeat rides the journal with its full delivery row, so a
+    // respawned worker restores the heartbeat component, not a plain user row.
     let content = "[heartbeat: every 10m run#0]\n\nnudge the mission";
     let labeled_preview = format!(
         "{}: {content}",
@@ -381,8 +379,7 @@ fn queue_snapshot_round_trips_through_the_recovery_journal() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A version-1 queue snapshot (the pre-item text lanes a prior binary
-/// wrote) still restores as plain rows.
+/// A version-1 queue snapshot (pre-item text lanes a prior binary wrote).
 #[test]
 fn a_version_one_queue_snapshot_restores_as_plain_rows() {
     let dir = std::env::temp_dir().join(format!("pa-worker-{}", uuid::Uuid::new_v4()));
@@ -406,11 +403,8 @@ fn a_version_one_queue_snapshot_restores_as_plain_rows() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The forced-batch arming classification (TS `abortAndSendQueued`'s
-/// `queuedSteering` filter): only the visible plain-user steering items
-/// arm — queue-visible rows whose delivery record is a user message;
-/// agent-message deliveries and injected custom rows never join, and an
-/// empty (or all-injected) lane arms nothing.
+/// Only the visible plain-user steering items arm; agent-message deliveries
+/// and injected custom rows never join, and an empty lane arms nothing.
 #[tokio::test]
 async fn forced_batch_arming_classifies_the_visible_plain_rows() {
     let worker = created_dispatch_worker().await;
@@ -488,9 +482,7 @@ async fn forced_batch_arming_classifies_the_visible_plain_rows() {
         );
     }
     // A lane with nothing armable arms nothing new — the armed state
-    // itself persists (TS's armed set survives until a pump selection
-    // consumes or disarms it; a later abort with an empty lane runs
-    // the plain `requestAbort` arm and touches nothing).
+    // itself persists until a pump selection consumes or disarms it.
     worker.core.lock().unwrap().steering.clear();
     assert!(
         !worker.arm_forced_all_steering(),

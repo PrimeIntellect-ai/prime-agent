@@ -1,11 +1,7 @@
-//! Append-only recovery journals (ports of command-recovery-journal.ts and
-//! worker-recovery-journal.ts).
-//!
-//! The command journal makes supervisor mutations exactly-once: a received
-//! record is durable before dispatch, a missing result after a crash is
-//! reported as uncertain and never replayed. The worker journal records the
-//! latest busy/operation state per session so a replacement can mark
-//! interrupted work instead of guessing.
+//! Append-only recovery journals: the command journal makes supervisor
+//! mutations exactly-once (a received record is durable before dispatch; a
+//! missing result after a crash is uncertain, never replayed); the worker
+//! journal records the latest busy/operation state and queue snapshots.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -33,18 +29,13 @@ pub(crate) fn append_record(path: &Path, record: &Value) -> Result<()> {
     Ok(())
 }
 
-/// Append several records as ONE durable write: one open, all lines in one
-/// `write_all`, one `fsync`. The records land together or not at all — a
-/// batched checkpoint keeps its all-or-nothing shape (the busy verdict
-/// never publishes without the queue snapshot it describes), and the
-/// journal's on-disk bytes are exactly what the same records appended one
-/// by one would produce.
+/// Append several records as ONE durable write: the batch is
+/// all-or-nothing; the on-disk bytes match the records appended one by one.
 ///
 /// # Errors
 ///
-/// Returns an error when the parent directory, the open, a serialization,
-/// the write, or the sync fails; a partial write may leave truncated
-/// trailing lines, which the loader skips like any crash-truncated record.
+/// Returns an error when the open, serialization, write, or sync fails;
+/// the loader skips a partial write's truncated trailing lines.
 pub(crate) fn append_records(path: &Path, records: &[Value]) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
@@ -65,25 +56,17 @@ pub(crate) fn append_records(path: &Path, records: &[Value]) -> Result<()> {
 }
 
 /// How the temp journal lands on its path, and whether its data rides a
-/// full sync before the swap: the two are one seam — each variant is the
-/// sync class its TS counterpart (or Rust-native owner) carries.
+/// full sync before the swap.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Finalize {
-    /// Rename through `rename_onto`: the bounded win32 destination-busy
-    /// retry (TS `writeFileAtomicSync` -> `renameOntoSync`), with the
-    /// temp file synced before the swap (TS `fsync: true`).
+    /// Rename through `rename_onto` (the bounded win32 destination-busy
+    /// retry), temp synced before the swap.
     RetryBusy,
-    /// Bare rename with the temp file synced before the swap: every
-    /// failure surfaces immediately. The Rust-native terminal-compaction
-    /// journal (no TS counterpart) keeps its belt.
+    /// Bare rename, temp synced before the swap: every failure surfaces
+    /// immediately.
     Synced,
-    /// Bare rename with an UNSYNCED temp (TS
-    /// `worker-recovery-journal.ts` compact: `writeFileSync` + plain
-    /// `renameSync` — no retry, no temp fsync): the OS carries the temp
-    /// data to the rename. Durability is owned by the append path — the
-    /// compacted form holds only records the append path already made
-    /// durable, so a lost compact falls back to the append-only history,
-    /// which replays identically.
+    /// Bare rename with an UNSYNCED temp: durability is owned by the
+    /// append path — a lost compact falls back to the append-only history.
     Bare,
 }
 
@@ -117,7 +100,6 @@ pub struct CommandJournalEntry {
     pub response: Option<Value>,
 }
 
-/// Port of `CommandRecoveryJournal`.
 pub struct CommandRecoveryJournal {
     path: std::path::PathBuf,
     entries: HashMap<String, CommandJournalEntry>,
@@ -125,14 +107,12 @@ pub struct CommandRecoveryJournal {
 }
 
 impl CommandRecoveryJournal {
-    /// Open the journal at `path` (creating the parent directory as needed)
-    /// and load the pending receipts from any existing records.
+    /// Open the journal at `path`, creating the parent directory as needed.
     ///
     /// # Errors
     ///
     /// Returns an error when the parent directory cannot be created; a
-    /// missing journal loads as empty, and the record load itself never
-    /// errors (lines truncated by a crash are skipped).
+    /// missing journal loads as empty, and the record load never errors.
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -160,9 +140,7 @@ impl CommandRecoveryJournal {
     ///
     /// # Errors
     ///
-    /// Returns an error when the receipt record cannot be appended (the
-    /// parent directory, the journal open, the serialization, the write,
-    /// or the sync fails).
+    /// Returns an error when the receipt record cannot be appended.
     pub fn begin(
         &mut self,
         client_id: &str,
@@ -198,9 +176,8 @@ impl CommandRecoveryJournal {
     ///
     /// # Errors
     ///
-    /// Returns an error when no receipt was journaled for the command (a
-    /// result cannot be recorded first), when the result record cannot be
-    /// appended, or when the post-append compaction fails.
+    /// Returns an error when no receipt was journaled, the result record
+    /// cannot be appended, or the post-append compaction fails.
     pub fn record_result(
         &mut self,
         client_id: &str,
@@ -355,14 +332,9 @@ fn parse_worker_records(path: &Path) -> Result<HashMap<String, WorkerRecoveryRec
     Ok(latest)
 }
 
-/// One parked queue row in a worker queue snapshot: the delivery payload a
-/// respawned worker needs — the message text, the labeled preview, the
-/// injected custom row, the queue key, the visibility flag, and the
-/// agent-message marker — so a restored queued heartbeat still delivers as
-/// the `heartbeat_prompt` component (and keeps its `Heartbeat prompt:`
-/// row) instead of collapsing into a plain user message, and a restored
-/// queued agent message still counts as an ingestion turn (and stays
-/// removable by `agent_messages_clear`/`agent_messages_pause`).
+/// One parked queue row in a worker queue snapshot: a restored queued
+/// heartbeat still delivers as the `heartbeat_prompt` component instead of
+/// a plain user message.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WorkerQueueItemRecord {
     pub message: String,
@@ -376,10 +348,9 @@ pub struct WorkerQueueItemRecord {
     pub queue_key: Option<String>,
     #[serde(default = "queue_visible_default")]
     pub queue_visible: bool,
-    /// The item's turn-execution class ("queued"/"injected"/"direct", see
-    /// `worker::TurnPolicy)`: the batch gathering's compatibility gate. A
-    /// record written before the field existed restores as "queued" — the
-    /// dominant lane class, and the only one a fresh snapshot can batch.
+    /// The item's turn-execution class ("queued"/"injected"/"direct"):
+    /// the batch gathering's compatibility gate. A pre-field record
+    /// restores as "queued" — the only class a fresh snapshot can batch.
     #[serde(default = "queue_policy_default")]
     pub policy: String,
     /// The original agent-message text when the row came from an
@@ -413,13 +384,9 @@ impl WorkerQueueItemRecord {
     }
 }
 
-/// A worker queue snapshot record: the pending steering/follow-up lanes so a
-/// respawned worker restores its queues. Lives in the worker recovery journal
-/// (TS keeps its session files free of daemon bookkeeping; queue recovery is
-/// worker-private state, so it rides the journal next to the busy records).
-/// Version 2 lanes carry the full item records; a version-1 lane (written
-/// before the item payload existed) is a bare message-text array and
-/// restores as a plain row.
+/// A worker queue snapshot record: the pending steering/follow-up lanes so
+/// a respawned worker restores its queues. Version 2 lanes carry the full
+/// item records; a version-1 lane is a bare message-text array.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerQueueSnapshotRecord {
     pub version: u32,
@@ -430,8 +397,8 @@ pub struct WorkerQueueSnapshotRecord {
     pub recorded_at: String,
 }
 
-/// Port of `WorkerRecoveryJournal`: latest busy/operation per active session,
-/// plus the latest queue snapshot per session.
+/// Latest busy/operation per active session, plus the latest queue
+/// snapshot per session.
 pub struct WorkerRecoveryJournal {
     path: std::path::PathBuf,
     latest: HashMap<String, WorkerRecoveryRecord>,
@@ -439,14 +406,12 @@ pub struct WorkerRecoveryJournal {
 }
 
 impl WorkerRecoveryJournal {
-    /// Open the worker journal at `path` (creating the parent directory as
-    /// needed) and load the latest busy records and queue snapshots.
+    /// Open the worker journal at `path`, creating the parent directory as needed.
     ///
     /// # Errors
     ///
     /// Returns an error when the parent directory cannot be created, or
-    /// when the journal exists but the queue-snapshot pass cannot read it
-    /// (a missing journal loads as empty).
+    /// the queue-snapshot pass cannot read an existing journal.
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -470,22 +435,16 @@ impl WorkerRecoveryJournal {
         Ok(parse_worker_records(path)?.into_values().collect())
     }
 
-    /// Does the journal prove live work at the worker's last exit? A plain
-    /// supervisor startup adopts a dead worker only when this holds (a
-    /// restart must not mass-revive historical sessions): a latest `busy`
-    /// record marks an in-flight turn or an admitted-but-undelivered
-    /// prompt/queue lane. An unreadable journal proves nothing —
-    /// uncertainty must not revive a session.
+    /// Does the journal prove live work at the worker's last exit? A
+    /// restart must not mass-revive historical sessions: a latest `busy`
+    /// record marks in-flight work; an unreadable journal proves nothing.
     #[must_use]
     pub fn read_interrupted(path: &Path) -> bool {
         Self::read_latest(path).is_ok_and(|records| records.iter().any(|record| record.busy))
     }
 
     /// The newest `busy` record's `recorded_at`, when the journal proves
-    /// live work: the timestamp the boot-revival gate ages the evidence
-    /// against (an old busy record is residue of an era that already
-    /// ended, not interrupted work this boot must heal). A journal with
-    /// no busy record answers `None`.
+    /// live work: the timestamp the boot-revival gate ages the evidence against.
     #[must_use]
     pub fn latest_busy_recorded_at(path: &Path) -> Option<String> {
         Self::read_latest(path)
@@ -497,15 +456,12 @@ impl WorkerRecoveryJournal {
     }
 
     /// Settle every busy session to idle with `operation` (the give-up
-    /// belt): a supervisor that gave up on a worker records the verdict
-    /// in the same journal a later boot would read as revival evidence —
-    /// stale busy evidence must not outlive the give-up that superseded
-    /// it, or every boot re-storms the slot the cap already condemned.
+    /// belt): stale busy evidence must not outlive the give-up that
+    /// superseded it, or every boot re-storms the slot.
     ///
     /// # Errors
     ///
-    /// Returns an error when the journal cannot be opened or a settle
-    /// record cannot be appended.
+    /// Returns an error when the journal cannot be opened or a settle record cannot be appended.
     pub fn settle_busy_records(path: &Path, operation: &str) -> Result<()> {
         let mut journal = Self::open(path)?;
         let busy: Vec<WorkerRecoveryRecord> = journal
@@ -531,7 +487,7 @@ impl WorkerRecoveryJournal {
     /// # Errors
     ///
     /// Returns an error when the record cannot be serialized or appended,
-    /// or when the all-idle compaction fails.
+    /// or the all-idle compaction fails.
     pub fn record(
         &mut self,
         active_session_id: &str,
@@ -558,13 +514,9 @@ impl WorkerRecoveryJournal {
         };
         append_record(&self.path, &serde_json::to_value(&record)?)?;
         self.latest.insert(active_session_id.to_string(), record);
-        // TS parity: the all-idle check includes the just-landed record
-        // (TS `record` runs `[...this.latest.values()].every(!busy)`
-        // AFTER `set`). Checking before the insert let the session's own
-        // busy admission record block its settle's compaction, so a
-        // single-session journal never compacted and grew append-only
-        // for the session's lifetime; the compaction now fires at every
-        // changed-idle record like TS, keeping the file bounded.
+        // TS parity: the all-idle check runs AFTER the insert (TS checks
+        // after `set`); checking before it, a single-session journal never
+        // compacted.
         if self.latest.values().all(|entry| !entry.busy) {
             self.compact()?;
         }
@@ -580,8 +532,7 @@ impl WorkerRecoveryJournal {
     ///
     /// # Errors
     ///
-    /// Returns an error when the snapshot record cannot be serialized or
-    /// appended.
+    /// Returns an error when the snapshot record cannot be serialized or appended.
     pub fn record_queue_snapshot(
         &mut self,
         active_session_id: &str,
@@ -603,20 +554,13 @@ impl WorkerRecoveryJournal {
     }
 
     /// Record the queue snapshot and the busy/operation verdict in ONE
-    /// durable append (the queue-checkpoint pair `checkpoint_queue_recovery`
-    /// writes): the snapshot line and the verdict line share a single open,
-    /// write, and `fsync`, so a checkpoint costs one journal flush instead
-    /// of two. The on-disk order matches the sequential form exactly — the
-    /// snapshot record first, then the verdict — and the verdict still
-    /// never publishes over a snapshot that did not persist (the batch is
-    /// all-or-nothing). An unchanged verdict appends the snapshot alone,
-    /// like the sequential pair does.
+    /// durable append: the verdict never publishes over a snapshot that
+    /// did not persist.
     ///
     /// # Errors
     ///
-    /// Returns an error when either record cannot be serialized or the
-    /// batched append fails, or when the all-idle compaction fails after a
-    /// changed verdict landed.
+    /// Returns an error when either record cannot be serialized, the
+    /// batched append fails, or the all-idle compaction fails.
     #[allow(clippy::too_many_arguments)]
     pub fn record_queue_checkpoint(
         &mut self,
@@ -663,10 +607,8 @@ impl WorkerRecoveryJournal {
             .insert(active_session_id.to_string(), snapshot);
         if let Some(record) = record {
             self.latest.insert(active_session_id.to_string(), record);
-            // TS parity (the same post-insert check as `record`): the
-            // settle's compaction fires on the all-idle map that includes
-            // the just-landed verdict, never blocked by the session's own
-            // busy admission record.
+            // TS parity (same post-insert check as `record`): the
+            // compaction fires on the all-idle map including the verdict.
             if self.latest.values().all(|entry| !entry.busy) {
                 self.compact()?;
             }
@@ -717,7 +659,6 @@ impl WorkerRecoveryJournal {
     }
 }
 
-/// The record-type tag of a queue snapshot line.
 const QUEUE_SNAPSHOT_RECORD_TYPE: &str = "queue_snapshot";
 /// The current queue-snapshot record version: the lanes carry the full
 /// item records.
@@ -764,9 +705,8 @@ fn parse_queue_snapshot_records(path: &Path) -> Result<HashMap<String, WorkerQue
     Ok(latest)
 }
 
-/// One snapshot lane: a version-2 entry is the full item record, while a
-/// version-1 entry is the bare message text and restores as a plain row
-/// (no preview, no injected custom row — the pre-item payload).
+/// One snapshot lane: a version-2 entry is the full item record; a
+/// version-1 entry is the bare message text and restores as a plain row.
 fn parse_snapshot_lane(value: Option<&Value>) -> Vec<WorkerQueueItemRecord> {
     value
         .and_then(Value::as_array)
@@ -845,18 +785,15 @@ mod tests {
     fn worker_journal_interrupted_evidence_tracks_latest_busy() {
         let path = temp_path("interrupted.recovery.jsonl");
         let mut journal = WorkerRecoveryJournal::open(&path).unwrap();
-        // Idle sessions prove nothing: no interrupted work to revive.
         journal
             .record("s1", "sess1", None, false, "shutdown")
             .unwrap();
         journal.record("s2", "sess2", None, false, "ready").unwrap();
         assert!(!WorkerRecoveryJournal::read_interrupted(&path));
-        // One busy session is durable evidence of interrupted work.
         journal
             .record("s2", "sess2", Some("/b.jsonl"), true, "create")
             .unwrap();
         assert!(WorkerRecoveryJournal::read_interrupted(&path));
-        // The latest record per session decides: s2 settles back to idle.
         journal
             .record("s2", "sess2", None, false, "shutdown")
             .unwrap();
@@ -864,10 +801,6 @@ mod tests {
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 
-    /// The batched queue checkpoint and the sequential form produce the
-    /// same journal: same lines in the same order, same latest records,
-    /// same restorable queue snapshots (the `recorded_at` stamps differ only
-    /// because the two runs cannot share a clock instant).
     #[test]
     fn worker_journal_batched_checkpoint_matches_sequential_form() {
         let sequential_path = temp_path("sequential.recovery.jsonl");
@@ -884,9 +817,6 @@ mod tests {
             policy: queue_policy_default(),
             agent_message: None,
         };
-        // Admitted (snapshot + busy verdict), settle (snapshot + idle
-        // verdict + compaction), then an unchanged-verdict checkpoint whose
-        // snapshot lands alone in both forms.
         sequential
             .record_queue_snapshot("s1", std::slice::from_ref(&item), &[])
             .unwrap();
@@ -897,7 +827,6 @@ mod tests {
         sequential
             .record("s1", "sess1", Some("/a.jsonl"), false, "turn_end")
             .unwrap();
-        // An unchanged verdict: the snapshot still lands, alone.
         sequential.record_queue_snapshot("s1", &[], &[]).unwrap();
         sequential
             .record("s1", "sess1", Some("/a.jsonl"), false, "turn_end")
@@ -951,41 +880,28 @@ mod tests {
         let _ = fs::remove_dir_all(batched_path.parent().unwrap());
     }
 
-    /// The busy verdict rides the snapshot's single flush: a checkpoint
-    /// whose batched append fails lands NEITHER record (no verdict over an
-    /// unpersisted snapshot, and no snapshot without its flush).
     #[test]
     fn worker_journal_batched_checkpoint_is_all_or_nothing() {
         let path = temp_path("allornothing.recovery.jsonl");
         fs::write(&path, "").unwrap();
         let mut journal = WorkerRecoveryJournal::open(&path).unwrap();
         journal.record("s1", "sess1", None, false, "ready").unwrap();
-        // Replace the journal with a directory: every open for append now
-        // fails, so the checkpoint cannot land either record.
+        // Replace the journal with a directory: every append open now fails.
         fs::remove_file(&path).unwrap();
         fs::create_dir(&path).unwrap();
         let result =
             journal.record_queue_checkpoint("s1", "sess1", None, true, "prompt_accepted", &[], &[]);
         assert!(result.is_err());
-        // The in-memory verdict did not advance over the failed append.
         assert!(journal.latest.get("s1").is_some_and(|record| !record.busy));
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 
-    /// TS parity oracle: a single session's settle compacts (the post-
-    /// insert all-idle check). The OLD pre-insert check let the session's
-    /// own busy admission record block the compaction, so a single-session
-    /// journal grew append-only forever; TS compacts at every changed-idle
-    /// record and so does the port now.
+    /// TS parity oracle: TS compacts at every changed-idle record, and so
+    /// does the port.
     #[test]
     fn worker_journal_settle_compacts_single_session() {
         let path = temp_path("settle-compacts.recovery.jsonl");
         let mut journal = WorkerRecoveryJournal::open(&path).unwrap();
-        // Two busy/idle cycles through the plain `record` path: the first
-        // settle compacts to one line, so the second admission starts from
-        // a one-line file (two lines mid-flight, one after the settle) —
-        // without the settle compaction the file would grow 2 lines per
-        // cycle.
         journal
             .record("s1", "sess1", Some("/a.jsonl"), true, "prompt_accepted")
             .unwrap();
@@ -1008,14 +924,12 @@ mod tests {
         journal
             .record("s1", "sess1", Some("/a.jsonl"), false, "turn_end")
             .unwrap();
-        // The settle compacted: the file holds exactly the latest record.
         let content = fs::read_to_string(&path).unwrap();
         let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
         assert_eq!(lines.len(), 1, "the settle compacts to the latest record");
         let record: Value = serde_json::from_str(lines[0]).unwrap();
         assert_eq!(record["busy"], false);
         assert_eq!(record["operation"], "turn_end");
-        // The compacted journal replays the same latest state.
         let reopened = WorkerRecoveryJournal::open(&path).unwrap();
         let latest = reopened.get_latest();
         assert_eq!(latest.len(), 1);
@@ -1024,9 +938,6 @@ mod tests {
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 
-    /// The settle through the batched checkpoint compacts to the same
-    /// two lines (idle verdict + latest snapshot) and restores the same
-    /// queue lanes a pre-compact append-only history would.
     #[test]
     fn worker_journal_batched_settle_compacts_and_restores() {
         let path = temp_path("batched-settle.recovery.jsonl");
@@ -1041,9 +952,6 @@ mod tests {
             agent_message: None,
         };
         let mut journal = WorkerRecoveryJournal::open(&path).unwrap();
-        // Two turns: each admission batch grows the file; each settle
-        // compacts it back — without the compaction the second admission
-        // would stack on the first turn's history (6 lines by the end).
         journal
             .record_queue_checkpoint(
                 "s1",
@@ -1087,11 +995,9 @@ mod tests {
         assert_eq!(verdict["operation"], "turn_end");
         let snapshot: Value = serde_json::from_str(lines[1]).unwrap();
         assert_eq!(snapshot["type"], "queue_snapshot");
-        // the compact keeps the LATEST snapshot per session: the settle's
-        // (empty) lanes, not the admission's parked row.
+        // the compact keeps the LATEST snapshot per session: the
+        // settle's (empty) lanes, not the admission's parked row.
         assert_eq!(snapshot["steering"].as_array().map(Vec::len), Some(0));
-        // The reopened journal restores the settled verdict and the
-        // settle's (empty) lanes exactly like the append-only history.
         let reopened = WorkerRecoveryJournal::open(&path).unwrap();
         assert!(!WorkerRecoveryJournal::read_interrupted(&path));
         let restored = reopened.latest_queue_snapshot("s1").unwrap();
@@ -1100,8 +1006,7 @@ mod tests {
     }
 
     /// An unchanged verdict appends the snapshot alone and never compacts
-    /// (TS `record` early-returns before its compaction check): the
-    /// compaction belongs to changed-idle records only.
+    /// (TS `record` early-returns before its compaction check).
     #[test]
     fn worker_journal_unchanged_verdict_does_not_compact() {
         let path = temp_path("unchanged-nocompact.recovery.jsonl");
@@ -1113,8 +1018,6 @@ mod tests {
             .record_queue_checkpoint("s1", "sess1", None, false, "turn_end", &[], &[])
             .unwrap();
         let lines_after_settle = fs::read_to_string(&path).unwrap().lines().count();
-        // The unchanged settle: the snapshot lands, the verdict does not,
-        // and no compaction runs (the map never changed).
         journal
             .record_queue_checkpoint("s1", "sess1", None, false, "turn_end", &[], &[])
             .unwrap();
@@ -1126,7 +1029,6 @@ mod tests {
     #[test]
     fn worker_journal_missing_or_unreadable_file_is_not_interrupted() {
         let path = temp_path("missing.recovery.jsonl");
-        // No journal: no evidence, so no revival on uncertainty.
         assert!(!WorkerRecoveryJournal::read_interrupted(&path));
         std::fs::write(&path, "not json").unwrap();
         assert!(!WorkerRecoveryJournal::read_interrupted(&path));

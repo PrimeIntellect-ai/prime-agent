@@ -1,29 +1,16 @@
-//! End-to-end verifier for the live `compaction_summary_delta` broadcast
-//! (the operator's "stream the compacted summary" feature): a forced
-//! threshold auto-compaction at the daemon worker must forward the
-//! summarizer's streamed text chunks to the attached clients as
-//! `compaction_summary_delta` session events, in generation order, strictly
-//! between the owning `compaction_start` and the settling `compaction_end`
-//! — and the frames stay ephemeral: the durable session file never records
-//! them, and the settled end's result carries the same text the deltas
-//! streamed (the streamed block resolves into the final summary entry).
-// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
-// the full rationale).
-// Stack-resident futures by design on the daemon's hot paths; boxing the
-// call sites for a lint tick is a perf regression with zero correctness gain.
+//! Live `compaction_summary_delta` e2e: a forced auto-compaction forwards
+//! the summarizer's chunks in generation order, strictly between the owning
+//! `compaction_start` and the settling `compaction_end`; the frames stay
+//! ephemeral and the end's result carries the same text.
 #![allow(clippy::large_futures)]
-// 64-bit-only targets; the narrowing casts sit at OS boundaries
-// (pid/fd/time/size) where the values are bounded by the kernel - the
-// dead-guard expect()s would add panic paths where silent wrap was
-// deliberate.
+// 64-bit-only targets; the narrowing casts sit at bounded OS boundaries.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// The fn-length threshold is a style gate, not correctness; the structure
-// campaign owns the god-fn splits as a follow-up.
+// Fn length is a style gate, not correctness.
 #![allow(clippy::too_many_lines)]
 // API-shape opinions, not defects; the surfaces are deliberate.
 #![allow(
@@ -44,11 +31,10 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-/// The compaction summarizer request marker (the fixed summarization
-/// system prompt rides the request's first message).
+/// The compaction summarizer request marker (the fixed summarization prompt rides the first
+/// message).
 const SUMMARIZER_MARKER: &str = "context summarization assistant";
 
-/// The scripted summary the mock's summarizer streams, chunk by chunk.
 const SUMMARY_CHUNKS: [&str; 4] = [
     "The session covered the fleet work: ",
     "one compaction summary, ",
@@ -68,12 +54,9 @@ impl Drop for Supervisor {
     }
 }
 
-/// An OpenAI-compatible SSE mock: turn requests answer with the fixed
-/// reply; the compaction summarizer request streams the scripted summary
-/// in multiple content chunks (the live delta source). The per-request
-/// usage list makes the second turn's usage cross the compaction
-/// threshold (the f14-auto battery shape: `126_010` tokens against a
-/// 500-token headroom).
+/// An OpenAI-compatible SSE mock: turn requests answer the fixed reply; the summarizer
+/// streams the scripted summary in chunks (the live delta source). The usage list
+/// makes the second turn cross the threshold (f14-auto shape: `126_010` vs a 500 headroom).
 struct CompactionMock {
     requests: Arc<Mutex<Vec<Value>>>,
     port: u16,
@@ -129,7 +112,6 @@ fn small_usage() -> Value {
     })
 }
 
-/// The crossing turn's reported usage (the f14-auto battery shape).
 fn crossing_usage() -> Value {
     json!({
         "prompt_tokens": 126_000, "completion_tokens": 10, "total_tokens": 126_010,
@@ -187,9 +169,8 @@ fn serve(mut stream: TcpStream, requests: &Arc<Mutex<Vec<Value>>>) -> std::io::R
     requests.lock().expect("mock lock").push(body.clone());
     let mut payload = String::new();
     if is_summarizer_request(&body) {
-        // The summarizer request streams the scripted summary one content
-        // chunk at a time: the daemon forwards each as one
-        // `compaction_summary_delta` in generation order.
+        // The summarizer streams the scripted summary one content chunk at a time:
+        // the daemon forwards each as one `compaction_summary_delta` in generation order.
         for piece in SUMMARY_CHUNKS {
             let _ = write!(
                 payload,
@@ -208,9 +189,8 @@ fn serve(mut stream: TcpStream, requests: &Arc<Mutex<Vec<Value>>>) -> std::io::R
         );
         payload.push_str("data: [DONE]\n\n");
     } else {
-        // Turn 2 (the crossing turn) reports the over-threshold usage;
-        // every other request reports the small usage so the session
-        // does not re-cross.
+        // Turn 2 reports the over-threshold usage; every other request reports the
+        // small usage so the session does not re-cross.
         let usage = if index == 1 {
             crossing_usage()
         } else {
@@ -245,8 +225,8 @@ fn serve(mut stream: TcpStream, requests: &Arc<Mutex<Vec<Value>>>) -> std::io::R
     )
 }
 
-// The supervisor child is reaped by `Supervisor`'s `Drop` (kill + wait),
-// so the detached-process lint does not apply.
+// The supervisor child is reaped by `Supervisor`'s `Drop` (kill + wait); the detached-process lint
+// does not apply.
 #[allow(clippy::zombie_processes)]
 fn spawn_supervisor(socket: &Path, agent_dir: &Path) -> Supervisor {
     std::fs::create_dir_all(agent_dir).expect("agent dir");
@@ -378,12 +358,6 @@ impl Client {
     }
 }
 
-/// A threshold auto-compaction at the worker streams its summarizer
-/// deltas to the attached clients: the `compaction_summary_delta` frames
-/// arrive in generation order between the owning `compaction_start` and
-/// the settling `compaction_end`, concatenate to the summary the settled
-/// end carries, and never persist to the session file (the streamed block
-/// is ephemeral; the durable row is the end's entry).
 #[test]
 fn threshold_compaction_streams_summary_deltas_to_attached_clients() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -414,11 +388,9 @@ fn threshold_compaction_streams_summary_deltas_to_attached_clients() {
         .to_string(),
     )
     .expect("write models.json");
-    // The f14-auto battery settings shape: a tiny reserve (the 4_096
-    // estimate-error floor governs the headroom), so the combined
-    // input+output ceiling sits at 119_808 on the 128k window — the
-    // 126_010 crossing fires. A tiny keep-recent budget keeps the seeded
-    // turns summarizable.
+    // The f14-auto shape: a tiny reserve (the 4_096 estimate-error floor governs the
+    // headroom) puts the combined ceiling at 119_808 on the 128k window — the 126_010
+    // crossing fires; a tiny keep-recent budget keeps the seeded turns summarizable.
     std::fs::write(
         agent_dir.join("settings.json"),
         json!({ "compaction": {"enabled": true, "reserveTokens": 500, "keepRecentTokens": 10} })
@@ -457,7 +429,6 @@ fn threshold_compaction_streams_summary_deltas_to_attached_clients() {
     let attached = client.read_response("a1");
     assert_eq!(attached["success"], true, "attach failed: {attached}");
 
-    // Seed turn (small usage): the compaction threshold stays silent.
     client.send_command(
         "p1",
         &json!({"type": "prompt_and_wait", "activeSessionId": session_id, "message": "seed turn"}),
@@ -465,15 +436,10 @@ fn threshold_compaction_streams_summary_deltas_to_attached_clients() {
     let seeded = client.read_response("p1");
     assert_eq!(seeded["success"], true, "seed prompt failed: {seeded}");
 
-    // The crossing turn reports `126_010` tokens (over the 500-token
-    // headroom): the post-turn threshold check fires a compaction, and
-    // the mock streams the summarizer summary chunk by chunk. The turn's
-    // user message is big on purpose: the 10-token keep-recent budget
-    // then cuts AT the big user message's own boundary — a non-split cut
-    // with the seed turn as the summarizable history (the interactive
-    // e2e's same shape: a mid-turn cut would be a split-turn compaction
-    // whose turn-prefix call does not stream, a different test shape
-    // than this single-history-chunk script).
+    // The crossing turn reports `126_010` tokens: the threshold check fires a compaction
+    // and the mock streams the summary chunk by chunk. The turn's user message is big
+    // so the 10-token keep-recent budget cuts at its own boundary — a non-split cut with
+    // the seed turn as the summarizable history (a split-turn compaction does not stream).
     client.send_command(
         "p2",
         &json!({"type": "prompt_and_wait", "activeSessionId": session_id, "message": format!("crossing turn {}", "x".repeat(4_000))}),
@@ -494,9 +460,6 @@ fn threshold_compaction_streams_summary_deltas_to_attached_clients() {
     );
     client.drain_events(500);
 
-    // The run's event family: the loader's start, the streamed deltas in
-    // generation order, and the settling end whose result resolves the
-    // streamed block.
     let start_index = client
         .events
         .iter()
@@ -527,8 +490,7 @@ fn threshold_compaction_streams_summary_deltas_to_attached_clients() {
         delta_indexes.iter().all(|index| *index > start_index && *index < end_index),
         "every delta lives between the start and the settling end: {delta_indexes:?} in {start_index}..{end_index}"
     );
-    // The deltas arrive in generation order and concatenate to the full
-    // scripted summary (the live block the expanded TUI renders).
+    // The deltas arrive in generation order and concatenate to the full summary.
     let deltas: Vec<&str> = delta_indexes
         .iter()
         .map(|index| client.events[*index]["delta"].as_str().expect("delta text"))
@@ -536,9 +498,8 @@ fn threshold_compaction_streams_summary_deltas_to_attached_clients() {
     assert_eq!(deltas, SUMMARY_CHUNKS.to_vec(), "generation order holds");
     let streamed = deltas.concat();
     assert_eq!(streamed, FULL_SUMMARY);
-    // The settled end carries the same text: the streamed block resolves
-    // into the final summary entry (the end's result is the summary's
-    // only durable source).
+    // The settled end carries the same text: the streamed block resolves into the
+    // final summary entry.
     let end_event = client.events[end_index].clone();
     assert_eq!(
         end_event["result"]["summary"]
@@ -547,8 +508,8 @@ fn threshold_compaction_streams_summary_deltas_to_attached_clients() {
         FULL_SUMMARY
     );
 
-    // The delta frames are ephemeral: the durable session file carries
-    // the compaction entry but never a delta frame.
+    // The delta frames are ephemeral: the session file carries the compaction entry but never a
+    // delta frame.
     let session_file = std::fs::read_dir(&session_dir)
         .expect("list session dir")
         .flatten()

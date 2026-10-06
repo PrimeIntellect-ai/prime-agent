@@ -1,5 +1,4 @@
-//! The agent-messaging unit battery: the message validation and prompt
-//! shapes, the host-handler round trips, and the observe rows.
+//! Agent-messaging unit battery: validation/prompt shapes, handler round trips, observe rows.
 use super::*;
 
 /// TS #2493: an observation row carries the typed family status and
@@ -92,7 +91,6 @@ fn message_prompts_and_id_parsing() {
     };
     let prompt = create_agent_session_message_prompt(&payload);
     assert_eq!(prompt, "[agent-message from child:worker-1]\n\nkeep going");
-    // Header values are sanitized.
     let evil = AgentMessagePromptPayload {
         message: "m".to_string(),
         sender_name: "bad name!".to_string(),
@@ -102,7 +100,6 @@ fn message_prompts_and_id_parsing() {
         create_agent_session_message_prompt(&evil),
         "[agent-message from bad name!]\n\nm"
     );
-    // Legacy transcript header parsing.
     let header = format!(
         "Agent-to-agent message received.\nSource: {AGENT_MESSAGE_SOURCE}\nTo: worker\nMessage id: {}",
         create_agent_session_message_id()
@@ -136,9 +133,8 @@ fn the_custom_row_carries_the_ts_agent_message_shape() {
         target: &target,
         timestamp: 123,
     });
-    // TS `createAgentSessionMessage`: the custom role, the agent_message
-    // type, the prompt as the content, display on, and the identity
-    // details the `agent_message` UI reads.
+    // TS `createAgentSessionMessage`: custom role, agent_message type, prompt as content, and the
+    // identity details the UI reads.
     assert_eq!(row["role"], "custom");
     assert_eq!(row["customType"], AGENT_MESSAGE_CUSTOM_TYPE);
     assert_eq!(row["content"], prompt);
@@ -282,7 +278,6 @@ async fn message_host_handler_round_trip() {
     );
     let send = handlers.get("agent_message.send").unwrap().clone();
 
-    // Role-addressed send resolves the name through the family.
     let receipt = send_request(
         &send,
         json!({
@@ -300,7 +295,6 @@ async fn message_host_handler_round_trip() {
     assert_eq!(receipt["receiverRole"], "sibling");
     assert!(receipt["id"].as_str().unwrap().starts_with("agentmsg_"));
 
-    // Unnamed members resolve by id (TS agentFamilyMemberName).
     let by_id = send_request(
         &send,
         json!({ "message": "hi", "receiver_role": "sibling", "receiver_name": "sib-2" }),
@@ -308,7 +302,6 @@ async fn message_host_handler_round_trip() {
     .unwrap();
     assert_eq!(by_id["target"]["activeSessionId"], "sib-2");
 
-    // Parent sends need no name.
     let parent = send_request(
         &send,
         json!({ "message": "reply to parent", "receiver_role": "parent" }),
@@ -344,7 +337,6 @@ async fn message_host_handler_round_trip() {
         "agent_message.send receiver_name is required for sibling and child messages"
     );
 
-    // Resolution failures keep the TS wording.
     let no_match = send_request(
         &send,
         json!({ "message": "hi", "receiver_role": "child", "receiver_name": "ghost" }),
@@ -376,7 +368,6 @@ async fn message_host_handler_round_trip() {
     .unwrap();
     assert_eq!(by_session_alias["target"]["activeSessionId"], "kid-1");
 
-    // Broadcast sends to every family member, all-settled.
     let broadcast =
         send_request(&send, json!({ "target": "all", "message": "  everyone  " })).unwrap();
     let receipts = broadcast["receipts"].as_array().expect("receipts");
@@ -434,7 +425,6 @@ async fn broadcast_without_family_is_empty_and_failures_settle() {
     let broadcast = send_request(&send, json!({ "target": "all", "message": "hi" })).unwrap();
     assert_eq!(broadcast["receipts"].as_array().map(Vec::len), Some(0));
 
-    // A role send against an empty family: no parent matches.
     let no_parent =
         send_request(&send, json!({ "message": "hi", "receiver_role": "parent" })).unwrap_err();
     assert_eq!(no_parent.to_string(), "No parent matches the current agent");

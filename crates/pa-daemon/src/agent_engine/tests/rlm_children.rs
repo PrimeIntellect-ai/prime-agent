@@ -35,13 +35,10 @@ fn depth_override_row(id: &str, depth: &serde_json::Value) -> String {
     .to_string()
 }
 
-/// The depth scan matches the reference reader over every row class: the
-/// common absent case, a present override (last and mid-file), a
-/// non-`u64` bound that must not stop the scan, malformed lines, the
-/// shape-loose row a typed store reader would skip (no `id`), the
-/// transcript-text marker false-positive gate, CRLF lines, multi-byte
-/// content, the invalid-UTF-8 file (both readers return `None`), and
-/// the empty/missing/absent-path fallthroughs.
+/// The depth scan matches the reference reader over every row class:
+/// absent, present (last/mid-file), a non-`u64` bound, malformed lines,
+/// the shape-loose row, the marker-text false-positive gate, CRLF,
+/// multi-byte content, invalid UTF-8, and the fallthroughs.
 #[test]
 fn persisted_rlm_max_depth_scan_matches_reference_across_classes() {
     let header = || {
@@ -65,9 +62,8 @@ fn persisted_rlm_max_depth_scan_matches_reference_across_classes() {
         })
         .to_string()
     };
-    // The shape-loose row: parses as a raw `Value` (the reference's row
-    // shape) but would fail the typed `SessionEntry` reader (no `id`) -
-    // the scan must see it exactly like the reference does.
+    // The shape-loose row: parses as a raw `Value` but would fail the
+    // typed `SessionEntry` reader (no `id`) — the scan must see it too.
     let shape_loose = || {
         json!({
             "type": "custom",
@@ -109,9 +105,7 @@ fn persisted_rlm_max_depth_scan_matches_reference_across_classes() {
             ]
             .join("\n"),
         ),
-        // A newer row whose bound does not parse as u64 must not stop
-        // the scan: the older valid row still wins (the reference's
-        // `find_map` continues past it).
+        // A non-`u64` bound must not stop the scan: the older valid row wins.
         (
             "non_u64_bound_continues",
             [
@@ -167,12 +161,9 @@ fn persisted_rlm_max_depth_scan_matches_reference_across_classes() {
             ]
             .join("\n"),
         ),
-        // The escaped-marker classes (the union gate's `\u` arm): a
-        // row whose `customType` carries a JSON-escaped marker character
-        // is exactly the reference's row after decoding — the scan must
-        // honor it like the full-parse reference does — and an escaped
-        // NON-marker must stay rejected (the `\u` arm widens the parse
-        // set, never a match).
+        // The escaped-marker classes (the union gate's `\u` arm): an
+        // escaped marker character is the reference's row after decoding
+        // (the scan honors it), and an escaped NON-marker stays rejected.
         (
             "escaped_customType_honored",
             [
@@ -189,8 +180,7 @@ fn persisted_rlm_max_depth_scan_matches_reference_across_classes() {
             [
                 header(),
                 message(),
-                // `\u0041` decodes to `A`: an escaped customType that is
-                // NOT the marker — both readers return `None`.
+                // `\u0041` decodes to `A`: NOT the marker — both readers return `None`.
                 r#"{"type":"custom","id":"e2","timestamp":"2026-01-01T00:00:06.000Z","customType":"totally_other_\u0041type","data":{"maxDepth":13}}"#
                     .to_string(),
             ]
@@ -214,8 +204,7 @@ fn persisted_rlm_max_depth_scan_matches_reference_across_classes() {
             "depth class {name}"
         );
     }
-    // An invalid UTF-8 byte anywhere voids the override for both
-    // readers (the reference's whole-file `read_to_string` fails).
+    // An invalid UTF-8 byte voids the override for both readers.
     {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("session.jsonl");
@@ -240,8 +229,7 @@ fn persisted_rlm_max_depth_scan_matches_reference_across_classes() {
             "invalid utf8 voids the override"
         );
     }
-    // Missing file and absent path: the TS fallthrough keeps the
-    // create-carried bound for both readers.
+    // Missing file and absent path: both readers keep the create-carried bound.
     assert_eq!(model::persisted_rlm_max_depth(None), None);
     assert_eq!(
         model::persisted_rlm_max_depth(None),
@@ -254,11 +242,9 @@ fn persisted_rlm_max_depth_scan_matches_reference_across_classes() {
     );
 }
 
-/// The settled-child kernel release policy (TS #2483's
-/// `canPassivateSettledSession` gates, engine-side): with no
-/// registered scheduled jobs the release probe fires; a jobs probe
-/// reporting this session's jobs defers the release (the kernel
-/// stays resident for the job's next run).
+/// The settled-child kernel release policy (TS #2483): with no registered
+/// jobs the release probe fires; a jobs probe reporting this session's jobs
+/// defers it.
 #[test]
 fn release_settled_child_kernel_defers_to_scheduled_jobs_and_fires_the_release_probe() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -272,16 +258,14 @@ fn release_settled_child_kernel_defers_to_scheduled_jobs_and_fires_the_release_p
         probe_fired.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Box::pin(std::future::ready(()))
     }));
-    // No children (the bare engine wires none) and no jobs probe:
-    // the release probe fires once.
+    // No children and no jobs probe: the release probe fires once.
     engine
         .runtime
         .block_on(crate::engine::SessionEngine::release_settled_child_kernel(
             &*engine,
         ));
     assert_eq!(fired.load(std::sync::atomic::Ordering::SeqCst), 1);
-    // A jobs probe reporting this session's jobs defers the
-    // release (the TS `hasRegisteredCronJob` gate).
+    // A jobs probe reporting jobs defers the release.
     *engine
         .registered_jobs_probe
         .lock()
@@ -334,12 +318,10 @@ fn can_passivate_worker_mirrors_the_release_gates_and_adds_the_registry_rule() {
         probe_fired.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Box::pin(std::future::ready(()))
     }));
-    // An empty registry with nothing armed: the gate passes.
     assert!(engine
         .runtime
         .block_on(crate::engine::SessionEngine::can_passivate_worker(&*engine)));
-    // A live background bash handle blocks the passivation (the kernel
-    // snapshot cannot resurrect a live process), and the release consumes
+    // A live background bash handle blocks the passivation, and the release consumes
     // the same gate: the probe never fires while a handle runs.
     *engine
         .background_bash_probe
@@ -358,8 +340,6 @@ fn can_passivate_worker_mirrors_the_release_gates_and_adds_the_registry_rule() {
         .background_bash_probe
         .lock()
         .expect("background bash probe lock") = None;
-    // A jobs probe reporting armed jobs blocks the passivation the same
-    // way.
     *engine
         .registered_jobs_probe
         .lock()

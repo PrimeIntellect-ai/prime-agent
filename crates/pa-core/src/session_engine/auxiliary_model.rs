@@ -1,19 +1,14 @@
-//! Auxiliary-model routing for background summarizer passes (TS #2411's
-//! `_resolveAuxiliaryModel`): compaction and branch summaries resolve
-//! their model through the `auxiliaryModel` setting, so their one-off
-//! prompts run off the session model and the session's provider
-//! prompt-cache prefix stays intact. An unset, equal, or unusable selector
-//! falls back to the session model.
+//! Auxiliary-model routing for background summarizer passes: compaction
+//! and branch summaries resolve their model through the `auxiliaryModel`
+//! setting, so their one-off prompts stay off the prompt-cache prefix; an
+//! unset, equal, or unusable selector falls back to the session model.
 
 use std::path::PathBuf;
 
 use pa_types::ai::Model;
 
-/// The routing context: the working directory and agent directory the
-/// settings (`auxiliaryModel`, `allowedModels`) and the model registry
-/// (`models.json`, auth storage) resolve against. Embeddings wire one at
-/// session assembly; `None` at a call site keeps the session model
-/// (verification harnesses, in-memory sessions).
+/// The directories the settings (`auxiliaryModel`, `allowedModels`) and the
+/// model registry resolve against; `None` keeps the session model.
 #[derive(Debug, Clone)]
 pub struct AuxiliaryModelContext {
     pub cwd: PathBuf,
@@ -21,10 +16,7 @@ pub struct AuxiliaryModelContext {
 }
 
 /// The session fallback for a summarizer call, WITH its merged request
-/// headers: the registry (auth storage + models.json) is the single owner
-/// of the team header, so a fallback call ships the stored team exactly
-/// like the session's own requests (TS `_resolveAuxiliaryModel`'s fallback
-/// resolves through the same storage the session request path uses).
+/// headers — the registry's single team header, shipped like the session's own requests.
 pub(crate) fn session_fallback_with_headers(
     context: &AuxiliaryModelContext,
     session_model: &Model,
@@ -41,11 +33,8 @@ pub(crate) fn session_fallback_with_headers(
     }
 }
 
-/// One routed summarizer target: the model the pass runs on, the key it
-/// sends, and the merged request headers its provider needs (TS
-/// `_resolveAuxiliaryModel`'s `{ model, apiKey, headers }`). The session
-/// fallback resolves its headers through the same registry the session's
-/// own requests use.
+/// One routed summarizer target: the model, the key, and the merged
+/// request headers its provider needs.
 #[derive(Debug, Clone)]
 pub struct ResolvedAuxiliaryModel {
     pub model: Model,
@@ -53,24 +42,18 @@ pub struct ResolvedAuxiliaryModel {
     pub headers: Option<std::collections::BTreeMap<String, String>>,
 }
 
-/// The fallback warning (TS `_resolveAuxiliaryModel`'s `console.warn`).
-/// The selector is logged, never the auth-stack error details: those can
-/// embed credential material (TS `CodeQL` `js/clear-text-logging`).
+/// The fallback warning: the selector is logged, never the auth-stack
+/// error details (those can embed credential material).
 fn warn_fallback(selector: &str, purpose: &str) {
     eprintln!(
         "Warning: auxiliaryModel \"{selector}\" unusable for {purpose}; using the session model."
     );
 }
 
-/// Resolve a background summarizer pass's model through the
-/// `auxiliaryModel` setting (TS #2411's `_resolveAuxiliaryModel`).
-///
-/// `session_model` + `session_api_key` are the fallback the caller
-/// resolved for its own turns; `required_context_tokens` is the size of
-/// the request the pass will issue (None when unknown): a known auxiliary
-/// context window smaller than the request falls back to the session
-/// model instead of failing over-limit on the wire, and an unknown
-/// window keeps the routing rather than guessing.
+/// Resolve a background summarizer pass's model through the `auxiliaryModel`
+/// setting; `session_model` + `session_api_key` are the fallback.
+/// `required_context_tokens` is the pass's request size (None when unknown):
+/// a smaller known auxiliary window falls back instead of failing on the wire.
 #[must_use]
 pub fn resolve_auxiliary_model(
     context: &AuxiliaryModelContext,
@@ -83,8 +66,7 @@ pub fn resolve_auxiliary_model(
         session_fallback_with_headers(context, session_model, session_api_key.map(str::to_string))
     };
     let settings = crate::settings::SettingsManager::create(&context.cwd, &context.agent_dir);
-    // A malformed or whitespace value behaves as unset (TS
-    // `getAuxiliaryModel`): the pass falls back to the session model.
+    // A malformed or whitespace value behaves as unset.
     let selector = settings
         .get_auxiliary_model()
         .map(|selector| selector.trim().to_lowercase())
@@ -96,10 +78,8 @@ pub fn resolve_auxiliary_model(
         return fallback();
     }
     // The daemon's `allowedModels` pin (rust-only guardrail, no TS
-    // equivalent) covers every model the product could run a pass on: a
-    // selector outside the pin falls back to the (allowlisted) session
-    // model instead of calling a forbidden model. A summarizer must
-    // never fail loudly over the guardrail.
+    // equivalent) covers every pass model: a selector outside the pin
+    // falls back to the session model.
     if let Some(allowlist) = settings.get_allowed_models() {
         if !crate::models::model_allowed(&selector, &allowlist) {
             warn_fallback(&selector, purpose);
@@ -107,8 +87,7 @@ pub fn resolve_auxiliary_model(
         }
     }
     // The TS find runs over the authenticated, non-stale catalog
-    // (`_authenticatedRlmModels`); the registry's searchable set is the
-    // same filter.
+    // (`_authenticatedRlmModels`); the registry's set is the same filter.
     let auth = crate::auth::AuthStorage::create(&context.agent_dir);
     let mut registry =
         crate::models::ModelRegistry::create(auth, context.agent_dir.join("models.json"));
@@ -187,9 +166,7 @@ mod tests {
     }
 
     /// The session fallback resolves its MERGED headers through the same
-    /// registry the session's own requests use (Cursor PR #2755: with the
-    /// provider-side team-header fallback deleted, the fallback summarizer
-    /// call is the only other path that must carry the stored team).
+    /// registry the session's own requests use.
     #[test]
     fn the_session_fallback_keeps_the_merged_headers() {
         let (dir, context) = context_with_settings(&serde_json::json!({}));
@@ -261,10 +238,7 @@ mod tests {
             None,
         );
         assert_eq!(routed.model.id, "aux-model");
-        // The auxiliary call runs on the auxiliary model's own key, never
-        // the session's.
         assert_eq!(routed.api_key.as_deref(), Some("aux-key"));
-        // The fallback carries no headers.
         assert_eq!(routed.headers, None);
     }
 
@@ -289,8 +263,6 @@ mod tests {
         let (_dir, context) =
             context_with_settings(&serde_json::json!({ "auxiliaryModel": "testaux/aux-model" }));
         let session = model("session-model", "faux", 8_000);
-        // The required size exceeds the auxiliary window (128000): the
-        // routing falls back instead of failing over-limit on the wire.
         let routed = resolve_auxiliary_model(
             &context,
             "compaction summary",
@@ -299,7 +271,6 @@ mod tests {
             Some(200_000),
         );
         assert_eq!(routed.model.id, "session-model");
-        // A window that fits keeps the routing.
         let routed = resolve_auxiliary_model(
             &context,
             "compaction summary",

@@ -1,5 +1,5 @@
-//! User MCP server management, ported from `core/mcp/mcp-command.ts` together
-//! with the minimal `mcpServers` settings store it reads and writes.
+//! User MCP server management, plus the minimal `mcpServers` settings
+//! store it reads and writes.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -11,8 +11,7 @@ use crate::config::get_agent_dir;
 use pa_core::auth::AuthStorageBackend;
 use pa_core::settings::SettingsStorage;
 
-/// Built-in MCP integrations that reserve their server name
-/// (`BUILTIN_MCP_CATALOG` in packages/ai/src/mcp/catalog.ts).
+/// Built-in MCP integrations that reserve their server name.
 pub const BUILTIN_MCP_CATALOG: &[&str] = &["linear", "notion"];
 
 const NAME_PATTERN: fn(&str) -> bool = is_valid_server_name;
@@ -86,15 +85,11 @@ fn read_settings() -> serde_json::Value {
         .unwrap_or_else(|| serde_json::json!({}))
 }
 
-/// Locked read/modify/write of the global settings document. The TS `mcp`
-/// command flushes through the settings manager, whose writes hold the
-/// proper-lockfile directory lock on `settings.json` (`acquireLockSyncWithRetry`);
-/// writes here must hold the same cross-process lock so TS and Rust never
-/// race on the same document. `mutate` returns whether the document changed
-/// (an unchanged document is not rewritten); a `mutate` error leaves the
-/// file unchanged and surfaces. The storage re-invokes the mutator when a
-/// racing first writer lands mid-acquisition, so the mutator must be
-/// idempotent for the same input document.
+/// Locked read/modify/write of the global settings document: writes here hold
+/// the same cross-process lock as the TS settings manager. `mutate` returns
+/// whether the document changed (unchanged is not rewritten); a `mutate` error
+/// leaves the file unchanged. The storage re-invokes the mutator when a racing
+/// first writer lands mid-acquisition, so it must be idempotent.
 fn mutate_global_settings(
     mut mutate: impl FnMut(&mut serde_json::Value) -> Result<bool>,
 ) -> Result<()> {
@@ -169,10 +164,8 @@ fn remove_global_mcp_server(name: &str) -> Result<bool> {
     Ok(removed)
 }
 
-/// Drop the `mcp:<name>` credential from auth.json under the auth storage
-/// lock, mirroring `AuthStorage.removeVerified`: the TS product serializes the
-/// current document and writes it back inside `withLock`, so a concurrent TS
-/// credential refresh and a Rust credential drop never race on the file.
+/// Drop the `mcp:<name>` credential from auth.json under the auth storage lock,
+/// so a TS credential refresh and a Rust drop never race on the file.
 fn drop_server_credentials(name: &str) -> Result<()> {
     if BUILTIN_MCP_CATALOG.contains(&name) {
         return Ok(());
@@ -387,11 +380,9 @@ fn validate_env_name(value: &str, option: &str) -> Result<String> {
 }
 
 fn validate_http_url(value: &str) -> Result<String> {
-    // WHATWG-style checks matching `new URL(value)` in the TS product:
-    // - no scheme, or an empty host after skipping extra slashes, fails to parse
-    //   ("Invalid MCP URL: <value>");
-    // - a parsed URL with a non-http(s) protocol, no hostname, or embedded
-    //   credentials is rejected by the http(s) requirement instead.
+    // WHATWG-style checks matching `new URL(value)` in the TS product: no scheme or an
+    // empty host after extra slashes fails to parse; non-http(s), no hostname, or
+    // embedded credentials is rejected.
     let Some((scheme, rest)) = split_scheme(value) else {
         bail!("Invalid MCP URL: {value}");
     };

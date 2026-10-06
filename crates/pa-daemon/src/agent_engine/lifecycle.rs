@@ -1,7 +1,6 @@
 //! The engine's lifecycle surface: the constructor and the session
 //! build/adopt/retire cycle, the closed-state markers, the skill
-//! expansion and session-command funnels, and the kernel host
-//! wiring the session build installs (moved with its concern).
+//! expansion and session-command funnels, and the kernel host wiring.
 use super::{
     execute_session_command, json_round_trip, map_thinking_level,
     register_agent_message_host_handlers, register_agent_observe_host_handlers,
@@ -12,10 +11,8 @@ use super::{
     SupervisorChildSessions, Value,
 };
 
-/// The harness-owned instruction the engine floor appends to a bare
-/// skill invocation (no task text): the model receives the skill's
-/// protocol, but as an instruction to ask what the user wants first —
-/// never as an imperative to execute (the floor's whole point).
+/// The instruction the floor appends to a bare skill invocation: ask what
+/// the user wants first, never an imperative to execute.
 pub(crate) const BARE_SKILL_INVOCATION_INSTRUCTION: &str = "The user invoked this skill with no task text - ask what they want before executing any protocol inside it.";
 
 impl AgentSessionEngine {
@@ -29,9 +26,7 @@ impl AgentSessionEngine {
     ///
     /// # Panics
     ///
-    /// The MCP user-server and catalog-source closures built here panic
-    /// on a poisoned engine cwd lock (a holder panicked while holding
-    /// it).
+    /// The MCP closures here panic on a poisoned engine cwd lock.
     pub fn new(config: AgentEngineConfig) -> anyhow::Result<Self> {
         let runtime = crate::async_safe_runtime::AsyncSafeRuntime::new_multi_thread()?;
         let session_file = std::sync::Mutex::new(config.session_file.clone());
@@ -41,9 +36,6 @@ impl AgentSessionEngine {
             api_key: config.api_key.clone(),
             thinking: config.thinking,
         };
-        // One shared supervisor-link client for the worker: agent messaging
-        // and supervisor-backed RLM children multiplex the same connection
-        // (the TS worker's single `SupervisorLink` socket).
         let link = Arc::new(crate::supervisor_link::SupervisorLink::new(
             config
                 .supervisor_link
@@ -69,15 +61,10 @@ impl AgentSessionEngine {
         )
             as std::sync::Arc<dyn pa_core::autonomous::AutonomousDriver>);
         let cwd = std::sync::Arc::new(std::sync::RwLock::new(config.cwd.clone()));
-        // The ACP MCP store (auth storage construction is blocking; the
-        // engine construction paths are already off the hot async paths).
+        // The ACP MCP store (auth storage construction is blocking, off the hot async paths).
         let agent_dir = config.agent_dir.clone();
-        // Settings-declared user servers feed the store this worker owns
-        // (TS `session._mcpManager` resolves user settings; the
-        // `mcp.config` host request answers from them). Read per resolve
-        // so `mcp.refresh` - which re-resolves integrations - sees
-        // settings changes, mirroring the in-process engine's
-        // `mcp_gating` extraction (agentDir + project settings.json).
+        // Settings-declared user servers; re-read per resolve so `mcp.refresh` sees settings
+        // changes.
         let mcp_cwd = std::sync::Arc::clone(&cwd);
         let mcp_agent_dir = agent_dir.clone();
         let catalog_cwd = std::sync::Arc::clone(&cwd);
@@ -88,10 +75,8 @@ impl AgentSessionEngine {
                 std::sync::Arc::new(pa_core::mcp::McpOAuth::new()),
             ),
             get_user_servers: Box::new(move || {
-                // The live cwd slot, not the construction-time cwd: the
-                // rebind (a switched-to session in another directory) must
-                // reach the MCP settings discovery (TS rebuilds the runtime's
-                // MCP manager per replacement).
+                // The live cwd slot, not the construction-time cwd: the rebind must reach the MCP
+                // settings discovery.
                 let mcp_cwd = mcp_cwd.read().expect("engine cwd lock").clone();
                 let settings = pa_core::settings::SettingsManager::create(&mcp_cwd, &mcp_agent_dir);
                 Some(
@@ -115,9 +100,7 @@ impl AgentSessionEngine {
             begin_login: None,
             agent_dir: Some(agent_dir),
             get_catalog_sources: Some(Box::new(move || {
-                // Declared local service-catalog sources (TS
-                // `settingsManager.getMcpCatalogSources()`), re-read per
-                // resolve so settings changes reach the next refresh.
+                // Declared local service-catalog sources, re-read per resolve.
                 let catalog_cwd = catalog_cwd.read().expect("engine cwd lock").clone();
                 let settings =
                     pa_core::settings::SettingsManager::create(&catalog_cwd, &catalog_agent_dir);
@@ -131,21 +114,15 @@ impl AgentSessionEngine {
             probe_override: None,
         });
         // The kernel's `mcp.begin_login` host request: the worker runs the
-        // OAuth login (browser + local callback) and persists the
-        // endpoint-bound credential the shared auth store gates on. Wired
-        // before any session registers host handlers, so every session the
-        // worker builds exposes it.
+        // OAuth login; wired before any session registers host handlers.
         let mcp = std::sync::Arc::new(std::sync::Mutex::new(mcp));
         crate::mcp_login::wire_worker_mcp_login(
             &mcp,
             std::sync::Arc::new(crate::mcp_login::WorkerMcpLoginUi::from_env()),
             std::sync::Arc::new(pa_core::mcp::ReqwestOAuthHttp::new()),
         );
-        // The queue delivery modes arrive at session create (TS `sdk.ts`
-        // builds the agent with the settings modes; the worker's create
-        // seeds them through `set_queue_modes`), so the engine starts
-        // unseeded (None keeps the TS default "one-at-a-time" until the
-        // create writes the settings modes — steering "all" by default).
+        // Queue delivery modes arrive at create, so the engine starts
+        // unseeded (None keeps the TS default "one-at-a-time").
         let queue_modes = std::sync::Mutex::new((None, None));
         Ok(Self {
             runtime,
@@ -218,15 +195,11 @@ impl AgentSessionEngine {
         })
     }
 
-    /// Replace the autonomous continuation policy. Deterministic eval
-    /// harnesses inject a scripted driver here; the product keeps the
-    /// default shell-gate driver in the session cwd. Call before the
-    /// first admitted turn.
+    /// Replace the autonomous continuation policy. Call before the first admitted turn.
     ///
     /// # Panics
     ///
-    /// Panics when the autonomous-driver lock is poisoned (a holder
-    /// panicked while holding it).
+    /// Panics when the autonomous-driver lock is poisoned.
     pub fn set_autonomous_driver(
         &self,
         driver: std::sync::Arc<dyn pa_core::autonomous::AutonomousDriver>,
@@ -239,37 +212,17 @@ impl AgentSessionEngine {
             .expect("autonomous driver lock") = driver;
     }
 
-    /// The session's live working directory (the engine's cwd slot).
     pub(crate) fn cwd(&self) -> std::path::PathBuf {
         self.cwd.read().expect("engine cwd lock").clone()
     }
 
-    /// Expand a `/skill:<name>` submission for the accepted-turn user row
-    /// (TS `_normalizeSubmission` persists the expanded text as the user
-    /// message): build the core session when needed (it loads the skill
-    /// inventory), then expand against it. Non-skill inputs and build
-    /// failures pass the text through unchanged — the turn then surfaces
-    /// the failure it would have surfaced anyway.
-    ///
-    /// A bare invocation (the expanded block parses without a trailing
-    /// user message) carries no task text: the model would receive the
-    /// skill's imperative protocol as its only user message and
-    /// confabulate a task. The engine floor appends the harness-owned
-    /// [`BARE_SKILL_INVOCATION_INSTRUCTION`] as the block's trailing user
-    /// message — the same `\n\n` tail the with-args shape uses, so the
-    /// row's shape is unchanged (every surface parses and renders it
-    /// exactly like the with-args invocation) and the turn admits with
-    /// the model asked what the user wants.
+    /// Expand a `/skill:<name>` submission against the core session
+    /// (built here when needed); non-skill inputs and build failures
+    /// pass through unchanged.
     pub(crate) fn expand_skill_submission(&self, text: &str) -> String {
-        // The floor keys on the ORIGINAL invocation's shape (a `/skill:`
-        // command with no argument text), not on the expanded block's
-        // parse: a skill body can itself contain a close tag plus a
-        // `\n\n` tail that parses as a trailing user message
-        // (`parse_skill_block`'s non-greedy body scan), which would
-        // misread the bare invocation as carrying args. The parse below
-        // then only answers whether the expansion produced a block at
-        // all — an unknown skill or a build failure keeps the raw
-        // command text, and a with-args invocation keeps the user's args.
+        // The floor keys on the ORIGINAL invocation's shape, not the
+        // expanded parse: a skill body can contain a close tag plus a
+        // `\n\n` tail that parses as a trailing user message.
         let bare_invocation = pa_types::slash_commands::parse_slash_command(text)
             .is_some_and(|(name, args)| name.starts_with("skill:") && args.trim().is_empty());
         let Ok(model) = self.resolve_model() else {
@@ -292,11 +245,8 @@ impl AgentSessionEngine {
         expanded
     }
 
-    /// The async build of the core session (the same funnel as
-    /// `ensure_core_session`, awaited on the caller's runtime instead of
-    /// parked on the engine's own): read seams (`get_system_prompt`)
-    /// reaching an unbuilt session build it here. The build gate makes the
-    /// eager create-time build and every demand seam meet at one build.
+    /// The async build of the core session, awaited on the caller's
+    /// runtime: unbuilt read seams build here.
     pub(crate) async fn ensure_core_session_async(&self, model: &Model) -> anyhow::Result<()> {
         let _build = self.session_build.lock().await;
         {
@@ -311,14 +261,7 @@ impl AgentSessionEngine {
         Ok(())
     }
 
-    /// Install the worker's live compaction summary-delta sink (the
-    /// `compaction_summary_delta` broadcast seam): the worker calls this
-    /// once after the engine is built, capturing its event pump; every
-    /// built session adopts the sink at [`Self::adopt_built_session`], so
-    /// each compaction surface (the manual `compact` command, the
-    /// threshold, overflow, and requested auto arms) streams its
-    /// summarizer deltas to the attached clients while the summary
-    /// generates.
+    /// Install the worker's live compaction summary-delta sink: every built session adopts it.
     ///
     /// # Panics
     ///
@@ -333,20 +276,9 @@ impl AgentSessionEngine {
             .expect("compaction summary sink lock") = Some(sink);
     }
 
-    /// Post-build adoption, shared by every build path (the async funnel
-    /// and the turn-driven `session_agent` build): mirror the goal
-    /// runtime, flush a depth override that landed before the build, and
-    /// consume a parked replacement branch. A replacement flow retires
-    /// the built session (see [`Self::retire_session_runtime`]) and parks
-    /// the moved branch in `pending_branch`; whichever build path runs
-    /// first must adopt it, or a read-seam build would strand the parked
-    /// branch and the session would start off the moved branch's entries.
-    /// The stale-row guard's deferred durable write (see
-    /// [`Self::stale_goal_terminal_pending`]): the terminal row lands AFTER
-    /// the context adoption replaced the manager's contents, so the active
-    /// row stops being rediscovered on every rebuild. Best effort — the
-    /// in-memory driver already adopted the terminal verdict, and a failed
-    /// write re-derives at the next rebuild's scan.
+    /// The stale-row guard's deferred durable write: the terminal row
+    /// lands AFTER the context adoption, so the active row stops being
+    /// rediscovered.
     pub(crate) async fn flush_pending_stale_goal_terminal(&self) {
         let terminal = self
             .stale_goal_terminal_pending
@@ -379,11 +311,6 @@ impl AgentSessionEngine {
 
     async fn adopt_built_session(&self, built: &CoreSessionEngine) -> anyhow::Result<()> {
         self.mirror_goal_runtime(built).await;
-        // The live compaction summary-delta sink (the worker's
-        // `compaction_summary_delta` broadcast): adopted onto the built
-        // session like the goal runtime mirrors, so every rebuild's
-        // compactions stream — the worker installs the sink before the
-        // first build and every built session takes the current slot.
         if let Some(sink) = self
             .compaction_summary_sink
             .lock()
@@ -392,9 +319,8 @@ impl AgentSessionEngine {
         {
             built.session.set_compaction_summary_sink(sink);
         }
-        // The in-run consult's mirror (deadlock-free reads: the session
-        // mutex is held across compaction model turns, and the consult
-        // runs inside one of them).
+        // The in-run consult's mirror: the session mutex is held across
+        // compaction turns, and the consult runs inside one.
         *self
             .autonomous_boundary
             .lock()
@@ -404,12 +330,8 @@ impl AgentSessionEngine {
                 agent: std::sync::Arc::clone(built.session.agent()),
                 compaction: built.session.compaction_settings(),
             });
-        // The background-bash liveness probe (TS `_hasLiveBackgroundBashHandles`
-        // reads the provisioner's kernel manager): the same deadlock-free
-        // read discipline as the mirror, over the build's own provisioner —
-        // the kernel's bash-activity tracking (the state behind the
-        // bash-done completion follow-ups) is the liveness surface a held
-        // continuation waits on.
+        // The background-bash liveness probe: a deadlock-free read over the
+        // build's provisioner.
         let provisioner = built.kernel_provisioner_weak();
         *self
             .background_bash_probe
@@ -420,11 +342,9 @@ impl AgentSessionEngine {
                 .and_then(|provisioner| provisioner.manager())
                 .is_some_and(|manager| manager.has_background_work())
         }));
-        // The settled-child kernel release handle (TS #2483's inline
-        // arm): the same weak-provisioner adoption, so the turn runner's
-        // park arm can stop the session's kernel with a snapshot flush
-        // without ever taking the session mutex. A retired runtime or a
-        // dead weak reference releases nothing (the TS `?.` arm).
+        // The settled-child kernel release handle: the park arm stops the
+        // kernel without taking the session mutex (a dead weak reference
+        // releases nothing).
         let release_provisioner = built.kernel_provisioner_weak();
         *self
             .kernel_release_probe
@@ -442,17 +362,11 @@ impl AgentSessionEngine {
                 }
             })
         }));
-        // The in-run autonomous continuation hook (the natural mint rides
-        // the agent loop; the goal seam keeps its own boundary mint).
+        // The in-run autonomous continuation hook (the goal seam keeps its own boundary mint).
         self.install_autonomous_continuation_hook_on(built.session.agent());
-        // The children registry's usage observation feeds the engine's
-        // attribution producer (TS `flushPendingChildUsageAttribution`'s
-        // Rust seam): one sink per build. The session's live children are
-        // separate worker processes that OUTLIVE the rebuild — their
-        // spawns were registered on the previous build's producer, so
-        // adopt those registrations forward before the new sink starts
-        // observing, or the first post-swap report drops against a
-        // producer that never saw the spawn.
+        // Live children outlive the rebuild and registered their spawns on the old producer:
+        // adopt those registrations before the new sink observes, or the first post-swap
+        // report drops against a producer that never saw the spawn.
         if let Some(children) = &self.children {
             let retired = self
                 .usage_producer
@@ -472,12 +386,8 @@ impl AgentSessionEngine {
             // request into this recorder.
             children.set_semantic_edges(built.session.semantic_edges());
         }
-        // The eager-abort target rides the same mirror (see
-        // [`Self::turn_agent`]).
         *self.turn_agent.lock().expect("turn agent lock") =
             Some(std::sync::Arc::clone(built.session.agent()));
-        // A `set_rlm_max_depth` that landed before the build parks its
-        // durable entry; the built session owns the store now.
         {
             let handles = self.goal_runtime.lock().expect("goal runtime lock").clone();
             if let Some(handles) = handles {
@@ -485,29 +395,14 @@ impl AgentSessionEngine {
                 self.flush_pending_max_depth(&mut manager);
             }
         }
-        // A branch move that landed before the first turn built the
-        // session (tree navigation/fork/replacement with no turn yet)
-        // re-seeds the session onto the moved branch.
         let pending_branch = self
             .pending_branch
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
-        // Rehydrate the goal driver from the durable store (TS
-        // constructor: `this._goalState = this._loadPersistedGoalState()`
-        // reads the same session rows `_persistGoalState` wrote). A moved
-        // branch's own latest entry wins (faithful branch semantics); the
-        // worker-owned session file answers otherwise. The seed also sets
-        // the published baseline so the rehydrated state never announces
-        // itself (TS loads at construction without emitting).
-        // The goal seed and the retained-context adoption read the SAME
-        // session file through ONE windowed open below (the old flow
-        // opened the store twice back-to-back: `persisted_goal_state`'s
-        // open for the seed, then an identical open for the adoption -
-        // each re-reading and re-parsing the retained suffix; on a
-        // no-boundary session the whole file pays that twice). The seed
-        // reads the shared window's snapshot goal BEFORE the adoption
-        // moves the window's trees in.
+        // Rehydrate the goal driver from the durable store (a moved
+        // branch's latest entry wins), seeding the published baseline so
+        // it never announces itself.
         let seed;
         let mut shared_window = None;
         let mut shared_branch = None;
@@ -521,11 +416,8 @@ impl AgentSessionEngine {
                 seed = crate::goal_state_persist::goal_state_in_branch(entries);
             } else {
                 let (goal, window, branch) = tokio::task::spawn_blocking(move || {
-                    // Mirrors `persisted_goal_state` (the window's
-                    // snapshot goal; the full reader's branch scan
-                    // fallback) and the adoption open (window present ->
-                    // adopt; the full reader's branch entries otherwise)
-                    // over one read of each artifact instead of two.
+                    // Window present -> snapshot goal + adopt; the full reader's branch entries
+                    // otherwise.
                     let Some(path) = path else {
                         return (None, None, None);
                     };
@@ -550,16 +442,9 @@ impl AgentSessionEngine {
             }
         }
         if let Some(state) = seed {
-            // The restore-resurrection guard (the 402 diagnosis's (d)):
-            // an active seed whose trailing turn settled as a terminal
-            // provider failure adopts the failure as the goal's terminal
-            // state. The failed turn's own error-finish never persisted
-            // (a worker death or restart interrupted the settle), so the
-            // newest goal row is still the mint's active row — adopting
-            // it would resurrect the goal and the resume sites would
-            // keep delivering continuations into the dead provider (the
-            // operator's ~84s restart cadence, 64 cycles in 1.5h). The
-            // scan reads the SAME artifact the seed came from.
+            // The restore-resurrection guard: an active seed whose
+            // trailing turn settled as a terminal provider failure adopts
+            // the failure (the active row cannot resurrect the goal).
             let mut stale_error = None;
             if state.status == pa_core::goals::GoalStatus::Active {
                 let scan: Option<Vec<pa_types::session::FileEntry>> = pending_branch
@@ -577,13 +462,9 @@ impl AgentSessionEngine {
                 }
             }
             if let Some(error) = stale_error {
-                // The stale-row guard's adoption: the IN-MEMORY driver and
-                // the published baseline take the terminal verdict directly
-                // (a mint consult can never resurrect the loop), and the
-                // DURABLE row is DEFERRED to the post-adoption flush — a
-                // write here would precede `rebuild_branch_context`/
-                // `restore_windowed_context` and be replaced with the
-                // adopted entries (the review round's ordering finding).
+                // The stale-row guard's adoption: the IN-MEMORY driver
+                // takes the verdict directly; the DURABLE row is DEFERRED
+                // to the post-adoption flush (a write here would be replaced).
                 let terminal = pa_core::goals::GoalState {
                     active: false,
                     status: pa_core::goals::GoalStatus::Error,
@@ -601,14 +482,9 @@ impl AgentSessionEngine {
                     .stale_goal_terminal_pending
                     .lock()
                     .expect("stale terminal pending lock") = Some(terminal);
-                // The published baseline keeps the RAW row (not the
-                // terminal verdict): the driver's terminal state then
-                // DIFFERS from the baseline, so the first
-                // `goal_update_if_changed` EMITS the `goal_update` event —
-                // the worker's durable mirror (EngineEvent::GoalUpdate ->
-                // the store's thread_goal_state row) is the ONE path the
-                // terminal row reaches the worker-owned session file; the
-                // core manager's in-memory append alone does not.
+                // The published baseline keeps the RAW row: the first
+                // `goal_update_if_changed` EMITS — the worker's durable
+                // mirror is the ONE path the terminal row reaches the file.
                 *self.published_goal.lock().expect("published goal lock") = Some(state);
             } else {
                 let handles = self.goal_runtime.lock().expect("goal runtime lock").clone();
@@ -622,63 +498,39 @@ impl AgentSessionEngine {
         }
         if let Some(entries) = pending_branch {
             built.session.rebuild_branch_context(entries).await?;
-            // A moved branch restores its own park (the early return
-            // would otherwise skip the build-tail restore and leave the
-            // previous branch's park — or none — armed).
+            // A moved branch restores its own park (the early return would leave the previous
+            // branch's park armed).
             self.restore_quota_park(built).await;
-            // The context adoption replaced the manager contents: the
-            // stale-row guard's deferred terminal row lands now.
             self.flush_pending_stale_goal_terminal().await;
             return Ok(());
         }
-        // Restore the retained context and certified metadata without loading
-        // discarded message bodies. Unsupported files use the ordinary
-        // reader. The window (or the fallback branch entries) came from the
-        // shared open above - the second back-to-back open is gone.
+        // Restore the retained context and certified metadata without loading discarded bodies.
         if let Some(window) = shared_window {
             built.session.restore_windowed_context(window).await;
-            // This worker holds the session's runtime lease for the
-            // engine's lifetime: its durable appends may certify the
-            // window cache incrementally (exactly one writer per
-            // lease), and the lease's release flushes the certified
-            // snapshot to the sidecar for the next warm open.
+            // This worker holds the runtime lease: exactly one writer per
+            // lease certifies the window cache; the release flushes the
+            // snapshot.
             built
                 .session
                 .shared_persistence()
                 .lock()
                 .await
                 .set_append_ownership(pa_core::session::window::AppendOwnership::SessionLeaseHeld);
-            // The context adoption replaced the manager contents: the
-            // stale-row guard's deferred terminal row lands now.
             self.flush_pending_stale_goal_terminal().await;
         } else if let Some(entries) = shared_branch.take().filter(|entries| !entries.is_empty()) {
             built.session.rebuild_branch_context(entries).await?;
-            // The context adoption replaced the manager contents: the
-            // stale-row guard's deferred terminal row lands now.
             self.flush_pending_stale_goal_terminal().await;
         }
-        // Restore the quota park this branch ended on (TS
-        // `_restoreQuotaPark`, at construction): the newest
-        // `provider_quota_park` entry not followed by a
-        // `provider_quota_resume` entry. A wake still ahead re-arms the
-        // live state (a missing wake is rebuilt; a user-cancelled one is
-        // honored by leaving the session unparked); a wake that already
-        // passed is left to the durable job — a later failure re-parks
-        // from a fresh count, like the TS.
         self.restore_quota_park(built).await;
-        // The window walk and the retained-context replay allocated
-        // transient entry trees several times the retained size; both are
-        // consumed here, so release their freed heap to the OS.
+        // The walk and replay allocated transient trees several times the
+        // retained size: release the freed heap.
         pa_types::memory_release::trim_freed_heap();
         Ok(())
     }
 
-    /// Scan the built session's branch entries for the park this branch
-    /// ended on and re-arm the live park state (TS `_restoreQuotaPark`).
-    /// A rebuild starts from the branch's own records: any park carried
-    /// by the previous build (a replaced session or a moved branch) is
-    /// cleared first, so the state never survives onto a branch that did
-    /// not park.
+    /// Scan the branch entries for the park this branch ended on and re-arm the live park state.
+    /// A previous build's park is cleared first, so it never survives onto a
+    /// branch that did not park.
     async fn restore_quota_park(&self, built: &CoreSessionEngine) {
         *self
             .quota_park
@@ -692,15 +544,11 @@ impl AgentSessionEngine {
         drop(manager);
         let now_ms = crate::util::now_ms();
         if persisted.resume_at_ms <= now_ms {
-            // The wake time passed: the durable wake job owns the resume
-            // (a failed probe re-parks from a fresh count, like the TS).
+            // The wake time passed: the durable wake job owns the resume.
             return;
         }
-        // A wake job that still exists keeps its id; a missing one is
-        // rebuilt and the replacement is recorded so the next restart
-        // reuses it instead of arming another beside it; a user-cancelled
-        // one is honored (the user owns the wake) by leaving the session
-        // unparked.
+        // A missing wake job is rebuilt and recorded for the next restart;
+        // a user-cancelled one is honored by leaving the session unparked.
         let job_id = match &persisted.job_id {
             Some(job_id) if self.quota_wake_job_active(job_id) => persisted.job_id.clone(),
             Some(job_id)
@@ -713,10 +561,8 @@ impl AgentSessionEngine {
             Some(_) | None => self.create_quota_resume_job(persisted.resume_at_ms).await,
         };
         if job_id != persisted.job_id {
-            // Write through the BUILT session: the installed slot is
-            // still empty while the build runs. A failed write surfaces
-            // as a log: the wake exists (rebuilt above), so the restart's
-            // stale-park arms still own the recovery.
+            // Write through the BUILT session (the installed slot is
+            // still empty). A failed write only logs.
             if let Err(write_error) = self
                 .append_quota_park_entry(
                     Some(built.session.shared_persistence()),
@@ -741,25 +587,13 @@ impl AgentSessionEngine {
         });
     }
 
-    /// The TS replacement teardown (`teardownForReplacement` ->
-    /// `teardownCurrent` -> `session.disposeAsync()`): retire the live
-    /// runtime so the next demand seam rebuilds a fresh session against
-    /// the moved session file. The built session's kernel disposes first -
-    /// one final namespace snapshot flush, drained host requests, then the
-    /// process exits; a kernel that survived here would carry the old
-    /// session's namespace into what TS treats as a new session - and the
-    /// built session drops together with its mirrored goal handles and the
-    /// last published goal state (a read before the next build reports
-    /// the fresh runtime's empty state, not the retired session's). The
-    /// build gate is held across the teardown so no racing demand seam
-    /// rebuilds mid-dispose; the kernel dispose happens after the session
-    /// is taken, so the fresh build it enables starts from nothing.
+    /// Retire the live runtime so the next demand seam rebuilds a fresh
+    /// session against the moved file. The kernel disposes first — it
+    /// must not carry the old session's namespace — and the build gate
+    /// is held across the teardown.
     pub(crate) async fn retire_session_runtime(&self) {
         let _build = self.session_build.lock().await;
         let built = self.session.lock().await.take();
-        // The retired session's quota park ends with it (the wake's owner
-        // is gone); the replacement build restores whatever the new
-        // branch's own entries say.
         *self
             .quota_park
             .lock()
@@ -779,23 +613,13 @@ impl AgentSessionEngine {
             .lock()
             .expect("kernel release probe lock") = None;
         *self.published_goal.lock().expect("published goal lock") = None;
-        // The retired session's provider target goes with it: a demand
-        // seam before the replacement build (an immediate `/compact`)
-        // must resolve the CURRENT model through the pre-build
-        // `resolve_model` fallback, not rebuild on the retired session's
-        // target while a cwd/settings change waits for the prewarm.
+        // The retired session's provider target goes with it: a pre-build demand seam resolves the
+        // CURRENT model.
         *self.provider_target.write().expect("provider target lock") = None;
         if let Some(engine) = built {
-            // The replacement teardown also drops the compact-trigger
-            // state with a version bump (TS teardown -> `requestAbort` ->
-            // `_autoRefineReviewAbort.abort()`): a background review round
-            // still in flight on this session resolves against the
-            // bumped version and never applies its edits or surfaces its
-            // rows.
+            // The teardown drops the compact-trigger state with a version bump: an in-flight
+            // review round never applies its edits.
             engine.session.discard_compact_auto_refine();
-            // The session's telemetry ends with it (the TS dispose
-            // callback the replacement teardown runs); best-effort like
-            // every end path, a failed flush never fails the teardown.
             if let Some(telemetry) = &engine.telemetry {
                 let _ = telemetry.end().await;
             }
@@ -803,16 +627,10 @@ impl AgentSessionEngine {
         }
     }
 
-    /// Tear the built session's kernel down (TS `closeSession` ->
-    /// `AgentSessionRuntime.dispose` -> `AgentSession.disposeAsync` ->
-    /// `IpythonKernelProvisioner.dispose`: one final namespace snapshot,
-    /// drained host requests, then the `python -m rlm.repl` process exits).
-    ///
-    /// The engine object survives the call: the worker process outlives its
-    /// session, so the engine-drop teardown (the strong owner of the
-    /// provisioner going away) cannot run yet. This is the explicit seam the
-    /// worker invokes at every session end — kill, shutdown, the orphan
-    /// exit — so the kernel process never outlives the session that owns it.
+    /// Tear the built session's kernel down. The engine object survives
+    /// the call (the worker process outlives its session): the explicit
+    /// seam the worker invokes at every session end — the kernel never
+    /// outlives the session that owns it.
     pub async fn dispose_kernel(&self) {
         let guard = self.session.lock().await;
         if let Some(engine) = guard.as_deref() {
@@ -820,22 +638,12 @@ impl AgentSessionEngine {
         }
     }
 
-    /// Mark the session closed (TS `runtime.dispose`'s `_disposing`/`_disposed`
-    /// gates) and retire the closed runtime's continuation mirrors: the
-    /// worker's kill, shutdown, and replacement closes set it first, so
-    /// every continuation mint site and settle-hook retry bails — a stopped
-    /// session never continues (no mint, no goal-state churn, no queued
-    /// follow-up a later wake could run). The mirrors go with the marker:
-    /// the engine object outlives the close (the worker process may be
-    /// reused for a fresh create), and a stale settle callback must find
-    /// no goal runtime to mint through — the owed slot itself survives
-    /// the close in the durable state for a later resumed session.
+    /// Mark the session closed and retire the closed runtime's continuation
+    /// mirrors — a stopped session never continues.
     ///
     /// # Panics
     ///
-    /// Panics when an internal mutex is poisoned (the goal runtime or the
-    /// autonomous boundary lock, after a holder panicked while holding
-    /// it).
+    /// Panics when an internal mutex is poisoned.
     pub fn mark_session_closed(&self) {
         self.session_closed
             .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -854,15 +662,12 @@ impl AgentSessionEngine {
             .expect("kernel release probe lock") = None;
     }
 
-    /// The create path's live reset: a fresh (or replaced) session starts
-    /// live (TS's fresh runtime starts un-disposed).
+    /// The create path's live reset: a fresh (or replaced) session starts live.
     pub fn clear_session_closed(&self) {
         self.session_closed
             .store(false, std::sync::atomic::Ordering::SeqCst);
     }
 
-    /// Whether the session is closed (TS `this._disposed || this._disposing`
-    /// in the continuation resume sites).
     pub fn session_is_closed(&self) -> bool {
         self.session_closed
             .load(std::sync::atomic::Ordering::SeqCst)
@@ -872,8 +677,8 @@ impl AgentSessionEngine {
     ///
     /// # Errors
     ///
-    /// Returns an error when no session kernel is running ("Kernel is
-    /// not running"), or when the kernel's own shell-activity call fails.
+    /// Returns an error when no session kernel is running or its own
+    /// shell-activity call fails.
     pub async fn bash_activity(
         &self,
         action: &str,
@@ -922,16 +727,13 @@ impl AgentSessionEngine {
             .block_on(async { self.ensure_core_session_async(model).await })
     }
 
-    /// Execute one session slash command against the built session: resolve
-    /// the model, build the core session on first use, then run the pa-core
-    /// executor (durable rows, compaction, goal continuation).
+    /// Execute one session slash command against the built session:
+    /// resolve the model, build on first use, then run the pa-core
+    /// executor.
     pub(crate) fn execute_session_command(
         &self,
         command: &pa_core::session_engine::slash_commands::SessionSlashCommand,
     ) -> anyhow::Result<SessionCommandExecution> {
-        // The session's live model (`/compact` runs a summarizer call):
-        // the provider target the turn stream reads, not a fresh
-        // startup-chain resolution (R8).
         let model = self.session_model()?;
         self.ensure_core_session(&model)?;
         let api_key = self.resolve_request_api_key(&model);
@@ -942,10 +744,8 @@ impl AgentSessionEngine {
             global_harness_dir: self.config.agent_dir.clone(),
             autonomous: &mut autonomous,
         };
-        // The lock covers the clone only (see `run_turn_once`): a
-        // session command can run a summarizer model call (`/compact`),
-        // so holding the mutex across the execution serialized every
-        // client read seam behind it.
+        // The lock covers the clone only: the command below can run a summarizer call, so the
+        // mutex must not ride it.
         let core = self
             .session
             .blocking_lock()
@@ -956,16 +756,15 @@ impl AgentSessionEngine {
             .block_on(async { execute_session_command(&core, &mut params, command).await }))
     }
 
-    /// The current explicit selection (create-config flags merged over the
-    /// process fallback). `pub(crate)`: the image-route acceptance probe
-    /// reads the create-config key pin alongside the registry resolution.
+    /// The current explicit selection (create-config flags over the
+    /// process fallback). `pub(crate)`: the image-route probe reads the
+    /// create-config key pin.
     pub(crate) fn current_selection(&self) -> EngineModelSelection {
         self.selection.read().expect("model selection lock").clone()
     }
 
-    /// Kernel host-request handlers for agent messaging and observation,
-    /// routed through the worker's supervisor link. `None` outside a daemon
-    /// worker: without a supervisor there is nobody to reach.
+    /// Kernel host-request handlers for messaging and observation,
+    /// routed through the supervisor link. `None` outside a daemon worker.
     fn extra_host_handlers(&self) -> Option<HostRequestHandlers> {
         let config = self.config.supervisor_link.as_ref()?;
         let sender = Arc::new(LinkAgentMessageController::new(
@@ -999,11 +798,8 @@ impl AgentSessionEngine {
         self.config.cron_store.clone()
     }
 
-    /// The kernel cron binding for the current session build: the live
-    /// active session id (the supervisor link carries it) plus the
-    /// durable session id + file from the worker-owned session file's
-    /// header. `None` outside a daemon worker or before the session file
-    /// exists (the engine falls back to its in-memory identity).
+    /// The kernel cron binding: the live active session id plus the
+    /// durable id + file from the header. `None` outside a daemon worker.
     pub(super) fn kernel_cron_binding(
         &self,
     ) -> Option<pa_core::session_engine::runtime_wiring::KernelCronBinding> {
@@ -1030,10 +826,8 @@ impl AgentSessionEngine {
     async fn build_session(&self, model: &Model) -> anyhow::Result<CoreSessionEngine> {
         let agent_model =
             json_round_trip(model).ok_or_else(|| anyhow::anyhow!("model conversion failed"))?;
-        // The live queue-delivery modes (seeded from the start config or
-        // switched by `set_steering_mode`/`set_follow_up_mode`): read
-        // under a scoped lock — a std guard must never ride the build's
-        // awaits below.
+        // The live queue-delivery modes: read under a scoped lock (a std
+        // guard must never ride the awaits below).
         let (steering_mode, follow_up_mode) = {
             let delivery_modes = self.queue_modes.lock().expect("queue modes");
             (
@@ -1047,8 +841,8 @@ impl AgentSessionEngine {
             .expect("create resources lock")
             .clone();
 
-        // The session's stream reads its target from the engine's live slot:
-        // `set_model` swaps the slot so the built session follows without a
+        // The session's stream reads its target from the live slot:
+        // `set_model` swaps it so the built session follows without a
         // rebuild.
         let stream_fn = switchable_stream_fn(std::sync::Arc::clone(&self.provider_target));
         {
@@ -1070,13 +864,9 @@ impl AgentSessionEngine {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        // The engine session carries the session's own directory (the
-        // refine path's local harness state and the session's identity)
-        // while staying non-persisted: the worker owns the durable
-        // session file and mirrors the entries into it. The configured
-        // session dir leads; the session file's parent (the create
-        // command's sessionDir) is the daemon's own fallback — the
-        // engine config itself is built without one.
+        // The engine session stays non-persisted (the worker owns the
+        // durable file); the configured session dir leads, the file's
+        // parent is the fallback.
         let session_manager = match self
             .config
             .session_dir
@@ -1091,16 +881,12 @@ impl AgentSessionEngine {
             }
             None => pa_core::session::manager::SessionManager::in_memory(&cwd),
         };
-        // Children inherit the parent model selector; the engine resolves
-        // the model here, after the create command set the rest of the
-        // parent identity.
         if let Some(children) = &self.children {
             children.set_model(format!("{}/{}", model.provider, model.id));
         }
-        // Session telemetry: the composition root is this worker process;
-        // the create command's opt-out rides the engine config (TS main.ts
-        // `telemetryDisabled` on the runtime config). Sinks resolve from
-        // settings + env inside `build_client`.
+        // Session telemetry: the composition root is this worker; the
+        // create's opt-out rides the engine config. Sinks resolve in
+        // `build_client`.
         let telemetry = (self.config.telemetry_disabled != Some(true)).then(|| {
             let settings =
                 pa_core::settings::SettingsManager::create(self.cwd(), &self.config.agent_dir);
@@ -1119,20 +905,16 @@ impl AgentSessionEngine {
                 ),
             }
         });
-        // Bound before the awaited build: the purge-clone binding must not
-        // hold the lock guard across the await.
+        // Bound before the awaited build: the purge-clone must not hold the lock guard across the
+        // await.
         let queued_goal_context_purge = self
             .goal_queue_purge
             .lock()
             .expect("goal queue purge lock")
             .clone();
-        // TS `AgentSession` wires `onBackgroundWorkSettled` onto the kernel
-        // provisioner (agent-session.ts): the kernel's last live background
-        // `bash()` handle settling — or the kernel tearing down while one
-        // runs — retries the owed continuations, the same resume pair the
-        // RLM child settlement sites fire. An engine without a registered
-        // arc (direct-construction harnesses) wires nothing, exactly like
-        // the in-run autonomous hook.
+        // The kernel's last live background `bash()` handle settling
+        // (or a mid-run teardown) retries the owed continuations. No
+        // registered arc wires nothing.
         let on_background_work_settled = self
             .self_weak
             .lock()
@@ -1164,17 +946,15 @@ impl AgentSessionEngine {
             semantic_edges,
             telemetry,
             cwd,
-            // TS settings.imageModel routing: the daemon owns the routing
-            // (the armed route overrides the serving target + the run's
-            // model); the headless surfaces pass `None` to keep their own.
+            // TS settings.imageModel routing: the daemon owns the routing;
+            // the headless surfaces pass `None` to keep their own.
             image_model_router: None,
             agent_dir: self.config.agent_dir.clone(),
             mcp_manager: Some(std::sync::Arc::clone(&self.mcp)),
             model: Some(agent_model),
             thinking_level: Some(map_thinking_level(self.effective_thinking())),
             stream_fn: Some(stream_fn),
-            // Model tools: `ipython` only (kernel-resident bash/edit parity);
-            // the engine adds the kernel-backed `ipython` tool itself.
+            // Model tools: `ipython` only; the engine adds the kernel-backed `ipython` tool itself.
             tools: vec![],
             custom_system_prompt: create_resources.system_prompt,
             prompt_guidelines: create_resources.append_system_prompt,
@@ -1191,38 +971,19 @@ impl AgentSessionEngine {
             }),
             rlm_depth: Some(self.rlm_depth.load(std::sync::atomic::Ordering::Relaxed)),
             model_info: Some(model.clone()),
-            // TS main.ts `createDefaultRuntimeFactory` passes
-            // `prewarmIpythonKernel: true` for every session it hosts; the
-            // engine's depth gate keeps subagent workers (rlmDepth > 0) on
-            // the lazy first-call start, exactly like the TS session's
-            // `rlmDepth === 0` check.
+            // Prewarm; the depth gate keeps subagent workers lazy.
             prewarm_ipython_kernel: Some(true),
             on_background_work_settled,
-            // TS `_clearQueuedGoalContexts` (the session-command sites and
-            // the kernel's `goal.complete`): the worker-installed queue
-            // purge, so the session engine's surfaces withdraw queued
-            // minted continuations.
+            // The worker-installed purge withdraws queued minted continuations.
             queued_goal_context_purge,
-            // TS `_steeringStopPending`: the worker's steering lane owns
-            // the stop hooks (a queued steer cuts the run at the next
-            // turn boundary; the runner delivers it as the next turn).
+            // The steering lane owns the stop hooks (a queued steer cuts the next turn).
             queued_steering_probe: self.config.queued_steering_probe.clone(),
-            // TS `sdk.ts` seeds the Agent's queue modes from the settings
-            // manager; the worker create reads the same settings (the
-            // engine-level queues drain per the mode at the loop
-            // boundary, mirroring the worker lane's delivery modes). The
-            // live switch (`set_steering_mode`/`set_follow_up_mode`)
-            // updates the same slot ahead of any later build. The lock
-            // is scoped to the read (a guard must never ride the build's
-            // awaits).
+            // Seeded from settings at create; the live switch updates the slot ahead of any later
+            // build.
             steering_mode,
             follow_up_mode,
-            // The worker's shared scheduled-jobs store with the session
-            // identity the kernel binding needs: the live active session
-            // id the supervisor routes commands by, and the durable session
-            // id + file the store partitions and rebinds by. Both come from
-            // the worker-owned session (the engine's in-memory manager
-            // carries neither), so the enrichment runs per build.
+            // The shared scheduled-jobs store with the identity the kernel binding needs; enriched
+            // per build.
             cron_store: self.cron_wiring().map(|mut wiring| {
                 wiring.binding = self.kernel_cron_binding().or(wiring.binding);
                 wiring
@@ -1230,13 +991,8 @@ impl AgentSessionEngine {
         })
         .await
         .inspect(|engine| {
-            // A queue-mode switch that landed while this build was in
-            // flight wrote only the live slot (the build snapshot above
-            // predates it, and the agent handle did not exist yet): re-
-            // apply the current modes to the freshly built agent so the
-            // first build can never serve a stale mode (TS's agent is
-            // built once per session, so the race does not exist there;
-            // this port's lazy build needs the catch-up).
+            // A queue-mode switch that landed mid-build wrote only the live slot: re-apply the
+            // modes so the first build never serves a stale one.
             let (steering_mode, follow_up_mode) = {
                 let delivery_modes = self.queue_modes.lock().expect("queue modes");
                 (

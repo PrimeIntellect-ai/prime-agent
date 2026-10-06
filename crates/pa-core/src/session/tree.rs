@@ -1,5 +1,4 @@
 //! Session tree: branches, labels, and path queries over parsed entries.
-//! Port of the tree/branch portion of core/session-manager.ts.
 
 use std::collections::HashMap;
 
@@ -19,11 +18,9 @@ pub struct SessionTreeFlatNode {
 pub struct SessionTree {
     /// Children indices by parent id (position in the file).
     pub children: HashMap<Option<String>, Vec<usize>>,
-    /// The header position, if present.
     pub header: Option<usize>,
     /// Label state: latest `label` entry per target id.
     pub labels: HashMap<String, Option<String>>,
-    /// Label timestamps keyed by target id.
     pub label_timestamps: HashMap<String, String>,
 }
 
@@ -110,18 +107,15 @@ mod tests {
 "#;
         let entries = parse_session_entries(content);
         let tree = SessionTree::build(&entries);
-        // Branch roots: parentless entries (excluding the header).
         assert_eq!(
             tree.children
                 .get(&Some("a".to_string()))
                 .map(std::vec::Vec::len),
             Some(2)
         );
-        // Path to c: a -> c.
         let path = tree.path_to(&entries, "c");
         let ids: Vec<&str> = path.iter().map(|&i| entries[i].id().unwrap()).collect();
         assert_eq!(ids, vec!["a", "c"]);
-        // Label was set then cleared by the second label entry.
         assert_eq!(get_label(&tree, "b"), Some(None));
         assert_eq!(tree.default_leaf(&entries).as_deref(), Some("l2"));
     }

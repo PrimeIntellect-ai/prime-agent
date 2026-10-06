@@ -1,12 +1,10 @@
-//! Worker tests (moved with their concerns).
+//! Worker tests.
 use super::*;
 use crate::engine::SessionEngine;
 use std::path::Path;
 
-/// A recording engine whose session-model restore holds open for a
-/// fixed window (the restore's readiness awaits): the event log proves
-/// whether two concurrent replacement commands interleave their
-/// teardown/swap/restore/rebuild critical sections.
+/// A recording engine whose session-model restore holds open for a fixed
+/// window: the event log proves whether two concurrent replacements interleave.
 struct RecordingEngine {
     events: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 }
@@ -103,11 +101,8 @@ fn recording_worker(dir: &Path, events: std::sync::Arc<std::sync::Mutex<Vec<Stri
 }
 
 /// Two concurrent `switch_session` commands must not interleave their
-/// replacement critical sections: the teardown, the store/file swap,
-/// the restore, and the rebuild move the worker onto one session as a
-/// unit — the second command runs only after the first settles, so
-/// the restore windows never overlap (an overlap would leave the
-/// store, the branch context, and the model from different sessions).
+/// replacement critical sections — an overlap would leave the store, the
+/// branch context, and the model from different sessions.
 #[tokio::test]
 async fn concurrent_replacements_never_interleave_their_critical_sections() {
     let dir = std::env::temp_dir().join(format!(
@@ -157,11 +152,9 @@ async fn concurrent_replacements_never_interleave_their_critical_sections() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A failed existing-session `create` (a held lease, an unreadable
-/// file) must never bind the engine to the failed path: the
-/// session-model restore runs only after the file opened, so a later
-/// create on a different session never resolves against the failed
-/// path's model or records it in its creation prefix.
+/// A failed existing-session `create` must never bind the engine to the
+/// failed path: a later create on a different session never resolves against
+/// the failed path's model.
 #[tokio::test]
 async fn a_failed_existing_session_create_never_binds_the_engine() {
     let dir =
@@ -170,8 +163,6 @@ async fn a_failed_existing_session_create_never_binds_the_engine() {
     let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let worker = recording_worker(&dir, std::sync::Arc::clone(&events));
 
-    // An unreadable "session file" (a directory at the path): the
-    // existing-session arm fails its windowed open.
     let held = dir.join("held.jsonl");
     std::fs::create_dir_all(&held).expect("directory at the session path");
 
@@ -186,8 +177,6 @@ async fn a_failed_existing_session_create_never_binds_the_engine() {
         "the unreadable path must fail the create: {failed:?}"
     );
 
-    // The engine never bound to the failed path: no restore ran for
-    // it.
     let log = events.lock().unwrap().clone();
     assert!(
         log.iter().all(|event| !event.starts_with("restore-enter")),

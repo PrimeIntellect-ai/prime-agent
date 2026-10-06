@@ -1,12 +1,7 @@
-//! Package manager subsystem: install/remove/list/update of `npm:`, git, and
-//! local-dir package sources against the settings store, plus the
-//! configured-npm/git child-process flows.
-//!
-//! Session resource resolution lives here as well: `PackageManager::resolve`
-//! produces the ranked skill/prompt/theme paths sessions consume.
-//!
-//! Non-goals: loading/executing session-resource code and Prime Agent
-//! self-updates.
+//! Package manager subsystem: install/remove/list/update of `npm:`, git,
+//! and local-dir package sources against the settings store, plus the
+//! configured-npm/git child-process flows and session resource resolution.
+//! Non-goals: loading/executing session-resource code and self-updates.
 
 mod git;
 mod manager;
@@ -81,10 +76,9 @@ fn home_dir() -> PathBuf {
     pa_types::platform::home_dir().unwrap_or_else(|| PathBuf::from("/"))
 }
 
-/// The workspace root at compile time (source-checkout layout): pa-core
-/// lives at `<root>/crates/pa-core`.
-/// Compile-time workspace root (`<root>/crates/pa-core` ancestors), shared by
-/// every package-dir resolution that falls back to the source-checkout layout.
+/// The compile-time workspace root (source-checkout layout): pa-core lives
+/// at `<root>/crates/pa-core`; every package-dir resolution that falls back
+/// to the source-checkout layout shares it.
 pub(crate) fn source_checkout_root() -> Option<&'static std::path::Path> {
     static ROOT: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
     ROOT.get_or_init(|| {
