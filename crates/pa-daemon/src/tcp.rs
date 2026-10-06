@@ -80,12 +80,11 @@ pub struct DaemonTcpTokenRecord {
 
 /// The token file's name inside the agent dir (TS: `daemon-tcp-token`,
 /// no `.json` suffix - the docs review round pinned the real name).
-pub const DAEMON_TCP_TOKEN_FILE_NAME: &str = "daemon-tcp-token";
-const DAEMON_TCP_TOKEN_FILE: &str = DAEMON_TCP_TOKEN_FILE_NAME;
+const DAEMON_TCP_TOKEN_FILE_NAME: &str = "daemon-tcp-token";
 
 /// The token file path inside the agent dir (TS `daemonTcpTokenPath`).
 fn daemon_tcp_token_path(agent_dir: &Path) -> PathBuf {
-    agent_dir.join(DAEMON_TCP_TOKEN_FILE)
+    agent_dir.join(DAEMON_TCP_TOKEN_FILE_NAME)
 }
 
 /// Parse the port from an environment map. A present-but-invalid value is
