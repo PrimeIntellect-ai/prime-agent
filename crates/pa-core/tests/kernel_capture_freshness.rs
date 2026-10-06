@@ -1,24 +1,6 @@
-//! Verifier integration tests for the recurring capture-freshness memo.
-//!
-//! Every capture entry (the compact-time prune, the dispose flush, and the
-//! debounced fire) consults the memo: while no execution settled since the
-//! last committed capture and nothing replaced the committed manifest, the
-//! kernel's full-namespace re-dump is skipped — a fresh capture would
-//! reproduce the committed payload byte-for-byte. The oracles here prove
-//! both directions of the served path:
-//!
-//! - the skip is only-on-unchanged: a settled cell MUST defeat it and
-//!   re-dump (the changed value restores from the payload), an externally
-//!   replaced manifest MUST defeat it, and a live over-cap survivor MUST
-//!   still run the pruning capture (#227 semantics);
-//! - the fresh direction: the skipped capture replays the committed
-//!   result, leaves the manifest byte-identical, and the payload still
-//!   restores through a fresh kernel (the crash-resume freshness
-//!   contract).
-//!
-//! The kernel Python is ambient product state like `kernel_restore_guards`:
-//! skipped with a note when absent; `PA_CORE_KERNEL_PYTHON` points at an
-//! explicit interpreter.
+//! Verifier integration tests for the capture-freshness memo: while nothing settled since the last
+//! committed capture and nothing replaced the committed manifest, the kernel's full-namespace
+//! re-dump is skipped. The kernel Python is ambient product state; skipped when absent.
 #![cfg(unix)]
 
 use std::collections::HashMap;
@@ -57,8 +39,7 @@ fn kernel_python() -> Option<PathBuf> {
     None
 }
 
-/// Options with a snapshot dir; `None` (skip) when no kernel interpreter is
-/// available.
+/// Options with a snapshot dir; `None` (skip) when no kernel interpreter is available.
 fn test_options(snapshot_dir: Option<&Path>) -> Option<KernelManagerOptions> {
     let python = kernel_python()?;
     Some(KernelManagerOptions {
@@ -113,14 +94,13 @@ async fn fresh_capture_skips_until_a_settled_cell_changes_the_namespace() {
     let defined = execute(&manager, "alpha = 1\nbeta = \"x\" * 1024").await;
     assert_eq!(defined.status, ExecuteStatus::Ok);
 
-    // The first capture commits (no memo yet) and arms the memo.
     let first = manager.snapshot_state().await.expect("first capture");
     assert!(first.saved.iter().any(|name| name == "alpha"));
     let first_manifest = file_bytes(&manifest_path);
     let first_payload = file_bytes(&payload_path);
 
     // The fresh window: no execution settled since the commit, so the next
-    // capture replays the committed result and writes nothing.
+    // capture replays the committed result.
     tokio::time::sleep(Duration::from_millis(5)).await;
     let skipped = manager.snapshot_state().await.expect("fresh capture");
     assert_eq!(skipped, first, "the fresh capture replays the commit");
@@ -136,8 +116,7 @@ async fn fresh_capture_skips_until_a_settled_cell_changes_the_namespace() {
     );
 
     // The served path in the other direction: a settled cell changes the
-    // namespace, so the next capture MUST re-dump it (the skip is
-    // only-on-unchanged).
+    // namespace, so the next capture MUST re-dump it.
     let changed = execute(&manager, "alpha = 2").await;
     assert_eq!(changed.status, ExecuteStatus::Ok);
     let redumped = manager
@@ -189,8 +168,7 @@ async fn prune_capture_runs_while_over_cap_survivors_live_then_skips_back_to_bac
         .await
         .expect("kernel must start");
     // `big` exceeds the 16MiB per-variable cap: the non-pruning capture
-    // skips it (a live over-cap survivor the pruning capture must still
-    // remove and disclose).
+    // skips it (a live over-cap survivor).
     let defined = execute(&manager, "big = \"x\" * (16 * 1024 * 1024 + 1)\nsmall = 1").await;
     assert_eq!(
         defined.status,
@@ -211,9 +189,8 @@ async fn prune_capture_runs_while_over_cap_survivors_live_then_skips_back_to_bac
     );
     assert!(committed.saved.iter().any(|name| name == "small"));
 
-    // The pruning capture (the compaction sync) must NOT skip: `big` is a
-    // live over-cap survivor, so the prune removes it from the namespace
-    // and reports it — the #227 notice semantics.
+    // The pruning capture must NOT skip: `big` is a live over-cap survivor,
+    // so the prune removes it and reports it — the #227 notice semantics.
     let pruned = manager
         .prune_oversized_variables()
         .await
@@ -225,8 +202,7 @@ async fn prune_capture_runs_while_over_cap_survivors_live_then_skips_back_to_bac
     );
 
     // Back-to-back: nothing settled since the pruning commit and no live
-    // over-cap survivor remains, so the second pruning capture is fresh —
-    // it replays the committed lists with the prune already served.
+    // over-cap survivor remains, so the second pruning capture is fresh.
     tokio::time::sleep(Duration::from_millis(5)).await;
     let after_prune = file_bytes(&manifest_path);
     let fresh_prune = manager
@@ -274,8 +250,6 @@ async fn dispose_flush_skips_when_fresh_and_still_restores() {
     let defined = execute(&manager, "value = \"before-exit\"").await;
     assert_eq!(defined.status, ExecuteStatus::Ok);
 
-    // The committed capture arms the memo; the dispose flush that follows
-    // with nothing settled in between is fresh and must not rewrite.
     let committed = manager.snapshot_state().await.expect("capture");
     assert!(committed.saved.iter().any(|name| name == "value"));
     let before_exit = file_bytes(&manifest_path);
@@ -335,8 +309,6 @@ async fn dispose_flush_dumps_after_a_settled_cell() {
     assert!(committed.saved.iter().any(|name| name == "value"));
     let committed_manifest = file_bytes(&manifest_path);
 
-    // A settled cell after the commit defeats the memo, so the dispose
-    // flush must capture the final namespace (the served path).
     let changed = execute(&manager, "value = \"final\"").await;
     assert_eq!(changed.status, ExecuteStatus::Ok);
     let shutdown = manager
@@ -390,9 +362,6 @@ async fn an_externally_replaced_manifest_defeats_the_fresh_skip() {
     let committed = manager.snapshot_state().await.expect("capture");
     assert!(committed.saved.iter().any(|name| name == "alpha"));
 
-    // An external actor replaces the committed manifest: the payload the
-    // memo vouches for is no longer the one on disk, so the next capture
-    // must run for real.
     std::fs::write(&manifest_path, "{\"version\": 1, \"savedNames\": []}").expect("write");
     let redumped = manager.snapshot_state().await.expect("capture");
     assert!(redumped.saved.iter().any(|name| name == "alpha"));
@@ -424,8 +393,7 @@ async fn an_internal_state_request_does_not_defeat_the_fresh_skip() {
     let committed_manifest = file_bytes(&manifest_path);
 
     // The compact-time namespace listing settles like any request but never
-    // changes the namespace: a fresh window capture after it is still fresh
-    // (this is the arm the compact-then-dispose sequence rides).
+    // changes the namespace: a fresh window capture after it is still fresh.
     let names = manager.list_namespace_names(None).await.expect("listing");
     assert!(names.iter().any(|name| name == "alpha"));
 
@@ -462,10 +430,8 @@ async fn an_internal_execute_that_writes_a_user_variable_defeats_the_memo() {
     assert!(committed.saved.iter().any(|name| name == "alpha"));
     let committed_manifest = file_bytes(&manifest_path);
 
-    // An INTERNAL execute that writes a user name (the bootstrap class is
-    // the product's internal-execute shape): the settle must end the memo's
-    // description — a later capture re-dumps instead of replaying the old
-    // one and omitting the write.
+    // An INTERNAL execute that writes a user name (the bootstrap class is the product's
+    // internal-execute shape): the settle must end the memo's description.
     let internal = manager
         .execute(
             "late_from_internal = 42",
@@ -541,12 +507,8 @@ async fn a_restore_settle_clears_the_memo() {
     assert!(committed.saved.iter().any(|name| name == "value"));
     let committed_manifest = file_bytes(&manifest_path);
 
-    // A restore replaces the namespace wholesale: its settle ends the
-    // memo's description (this is the layer that covers the repair path's
-    // restart — the reprovision always runs through a restore or an
-    // internal bootstrap settle, and the start itself clears too). The
-    // next capture must re-dump even when the restored namespace happens
-    // to equal the committed one.
+    // A restore replaces the namespace wholesale: its settle ends the memo's description. The next
+    // capture must re-dump even when the restored namespace happens to equal the committed one.
     let restore = manager.restore_state().await.expect("restore");
     assert!(restore.restored.iter().any(|name| name == "value"));
 
@@ -585,10 +547,8 @@ async fn an_externally_replaced_payload_defeats_the_fresh_skip() {
     let committed = manager.snapshot_state().await.expect("capture");
     assert!(committed.saved.iter().any(|name| name == "alpha"));
 
-    // An external actor replaces the committed PAYLOAD while the manifest
-    // (the bookkeeping file) stands: the witness covers the payload itself —
-    // the file a later restore actually reads — so the next capture must
-    // run for real.
+    // An external actor replaces the committed PAYLOAD while the manifest (the bookkeeping file)
+    // stands: the witness covers the payload itself — the file a later restore actually reads.
     std::fs::write(&payload_path, b"externally replaced").expect("write");
     let redumped = manager.snapshot_state().await.expect("capture");
     assert!(
@@ -620,13 +580,10 @@ async fn concurrent_settles_keep_the_boundary_invariant() {
     let committed = manager.snapshot_state().await.expect("capture");
     assert!(committed.saved.iter().any(|name| name == "v"));
 
-    // Cells and captures race for a bounded window (the settle-race class:
-    // a cell settling between a consult's count sample and its decision).
-    // The served-path invariant is the crash-resume one: whatever the racing
-    // captures skipped or committed, the final on-disk payload must revive
-    // the LAST SETTLED namespace — a capture may legitimately skip when a
-    // concurrent capture already committed that exact namespace, so the
-    // assertion is on the restored value, not on a re-dump happening.
+    // Cells and captures race for a bounded window (the settle-race class: a cell settling between
+    // a consult's count sample and its decision). The final on-disk payload must revive the LAST
+    // SETTLED namespace — a capture may legitimately skip when a concurrent capture already
+    // committed that exact namespace, so the assertion is on the restored value.
     let writer = {
         let manager = manager.clone();
         tokio::spawn(async move {
@@ -647,8 +604,6 @@ async fn concurrent_settles_keep_the_boundary_invariant() {
     writer.await.expect("writer task");
     reader.await.expect("reader task");
 
-    // The final capture after every settle: its result describes the final
-    // namespace, and the payload revives the last settled value.
     let boundary = manager.snapshot_state().await.expect("boundary capture");
     assert!(
         boundary.saved.iter().any(|name| name == "v"),

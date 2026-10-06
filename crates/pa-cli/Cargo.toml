@@ -43,6 +43,12 @@ nix = { version = "0.29", features = ["term", "signal", "fs"] }
 url = "2"
 
 [lints.clippy]
+# pa-cli keeps its OWN lints table (not `workspace = true`): the
+# workspace's `rust.unsafe_code = "forbid"` would outlaw the e2e
+# tests' process-kill/cleanup unsafe blocks. The clippy rows mirror
+# the workspace table, and the pedantic class rides here so CI's
+# -D warnings bar enforces it on this crate too.
+pedantic = "warn"
 redundant_clone = "warn"
 clone_on_copy = "warn"
 assigning_clones = "warn"

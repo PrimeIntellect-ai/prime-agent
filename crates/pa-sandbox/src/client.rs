@@ -56,7 +56,6 @@ pub struct ClientOptions {
 /// The Prime Sandboxes lifecycle client. The default transport is
 /// reqwest; tests inject a scripted transport through
 /// [`PrimeSandboxClient::with_transport`].
-#[derive(Debug)]
 pub struct PrimeSandboxClient<T: SandboxTransport = ReqwestSandboxTransport> {
     pub(crate) transport: T,
     pub(crate) api_key: String,
@@ -64,6 +63,18 @@ pub struct PrimeSandboxClient<T: SandboxTransport = ReqwestSandboxTransport> {
     team_id: Option<String>,
     pub(crate) request_timeout: Duration,
     pub(crate) allow_insecure_localhost: bool,
+}
+
+impl<T: SandboxTransport + std::fmt::Debug> std::fmt::Debug for PrimeSandboxClient<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PrimeSandboxClient")
+            .field("transport", &self.transport)
+            .field("api_key", &"[redacted]")
+            .field("base_url", &self.base_url)
+            .field("team_id", &self.team_id)
+            .field("request_timeout", &self.request_timeout)
+            .finish()
+    }
 }
 
 impl PrimeSandboxClient<ReqwestSandboxTransport> {
@@ -408,4 +419,28 @@ pub(crate) fn http_error(
         SandboxError::http(format!("{context} failed with HTTP {status}"))
     };
     error.with_http_context(method, url, Some(status), details)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn client_debug_redacts_api_key() {
+        let key = "sk-synthetic-private-key";
+        let client = PrimeSandboxClient::new(
+            key,
+            ClientOptions {
+                base_url: DEFAULT_BASE_URL.to_string(),
+                team_id: Some("team-1".to_string()),
+                request_timeout: None,
+                allow_insecure_localhost: false,
+            },
+        )
+        .unwrap();
+        let rendered = format!("{client:?}");
+        assert!(!rendered.contains(key));
+        assert!(rendered.contains(r#"api_key: "[redacted]""#));
+        assert!(rendered.contains(DEFAULT_BASE_URL));
+    }
 }

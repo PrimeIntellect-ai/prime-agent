@@ -1,16 +1,11 @@
-//! The crash-repair + load concern (moved with its concern): the
-//! serialized-entry wire, the bounded damage scan, the torn-tail
-//! repair, and the header-validating load.
+//! The crash-repair + load concern: the serialized-entry wire, the bounded
+//! damage scan, the torn-tail repair, and the header-validating load.
 
 use super::{atomic_write, parse_session_entries, FileEntry, Path};
 
 pub(super) fn serialize_entry(entry: &FileEntry) -> String {
     serde_json::to_string(entry).unwrap_or_default()
 }
-
-// ---------------------------------------------------------------------------
-// Crash repair
-// ---------------------------------------------------------------------------
 
 const REPAIR_SUSPICION_WINDOW_BYTES: usize = 1024 * 1024;
 

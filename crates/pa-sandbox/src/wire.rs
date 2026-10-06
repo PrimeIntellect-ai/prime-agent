@@ -141,13 +141,13 @@ fn validate_egress_list(entries: &[String], field: &str) -> Result<(), SandboxEr
         ] {
             if entry.contains(forbidden) {
                 return Err(SandboxError::invalid_request(format!(
-                    "{field} entry {entry:?}: {reason}"
+                    "{field} entry rejected: {reason}"
                 )));
             }
         }
         if !is_hostname_entry(entry) {
             return Err(SandboxError::invalid_request(format!(
-                "{field} entry {entry:?} is not a valid egress rule"
+                "{field} entry is not a valid egress rule"
             )));
         }
     }
@@ -233,9 +233,7 @@ fn validate_idempotency_key(value: &str) -> Result<(), SandboxError> {
 
 /// Validate a create request locally, exactly mirroring the TS
 /// `createVmSandbox` guards; nothing is sent when this fails.
-/// One TS function (`validateCreateRequest`) ported 1:1; slicing it
-/// would trade review fidelity for the lint's line budget.
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines)] // Keep the complete create-request contract in one validation function.
 pub(crate) fn validate_create_request(request: &VmCreateRequest) -> Result<(), SandboxError> {
     if request.name.trim().is_empty() || request.name.len() > MAX_NAME_BYTES {
         return Err(SandboxError::invalid_request(
@@ -587,6 +585,35 @@ mod tests {
             secrets: None,
             labels: Vec::new(),
             idempotency_key: None,
+        }
+    }
+
+    #[test]
+    fn create_request_debug_omits_secrets_and_environment_values() {
+        let key = "sk-synthetic-private-key";
+        let mut request = valid_request();
+        request.secrets = Some(BTreeMap::from([(
+            "SECRET_TOKEN".to_string(),
+            key.to_string(),
+        )]));
+        request.environment_vars = Some(BTreeMap::from([("APP_KEY".to_string(), key.to_string())]));
+        let rendered = format!("{request:?}");
+        assert!(!rendered.contains(key));
+        assert!(rendered.contains(r#"name: "agent""#));
+        assert!(rendered.contains(r#"environment_vars: Some("[redacted]")"#));
+        assert!(rendered.contains(r#"secrets: Some("[redacted]")"#));
+    }
+
+    #[test]
+    fn rejected_egress_values_never_echo_credentials() {
+        let secret = "sk-synthetic-private-key";
+        for entry in [
+            format!("{secret}@example.com"),
+            format!("{secret}.invalid_host"),
+        ] {
+            let error = validate_egress_list(&[entry], "networkAllowlist").unwrap_err();
+            assert!(!error.to_string().contains(secret));
+            assert!(error.to_string().contains("networkAllowlist"));
         }
     }
 

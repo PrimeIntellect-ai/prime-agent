@@ -57,11 +57,7 @@ the slim `assistantMessageEvent` (the daemon wire drops the nested
 the first-turn boundary, the compaction `compaction_start`/`compaction_end`
 pairs with their durable outcome rows, the `goal_update`/`session_action_update`
 frames of the goal loop, and the refinement rows with
-`refine_complete`/`refine_failed`. Verifier: `scripts/print_json_parity.py`
-(the TS binary differential, the goal-budget/goal-natural plus the
-session-command scenarios — the harness supports split runs: `--only ts`
-on the TS host, `--only rust` against the sandbox build, both against one
-`--out`) plus the `print_runtime_e2e` rows.
+`refine_complete`/`refine_failed`. Verifier: the `print_runtime_e2e` rows.
 
 ## Daemon client
 The daemon-backed public commands (`list`, `stop`, `rename`, `send`, `schedule`) talk to the

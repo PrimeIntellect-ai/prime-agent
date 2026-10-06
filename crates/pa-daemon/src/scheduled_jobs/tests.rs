@@ -18,12 +18,8 @@ fn persisted_worker_config(dir: &std::path::Path) -> crate::worker::WorkerConfig
     }
 }
 
-/// The fire-chain e2e behind the dogfood P0 (a heartbeat created by
-/// the kernel never fired): the kernel's `rlm_heartbeat.create` store
-/// mutation plus the mutation hook the worker installs must re-arm the
-/// bind-time (empty) scheduler, fire the job on schedule, deliver its
-/// prompt onto the session's steer lane, and record the run.
-/// An active rlm heartbeat job due to fire (`every 10s`, never run).
+/// The fire-chain e2e behind the dogfood P0 (a kernel-created heartbeat never
+/// fired): the mutation hook re-arms the scheduler, fires the job, and records the run.
 fn heartbeat_job(
     id: &str,
     prompt: &str,
@@ -73,10 +69,6 @@ fn write_active_session(dir: &std::path::Path) -> (String, std::path::PathBuf) {
     (session.session_id().to_string(), path)
 }
 
-/// The delivery-side verification (TS `isPersistedCronJobRunnable`):
-/// a fire whose target was killed (state `archived`) cancels the
-/// session's jobs and skips instead of reviving it, and the queue
-/// lanes stay empty.
 #[tokio::test]
 async fn a_fire_at_a_killed_session_cancels_and_skips() {
     let dir = std::env::temp_dir().join(format!("pa-sched-dead-{}", uuid::Uuid::new_v4()));
@@ -115,8 +107,8 @@ async fn a_fire_at_a_killed_session_cancels_and_skips() {
         store: Arc::new(AgentCronJobStore::for_session_artifacts()),
         recovery: Arc::new(std::sync::Mutex::new(None)),
     };
-    // The dead-target cancel registers the artifact partition itself
-    // (a fresh store knows nothing of the session yet).
+    // The dead-target cancel registers the artifact partition itself (a fresh store knows
+    // nothing of the session yet).
     hooks
         .store
         .register_session_artifact(&session_id, &artifact_dir);
@@ -139,12 +131,8 @@ async fn a_fire_at_a_killed_session_cancels_and_skips() {
     );
 }
 
-/// The fire's parked shape (TS `runCronJob` -> `promptHeartbeat`): a
-/// heartbeat parks on its delivery-mode lane as the injected
-/// `heartbeat_prompt` row with the TS preview — the queue strip reads
-/// `Heartbeat prompt: <content>` (no lane label), while the turn text
-/// and the active-action label keep the raw content — and a plain cron
-/// job parks as a regular follow-up prompt.
+/// A heartbeat parks as the injected `heartbeat_prompt` row with the TS preview (the
+/// queue strip reads `Heartbeat prompt: <content>`, the turn text keeps the raw content).
 #[tokio::test]
 async fn heartbeat_fire_parks_the_labeled_preview_on_its_lane() {
     let dir = std::env::temp_dir().join(format!("pa-sched-fire-{}", uuid::Uuid::new_v4()));
@@ -177,9 +165,8 @@ async fn heartbeat_fire_parks_the_labeled_preview_on_its_lane() {
         let run = tokio::spawn(async move {
             pa_core::cron::scheduler::AgentCronSchedulerHooks::run_job(&*hooks, &spawned_job).await
         });
-        // The spawned fire parks its item before its settle wait; the
-        // runner is absent, so the item stays parked until this test
-        // pops it (releasing the settle).
+        // The spawned fire parks its item before its settle wait; the runner is absent,
+        // so the item stays parked until this test pops it (releasing the settle).
         let park_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let (lane, item) = loop {
             let popped = {
@@ -248,12 +235,9 @@ async fn heartbeat_fire_parks_the_labeled_preview_on_its_lane() {
     }
 }
 
-/// The failure propagation behind the backoff (dogfood incident: a
-/// failing heartbeat re-fired ~120x at its full cadence): a turn that
-/// settles with a real error surfaces it to the scheduler — still a
-/// run, with the error riding it — instead of the old unconditional
-/// success verdict; abort- and withdrawal-shaped settles classify as
-/// a clean run and a skip respectively.
+/// The failure propagation behind the backoff (dogfood incident: a failing
+/// heartbeat re-fired ~120x): a real error settles as a run, abort/withdrawal
+/// as a clean run and a skip.
 #[tokio::test]
 async fn settles_classify_ran_failed_or_skipped() {
     // Park one fire, settle it with `settle`, and return the verdict.
@@ -304,15 +288,15 @@ async fn settles_classify_ran_failed_or_skipped() {
     std::fs::create_dir_all(&dir).unwrap();
     let session = write_active_session(&dir);
 
-    // A provider failure surfaces: the scheduler records it and backs
-    // off (the incident's 404).
+    // A provider failure surfaces: the scheduler records it and backs off (the incident's
+    // 404).
     let failure = "404 No endpoints found that support tool use.".to_string();
     let error = settle_one(&session, crate::worker::TurnSettle::Failed(failure.clone()))
         .await
         .expect_err("the failed settle surfaces");
     assert_eq!(error.to_string(), failure);
-    // A provider failure whose text happens to equal the abort wire
-    // text still fails (the typed settle never reads the text).
+    // A provider failure whose text happens to equal the abort wire text still fails
+    // (the typed settle never reads the text).
     let sneaky = settle_one(
         &session,
         crate::worker::TurnSettle::Failed(crate::worker::ABORTED_TURN_SETTLE_ERROR.to_string()),
@@ -367,9 +351,8 @@ async fn rlm_heartbeat_mutation_hook_fires_into_the_session_queue() {
         .await;
     assert!(created.success, "create failed: {created:?}");
 
-    // The kernel host handler's store mutation (the same live binding
-    // the engine's kernel cron wiring binds): `rlm_heartbeat.create`
-    // through the shared session-artifacts store.
+    // The kernel host handler's store mutation, the same live binding the
+    // engine's kernel cron wiring binds: `rlm_heartbeat.create`.
     let job = {
         let core = worker
             .core
@@ -394,11 +377,8 @@ async fn rlm_heartbeat_mutation_hook_fires_into_the_session_queue() {
     };
     assert_eq!(job.status, JobStatus::Active);
 
-    // The mutation hook the worker installs on the engine's kernel
-    // cron wiring (the handler invokes it right after the store
-    // mutation): withdraws dropped queued fires, then re-arms the
-    // scheduler (TS `removeQueuedHeartbeatFollowUp` +
-    // `cronScheduler.wake()`).
+    // The mutation hook the worker installs: withdraws dropped queued
+    // fires, then re-arms the scheduler.
     let hook = worker.scheduled.mutation_hook();
     hook(
         pa_core::session_engine::host_requests::RlmHeartbeatMutation {
@@ -408,9 +388,8 @@ async fn rlm_heartbeat_mutation_hook_fires_into_the_session_queue() {
     )
     .await;
 
-    // The re-armed timer fires within the interval: the job's prompt
-    // lands on the session's steer lane, the turn runs, and the store
-    // records the run (`runCount` + `lastRunAt`).
+    // The re-armed timer fires within the interval: the job's prompt lands on the steer
+    // lane, the turn runs, and the store records the run (`runCount` + `lastRunAt`).
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
     loop {
         let recorded = worker
@@ -434,9 +413,7 @@ async fn rlm_heartbeat_mutation_hook_fires_into_the_session_queue() {
     }
 
     // The fired prompt ran as the session's turn and persisted as the
-    // injected `heartbeat_prompt` custom row (TS `promptHeartbeat`):
-    // the ◷ Heartbeat transcript component's wire shape, never a
-    // plain user message.
+    // injected `heartbeat_prompt` custom row, never a plain user message.
     let fired_row = {
         let core = worker
             .core

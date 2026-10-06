@@ -339,12 +339,12 @@ mod tests {
         let body =
             r#"{"detail":"denied","api_key":"sk-live-abcdef","nested":{"token":"t1","ok":1}}"#;
         let preview = SandboxError::preview_from_text(body, &["sk-live-abcdef"]).unwrap();
-        assert!(preview.contains("\"api_key\":\"[redacted]\""), "{preview}");
-        assert!(preview.contains("\"token\":\"[redacted]\""), "{preview}");
-        assert!(preview.contains("denied"), "{preview}");
-        assert!(!preview.contains("sk-live-abcdef"), "{preview}");
+        assert!(preview.contains("\"api_key\":\"[redacted]\""));
+        assert!(preview.contains("\"token\":\"[redacted]\""));
+        assert!(preview.contains("denied"));
+        assert!(!preview.contains("sk-live-abcdef"));
         // Field order is preserved (serde_json preserve_order).
-        assert!(preview.starts_with("{\"detail\":"), "{preview}");
+        assert!(preview.starts_with("{\"detail\":"));
     }
 
     #[test]

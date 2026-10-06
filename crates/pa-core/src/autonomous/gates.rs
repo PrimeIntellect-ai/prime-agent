@@ -1,6 +1,5 @@
-//! Autonomous quality gates: shell-command gates evaluated after each turn,
-//! with workspace snapshots that suppress re-running a failing gate over an
-//! unchanged workspace (the retry valve).
+//! Autonomous quality gates: shell-command gates evaluated after each turn, with workspace
+//! snapshots that suppress re-running a failing gate over an unchanged workspace.
 
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -19,21 +18,16 @@ const MAX_CHILD_PROCESS_OUTPUT_CHARS: usize = 1024 * 1024;
 /// Timeout for the git commands that capture a worktree snapshot.
 const SNAPSHOT_TIMEOUT_MS: u64 = 10_000;
 
-/// Future returned by [`GateCommandRunner`] methods.
 pub type GateRunFuture<'a> =
     Pin<Box<dyn std::future::Future<Output = anyhow::Result<ChildProcessResult>> + Send + 'a>>;
-/// Future returned by [`GateCommandRunner::capture_snapshot`].
 pub type SnapshotFuture<'a> =
     Pin<Box<dyn std::future::Future<Output = Option<GitWorktreeSnapshot>> + Send + 'a>>;
 
-/// Runs gate commands and captures workspace evidence for them. The product
-/// implementation shells out in the session cwd; tests and eval harnesses
-/// implement scripted, deterministic runners.
+/// Runs gate commands and captures workspace evidence for them; tests and eval
+/// harnesses implement scripted, deterministic runners.
 ///
-/// Contract: `run_gate` always resolves (a spawn failure is an `Err`, which
-/// the gate loop counts as a failed attempt), and `capture_snapshot` returns
-/// `None` when the workspace state is unavailable, which means "always
-/// re-run the gate" (snapshots never compare equal).
+/// Contract: `run_gate` always resolves (a spawn failure is an `Err`), and
+/// `capture_snapshot` returning `None` means "always re-run the gate".
 pub trait GateCommandRunner: Send + Sync {
     /// Run one gate command with the configured per-gate timeout.
     fn run_gate(&self, command: &str, timeout_ms: u64) -> GateRunFuture<'_>;
@@ -70,7 +64,6 @@ impl GateCommandRunner for ShellGateRunner {
     }
 }
 
-/// Result of one gate child process.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ChildProcessResult {
     pub status: Option<i32>,
@@ -279,9 +272,8 @@ const SNAPSHOT_EXCLUDES: [&str; 6] = [
     "runner_args.log",
 ];
 
-/// Snapshot the git worktree state: porcelain status, the HEAD diff, and a
-/// content hash of untracked files. `None` when any capture step fails (the
-/// gate loop then treats the workspace as always-changed).
+/// Snapshot the git worktree state: porcelain status, the HEAD diff, and a content
+/// hash of untracked files. `None` when any capture step fails.
 pub async fn capture_git_worktree_snapshot(cwd: &Path) -> Option<GitWorktreeSnapshot> {
     if !cwd.is_dir() {
         return None;
@@ -366,9 +358,8 @@ fn untracked_paths_from_status(status: &str) -> Vec<String> {
     paths
 }
 
-/// Digest of one untracked path: symlink target, file content, or metadata
-/// for everything else; capture failures hash their message (a partial
-/// digest is still a stable comparison basis between attempts).
+/// Digest of one untracked path: symlink target, file content, or metadata for everything else;
+/// capture failures hash their message.
 fn hash_untracked_path(path: &Path) -> String {
     let Ok(metadata) = std::fs::symlink_metadata(path) else {
         return "missing".to_string();
@@ -563,14 +554,12 @@ mod tests {
             decision.reason,
             AutonomousDecisionReason::MissingTerminalEvidence
         );
-        // Error and aborted turns never continue.
         let stopped =
             should_autonomously_continue(&mut state, Some(StopReason::Error), &ok_gates()).await;
         assert!(!stopped.should_continue);
         let aborted =
             should_autonomously_continue(&mut state, Some(StopReason::Aborted), &ok_gates()).await;
         assert!(!aborted.should_continue);
-        // Disabled state never continues.
         state.enabled = false;
         let disabled =
             should_autonomously_continue(&mut state, Some(StopReason::Stop), &ok_gates()).await;
@@ -591,7 +580,6 @@ mod tests {
             }),
             None,
         );
-        // Failing gate -> continue with gate_failed.
         let failed =
             should_autonomously_continue(&mut state, Some(StopReason::Stop), &failing_gates())
                 .await;
@@ -602,7 +590,6 @@ mod tests {
         assert_eq!(failure.attempt, 1);
         assert_eq!(failure.exit_text, "exited with code 1");
         assert_eq!(failure.output, "boom");
-        // Passing gate -> stop with not_needed.
         let passed =
             should_autonomously_continue(&mut state, Some(StopReason::Stop), &ok_gates()).await;
         assert!(!passed.should_continue);
@@ -614,7 +601,6 @@ mod tests {
                 .await;
         assert!(failed_again.should_continue);
         assert_eq!(failed_again.reason, AutonomousDecisionReason::GateFailed);
-        // Without a pass in between, the next failure exhausts the window.
         let exhausted =
             should_autonomously_continue(&mut state, Some(StopReason::Stop), &failing_gates())
                 .await;
@@ -656,7 +642,6 @@ mod tests {
         assert!(failure
             .output
             .starts_with("The autonomous gate was not rerun"));
-        // Past the retry window the held failure exhausts the run.
         let exhausted =
             should_autonomously_continue(&mut state, Some(StopReason::Stop), &runner).await;
         assert!(!exhausted.should_continue);
@@ -680,7 +665,6 @@ mod tests {
         let timed_out = runner.run_gate("sleep 5", 50).await.unwrap();
         assert!(timed_out.timed_out);
         assert_eq!(format_process_exit(&timed_out), "timed out");
-        // Outside a git worktree no snapshot is captured.
         assert!(runner.capture_snapshot().await.is_none());
     }
 
@@ -708,15 +692,12 @@ mod tests {
         assert!(run(&["commit", "-q", "-m", "init"]).0);
         let runner = ShellGateRunner::new(dir.path());
         let empty = runner.capture_snapshot().await.unwrap();
-        // An untracked file changes the snapshot (content-hashed).
         std::fs::write(dir.path().join("untracked.txt"), "hello\n").unwrap();
         let with_file = runner.capture_snapshot().await.unwrap();
         assert!(with_file.status.contains("?? untracked.txt"));
         assert_ne!(with_file.untracked_hash, empty.untracked_hash);
-        // Same content again: an identical snapshot (the comparison basis).
         let same = runner.capture_snapshot().await.unwrap();
         assert_eq!(same, with_file);
-        // A tracked modification changes the diff instead.
         std::fs::write(dir.path().join("tracked.txt"), "two\n").unwrap();
         let modified = runner.capture_snapshot().await.unwrap();
         assert!(modified.diff.contains("+two"));

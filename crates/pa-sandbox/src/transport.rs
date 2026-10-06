@@ -30,7 +30,9 @@ use crate::types::Method;
 pub const MAX_JSON_BODY_BYTES: usize = 32 * 1024 * 1024;
 
 /// One outbound HTTP request.
-#[derive(Debug, Clone)]
+/// HTTP request values must not appear in debug output: headers contain
+/// Authorization and the body may contain sandbox secrets.
+#[derive(Clone)]
 pub struct TransportRequest {
     /// The request method.
     pub method: Method,
@@ -74,14 +76,36 @@ impl TransportRequest {
     }
 }
 
+impl std::fmt::Debug for TransportRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let header_names: Vec<_> = self.headers.iter().map(|(name, _)| name).collect();
+        f.debug_struct("TransportRequest")
+            .field("method", &self.method)
+            .field("url", &self.url)
+            .field("headers", &header_names)
+            .field("body", &self.body.as_ref().map(|_| "[redacted]"))
+            .field("timeout", &self.timeout)
+            .finish()
+    }
+}
+
 /// One inbound HTTP response, for every status.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TransportResponse {
     /// The response status.
     pub status: u16,
     /// The response body, read under the request's (or transport's) byte
     /// cap.
     pub body: Vec<u8>,
+}
+
+impl std::fmt::Debug for TransportResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TransportResponse")
+            .field("status", &self.status)
+            .field("body_bytes", &self.body.len())
+            .finish()
+    }
 }
 
 /// One inbound streaming HTTP response: the status, the response headers,
@@ -137,8 +161,7 @@ impl ResponseChunks {
                 ))),
             },
             Self::Queued(chunks) => Ok(chunks.pop_front()),
-        }
-    }
+        }    }
 }
 
 /// The sandbox HTTP transport. Implementations execute one request and
@@ -346,5 +369,40 @@ fn reqwest_method(method: Method) -> reqwest::Method {
         Method::Get => reqwest::Method::GET,
         Method::Post => reqwest::Method::POST,
         Method::Delete => reqwest::Method::DELETE,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn response_debug_never_prints_server_body() {
+        let key = "sk-synthetic-private-key";
+        let response = TransportResponse {
+            status: 403,
+            body: format!("server echoed {key}").into_bytes(),
+        };
+        let rendered = format!("{response:?}");
+        assert!(!rendered.contains(key));
+        assert!(rendered.contains("status: 403"));
+        assert!(rendered.contains(&format!("body_bytes: {}", response.body.len())));
+    }
+
+    #[test]
+    fn request_debug_keeps_header_names_but_not_values_or_body() {
+        let key = "sk-synthetic-private-key";
+        let request = TransportRequest {
+            method: Method::Post,
+            url: "https://api.example.com/api/v1/sandbox".to_string(),
+            headers: vec![("Authorization".to_string(), format!("Bearer {key}"))],
+            body: Some(format!(r#"{{"secrets":{{"PRIVATE":"{key}"}}}}"#)),
+            timeout: Duration::from_secs(5),
+        };
+        let rendered = format!("{request:?}");
+        assert!(!rendered.contains(key));
+        assert!(rendered.contains("Authorization"));
+        assert!(rendered.contains(r#"body: Some("[redacted]")"#));
+        assert!(rendered.contains("method: Post"));
     }
 }

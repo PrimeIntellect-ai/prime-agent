@@ -1,24 +1,20 @@
 //! The host adapter concern: the `RlmSubagentHost` wire surface
 //! (`spawn`, `create_session`, `list_subagents`, `delete_subagent`,
-//! `collect`) over the supervisor's child-sessions registry, with the
-//! spawn-admission helpers only this surface uses.
+//! `collect`, `rename`) over the supervisor's child-sessions registry,
+//! with the spawn-admission helpers only this surface uses.
 use super::{
-    assert_thinking_supported, bail, create_default_rlm_subagent_session_name, json, now_ms,
-    resolve_child_model, rlm_child_label, spawn_name_unavailable, Arc, ChildCloseReason,
-    ChildRecord, Context, DaemonCommand, Duration, Instant, Mutex, Path, PathBuf, Result,
-    RlmChildResult, RlmChildTerminalNotice, RlmCreateSessionHandle, RlmCreateSessionRequest,
-    RlmDeleteSubagentResult, RlmHostFuture, RlmSpawnHandle, RlmSpawnRequest, RlmSubagentEntry,
-    RlmSubagentHost, SpawnNameReservationGuard, SupervisorChildSessions,
-    SupervisorChildSessionsInner, Value, KILL_TIMEOUT_MS,
+    assert_thinking_supported, bail, create_default_rlm_subagent_session_name,
+    create_rlm_child_terminal_notice, json, now_ms, resolve_child_model, rlm_child_label,
+    spawn_name_unavailable, Arc, ChildCloseReason, ChildRecord, Context, DaemonCommand, Duration,
+    Instant, Mutex, Path, PathBuf, Result, RlmChildResult, RlmChildTerminalNotice,
+    RlmCreateSessionHandle, RlmCreateSessionRequest, RlmDeleteSubagentResult, RlmHostFuture,
+    RlmSpawnHandle, RlmSpawnRequest, RlmSubagentEntry, RlmSubagentHost, SpawnNameReservationGuard,
+    SupervisorChildSessions, SupervisorChildSessionsInner, Value, KILL_TIMEOUT_MS,
+    RENAME_TIMEOUT_MS,
 };
 
-/// Resolve the child model with the daemon `allowedModels` allowlist
-/// enforced (the parent's cwd scopes the settings read), refusing a model
-/// outside the allowlist loudly with the typed error and emitting the
-/// `model refused` adoption event through the worker's shared client. The
-/// settings read (a synchronous file lock under `with_lock`) runs on the
-/// blocking pool, so a contended settings lock never stalls this async
-/// spawn path's Tokio worker.
+/// Resolve the child model with the daemon `allowedModels` allowlist enforced, refusing loudly with
+/// the typed error and the `model refused` event; the settings read runs on the blocking pool.
 async fn resolve_child_model_allowlisted(
     this: &SupervisorChildSessionsInner,
     reference: Option<&str>,
@@ -71,14 +67,9 @@ impl RlmSubagentHost for SupervisorChildSessions {
             let name = request.name.clone().unwrap_or_else(|| {
                 create_default_rlm_subagent_session_name(&request.prompt, &child_id)
             });
-            // TS `_startRlmChildRun` (#2396): a requested name is reserved
-            // before the first await and held until the admission settles,
-            // so two parallel same-name spawns cannot both pass the
-            // availability check and both register durable children. A
-            // default name embeds its fresh child id and never reserves
-            // (TS parity). The RAII guard owns the release: it frees the
-            // name at the admission settle, on every failure path, and on
-            // cancellation (a dropped host future) alike.
+            // A requested name is reserved before the first await and held
+            // until the admission settles, so parallel same-name spawns
+            // cannot both register; a default name never reserves.
             let _reservation = request
                 .name
                 .is_some()
@@ -123,6 +114,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                         thinking,
                         &cwd,
                         &child_dir,
+                        request.spawned_by_request_id.as_deref(),
                         Some(runtime_metadata),
                         &identity,
                     )
@@ -133,9 +125,11 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     active_session_id: created.active_session_id.clone(),
                     session_id: created.session_id.clone(),
                     session_dir: created.session_dir.clone(),
+                    model: model.clone(),
                     label: rlm_child_label(&request.prompt),
                     started_at_ms: now_ms(),
                     settled_status: None,
+                    settled: false,
                     answer_preview: None,
                     answer_captured: false,
                     replied_since_task: false,
@@ -144,44 +138,39 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     error: None,
                     closed_by_parent: false,
                     session_file: created.session_file.clone(),
-                    attributed_rows: 0,
+                    attributed_rows: Some(0),
                     usage_watch_live: false,
                     usage_rearm: false,
                     emit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+                    last_emitted_status: None,
+                    rename_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
                 };
                 let record = Arc::new(Mutex::new(record));
                 this.children.lock().await.push(Arc::clone(&record));
+                this.refresh_running().await;
+                this.emit_child_update(&record).await;
                 anyhow::Ok((record, created, model))
             }
             .await;
             let (record, created, model) = admission?;
-            // The reservation's guard is still bound: the release runs at
-            // this scope's end (a successful registration made the name
-            // durable - it transfers from the pending reservation to the
-            // live registry), on every earlier failure path's `?`, and on
-            // cancellation of the host future itself.
-            // The task prompt runs detached from the spawn admission (TS
-            // `void (async () => ...)`): the handle returns at registration
-            // and the child's first turn starts after the parent's own
-            // continuation request is in flight. The watcher starts once
-            // the prompt is admitted (it idles on a pre-prompt child).
+            // The task prompt runs detached from the spawn admission: the
+            // handle returns at registration and the child's first turn
+            // starts after the parent's continuation request is in flight.
             let watcher_this = Arc::clone(&this);
             let watcher_record = Arc::clone(&record);
             let prompt = request.prompt.clone();
             let child_active_session_id = created.active_session_id.clone();
             let child_session_file = created.session_file.clone();
+            let child_log_id = child_id.clone();
             // Capture the current turn boundary before detaching: spawn
             // admission happens mid-turn, so the parent's continuation
-            // request (already issued for this turn's tool result) is
-            // guaranteed to reach the provider first (see
-            // `wait_turn_done`).
+            // request reaches the provider first (see `wait_turn_done`).
             let turn_generation = *this.turn_done.subscribe().borrow();
             tokio::spawn(async move {
                 watcher_this.wait_turn_done(turn_generation).await;
-                // The parent session closed before the prompt admitted (a
-                // replacement teardown or a session close between the spawn
-                // and the turn boundary): the child is closed with the
-                // parent, so the detached task prompt never fires.
+                // The parent closed before the prompt admitted: the
+                // child is closed with it, so the detached task prompt
+                // never fires.
                 if watcher_record.lock().await.closed_by_parent {
                     return;
                 }
@@ -191,13 +180,9 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     .await
                 {
                     // The route can fail ambiguously around a worker
-                    // replacement: the frame reached a dying connection and
-                    // no reply came back. The child's durable session file
-                    // is the record the replacement replays from, so it
-                    // arbitrates the ambiguity - a prompt already in the
-                    // file landed (re-sending would duplicate the first
-                    // turn), a missing prompt provably never landed and one
-                    // retry against the replaced worker is safe.
+                    // replacement. The durable session file arbitrates: a
+                    // prompt in the file landed (re-sending would duplicate
+                    // the first turn); one retry is safe.
                     let landed =
                         session_file_carries_prompt(child_session_file.as_deref(), &prompt);
                     let retried = if landed {
@@ -209,12 +194,18 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     };
                     if let Err(retry_error) = retried {
                         eprintln!(
-                            "pa-daemon: RLM child task prompt failed for {child_active_session_id}: {error:#}; retry failed: {retry_error:#}"
+                            "pa-daemon: RLM child task prompt failed for {child_log_id}: {error:#}; retry failed: {retry_error:#}"
                         );
                         let _ = watcher_this
                             .kill_child(&child_active_session_id, ChildCloseReason::Killed)
                             .await;
-                        watcher_record.lock().await.settled_status = Some("error");
+                        watcher_this
+                            .settle_failed(
+                                &watcher_record,
+                                format!("{retry_error:#}"),
+                                super::lifecycle::FailedArm::Prompt,
+                            )
+                            .await;
                         return;
                     }
                 }
@@ -248,8 +239,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
             .await?;
             assert_thinking_supported(&this.agent_dir, request.thinking.as_deref(), &model)?;
             // A depth-0 resident session is created exactly like a client
-            // `create`: the shared sessions dir and the requested cwd
-            // (TS `resolve(this._cwd, rawCwd)`), no per-child artifacts dir.
+            // `create`: the shared sessions dir and the requested cwd.
             let cwd = match &request.cwd {
                 Some(cwd) if Path::new(cwd).is_absolute() => PathBuf::from(cwd),
                 Some(cwd) => Path::new(identity.cwd.as_deref().unwrap_or("/")).join(cwd),
@@ -312,15 +302,22 @@ impl RlmSubagentHost for SupervisorChildSessions {
     fn delete_subagent(&self, target: String) -> RlmHostFuture<RlmDeleteSubagentResult> {
         let this = Arc::clone(&self.inner);
         Box::pin(async move {
-            // Selector errors surface unwrapped (TS parity: the
-            // `No direct RLM subagent matches ...` message is the product
-            // surface); only the kill below gets a delete context.
+            // Selector errors surface unwrapped (the TS message is the
+            // product surface); only the kill below gets a delete context.
             let record = this.resolve_record(&target, "subagent").await?;
+            let rename_lock = record.lock().await.rename_lock.clone();
+            let _rename_guard = rename_lock.lock().await;
+            let no_longer_matches = {
+                let record = record.lock().await;
+                record.closed_by_parent || !record.matches(&target)
+            };
+            if no_longer_matches {
+                bail!("No direct RLM subagent matches \"{target}\" in the current parent session");
+            }
             let active_session_id = record.lock().await.active_session_id.clone();
-            // Kill first: a failed kill keeps the child tracked so the caller
-            // can retry; a successful kill removes it from the registry.
-            // The `rlmLedgerDelete` marker tells the supervisor this kill
-            // is a delete (a plain stop must not tombstone the child).
+            // Kill first: a failed kill keeps the child tracked; the
+            // `rlmLedgerDelete` marker tells the supervisor this kill is a
+            // delete, never a plain stop.
             let record_guard = record.lock().await;
             let command = DaemonCommand::Kill {
                 id: None,
@@ -339,31 +336,35 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 .await
                 .with_context(|| format!("kill RLM child \"{target}\""))?;
             // Rows can land between the pre-kill capture and the kill
-            // reaching the worker (a turn that completed just before the
-            // kill aborted the in-flight one): the post-kill walk is the
-            // LAST observation — after this the record closes and no
-            // watcher reads the file again. The cursor keeps the second
-            // walk free of double-billing.
+            // reaching the worker: the post-kill walk is the LAST observation
+            // (the cursor keeps it free of double-billing).
             this.emit_child_usage(&record).await;
-            // The final observation landed: the registration drops (TS
-            // keeps a child's subscription alive only while the child
-            // lives).
+            // The final observation landed: the registration drops.
             this.forget_child_usage(&record).await;
             // The watcher owns an Arc to this record; deleting the roster
             // row alone cannot stop its polling loop.
-            record.lock().await.closed_by_parent = true;
+            {
+                let mut record = record.lock().await;
+                record.closed_by_parent = true;
+                if was_running {
+                    record.settled_status = Some("cancelled");
+                    record.error = Some("Deleted by parent orchestrator".to_string());
+                }
+            }
             let entry = {
                 let record = record.lock().await;
                 SupervisorChildSessions::entry(&record)
             };
-            // The delete receipt promised a collectable cancelled envelope
-            // (TS #2388): the tombstone keeps the child's identity behind
-            // the registry so a just-deleted selector still answers
-            // `rlm.collect` with its settled cancellation instead of the
-            // unknown-selector error.
+            // The tombstone keeps the identity behind the registry so a
+            // just-deleted selector still answers `collect`.
             {
                 let record = record.lock().await;
                 this.remember_deleted_child(&record);
+            }
+            if was_running {
+                this.emit_child_update(&record).await;
+            } else {
+                this.emit_child_removal(&record).await;
             }
             // The deletion commits BEFORE the best-effort terminal
             // notice: the notice's supervisor delivery can ride its full
@@ -373,10 +374,8 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 .lock()
                 .await
                 .retain(|candidate| !Arc::ptr_eq(candidate, &record));
-            // The cached context-tree rows must not outlive the child: a
-            // deleted subagent leaves `/context` immediately (the
-            // background refresh would otherwise resurrect it through the
-            // settled-children backfill until its next walk).
+            // A deleted subagent leaves `/context` immediately (the
+            // background refresh would otherwise resurrect it).
             if let Some(notify) = this
                 .delete_notifier
                 .lock()
@@ -385,11 +384,8 @@ impl RlmSubagentHost for SupervisorChildSessions {
             {
                 notify(&entry.rlm_child_id);
             }
-            // A still-running child was cut short by the delete: the parent
-            // session receives the cancelled terminal notice (TS
-            // `completeDeletion`, reason `Deleted by parent orchestrator`).
-            // The settle watcher stops silently once the record leaves the
-            // registry, so the delete path owns this notice.
+            // A still-running child was cut short by the delete: the
+            // parent receives the cancelled terminal notice.
             if was_running {
                 let notice = {
                     let mut record = record.lock().await;
@@ -402,9 +398,16 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     })
                 };
                 if let Some(notice) = notice {
-                    this.deliver_terminal_notice(&notice).await;
+                    this.deliver_terminal_notice(create_rlm_child_terminal_notice(
+                        &notice,
+                        now_ms(),
+                    ))
+                    .await;
                 }
             }
+            // The deletion settles the run: a parked barrier re-reads a removed
+            // record as settled.
+            this.fire_settle_hook(&record).await;
             Ok(RlmDeleteSubagentResult {
                 subagent: entry,
                 outcome: Some("deleted"),
@@ -422,15 +425,9 @@ impl RlmSubagentHost for SupervisorChildSessions {
             } else {
                 Vec::with_capacity(targets.len())
             };
-            // TS #2388: a target whose delete receipt already returned
-            // resolves immediately to its settled cancelled envelope —
-            // the delete accepted the cancellation, so waiting for a
-            // teardown that already finished (or reporting the snapshot it
-            // would produce) would only mislead callers. Unknown selectors
-            // keep erroring, and a live record always owns its selector
-            // again (a respawn under a freed name wins before the
-            // tombstone is consulted), so the deleted generation never
-            // answers for a live replacement.
+            // A target whose delete receipt already returned resolves
+            // immediately to its settled cancelled envelope; unknown
+            // selectors keep erroring (a respawned freed name wins first).
             let mut deleted_results: Vec<RlmChildResult> = Vec::new();
             for target in &targets {
                 let record = match this.resolve_record(target, "child").await {
@@ -464,10 +461,9 @@ impl RlmSubagentHost for SupervisorChildSessions {
             let mut results = Vec::with_capacity(records.len());
             for record in &records {
                 this.refresh_record(record).await;
-                // A settled child that is busy again runs a follow-up turn
-                // (delayed messaging): re-arm usage observation — the
-                // task-run watcher retired at its settle. A roster read
-                // settles nothing here; the arm only observes usage.
+                // A settled child that is busy again runs a follow-up turn:
+                // re-arm usage observation (the task-run watcher retired at
+                // its settle).
                 if record.lock().await.settled_status.is_some() {
                     let active_session_id = record.lock().await.active_session_id.clone();
                     if matches!(this.child_busy(&active_session_id).await, Ok(true)) {
@@ -489,19 +485,120 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 };
                 results.push(result);
             }
-            // Live entries first, the deleted generations' envelopes after
-            // (TS `collectRlmChildren` result order).
+            // Live entries first, the deleted generations' envelopes after.
             results.extend(deleted_results);
             Ok(results)
         })
     }
+
+    fn rename(&self, name: String, session_id: Option<String>) -> RlmHostFuture<String> {
+        let this = Arc::clone(&self.inner);
+        Box::pin(async move {
+            // Resolve the target: the caller's own session (an absent
+            // session id, its live active id, or its durable session id),
+            // or one direct child by rlm child id, active id, or durable
+            // session id ONLY — a child NAME never selects a rename
+            // target (TS `renameAgentFamilySession`).
+            let identity = this.identity.lock().expect("identity lock").clone();
+            let self_target = match &session_id {
+                None => true,
+                Some(target) => {
+                    target == &this.parent_active_session_id
+                        || identity.session_id.as_deref() == Some(target.as_str())
+                }
+            };
+            let (active_session_id, record) = if self_target {
+                (this.parent_active_session_id.clone(), None)
+            } else {
+                let target = session_id.clone().unwrap_or_default();
+                let mut by_ids = None;
+                let mut by_name = false;
+                {
+                    let children = this.children.lock().await;
+                    for candidate in children.iter() {
+                        let record = candidate.lock().await;
+                        if record.matches_id(&target) {
+                            by_ids = Some(Arc::clone(candidate));
+                            break;
+                        }
+                        if record.session_name == target {
+                            by_name = true;
+                        }
+                    }
+                }
+                match by_ids {
+                    Some(record) => {
+                        let active_session_id = record.lock().await.active_session_id.clone();
+                        (active_session_id, Some(record))
+                    }
+                    None if by_name => bail!(
+                        "rlm.rename session_id \"{target}\" must be the full session id or a child handle, not a session name or id suffix"
+                    ),
+                    None => bail!(
+                        "rlm.rename can only rename the current session or one of its direct children"
+                    ),
+                }
+            };
+            // Serialize the daemon command and parent-side record update
+            // against another rename or delete of this child.
+            let rename_lock = if let Some(record) = &record {
+                Some(record.lock().await.rename_lock.clone())
+            } else {
+                None
+            };
+            let _rename_guard = if let Some(lock) = &rename_lock {
+                Some(lock.lock().await)
+            } else {
+                None
+            };
+            if let Some(record) = &record {
+                if record.lock().await.closed_by_parent {
+                    bail!("rlm.rename can only rename the current session or one of its direct children");
+                }
+            }
+            // The rename itself is daemon-owned: the supervisor's live
+            // rename route reserves the name, asserts sibling uniqueness
+            // across the family, and appends the child's RLM ledger
+            // rename. `renamedBy: parent` marks the parent-directed
+            // rename so the renamed session's transcript notice names it.
+            // The child may be passivated — or a prior wake may have
+            // re-keyed its roster row past the record's spawn-time id —
+            // so the rename rides the same durable-selector wake retry
+            // the child prompts use (the record keeps the spawn-time
+            // routing id; only its durable session id still names a
+            // passivated child).
+            let renamed_by = record.as_ref().map(|_| {
+                pa_core::session_engine::agent_messaging::AgentFamilyRelationship::Parent
+                    .as_str()
+                    .to_string()
+            });
+            let make_command = |selector: &str| DaemonCommand::Rename {
+                id: None,
+                active_session_id: selector.to_string(),
+                name: name.clone(),
+                renamed_by: renamed_by.clone(),
+                rest: serde_json::Map::default(),
+            };
+            this.command_with_durable_wake(
+                make_command,
+                &active_session_id,
+                RENAME_TIMEOUT_MS,
+                &format!("rename session \"{active_session_id}\""),
+            )
+            .await?;
+            // A parent-directed rename updates the parent-side record so
+            // the roster row, collect/delete selectors, and the parent's
+            // name-availability check all stop matching the old name.
+            if let Some(record) = record {
+                record.lock().await.session_name = name.clone();
+            }
+            Ok(name)
+        })
+    }
 }
 
-/// Whether the child's durable session file already carries the task prompt
-/// as a user message. The session file is the record a worker replacement
-/// replays from, so it arbitrates an ambiguous prompt-route failure: a
-/// prompt in the file was durably processed by the dead worker (a re-send
-/// would duplicate the first turn), a missing prompt provably never landed.
+/// Whether the child's durable session file already carries the task
+/// prompt (the record a worker replacement replays from arbitrates).
 fn session_file_carries_prompt(session_file: Option<&str>, prompt: &str) -> bool {
     let Some(path) = session_file.filter(|path| !path.is_empty()) else {
         return false;

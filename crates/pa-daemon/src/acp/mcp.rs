@@ -1,11 +1,8 @@
-//! ACP MCP server admission: the wire-shape validation port of the TS
-//! `resolveAcpMcpServers` (modes/acp/acp-mcp.ts) plus the tool-name
-//! derivation checks from `acpMcpToolNames` (core/tools/acp-mcp.ts).
-//!
-//! Transport-level contract: validation failures are ACP `invalid params`
-//! errors with a `reason` payload; admission failures (tool-name
+//! ACP MCP server admission: the wire-shape validation port plus the
+//! tool-name derivation checks. Validation failures are ACP `invalid
+//! params` errors with a `reason` payload; admission failures (tool-name
 //! conflicts, ownership fencing) are internal errors carrying the raw
-//! message, exactly like the TS in-process connection.
+//! message, like the TS connection.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -110,10 +107,9 @@ fn entries(
     Ok(result)
 }
 
-/// The SDK zod entry filter (`vecSkipError(zMcpServer)`): entries that
-/// do not match the `McpServer` union are silently DROPPED before the
-/// handler sees them. Required fields are strict; unknown keys (including
-/// `type` on stdio entries) are stripped by the schema.
+/// The SDK zod entry filter (`vecSkipError(zMcpServer)`): entries that do
+/// not match the `McpServer` union are silently DROPPED. Required fields are
+/// strict; unknown keys (including `type` on stdio entries) are stripped.
 fn parse_wire(server: &Value) -> Option<WireServer> {
     let object = server.as_object()?;
     let name = object.get("name")?.as_str()?.to_string();
@@ -194,8 +190,6 @@ struct ParsedUrl {
 }
 
 /// Minimal URL split for the admission checks: scheme, credentials, rest.
-/// Handles exactly what the TS checks read — `url.protocol`,
-/// `url.username`, and `url.password`.
 fn parse_url(url: &str) -> Option<ParsedUrl> {
     let (scheme, rest) = url.split_once(':')?;
     if scheme.is_empty()
@@ -226,8 +220,6 @@ pub fn resolve_acp_mcp_servers(
     let mut names: HashSet<String> = HashSet::new();
     let mut resolved = Vec::new();
     for server in servers {
-        // Schema-invalid entries are dropped before validation (SDK
-        // `vecSkipError`): admission never reports them.
         let Some(parsed) = parse_wire(server) else {
             continue;
         };
@@ -296,9 +288,9 @@ fn normalize_url(url: &str) -> String {
     }
 }
 
-/// The tool names an ACP MCP server adds (TS `acpMcpToolNames`):
-/// `mcp_list_tools_<name>` and `mcp_call_<name>` per server. Names that
-/// pass admission but overflow the tool-name limit fail here.
+/// The tool names an ACP MCP server adds: `mcp_list_tools_<name>` and
+/// `mcp_call_<name>` per server. Names that pass admission but overflow
+/// the tool-name limit fail here.
 pub fn acp_mcp_tool_names(servers: &[AcpMcpServerConfig]) -> Result<Vec<String>, String> {
     let mut names = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
@@ -314,80 +306,6 @@ pub fn acp_mcp_tool_names(servers: &[AcpMcpServerConfig]) -> Result<Vec<String>,
         names.push(format!("mcp_call_{}", server.name()));
     }
     Ok(names)
-}
-
-/// Admit one session's `mcpServers` through the full TS pipeline:
-/// zod entry dropping, `resolveAcpMcpServers` validation, tool-name
-/// derivation, owner-scoped replace with cleanup on failure. Returns the
-/// queued JSON-RPC error response on rejection.
-pub async fn admit_session_servers(
-    servers: &[Value],
-    mode: &super::AcpModeState,
-) -> std::result::Result<(), Value> {
-    let resolved = match resolve_acp_mcp_servers(servers, &mode.actual_cwd) {
-        Ok(resolved) => resolved,
-        Err(reason) => {
-            return Err(jsonrpc_invalid_params(&reason));
-        }
-    };
-    if let Err(details) = acp_mcp_tool_names(&resolved) {
-        return Err(super::internal_error_value(&details));
-    }
-    // A second admission first clears the previous session's servers, even
-    // when the new list is empty.
-    let previous_names = std::mem::take(&mut *mode.mcp_server_names.lock().await);
-    if previous_names.is_empty() && resolved.is_empty() {
-        return Ok(());
-    }
-    // The manager guard must not cross an await: scope it tightly.
-    let failure = {
-        let manager = mode.mcp.lock().unwrap();
-        manager
-            .replace_acp_servers(&resolved, &mode.mcp_owner_id)
-            .err()
-            .map(|error| {
-                // The daemon may have applied the configuration before its
-                // acknowledgement was lost: always attempt owner-scoped
-                // cleanup before rejecting admission.
-                if manager.can_release_acp_servers(&mode.mcp_owner_id) {
-                    let _ = manager.replace_acp_servers(&[], &mode.mcp_owner_id);
-                }
-                error.to_string()
-            })
-    };
-    if let Some(failure) = failure {
-        return Err(super::internal_error_value(&failure));
-    }
-    if !resolved.is_empty() {
-        *mode.mcp_server_names.lock().await = resolved
-            .iter()
-            .map(AcpMcpServerConfig::name)
-            .map(str::to_string)
-            .collect();
-    }
-    Ok(())
-}
-
-/// Release the admitted servers on `session/close` or a failed admission
-/// tail (TS `clearAcpMcpServers`): owner-fenced replace-with-empty.
-pub async fn release_session_servers(mode: &super::AcpModeState) {
-    let names = std::mem::take(&mut *mode.mcp_server_names.lock().await);
-    if names.is_empty() {
-        return;
-    }
-    let manager = mode.mcp.lock().unwrap();
-    if manager.can_release_acp_servers(&mode.mcp_owner_id) {
-        let _ = manager.replace_acp_servers(&[], &mode.mcp_owner_id);
-    }
-}
-
-fn jsonrpc_invalid_params(reason: &str) -> Value {
-    super::jsonrpc::error_response(
-        &Value::Null,
-        super::jsonrpc::INVALID_PARAMS,
-        "Invalid params",
-        Some(&serde_json::json!({ "reason": reason })),
-    )
 }
 
 #[cfg(test)]

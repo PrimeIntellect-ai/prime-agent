@@ -82,15 +82,10 @@ fn require_non_empty(value: &str, field: &str) -> Result<(), SandboxError> {
 /// `invalid_response` error, never a silent default (TS
 /// `parsePrimeSandbox`).
 pub(crate) fn parse_sandbox(value: serde_json::Value) -> Result<Sandbox, SandboxError> {
-    let raw: RawSandbox = serde_json::from_value(value).map_err(|error| {
-        SandboxError::invalid_response(format!("Sandbox response record is malformed: {error}"))
-    })?;
-    let status = SandboxStatus::from_wire(&raw.status).ok_or_else(|| {
-        SandboxError::invalid_response(format!(
-            "Sandbox response has unknown status {}",
-            raw.status
-        ))
-    })?;
+    let raw: RawSandbox = serde_json::from_value(value)
+        .map_err(|_| SandboxError::invalid_response("Sandbox response record is malformed"))?;
+    let status = SandboxStatus::from_wire(&raw.status)
+        .ok_or_else(|| SandboxError::invalid_response("Sandbox response has unknown status"))?;
     for (field, value) in [
         ("id", raw.id.as_str()),
         ("name", raw.name.as_str()),
@@ -103,8 +98,8 @@ pub(crate) fn parse_sandbox(value: serde_json::Value) -> Result<Sandbox, Sandbox
     if !(0..=i64::from(u32::MAX)).contains(&raw.gpu_count) {
         return Err(SandboxError::invalid_response(
             "Sandbox response field gpuCount must be a non-negative integer",
-        ));
-    }
+        )
+    })?;
     Ok(Sandbox {
         id: raw.id,
         name: raw.name,
@@ -173,6 +168,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::float_cmp)] // These exact integer-valued JSON numbers must round-trip unchanged.
     fn sandbox_records_parse_strictly() {
         let sandbox = parse_sandbox(sandbox_wire()).unwrap();
         assert_eq!(sandbox.id, "sb-1");
@@ -201,8 +197,7 @@ mod tests {
             serde_json::json!({"id": "sb-1"}),
             serde_json::Value::String("nope".to_string()),
         ] {
-            let rendered = broken.to_string();
-            assert!(parse_sandbox(broken).is_err(), "{rendered}");
+            assert!(parse_sandbox(broken).is_err());
         }
         let mut wire = sandbox_wire();
         wire["status"] = serde_json::json!("STARTING_LATER");
@@ -216,6 +211,30 @@ mod tests {
         let mut wire = sandbox_wire();
         wire["vm"] = serde_json::json!("yes");
         assert!(parse_sandbox(wire).is_err());
+    }
+
+    #[test]
+    fn malformed_record_error_never_echoes_untrusted_values() {
+        let secret = "sk-synthetic-private-key";
+        let mut wire = sandbox_wire();
+        wire["cpuCores"] = serde_json::json!(format!("Bearer {secret}\r\n"));
+        let rendered = parse_sandbox(wire).unwrap_err().to_string();
+        assert_eq!(rendered, "Sandbox response record is malformed");
+        assert!(!rendered.contains(secret));
+        assert!(!rendered.contains('\r'));
+        assert!(!rendered.contains('\n'));
+    }
+
+    #[test]
+    fn unknown_status_error_never_echoes_untrusted_body() {
+        let secret = "sk-synthetic-private-key";
+        let mut wire = sandbox_wire();
+        wire["status"] = serde_json::json!(format!("INVALID\r\n{secret}{}", "x".repeat(2048)));
+        let rendered = parse_sandbox(wire).unwrap_err().to_string();
+        assert_eq!(rendered, "Sandbox response has unknown status");
+        assert!(!rendered.contains(secret));
+        assert!(!rendered.contains('\r'));
+        assert!(!rendered.contains('\n'));
     }
 
     #[test]

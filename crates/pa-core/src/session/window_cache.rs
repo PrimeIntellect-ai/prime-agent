@@ -49,20 +49,14 @@ impl Generation {
             && *self == Self::of(&std::fs::metadata(path)?))
     }
 }
-/// The snapshot format version. 7: `WindowStats` gained
-/// `attributed_child_cost` (v6 sidecars deserialize it as zero and
-/// would bill the discarded prefix's subagent spend to the session's
-/// own cost — they must not serve). 5: `WindowStats` gained
-/// `summarization_cost` (v4 sidecars deserialize it as zero and
-/// undercount the discarded prefix's summarizer bill — they must not
-/// serve). 4: the older-path stats fold child usage attributions (v3
-/// sidecars carry pre-fold totals and must not serve).
+/// The snapshot format version: a sidecar serves only at exactly this
+/// version (any other version is rebuilt by the full walk). A served
+/// snapshot's `WindowStats` already folds the child usage attributions,
+/// and unread keys are ignored on load (no `deny_unknown_fields`).
 pub(super) const SNAPSHOT_VERSION: u32 = 7;
-// `retained_whole_file` (added after v7) is `#[serde(default)]` false:
-// older sidecars deserialize it as false and simply skip the
-// full-history fast paths until the next walk rewrites the sidecar —
-// the default is the conservative pre-change behavior, so v7 caches
-// stay servable (a version bump would force a full re-walk instead).
+// `retained_whole_file` is `#[serde(default)]` false: older sidecars
+// deserialize it as false and skip the full-history fast paths until the
+// next walk rewrites the sidecar (a version bump would force a re-walk).
 
 #[derive(Clone, Serialize, Deserialize)]
 // The mirrored TS API shape is deliberate (the booleans are the
@@ -86,11 +80,18 @@ pub(super) struct Snapshot {
     pub stats: WindowStats,
     pub first_user: Option<serde_json::Value>,
     pub goal: Option<crate::goals::GoalState>,
+    /// Whether the active branch already carries an
+    /// [`crate::session::ANTHROPIC_WARNING_SHOWN_CUSTOM_TYPE`] row: the
+    /// subscription warning's once-per-session-lifecycle gate, hydrated
+    /// from the walk like `goal`. Older sidecars deserialize this as
+    /// `false` (the conservative default: the warning shows again rather
+    /// than being suppressed by a cache that predates the flag).
+    #[serde(default)]
+    pub anthropic_warning_shown: bool,
     pub non_bootstrap: bool,
-    /// The open's walk retained every file row (no compaction boundary
-    /// was found): the retained window covers the whole session file, so
-    /// the owning manager's entries hold every persisted row. Older
-    /// sidecars deserialize this as `false` (the conservative default).
+    /// The open's walk retained every file row (no compaction boundary): the
+    /// window covers the whole session file. Older sidecars deserialize this
+    /// as `false` (the conservative default).
     #[serde(default)]
     pub retained_whole_file: bool,
 }
@@ -158,9 +159,8 @@ pub(super) fn save(path: &Path, snapshot: &Snapshot) -> io::Result<()> {
 ///
 /// # Errors
 ///
-/// Returns the sidecar write error when a live snapshot exists and saving
-/// it fails; a path without a live snapshot succeeds without touching the
-/// disk.
+/// Sidecar write error when saving fails; a path without a live snapshot
+/// never touches the disk.
 pub fn flush(path: &Path) -> io::Result<()> {
     let snapshot = live_snapshots()
         .lock()
@@ -186,9 +186,7 @@ pub enum AppendOwnership {
 ///
 /// # Errors
 ///
-/// Returns the underlying I/O error while performing the durable append
-/// itself (open, write, flush, sync); a failed incremental cache
-/// certification is dropped, not surfaced.
+/// The durable append's I/O error; a failed incremental certification is dropped.
 pub fn append_cached(path: &Path, bytes: &[u8], ownership: AppendOwnership) -> io::Result<()> {
     let mut file = std::fs::OpenOptions::new().append(true).open(path)?;
     file.write_all(bytes)?;

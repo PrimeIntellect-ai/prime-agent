@@ -1,8 +1,6 @@
-//! The `/model` inline selector: the TS `ModelSelectorComponent` inline
-//! panel — a bordered "Search models" field over `›`-marker rows that carry
-//! effort squares and a right-aligned `current · provider` trailing, a
-//! price-detail block for the selection, and the model/effort key hint.
-//! The daemon supplies the catalog (bundled fallback); this module owns
+//! The `/model` inline selector: a bordered "Search models" field over `›`-marker rows with effort
+//! squares and a right-aligned `current · provider` trailing, a price-detail block, and the
+//! model/effort key hint. The daemon supplies the catalog (bundled fallback); this module owns
 //! ordering, filtering, effort state, and the inline geometry.
 
 mod render;
@@ -18,8 +16,7 @@ use crate::keybindings::KeybindingsManager;
 use crate::search_input::SearchInput;
 use crate::theme::Theme;
 
-/// The session's current model, matched against the catalog (the TS
-/// `modelsAreEqual` key: provider plus id).
+/// The session's current model, matched against the catalog (the key is provider plus id).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CurrentModel {
     pub provider: String,
@@ -43,6 +40,8 @@ pub enum ModelPickerAction {
     Cancel,
     /// Navigation, filtering, or effort editing only.
     None,
+    /// The scope key toggled the picker's list (the picker stays mounted).
+    ScopeToggled { scoped: bool },
 }
 
 /// The outcome of dispatching `/model [search]`.
@@ -52,30 +51,32 @@ pub(crate) enum ModelCommandOutcome {
     Open(Box<ModelPicker>),
 }
 
-/// The catalog snapshot plus the client state the picker needs (TS
-/// `ModelSelectorOptions` inline subset).
+/// The catalog snapshot plus the client state the picker needs.
 #[derive(Debug, Default)]
 pub struct ModelPickerOptions {
-    /// The full catalog (bundled or daemon-refreshed); the picker owns its
-    /// order.
+    /// The full catalog (bundled or daemon-refreshed).
     pub models: Vec<Model>,
     /// The session's model, checked `current` and leading the list.
     pub current: Option<CurrentModel>,
-    /// Providers with configured auth (the daemon catalog's
-    /// `configuredProviders`).
+    /// Providers with configured auth (`configuredProviders`).
     pub configured_providers: HashSet<String>,
     /// The settings recent-model list (`provider/id` keys, newest first).
     pub recent_models: Vec<String>,
+    /// The session's scoped models as `provider/id` keys: the picker opens on them when non-empty,
+    /// else the full catalog; the keys resolve against the loaded catalog (a missing entry is not
+    /// listed).
+    pub scoped_models: Vec<String>,
     /// The effort a fresh selection starts from (TS `thinkingLevel`).
     pub thinking_level: Option<ModelThinkingLevel>,
-    /// The viewport height the list sizes itself against (already the TS
-    /// `getRows` value: one row less than the dock's row budget).
+    /// The viewport height the list sizes itself against (already the `getRows` value).
     pub viewport_rows: usize,
 }
 
+mod scope;
 mod search;
 mod sort;
 
+use scope::ModelScope;
 use search::{score_model_search, SearchMatch};
 use sort::{natural_cmp, version_desc, version_key};
 
@@ -96,43 +97,40 @@ pub(crate) struct EffortLayout {
 /// One picker over the model catalog.
 #[derive(Debug)]
 pub struct ModelPicker {
-    /// The sorted catalog (`sortModels` order).
     all_models: Vec<Model>,
     current: Option<CurrentModel>,
     configured_providers: HashSet<String>,
     recent_rank: HashMap<String, usize>,
-    /// The effort a fresh selection starts from; `None` mirrors TS
-    /// `undefined` (resolved to "off" per model).
+    /// The effort a fresh selection starts from; `None` resolves to "off" per model.
     initial_thinking_level: Option<ModelThinkingLevel>,
     /// The viewport row budget (TS `getRows`).
     viewport_rows: usize,
     search: SearchInput,
     filtered: Vec<usize>,
     selected: usize,
-    /// True once the user moves into the list; left/right then adjust the
-    /// highlighted model's effort instead of the search cursor.
+    /// True once the user moves into the list; left/right then adjust the highlighted
+    /// model's effort instead of the search cursor.
     navigated_into_list: bool,
-    /// Resolved effort per model key, seeded for every catalog entry with a
-    /// thinking surface (TS `effortLevels`).
+    /// Resolved effort per model key, seeded for every catalog entry with a thinking surface.
     effort_levels: HashMap<String, ModelThinkingLevel>,
-    /// Models whose effort the user edited (Enter passes the effort only
-    /// for these; TS `editedEffortModels`).
+    /// Models whose effort the user edited (Enter passes the effort only for these).
     edited_effort: HashSet<String>,
     render_width: usize,
-    /// Cached inline list layout (recomputed on render).
     visible_items: usize,
-    /// The query the filtered view was built for (TS `searchQuery`).
     last_query: String,
-    /// The version runs parsed from each `all_models` entry's id, indexed
-    /// alike (the search sort's recency tier: the catalog carries no
-    /// release-date metadata, so the id's version stands in for release
-    /// recency).
+    /// The session's scoped list as `provider/id` keys; empty is the unscoped picker.
+    scoped_models: Vec<String>,
+    /// The scoped entries' positions in `all_models`, in the scoped list's own order
+    /// (the scoped view keeps the session's scope order, not the catalog's sorted one).
+    scoped_positions: Vec<usize>,
+    /// The active list: `Scoped` while the session holds scoped models, else the full catalog.
+    scope: ModelScope,
+    /// The version runs parsed from each `all_models` entry's id, indexed alike
+    /// (the search sort's recency tier: the ids' versions stand in for release recency).
     version_keys: Vec<Vec<String>>,
 }
 
 impl ModelPicker {
-    /// Build the picker: sort the catalog, resolve the per-model effort
-    /// defaults, then show everything unfiltered.
     #[must_use]
     pub fn new(options: ModelPickerOptions) -> Self {
         let mut picker = ModelPicker {
@@ -156,23 +154,31 @@ impl ModelPicker {
             render_width: 80,
             visible_items: 8,
             last_query: String::new(),
+            scoped_models: options.scoped_models,
+            scoped_positions: Vec::new(),
+            scope: ModelScope::All,
             version_keys: Vec::new(),
         };
         picker.load_models(options.models);
+        picker.resolve_scope_positions();
+        if picker.has_scoped_models() {
+            picker.scope = ModelScope::Scoped;
+        }
         let query = picker.search.value().to_string();
         picker.filter_models(&query);
+        if matches!(picker.scope, ModelScope::Scoped) {
+            picker.select_current_or_top();
+        }
         picker
     }
 
-    /// The active filter query.
     #[must_use]
     pub fn query(&self) -> &str {
         self.search.value()
     }
 
-    /// Replace the catalog snapshot (the daemon refresh landing; TS
-    /// `updateState`): re-sort, re-filter with the live query, and keep the
-    /// selection on the same model when it survived the refresh.
+    /// Replace the catalog snapshot (the daemon refresh landing): re-sort, re-filter with the live
+    /// query, and keep the selection on the same model when it survived the refresh.
     pub fn update_state(
         &mut self,
         current: Option<CurrentModel>,
@@ -185,6 +191,9 @@ impl ModelPicker {
             .selected_model()
             .map(|model| Self::model_key_provider(&model.provider, &model.id));
         self.load_models(models);
+        // The refresh re-resolves the scoped keys against it: an entry missing
+        // from the loaded catalog is not listed, and one the refresh brings appears.
+        self.resolve_scope_positions();
         let query = self.search.value().to_string();
         self.filter_models(&query);
         if let Some(key) = selected_key {
@@ -198,17 +207,33 @@ impl ModelPicker {
         }
     }
 
-    /// One key id. Cancel keys close without applying; Enter applies the
-    /// selection (plus the user-edited effort); everything else navigates,
-    /// edits the filter, or adjusts effort.
+    /// One key id. Cancel keys close without applying; Enter applies the selection (plus the
+    /// user-edited effort); everything else navigates, edits the filter, or adjusts effort.
     pub fn handle_key(&mut self, key: &str, kb: &KeybindingsManager) -> ModelPickerAction {
-        // The full-screen selector loop treats Ctrl+C as process exit; the
-        // in-chat overlay only cancels, like the TS model selector.
+        // The full-screen selector loop treats Ctrl+C as process exit; the in-chat
+        // overlay only cancels, like the TS model selector.
         if key == "ctrl+c" {
             return ModelPickerAction::Cancel;
         }
-        // Keep arrows available for editing a filter; an empty filter or an
-        // explicit move into the list controls effort.
+        // The scope toggle goes first: it toggles only with scoped entries,
+        // re-filters, and re-selects the current model, else the top.
+        if kb.matches(key, "app.model.toggleScope")
+            || kb.matches_option_composed(key, "app.model.toggleScope")
+        {
+            if self.has_scoped_models() {
+                self.scope = match self.scope {
+                    ModelScope::All => ModelScope::Scoped,
+                    ModelScope::Scoped => ModelScope::All,
+                };
+                let query = self.search.value().to_string();
+                self.filter_models(&query);
+                self.select_current_or_top();
+                return ModelPickerAction::ScopeToggled {
+                    scoped: self.scoped_side(),
+                };
+            }
+            return ModelPickerAction::None;
+        }
         if self.search.value().is_empty() || self.navigated_into_list {
             for (binding, direction) in
                 [("tui.editor.cursorLeft", -1), ("tui.editor.cursorRight", 1)]
@@ -266,7 +291,6 @@ impl ModelPicker {
         if kb.matches(key, "tui.select.cancel") || self.should_treat_as_back(kb, key) {
             return ModelPickerAction::Cancel;
         }
-        // Everything else edits the search field.
         let previous = self.search.value().to_string();
         self.search.handle_key(key, kb);
         if self.search.value() != previous {
@@ -277,8 +301,6 @@ impl ModelPicker {
         ModelPickerAction::None
     }
 
-    /// The picked frame (the inline panel: bordered search field, rows,
-    /// scroll indicator, selection detail, hint).
     pub fn render(
         &mut self,
         theme: &Theme,
@@ -288,28 +310,26 @@ impl ModelPicker {
         render::render(self, theme, width, kb)
     }
 
-    /// The inline list layout for the current width (TS
-    /// `updateResponsiveLayout`, inline shape). The frame's trailing
-    /// blank row (the operator's 2026-09-24 spacing directive) rides the
-    /// reserved rows: the list shrinks first on a height-limited
-    /// terminal, never the frame's own head (a front-crop would hide the
-    /// bordered search field).
+    /// The inline list layout for the current width. The frame's trailing blank row (the operator's
+    /// 2026-09-24 spacing directive) rides the reserved rows: the list shrinks first on a
+    /// height-limited terminal, never the frame's own head.
     pub(crate) fn list_layout(&self) -> usize {
         let detail_rows = self.detail_rows();
         crate::menu_panel::menu_list_layout(
             Some(self.viewport_rows),
             8,
             self.filtered.len(),
-            4 + detail_rows,
+            // The frame's fixed rows plus the scope row when the session has
+            // scoped models.
+            4 + usize::from(self.has_scoped_models()) + detail_rows,
             1,
         )
     }
 
     pub(crate) fn detail_rows(&self) -> usize {
         let detail_rows = if self.render_width >= 58 { 4 } else { 5 };
-        // The fixed floor is the search field (3), the scroll row (1),
-        // the hint (1), and the trailing blank (1): the detail block
-        // needs that plus its own rows to render at all.
+        // The fixed floor is the search field (3), the scroll row (1), the hint (1), and the
+        // trailing blank (1): the detail block needs that plus its own rows to render at all.
         if self.viewport_rows >= 6 + detail_rows {
             detail_rows
         } else {
@@ -325,7 +345,6 @@ impl ModelPicker {
         self.visible_items = visible;
     }
 
-    /// The list's visible-row budget at the current width.
     #[must_use]
     pub fn visible_items(&self) -> usize {
         self.visible_items
@@ -335,7 +354,6 @@ impl ModelPicker {
         self.all_models.get(*self.filtered.get(self.selected)?)
     }
 
-    /// The catalog index behind one filtered position.
     pub(crate) fn filtered_index(&self, position: usize) -> Option<usize> {
         self.filtered.get(position).copied()
     }
@@ -358,12 +376,8 @@ impl ModelPicker {
         self.selected.min(self.filtered.len().saturating_sub(1))
     }
 
-    /// Move the selection to one filtered position (the click grammar's
-    /// row select — the arrow keys' exact movement, no apply): a
-    /// position past the filtered list keeps the selection where it
-    /// was. A click lands the user in the list, so the arrow keys
-    /// adjust the clicked row's effort instead of editing the search
-    /// (the same flag the arrow paths set).
+    /// Move the selection to one filtered position: a position past the filtered list keeps the
+    /// selection; a click lands the user in the list, so arrows adjust the clicked row's effort.
     pub(crate) fn select_filtered(&mut self, position: usize) {
         if position < self.filtered.len() {
             self.selected = position;
@@ -371,10 +385,7 @@ impl ModelPicker {
         }
     }
 
-    /// The provider-sorted catalog (TS `sortModels`): configured providers
-    /// first, signed-in Prime Inference pinned, the current model leading,
-    /// then the recent-use rank, the provider name, `featured`, and the
-    /// numeric id compare.
+    /// The provider-sorted catalog (TS `sortModels`).
     fn load_models(&mut self, models: Vec<Model>) {
         let mut models = models;
         models.sort_by(|a, b| self.compare(a, b));
@@ -447,23 +458,20 @@ impl ModelPicker {
         natural_cmp(&a.id, &b.id)
     }
 
-    /// Rebuild the filtered view (TS `filterModels`): a non-empty query
-    /// scores every model and orders the matches by configured provider,
-    /// pin, match quality, score, version descending, currency, recent
-    /// rank, and key. The selection resets to the top only when the query
-    /// changed.
+    /// Rebuild the filtered view: a non-empty query scores every model and orders the matches by
+    /// configured provider, pin, match quality, score, version descending, currency, recent rank,
+    /// and key. The selection resets to the top only when the query changed.
     fn filter_models(&mut self, query: &str) {
         let query_changed = query != self.last_query;
         self.last_query = query.to_string();
         if query.trim().is_empty() {
-            self.filtered = (0..self.all_models.len()).collect();
+            self.filtered = self.active_indices();
         } else {
             let mut matches: Vec<(usize, SearchMatch)> = self
-                .all_models
-                .iter()
-                .enumerate()
-                .filter_map(|(index, model)| {
-                    score_model_search(model, query).map(|match_| (index, match_))
+                .active_indices()
+                .into_iter()
+                .filter_map(|index| {
+                    score_model_search(&self.all_models[index], query).map(|match_| (index, match_))
                 })
                 .collect();
             let configured = |model: &Model| self.configured_providers.contains(&model.provider);
@@ -492,9 +500,8 @@ impl ModelPicker {
                         .partial_cmp(&b_match.score)
                         .unwrap_or(Ordering::Equal);
                 }
-                // The version tier: newer releases first. The catalog
-                // carries no release-date metadata, so the version runs
-                // parsed from the ids stand in for release recency.
+                // The version tier: newer releases first (the version runs parsed from
+                // the ids stand in for release recency).
                 let order =
                     version_desc(&self.version_keys[*a_index], &self.version_keys[*b_index]);
                 if order != Ordering::Equal {
@@ -535,7 +542,7 @@ impl ModelPicker {
 
     fn should_treat_as_back(&self, kb: &KeybindingsManager, key: &str) -> bool {
         // Left arrow acts like Esc only when the search cursor sits at the
-        // start of the field (TS `shouldTreatAsBack`).
+        // field's start.
         kb.matches(key, "app.modal.back") && self.search.cursor() == 0
     }
 
@@ -558,8 +565,7 @@ impl ModelPicker {
         }))
     }
 
-    /// The selectable effort levels of a model (TS `getSelectableLevels`):
-    /// an off-only model has no thinking surface.
+    /// The selectable effort levels of a model; an off-only model has none.
     pub(crate) fn selectable_levels(model: &Model) -> Vec<ModelThinkingLevel> {
         let levels = get_supported_thinking_levels(model);
         if levels.len() == 1 && levels[0] == ModelThinkingLevel::Off {
@@ -568,8 +574,8 @@ impl ModelPicker {
         levels
     }
 
-    /// Seed the default effort for every model with a thinking surface (TS
-    /// `getEffort`, resolved eagerly so rendering stays pure).
+    /// Seed the default effort for every model with a thinking surface (resolved
+    /// eagerly so rendering stays pure).
     fn resolve_effort_defaults(&mut self) {
         let initial = self
             .initial_thinking_level
@@ -603,7 +609,6 @@ impl ModelPicker {
         }
     }
 
-    /// The resolved effort for a model (its seeded or user-edited level).
     pub(crate) fn effort_of(&self, model: &Model) -> Option<ModelThinkingLevel> {
         if Self::selectable_levels(model).is_empty() {
             return None;
@@ -613,8 +618,8 @@ impl ModelPicker {
             .copied()
     }
 
-    /// Move the model's effort one level (`direction` ±1, wrapping; TS
-    /// `adjustEffort`). Returns whether the effort changed.
+    /// Move the model's effort one level (`direction` ±1, wrapping); returns whether the effort
+    /// changed.
     fn adjust_effort(&mut self, model: &Model, direction: isize) -> bool {
         let levels = Self::selectable_levels(model);
         if levels.is_empty() {
@@ -656,7 +661,7 @@ impl ModelPicker {
             .unwrap_or_default()
     }
 
-    fn model_key_provider(provider: &str, id: &str) -> String {
+    pub(crate) fn model_key_provider(provider: &str, id: &str) -> String {
         format!("{provider}/{id}")
     }
 
@@ -665,10 +670,9 @@ impl ModelPicker {
     }
 
     pub(crate) fn effort_layout(&self, start: usize, end: usize) -> EffortLayout {
-        /// TS constant: wide detail columns must fit "Cached input".
+        /// Wide detail columns must fit "Cached input".
         const EFFORT_NAME_COLUMN_MAX: usize = 30;
         const EFFORT_NAME_COLUMN_MIN: usize = 12;
-        /// Arrow slots and the spaces around the squares and label.
         const ARROWS_AND_GAPS: usize = 6;
 
         let empty = EffortLayout {
@@ -726,7 +730,7 @@ impl ModelPicker {
             .unwrap_or(0);
         let cluster_width = square_slots;
         // Fixed label cell sized to the longest supported level name, so
-        // changing the selected level never changes the cluster span.
+        // changing the level never changes the cluster span.
         let label_width = reasoning
             .iter()
             .flat_map(|model| Self::selectable_levels(model))
@@ -770,8 +774,7 @@ impl ModelPicker {
         empty
     }
 
-    /// The trailing segments of one row (TS `getTrailingSegments`):
-    /// `current`, `require sign in`, then the provider.
+    /// The trailing segments of one row: `current`, `require sign in`, then the provider.
     pub(crate) fn trailing_segments(&self, model: &Model) -> Vec<String> {
         let mut segments: Vec<String> = Vec::new();
         if self.is_current(model) {
@@ -786,10 +789,8 @@ impl ModelPicker {
 }
 
 impl ModelPicker {
-    /// Dispatch `/model [search]`: open the picker with `current` checked
-    /// and `search` as the prefilled filter. TS `handleModelCommand` always
-    /// opens the menu — an empty catalog renders the empty panel (the
-    /// no-match row), never a note.
+    /// Dispatch `/model [search]`: open the picker with `current` checked and `search` prefilled;
+    /// TS always opens the menu — an empty catalog renders the empty panel, never a note.
     pub(crate) fn open(options: ModelPickerOptions, search: &str) -> ModelCommandOutcome {
         let mut picker = ModelPicker::new(options);
         let search = search.trim();
@@ -799,8 +800,7 @@ impl ModelPicker {
         ModelCommandOutcome::Open(Box::new(picker))
     }
 
-    /// A bracketed paste into the search field (TS `Input.handleInput`
-    /// paste branch: newlines stripped, tabs expanded).
+    /// A bracketed paste into the search field (newlines stripped, tabs expanded).
     pub fn paste(&mut self, text: &str) {
         let previous = self.search.value().to_string();
         self.search.paste(text);
@@ -811,9 +811,8 @@ impl ModelPicker {
         }
     }
 
-    /// Prefill the filter (`/model <search>`; TS opens the selector with
-    /// the search term applied), the caret at the search's end so typing
-    /// extends it.
+    /// Prefill the filter (`/model <search>`), the caret at the search's end so
+    /// typing extends it.
     pub fn set_query(&mut self, query: &str) {
         self.search.prefill(query);
         self.filter_models(query);

@@ -1,6 +1,4 @@
 //! models.json: custom providers/models, provider and per-model overrides.
-//! Port of the config schema, `stripJsonComments`, `validateConfig`,
-//! `parseModels`, `applyModelOverride`, and `mergeCompat`.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -154,7 +152,6 @@ pub struct ModelsConfig {
     pub providers: BTreeMap<String, ProviderConfig>,
 }
 
-/// Result of loading models.json.
 #[derive(Debug, Default)]
 pub struct CustomModelsResult {
     pub models: Vec<Model>,
@@ -174,20 +171,18 @@ pub struct ProviderOverride {
 ///
 /// # Errors
 ///
-/// Returns a human-readable error string when the document is not valid
-/// JSON after comment and trailing-comma stripping.
+/// Human-readable error when the document is not valid JSON after stripping.
 pub fn parse_models_config(content: &str) -> Result<ModelsConfig, String> {
     let stripped = strip_json_comments(content);
     serde_json::from_str(&stripped).map_err(|error| format!("Invalid models.json: {error}"))
 }
 
-/// Port of `validateConfig`: semantic checks beyond the schema.
+/// Semantic checks beyond the schema.
 ///
 /// # Errors
 ///
-/// Returns a human-readable error string when a custom provider lacks the
-/// required base URL, API key, or API kind, or defines a model with a
-/// missing id or a zero `contextWindow`/`maxTokens`.
+/// Error when a provider lacks its base URL, API key, or API kind, or a
+/// model lacks an id or zero limits.
 pub fn validate_config(
     config: &ModelsConfig,
     built_in_providers: &dyn Fn(&str) -> bool,
@@ -307,7 +302,6 @@ pub fn merge_compat(base: Option<&ModelCompat>, over: Option<ModelCompat>) -> Op
     Some(ModelCompat { raw: merged })
 }
 
-/// Deep-merge a model override into a model.
 #[must_use]
 pub fn apply_model_override(model: &Model, over: &ModelOverride) -> Model {
     let mut result = model.clone();
@@ -341,6 +335,9 @@ pub fn apply_model_override(model: &Model, over: &ModelOverride) -> Model {
     }
     if let Some(max_tokens) = over.max_tokens {
         result.max_tokens = max_tokens;
+        // An override-supplied `maxTokens` is configuration: it bypasses
+        // the default output ceiling.
+        result.max_tokens_explicit = true;
     }
     if let Some(cost) = &over.cost {
         let base = &result.cost;
@@ -367,7 +364,6 @@ pub fn apply_model_override(model: &Model, over: &ModelOverride) -> Model {
     result
 }
 
-/// Parse models.json into custom models + override maps.
 pub fn load_custom_models(
     content: &str,
     built_in_providers: &dyn Fn(&str) -> bool,
@@ -391,7 +387,6 @@ pub fn load_custom_models(
 
     let mut result = CustomModelsResult::default();
     for (provider_name, provider_config) in &config.providers {
-        // Provider-level override.
         if provider_config.base_url.is_some() || provider_config.compat.is_some() {
             result.provider_overrides.insert(
                 provider_name.clone(),
@@ -401,13 +396,11 @@ pub fn load_custom_models(
                 },
             );
         }
-        // Per-model overrides.
         if let Some(overrides) = &provider_config.model_overrides {
             result
                 .model_overrides
                 .insert(provider_name.clone(), overrides.clone());
         }
-        // Custom models.
         let model_defs = provider_config.models.as_deref().unwrap_or_default();
         if model_defs.is_empty() {
             continue;
@@ -437,9 +430,8 @@ pub fn load_custom_models(
                 provider: provider_name.clone(),
                 base_url,
                 reasoning: model_def.reasoning.unwrap_or(false),
-                // TS `thinkingLevelMap: modelDef.thinkingLevelMap`: the
-                // definition's map is the model's, parsed from the same
-                // wire names the override merge uses.
+                // The definition's `thinkingLevelMap` is the model's,
+                // parsed from the same wire names the override merge uses.
                 thinking_level_map: model_def.thinking_level_map.as_ref().and_then(|map| {
                     serde_json::from_value::<pa_types::ai::ThinkingLevelMap>(
                         serde_json::to_value(map).ok()?,
@@ -453,6 +445,9 @@ pub fn load_custom_models(
                 ),
                 context_window: model_def.context_window.unwrap_or(128_000),
                 max_tokens: model_def.max_tokens.unwrap_or(16_384),
+                // A configured `maxTokens` is explicit; the 16_384
+                // default is not, so a defaulted model stays capped.
+                max_tokens_explicit: model_def.max_tokens.is_some(),
                 featured: None,
                 headers: None,
                 compat,
@@ -485,10 +480,8 @@ mod tests {
             r#"{ "providers": { "custom": { "baseUrl": "http://x", "models": [ { "id": "m" } ] } } }"#,
         )
         .unwrap();
-        // Custom provider without apiKey fails.
         let error = validate_config(&config, &|_| false).unwrap_err();
         assert!(error.contains("apiKey"));
-        // Built-in providers are exempt.
         assert!(validate_config(&config, &|p| p == "custom").is_ok());
     }
 
@@ -511,10 +504,6 @@ mod tests {
         assert_eq!(result.models[0].context_window, 128_000);
     }
 
-    /// TS `thinkingLevelMap: modelDef.thinkingLevelMap`: a model
-    /// definition's map is the model's, so a locally-defined route that
-    /// declares addressable thinking levels keeps them (the definition's
-    /// levels drive `/effort` through the shared thinking helpers).
     #[test]
     fn parses_a_custom_model_definition_thinking_level_map() {
         let result = load_custom_models(
@@ -543,6 +532,75 @@ mod tests {
         );
     }
 
+    /// TS `755-configured-max-tokens.test.ts`: a models.json `maxTokens`
+    /// is explicit — the configured value reaches the provider unchanged
+    /// instead of being clamped to the 32000 default ceiling.
+    #[test]
+    fn a_models_json_max_tokens_is_explicit() {
+        let result = load_custom_models(
+            r#"{ "providers": { "glm-h200": {
+                "baseUrl": "http://vllm.example.test:8000/v1",
+                "api": "openai-completions",
+                "apiKey": "TEST_KEY",
+                "models": [ { "id": "glm-5.2", "reasoning": true,
+                              "contextWindow": 393216, "maxTokens": 131072 } ]
+            } } }"#,
+            &|_| false,
+            &|_| None,
+        );
+        assert!(result.error.is_none());
+        let model = &result.models[0];
+        assert_eq!(model.max_tokens, 131_072);
+        assert!(model.max_tokens_explicit);
+    }
+
+    /// A custom model that omits `maxTokens` defaults to 16384 and stays
+    /// catalog-like (capped): the flag marks a CONFIGURED value only.
+    #[test]
+    fn a_custom_model_without_max_tokens_stays_unmarked() {
+        let result = load_custom_models(
+            r#"{ "providers": { "ollama": {
+                "baseUrl": "http://localhost:11434",
+                "apiKey": "none",
+                "api": "openai-completions",
+                "models": [ { "id": "llama3" } ]
+            } } }"#,
+            &|_| false,
+            &|_| None,
+        );
+        assert!(result.error.is_none());
+        let model = &result.models[0];
+        assert_eq!(model.max_tokens, 16_384);
+        assert!(!model.max_tokens_explicit);
+    }
+
+    /// TS `applyModelOverride`: an override-supplied `maxTokens` is
+    /// configuration too — the flag flips true so the value bypasses the
+    /// ceiling (a per-model override of a built-in model is the #755
+    /// shape with no custom provider involved).
+    #[test]
+    fn a_per_model_override_marks_max_tokens_explicit() {
+        let base: Model = serde_json::from_value(serde_json::json!({
+            "id": "claude-sonnet-4-5", "name": "Claude", "api": "anthropic",
+            "provider": "anthropic", "baseUrl": "https://x", "reasoning": false,
+            "input": [],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 200_000, "maxTokens": 65_536
+        }))
+        .unwrap();
+        assert!(!base.max_tokens_explicit);
+        let over = ModelOverride {
+            max_tokens: Some(200_000),
+            ..Default::default()
+        };
+        let merged = apply_model_override(&base, &over);
+        assert_eq!(merged.max_tokens, 200_000);
+        assert!(merged.max_tokens_explicit);
+        // An override that does not touch maxTokens leaves the flag alone.
+        let untouched = apply_model_override(&base, &ModelOverride::default());
+        assert!(!untouched.max_tokens_explicit);
+    }
+
     #[test]
     fn model_overrides_merge() {
         let base = serde_json::from_value(serde_json::json!({
@@ -565,7 +623,6 @@ mod tests {
         assert_eq!(merged.name, "Renamed");
         assert_eq!(merged.context_window, 2000);
         assert_eq!(merged.cost.output.0, 9.0);
-        // Untouched cost fields survive.
         assert_eq!(merged.cost.input.0, 1.0);
     }
 }

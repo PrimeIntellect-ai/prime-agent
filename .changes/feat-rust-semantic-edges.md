@@ -1,0 +1,1 @@
+- Each model request now carries a request id header, and each session writes a semantic-edge ledger (request, subagent and compaction events) matching the TS agent.

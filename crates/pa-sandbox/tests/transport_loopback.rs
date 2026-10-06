@@ -48,18 +48,9 @@ async fn platform_headers_and_method_reach_the_wire() {
     let client = loopback_client(&server);
     client.delete_sandbox("sb-9").await.unwrap();
     let recorded = &server.recorded_requests()[0];
-    assert!(
-        recorded.contains("DELETE /api/v1/sandbox/sb-9 HTTP/1.1"),
-        "{recorded}"
-    );
-    assert!(
-        recorded.contains("authorization: Bearer test-key"),
-        "{recorded}"
-    );
-    assert!(
-        recorded.contains("content-type: application/json"),
-        "{recorded}"
-    );
+    assert!(recorded.contains("DELETE /api/v1/sandbox/sb-9 HTTP/1.1"));
+    assert!(recorded.contains("authorization: Bearer test-key"));
+    assert!(recorded.contains("content-type: application/json"));
 }
 
 #[tokio::test]
@@ -75,11 +66,8 @@ async fn status_and_body_map_through_the_real_transport() {
     assert_eq!(error.code(), SandboxErrorCode::Http);
     assert_eq!(error.status(), Some(403));
     let rendered = format!("{error:?}");
-    assert!(!rendered.contains("test-key"), "{rendered}");
-    assert!(
-        error.details().unwrap().contains("[redacted]"),
-        "{rendered}"
-    );
+    assert!(!rendered.contains("test-key"));
+    assert!(error.details().unwrap().contains("[redacted]"));
 }
 
 #[tokio::test]
@@ -117,7 +105,7 @@ async fn unresponsive_servers_lose_the_deadline_race() {
     assert_eq!(error.code(), SandboxErrorCode::Timeout);
     assert!(started.elapsed() < Duration::from_secs(5), "hard abort");
     let rendered = error.to_string();
-    assert!(rendered.contains("Request timed out after"), "{rendered}");
+    assert!(rendered.contains("Request timed out after"));
 }
 
 #[tokio::test]
@@ -176,7 +164,7 @@ async fn redirects_are_refused_and_the_key_never_hops() {
     assert_eq!(error.code(), SandboxErrorCode::Http);
     assert_eq!(error.status(), Some(301));
     let rendered = error.to_string();
-    assert!(rendered.contains("refused a redirect"), "{rendered}");
+    assert!(rendered.contains("refused a redirect"));
     assert_eq!(
         server.request_count(),
         1,

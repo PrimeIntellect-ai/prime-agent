@@ -1,5 +1,57 @@
 use super::*;
 
+use proptest::prelude::*;
+use proptest::test_runner::RngSeed;
+
+/// The cargo test config sets `DO_NOT_TRACK=1`; the daemon's live
+/// recording gate reads it (env before settings). Tests that exercise
+/// gated daemon-event paths hold this guard while the three override
+/// vars are scrubbed, and restore them after. The env is process-wide,
+/// so these tests serialize through the crate-wide
+/// `test_support::TELEMETRY_ENV_MUTEX` (shared with `agent_engine`'s
+/// `telemetry_opt_in`) while they hold it.
+const TELEMETRY_ENV_VARS: [&str; 3] = ["DO_NOT_TRACK", "PI_OFFLINE", "PRIME_AGENT_TELEMETRY"];
+
+struct CleanTelemetryEnv {
+    saved: Vec<(&'static str, Option<String>)>,
+    _env_lock: std::sync::MutexGuard<'static, ()>,
+}
+
+impl Default for CleanTelemetryEnv {
+    fn default() -> Self {
+        // Held first: the vars may not be touched while another env test
+        // runs.
+        let env_lock = crate::test_support::TELEMETRY_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let saved = TELEMETRY_ENV_VARS
+            .iter()
+            .map(|var| {
+                let value = std::env::var(var).ok();
+                std::env::remove_var(var);
+                (*var, value)
+            })
+            .collect();
+        Self {
+            saved,
+            _env_lock: env_lock,
+        }
+    }
+}
+
+impl Drop for CleanTelemetryEnv {
+    fn drop(&mut self) {
+        // The manual drop runs before the field drops: the restore lands
+        // while the env lock is still held.
+        for (var, value) in self.saved.drain(..) {
+            match value {
+                Some(value) => std::env::set_var(var, value),
+                None => std::env::remove_var(var),
+            }
+        }
+    }
+}
+
 /// The crash-path failure count: spawn-dies-fast churn accumulates to
 /// the give-up cap (the storm's counter could never grow while
 /// relaunch-spawns kept resetting it); a child that lived past the
@@ -31,7 +83,7 @@ fn churn_accumulates_and_a_stable_lifetime_resets() {
     // No spawn time (an adopted pid): plain accumulation.
     assert_eq!(Supervisor::next_failure_count(&resident, now), 1);
     assert_eq!(Supervisor::next_failure_count(&resident, now), 2);
-    // A stable lifetime: the healthy death starts a fresh count.
+
     resident
         .spawned_at_ms
         .store(now - STABLE_LIFETIME_MS - 1, Ordering::SeqCst);
@@ -41,6 +93,234 @@ fn churn_accumulates_and_a_stable_lifetime_resets() {
         .spawned_at_ms
         .store(now - STABLE_LIFETIME_MS + 10_000, Ordering::SeqCst);
     assert_eq!(Supervisor::next_failure_count(&resident, now), 2);
+}
+
+/// A failed relaunch produced no worker, so the count accumulates instead of
+/// resetting.
+#[tokio::test(start_paused = true)]
+async fn a_failed_relaunch_accumulates_to_the_give_up_cap() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    // The relaunch fails deterministically: a file stands where the logs dir would
+    // go, so every spawn dies at the worker stderr log's open.
+    std::fs::write(agent_dir.join("logs"), "not a directory").unwrap();
+    let supervisor = Arc::new(
+        Supervisor::new(SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir: agent_dir.clone(),
+        })
+        .expect("supervisor"),
+    );
+    let descriptor: DaemonWorkerDescriptor = serde_json::from_value(serde_json::json!({
+        "version": 2,
+        "workerId": "w-relaunch",
+        "pid": 0,
+        "socketPath": "/tmp/none.sock",
+        "recoveryJournalPath": dir.path().join("journal.jsonl").to_string_lossy(),
+        "supervisorSocketPath": "/tmp/none.sock",
+        "authenticationToken": "token",
+        "rootActiveSessionId": "w-relaunch",
+        "createdAt": "t",
+        "updatedAt": "t",
+        "lifecycle": "ready",
+        "createCommand": {},
+        "consecutiveFailures": 0,
+    }))
+    .expect("descriptor");
+    let resident = Arc::new(ResidentWorker::new(
+        "w-relaunch".to_string(),
+        descriptor,
+        dir.path().join("w-relaunch.descriptor.json"),
+    ));
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the clock is after the epoch")
+        .as_millis() as u64;
+    resident
+        .spawned_at_ms
+        .store(now_ms - STABLE_LIFETIME_MS - 1, Ordering::SeqCst);
+    supervisor.registry.insert(Arc::clone(&resident)).await;
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        Arc::clone(&supervisor).watch_worker(Arc::clone(&resident), None, 0),
+    )
+    .await
+    .expect("the watch loop gives up instead of spinning");
+    assert!(
+        supervisor.registry.get("w-relaunch").await.is_none(),
+        "the give-up removes the worker from the registry"
+    );
+    assert_eq!(
+        resident.descriptor.lock().await.lifecycle,
+        DaemonWorkerLifecycle::Failed
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stop_during_the_storm_leaves_the_terminal_state_to_the_stop() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(agent_dir.join("logs"), "not a directory").unwrap();
+    let supervisor = Arc::new(
+        Supervisor::new(SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir: agent_dir.clone(),
+        })
+        .expect("supervisor"),
+    );
+    let descriptor: DaemonWorkerDescriptor = serde_json::from_value(serde_json::json!({
+        "version": 2,
+        "workerId": "w-storm-stop",
+        "pid": 0,
+        "socketPath": "/tmp/none.sock",
+        "recoveryJournalPath": dir.path().join("journal.jsonl").to_string_lossy(),
+        "supervisorSocketPath": "/tmp/none.sock",
+        "authenticationToken": "token",
+        "rootActiveSessionId": "w-storm-stop",
+        "createdAt": "t",
+        "updatedAt": "t",
+        "lifecycle": "ready",
+        "createCommand": {},
+        "consecutiveFailures": 0,
+    }))
+    .expect("descriptor");
+    let resident = Arc::new(ResidentWorker::new(
+        "w-storm-stop".to_string(),
+        descriptor,
+        dir.path().join("w-storm-stop.descriptor.json"),
+    ));
+    // The storm is at the cap and the stop already landed (the stop sets the flag
+    // first).
+    resident
+        .consecutive_failures
+        .store(MAX_CONSECUTIVE_FAILURES, Ordering::SeqCst);
+    resident.intentional_stop.store(true, Ordering::SeqCst);
+    supervisor.registry.insert(Arc::clone(&resident)).await;
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        Arc::clone(&supervisor).watch_worker(Arc::clone(&resident), None, 0),
+    )
+    .await
+    .expect("the give-up arm returns instead of spinning");
+    assert_eq!(
+        resident.descriptor.lock().await.lifecycle,
+        DaemonWorkerLifecycle::Ready,
+        "the give-up must not persist Failed over a concurrent stop"
+    );
+    assert!(
+        supervisor.registry.get("w-storm-stop").await.is_some(),
+        "the stop path owns the worker's removal"
+    );
+}
+
+/// An adopted worker's watch parks on the kernel's exit notification and
+/// hands the exit to whoever owns the resident now - a stop that landed,
+/// or a relaunch elsewhere that took the resident's pid. Both cases return
+/// at the exit without entering the crash arm, and with no timer in the
+/// runtime the paused clock cannot advance.
+#[cfg(any(target_os = "linux", target_os = "macos"))] // the kernel-watch arms
+#[tokio::test(start_paused = true)]
+async fn an_adopted_watch_hands_off_at_exit_without_a_timer() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    // A hand-off the watch misses (the unfixed tree) reaches the crash
+    // arm: its relaunch must fail deterministically (the logs dir cannot
+    // be created - a file stands where it would go) instead of spawning
+    // the test binary as a worker.
+    std::fs::write(agent_dir.join("logs"), "not a directory").unwrap();
+    let supervisor = Arc::new(
+        Supervisor::new(SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir: agent_dir.clone(),
+        })
+        .expect("supervisor"),
+    );
+    {
+        // A stop that landed owns the exit's terminal state.
+        let mut worker = std::process::Command::new("sleep")
+            .arg("600")
+            .spawn()
+            .expect("spawn sleep");
+        let resident = adopted_watch_resident(dir.path(), worker.id());
+        let started = tokio::time::Instant::now();
+        let mut watch = std::pin::pin!(Arc::clone(&supervisor).watch_worker(
+            Arc::clone(&resident),
+            None,
+            u64::from(worker.id())
+        ));
+        assert!(
+            futures::poll!(watch.as_mut()).is_pending(),
+            "a live adopted worker keeps the watch parked"
+        );
+        resident.intentional_stop.store(true, Ordering::SeqCst);
+        worker.kill().expect("kill sleep");
+        worker.wait().expect("reap sleep");
+        watch.await;
+        assert_eq!(
+            tokio::time::Instant::now(),
+            started,
+            "the kernel exit notification woke the watch; no poll timer fired"
+        );
+    }
+    {
+        // A relaunch elsewhere took the resident: the pid no longer names
+        // the watched process, so the watch hands off instead of running
+        // the crash arm over the replacement.
+        let mut worker = std::process::Command::new("sleep")
+            .arg("600")
+            .spawn()
+            .expect("spawn sleep");
+        let resident = adopted_watch_resident(dir.path(), worker.id());
+        let started = tokio::time::Instant::now();
+        let mut watch = std::pin::pin!(Arc::clone(&supervisor).watch_worker(
+            Arc::clone(&resident),
+            None,
+            u64::from(worker.id())
+        ));
+        assert!(
+            futures::poll!(watch.as_mut()).is_pending(),
+            "a live adopted worker keeps the watch parked"
+        );
+        resident.descriptor.lock().await.pid = u64::from(std::process::id());
+        worker.kill().expect("kill sleep");
+        worker.wait().expect("reap sleep");
+        watch.await;
+        assert_eq!(
+            tokio::time::Instant::now(),
+            started,
+            "the kernel exit notification woke the watch; no poll timer fired"
+        );
+    }
+}
+
+/// The watched adopted worker's resident, with the descriptor carrying the
+/// watched pid (the post-exit ownership check compares against it).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn adopted_watch_resident(dir: &std::path::Path, pid: u32) -> Arc<ResidentWorker> {
+    let descriptor: DaemonWorkerDescriptor = serde_json::from_value(serde_json::json!({
+        "version": 2,
+        "workerId": "w-adopted-watch",
+        "pid": pid,
+        "socketPath": "/tmp/none.sock",
+        "recoveryJournalPath": dir.join("journal.jsonl").to_string_lossy(),
+        "supervisorSocketPath": "/tmp/none.sock",
+        "authenticationToken": "token",
+        "rootActiveSessionId": "w-adopted-watch",
+        "createdAt": "t",
+        "updatedAt": "t",
+        "lifecycle": "ready",
+        "createCommand": {},
+        "consecutiveFailures": 0,
+    }))
+    .expect("descriptor");
+    ResidentWorker::new(
+        "w-adopted-watch".to_string(),
+        descriptor,
+        dir.join("w-adopted-watch.descriptor.json"),
+    )
 }
 
 /// The saved-session surfaces (the `list --all` summary row and the
@@ -117,11 +397,7 @@ fn saved_session_rows_carry_the_persisted_thinking_level() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The saved-session surfaces publish the scan's own-usage summary (TS
-/// `serializeSavedSessionInfo` and `summaryForInactiveSession`): the
-/// agents-view spend columns and the archived-row keep-condition read
-/// `usage.cost`; a session with no billable work stays bare, exactly
-/// like TS's undefined serialization.
+/// No billable work stays bare, like TS's undefined serialization.
 #[test]
 fn saved_session_rows_publish_the_own_usage_summary() {
     let dir = std::env::temp_dir().join(format!("pa-saved-usage-{}", uuid::Uuid::new_v4()));
@@ -161,10 +437,8 @@ fn saved_session_rows_publish_the_own_usage_summary() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// TS `summaryForInactiveSession` publishes the header binding: a saved
-/// row carries its `parentSessionPath` (only when one is recorded — TS's
-/// `undefined` is omitted) and its `rlmDepth`, so a non-resident bound
-/// session keeps its family edge for the family classifiers.
+/// `parentSessionPath` only when one is recorded (TS's `undefined` is omitted), so a
+/// non-resident bound session keeps its family edge.
 #[test]
 fn saved_session_summaries_carry_the_parent_binding() {
     let dir = std::env::temp_dir().join(format!("pa-saved-binding-{}", uuid::Uuid::new_v4()));
@@ -228,11 +502,6 @@ async fn worker_probe_accepts_a_live_socket() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The boot roster seed runs exactly once, in the background, once
-/// adoption settles: the adoption pass hands back the seed task's
-/// handle, and the seed roots are the registry's residents. An empty
-/// descriptor dir adopts nothing; the pre-registered root anchors the
-/// family the seed must publish.
 #[tokio::test]
 async fn adoption_settles_then_seeds_the_roster_once() {
     let dir = std::env::temp_dir().join(format!("pa-adopt-seed-{}", uuid::Uuid::new_v4()));
@@ -329,9 +598,6 @@ async fn adoption_settles_then_seeds_the_roster_once() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The shutdown gate: a create dispatched while the supervisor stops
-/// must fail instead of launching a worker the stop pass would miss
-/// (a late create racing a shutdown would orphan its worker process).
 #[tokio::test]
 async fn a_create_while_shutting_down_is_refused() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -367,9 +633,6 @@ async fn a_create_while_shutting_down_is_refused() {
     );
 }
 
-/// The shutdown gate and the accept loop's exit flag are separate: the
-/// gate refuses creates the moment a terminal stop begins, but the
-/// loop must stay up until `begin_shutdown` finishes stopping the workers.
 #[tokio::test]
 async fn begin_shutdown_sets_the_accept_exit_after_the_stop_pass() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -390,14 +653,8 @@ async fn begin_shutdown_sets_the_accept_exit_after_the_stop_pass() {
     );
 }
 
-/// A kill whose stop never durably started — the stop tombstone's
-/// persist fails, the only `Err` `stop_worker` takes — must not run
-/// the kill's belt: the worker is untouched and the kill stays
-/// retryable (TS `stopWorkerUntracked` throws before any teardown).
-/// The belt otherwise cancels the session tree's jobs, archives the
-/// root file, and — for a ledger delete — sweeps the child's
-/// artifacts against a live worker whose resident still serves the
-/// file (its stores may still grow).
+/// The stop's only `Err` (tombstone persist) leaves the worker untouched and the kill
+/// retryable.
 #[tokio::test]
 async fn a_failed_stop_persist_gates_the_kill_stop_belt() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -454,9 +711,8 @@ async fn a_failed_stop_persist_gates_the_kill_stop_belt() {
         last_error: None,
         rest: Map::default(),
     };
-    // The persist target is a directory: the stop tombstone's
-    // atomic write cannot land there (the rename onto a directory
-    // fails), so the stop never durably starts.
+    // The persist target is a directory: the atomic write's rename cannot land there,
+    // so the stop never durably starts.
     let persist_target = sessions_dir.join("w.d");
     std::fs::create_dir(&persist_target).unwrap();
     let resident = ResidentWorker::new("w-live".to_string(), descriptor, persist_target);
@@ -482,13 +738,7 @@ async fn a_failed_stop_persist_gates_the_kill_stop_belt() {
     );
 }
 
-/// A plain kill holds the route-side tombstone when its stop's
-/// redundant re-write fails: the durable intent is already on disk,
-/// so the stop proceeds (the escalation runs, the registry row goes,
-/// the stop is intentional) instead of aborting and leaving the
-/// killed worker running on its session lease until the next boot —
-/// the finding-#5 symptom. The belt gate stays keyed on the stop
-/// that never durably started: no tombstone at all still fails.
+/// The durable intent is already on disk, so the stop proceeds instead of aborting.
 #[tokio::test]
 async fn an_existing_tombstone_carries_the_stop_past_its_failed_re_write() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -558,13 +808,8 @@ async fn an_existing_tombstone_carries_the_stop_past_its_failed_re_write() {
     );
 }
 
-/// The first OS signal's drain: the gate rejects new work, every
-/// client gets the `daemon_closing` event, and the running turn
-/// settles inside its worker's routed `shutdown` before the stop
-/// pass retires the worker (descriptor gone - no supervisor-lost
-/// lingering) and lets the accept loop exit. The fake worker holds
-/// its `shutdown` reply on a test-controlled settle, so a pass that
-/// does not wait for the flush barrier fails the assertions below.
+/// The fake worker holds its `shutdown` reply on a test-controlled settle, so a stop
+/// pass that does not wait for the flush barrier fails below.
 #[cfg(unix)] // the signal-drain state machine: unix signal source
 #[tokio::test]
 async fn first_signal_drains_a_settling_turn_and_rejects_new_work() {
@@ -598,12 +843,8 @@ async fn first_signal_drains_a_settling_turn_and_rejects_new_work() {
         descriptor,
         descriptor_path.clone(),
     ));
-    // The fake worker connection: the routed `shutdown` reply is the
-    // flush barrier, so it is held until the test releases the turn's
-    // settle.
-    // The bounded command-channel type (the backpressure lane's
-    // request-path bound): one slot is plenty for the single routed
-    // `shutdown`.
+    // The fake worker connection: the routed `shutdown` reply is the flush barrier, held
+    // until the test releases the settle. One channel slot is plenty.
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<WorkerRequest>(1);
     *resident.cmd_tx.lock().await = Some(cmd_tx);
     let (shutdown_routed_tx, shutdown_routed_rx) = oneshot::channel::<()>();
@@ -672,11 +913,9 @@ async fn first_signal_drains_a_settling_turn_and_rejects_new_work() {
         .await
         .expect("the drain routes the worker's shutdown")
         .expect("the routed channel stays open");
-    // While the settle is held the pass can never finish (the routed
-    // reply is the flush barrier), so assert it stays unexited across
-    // a polled window: a fire-and-forget drain that retired the
-    // worker early fails here deterministically, not on one fixed
-    // sleep.
+    // While the settle is held the pass can never finish, so assert it stays unexited
+    // across a polled window: a fire-and-forget drain fails here deterministically,
+    // not on one fixed sleep.
     let hold_deadline = std::time::Instant::now() + Duration::from_millis(100);
     while std::time::Instant::now() < hold_deadline {
         assert!(
@@ -711,6 +950,93 @@ async fn first_signal_drains_a_settling_turn_and_rejects_new_work() {
         "a second signal while shutting down forces"
     );
     pump.abort();
+}
+
+/// A turn-long client route rides TS's 24 h worker-request budget
+/// (`WORKER_REQUEST_TIMEOUT_MS`, daemon-supervisor.ts:204), not the
+/// invented ten-minute cap: a `prompt_and_wait` whose worker answers a
+/// virtual hour later still succeeds.
+#[tokio::test(start_paused = true)]
+async fn a_prompt_and_wait_route_outlives_the_old_ten_minute_cap() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let options = SupervisorOptions {
+        socket_path: dir.path().join("daemon.sock"),
+        agent_dir: dir.path().join("agent"),
+    };
+    let supervisor = Arc::new(Supervisor::new(options).expect("supervisor"));
+    let descriptor: DaemonWorkerDescriptor = serde_json::from_value(serde_json::json!({
+        "version": 2,
+        "workerId": "w-longroute",
+        "pid": 0,
+        "socketPath": "/tmp/none.sock",
+        "recoveryJournalPath": "/tmp/none.jsonl",
+        "supervisorSocketPath": "/tmp/none.sock",
+        "authenticationToken": "test",
+        "rootActiveSessionId": "w-longroute",
+        "createdAt": "t",
+        "updatedAt": "t",
+        "lifecycle": "ready",
+        "createCommand": {},
+        "consecutiveFailures": 0,
+    }))
+    .expect("descriptor");
+    let descriptor_dir = dir.path().join("descriptors");
+    std::fs::create_dir_all(&descriptor_dir).unwrap();
+    let resident = Arc::new(ResidentWorker::new(
+        "w-longroute".to_string(),
+        descriptor,
+        descriptor_dir.join("w-longroute.descriptor.json"),
+    ));
+    // The fake worker holds the turn for a virtual hour — past the old
+    // ten-minute cap, inside the 24 h worker-request budget.
+    let (cmd_tx, mut cmd_rx) = mpsc::channel::<WorkerRequest>(1);
+    *resident.cmd_tx.lock().await = Some(cmd_tx);
+    let pump_resident = Arc::clone(&resident);
+    tokio::spawn(async move {
+        let request = cmd_rx.recv().await.expect("the route lands the prompt");
+        tokio::time::sleep(Duration::from_hours(1)).await;
+        let reply = pump_resident
+            .pending
+            .lock()
+            .await
+            .remove(&request.request_id)
+            .expect("the routed prompt holds a reply slot");
+        let _ = reply.send(WorkerReply::Typed(crate::protocol::response_success(
+            None,
+            "prompt_and_wait",
+            None,
+        )));
+    });
+    supervisor.registry.insert(Arc::clone(&resident)).await;
+    resident.note_connection_live();
+    resident.note_session_ready();
+    let (targeted_tx, _targeted_rx) = tokio::sync::mpsc::channel::<Arc<Value>>(16);
+    let attached = subscribers::ClientSubscriptions::new("c".to_string(), targeted_tx);
+    let command: DaemonCommand = serde_json::from_value(serde_json::json!({
+        "type": "prompt_and_wait",
+        "activeSessionId": "w-longroute",
+        "message": "go",
+    }))
+    .expect("command");
+    let route = {
+        let supervisor = Arc::clone(&supervisor);
+        tokio::spawn(async move {
+            supervisor
+                .route_client_command(
+                    &command,
+                    "c",
+                    &attached,
+                    "p-1".to_string(),
+                    "prompt_and_wait".to_string(),
+                    None,
+                )
+                .await
+        })
+    };
+    let (lines, stop) = route.await.expect("the route task lives");
+    assert!(!stop);
+    let line = lines.first().expect("the route answers with one line");
+    assert_eq!(line["success"], json!(true));
 }
 
 /// Every signal that finds a shutdown already in flight is the force
@@ -768,10 +1094,9 @@ async fn a_signal_during_an_in_flight_shutdown_forces() {
         "the update exit must not become a terminal stop pass"
     );
 
-    // The update's committed stop window (the coordinator's Stopping
-    // state, before exit_for_update publishes accept_exit): a signal
-    // forces without flipping the gate, so the terminal pass can never
-    // tombstone and delete the descriptors the successor must adopt.
+    // The update's committed stop window: a signal forces without flipping
+    // the gate, so the terminal pass can never tombstone and delete the
+    // descriptors the successor must adopt.
     let dir = tempfile::TempDir::new().unwrap();
     let options = SupervisorOptions {
         socket_path: dir.path().join("daemon.sock"),
@@ -804,10 +1129,6 @@ async fn a_signal_during_an_in_flight_shutdown_forces() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// The worker-driven idle passivation handler (TS `idleEvictionMinutes`).
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn idle_passivation_requires_the_worker_token() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -836,10 +1157,12 @@ async fn idle_passivation_requires_the_worker_token() {
 }
 
 #[tokio::test]
-async fn idle_passivation_refuses_a_root_worker() {
-    // The parent-owned gate: only a child worker (rlmDepth > 0 in the
-    // create command) may ask; a root worker's lease is client-owned
-    // policy and the ask is refused.
+async fn idle_passivation_refuses_a_client_owned_worker() {
+    // The owner refusal (TS `canEvictWorker`'s `hasOwnerClient` arm):
+    // ownership alone carries it (TS `clientOwned: noSession`). An
+    // unowned root passes this gate; with a route in flight, its ask
+    // defers instead of stopping the worker underneath it (the e2e
+    // drives the pass side end to end).
     let dir = tempfile::TempDir::new().unwrap();
     let agent_dir = dir.path().join("agent");
     std::fs::create_dir_all(&agent_dir).unwrap();
@@ -852,17 +1175,17 @@ async fn idle_passivation_refuses_a_root_worker() {
     );
     let descriptor = pa_types::daemon::DaemonWorkerDescriptor {
         version: 1,
-        worker_id: "w-root".to_string(),
+        worker_id: "w-owned".to_string(),
         pid: 4242,
         process_start_id: None,
         socket_path: "/tmp/none.sock".to_string(),
         recovery_journal_path: "/tmp/none.jsonl".to_string(),
         orphan_process_journal_path: None,
         supervisor_socket_path: "/tmp/none.sock".to_string(),
-        authentication_token: "root-token".to_string(),
+        authentication_token: "owned-token".to_string(),
         worker_instance_id: None,
-        root_active_session_id: "w-root".to_string(),
-        owner_client_id: None,
+        root_active_session_id: "w-owned".to_string(),
+        owner_client_id: Some("client-1".to_string()),
         root_session_id: Some("root-1".to_string()),
         session_file: None,
         session_dir: None,
@@ -882,10 +1205,16 @@ async fn idle_passivation_refuses_a_root_worker() {
         last_error: None,
         rest: Map::default(),
     };
-    let resident = ResidentWorker::new("w-root".to_string(), descriptor, dir.path().join("w.d"));
+    let idle = pa_types::daemon::DaemonWorkerDescriptor {
+        worker_id: "w-idle".to_string(),
+        authentication_token: "idle-token".to_string(),
+        owner_client_id: None,
+        ..descriptor.clone()
+    };
+    let resident = ResidentWorker::new("w-owned".to_string(), descriptor, dir.path().join("w.d"));
     supervisor.registry.insert(resident).await;
     let response = supervisor
-        .handle_worker_idle_passivation("c1", "worker_idle_passivation", "root-token", Some(1))
+        .handle_worker_idle_passivation("c1", "worker_idle_passivation", "owned-token", Some(1))
         .await;
     assert!(!response.success);
     assert!(
@@ -893,96 +1222,44 @@ async fn idle_passivation_refuses_a_root_worker() {
             .error
             .as_deref()
             .unwrap_or("")
-            .contains("child-worker policy"),
-        "the root worker's ask is refused: {response:?}"
+            .contains("client-owned worker"),
+        "the client-owned worker's ask is refused: {response:?}"
     );
-}
-
-#[tokio::test]
-async fn idle_passivation_accepts_a_parent_owned_revived_child() {
-    // The parent-owned gate's pass side (Macroscope's/Bugbot's revival
-    // identity finding): a worker relaunched by a WAKE whose create's
-    // rest carries the child's rlmDepth passes the gate - the revived
-    // child stays passivation-eligible (its park window arms on the
-    // persisted header depth; the fence reads the create identity).
-    let dir = tempfile::TempDir::new().unwrap();
-    let agent_dir = dir.path().join("agent");
-    std::fs::create_dir_all(&agent_dir).unwrap();
-    let supervisor = Arc::new(
-        Supervisor::new(SupervisorOptions {
-            socket_path: dir.path().join("daemon.sock"),
-            agent_dir: agent_dir.clone(),
-        })
-        .expect("supervisor"),
-    );
-    let descriptor = pa_types::daemon::DaemonWorkerDescriptor {
-        version: 1,
-        worker_id: "w-child".to_string(),
-        pid: 4245,
-        process_start_id: None,
-        socket_path: "/tmp/none.sock".to_string(),
-        recovery_journal_path: "/tmp/none.jsonl".to_string(),
-        orphan_process_journal_path: None,
-        supervisor_socket_path: "/tmp/none.sock".to_string(),
-        authentication_token: "child-token".to_string(),
-        worker_instance_id: None,
-        root_active_session_id: "w-child".to_string(),
-        owner_client_id: None,
-        root_session_id: Some("kid".to_string()),
-        session_file: None,
-        session_dir: None,
-        telemetry_disabled: None,
-        created_at: "t".to_string(),
-        updated_at: "t".to_string(),
-        lifecycle: DaemonWorkerLifecycle::Ready,
-        create_command: pa_types::daemon::DurableDaemonCreateCommand {
-            session_path: None,
-            no_session: None,
-            rest: Map::from_iter([
-                ("rlmDepth".to_string(), json!(1)),
-                ("rlmChildId".to_string(), json!("sub-kid")),
-            ]),
-        },
-        consecutive_failures: 0,
-        stop_requested_at: None,
-        archive_on_stop: None,
-        last_failure_at: None,
-        last_error: None,
-        rest: Map::default(),
-    };
-    let resident = ResidentWorker::new("w-child".to_string(), descriptor, agent_dir);
+    // The eviction fence (TS `withEvictionFence`): a request in flight
+    // when the ask arrives defers the passivation — no stop, no
+    // tombstone — and the same ask stops the worker once the route
+    // drains.
+    let resident = ResidentWorker::new("w-idle".to_string(), idle, dir.path().join("w-idle.d"));
+    supervisor.registry.insert(resident.clone()).await;
+    let in_flight = Arc::clone(&resident.inflight).try_acquire_owned().unwrap();
     supervisor
-        .registry
-        .insert(std::sync::Arc::clone(&resident))
+        .handle_worker_idle_passivation("c3", "worker_idle_passivation", "idle-token", None)
         .await;
-    let response = supervisor
-        .handle_worker_idle_passivation("c1", "worker_idle_passivation", "child-token", Some(1))
-        .await;
-    // The gate passes: the answer is NOT the child-worker-policy refusal
-    // (the stop path itself answers with its own outcome - the gate is
-    // what this test pins).
     assert!(
-        !response
-            .error
-            .as_deref()
-            .unwrap_or("")
-            .contains("child-worker policy"),
-        "the parent-owned revived child's ask must pass the gate: {response:?}"
+        supervisor.registry.get("w-idle").await.is_some(),
+        "the deferred ask never stopped the worker"
+    );
+    assert!(
+        resident.descriptor.lock().await.stop_requested_at.is_none(),
+        "the deferred ask left no stop tombstone on the live worker"
+    );
+    drop(in_flight);
+    supervisor
+        .handle_worker_idle_passivation("c4", "worker_idle_passivation", "idle-token", None)
+        .await;
+    assert!(
+        supervisor.registry.get("w-idle").await.is_none(),
+        "the drained worker's ask stops it"
     );
 }
 
-/// The roster wake's reuse arm (Macroscope's concurrent-wake finding,
-/// the reuse half): a prompt for a passivated child's active-session id
-/// whose roster row resolves to a session file a CONCURRENT revival
-/// already hosts must join the resident — no second launch.
 #[tokio::test]
 async fn a_passivated_row_prompt_joins_an_already_hosting_resident() {
     let dir = tempfile::TempDir::new().unwrap();
     let agent_dir = dir.path().join("agent");
     std::fs::create_dir_all(&agent_dir).unwrap();
-    // The child's file lives in the session-artifacts tree (the RLM
-    // child shape): the saved-session catalog never resolves it, so the
-    // wake falls to the roster row.
+    // The child's file lives in the session-artifacts tree: the saved-session catalog
+    // never resolves it, so the wake falls to the roster row.
     let artifacts = agent_dir.join("session-artifacts").join("child-1");
     std::fs::create_dir_all(&artifacts).unwrap();
     let session_file = artifacts.join("child-1.jsonl");
@@ -1071,11 +1348,6 @@ async fn a_passivated_row_prompt_joins_an_already_hosting_resident() {
     );
 }
 
-/// The roster wake's failure arm: with no resident hosting the row's
-/// file and the launch refused (the shutdown gate stands in for any
-/// launch failure), the wake falls through to the caller's error — the
-/// concurrent-revival race's loser only fails when the rival never
-/// registered.
 #[tokio::test]
 async fn a_passivated_row_prompt_with_no_rival_falls_through_the_failed_launch() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -1127,11 +1399,6 @@ async fn a_passivated_row_prompt_with_no_rival_falls_through_the_failed_launch()
     }
 }
 
-/// The passivation-aware delete: a Kill carrying the `rlmLedgerDelete`
-/// marker aimed at a STOPPED child (no resident worker) resolves the
-/// ledger edge and tombstones it — the deletion boundary without a
-/// worker (TS `recordRlmSubagentDeletion` after a whole-worker
-/// eviction).
 #[tokio::test]
 async fn a_ledger_delete_of_a_stopped_child_tombstones_without_a_worker() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -1175,8 +1442,7 @@ async fn a_ledger_delete_of_a_stopped_child_tombstones_without_a_worker() {
         .expect("the spawn edge appends");
     assert_eq!(ledger.live_edges().expect("edges").len(), 1);
 
-    // The parent's delete rides the kill route with the marker; the
-    // route finds no resident and the passivation-aware arm must answer
+    // The parent's delete rides the kill route with the marker; the arm must answer
     // success WITH the tombstone applied.
     let outcome = supervisor
         .tombstone_saved_rlm_child(
@@ -1210,10 +1476,8 @@ async fn a_ledger_delete_of_a_stopped_child_tombstones_without_a_worker() {
         )
         .await;
     assert!(miss.is_err(), "a selector with no edge must not delete");
-    // The stopped child's delete teardown mirrors the resident delete's
-    // end state (the second bot round's leftover-partition finding): the
-    // artifact partition is swept and the session file carries the
-    // archived state.
+    // The teardown mirrors the resident delete: the artifact partition is swept and the
+    // session file carries the archived state.
     assert!(
         !artifacts.exists(),
         "the deleted child's artifact partition must be swept"
@@ -1223,6 +1487,187 @@ async fn a_ledger_delete_of_a_stopped_child_tombstones_without_a_worker() {
             .expect("the child file survives (archived, not unlinked)")
             .contains("archived"),
         "the stopped child's delete must archive the session file"
+    );
+}
+
+/// The stopped-child delete settles the roster the way the resident
+/// delete does (the D1b composition with the idle passivation): a
+/// `rlmLedgerDelete` aimed at an idle-passivated child finds no stop to
+/// settle the row, so the passivation's unowned row would linger while
+/// the bucket bills the captured spend on the parent - the same child
+/// billed twice until some later stop's unowned sweep catches the row.
+/// The delete's own push carries both halves together: the parent's
+/// refreshed bucket AND the child's row removal, one `roster_update`.
+#[tokio::test]
+async fn the_stopped_childs_delete_removes_its_row_and_bills_the_parent() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    let sessions_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&sessions_dir).unwrap();
+    let supervisor = Arc::new(
+        Supervisor::new(SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir: agent_dir.clone(),
+        })
+        .expect("supervisor"),
+    );
+    // The parent's roster row: the bucket's target.
+    let parent_file = sessions_dir.join("parent.jsonl");
+    std::fs::write(&parent_file, "{\"type\":\"session\",\"id\":\"p\"}\n").unwrap();
+    let parent_row = json!({
+        "sessionId": "p",
+        "activeSessionId": "p-live",
+        "runtimeKind": "top-level",
+        "sessionFile": parent_file.to_string_lossy(),
+        "sessionName": "parent",
+        "status": "idle",
+    });
+    supervisor.write_roster_summary(&parent_row, None);
+    // The idle-passivated child: its transcript lives under
+    // session-artifacts (the real RLM-delete shape - the flat catalog
+    // never lists it, so the bucket is its only billing surface), one
+    // billed assistant turn ($0.30) the delete captures into the
+    // tombstone, and the passivation's lingering unowned roster row.
+    let child_transcript = agent_dir
+        .join("session-artifacts")
+        .join("root-1")
+        .join("sub-gone")
+        .join("sub-gone.jsonl");
+    std::fs::create_dir_all(child_transcript.parent().expect("artifact dir")).unwrap();
+    {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&child_transcript)
+            .expect("open the child transcript");
+        writeln!(
+            file,
+            "{}",
+            json!({
+                "type": "session", "version": 3, "id": "sub-gone",
+                "timestamp": "2026-09-29T00:00:00.000Z", "cwd": "/the/stopped/cwd",
+                "parentSession": parent_file.to_string_lossy(), "rlmDepth": 1
+            })
+        )
+        .expect("the child header");
+        writeln!(
+            file,
+            "{}",
+            json!({
+                "type": "message", "id": "dm1a", "parentId": null,
+                "timestamp": "2026-09-29T00:00:02.100Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "parked work"}],
+                    "timestamp": 2100,
+                    "usage": {
+                        "input": 60, "output": 6, "cacheRead": 0, "cacheWrite": 0,
+                        "totalTokens": 66,
+                        "cost": {"input": 0.0, "output": 0.3, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.3}
+                    }
+                }
+            })
+        )
+        .expect("the billed turn");
+    }
+    let child_row = json!({
+        "sessionId": "sub-gone-persisted",
+        "activeSessionId": "sub-gone-live",
+        "runtimeKind": "subagent",
+        "rlmChildId": "sub-gone",
+        "rlmDepth": 1,
+        "sessionFile": child_transcript.to_string_lossy(),
+        "sessionName": "parked-worker",
+        "cwd": "/the/stopped/cwd",
+        "parentSessionPath": parent_file.to_string_lossy(),
+        "status": "done",
+        "usage": { "inputTokens": 60, "outputTokens": 6, "cost": 0.3 },
+    });
+    let child_agent_id = supervisor
+        .write_roster_summary(&child_row, None)
+        .expect("the child row")
+        .agent_id;
+    // A live ledger edge for the stopped child (the whole-worker idle
+    // stop left the edge behind).
+    let ledger = supervisor
+        .rlm_spawn_ledger_for(None)
+        .await
+        .expect("the spawn ledger resolves");
+    ledger
+        .append_spawn(&crate::rlm_ledger::RlmSpawnInput {
+            child_id: "sub-gone".to_string(),
+            parent: parent_file.to_string_lossy().into_owned(),
+            child: child_transcript.to_string_lossy().into_owned(),
+            depth: 1,
+            name: "parked-worker".to_string(),
+        })
+        .expect("the spawn edge appends");
+    let mut events = supervisor.events.subscribe();
+    // The parent's delete of its stopped child.
+    supervisor
+        .tombstone_saved_rlm_child(
+            "sub-gone",
+            Some("sub-gone"),
+            crate::rlm_ledger::RlmLedgerDeleteReason::User,
+        )
+        .await
+        .expect("the stopped child's delete tombstones");
+    // ONE push carries both halves of the settle: the parent's
+    // refreshed bucket and the child's row removal.
+    let mut pushes = Vec::new();
+    loop {
+        match events.try_recv() {
+            Ok((ClientRouting::RosterSubscribers, payload)) => pushes.push((*payload).clone()),
+            Ok(_) => {}
+            Err(
+                tokio::sync::broadcast::error::TryRecvError::Empty
+                | tokio::sync::broadcast::error::TryRecvError::Closed,
+            ) => break,
+            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(missed)) => {
+                panic!("roster push subscriber lagged by {missed}");
+            }
+        }
+    }
+    assert_eq!(
+        pushes.len(),
+        1,
+        "the stopped child's delete settles in one push: {pushes:?}"
+    );
+    let parent_after = supervisor
+        .roster
+        .lock()
+        .unwrap()
+        .entries()
+        .into_iter()
+        .find(|entry| entry.summary.get("sessionId").and_then(Value::as_str) == Some("p"))
+        .expect("the parent row");
+    assert_eq!(
+        pushes[0]["changed"],
+        serde_json::to_value(vec![parent_after]).expect("serialized parent"),
+        "the push carries the parent's refreshed row: {pushes:?}"
+    );
+    assert_eq!(
+        pushes[0]["changed"][0]["summary"]["deletedDescendantUsage"],
+        json!({ "inputTokens": 60, "outputTokens": 6, "cost": 0.3 }),
+        "the deleted child's captured spend bills through the parent"
+    );
+    assert_eq!(
+        pushes[0]["removed"],
+        json!([child_agent_id]),
+        "the lingering row is removed in the same push: {pushes:?}"
+    );
+    assert!(
+        supervisor
+            .roster
+            .lock()
+            .unwrap()
+            .entries()
+            .into_iter()
+            .all(|entry| {
+                entry.summary.get("rlmChildId").and_then(Value::as_str) != Some("sub-gone")
+            }),
+        "the deleted child's row is gone from the roster"
     );
 }
 
@@ -1290,10 +1735,6 @@ async fn a_ledger_delete_never_tombstones_an_unrelated_edge_sharing_the_child_id
     assert_eq!(live[0].child, file_b, "the survivor is child-b's edge");
 }
 
-/// The durable-id wake's reuse arm (the second bot round's finding: the
-/// join lived only on the roster path): a revival for a ledger child
-/// whose file a concurrent wake already hosts must join the resident
-/// through the LEDGER path — the path children actually revive by.
 #[tokio::test]
 async fn a_ledger_child_wake_joins_an_already_hosting_resident() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -1381,9 +1822,8 @@ async fn a_ledger_child_wake_joins_an_already_hosting_resident() {
         .insert(std::sync::Arc::clone(&resident))
         .await;
     let before = supervisor.registry.list().await.len();
-    // The wake by the child's NAME (the ledger edge's live resolution):
-    // the catalog misses (the artifacts tree), the ledger matches, and
-    // the REUSE arm joins — no second launch.
+    // The wake by the child's NAME: the catalog misses (the artifacts tree), the ledger
+    // matches, and the REUSE arm joins — no second launch.
     let route = supervisor.wake_saved_session("kid-1").await;
     match route {
         super::routing::WakeRoute::Woken(woken) => {
@@ -1401,4 +1841,168 @@ async fn a_ledger_child_wake_joins_an_already_hosting_resident() {
         before,
         "the ledger wake's reuse arm must not launch a second worker"
     );
+}
+
+/// The daemon's exit sends the partial `daemon event` summary of the
+/// current window (the window is under an hour, so no count sent it yet).
+#[tokio::test]
+async fn the_exit_flush_sends_the_partial_daemon_event_summary() {
+    let _env = CleanTelemetryEnv::default();
+    let dir = tempfile::TempDir::new().unwrap();
+    let supervisor = Supervisor::new(SupervisorOptions {
+        socket_path: dir.path().join("daemon.sock"),
+        agent_dir: dir.path().join("agent"),
+    })
+    .expect("supervisor");
+    let mock = Arc::new(pa_telemetry::MockSink::new());
+    let mut config = pa_telemetry::TelemetryClientConfig::new("install-1");
+    config.sinks = vec![mock.clone() as Arc<dyn pa_telemetry::TelemetrySink>];
+    *supervisor.telemetry.lock().unwrap() =
+        Some(pa_telemetry::TelemetryClient::spawn(config).unwrap());
+    supervisor.note_daemon_event("attach", None);
+    supervisor.note_daemon_event("attach", None);
+    assert!(mock.events().is_empty(), "the window is still open");
+    supervisor.flush_telemetry_on_exit().await;
+    let events = mock.events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].name, "daemon event");
+    assert_eq!(
+        events[0].properties.get("kind"),
+        Some(&Value::from("summary"))
+    );
+    assert_eq!(
+        events[0].properties.get("attach_count"),
+        Some(&Value::from(2))
+    );
+}
+
+/// The daemon's live gate counts only while telemetry is on: events
+/// that fire during a settings opt-out window never ride the summary
+/// after a re-enable. The counters skip while off (they are not
+/// severed), so the on-period count before the window still reports.
+#[tokio::test]
+async fn off_window_daemon_events_never_count_into_the_summary() {
+    let _env = CleanTelemetryEnv::default();
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    let mut settings = pa_core::settings::SettingsManager::create(dir.path(), &agent_dir);
+    settings.set_telemetry_enabled(false).unwrap();
+    let supervisor = Supervisor::new(SupervisorOptions {
+        socket_path: dir.path().join("daemon.sock"),
+        agent_dir: agent_dir.clone(),
+    })
+    .expect("supervisor");
+    let mock = Arc::new(pa_telemetry::MockSink::new());
+    let mut config = pa_telemetry::TelemetryClientConfig::new("install-1");
+    config.sinks = vec![mock.clone() as Arc<dyn pa_telemetry::TelemetrySink>];
+    *supervisor.telemetry.lock().unwrap() =
+        Some(pa_telemetry::TelemetryClient::spawn(config).unwrap());
+    // Off: the event skips, so nothing counts.
+    supervisor.note_daemon_event("attach", None);
+    settings.set_telemetry_enabled(true).unwrap();
+    // Back on: the event counts again.
+    supervisor.note_daemon_event("attach", None);
+    supervisor.flush_telemetry_on_exit().await;
+    let events = mock.events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].name, "daemon event");
+    assert_eq!(
+        events[0].properties.get("attach_count"),
+        Some(&Value::from(1)),
+        "the off-window attach never counts"
+    );
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 64,
+        rng_seed: RngSeed::Fixed(0x1145_2f6a),
+        ..ProptestConfig::default()
+    })]
+
+    // The live rename ladder: TS `routeClientCommand` wraps the forward in the name reservation.
+    #[test]
+    fn live_renames_reserve_family_names(
+        rows in prop::collection::vec(
+            (prop::sample::select(vec!["delta", "kilo"]), 0u32..=2, 0u8..=1),
+            1..=4,
+        ),
+        (requested, pad) in (prop::sample::select(vec!["delta", "kilo"]), any::<bool>()),
+        kind in prop::sample::select(vec!["rename", "set_session_name"]),
+        pre_reserved in prop::bool::weighted(0.25),
+    ) {
+        let requested = if pad { format!(" {requested} ") } else { requested.to_string() };
+        let trimmed = requested.trim();
+        let (_, target_depth, target_parent) = *rows.last().expect("the last row");
+        // TS sameAgentSessionNameParent: depth-0 rows share one scope.
+        let conflict = rows[..rows.len() - 1].iter().any(|(name, depth, parent)| {
+            *name == trimmed
+                && *depth == target_depth
+                && (target_depth == 0 || *parent == target_parent)
+        });
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("the per-case runtime");
+        runtime.block_on(async {
+            let dir = tempfile::TempDir::new().expect("case dir");
+            let agent_dir = dir.path().join("agent");
+            let sessions_dir = agent_dir.join("sessions");
+            std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
+            let parents = [sessions_dir.join("pa.jsonl"), sessions_dir.join("pb.jsonl")];
+            let options = SupervisorOptions { socket_path: dir.path().join("d.sock"), agent_dir };
+            let supervisor = Arc::new(Supervisor::new(options).expect("supervisor"));
+            let active = format!("r{}-live", rows.len() - 1);
+            for (index, (name, depth, parent)) in rows.iter().enumerate() {
+                let summary = json!({
+                    "sessionId": format!("r{index}"), "activeSessionId": format!("r{index}-live"),
+                    "runtimeKind": "subagent", "rlmDepth": depth, "sessionName": name,
+                    "parentSessionPath": parents[*parent as usize].to_string_lossy(),
+                });
+                supervisor.write_roster_summary(&summary, Some(format!("r{index}-live").as_str()));
+            }
+            let descriptor = serde_json::from_value::<DaemonWorkerDescriptor>(json!({
+                "version": 2, "workerId": &active, "pid": 4242, "socketPath": "/tmp/none.sock",
+                "recoveryJournalPath": "/tmp/none.jsonl", "supervisorSocketPath": "/tmp/none.sock",
+                "authenticationToken": "token", "rootActiveSessionId": &active, "createdAt": "t",
+                "updatedAt": "t", "lifecycle": "ready", "createCommand": {},
+                "consecutiveFailures": 0,
+            }))
+            .expect("descriptor");
+            let resident = ResidentWorker::new(active.clone(), descriptor, PathBuf::from("none"));
+            supervisor.registry.insert(resident.clone()).await;
+            // Retired: a forward past the ladder fails fast with WORKER_NOT_CONNECTED.
+            resident.note_retired();
+            let pre_key = pre_reserved.then(|| {
+                let scope = supervisor
+                    .live_session_name_scope(&active, trimmed.into())
+                    .expect("the target's own roster row");
+                let key = reservation_key(&scope);
+                supervisor.pending_session_names.lock().unwrap().insert(key.clone());
+                key
+            });
+            let command: DaemonCommand = serde_json::from_value(
+                json!({"type": kind, "activeSessionId": &active, "name": &requested}),
+            )
+            .expect("command");
+            let (queue_tx, _queue_rx) = tokio::sync::mpsc::channel(4);
+            let attached = subscribers::ClientSubscriptions::new("conn".to_string(), queue_tx);
+            let type_name = command_type_name(&command).to_string();
+            let (lines, stop) = supervisor
+                .route_client_command(&command, "client", &attached, "c1".into(), type_name, None)
+                .await;
+            prop_assert!(!stop);
+            prop_assert_eq!(&lines[0]["success"], &json!(false));
+            let expected = if conflict || pre_key.is_some() {
+                format!("Agent name \"{trimmed}\" is unavailable: an agent of that name already exists at depth {target_depth} under this parent")
+            } else {
+                WORKER_NOT_CONNECTED.to_string()
+            };
+            prop_assert_eq!(lines[0]["error"].as_str(), Some(expected.as_str()));
+            let pending = supervisor.pending_session_names.lock().unwrap().clone();
+            let expected_pending: std::collections::HashSet<String> = pre_key.into_iter().collect();
+            prop_assert_eq!(pending, expected_pending);
+            Ok(())
+        })?;
+    }
 }

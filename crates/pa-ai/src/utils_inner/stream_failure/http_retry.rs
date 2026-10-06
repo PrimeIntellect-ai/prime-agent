@@ -1,6 +1,6 @@
 //! The HTTP `retry-after` parsing family: the header lookup, the
 //! seconds-vs-HTTP-date forms, and the civil-date math behind the date form.
-use super::*;
+use super::now_ms;
 
 pub(super) fn header_value<S: std::hash::BuildHasher>(
     headers: &std::collections::HashMap<String, String, S>,

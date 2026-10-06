@@ -1,11 +1,7 @@
-//! The composition root's Prime Agent Traces login (TS
-//! `runPrimeAgentTracesLogin`): the prime-cli credential reuse, the RSA
-//! browser challenge raced against the paste prompt (the TS dialog's
-//! manual-key fallback), the `agent_traces` access check, and the
-//! credential write. The flow renders through the inline auth panel (TS
-//! the login dialog mounts in the TUI): every progress line, the auth
-//! URL block, and the paste prompt ride the panel channel, and no
-//! surface touches the terminal.
+//! The Prime Agent Traces login (TS `runPrimeAgentTracesLogin`): the
+//! prime-cli credential reuse, the RSA browser challenge raced against
+//! the paste prompt, the access check, and the credential write — all
+//! through the inline auth panel.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -22,53 +18,44 @@ use pa_core::auth::{
 use pa_tui::auth_panel::{PastePromptTone, PasteStyle};
 use pa_tui::traces::TraceLoginOutcome;
 
-/// TS `armManualInput`'s armed prompt after the browser URL shows.
+/// The armed prompt after the browser URL shows.
 const BROWSER_PROMPT: &str =
     "Complete the sign-in in your browser, or paste a Prime API key below:";
 /// TS the browser-unavailable fallback's prompt.
 const FALLBACK_PROMPT: &str = "Paste a Prime API key below:";
 
-/// The login's terminal surface (the TS login dialog's surface): the
-/// progress lines, the auth URL (with the browser open), and the paste
-/// prompt. The seam keeps the flow scriptable in tests; `Send + Sync`
-/// because the race's boxed arms are `Send`.
+/// The login's terminal surface: the progress lines, the auth URL (with the browser
+/// open), and the paste prompt; the seam keeps the flow scriptable in tests
+/// (`Send + Sync` for the race's boxed arms).
 pub(crate) trait TracesLoginUi: Send + Sync {
-    /// TS `onProgress` / `dialog.showProgress`.
     fn progress(&self, message: &str);
-    /// The driving surface's cooperative cancel state (`true` once the
-    /// pane that mounted the login exited): the flow checks it before
-    /// its credential writes, so a cancelled flow can neither
-    /// authenticate nor report success. The default (`false`) serves
-    /// the surfaces that never cancel mid-flow (the scripted tests).
+    /// The driving surface's cooperative cancel state: the flow checks it
+    /// before its credential writes, so a cancelled flow cannot authenticate.
     fn is_cancelled(&self) -> bool {
         false
     }
-    /// TS `dialog.showAuth` (the URL + the code line) and the terminal
-    /// port's browser open.
+    /// The auth URL (with the browser open).
     fn on_auth(&self, url: &str, instructions: &str);
-    /// One paste prompt (TS `armManualInput`): an empty line re-reads,
-    /// `None` (the input surface went away) cancels the login.
+    /// One paste prompt: an empty line re-reads, `None` (the input surface went away) cancels the
+    /// login.
     fn prompt_line(
         &self,
         prompt: &str,
     ) -> Pin<Box<dyn Future<Output = Option<String>> + Send + '_>>;
 }
 
-/// The login's resolved inputs: the store's agent dir, the transport,
-/// and the prime-cli reuse candidate (TS `getPrimeCliConfigPath()`:
-/// enabled only when the agent dir is the resolved default).
+/// The login's resolved inputs; the prime-cli reuse candidate is enabled only when the agent dir is
+/// the resolved default.
 pub(crate) struct TracesLoginInputs<'a> {
     pub agent_dir: &'a Path,
     pub http: &'a dyn pa_core::auth::PrimeHttp,
     pub prime_cli_config_path: Option<&'a Path>,
-    /// The challenge poll interval (the product's 5s default; tests use
-    /// milliseconds to keep the browser-completes path short).
+    /// The challenge poll interval (the product's 5s default; tests use milliseconds to keep the
+    /// browser-completes path short).
     pub poll_interval_ms: Option<u64>,
 }
 
-/// TS `runPrimeAgentTracesLogin`: the whole flow against the inline auth
-/// panel (TS the login dialog mounts in the TUI; no surface touches the
-/// terminal).
+/// The whole flow against the inline auth panel; no surface touches the terminal.
 pub(crate) async fn run_traces_login(
     agent_dir: &Path,
     panel: pa_tui::auth_panel::AuthPanelHandle,
@@ -91,9 +78,8 @@ async fn run_traces_login_inner(
 ) -> TraceLoginOutcome {
     let mut options = PrimeAgentTracesLoginOptions::new(inputs.prime_cli_config_path);
     options.poll_interval_ms = inputs.poll_interval_ms;
-    // TS `armManualInput`: the paste prompt arms when the browser URL
-    // shows, and again (under the fallback text) when the browser flow
-    // fails before it does.
+    // The paste prompt arms when the browser URL shows, and again under the
+    // fallback text when the browser flow fails.
     let (arm_tx, mut arm_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let armed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let on_auth = {
@@ -112,20 +98,18 @@ async fn run_traces_login_inner(
         on_progress: Some(&on_progress),
     };
     let mut login = pin!(login_prime_agent_traces(inputs.http, &options, &callbacks));
-    // The local sender keeps the arm channel open for the fallback arm
-    // (the login future's own sender dies with it).
+    // The local sender keeps the arm channel open for the fallback arm (the login future's own
+    // sender dies with it).
     let _keep_arm_open = arm_tx;
 
     let mut manual: Option<Pin<Box<dyn Future<Output = Option<String>> + Send + '_>>> = None;
-    // Whether the arm signal has been consumed (the armed flag inside
-    // the closure guards the double-send; this one gates the select arm).
+    // Whether the arm signal has been consumed (the closure's armed flag
+    // guards the double-send; this gates the select arm).
     let mut arm_seen = false;
     let mut login_dead = false;
     loop {
-        // TS `Promise.race([browserLoginOrFallback, manualKeyEntry,
-        // dialogCancelled])`: whichever settles first wins; the loser is
-        // dropped (the browser abort on a manual key, the paste read on
-        // a browser key).
+        // The race: whichever settles first wins; the loser is dropped (the
+        // browser abort on a manual key, the paste read on a browser key).
         enum Step {
             Login(Result<(String, pa_core::auth::PrimeAgentTracesLoginSource), String>),
             Armed,
@@ -138,16 +122,14 @@ async fn run_traces_login_inner(
         };
         match step {
             Step::Login(Ok((api_key, _source))) => {
-                // A cancelled surface never authenticates (the pane exit
-                // marks the flag; the check before the credential write).
+                // A cancelled surface never authenticates (the check before the credential write).
                 if ui.is_cancelled() {
                     return TraceLoginOutcome::Cancelled;
                 }
                 return complete_login(inputs, &api_key);
             }
             Step::Login(Err(error)) => {
-                // TS the browser-unavailable fallback: keep the dialog
-                // open and fall back to plain API key entry.
+                // The browser-unavailable fallback: fall back to plain API key entry.
                 login_dead = true;
                 ui.progress(&format!("Browser sign-in unavailable ({error})."));
                 if manual.is_none() {
@@ -163,23 +145,20 @@ async fn run_traces_login_inner(
                 let Some(api_key) = line else {
                     return TraceLoginOutcome::Cancelled;
                 };
-                // A cancelled surface never authenticates: the check
-                // runs before the access request and the credential
-                // write below.
+                // A cancelled surface never authenticates (the check before the access request and
+                // the credential write).
                 if ui.is_cancelled() {
                     return TraceLoginOutcome::Cancelled;
                 }
-                // TS the manual path: stop the browser flow (the login
-                // future above is dropped when this branch wins) and
-                // check the pasted key's trace access.
+                // The manual path: stop the browser flow (the login future above
+                // is dropped when this branch wins) and check the pasted key.
                 return manual_login(inputs, ui, &api_key).await;
             }
         }
     }
 }
 
-/// TS `armManualInput`'s loop: the prompt repeats until a non-empty line
-/// arrives; a closed input cancels.
+/// The prompt repeats until a non-empty line arrives; a closed input cancels.
 async fn prompt_non_empty(ui: &dyn TracesLoginUi, prompt: &str) -> Option<String> {
     loop {
         let line = ui.prompt_line(prompt).await?;
@@ -190,9 +169,7 @@ async fn prompt_non_empty(ui: &dyn TracesLoginUi, prompt: &str) -> Option<String
     }
 }
 
-/// TS the manual-key path: `dialog.showProgress("Checking Prime Agent
-/// trace access...")` + `checkPrimeAgentTracesAccess`, with the thrown
-/// denial mapped to the flow's error row.
+/// The manual-key path: show progress, check access, and map a denial to the flow's error row.
 async fn manual_login(
     inputs: &TracesLoginInputs<'_>,
     ui: &dyn TracesLoginUi,
@@ -219,8 +196,7 @@ async fn manual_login(
     }
 }
 
-/// TS `completePrimeAgentTracesLogin` + `completeProviderAuthentication`:
-/// store the key and report the TS status row.
+/// Store the key and report the status row.
 fn complete_login(inputs: &TracesLoginInputs<'_>, api_key: &str) -> TraceLoginOutcome {
     let mut auth = AuthStorage::create(inputs.agent_dir);
     auth.set(
@@ -242,10 +218,8 @@ fn complete_login(inputs: &TracesLoginInputs<'_>, api_key: &str) -> TraceLoginOu
     ))
 }
 
-/// The login's inline-panel surface (TS the login dialog renders in the
-/// TUI): the progress lines, the auth URL (with the browser open), and
-/// the paste prompt drive the auth panel through the request channel;
-/// the flow never touches the terminal.
+/// The inline-panel surface: the progress lines, the auth URL, and the paste prompt drive the auth
+/// panel through the request channel.
 struct PanelTracesLoginUi {
     panel: pa_tui::auth_panel::AuthPanelHandle,
 }
@@ -296,10 +270,8 @@ mod tests {
 
     /// A scripted transport: exact URL -> response, in call order; the
     /// served requests land in the log. With `dynamic_generate` (the
-    /// default) the generate POST answers with a fixed challenge and the
-    /// status poll answers pending once, then the encrypted fixture key —
-    /// the flow's poll interval genuinely yields mid-flow, so the armed
-    /// paste wins the race deterministically.
+    /// default) the generate POST answers a fixed challenge, the status poll
+    /// answers pending once then the fixture key — the paste wins the race.
     struct ScriptedHttp {
         queue: Mutex<VecDeque<(String, u16, String)>>,
         dynamic_generate: bool,
@@ -347,17 +319,17 @@ mod tests {
             _api_key: &str,
             _timeout_ms: u64,
         ) -> Pin<Box<dyn Future<Output = Result<PrimeHttpResponse, String>> + Send>> {
-            // The trait's boxed answer is 'static, so the whole read
-            // resolves before the future arms.
+            // The trait's boxed answer is 'static, so the whole read resolves before the future
+            // arms.
             let url = url.to_string();
             self.served.lock().unwrap().push(url.clone());
-            // The cipher stays until the pending answer has been served:
-            // only the result response consumes it.
+            // The cipher stays until the pending answer has been served: only the result response
+            // consumes it.
             let dynamic = self.dynamic_status.lock().unwrap().clone();
             let answer = if url.contains("/api/v1/auth_challenge/status") && dynamic.is_some() {
                 if self.status_pending_once.swap(false, Ordering::SeqCst) {
-                    // The first poll answers pending (the flow sleeps its
-                    // poll interval and yields).
+                    // The first poll answers pending (the flow sleeps its poll interval and
+                    // yields).
                     Ok(PrimeHttpResponse {
                         status: 200,
                         body: r#"{"pending":true}"#.to_string(),
@@ -423,10 +395,8 @@ mod tests {
         }
     }
 
-    /// A scripted UI: the queued paste answers arrive in order (a `None`
-    /// closes the input); progress lines and the auth URL land in the
-    /// log. `wait_forever` holds the paste unanswered (the browser login
-    /// completes instead).
+    /// A scripted UI: the queued paste answers arrive in order (a `None` closes
+    /// the input); progress lines and the auth URL land in the log.
     struct ScriptedUi {
         progress: Mutex<Vec<String>>,
         auth: Mutex<Vec<String>>,
@@ -472,8 +442,7 @@ mod tests {
             prompt: &str,
         ) -> Pin<Box<dyn Future<Output = Option<String>> + Send + '_>> {
             self.prompt_seen.lock().unwrap().push(prompt.to_string());
-            // The answer pops synchronously (a Mutex is not clonable into
-            // the future).
+            // The answer pops synchronously (a Mutex is not clonable into the future).
             let answer = self
                 .pastes
                 .lock()
@@ -513,8 +482,7 @@ mod tests {
     }
 
     #[tokio::test]
-    // The process env must stay stable across the flow's awaits:
-    // the sync env lock is held for the whole test by design.
+    // The env lock is held across awaits by design (the process env must stay stable).
     #[allow(clippy::await_holding_lock)]
     async fn the_cli_candidate_logs_in_without_a_prompt() {
         let _env = env_lock();
@@ -549,7 +517,6 @@ mod tests {
         );
         assert!(auth.is_empty(), "no browser URL on the cli path");
         assert!(prompts.is_empty(), "no paste prompt on the cli path");
-        // The store holds the trace credential.
         let mut storage = AuthStorage::create(&agent);
         assert_eq!(
             storage
@@ -560,15 +527,14 @@ mod tests {
     }
 
     #[tokio::test]
-    // The process env must stay stable across the flow's awaits:
-    // the sync env lock is held for the whole test by design.
+    // The env lock is held across awaits by design (the process env must stay stable).
     #[allow(clippy::await_holding_lock)]
     async fn the_manual_key_wins_the_race_and_checks_access() {
         let _env = env_lock();
         std::env::remove_var("PRIME_AGENT_TRACES_BASE_URL");
         let (_dir, agent) = temp_agent();
-        // The browser flow starts (the generate answer arms the prompt),
-        // the pending status poll yields, and the pasted key wins.
+        // The browser flow starts (the generate answer arms the prompt), the pending status poll
+        // yields, and the pasted key wins.
         let http = ScriptedHttp::new(vec![whoami_ok()]);
         let ui = ScriptedUi::new(vec![Some("manual-key".to_string()), None]);
         let ui = Arc::new(ui);
@@ -587,8 +553,7 @@ mod tests {
             ))
         );
         let (progress, _auth, prompts) = ui.logs();
-        // The browser flow starts (its no-cli progress line lands) before
-        // the pasted key overtakes it — both TS dialog progress lines.
+        // The browser flow's progress line lands before the pasted key overtakes it.
         assert_eq!(
             progress,
             vec![
@@ -596,9 +561,7 @@ mod tests {
                 "Checking Prime Agent trace access...".to_string(),
             ]
         );
-        // The prompt is the TS browser companion text.
         assert_eq!(prompts, vec![BROWSER_PROMPT.to_string()]);
-        // The manual key was stored.
         let mut storage = AuthStorage::create(&agent);
         assert_eq!(
             storage
@@ -609,8 +572,7 @@ mod tests {
     }
 
     #[tokio::test]
-    // The process env must stay stable across the flow's awaits:
-    // the sync env lock is held for the whole test by design.
+    // The env lock is held across awaits by design (the process env must stay stable).
     #[allow(clippy::await_holding_lock)]
     async fn the_browser_login_completes_when_the_prompt_never_answers() {
         let _env = env_lock();
@@ -648,15 +610,14 @@ mod tests {
     }
 
     #[tokio::test]
-    // The process env must stay stable across the flow's awaits:
-    // the sync env lock is held for the whole test by design.
+    // The env lock is held across awaits by design (the process env must stay stable).
     #[allow(clippy::await_holding_lock)]
     async fn a_denied_manual_key_reports_the_ts_error() {
         let _env = env_lock();
         std::env::remove_var("PRIME_AGENT_TRACES_BASE_URL");
         let (_dir, agent) = temp_agent();
-        // The browser cannot start (the generate answer is down), the
-        // fallback prompt arms, and the pasted key is denied.
+        // The browser cannot start (the generate answer is down), the fallback prompt arms, and the
+        // pasted key is denied.
         let http = ScriptedHttp::without_dynamic(vec![
             (
                 "https://api.primeintellect.ai/api/v1/auth_challenge/generate",
@@ -687,15 +648,14 @@ mod tests {
     }
 
     #[tokio::test]
-    // The process env must stay stable across the flow's awaits:
-    // the sync env lock is held for the whole test by design.
+    // The env lock is held across awaits by design (the process env must stay stable).
     #[allow(clippy::await_holding_lock)]
     async fn a_cancelled_prompt_stays_silent() {
         let _env = env_lock();
         std::env::remove_var("PRIME_AGENT_TRACES_BASE_URL");
         let (_dir, agent) = temp_agent();
-        // The browser flow arms the prompt; the closed input cancels the
-        // login (the pending status poll yields first).
+        // The browser flow arms the prompt; the closed input cancels the login (the pending status
+        // poll yields first).
         let http = ScriptedHttp::new(vec![]);
         let ui = Arc::new(ScriptedUi::new(vec![None]));
         let inputs = TracesLoginInputs {
@@ -706,21 +666,18 @@ mod tests {
         };
         let outcome = run_traces_login_inner(&inputs, ui.as_ref()).await;
         assert_eq!(outcome, TraceLoginOutcome::Cancelled);
-        // No credential landed.
         let storage = AuthStorage::create(&agent);
         assert!(storage.get_all().get("prime-agent-traces").is_none());
     }
 
     #[tokio::test]
-    // The process env must stay stable across the flow's awaits:
-    // the sync env lock is held for the whole test by design.
+    // The env lock is held across awaits by design (the process env must stay stable).
     #[allow(clippy::await_holding_lock)]
     async fn a_failed_browser_falls_back_to_the_paste_prompt() {
         let _env = env_lock();
         std::env::remove_var("PRIME_AGENT_TRACES_BASE_URL");
         let (_dir, agent) = temp_agent();
-        // The challenge generate endpoint is down (the browser flow
-        // fails before any URL shows).
+        // The challenge generate endpoint is down (the browser flow fails before any URL shows).
         let http = ScriptedHttp::without_dynamic(vec![
             (
                 "https://api.primeintellect.ai/api/v1/auth_challenge/generate",
@@ -742,7 +699,6 @@ mod tests {
         let (progress, _auth, prompts) = ui.logs();
         assert!(progress.contains(&"Browser sign-in unavailable (Failed to generate Prime login challenge: Service Unavailable).".to_string()));
         assert_eq!(prompts, vec![FALLBACK_PROMPT.to_string()]);
-        // The pasted key was stored.
         let mut storage = AuthStorage::create(&agent);
         assert_eq!(
             storage

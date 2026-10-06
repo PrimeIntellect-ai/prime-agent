@@ -134,7 +134,7 @@ pub struct StartCommand {
 /// `region` is deliberately unrepresentable: it is not caller-selectable
 /// for VM sandboxes, so the TS runtime guard becomes a compile-time
 /// exclusion in Rust.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct VmCreateRequest {
     /// Sandbox name; non-empty, at most 100 characters.
     pub name: String,
@@ -174,6 +174,32 @@ pub struct VmCreateRequest {
     /// underscores, or dashes, starting with a letter or digit. The server
     /// returns the same sandbox for repeated creates carrying the same key.
     pub idempotency_key: Option<String>,
+}
+
+impl std::fmt::Debug for VmCreateRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VmCreateRequest")
+            .field("name", &self.name)
+            .field("docker_image", &self.docker_image)
+            .field("cpu_cores", &self.cpu_cores)
+            .field("memory_gb", &self.memory_gb)
+            .field("disk_size_gb", &self.disk_size_gb)
+            .field("gpu_count", &self.gpu_count)
+            .field("gpu_type", &self.gpu_type)
+            .field("start_command", &self.start_command)
+            .field("network_allowlist", &self.network_allowlist)
+            .field("network_denylist", &self.network_denylist)
+            .field("timeout_minutes", &self.timeout_minutes)
+            .field("idle_timeout_minutes", &self.idle_timeout_minutes)
+            .field(
+                "environment_vars",
+                &self.environment_vars.as_ref().map(|_| "[redacted]"),
+            )
+            .field("secrets", &self.secrets.as_ref().map(|_| "[redacted]"))
+            .field("labels", &self.labels)
+            .field("idempotency_key", &self.idempotency_key)
+            .finish()
+    }
 }
 
 /// Wait configuration for [`crate::PrimeSandboxClient::wait_for_running`].

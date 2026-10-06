@@ -1,33 +1,30 @@
 //! The composition root's MCP auth flows behind the TUI's
-//! `/mcp login <name>` and `/mcp logout <name>`: resolve the server
-//! through the settings + builtin catalog, run the pa-core OAuth login
-//! against the inline auth panel (the authorization URL block and the
-//! paste fallbacks render in the TUI; the browser launch rides the
-//! request), and persist the endpoint-bound credential in the shared auth
-//! store. The TS interactive client runs the same flow in its own process
-//! (auth-flows.ts `runMcpLogin`) and reloads the session; this build
-//! surfaces the activation state instead (the skill gating resolves at
-//! session build).
+//! `/mcp login <name>` and `/mcp logout <name>` plus the `/mcp` view's
+//! api-key credential flow (`key <name>`): resolve the server through
+//! the settings + builtin catalog, run the pa-core OAuth login against
+//! the inline auth panel (the authorization URL block and the paste
+//! fallbacks render in the TUI; the browser launch rides the request),
+//! and persist the endpoint-bound credential in the shared auth store —
+//! the api-key credentials store their key in the auth slot the runtime
+//! reads (the web-search key). The TS interactive client runs the same
+//! flow in its own process (auth-flows.ts `runMcpLogin`) and reloads the
+//! session; this build surfaces the activation state instead (the skill
+//! gating resolves at session build).
 use std::path::PathBuf;
 use std::pin::Pin;
 
 use anyhow::{anyhow, Context, Result};
 
-use pa_core::auth::AuthStorage;
+use pa_core::auth::{AuthCredential, AuthStorage};
 use pa_core::mcp::{
     McpLoginUi, McpManager, McpManagerOptions, McpServerConfig, OAuthHttp, ReqwestOAuthHttp,
 };
 use pa_tui::auth_panel::{PastePromptTone, PasteStyle};
 use pa_tui::client_auth::{AuthFuture, ClientAuthCommands};
 
-/// The CLI's live MCP manager: the shared auth store, settings-declared
-/// user servers (`mcpServers`), and local service-catalog sources
-/// (`mcpCatalogSources`) all re-read per resolve — the same closures TS
-/// `createAgentSessionServices` wires into every CLI session. No
-/// interactive login: hosts with a login UI call `set_begin_login`
-/// before the session registers host handlers; headless surfaces keep
-/// the host request absent (TS registers `mcp.begin_login` only when a
-/// login is wired).
+/// The CLI's live MCP manager: the shared auth store, `mcpServers`, and
+/// `mcpCatalogSources` all re-read per resolve. No interactive login: hosts with
+/// a login UI call `set_begin_login` before the session registers host handlers.
 pub(crate) fn cli_mcp_manager(cwd: &std::path::Path, agent_dir: &std::path::Path) -> McpManager {
     let user_cwd = cwd.to_path_buf();
     let user_agent_dir = agent_dir.to_path_buf();
@@ -71,7 +68,6 @@ pub(crate) fn cli_mcp_manager(cwd: &std::path::Path, agent_dir: &std::path::Path
     })
 }
 
-/// `/mcp login` / `/mcp logout` against one daemon's shared directories.
 #[derive(Clone)]
 pub struct TerminalMcpAuth {
     cwd: PathBuf,
@@ -86,15 +82,13 @@ impl TerminalMcpAuth {
         }
     }
 
-    /// The manager that resolves integrations the same way the session
-    /// engine's gating does (settings `mcpServers` + the builtin catalog):
-    /// the crate's one live-manager construction.
+    /// The manager that resolves integrations the same way the session engine's
+    /// gating does (settings `mcpServers` + the builtin catalog).
     fn manager(&self) -> McpManager {
         cli_mcp_manager(&self.cwd, &self.agent_dir)
     }
 
-    /// Run one login against an injectable UI/transport (the product uses
-    /// the inline auth panel and the reqwest transport; tests script the
+    /// Run one login against an injectable UI/transport (tests script the
     /// flow).
     async fn login_with(
         &self,
@@ -102,20 +96,16 @@ impl TerminalMcpAuth {
         ui: &dyn McpLoginUi,
         http: &dyn OAuthHttp,
     ) -> Result<String> {
-        // Unknown and non-OAuth servers fail with the TS wording
-        // (`runMcpLogin`'s provider lookup).
+        // Unknown and non-OAuth servers fail with the TS wording.
         let context = self.manager().login_context(server)?;
         context.run(ui, http).await?;
-        // TS: `Connected <name>.` after the post-login reload; the skill
-        // gating here resolves when the next session builds.
+        // `Connected <name>.` (the skill gating resolves at the next
+        // session build).
         Ok(format!(
             "Connected {server}. Its skill activates in new sessions (/new)."
         ))
     }
 
-    /// The login against the inline auth panel (TS `LoginDialogComponent`'s
-    /// surface): progress lines, the authorization URL block, and the
-    /// paste fallbacks render in the TUI; nothing touches the terminal.
     async fn login_inner(
         &self,
         server: &str,
@@ -125,10 +115,8 @@ impl TerminalMcpAuth {
         self.login_with(server, &ui, &ReqwestOAuthHttp::new()).await
     }
 
-    /// The inline paste panel's flow (TS `McpTokenPastePanelComponent`):
-    /// prompt for the ONE credential a pasteable service collects (the
-    /// masked field never renders the secret), store it bound to the
-    /// endpoint, verify.
+    /// The inline paste panel's flow: prompt for the ONE credential a pasteable
+    /// service collects (the masked field never renders the secret).
     async fn paste_inner(
         &self,
         server: &str,
@@ -170,11 +158,48 @@ impl TerminalMcpAuth {
         }
     }
 
+    /// The api-key credential flow (the `/mcp` view's key rows): prompt
+    /// for the ONE key the credential collects (the masked field never
+    /// renders the secret) and store it in the credential's auth slot —
+    /// the exact contract the runtime reads (auth.json's `serper` key,
+    /// the `AuthCredential::ApiKey` form).
+    async fn api_key_inner(
+        &self,
+        credential: &str,
+        panel: pa_tui::auth_panel::AuthPanelHandle,
+    ) -> Result<String> {
+        let label = pa_core::mcp::API_KEY_CREDENTIALS
+            .iter()
+            .find(|(id, _)| *id == credential)
+            .map(|(_, label)| *label)
+            .ok_or_else(|| anyhow!("{credential} is not a known api-key credential."))?;
+        let key = panel
+            .paste_prompt(
+                &format!("Paste the API key for {label}:"),
+                PastePromptTone::Text,
+                PasteStyle::Masked,
+            )
+            .await
+            .filter(|line| !line.is_empty())
+            .ok_or_else(|| anyhow!("Paste cancelled"))?;
+        let mut auth = AuthStorage::create(&self.agent_dir);
+        auth.set(
+            credential,
+            AuthCredential::ApiKey {
+                key,
+                prime_team: None,
+            },
+        );
+        if let Some(error) = auth.drain_errors().pop() {
+            return Err(anyhow!(error)).context("could not save the API key");
+        }
+        Ok(format!("Saved API key for {label}. Web search is ready."))
+    }
+
     fn logout_inner(&self, server: &str) -> Result<String> {
         let provider = format!("mcp:{server}");
         let mut auth = AuthStorage::create(&self.agent_dir);
-        // TS: `isAuthed` reads the store; a missing credential is a no-op
-        // notice, not an error.
+        // A missing credential is a no-op notice, not an error.
         if auth.get_all().get(&provider).is_none() {
             return Ok(format!("{server} is not connected."));
         }
@@ -199,25 +224,28 @@ impl ClientAuthCommands for TerminalMcpAuth {
         Box::pin(async move { auth.paste_inner(&server, panel).await })
     }
 
+    fn api_key(&self, credential: &str, panel: pa_tui::auth_panel::AuthPanelHandle) -> AuthFuture {
+        let (auth, credential) = (self.clone(), credential.to_string());
+        Box::pin(async move { auth.api_key_inner(&credential, panel).await })
+    }
+
     fn logout(&self, server: &str) -> AuthFuture {
         let (auth, server) = (self.clone(), server.to_string());
         Box::pin(async move { auth.logout_inner(&server) })
     }
 }
 
-/// The login's inline-panel surface (TS the OAuth login dialog renders in
-/// the TUI): progress lines, the authorization URL block (the browser
-/// launch rides the request; the panel only renders), and the paste
-/// fallbacks drive the auth panel through the request channel; the flow
-/// never touches the terminal.
+/// The login's inline-panel surface: progress lines, the authorization URL block,
+/// and the paste fallbacks drive the auth panel through the request channel; never
+/// touches the terminal.
 struct PanelMcpLoginUi {
     panel: pa_tui::auth_panel::AuthPanelHandle,
 }
 
 impl McpLoginUi for PanelMcpLoginUi {
     fn on_progress(&self, message: &str) {
-        // TS `showLoginDialog`'s `onProgress` arm is unguarded chatter —
-        // a direct `dialog.showProgress` line: renders on every surface.
+        // Unguarded chatter — a direct progress line: renders on every
+        // surface.
         self.panel.progress_line(message);
     }
 
@@ -264,8 +292,8 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    /// A scripted transport (exact URL -> response), mirroring the pa-core
-    /// login tests' fixture: a plain origin-level authorization server.
+    /// A scripted transport (exact URL -> response): a plain origin-level
+    /// authorization server.
     struct ScriptedHttp(HashMap<String, pa_core::mcp::OAuthHttpResponse>);
 
     impl ScriptedHttp {
@@ -323,8 +351,6 @@ mod tests {
         }
     }
 
-    /// A paste UI that derives the redirect from the authorization URL
-    /// (the pa-core login tests' `PasteUi` shape).
     struct PasteUi {
         auth_url: std::sync::Arc<std::sync::Mutex<String>>,
     }
@@ -410,8 +436,6 @@ mod tests {
         );
         assert_eq!(stored["mcp:fixture"]["clientId"], "fixture-client");
 
-        // A login through the hook path: unknown servers carry the TS
-        // error wording.
         let error = auth
             .login_with("nope", &ui, &http)
             .await
@@ -456,9 +480,81 @@ mod tests {
             stored.get("mcp:linear").is_none(),
             "the credential was removed"
         );
-        // A second logout reports the TS not-connected notice.
         let status = hook.logout_inner("linear")?;
         assert_eq!(status, "linear is not connected.");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn the_api_key_flow_stores_the_exact_runtime_contract() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(&agent_dir)?;
+        let hook = TerminalMcpAuth::new(dir.path().to_path_buf(), agent_dir.clone());
+
+        // The flow prompts (masked) for the key, then stores it.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let panel = pa_tui::auth_panel::AuthPanelHandle::new(tx);
+        let flow = tokio::spawn({
+            let hook = hook.clone();
+            let panel = panel.clone();
+            async move { hook.api_key_inner("serper", panel).await }
+        });
+        let request = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("the paste request sends")
+            .expect("the channel stays open");
+        let pa_tui::auth_panel::AuthPanelRequest::PastePrompt { prompt, reply, .. } = request
+        else {
+            panic!("expected the paste request")
+        };
+        assert_eq!(prompt, "Paste the API key for Serper (web search):");
+        reply
+            .send(Some("the-serper-key".to_string()))
+            .expect("the reply lands");
+        assert_eq!(
+            flow.await.expect("the flow ran")?,
+            "Saved API key for Serper (web search). Web search is ready."
+        );
+
+        // The stored credential is the EXACT contract the websearch runtime
+        // reads: auth.json's `serper` slot, the `api_key` form.
+        let stored: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(agent_dir.join("auth.json")).expect("auth.json"),
+        )?;
+        assert_eq!(stored["serper"]["type"], "api_key");
+        assert_eq!(stored["serper"]["key"], "the-serper-key");
+
+        // An unknown credential keeps its wording.
+        let error = hook
+            .api_key_inner("nope", panel.clone())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "nope is not a known api-key credential.");
+
+        // A cancelled prompt answers the cancel (the stored key stays).
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let panel = pa_tui::auth_panel::AuthPanelHandle::new(tx);
+        let flow = tokio::spawn({
+            let hook = hook.clone();
+            let panel = panel.clone();
+            async move { hook.api_key_inner("serper", panel).await }
+        });
+        let request = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("the paste request sends")
+            .expect("the channel stays open");
+        let pa_tui::auth_panel::AuthPanelRequest::PastePrompt { reply, .. } = request else {
+            panic!("expected the paste request")
+        };
+        reply.send(None).expect("the cancel lands");
+        let error = flow.await.expect("the flow ran").unwrap_err().to_string();
+        assert_eq!(error, "Paste cancelled");
+        let stored: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(agent_dir.join("auth.json")).expect("auth.json"),
+        )?;
+        assert_eq!(stored["serper"]["key"], "the-serper-key");
         Ok(())
     }
 }

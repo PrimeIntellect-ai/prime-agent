@@ -96,6 +96,7 @@ fn clone_error(error: &pa_sandbox::SandboxError) -> pa_sandbox::SandboxError {
     pa_sandbox::SandboxError::network(error.to_string())
 }
 
+#[allow(clippy::needless_pass_by_value)] // Test fixtures own their one-shot JSON bodies.
 fn ok(body: serde_json::Value) -> Reply {
     Reply::Response(TransportResponse {
         status: 200,
@@ -103,6 +104,7 @@ fn ok(body: serde_json::Value) -> Reply {
     })
 }
 
+#[allow(clippy::needless_pass_by_value)] // Test fixtures own their one-shot JSON bodies.
 fn status_reply(status: u16, body: serde_json::Value) -> Reply {
     Reply::Response(TransportResponse {
         status,
@@ -447,7 +449,7 @@ async fn wait_fails_fast_on_terminal_status() {
         .unwrap_err();
     assert_eq!(error.code(), SandboxErrorCode::TerminalStatus);
     let rendered = error.to_string();
-    assert!(rendered.contains("terminal status ERROR"), "{rendered}");
+    assert!(rendered.contains("terminal status ERROR"));
     assert_eq!(
         error.details().unwrap(),
         "ImagePullFailure: image pull failed"
@@ -503,7 +505,7 @@ async fn redirects_surface_as_refused_not_followed() {
     assert_eq!(error.code(), SandboxErrorCode::Http);
     assert_eq!(error.status(), Some(302));
     let rendered = error.to_string();
-    assert!(rendered.contains("refused a redirect"), "{rendered}");
+    assert!(rendered.contains("refused a redirect"));
     assert_eq!(
         transport.recorded().len(),
         1,
@@ -520,7 +522,7 @@ async fn error_details_never_leak_the_api_key() {
     let client = test_client(&transport);
     let error = client.get_sandbox("sb-1").await.unwrap_err();
     let rendered = format!("{error:?}");
-    assert!(!rendered.contains("test-key"), "{rendered}");
+    assert!(!rendered.contains("test-key"));
     assert!(error.details().unwrap().contains("[redacted]"));
 }
 
@@ -578,6 +580,7 @@ async fn construction_validates_the_configuration() {
 }
 
 #[tokio::test]
+#[allow(clippy::float_cmp)] // Exact integer-valued JSON numbers must match the reference profile.
 async fn sandbox_records_match_the_reference_profile() {
     let transport = ScriptedTransport::new(vec![ok(sandbox_wire("RUNNING"))]);
     let client = test_client(&transport);

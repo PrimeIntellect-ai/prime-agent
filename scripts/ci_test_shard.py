@@ -33,11 +33,23 @@ recorded in the shard manifest (JSON) the summary job audits: the union of
 shard manifests must equal the full enumeration, so coverage can never
 silently regress when targets are added or renamed.
 
+The PR smoke gate narrows the selection, never the partition: `--crates
+a,b` restricts the units this wave runs to the named packages' (a PR's
+runtime smoke covers what it touched; the push wave runs the full union —
+main is the authority). The stable crc32 assignment is untouched — a unit
+still lands in exactly one shard of N — so flake attribution stays put and
+the narrow and full runs of a unit are the same leg. Every shard records the
+selection scope in its manifest, and the summary job audits the union
+against the SELECTED set: coverage can never silently regress, and a
+narrowed run can never masquerade as a full one.
+
 Usage (from the repo root, e.g. in ci.yml):
 
   python3 scripts/ci_test_shard.py --shard 2 --total 4 \
       --manifest shard-manifest.json
   python3 scripts/ci_test_shard.py --list   # enumerate + shard assignment
+  python3 scripts/ci_test_shard.py --shard 2 --total 8 --crates pa-tui \
+      --print-selection   # resolve + report the selection, run nothing
 """
 
 from __future__ import annotations
@@ -83,6 +95,10 @@ def _unit_id(package: str, kind: str, name: str | None) -> str:
 
 def shard_of(unit_id: str, total: int) -> int:
     return zlib.crc32(unit_id.encode("utf-8")) % total
+
+
+def _unit_package(unit_id: str) -> str:
+    return unit_id.split("#", 1)[0]
 
 
 def enumerate_units() -> list[dict]:
@@ -177,15 +193,21 @@ def _failed_tests(lines: list[str]) -> list[str]:
 
 
 def write_manifest(path: Path, shard: int, total: int, all_ids: list[str],
-                   results: list[dict]) -> None:
+                   results: list[dict], crates: list[str] | None = None) -> None:
+    selection_ids = [i for i in all_ids
+                     if crates is None or _unit_package(i) in set(crates)]
     manifest = {
         "schema": 1,
         "shard": shard,
         "total": total,
         "all_unit_ids": all_ids,
         "digest": hashlib.sha256("\n".join(all_ids).encode("utf-8")).hexdigest(),
+        "scope": scope_manifest(crates),
+        "selected_unit_ids": selection_ids,
         "units": results,
-        "complete": len(results) == sum(1 for i in all_ids if shard_of(i, total) == shard - 1),
+        # Complete means: every unit this wave SELECTED for this shard ran.
+        "complete": len(results) == sum(1 for i in selection_ids
+                                        if shard_of(i, total) == shard - 1),
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -193,11 +215,14 @@ def write_manifest(path: Path, shard: int, total: int, all_ids: list[str],
     os.replace(tmp, path)
 
 
-def summary_md(shard: int, total: int, results: list[dict]) -> str:
+def summary_md(shard: int, total: int, results: list[dict],
+                crates: list[str] | None = None) -> str:
     failed = [r for r in results if r["rc"] != 0]
+    scope = ("full selection" if crates is None
+             else f"crate selection: {', '.join(crates)}")
     lines = [
         f"### test shard {shard}/{total}",
-        f"- {len(results) - len(failed)}/{len(results)} units green",
+        f"- {len(results) - len(failed)}/{len(results)} units green ({scope})",
     ]
     if failed:
         lines.append(f"- **{len(failed)} failed:**")
@@ -211,22 +236,81 @@ def summary_md(shard: int, total: int, results: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def parse_crates(raw: str | None) -> list[str] | None:
+    """The selection scope: None = the full union; a crate list narrows it."""
+    if raw is None or not raw.strip():
+        return None
+    crates = sorted({name.strip() for name in raw.split(",") if name.strip()})
+    return crates or None
+
+
+def scope_manifest(crates: list[str] | None) -> dict:
+    """The manifest's scope record (the summary audits against it)."""
+    if crates is None:
+        return {"kind": "all"}
+    return {"kind": "crates", "crates": crates}
+
+
+def selected_units(units: list[dict], crates: list[str] | None) -> list[dict]:
+    """The units this wave runs: the full union, or the named crates' subset."""
+    if crates is None:
+        return units
+    return [u for u in units if u["package"] in set(crates)]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--shard", type=int, required=True, help="1-based shard index")
     parser.add_argument("--total", type=int, required=True, help="shard count")
     parser.add_argument("--manifest", type=Path, default=None,
                         help="write the per-shard JSON manifest here")
+    parser.add_argument("--crates", default=None,
+                        help="comma-separated crate names to run (the PR smoke's "
+                             "narrowed selection); omit for the full union")
+    parser.add_argument("--print-selection", action="store_true",
+                        help="resolve + report this shard's selection, run nothing "
+                             "(the wave's conditional bins build reads it)")
     parser.add_argument("--list", action="store_true",
                         help="print the enumeration and shard assignment, run nothing")
     args = parser.parse_args()
     if not 1 <= args.shard <= args.total:
         parser.error("--shard must be in 1..--total")
+    crates = parse_crates(args.crates)
+    if crates is not None and args.list:
+        parser.error("--list enumerates the full workspace; it takes no --crates")
 
     units = enumerate_units()
+    if crates is not None:
+        # Fail closed on a mapping bug: a named package the workspace does
+        # not build would narrow the wave to a silent zero (the selection
+        # cannot name what the enumeration never saw).
+        known = {u["package"] for u in units}
+        unknown = sorted(set(crates) - known)
+        if unknown:
+            parser.error(
+                f"--crates names packages the workspace does not build: "
+                f"{', '.join(unknown)} (known: {', '.join(sorted(known))})")
     all_ids = [u["id"] for u in units]
-    mine = [u for u in units if shard_of(u["id"], args.total) == args.shard - 1]
-    print(f"[shard {args.shard}/{args.total}] {len(mine)}/{len(units)} units")
+    selection = selected_units(units, crates)
+    mine = [u for u in selection if shard_of(u["id"], args.total) == args.shard - 1]
+    if crates is None:
+        print(f"[shard {args.shard}/{args.total}] {len(mine)}/{len(units)} units "
+              "(full selection)")
+    else:
+        print(f"[shard {args.shard}/{args.total}] {len(mine)}/{len(selection)} units "
+              f"(crate selection: {', '.join(crates)}; the full union is {len(units)})")
+
+    if args.print_selection:
+        for u in mine:
+            print(f"  selected: {u['id']}")
+        # The workflow's sibling-binary build reads this (an empty selection
+        # needs no workspace bins): one machine line + the GITHUB_OUTPUT row.
+        print(f"SELECTED={len(mine)}")
+        github_output = os.environ.get("GITHUB_OUTPUT")
+        if github_output:
+            with open(github_output, "a", encoding="utf-8") as handle:
+                handle.write(f"units={len(mine)}\n")
+        return 0
 
     if args.list:
         for u in units:
@@ -243,15 +327,17 @@ def main() -> int:
               f"in {result['seconds']}s")
         results.append(result)
         if args.manifest:
-            write_manifest(args.manifest, args.shard, args.total, all_ids, results)
+            write_manifest(args.manifest, args.shard, args.total, all_ids,
+                           results, crates)
 
     if args.manifest:
-        write_manifest(args.manifest, args.shard, args.total, all_ids, results)
+        write_manifest(args.manifest, args.shard, args.total, all_ids,
+                       results, crates)
     step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if step_summary:
         Path(step_summary).parent.mkdir(parents=True, exist_ok=True)
         with open(step_summary, "a", encoding="utf-8") as f:
-            f.write(summary_md(args.shard, args.total, results) + "\n")
+            f.write(summary_md(args.shard, args.total, results, crates) + "\n")
 
     failed = [r["id"] for r in results if r["rc"] != 0]
     if failed:

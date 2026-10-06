@@ -5,9 +5,8 @@ use std::path::Path;
 
 use super::*;
 
-// Session-read commands over the persisted branch: differential goldens
-// captured from the live TS daemon (protocol 7, schema 28, read-only
-// `get_session_header` / `get_session_stats` against a live session).
+// Differential goldens from the live TS daemon (protocol 7, schema 28:
+// read-only `get_session_header` / `get_session_stats` on a live session).
 #[test]
 fn session_stats_and_header_match_live_daemon_goldens() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -48,8 +47,7 @@ fn session_stats_and_header_match_live_daemon_goldens() {
         .expect("sessionId in create response")
         .to_string();
 
-    // Attach like the lifecycle test: the turn's streamed events go to
-    // attached clients only.
+    // The turn's streamed events go to attached clients only.
     client.send_command(
         "a1",
         &serde_json::json!({ "type": "attach", "activeSessionId": session_id }),
@@ -61,17 +59,13 @@ fn session_stats_and_header_match_live_daemon_goldens() {
         "p1",
         &serde_json::json!({ "type": "prompt", "activeSessionId": session_id, "message": "hi" }),
     );
-    let ack = client.read_response("p1");
+    let (ack, mut turn_lines) = client.read_response_and_lines("p1");
     assert_eq!(ack["success"], true, "prompt failed: {ack}");
-    // Drain the streamed turn until it settles.
-    loop {
-        let line = client.read_line();
-        if line["type"] == "session_event" && line["event"]["type"].as_str() == Some("turn_end") {
-            break;
-        }
-    }
+    // The turn's events may precede the prompt reply (TS order), so the
+    // lines buffered during the ack count toward the drain.
+    client.take_session_event(&mut turn_lines, "turn_end");
 
-    // get_session_header: same key set and header shape as the TS golden:
+    // get_session_header: the TS golden shape
     // {"header": { type, version, id, timestamp, cwd, parentSession?, rlmDepth?, git? }}.
     client.send_command(
         "h1",
@@ -130,27 +124,13 @@ fn session_stats_and_header_match_live_daemon_goldens() {
     assert_eq!(data["tokens"]["cacheRead"], 0);
     assert_eq!(data["tokens"]["cacheWrite"], 0);
     assert_eq!(data["tokens"]["total"], 128);
-    // The deliberate TS delta: the full-session total the top bar shows
-    // (the whole gap-bridged branch's cumulative spend, subagents
-    // included). The scripted turn's spend is the whole session here, so
-    // it equals the active `cost`.
-    assert_eq!(data["totalCost"], 0.0);
-    // The title's own/subagent split: no attributed child spend in this
-    // scripted turn, so the own half carries the whole bill and the
-    // subagent aggregate is zero.
-    assert_eq!(data["ownCost"], 0.0);
-    assert_eq!(data["subagentsCost"], 0.0);
     let stats_keys: Vec<&str> = data
         .as_object()
         .expect("stats object")
         .keys()
         .map(String::as_str)
         .collect();
-    // TS `SessionStats` key order (sessionFile, sessionId, userMessages,
-    // assistantMessages, toolCalls, toolResults, totalMessages, tokens,
-    // cost) with this port's `totalCost` plus the title split
-    // (`ownCost`, `subagentsCost`) appended after `cost`: the JSON map
-    // preserves insertion order.
+    // TS `SessionStats` key order: the JSON map preserves insertion order.
     assert_eq!(
         stats_keys,
         vec![
@@ -163,13 +143,9 @@ fn session_stats_and_header_match_live_daemon_goldens() {
             "totalMessages",
             "tokens",
             "cost",
-            "totalCost",
-            "ownCost",
-            "subagentsCost",
         ]
     );
 
-    // Unknown active session selector fails with the TS error string.
     client.send_command(
         "h2",
         &serde_json::json!({ "type": "get_session_stats", "activeSessionId": "nope" }),

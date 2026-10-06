@@ -1,12 +1,6 @@
-//! The daemon-reconnect concern (TS #2458): a window that survived a daemon
-//! restart reports it version-honestly — when the restarted daemon is NEWER
-//! than this window's binary, the recovered row says so instead of
-//! pretending the window is updated.
-//!
-//! [`RecoveryKind`] names the full reconnect drivers the interactive loop
-//! arms (the §10.2 update resume, the unexpected-loss hiccup window, and
-//! TS #2458's announced non-update closing), so the reattach banner and the
-//! window's expiry row follow the flow that owns the recovery.
+//! The daemon-reconnect concern (TS #2458): a window that survived a
+//! daemon restart reports it version-honestly — when the restarted daemon
+//! is NEWER than this window's binary, the recovered row says so.
 
 use crate::chat::StatusKind;
 
@@ -14,28 +8,26 @@ use crate::chat::StatusKind;
 /// decides the reattach banner and the expiry row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RecoveryKind {
-    /// Spec §10: an update restart's resume contract — the daemon is
-    /// coming back by design inside the 10-minute §10.2 window, and the
-    /// reattach paints the update banner.
+    /// Spec §10: an update restart's resume contract — the daemon is coming
+    /// back by design inside the 10-minute §10.2 window; the reattach paints
+    /// the update banner.
     Update,
     /// An unexpected connection loss with no notice: a daemon hiccup —
     /// same driver window, its own expiry row.
     Lost,
-    /// TS #2458 `reconnectAfterShutdown`: the daemon announced a
-    /// non-update closing (`daemon_closing` without an update). The pane
-    /// waits bounded for it to come back on the same socket path and
-    /// never relaunches it (an explicit stop stays stopped); the expiry
-    /// is the saved-transcript close.
+    /// TS #2458 `reconnectAfterShutdown`: the daemon announced a non-update
+    /// closing. The pane waits bounded for it to come back on the same socket
+    /// path and never relaunches it (an explicit stop stays stopped); the
+    /// expiry is the saved-transcript close.
     Shutdown,
 }
 
 /// TS #2458 `formatDaemonReconnectBanner`: the row a recovered window
 /// shows. `daemon_version` is the restarted daemon's hello `appVersion`
-/// (`None` when the daemon did not report one); `client_version` is this
-/// window's binary. The row is version-honest: a daemon NEWER than this
-/// window names the mismatch — the user restarts the window to pick the
-/// update up — while an older or unorderable daemon reports without the
-/// advice (restarting this window would pick up nothing).
+/// (`None` when unreported). The row is version-honest: a daemon NEWER
+/// than this window names the mismatch — the user restarts the window to
+/// pick the update up — while an older or unorderable daemon reports
+/// without the advice.
 pub(crate) fn reconnect_banner(
     daemon_version: Option<&str>,
     client_version: &str,
@@ -60,10 +52,9 @@ pub(crate) fn reconnect_banner(
     (message, StatusKind::Info)
 }
 
-/// TS `isDaemonVersionNewer`: the numeric version prefixes order segment
-/// by segment; a numeric-equal release outranks the client's own
-/// prerelease (semver: "1.2.3" > "1.2.3-beta.1"), so a prerelease window
-/// still gets the restart advice.
+/// The numeric version prefixes order segment by segment; a numeric-equal
+/// release outranks the client's own prerelease (semver: "1.2.3" >
+/// "1.2.3-beta.1"), so a prerelease window still gets the restart advice.
 fn is_daemon_version_newer(daemon_version: &str, client_version: &str) -> bool {
     let daemon = parse_numeric_version_prefix(daemon_version);
     let client = parse_numeric_version_prefix(client_version);
@@ -77,14 +68,14 @@ fn is_daemon_version_newer(daemon_version: &str, client_version: &str) -> bool {
     !has_prerelease_suffix(daemon_version) && has_prerelease_suffix(client_version)
 }
 
-/// TS `splitVersionSegments`: the dot- and dash-separated segments of a
-/// version ("1.2.3-beta.1" -> `["1", "2", "3", "beta", "1"]`).
+/// The dot- and dash-separated segments of a version ("1.2.3-beta.1" ->
+/// `["1", "2", "3", "beta", "1"]`).
 fn split_version_segments(value: &str) -> Vec<&str> {
     value.split(['.', '-']).collect()
 }
 
-/// TS `parseNumericVersionPrefix`: the leading numeric segments; the first
-/// unparseable segment ends the prefix.
+/// The leading numeric segments; the first unparseable segment ends the
+/// prefix.
 fn parse_numeric_version_prefix(value: &str) -> Vec<u64> {
     let mut segments = Vec::new();
     for segment in split_version_segments(value) {
@@ -96,8 +87,8 @@ fn parse_numeric_version_prefix(value: &str) -> Vec<u64> {
     segments
 }
 
-/// TS `hasPrereleaseSuffix`: whether the version continues past its
-/// numeric prefix with a prerelease suffix.
+/// Whether the version continues past its numeric prefix with a
+/// prerelease suffix.
 fn has_prerelease_suffix(value: &str) -> bool {
     let segments = split_version_segments(value);
     let prefix_len = parse_numeric_version_prefix(value).len();
@@ -108,8 +99,8 @@ fn has_prerelease_suffix(value: &str) -> bool {
 mod tests {
     use super::*;
 
-    /// The TS #2458 banner table (interactive-update-relaunch.test.ts),
-    /// verbatim: the recovered window's row is version-honest.
+    /// The TS #2458 banner table, verbatim: the recovered window's row is
+    /// version-honest.
     #[test]
     fn the_banner_table_is_the_ts_table() {
         assert_eq!(
@@ -140,21 +131,18 @@ mod tests {
         );
     }
 
-    /// TS `isDaemonVersionNewer`: numeric-prefix ordering with the semver
-    /// prerelease rule (a release outranks its own prereleases).
+    /// TS `isDaemonVersionNewer`: numeric-prefix ordering with the semver prerelease rule.
     #[test]
     fn the_version_order_follows_the_ts_rules() {
         assert!(is_daemon_version_newer("2.0.0", "1.2.3"));
         assert!(!is_daemon_version_newer("1.2.2", "1.2.3"));
-        // A missing segment reads as zero: 1.2 < 1.2.1.
         assert!(is_daemon_version_newer("1.2.1", "1.2"));
-        // Numeric-equal releases order by the prerelease suffix alone.
         assert!(is_daemon_version_newer("1.2.3", "1.2.3-beta.1"));
         assert!(!is_daemon_version_newer("1.2.3-beta.1", "1.2.3"));
         assert!(!is_daemon_version_newer("1.2.3-beta.2", "1.2.3-beta.10"));
         assert!(!is_daemon_version_newer("1.2.3-beta.1", "1.2.3-beta.2"));
-        // An unparseable version has an empty prefix: it reads as all
-        // zeros, so a real release orders above it but never below.
+        // An unparseable version has an empty prefix: it reads as all zeros, so a real release
+        // orders above it but never below.
         assert!(!is_daemon_version_newer("dev", "0.1.0"));
         assert!(is_daemon_version_newer("0.1.0", "dev"));
     }

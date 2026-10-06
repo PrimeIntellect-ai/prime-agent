@@ -15,17 +15,34 @@ deny:
 	cargo deny --all-features --workspace check advisories licenses
 
 # Windows cfg-hygiene gate: cross-target check +
-# clippy at -D warnings for every crate and test. Fails loudly when the
+# clippy at -D warnings for every crate and test, the local mirror of the
+# ci.yml windows-cross job (.github/workflows/ci.yml). Fails loudly when the
 # target is missing instead of silently skipping the gate.
 windows-cross:
 	@rustup target list --installed | grep -q x86_64-pc-windows-gnu || { echo "x86_64-pc-windows-gnu target not installed (rustup target add x86_64-pc-windows-gnu)"; exit 1; }
 	cargo check --workspace --target x86_64-pc-windows-gnu --all-targets
 	cargo clippy --workspace --target x86_64-pc-windows-gnu --all-targets -- -D warnings
 
-# Lints the live workflow files (.github/workflows/).
+# Windows MSVC cross-check: the release target's own triple (release.yml's
+# build-windows job builds x86_64-pc-windows-msvc natively on windows-2022;
+# this gate type-checks the same target from a linux host). The check form
+# needs MSVC-side C tooling for the native build scripts (ring): cargo-xwin
+# wraps the build with the MSVC CRT + clang-cl/llvm-lib, so the gate fails
+# loudly when cargo-xwin (or the llvm tools) is missing instead of silently
+# skipping. The gnu gate above stays the cheap cfg-hygiene mirror; the
+# authoritative msvc build runs on the windows runner.
+windows-msvc-cross:
+	@rustup target list --installed | grep -q x86_64-pc-windows-msvc || { echo "x86_64-pc-windows-msvc target not installed (rustup target add x86_64-pc-windows-msvc)"; exit 1; }
+	@command -v cargo-xwin >/dev/null 2>&1 || { echo "cargo-xwin not installed (cargo install cargo-xwin --locked; it provisions the MSVC CRT + expects clang-cl/llvm-lib on PATH)"; exit 1; }
+	cargo xwin check --workspace --target x86_64-pc-windows-msvc --all-targets
+
+# Lints every workflow file (.github/workflows/ is the one home for
+# workflow files).
 actionlint:
 	@command -v actionlint >/dev/null 2>&1 || { echo "actionlint not installed (see rhysd/actionlint releases)"; exit 1; }
-	actionlint .github/workflows/ci.yml .github/workflows/continuous.yml .github/workflows/release.yml
+	actionlint .github/workflows/ci.yml .github/workflows/codebase-health.yml .github/workflows/contribution-gate.yml \
+		.github/workflows/continuous.yml .github/workflows/release.yml .github/workflows/windows-runtime-triage.yml \
+		.github/workflows/release-prepare.yml .github/workflows/nightly.yml
 
 # GLIBC baseline gate (the continuous.yml/release.yml build-gnu jobs): a
 # GNU/Linux artifact must not require symbols above GLIBC_2.35, the Ubuntu
@@ -48,14 +65,6 @@ glibc-gate:
 			echo "binary requires $${max_glibc}, above the GLIBC_2.35 (Ubuntu 22.04) baseline" >&2; exit 1; \
 		fi \
 		;; esac
-
-# Perf wave + regression gate (benchmark.yml job, the local mirror): runs the
-# TS binary and a fresh release build side by side in a fresh Prime sandbox
-# (both sides on one quiet machine, the methodology BENCHMARKS.md requires)
-# and gates the rust medians against scripts/battery/perf-baseline.json.
-# PA_BENCH_NO_SANDBOX=1 runs it on the bare runner instead.
-perf-wave:
-	scripts/battery/ci_perf_wave.sh
 
 # Local mirror of the release build-job gates:
 # release build against the committed lockfile, deterministic tarball assembly,
@@ -156,4 +165,26 @@ package:
 catalog-assets-gates:
 	python3 scripts/release/test_catalog_assets.py
 
-.PHONY: check deny windows-cross actionlint perf-wave glibc-gate release-dry-run continuous-dry-run audit-build package catalog-assets catalog-assets-fixture catalog-assets-gates
+# The changelog fold's contract battery (RELEASE-FLOW-PROPOSAL.md §8): the
+# fold is the release-PR's changelog half, and the pathspec security case is
+# first - a fragment NAME is data, never a git pathspec, so no root-level
+# markdown file can ever become a fold deletion candidate.
+fold-gates:
+	python3 scripts/release/test_fold_changelog.py
+
+# The consume route's restamp battery (release.yml's beta channel): the
+# continuous artifacts restamped to the beta version keep the built bytes
+# and carry the release shape - the provenance case is first (a foreign
+# commit's artifacts are refused).
+restamp-gates:
+	python3 scripts/release/test_restamp.py
+
+# The CI shard tooling's contract battery (ci.yml's PR smoke): the stable
+# crc32 assignment under the narrowed selection, the scope-aware summary
+# audit, the selection resolver the conditional bins build reads, and the
+# fail-safe PR-files mapping the changes job feeds it.
+shard-gates:
+	python3 scripts/test_ci_test_shard.py
+	python3 scripts/test_ci_pr_crates.py
+
+.PHONY: check deny windows-cross actionlint glibc-gate release-dry-run continuous-dry-run audit-build package catalog-assets catalog-assets-fixture catalog-assets-gates fold-gates restamp-gates shard-gates

@@ -1,21 +1,15 @@
-//! Compact-session recent-state-anchor selection (moved with its concern):
-//! the newest kept-tail assistant text the history summary anchors on,
-//! tail-truncated to the bound.
+//! Compact-session recent-state-anchor selection: the newest kept-tail
+//! assistant text the history summary anchors on, tail-truncated to
+//! the bound.
 use super::{message_from_entry, AgentMessage, FileEntry};
 
-/// Maximum characters kept from the retained tail for the recency anchor
-/// (TS #2385 `RECENT_STATE_ANCHOR_MAX_CHARS`). The end of a message holds
-/// the newest state, so long text keeps its tail.
+/// Maximum characters kept from the retained tail for the recency anchor:
+/// the end of a message holds the newest state, so long text keeps its tail.
 const RECENT_STATE_ANCHOR_MAX_CHARS: usize = 2_000;
 
-/// Extract the newest retained assistant text — the recency anchor (TS
-/// #2385 `extractRecentStateAnchor`) — from the kept tail
-/// `[kept_start, kept_end)`: scanning newest-first, the first assistant
-/// message whose text blocks join to non-empty trimmed text wins; a longer
-/// text keeps its tail. Compaction entries and harness digests are never
-/// anchor candidates ([`message_from_entry`] drops them, mirroring TS
-/// `getMessageFromEntryForCompaction`); assistants without text (tool-call
-/// or thinking-only) skip until a text-bearing one is found.
+/// Extract the newest retained assistant text from the kept tail
+/// `[kept_start, kept_end)`: newest-first, the first assistant whose joined
+/// text blocks trim to non-empty wins; compaction/digest rows never qualify.
 pub(super) fn extract_recent_state_anchor(
     entries: &[FileEntry],
     kept_start: usize,

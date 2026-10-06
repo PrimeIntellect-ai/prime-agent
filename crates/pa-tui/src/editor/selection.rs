@@ -1,12 +1,11 @@
 //! Editor selection: the shift+arrow families, select-all, and the
-//! selection-consuming edits (typing/backspace replace the selection like
-//! every standard editor).
+//! selection-consuming edits.
 //!
-//! SANCTIONED DIVERGENCE from TS (operator ask 2026-09-24, documented per
-//! the #289 precedent): the TS editor has no selection model at all — its
-//! `tui.input.copy` arm returns without acting. The selection here spans
-//! the anchor (`selection_anchor`) to the cursor; rendering highlights it
-//! (view.rs), edits delete it before inserting, and undo/redo carry it.
+//! SANCTIONED DIVERGENCE from TS (operator ask 2026-09-24): the TS editor
+//! has no selection model at all — its `tui.input.copy` arm returns
+//! without acting. The selection spans the anchor (`selection_anchor`)
+//! to the cursor; rendering highlights it (view.rs), edits delete it
+//! before inserting, and undo/redo carry it.
 
 use super::text_utils::{char_at, char_prefix, char_suffix};
 #[cfg(test)]
@@ -15,10 +14,9 @@ use super::{Editor, EditorEvent, LastAction};
 
 impl Editor {
     /// A selection is active: the anchor plus cursor produce a non-empty
-    /// range after the hidden-prefix clamp. An anchor whose span the clamp
-    /// floors away (a cursor parked inside the bang prefix) is a phantom
-    /// the editor treats as no selection at all — every consumer gates on
-    /// this, so no stale anchor can wedge Backspace or the insert path.
+    /// range after the hidden-prefix clamp. An anchor the clamp floors away
+    /// is a phantom the editor treats as no selection — every consumer gates
+    /// on this.
     #[must_use]
     pub fn has_selection(&self) -> bool {
         self.selection_anchor.is_some_and(|anchor| {
@@ -81,9 +79,8 @@ impl Editor {
     /// anchors at the cursor, later ones keep the anchor.
     fn extend_selection(&mut self, motion: fn(&mut Editor)) {
         if self.selection_anchor.is_none() {
-            // The anchor floors at the hidden bang prefix (the cursor
-            // itself never sits below it, but the anchor is what
-            // remove_selection splices from).
+            // The anchor floors at the hidden bang prefix (the anchor is what remove_selection
+            // splices from).
             let col = self.cursor_col.max(self.line_start_col(self.cursor_line));
             self.selection_anchor = Some((self.cursor_line, col));
         }
@@ -144,8 +141,7 @@ impl Editor {
     }
 
     /// Select the whole text (macOS `Cmd+A` / editors' select-all): the
-    /// anchor at the first character (past any hidden bang prefix), the
-    /// cursor at the end.
+    /// anchor past any hidden bang prefix, the cursor at the end.
     pub(crate) fn select_all(&mut self) {
         self.last_action = None;
         let anchor = (0, self.line_start_col(0));
@@ -154,9 +150,8 @@ impl Editor {
         self.selection_anchor = Some(anchor);
         self.cursor_line = last;
         self.set_cursor_col(col);
-        // A prompt with nothing selectable (an empty prompt, or a bare
-        // hidden `!` prefix) must not leave a zero-span anchor behind:
-        // the next select motion would keep extending from it instead of
+        // A prompt with nothing selectable must not leave a zero-span anchor
+        // behind: the next select motion would keep extending from it instead of
         // anchoring at the cursor.
         if !self.has_selection() {
             self.selection_anchor = None;
@@ -238,10 +233,10 @@ impl Editor {
         } else {
             self.cursor_col.max(line_start + 1)
         };
-        // The snapshot is taken BEFORE the swap (undo/redo round-trips the
-        // pre-swap state, selection included), and the selection collapses
-        // only when the swap actually applies: a stale anchor would cover
-        // different text than the highlight shows.
+        // The snapshot is taken BEFORE the swap (undo round-trips the pre-swap
+        // state, selection included), and the selection collapses only when the
+        // swap applies: a stale anchor would cover different text than the
+        // highlight shows.
         self.push_undo_snapshot();
         self.selection_anchor = None;
         let head = char_prefix(&line, col - 1);
@@ -263,8 +258,6 @@ mod tests {
         Editor::new()
     }
 
-    /// `shift+left` twice selects two characters; typing replaces the
-    /// selection as one undo step.
     #[test]
     fn shift_right_selects_and_typing_replaces() {
         let mut e = ed();
@@ -278,17 +271,14 @@ mod tests {
         e.handle_input("Z");
         assert_eq!(e.get_text(), "abcdZ");
         assert!(!e.has_selection());
-        // One undo restores the whole original text.
         e.handle_input("ctrl+-");
         assert_eq!(e.get_text(), "abcdef");
     }
 
-    /// Backspacing a selection deletes it (the selection, not one char).
     #[test]
     fn backspace_deletes_the_selection() {
         let mut e = ed();
         e.set_text("hello world");
-        // Select the word `world` backwards from the end.
         e.move_to_doc_end();
         e.handle_input("shift+alt+left");
         assert_eq!(e.selection_text().as_deref(), Some("world"));
@@ -298,7 +288,6 @@ mod tests {
         assert_eq!(e.get_text(), "hello world");
     }
 
-    /// A plain motion collapses the selection (shift+left, then plain left).
     #[test]
     fn plain_motion_collapses_the_selection() {
         let mut e = ed();
@@ -310,7 +299,6 @@ mod tests {
         assert!(!e.has_selection());
     }
 
-    /// Shift+home extends to the line start; shift+end to the line end.
     #[test]
     fn shift_home_and_end_select_the_line() {
         let mut e = ed();
@@ -325,7 +313,6 @@ mod tests {
         assert_eq!(e.selection_text().as_deref(), Some("one two"));
     }
 
-    /// Word selection extends across a word and punctuation.
     #[test]
     fn shift_word_selections() {
         let mut e = ed();
@@ -339,14 +326,12 @@ mod tests {
         assert_eq!(e.selection_text().as_deref(), Some(", the bug"));
     }
 
-    /// Selection across lines: shift+up from the second line's end
-    /// selects through the newline (the sticky column clamps to the
-    /// shorter line above); deleting merges the lines at the selection.
+    /// Selection across lines: shift+up selects through the newline (the
+    /// sticky column clamps to the shorter line above).
     #[test]
     fn multiline_selection_delete_joins_lines() {
         let mut e = ed();
         e.set_text("first line\nsecond line");
-        // Cursor at the end of the second line; select up one line.
         e.move_to_doc_end();
         e.handle_input("shift+up");
         assert_eq!(
@@ -360,8 +345,6 @@ mod tests {
         assert_eq!(e.get_text(), "first line\nsecond line");
     }
 
-    /// Select-all anchors at the first character (the hidden bang prefix
-    /// stays unselected) and the cursor lands at the very end.
     #[test]
     fn select_all_spans_the_whole_text() {
         let mut e = ed();
@@ -372,8 +355,6 @@ mod tests {
         assert_eq!(e.get_text(), "x");
     }
 
-    /// Cut moves the selection onto the kill ring (yank pastes it back)
-    /// and asks the host clipboard for the same text.
     #[test]
     fn cut_selection_feeds_the_kill_ring_and_clipboard() {
         let mut e = ed();
@@ -392,12 +373,10 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(copied, vec!["this"]);
-        // Yank restores it at the cursor.
         e.handle_input("ctrl+y");
         assert_eq!(e.get_text(), "keep drop this");
     }
 
-    /// Copy leaves the buffer untouched and only writes the clipboard.
     #[test]
     fn copy_selection_keeps_the_text() {
         let mut e = ed();
@@ -415,8 +394,6 @@ mod tests {
         ));
     }
 
-    /// Cut without a selection is a consumed no-op (the buffer and the
-    /// clipboard stay untouched).
     #[test]
     fn cut_without_selection_is_a_noop() {
         let mut e = ed();
@@ -427,8 +404,6 @@ mod tests {
         assert!(e.take_events().is_empty());
     }
 
-    /// Undo restores a selection edit and its undo restores the redo
-    /// entry: undo -> redo round-trips the replaced text.
     #[test]
     fn undo_redo_round_trips_a_selection_replace() {
         let mut e = ed();
@@ -443,8 +418,8 @@ mod tests {
         assert_eq!(e.get_text(), "alpha b");
     }
 
-    /// Yank inserts at the cursor: an active selection collapses first, or
-    /// the stale anchor would splice a wrong range on the next keystroke.
+    /// Yank over a selection collapses it first: a stale anchor would splice a wrong range on the
+    /// next keystroke.
     #[test]
     fn yank_collapses_a_stale_selection() {
         let mut e = ed();
@@ -456,8 +431,6 @@ mod tests {
         assert!(e.has_selection());
         e.handle_input("ctrl+y");
         assert!(!e.has_selection(), "yank collapses the stale selection");
-        // The selection moved the cursor to the line start, so the yanked
-        // word inserts there (a stale anchor would splice `keep ` away).
         assert_eq!(e.get_text(), "dropkeep ");
         // Typing after a yank never replaces a stale range (the cursor
         // sits after the yanked word).
@@ -465,8 +438,6 @@ mod tests {
         assert_eq!(e.get_text(), "drop!keep ");
     }
 
-    /// An empty paste payload (control-only bytes) is a full no-op: the
-    /// selection, the text, and the undo stack stay untouched.
     #[test]
     fn an_empty_paste_with_a_selection_is_a_noop() {
         let mut e = ed();
@@ -482,8 +453,8 @@ mod tests {
         assert!(e.take_events().is_empty(), "no change event fired");
     }
 
-    /// Transpose collapses a selection before swapping (the swap moves the
-    /// cursor, which would strand the old anchor on different text).
+    /// Transpose collapses a selection before swapping: the swap moves the cursor, which would
+    /// strand the old anchor on different text.
     #[test]
     fn transpose_collapses_the_selection() {
         let mut e = ed();
@@ -494,18 +465,13 @@ mod tests {
         assert!(e.has_selection());
         e.handle_input("ctrl+t");
         assert!(!e.has_selection(), "transpose collapses the selection");
-        // The selection left the cursor at col 1: transpose swaps the a/b
-        // pair around it.
         assert_eq!(e.get_text(), "badc");
     }
 
-    /// The selection anchor floors at the hidden bang prefix: extending
-    /// from the prompt's start can never select or delete the prefix.
     #[test]
     fn selection_anchor_never_covers_the_hidden_prefix() {
         let mut e = ed();
         e.set_text("!cmd");
-        // Cursor at the protected start of the bang line.
         e.set_cursor_for_tests(0, e.line_start_col(0));
         e.handle_input("shift+right");
         e.handle_input("shift+right");
@@ -514,16 +480,13 @@ mod tests {
             panic!("selection expected");
         };
         assert_eq!((line, col), (0, 1), "the anchor sits past the prefix");
-        // Replacing the selection keeps the prefix (the selection's tail
-        // stays: `cm` replaced by `X` leaves the trailing `d`).
         e.handle_input("X");
         assert_eq!(e.get_text(), "!Xd", "the bang prefix survived the replace");
         assert_eq!(e.bash_prompt_prefix(), Some("! "));
     }
 
-    /// Transpose over a selection: undo/redo round-trips the WHOLE
-    /// pre-swap state, the selection included (the snapshot is taken
-    /// before the swap collapses it).
+    /// Undo/redo round-trips the WHOLE pre-swap state, the selection included (the snapshot is
+    /// taken before the swap collapses it).
     #[test]
     fn undo_round_trips_a_transposed_selection_state() {
         let mut e = ed();
@@ -535,61 +498,49 @@ mod tests {
         e.handle_input("ctrl+t");
         assert!(!e.has_selection());
         assert_eq!(e.get_text(), "badc");
-        // Undo restores the pre-swap text AND the selection span.
         e.handle_input("ctrl+-");
         assert_eq!(e.get_text(), "abdc");
         assert!(e.has_selection(), "undo restores the selection span");
-        // Redo returns to the transposed, selection-collapsed state.
         e.handle_input("ctrl+shift+z");
         assert_eq!(e.get_text(), "badc");
         assert!(!e.has_selection(), "redo collapses it again");
     }
 
-    /// A cursor parked inside the hidden bang prefix leaves a phantom
-    /// anchor: the clamp floors its range away, and the editor treats it
-    /// as NO selection at all — Backspace falls through to the normal
-    /// single-character delete and typing inserts, instead of a wedged
-    /// selection no-op that swallows keypresses.
+    /// A phantom anchor (a range the clamp floors away) is treated as NO
+    /// selection, instead of a wedged selection no-op that swallows
+    /// keypresses.
     #[test]
     fn a_phantom_selection_inside_the_prefix_is_treated_as_none() {
         let mut e = ed();
         e.set_text("!cmd");
-        // The exact phantom shape: the anchor sits inside the hidden
-        // prefix (column 0) and the cursor on the protected start
-        // (column 1) — the clamp floors the range to empty, so this is
-        // NOT a live selection even though the anchor differs.
+        // The exact phantom shape: the anchor inside the hidden prefix (col 0),
+        // the cursor on the protected start (col 1) — the clamp floors the range
+        // to empty, so this is NOT a live selection.
         e.selection_anchor = Some((0, 0));
         e.set_cursor_for_tests(0, 1);
         assert!(
             !e.has_selection(),
             "the clamped-away span is not a selection"
         );
-        // Backspace falls through to the normal path (a no-op at the
-        // protected prefix — NOT a wedged selection delete that pushes
-        // an undo snapshot and swallows the keypress).
         e.handle_input("backspace");
         assert_eq!(e.get_text(), "!cmd");
-        // Typing inserts instead of replacing a phantom range.
         e.handle_input("X");
         assert_eq!(e.get_text(), "!Xcmd");
     }
 
-    /// A jump landing inside the hidden bang prefix can never seed a
-    /// selection that covers it (the range start floors at the protected
-    /// column).
     #[test]
     fn a_cursor_parked_on_the_bang_prefix_cannot_select_it() {
         let mut e = ed();
         e.set_text("!cmd");
-        // A backward jump finds the raw `!` at column 0 and parks the
-        // cursor there — inside the hidden prefix.
+        // A backward jump finds the raw `!` at column 0 and parks the cursor inside the hidden
+        // prefix.
         e.set_cursor_for_tests(0, 4);
         e.handle_input("ctrl+alt+]");
         e.handle_input("!");
         assert_eq!(e.get_cursor(), (0, 0));
-        // Extending right from inside the prefix: the anchor floors at
-        // the protected column, so the first press yields no selection
-        // and the second selects PAST the prefix.
+        // Extending right from inside the prefix: the anchor floors at the
+        // protected column, so the first press yields no selection and the second
+        // selects PAST the prefix.
         e.handle_input("shift+right");
         assert!(!e.has_selection(), "no zero-span anchor is parked");
         e.handle_input("shift+right");
@@ -601,9 +552,6 @@ mod tests {
         assert_eq!(e.get_text(), "!md", "the prefix itself is never deleted");
     }
 
-    /// A prompt with nothing selectable leaves no zero-span anchor behind
-    /// (Ctrl+Shift+A on an empty prompt, then typing, must not create a
-    /// selection the NEXT keystroke would replace).
     #[test]
     fn select_all_on_an_empty_prompt_leaves_no_stale_anchor() {
         let mut e = ed();
@@ -616,14 +564,12 @@ mod tests {
         assert_eq!(e.get_text(), "ab", "the second keystroke inserts");
     }
 
-    /// Pasting a file path over a forward selection inspects the
-    /// INSERTION point (the selection start), not the live cursor the
-    /// selection leaves behind.
+    /// A file-path paste over a forward selection inspects the INSERTION point (the selection
+    /// start), not the live cursor the selection leaves behind.
     #[test]
     fn a_path_paste_over_a_forward_selection_gets_its_space_from_the_start() {
         let mut e = ed();
         e.set_text("abc def");
-        // Forward selection: cursor at 0 (before the selection), anchor at 3.
         e.set_cursor_for_tests(0, 0);
         e.handle_input("shift+right");
         e.handle_input("shift+right");
@@ -631,13 +577,9 @@ mod tests {
         assert!(e.has_selection());
         let _ = e.take_events();
         e.handle_paste("/tmp/x");
-        // The insertion point is the selection start (col 0), whose
-        // preceding character is nothing — no leading space.
         assert_eq!(e.get_text(), "/tmp/x def");
     }
 
-    /// Paragraph motion into line 0 lands on the protected column (the
-    /// same position Home lands on), never inside or before the prefix.
     #[test]
     fn paragraph_motion_into_the_bang_line_lands_on_the_protected_start() {
         let mut e = ed();
@@ -649,8 +591,6 @@ mod tests {
             (0, e.line_start_col(0)),
             "the cursor lands exactly on the protected start (the Home position)"
         );
-        // The hidden prefix itself is never inside a selection made by
-        // the paragraph family.
         e.set_cursor_for_tests(1, 13);
         e.handle_input("shift+ctrl+up");
         let Some(((line, col), _)) = e.selection_range() else {
@@ -663,22 +603,16 @@ mod tests {
         );
     }
 
-    /// Doc/paragraph selection families reach the buffer edges.
     #[test]
     fn doc_selection_families() {
         let mut e = ed();
         e.set_text("one\n\ntwo");
-        // From the end of line 0, select to the doc start.
         e.move_to_doc_start();
         e.move_to_line_end();
         e.handle_input("shift+ctrl+home");
         assert_eq!(e.selection_text().as_deref(), Some("one"));
-        // The anchor persists: extending to the doc end selects from the
-        // same anchor (line 0's end, so nothing of line 0) through the
-        // buffer end.
         e.handle_input("shift+ctrl+end");
         assert_eq!(e.selection_text().as_deref(), Some("\n\ntwo"));
-        // Anchor at the very start: extend to the doc end selects all.
         e.clear_selection();
         e.move_to_doc_start();
         e.handle_input("shift+ctrl+end");
