@@ -22,6 +22,52 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
+/// The process-local registry of witnessed guard paths currently held by
+/// THIS process: the same-process arm of the takeover protocol. On
+/// macOS/BSD `flock` is per-process (a probe by the holder's own process
+/// succeeds, and closing the probe fd releases the process's locks), so
+/// every `flock` probe this module runs must be CROSS-PROCESS by
+/// construction - the registry answers same-process contention here,
+/// before any probe: the path is in the set exactly while a `LockDir`
+/// witness of this process holds it, and the in-process guard callers
+/// (the daemon's registry re-entrancy) serialize on this set through
+/// their `WouldBlock` retry ladders, the same signal a cross-process
+/// holder produces.
+#[cfg(unix)]
+fn held_by_this_process() -> &'static Mutex<std::collections::HashSet<PathBuf>> {
+    static HELD: std::sync::OnceLock<Mutex<std::collections::HashSet<PathBuf>>> =
+        std::sync::OnceLock::new();
+    HELD.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+/// Same-process contention: the path is registered while a witness of
+/// this process holds it.
+#[cfg(unix)]
+fn locally_held(path: &Path) -> bool {
+    held_by_this_process()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(path)
+}
+
+/// Register a witnessed path as held by this process.
+#[cfg(unix)]
+fn register_locally_held(path: &Path) {
+    held_by_this_process()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(path.to_path_buf());
+}
+
+/// Unregister a witnessed path (any release/abandonment path).
+#[cfg(unix)]
+fn unregister_locally_held(path: &Path) {
+    held_by_this_process()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(path);
+}
+
 /// Minimum staleness threshold, like proper-lockfile's floor.
 const MIN_STALE: Duration = Duration::from_secs(2);
 
@@ -354,6 +400,20 @@ impl LockDir {
     fn acquire_unguarded(path: &Path, stale_after: Duration, witnessed: bool) -> io::Result<Self> {
         let path = path.to_path_buf();
         let stale_after = stale_after.max(MIN_STALE);
+        // Same-process contention first (unix): a witnessed guard already
+        // held by THIS process is answered from the registry - before any
+        // `flock` probe runs - so probes stay cross-process by
+        // construction. The in-process re-entrancy (the daemon's renewal
+        // thread against a guard caller) serializes on this `WouldBlock`
+        // through the caller's retry ladder, exactly like cross-process
+        // contention.
+        #[cfg(unix)]
+        if witnessed && locally_held(&path) {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                format!("Lock file is already being held: {}", path.display()),
+            ));
+        }
         match Self::create(&path) {
             Ok(probe) => Self::acquired(path, probe, witnessed),
             // Only an existing path is a lock collision; any other failure
@@ -418,7 +478,10 @@ impl LockDir {
         // The live-holder witness: an flock on the directory just created,
         // taken while the identity pair is still verifiably ours. A WouldBlock
         // here means the directory changed hands between the probe check and
-        // the flock - the same contention, never an adoption.
+        // the flock - the same contention, never an adoption. The witnessed
+        // path is registered in the process-local set the same moment, so
+        // same-process re-entrancy sees contention BEFORE any probe runs
+        // (the per-process flock platforms - macOS/BSD - stay sound).
         #[cfg(unix)]
         let witness = if witnessed {
             Self::witness_fd(&path)?
@@ -432,6 +495,10 @@ impl LockDir {
             let _ = witnessed;
             None
         };
+        #[cfg(unix)]
+        if witness.is_some() {
+            register_locally_held(&path);
+        }
         Ok(LockDir {
             owned,
             owned_mtime: Mutex::new(probe),
@@ -476,49 +543,34 @@ impl LockDir {
                 }
                 Err(error) => return Err(error),
             };
-            // The flock witness is Linux-only: `flock` is per-open-file-
-            // description there (a second open in the SAME process
-            // conflicts with the first holder's lock - the semantics the
-            // takeover gate and the guarded release rely on), while on
-            // macOS/BSD `flock` is PER-PROCESS (a probe by the holder's
-            // own process succeeds, and closing the probe fd releases
-            // the process's locks - the witness cannot be probed soundly
-            // there; `fcntl` record locks are also per-process and
-            // cannot be taken on a directory). Off-Linux the fd is only
-            // a pinned identity handle, and the takeover/release run the
-            // flock-free protocol (pre-judge, park, parked re-judge,
-            // mtime-ours, identity pair) - which is proper-lockfile's
-            // own protocol AND its own exposure on every platform: a
-            // live but stalled holder whose mtime aged past the
-            // threshold is stale-reclaimed exactly as the TS product
-            // stale-reclaims it (proper-lockfile has no live-holder
-            // protection at all; the displaced holder detects the
-            // foreign lock at its next mtime-ours check and aborts,
-            // fail-closed). The Linux flock gate is the port's hardening
-            // on top of that parity, not a contract the other platforms
-            // can carry.
-            #[cfg(not(target_os = "linux"))]
-            {
-                return Ok(Some(fd.into()));
+            // The flock witness runs on every unix platform. On Linux it is
+            // per-open-file-description (a second open in the SAME process
+            // conflicts with the first holder's lock); on macOS/BSD it is
+            // PER-PROCESS (a probe by the holder's own process succeeds,
+            // and closing the probe fd releases the process's locks). The
+            // per-process platforms are handled by the registry layer:
+            // same-process contention is answered by `locally_held`
+            // BEFORE any probe runs (see `acquire_unguarded`), so every
+            // `flock` this module takes or probes is cross-process by
+            // construction - sound everywhere. The registry also covers
+            // the daemon's in-process guard re-entrancy (the renewal
+            // thread and the guard callers serialize through the
+            // `WouldBlock` ladder on the registered path).
+            //
+            // An open directory fd carries no write state (O_RDONLY), so
+            // the flock is only the witness; it closes with the handle.
+            let held = unsafe { libc::flock(fd.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            if held != 0 {
+                let error = io::Error::last_os_error();
+                return Err(match error.kind() {
+                    io::ErrorKind::WouldBlock => io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        format!("Lock file is already being held: {}", path.display()),
+                    ),
+                    _ => error,
+                });
             }
-            #[cfg(target_os = "linux")]
-            {
-                // An open directory fd carries no write state (O_RDONLY),
-                // so the flock is only the witness; it closes with the
-                // handle.
-                let held = unsafe { libc::flock(fd.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-                if held != 0 {
-                    let error = io::Error::last_os_error();
-                    return Err(match error.kind() {
-                        io::ErrorKind::WouldBlock => io::Error::new(
-                            io::ErrorKind::WouldBlock,
-                            format!("Lock file is already being held: {}", path.display()),
-                        ),
-                        _ => error,
-                    });
-                }
-                Ok(Some(fd.into()))
-            }
+            Ok(Some(fd.into()))
         }
     }
 
@@ -671,7 +723,7 @@ impl LockDir {
         // replaces. The gate's flock attempt resolves the path's CURRENT
         // occupant, and a flock-free incumbent cannot GAIN a live holder
         // in the gate-to-park window (its holder is dead - permanently).
-        #[cfg(target_os = "linux")]
+        #[cfg(unix)]
         {
             if Self::dir_flock_held(path) {
                 return Err(io::Error::new(
@@ -689,7 +741,7 @@ impl LockDir {
         // can replace the incumbent (every rust takeover gates on this
         // flock), so the park below captures exactly the directory the
         // claim verified.
-        #[cfg(target_os = "linux")]
+        #[cfg(unix)]
         let _claim = match Self::claim_occupant(path, stale_after) {
             Ok(claim) => claim,
             // A live occupant under the claim: contention.
@@ -885,7 +937,7 @@ impl LockDir {
     /// steps) restarts the loop too - it exits with the vanished
     /// occupant's retry. The fd is the claim's lifetime: dropped when
     /// the reclaim returns.
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     fn claim_occupant(path: &Path, stale_after: Duration) -> io::Result<std::os::fd::OwnedFd> {
         use std::os::fd::AsRawFd;
         use std::os::unix::fs::MetadataExt;
@@ -944,7 +996,7 @@ impl LockDir {
     /// the lock DIRECTORY (the probe `flock` [`LockDir::witness_fd`] takes
     /// at acquisition). An unopenable path means no witness holder: the
     /// stale judgment alone decides.
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     fn dir_flock_held(path: &Path) -> bool {
         use std::os::unix::io::AsRawFd;
         let Ok(dir) = fs::File::open(path) else {
@@ -1132,6 +1184,10 @@ impl LockDir {
             // own staleness sweep, exactly like the stolen case.
         }
         self.abandon_witness();
+        #[cfg(unix)]
+        {
+            unregister_locally_held(&self.path);
+        }
         std::mem::forget(self);
     }
 
@@ -1156,6 +1212,10 @@ impl LockDir {
     /// released: that would delete the successor's lock.").
     pub fn disarm(mut self) {
         self.abandon_witness();
+        #[cfg(unix)]
+        {
+            unregister_locally_held(&self.path);
+        }
         std::mem::forget(self);
     }
 
@@ -1169,6 +1229,10 @@ impl LockDir {
 impl Drop for LockDir {
     fn drop(&mut self) {
         self.release();
+        #[cfg(unix)]
+        {
+            unregister_locally_held(&self.path);
+        }
     }
 }
 
