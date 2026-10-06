@@ -179,8 +179,6 @@ fn replay_stream() -> pa_tui::session::JsonlSessionStream {
     pa_tui::session::JsonlSessionStream::from_path(&path).expect("replay stream")
 }
 
-/// The route matrix: every route runs once on the probed path and the
-/// parity exit runs once more on the known-terminal path (the direct
 use pa_tui::agents_view::{run_agents_view, AgentsViewOptions, AgentsViewUiMode};
 use pa_tui::interactive::{
     run_interactive, InteractiveOptions, ModelSelection, SessionSelection, UiMode,

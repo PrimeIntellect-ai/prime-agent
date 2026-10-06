@@ -43,22 +43,14 @@ mod recorded_process_tests {
     }
 }
 
-/// The boot the descriptor-adoption pass runs under. An update boot
-/// relaunches kept workers from their descriptors before the roster
-/// restore walks the rows (spec §6 step 2's create-or-adopt order). A
-/// plain startup adopts live workers and revives only genuinely
-/// interrupted ones: a supervisor restart must not mass-revive the
-/// historical idle/completed sessions a TS daemon leaves down (their
-/// clients reopen them lazily through a fresh create).
+/// The boot the descriptor-adoption pass runs under. An update boot relaunches kept
+/// workers before the roster restore walks the rows (spec §6 step 2's create-or-adopt
+/// order). A plain startup revives only genuinely interrupted ones — no mass-revival
+/// of historical idle sessions.
 #[derive(Clone, PartialEq, Eq)]
 pub(super) enum AdoptionBoot {
-    /// Update boot: the roster's kept workers (by worker id) relaunch
-    /// eagerly ahead of the restore pass; busy-at-crash workers revive
-    /// too. Descriptors the update does not keep stay down — the update
-    /// must not revive the sessions a plain boot parked (a reopened
-    /// session file may already have a newer worker). The kept set is
-    /// shared (an `Arc`): one clone per descriptor task, not a deep
-    /// copy of every kept id per task.
+    /// Update boot: the roster's kept workers relaunch eagerly ahead of the restore
+    /// pass; busy-at-crash workers revive too. The kept set is shared (an `Arc`).
     UpdateRoster {
         kept: Arc<std::collections::HashSet<String>>,
     },
@@ -67,8 +59,7 @@ pub(super) enum AdoptionBoot {
 }
 
 /// One descriptor's boot-adoption decision, reported as a count in the
-/// pass's `worker_adoption` event (telemetry: counts only, never session
-/// payload).
+/// pass's `worker_adoption` event (counts only, never session payload).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum AdoptionOutcome {
     /// Live socket adopted (incl. a worker that re-registered before the
@@ -82,14 +73,12 @@ pub(super) enum AdoptionOutcome {
     /// The descriptor carried a durable stop tombstone: the boot re-ran
     /// the stop's finalization instead of adopting or reviving.
     Stopped,
-    /// Adoption or relaunch failed.
     Failed,
 }
 
 impl Supervisor {
-    /// Emit the boot descriptor-adoption pass's `daemon event` (schema v1,
-    /// kind `worker_adoption`): the boot kind and per-outcome counts,
-    /// primitives only — never session payload.
+    /// Emit the boot adoption pass's `worker_adoption` event: the boot kind
+    /// and per-outcome counts, primitives only — never session payload.
     #[allow(clippy::too_many_arguments)]
     fn note_worker_adoption(
         &self,
@@ -113,13 +102,9 @@ impl Supervisor {
         }
     }
 
-    /// Adopt or relaunch persisted workers, concurrently: one dead worker's
-    /// relaunch (create replay) must not delay adopting live sessions. The
-    /// fan-out is capped ([`crate::recovery_pacing::ADOPTION_CONCURRENCY`]):
-    /// a large sessions dir must not turn the pass into a relaunch storm
-    /// that starves the control plane for its whole duration. The pass
-    /// reports its decisions as one `worker_adoption` event (counts only,
-    /// never session payload).
+    /// Adopt or relaunch persisted workers, concurrently: one dead worker's relaunch must
+    /// not delay adopting live sessions; the fan-out is capped at
+    /// [`crate::recovery_pacing::ADOPTION_CONCURRENCY`] to avoid a relaunch storm.
     pub(super) async fn adopt_persisted_workers(self: &Arc<Self>, boot: AdoptionBoot) {
         let descriptors = load_descriptors(&self.descriptor_dir, &self.options.socket_path);
         let adopted_live = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -190,8 +175,7 @@ impl Supervisor {
 
     /// Adopt one persisted worker descriptor. Serialized against worker
     /// self-registration by the per-worker adoption gate: whichever path
-    /// arrives first (descriptor scan or live re-registration) builds the
-    /// roster entry; the other one finds it present.
+    /// arrives first builds the roster entry; the other finds it present.
     async fn adopt_persisted_worker(
         self: &Arc<Self>,
         path: PathBuf,
@@ -226,67 +210,40 @@ impl Supervisor {
         let pid = descriptor.pid;
         let journal_path = PathBuf::from(&descriptor.recovery_journal_path);
         let resident = ResidentWorker::new(worker_id.clone(), descriptor, path);
-        // The durable pending FIRST: a failed identity persist left a side
-        // record beside this descriptor carrying the moved-to identity —
-        // apply it before any routing, relaunch, or revival can act on the
-        // stale record (a revived worker replays the moved-to session's
-        // create path), and retry the record's persist: the repair removes
-        // the side record, a failure arms the resident's pending marker
-        // for the first roster write.
+        // The durable pending FIRST: a failed identity persist left a side record carrying the
+        // moved-to identity — apply it before any routing or revival acts on the stale record.
         self.apply_identity_pending(&resident).await;
-        // The stop tombstone outranks liveness (TS's stop ownership: the
-        // stop was durable intent BEFORE the worker was told): a
-        // supervisor that died between the tombstone and the worker's
-        // shutdown finishes the stop on the next boot — never adopts the
-        // still-reachable worker as healthy (that would drop the stop and
-        // leave the stopped session resident).
+        // The stop tombstone outranks liveness (TS's stop ownership: the stop was durable intent
+        // BEFORE the worker was told): a supervisor that died between the tombstone and the
+        // shutdown finishes the stop on the next boot — never adopts it as healthy.
         if resident.descriptor.lock().await.stop_requested_at.is_some() {
             self.finish_tombstoned_stop(&resident, alive).await;
             return AdoptionOutcome::Stopped;
         }
-        // The adoption answer plus the revival's spawned child, when one
-        // was launched: the monitor must watch the process that actually
-        // runs, never the descriptor's stale pre-restart pid (the
-        // zombie-holder incident: a revived worker was alive and serving
-        // while the monitor polled the dead pid the supervisor replaced,
-        // counted six phantom exits, gave up on the id, and left the live
-        // holder - lease and all - orphaned with every create refused).
+        // The monitor must watch the process that actually runs, never the
+        // descriptor's stale pre-restart pid (a revived worker was once left
+        // orphaned behind a phantom-exit loop while serving live).
         let (result, revived_child) = if alive {
             let adopted = self
                 .connect_worker(&resident, worker_connect_deadline())
                 .await;
             if adopted.is_ok() {
-                // The boot reconciliation (the root-identity seam): the
-                // adopted worker already serves a session this supervisor
-                // has only ever seen through its PERSISTED record — and
-                // the record can name a superseded session (a whole-session
-                // replacement whose identity persist failed before the
-                // restart, or any descriptor the restart re-adopted
-                // mid-flight). Pull the live state BEFORE the routing
-                // opens: the roster write carries the identity follow, so
-                // the descriptor, the persisted record, and the binding
-                // re-bind onto the session the worker actually serves
-                // before a single client route can resolve them. A failed
-                // pull serves the persisted identity (logged) until the
-                // next roster write runs the follow from the live state.
+                // The boot reconciliation: the adopted worker may already serve a superseded
+                // session the persisted record never learned. Pull the live state BEFORE the
+                // routing opens — the roster write carries the identity follow, so the record
+                // and binding re-bind first.
                 if !self.refresh_roster_entry(&resident).await {
-                    // A failed pull is not proof the worker is dead: the
-                    // persisted identity is unreconciled, so the resident
-                    // is quarantined from every identity route until the
-                    // live word lands (a slow pull retries on the
-                    // backoff below; the worker's own roster push or a
-                    // later pull clears the fence). The routing refuses
-                    // (the conservative miss) instead of serving the
-                    // superseded identity.
+                    // A failed pull is not proof the worker is dead: the resident is quarantined
+                    // from every identity route until the live word lands (the routing refuses
+                    // instead of serving the superseded identity).
                     resident.mark_identity_quarantined();
                     self.spawn_identity_reconciliation_retry(&resident);
                     self.log_line(&format!(
                         "session worker {worker_id}: the boot reconciliation pull failed; the resident is quarantined from routing until the live state lands"
                     ));
                 }
-                // The adopted worker's session already exists (its create
-                // ran before the supervisor restart): routed client
-                // commands may reach it immediately.
+                // The adopted worker's session already exists (its create ran before the
+                // supervisor restart): routed client commands may reach it immediately.
                 resident.note_session_ready();
             }
             (adopted, None)
@@ -298,30 +255,18 @@ impl Supervisor {
                 AdoptionBoot::PlainStartup => false,
             };
             if !interrupted && !kept {
-                // Dead worker with no durable busy state — and, on an
-                // update boot, not kept by the update's roster: not
-                // interrupted work. Leave it down (the descriptor stays
-                // on disk, inert) — the session reopens lazily through
-                // the next client create, like a TS supervisor that
-                // parks dead workers instead of reviving them; an
-                // update that did not keep it must not revive it either.
+                // Dead worker with no durable busy state — and, on an update boot, not
+                // kept: leave it down (the descriptor stays on disk); the session reopens
+                // on the next client create.
                 self.log_line(&format!(
                     "session worker {worker_id} was idle at exit; not revived (reopens on the next client open)"
                 ));
                 return AdoptionOutcome::SkippedIdle;
             }
-            // The revival ownership gate: the busy-evidence filter above
-            // answered "did the journal ever prove live work?"; this gate
-            // answers "is that proof still a genuine interruption THIS
-            // boot must heal?" A give-up verdict (lifecycle `failed`), a
-            // stopped session (the #2592 archived belt), a live session
-            // lease held by another worker (this daemon's or another
-            // daemon's, on a shared agent dir), or busy evidence older
-            // than the freshness bound each vetoes the relaunch: the
-            // descriptor stays down and the session reopens through the
-            // next client create. Without the gate a boot re-storms the
-            // same dead slots (stale journals outliving their era) and
-            // resurrects stopped sessions as active workers.
+            // The revival ownership gate: the busy-evidence filter answered "did the journal
+            // ever prove live work?"; this gate answers "is that proof still a genuine
+            // interruption THIS boot must heal?" A give-up, a stopped session, another
+            // worker's lease, or stale evidence vetoes.
             let busy_recorded_at =
                 crate::journal::WorkerRecoveryJournal::latest_busy_recorded_at(&journal_path);
             let gated = resident.descriptor.lock().await;
@@ -339,14 +284,9 @@ impl Supervisor {
                 ));
                 return AdoptionOutcome::SkippedIdle;
             }
-            // Dead worker with journal-proven live work (or a kept
-            // worker on an update boot): relaunch from the durable
-            // create command. The worker rehydrates the session store,
-            // restoring history and the persisted queue snapshot. The
-            // spawned child rides out to the monitor arming below: the
-            // descriptor's pid is the DEAD pre-restart holder, and a
-            // monitor parked on it reports a phantom exit of a process
-            // this very adoption just launched.
+            // Dead worker with journal-proven live work (or a kept worker): relaunch from
+            // the durable create command. The spawned child rides out to the monitor arming
+            // below — the descriptor's pid is the DEAD pre-restart holder.
             match self.relaunch_worker(&resident).await {
                 Ok(child) => (Ok(()), Some(child)),
                 Err(error) => (Err(error), None),
@@ -355,9 +295,8 @@ impl Supervisor {
         let outcome = match result {
             Ok(()) => {
                 self.registry.insert(Arc::clone(&resident)).await;
-                // A live leftover keeps its real pid; a revived worker is
-                // watched through the child handle itself (the pid the
-                // spawn recorded in the descriptor, never the stale one).
+                // A live leftover keeps its real pid; a revived worker is watched through
+                // the child handle itself.
                 match revived_child {
                     Some(child) => {
                         let child_pid = child.id().unwrap_or(0);
@@ -371,12 +310,9 @@ impl Supervisor {
                 }
                 // The adopted worker joins the roster from its live state.
                 self.refresh_roster_entry(&resident).await;
-                // A restore pass that owns this session's roster row can
-                // settle it now (spec §10.4): the per-target waiters attach
-                // to the live worker instead of queueing behind the rest
-                // of the recovery — unless the row still needs its
-                // continuation prompt (§10.5): those waiters wake only
-                // when the pass routes it. No pass, no roster row: a no-op.
+                // A restore pass that owns this session's roster row can settle it now (spec
+                // §10.4): the waiters attach to the live worker instead of queueing behind the
+                // recovery — unless the row still needs its §10.5 continuation prompt.
                 if let Some(session_file) = resident.descriptor.lock().await.session_file.clone() {
                     if let Some(stem) = Path::new(&session_file)
                         .file_stem()
@@ -403,10 +339,9 @@ impl Supervisor {
         outcome
     }
 
-    /// `worker_register`: a session worker presenting its identity (boot
-    /// registration or re-registration after this supervisor restarted).
-    /// The token was issued when the supervisor spawned or adopted the
-    /// worker, so an unknown worker id or a token mismatch is rejected.
+    /// `worker_register`: a session worker presenting its identity (boot registration or
+    /// re-registration after a supervisor restart). The token was issued at spawn or
+    /// adoption, so an unknown id or mismatch is rejected.
     pub(super) async fn handle_worker_register(
         self: &Arc<Self>,
         command_id: &str,
@@ -451,13 +386,9 @@ impl Supervisor {
                 Ok(resident) => resident,
                 Err(error) => {
                     let message = format!("{error:#}");
-                    // The definitive unknown-worker refusal is the one
-                    // registration verdict the box incident left invisible:
-                    // a live worker whose descriptor is gone can never be
-                    // adopted again, and before the self-heal it lingered
-                    // silently, holding its session lease against every
-                    // future resume. The refusal is now observable (log +
-                    // telemetry) and the worker retires on it.
+                    // The definitive unknown-worker refusal is observable (log + telemetry)
+                    // and the worker retires on it: a live worker with no descriptor would
+                    // otherwise hold its lease forever.
                     if message.starts_with(crate::registration::UNKNOWN_SESSION_WORKER_PREFIX) {
                         self.log_line(&format!(
                             "session worker {active_session_id} registration refused (no descriptor on this supervisor); the worker retires and its session file stays resumable"
@@ -468,43 +399,26 @@ impl Supervisor {
                 }
             },
         };
-        // Refresh the durable identity from the live worker (the token was
-        // issued by this supervisor; a mismatch is a rogue registration).
-        // The registration's durable id is optional on the wire: a
-        // re-registering worker that does not report it still owns its
-        // persisted descriptor, whose session-file stem addresses the same
-        // roster row (a fresh create's registration lands before the
-        // create replay assigns the session, so this reads the persisted
-        // path). Both reads share this one lock acquisition - the
-        // create path holds this mutex around its own replay steps, and a
-        // second acquisition here let the two race into a stall.
+        // The registration's durable id is optional on the wire: a re-registering worker
+        // that does not report it still owns its persisted descriptor. Both reads share
+        // this one lock acquisition — a second one let the create path race into a stall.
         let durable_session_id = {
             let mut descriptor = resident.descriptor.lock().await;
             if token.as_str() != descriptor.authentication_token {
                 return fail("Session worker authentication failed");
             }
             let previous_worker_instance_id = descriptor.worker_instance_id.clone();
-            // A REPLACEMENT registration flips the roster's stale-delta
-            // slot to the replacement BEFORE the replacement is exposed
-            // anywhere — the descriptor update below, the persisted
-            // record, the recorded registration: a predecessor's pull or
-            // frame still in flight must already meet the slot naming the
-            // replacement (its own stamp mismatches and drops), never the
-            // predecessor it carries. A same-process re-register (a
-            // dropped supervisor link, a create replay) keeps the slot
-            // untouched — the counter did not restart.
+            // A REPLACEMENT registration flips the roster's stale-delta slot to the replacement
+            // BEFORE it is exposed anywhere: a predecessor's pull or frame still in flight must
+            // meet the slot naming the replacement; a re-register keeps it untouched.
             if previous_worker_instance_id.as_deref() != worker_instance_id.as_deref() {
                 let replacement = worker_instance_id.clone().unwrap_or_default();
                 let mut roster = self.roster.lock().unwrap();
                 roster.note_worker_generation(&resident.worker_id, &replacement);
             }
             descriptor.pid = *pid;
-            // Refresh the identity from the live registrant (TS captures
-            // an identity while the process is known alive): a supervisor
-            // restart re-adopts the worker, and a pid that was recycled in
-            // between must not keep the old holder's identity. An
-            // unobservable start id keeps the previous value (a possibly
-            // live worker is never orphaned on a transient lookup failure).
+            // Refresh the identity from the live registrant: a recycled pid must not keep
+            // the old holder's identity; an unobservable start id keeps the previous value.
             if let Some(start_id) = crate::protocol::process_start_id(*pid as u32) {
                 descriptor.process_start_id = Some(start_id);
             }
@@ -516,10 +430,8 @@ impl Supervisor {
                 descriptor.root_session_id = Some(session_id.clone());
             }
             descriptor.lifecycle = DaemonWorkerLifecycle::Ready;
-            // A (re-)registered worker refreshes its binding: the id stays
-            // addressable with its current durable identity across supervisor
-            // restarts, and a session file this id newly owns supersedes any
-            // earlier binding to it.
+            // A (re-)registered worker refreshes its binding: the id stays addressable
+            // with its current durable identity; a newly owned session file supersedes.
             self.record_session_binding(
                 active_session_id,
                 descriptor.root_session_id.as_deref(),
@@ -545,15 +457,9 @@ impl Supervisor {
             durable_session_id
         };
         let record = self.registry.record_registration(registration).await;
-        // A restore pass that owns this session's roster row can settle it
-        // now (spec §10.4): the live worker serves the row's waiters
-        // without queueing behind the rest of the recovery. Covers the
-        // self-registration that beats the descriptor scan (the adoption
-        // early return) and `adopt_registered_worker` alike; a no-op when
-        // no pass owns the row, and never wakes a row still pending its
-        // §10.5 continuation prompt. The settle lands after the
-        // registration is recorded, so a woken waiter's re-resolve cannot
-        // miss it.
+        // A restore pass that owns this session's roster row can settle it now (spec §10.4).
+        // The settle lands after the registration is recorded, so a woken waiter's
+        // re-resolve cannot miss it.
         if let Some(session_id) = durable_session_id {
             self.restore.settle_adopted(&session_id);
         }
@@ -570,14 +476,9 @@ impl Supervisor {
         // Registration rebuilt the resident: refresh its roster entry from
         // the live worker so the roster reflects the re-registered state.
         self.refresh_roster_entry(&resident).await;
-        // A worker that registers after the boot seed (a supervisor
-        // restart's re-registration, a mid-tree resume, a wakened ledger
-        // child) publishes its passive ledger family in the background:
-        // TS reseeds the family when the worker's first roster snapshot
-        // applies (`applyWorkerRosterSnapshot`), and this port's workers
-        // push only their own summary, so the daemon walks the family
-        // here instead. Registration answers on the client's open path -
-        // the seed never blocks it.
+        // A worker that registers after the boot seed publishes its passive ledger family in
+        // the background: TS reseeds on the worker's first roster snapshot, and this port's
+        // workers push only their own summary, so the daemon walks the family here.
         let family_root = {
             let descriptor = resident.descriptor.lock().await;
             descriptor
@@ -615,22 +516,16 @@ impl Supervisor {
         let content = match std::fs::read_to_string(&descriptor_path) {
             Ok(content) => content,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                // The TS unknown-worker error: this supervisor holds no
-                // descriptor for the identity, so it can never adopt the
-                // registrant. The worker treats the verdict as terminal
-                // (the refused-registration self-heal) and retires
-                // instead of retrying forever.
+                // The TS unknown-worker error: this supervisor holds no descriptor for
+                // the identity, so it can never adopt the registrant, which retires.
                 return Err(anyhow!(
                     "{}: {}",
                     crate::registration::UNKNOWN_SESSION_WORKER_PREFIX,
                     registration.active_session_id
                 ));
             }
-            // An unreadable descriptor is NOT an unknown worker: the
-            // identity exists on disk, and retiring it over a transient
-            // I/O failure (permissions, a torn read) would strand a live
-            // lease holder behind a healable condition. The worker keeps
-            // its backoff loop; the next attempt re-reads the file.
+            // An unreadable descriptor is NOT an unknown worker: the identity exists on disk,
+            // and retiring it over a transient I/O failure would strand a live lease holder.
             Err(error) => {
                 return Err(anyhow!(
                     "descriptor read failed for {}: {error}",
@@ -650,34 +545,16 @@ impl Supervisor {
             descriptor,
             descriptor_path,
         );
-        // The durable pending (the same repair the descriptor adoption
-        // runs): the registration rebuilt the resident from the PERSISTED
-        // record — apply the failed follow's side record before the
-        // routing opens, so the in-memory identity serves the moved-to
-        // session even when the reconciliation pull below fails (the
-        // quarantine fences the routes until the live word lands).
+        // The durable pending (the same repair the descriptor adoption runs): apply the failed
+        // follow's side record before the routing opens, so the moved-to session is served.
         self.apply_identity_pending(&resident).await;
-        // A tombstoned identity is mid-stop (TS `adoptOrRecoverWorker`'s
-        // stopRequestedAt branch): adoption finishes the stop — the
-        // original command forwarded, the variant's finalize belt, the
-        // descriptor retired with the process — and never adopts the
-        // worker as healthy (that would undo the stop and leave the
-        // stopped session held by the leftover process). The refusal is
-        // transient: the worker's next attempt reads the retired
-        // descriptor (or the still-tombstoned one) and converges on the
-        // stop's completion - the definitive verdict once the process is
-        // provably gone.
+        // A tombstoned identity is mid-stop (TS `adoptOrRecoverWorker`'s stopRequestedAt
+        // branch): adoption finishes the stop and never adopts the worker as healthy.
+        // The refusal is transient: the next attempt converges on the stop's completion.
         if resident.descriptor.lock().await.stop_requested_at.is_some() {
-            // The registering process is the identity the stop must
-            // retire: the persisted descriptor still carries the stopped
-            // worker's stale pid, so observing the registrant's live
-            // identity first keeps the retire pass's escalation - and the
-            // descriptor's death - tied to the process that actually
-            // holds the session (TS `adoptOrRecoverWorker` persists the
-            // observed start id after its authenticated connect).
-            // Without this, a replacement registrant's stop would retire
-            // the stale pid, conclude the replacement was gone, and
-            // orphan the live worker as an unadoptable lease holder.
+            // The registering process is the identity the stop must retire: the persisted
+            // descriptor carries the stopped worker's stale pid, so observing the
+            // registrant's live identity keeps the escalation tied to the live process.
             {
                 let mut descriptor = resident.descriptor.lock().await;
                 if descriptor.pid != registration.pid {
@@ -697,22 +574,12 @@ impl Supervisor {
         }
         self.connect_worker(&resident, worker_connect_deadline())
             .await?;
-        // The boot reconciliation (the root-identity seam): registration
-        // rebuilt the resident from the PERSISTED record — and the worker
-        // already serves a whole-session replacement (a fork/switch the
-        // record never learned, or whose identity persist failed before
-        // this restart). Pull the live state BEFORE the resident joins the
-        // registry: the roster write carries the identity follow, so the
-        // descriptor, the persisted record, and the binding re-bind onto
-        // the session the worker actually serves before any client route
-        // can resolve them (the registration block above recorded the
-        // persisted identity — this heals it from the live truth).
+        // The boot reconciliation: registration rebuilt the resident from the PERSISTED record;
+        // the worker may already serve a replacement the record never learned. Pull the live
+        // state BEFORE the resident joins the registry, so the record and binding re-bind first.
         if !self.refresh_roster_entry(&resident).await {
-            // A failed pull is not proof the worker is dead: the persisted
-            // identity is unreconciled, so the resident is quarantined
-            // from every identity route until the live word lands (a slow
-            // pull retries; the worker's own roster push or a later pull
-            // clears the fence).
+            // A failed pull is not proof the worker is dead: the resident is quarantined
+            // from every identity route until the live word lands.
             resident.mark_identity_quarantined();
             self.spawn_identity_reconciliation_retry(&resident);
             self.log_line(&format!(

@@ -1,7 +1,6 @@
 //! Kernel `agent_message`/`agent_observe` controllers for daemon workers:
 //! the supervisor-link family roster, worker-to-worker direct peer delivery
-//! (thin-supervisor stage 3) with the supervisor-routed fallback, and the
-//! wire receipt mapping.
+//! with the supervisor-routed fallback, and the wire receipt mapping.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -16,37 +15,19 @@ use pa_core::session_engine::agent_messaging::{
 
 use crate::supervisor_link::SupervisorLink;
 
-// ---------------------------------------------------------------------------
-// Supervisor-link controllers (kernel agent_message/agent_observe bridges)
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// Durable family edges (the nuclear-family classification)
-// ---------------------------------------------------------------------------
-
 /// One session's durable family identity: the ids its family references it
 /// by, and its recorded parent edge in every identifier form the roster
-/// exposes. Family membership is derived from these edges alone — never
-/// from session names — so a parent-reply reaches its true parent across
-/// worker restarts and storage moves, and a role-addressed send can never
-/// cross families on a name collision.
+/// exposes. Membership derives from these edges alone, never from names.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct FamilyIdentity {
-    /// This session's live active session id.
     pub active_session_id: String,
-    /// This session's persisted session id (the durable uuid).
     pub session_id: Option<String>,
-    /// This session's session-file path.
     pub session_file: Option<String>,
-    /// The parent's live active-session id (subagent sessions).
     pub parent_active_session_id: Option<String>,
-    /// The parent's persisted session id (subagent sessions).
     pub parent_session_id: Option<String>,
-    /// The parent's session-file path (subagent sessions and seeded rows).
     pub parent_session_path: Option<String>,
-    /// This session's RLM depth (roots at 0): the family depth rule reads
-    /// it — a child sits exactly one level down, a sibling at the same
-    /// depth (TS `selectAgentFamily`).
+    /// This session's RLM depth (roots at 0): a child sits exactly one
+    /// level down, a sibling at the same depth (TS `selectAgentFamily`).
     pub rlm_depth: u64,
 }
 
@@ -88,23 +69,20 @@ fn row_str<'a>(row: &'a Value, key: &str) -> Option<&'a str> {
         .filter(|value| !value.is_empty())
 }
 
-/// The row's RLM depth (TS `agent.rlmDepth ?? 0`): a row without the
+/// The row's RLM depth (TS `agent.rlmDepth ?? 0`); a row without the
 /// field sits at the root depth.
 fn row_depth(row: &Value) -> u64 {
     row.get("rlmDepth").and_then(Value::as_u64).unwrap_or(0)
 }
 
-/// A summary's session-file parent edge (TS `familyCatalogEntry`:
-/// `depth > 0 && parentSessionPath`): a depth-0 binding is a root
-/// fork's source, never a parent — the fork stays a root.
+/// A summary's session-file parent edge (TS `familyCatalogEntry`): a
+/// depth-0 binding is a root fork's source, never a parent.
 fn parent_binding(summary: &Value) -> Option<&str> {
     row_str(summary, "parentSessionPath").filter(|_| row_depth(summary) > 0)
 }
 
 /// Whether two session-file paths name the same session: canonical-path
-/// equality first, then the durable session id extracted from the file
-/// name (the storage-root alias — the same session recorded under the
-/// pre-migration root and the migrated root resolves to one parent).
+/// equality first, then the durable session id from the file name.
 pub(crate) fn same_session_file(left: &str, right: &str) -> bool {
     let canonical = |path: &str| {
         crate::lease::canonical_session_path(Path::new(path))
@@ -124,10 +102,8 @@ fn session_file_id(path: &str) -> Option<String> {
     (!stem.is_empty() && uuid::Uuid::parse_str(&stem).is_ok()).then_some(stem)
 }
 
-/// Whether `row` is the parent of the session `identity` describes: the
-/// persisted session id decides first (it survives worker replacements
-/// and storage moves), then the live active id, then the session-file
-/// alias (a passivated parent's seeded row carries only the path).
+/// Whether `row` is the parent of the session `identity` describes: the persisted session
+/// id decides first, then the live active id, then the session-file alias.
 fn row_is_parent(row: &Value, identity: &FamilyIdentity) -> bool {
     if let Some(parent_id) = identity.parent_session_id.as_deref() {
         if row_str(row, "sessionId") == Some(parent_id) {
@@ -140,9 +116,8 @@ fn row_is_parent(row: &Value, identity: &FamilyIdentity) -> bool {
         }
     }
     if let Some(parent_path) = identity.parent_session_path.as_deref() {
-        // The peers roster (`list_agent_peers` -> `agent_peer_summary`)
-        // carries the session file under `sessionPath`; the supervisor's
-        // own roster rows carry `sessionFile`.
+        // The peers roster carries the session file under `sessionPath`;
+        // the supervisor's own roster rows carry `sessionFile`.
         if row_str(row, "sessionFile")
             .or_else(|| row_str(row, "sessionPath"))
             .is_some_and(|file| same_session_file(file, parent_path))
@@ -153,13 +128,9 @@ fn row_is_parent(row: &Value, identity: &FamilyIdentity) -> bool {
     false
 }
 
-/// Whether `row` is a child of the session `identity` describes: the row's
-/// durable parent edge points back at this session by its persisted id,
-/// its live id, or its session file. The spawn-id edges decide on their
-/// own (only spawned children carry them, and a spawn always sits one
-/// level below its parent); a file-bound row must sit exactly one level
-/// down as well — a same-depth binding is a fork of this session, never
-/// its child (TS `selectAgentFamily`).
+/// Whether `row` is a child of the session `identity` describes: the row's durable parent
+/// edge points back at this session. A file-bound row must sit exactly one level down
+/// — a same-depth binding is a fork, never a child (TS `selectAgentFamily`).
 fn row_is_child(row: &Value, identity: &FamilyIdentity) -> bool {
     if identity
         .session_id
@@ -182,22 +153,13 @@ fn row_is_child(row: &Value, identity: &FamilyIdentity) -> bool {
     false
 }
 
-/// Whether `row` is a sibling of the session `identity` describes: for a
-/// subagent, the row's durable parent edge points at the same parent
-/// (persisted id, live id, or session-file alias ([`parent_binding`]);
-/// a file-bound row must also sit at this session's depth (TS
-/// `selectAgentFamily`)); for a top-level session, the row is another
-/// parentless top-level session (root sessions are each other's
-/// family). A resumed subagent file re-opened as a top-level runtime
-/// keeps its parent edge and is not a root sibling.
+/// Whether `row` is a sibling of the session `identity` describes: for a subagent, the
+/// row's durable parent edge points at the same parent; for a top-level session, another
+/// parentless top-level session. A resumed subagent file re-opened top-level is not a root sibling.
 fn row_is_sibling(row: &Value, identity: &FamilyIdentity) -> bool {
     if identity.is_top_level() {
-        // A root session's siblings are the other root sessions: no
-        // recorded parent edge in any form, and not a subagent runtime
-        // (an orphaned subagent row has no durable family at all; a
-        // resumed subagent file re-opened top-level keeps its parent
-        // path and is not a root either). A root fork's depth-0
-        // binding is no parent edge, so it is a root too.
+        // A root session's siblings are the other root sessions: no recorded
+        // parent edge in any form, and not a subagent runtime.
         let subagent_runtime = row_str(row, "runtimeKind").is_some_and(|kind| kind == "subagent");
         return !subagent_runtime
             && row_str(row, "parentSessionId").is_none()
@@ -224,21 +186,11 @@ fn row_is_sibling(row: &Value, identity: &FamilyIdentity) -> bool {
     false
 }
 
-// The kernel agent_message/agent_observe bridge controllers moved to the
-// child modules at the same tree position
-// (agent_messaging::{message,observe}); the re-exports keep the facade's
-// type paths stable (agent_engine.rs's use + the agent-family e2e
-// verifier), the binding exposes the observe family helper to the tests
-// glob. The durable family-edges concern (FamilyIdentity + the row
-// classification) stays facade-resident: both controllers drive it.
 mod message;
 mod observe;
 
 pub use message::LinkAgentMessageController;
 pub(crate) use observe::LinkAgentObserveController;
 
-// The controller test battery moved to the child module at the same tree
-// position (agent_messaging::controller_tests); the #[cfg(test)] decl
-// rides at the facade tail.
 #[cfg(test)]
 mod controller_tests;

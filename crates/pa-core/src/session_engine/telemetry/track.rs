@@ -1,8 +1,7 @@
-//! The one-shot daemon/worker event trackers (moved with their concern):
-//! the `daemon event` and `model refused` one-shot surfaces the supervisor
-//! notes/adoption/sessions and model-allowlist seams call once per lifecycle
-//! event. Counts/categories only, never session payload (the module's
-//! privacy contract).
+//! The one-shot daemon/worker event trackers: the `daemon event` and
+//! `model refused` surfaces the supervisor and model-allowlist seams call
+//! once per lifecycle event. Counts/categories only, never session
+//! payload (the module's privacy contract).
 use super::{base_properties, model_category, provider_category, TelemetryClient, Value};
 
 /// Track the supervision summary (`daemon event`, kind `summary`): the
@@ -29,11 +28,10 @@ pub fn track_daemon_event_summary(
     client.track("daemon event", properties);
 }
 
-/// Track a deleted subagent's durable usage capture (`daemon event`,
-/// kind `deleted_child_usage_captured`): the deletion lifecycle's
-/// adoption backbone — how many tombstoned edges received the usage
-/// amendment that keeps a deleted child's spend billable after its
-/// transcript goes. Source and count only, never the spend values.
+/// Track a deleted subagent's durable usage capture (`daemon event`, kind
+/// `deleted_child_usage_captured`): how many tombstoned edges received the usage amendment
+/// that keeps a deleted child's spend billable after its transcript goes. Source and count
+/// only, never the spend values.
 pub fn track_deleted_child_usage_captured(client: &TelemetryClient, source: &str, count: usize) {
     let mut properties = base_properties("daemon");
     properties.set("kind", Value::from("deleted_child_usage_captured"));
@@ -42,13 +40,9 @@ pub fn track_deleted_child_usage_captured(client: &TelemetryClient, source: &str
     client.track("daemon event", properties);
 }
 
-/// Track a daemon model-allowlist refusal (`model refused`, schema v1):
-/// a daemon model resolution (the `set_model` command, an RLM
-/// spawn/`create_session` resolution, or the worker's startup model chain)
-/// refused a model outside the settings `allowedModels` allowlist.
-/// Categories and surface only — never the refused selector, pattern
-/// content, or session payload (the `daemon event` catalog-refresh rule:
-/// no model ids).
+/// Track a daemon model-allowlist refusal (`model refused`, schema v1): a daemon model
+/// resolution refused a model outside the settings `allowedModels` allowlist. Categories and
+/// surface only — never the refused selector, pattern content, or session payload.
 pub fn track_model_refused(
     client: &TelemetryClient,
     surface: &str,
@@ -74,11 +68,9 @@ pub fn track_sessions_archived(client: &TelemetryClient, count: usize) {
     client.track("daemon event", properties);
 }
 
-/// Track the boot descriptor-adoption pass's `daemon event` (schema v1,
-/// kind `worker_adoption`): the boot kind and per-outcome counts, never
-/// session payload. `skipped_idle` counts the dead descriptors the durable
-/// busy-evidence filter parked (plain boots only; update boots revive every
-/// kept worker ahead of the roster restore).
+/// Track the boot descriptor-adoption pass's `daemon event` (schema v1, kind
+/// `worker_adoption`): the boot kind and per-outcome counts, never session payload.
+/// `skipped_idle` counts the dead descriptors the busy-evidence filter parked.
 pub fn track_worker_adoption(
     client: &TelemetryClient,
     boot: &str,
@@ -99,10 +91,9 @@ pub fn track_worker_adoption(
     client.track("daemon event", properties);
 }
 
-/// Track the live-catalog warm-up settle's `daemon event` (schema v1,
-/// kind `catalog_refresh`): how many models the resolved
-/// no-cold-start chain serves after the daemon's startup refresh. A
-/// count only, never model ids, credentials, or catalog payloads.
+/// Track the live-catalog warm-up settle's `daemon event` (schema v1, kind
+/// `catalog_refresh`): how many models the resolved no-cold-start chain serves after the
+/// startup refresh. A count only, never model ids, credentials, or catalog payloads.
 pub fn track_catalog_refresh(client: &TelemetryClient, count: usize) {
     let mut properties = base_properties("daemon");
     properties.set("kind", Value::from("catalog_refresh"));
@@ -121,10 +112,9 @@ pub fn track_compaction_abort_declared(client: &TelemetryClient) {
     client.track("daemon event", properties);
 }
 
-/// Track the parent-death child close's `daemon event` (schema v1, kind
-/// `worker_children_closed`): how many resident RLM children the
-/// supervisor stopped with a hard-killed parent worker. A count only,
-/// never session payload.
+/// Track the parent-death child close's `daemon event` (kind `worker_children_closed`):
+/// how many resident RLM children the supervisor stopped with a hard-killed parent worker.
+/// A count only, never session payload.
 pub fn track_worker_children_closed(client: &TelemetryClient, count: usize) {
     let mut properties = base_properties("daemon");
     properties.set("kind", Value::from("worker_children_closed"));

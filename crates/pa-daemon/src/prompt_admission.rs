@@ -1,20 +1,8 @@
-//! The prompt-admission surface (protocol breadth wave b9): the
-//! supervisor's cancellation registry for `prompt` / `prompt_and_wait`
-//! (TS `SupervisorPromptAdmission` + the `cancel_prompt_admission`
-//! supervisor arm) and the worker-side admission bookkeeping the
-//! forwarded cancellations read (TS daemon-mode `promptAdmissions`).
-//!
-//! The lifecycle: a prompt carrying `admissionId` registers at dispatch
-//! (the TS parse-time registration; duplicates and empty ids answer the
-//! TS parse errors), the route rewrites the admission id to a
-//! supervisor-scoped one (`supervisor-admission:<uuid>`) and records the
-//! worker, a successful prompt commits the admission (`owned`), and the
-//! admission clears once the route settles. `cancel_prompt_admission`
-//! answers the TS status ladder - `unknown` for an unregistered id,
-//! `cancelled` for a waiting admission (aborting the in-flight prompt
-//! with the TS `Prompt admission was cancelled.` failure), `owned` for a
-//! committed one, and the worker's status for a cancellation racing a
-//! live route.
+//! The prompt-admission surface: the supervisor's cancellation registry
+//! for `prompt` / `prompt_and_wait` and the worker-side admission
+//! bookkeeping. A prompt carrying `admissionId` registers at dispatch and
+//! clears when the route settles; `cancel_prompt_admission` answers the
+//! TS status ladder.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -69,11 +57,8 @@ impl PromptAdmissionTable {
             return Err("admissionId must not be empty".to_string());
         }
         // The registry key joins its halves with NUL, so a NUL in either
-        // half makes the separator ambiguous: an admission id carrying NUL
-        // forges the stale-id cancel's NUL-prefixed suffix match, and a
-        // session id carrying NUL forges a different half-split of the
-        // same exact key. Registered halves stay NUL-free, so every key
-        // carries exactly one NUL and both lookups are unambiguous.
+        // half makes the separator ambiguous (a forged suffix match or a
+        // different half-split of the same key).
         if admission_id.contains('\0') {
             return Err("admissionId must not contain NUL".to_string());
         }
@@ -123,13 +108,8 @@ impl PromptAdmissionTable {
         admissions.get_mut(key).map(f)
     }
 
-    /// Move one admission under a new key (the stale-active-id rebind: a
-    /// cancellation addresses the admission by the session id the client
-    /// currently holds). Returns whether the admission now lives at `to`:
-    /// a missing source is a settled admission and an occupied
-    /// destination stays intact (overwriting would lose a concurrent
-    /// prompt's record), so on `false` the caller keeps addressing the
-    /// entry where it is.
+    /// Move one admission under a new key: `false` when the source is
+    /// settled or the destination is occupied.
     fn rekey(&self, from: &str, to: &str) -> bool {
         if from == to {
             return true;
@@ -151,9 +131,7 @@ impl PromptAdmissionTable {
     }
 
     /// The single admission whose key carries this admission id, when
-    /// exactly one does (the stale-id cancel's last resort: after repeated
-    /// replacements the session half of the key is unknowable, but a
-    /// connection's admission id is its own idempotency key).
+    /// exactly one does (the admission id is its own idempotency key).
     fn sole_key_for_admission_id(&self, admission_id: &str) -> Option<String> {
         if admission_id.is_empty() {
             return None;
@@ -190,10 +168,9 @@ impl PromptAdmissionTable {
     }
 }
 
-/// The admission id a prompt-family command carries (the registration
-/// and route hooks match the same pair). The wire field is the TS
-/// `admissionId`: it rides the command's lossless `rest` map (the
-/// pa-types `PromptInput` predates the camelCase wire spelling).
+/// The admission id a prompt-family command carries (the registration and
+/// route hooks match the same pair). The wire field is the TS
+/// `admissionId`: it rides the command's lossless `rest` map.
 pub(crate) fn input_admission_id(command: &pa_types::daemon::DaemonCommand) -> Option<&str> {
     use pa_types::daemon::DaemonCommand;
     match command {
@@ -207,8 +184,7 @@ pub(crate) fn input_admission_id(command: &pa_types::daemon::DaemonCommand) -> O
 }
 
 impl Supervisor {
-    /// Route one admitted prompt (the TS `forward()` closure in
-    /// `routeClientCommand`): the cancellation checks around the worker
+    /// Route one admitted prompt: the cancellation checks around the worker
     /// round trip, the admission-id rewrite, and the owned commit.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn route_prompt_with_admission(
@@ -242,8 +218,8 @@ impl Supervisor {
             .prompt_admissions
             .with(&key, |admission| admission.worker_admission_id.clone())
         else {
-            // An admission that vanished before the route: the prompt
-            // routes through the generic path (TS `admission undefined`).
+            // An admission that vanished before the route: prompt through
+            // the generic path.
             return self
                 .route_client_command(command, client_id, attached, command_id, type_name, None)
                 .await;
@@ -258,19 +234,15 @@ impl Supervisor {
             match self.registry.resolve(active_session_id).await {
                 Ok(resident) => resident,
                 Err(_) => {
-                    // The stale-active-id rebind (the generic route's
-                    // seam): the admission id stays the client's
-                    // idempotency key across the rebind - the prompt
-                    // failed before it reached any worker, so routing it
-                    // once to the session's current resident delivers
-                    // it exactly once.
+                    // The stale-active-id rebind: the admission id stays the
+                    // idempotency key — the prompt never reached a worker,
+                    // so routing to the current resident is exactly-once.
                     if let Some(resident) = self.binding_target(active_session_id).await {
                         let current = self
                             .rebind_connection(active_session_id, &resident, attached)
                             .await;
-                        // The admission follows the rebind: a
-                        // cancellation by the advertised current id
-                        // must find the in-flight admission.
+                        // The admission follows the rebind: a cancel by the
+                        // advertised current id must find it in flight.
                         let rekeyed = prompt_admission_key(
                             &current,
                             input_admission_id(command).unwrap_or_default(),
@@ -292,7 +264,7 @@ impl Supervisor {
             }
         };
         // A cancellation that landed during the resolution fails the
-        // prompt before it reaches the worker.
+        // prompt first.
         let cancelled = connection
             .prompt_admissions
             .with(&key, |admission| {
@@ -317,17 +289,12 @@ impl Supervisor {
             }
         };
         payload["admissionId"] = json!(worker_admission_id);
-        // A rebind retargets the routed frame to the session's current id.
         if let Some(current) = &rebound_to {
             payload["activeSessionId"] = json!(current);
         }
         // The replacement-aware route: a prompt aimed at a worker being
-        // replaced waits out the replay inside its own budget instead of
-        // bouncing off the worker's require-created gate, and a send that
-        // provably never left the supervisor retries on the next
-        // connection - the admission id stays the idempotency key, so the
-        // prompt still lands exactly once (the generic client route's
-        // contract).
+        // replaced waits out the replay inside its own budget; the
+        // admission id keeps a retried send exactly-once.
         let response = self
             .route_command_ready_typed(
                 &resident,
@@ -340,8 +307,7 @@ impl Supervisor {
         let mut response = match response {
             Ok(response) => response,
             Err(error) => {
-                // The route failed: the admission clears with it (TS
-                // deletes in the finally).
+                // The route failed: the admission clears with it.
                 connection.prompt_admissions.remove(&key);
                 return Self::admission_failure(&command_id, &type_name, &error.to_string());
             }
@@ -351,8 +317,7 @@ impl Supervisor {
                 .prompt_admissions
                 .update(&key, |admission| admission.status = AdmissionStatus::Owned);
         }
-        // The prompt settled: the admission clears (TS `finally`);
-        // a cancel that raced it already recorded its own outcome.
+        // The prompt settled: the admission clears (TS `finally`).
         connection.prompt_admissions.remove(&key);
         response.id = Some(command_id);
         (vec![response_line(&response)], false)
@@ -379,12 +344,9 @@ impl Supervisor {
         };
         let mut key = prompt_admission_key(active_session_id, admission_id);
         if connection.prompt_admissions.with(&key, |_| ()).is_none() {
-            // The stale-active-id rebind: a rebound prompt's admission
-            // moved under the session's current resident id (the same
-            // source the rebind seam re-keyed with), so a cancel still
-            // addressed by the superseded id follows it there. A resident
-            // replaced again mid-flight leaves no resolvable session half;
-            // the admission id alone settles it when it is unambiguous.
+            // The stale-active-id rebind: a cancel addressed by the
+            // superseded id follows the re-keyed admission; when no session
+            // half remains, the admission id alone settles it, unambiguous.
             let mut rebound = None;
             if let Some(resident) = self.binding_target(active_session_id).await {
                 let candidate = prompt_admission_key(&resident.worker_id, admission_id);
@@ -406,8 +368,7 @@ impl Supervisor {
             }
         }
         // A waiting admission with no worker yet cancels outright (the TS
-        // `handleLine` pre-check: the prompt route fails with the TS
-        // cancellation error at its next check).
+        // pre-check: the prompt route fails at its next check).
         connection.prompt_admissions.update(&key, |admission| {
             if admission.status == AdmissionStatus::Waiting && admission.worker_id.is_none() {
                 admission.status = AdmissionStatus::Cancelled;
@@ -426,7 +387,7 @@ impl Supervisor {
             AdmissionStatus::Owned => Self::admission_status(command_id, type_name, "owned"),
             AdmissionStatus::Waiting => {
                 // The route is in flight: forward the cancellation to the
-                // worker with the rewritten ids and map its status.
+                // worker and map its status.
                 let fields = connection.prompt_admissions.with(&key, |admission| {
                     (
                         admission.worker_admission_id.clone(),
@@ -518,10 +479,6 @@ impl Supervisor {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Worker side
-// ---------------------------------------------------------------------------
-
 /// The worker's admission registry: admission id -> status (the TS
 /// daemon-mode `promptAdmissions` map). Shared with the turn runner,
 /// which clears an admitted prompt when its turn settles.
@@ -588,8 +545,7 @@ impl WorkerAdmissions {
 }
 
 impl Worker {
-    /// Register a prompt's admission (the worker-side bookkeeping the
-    /// forwarded cancellations read); the queued item carries the id so
+    /// Register a prompt's admission; the queued item carries the id so
     /// the turn runner can commit it.
     pub(crate) fn register_prompt_admission(&self, admission_id: &str) {
         self.prompt_admissions.register(admission_id);
@@ -670,7 +626,6 @@ mod tests {
         assert!(table.rekey(&old_key, &new_key));
         assert!(table.with(&old_key, |_| ()).is_none());
         assert!(table.with(&new_key, |_| ()).is_some());
-        // A settled (already-removed) admission stays absent.
         table.remove(&new_key);
         assert!(!table.rekey(&new_key, &old_key));
         assert!(table.with(&old_key, |_| ()).is_none());
@@ -683,9 +638,6 @@ mod tests {
         table.register("current-id", "adm-1").expect("register");
         let from = prompt_admission_key("stale-id", "adm-1");
         let to = prompt_admission_key("current-id", "adm-1");
-        // The refusal is reported: the caller keeps addressing the
-        // admission under `from` (the route's cancel/remove stay keyed
-        // there instead of hitting the concurrent prompt's record).
         assert!(!table.rekey(&from, &to));
         assert!(table.with(&from, |_| ()).is_some());
         assert!(table.with(&to, |_| ()).is_some());
@@ -699,8 +651,6 @@ mod tests {
             table.sole_key_for_admission_id("adm-1"),
             Some(prompt_admission_key("sess-a", "adm-1"))
         );
-        // The same admission id under a second session is ambiguous: no
-        // last-resort match.
         table.register("sess-b", "adm-1").expect("register");
         assert_eq!(table.sole_key_for_admission_id("adm-1"), None);
         assert_eq!(table.sole_key_for_admission_id(""), None);
@@ -710,21 +660,17 @@ mod tests {
     fn a_nul_in_either_key_half_is_refused_at_registration() {
         let table = PromptAdmissionTable::default();
         // A NUL in the admission id forges the stale-id cancel's
-        // NUL-prefixed suffix match ("prefix<NUL>target" ends with
-        // "<NUL>target").
+        // NUL-prefixed suffix match.
         assert_eq!(
             table.register("sess-a", "prefix\0target"),
             Err("admissionId must not contain NUL".to_string())
         );
         // A NUL in the session id forges a different half-split of the
-        // same exact key (session "s<NUL>t" + admission "u" builds the
-        // key that session "s" + admission "t<NUL>u" addresses).
+        // same exact key.
         assert_eq!(
             table.register("s\0t", "u"),
             Err("activeSessionId must not contain NUL".to_string())
         );
-        // Both refusals left nothing registered, so neither forged key
-        // exists under any half-split.
         assert!(table.sole_key_for_admission_id("target").is_none());
         assert!(table.sole_key_for_admission_id("t\0u").is_none());
     }

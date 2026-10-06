@@ -1,40 +1,18 @@
-//! End-to-end verifier for the stop/delete lifecycle (the zombie fix):
-//! stopping a session must cancel its goals' continuation paths AND its
-//! scheduled jobs (heartbeats), and no wake pass — the boot re-arm, the
-//! descriptor adoption, the schedule delivery — may revive the stopped
-//! session. The TS contract (daemon-mode `closeSessionOnce("killed")` ->
-//! `cancelScheduledJobsForSession`, the supervisor's
-//! `finalizeArchivedWorkerStop`, `isPersistedCronJobRunnable`,
-//! `collectPassiveScheduledJobs`): a KILLED session's jobs cancel and its
-//! file archives; a CRASHED session's jobs survive and it revives.
-//!
-//! The flow: two faux-scripted sessions over one real daemon — A with an
-//! active goal and a heartbeat (the zombie-orchestrator shape), B with a
-//! heartbeat. A is killed through the wire `kill` (the stop path); both
-//! workers are then hard-crashed with the supervisor (the adoption +
-//! re-arm window), the supervisor restarts, and a tombstoned stop
-//! descriptor for A is planted to prove the interrupted-stop adoption
-//! finishes the stop instead of relaunching the killed worker. B (no
-//! stop) must come back — the wake model survives crashes — while A must
-//! stay dead: no resurrection, no continuation, its jobs cancelled on
-//! disk, its file archived.
-// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
-// the full rationale).
-// Stack-resident futures by design on the daemon's hot paths; boxing the
-// call sites for a lint tick is a perf regression with zero correctness gain.
+//! Stop/delete lifecycle e2e: stopping a session must cancel its goals'
+//! continuation paths and its scheduled jobs, and no wake pass may revive
+//! the stopped session (TS `closeSessionOnce("killed")`); a CRASHED
+//! session's jobs survive and it revives.
+// Stack-resident futures by design on the daemon's hot paths.
 #![allow(clippy::large_futures)]
-// 64-bit-only targets; the narrowing casts sit at OS boundaries
-// (pid/fd/time/size) where the values are bounded by the kernel - the
-// dead-guard expect()s would add panic paths where silent wrap was
-// deliberate.
+// Narrowing casts sit at OS boundaries (pid/fd/time/size) where the kernel
+// bounds the values.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// The fn-length threshold is a style gate, not correctness; the structure
-// campaign owns the god-fn splits as a follow-up.
+// Style gate only, not correctness.
 #![allow(clippy::too_many_lines)]
 // API-shape opinions, not defects; the surfaces are deliberate.
 #![allow(
@@ -101,7 +79,6 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path) -> Supervisor {
     panic!("supervisor socket never appeared");
 }
 
-/// One client connection over the supervisor socket.
 struct Client {
     reader: BufReader<std::os::unix::net::UnixStream>,
     writer: std::os::unix::net::UnixStream,
@@ -164,7 +141,6 @@ impl Client {
         }
     }
 
-    /// The active sessions the supervisor lists (active id + session id).
     fn listed_sessions(&mut self) -> Vec<(String, String)> {
         let response = self.request("list", &json!({ "type": "list" }));
         assert_eq!(response["success"], true, "list failed: {response}");
@@ -186,10 +162,8 @@ impl Client {
     }
 }
 
-/// One faux-scripted session over the daemon: its identities — the active
-/// id (the worker's addressable id) and the durable session id (the
-/// session-file stem and the artifact-partition key, the uuid the create
-/// answers as `sessionId`).
+/// The active id (the worker's addressable id) and the durable session id
+/// (the session-file stem, the uuid the create answers as `sessionId`).
 struct Session {
     agent_dir: PathBuf,
     #[allow(dead_code)]
@@ -250,7 +224,6 @@ impl Session {
             .join("scheduled-jobs.json")
     }
 
-    /// The latest `session_state` status of the session file.
     fn session_state(&self) -> String {
         let mut state = String::new();
         for line in std::fs::read_to_string(self.session_file())
@@ -269,8 +242,8 @@ impl Session {
         state
     }
 
-    /// The session file's `thread_goal_state` custom rows (the durable goal
-    /// record the continuation loop writes).
+    /// The session file's `thread_goal_state` rows (the durable goal record
+    /// the continuation loop writes).
     fn goal_state_rows(&self) -> usize {
         std::fs::read_to_string(self.session_file())
             .expect("session file readable")
@@ -299,13 +272,6 @@ impl Session {
     }
 }
 
-/// A killed session with a goal and a heartbeat stays dead across the
-/// supervisor restart: its scheduled jobs cancel at the kill (durable
-/// store rows), its session file archives, the boot re-arm never wakes
-/// it, the tombstoned-stop adoption finishes the stop instead of
-/// relaunching the killed worker, and its goal record freezes (no
-/// continuation). The crashed sibling (no stop) comes back — the wake
-/// model survives crashes; only the stop kills it.
 #[test]
 fn kill_cancels_goal_and_heartbeat_and_no_wake_revives_the_session() {
     let root = tempfile::TempDir::new().expect("temp dir");
@@ -332,18 +298,14 @@ fn kill_cancels_goal_and_heartbeat_and_no_wake_revives_the_session() {
     )
     .expect("write faux script");
 
-    // The first daemon generation: sessions A (goal + heartbeat) and B
-    // (heartbeat) over one supervisor.
     let supervisor = spawn_supervisor(&socket, &agent_dir);
     let mut client = Client::connect(&socket);
     let a = create_session(&mut client, "c-a", &dir, &agent_dir, &script, "stop-lane-a");
     let b = create_session(&mut client, "c-b", &dir, &agent_dir, &script, "stop-lane-b");
 
-    // A's pre-kill worker descriptor (the `<worker id>.json` record —
-    // the per-worker recovery journal also names the session, so the
-    // match filters the descriptor file itself): the stop path deletes
-    // it at the kill, and the crash-window probe replants it with the
-    // stop tombstone.
+    // A's pre-kill worker descriptor: the recovery journal also names the
+    // session, so the match filters the descriptor file itself. The stop
+    // deletes it at the kill; the crash-window probe replants it tombstoned.
     let (planted_path, planted_content) = {
         let descriptor_dir = pa_daemon::descriptor::descriptor_dir(&agent_dir, &socket);
         let found = std::fs::read_dir(&descriptor_dir)
@@ -361,8 +323,6 @@ fn kill_cancels_goal_and_heartbeat_and_no_wake_revives_the_session() {
     };
     let descriptor_dir = pa_daemon::descriptor::descriptor_dir(&agent_dir, &socket);
 
-    // A: the zombie-orchestrator shape — an active goal plus a
-    // lane-liveness heartbeat.
     let started = client.request(
         "a-goal",
         &json!({
@@ -391,7 +351,6 @@ fn kill_cancels_goal_and_heartbeat_and_no_wake_revives_the_session() {
     );
     assert_eq!(a.job_status().as_deref(), Some("active"));
 
-    // B: the crashed sibling — a heartbeat, no stop.
     let heartbeat = client.request(
         "b-hb",
         &json!({
@@ -407,8 +366,8 @@ fn kill_cancels_goal_and_heartbeat_and_no_wake_revives_the_session() {
     );
     assert_eq!(b.job_status().as_deref(), Some("active"));
 
-    // THE STOP: A dies through the wire kill. Its jobs cancel durably
-    // (TS cancelScheduledJobsForSession) and its file archives.
+    // THE STOP: A dies through the wire kill (TS `cancelScheduledJobsForSession`
+    // cancels durably).
     let killed = client.request(
         "a-kill",
         &json!({ "type": "kill", "activeSessionId": a.active_id }),
@@ -431,11 +390,9 @@ fn kill_cancels_goal_and_heartbeat_and_no_wake_revives_the_session() {
     let goal_rows_at_kill = a.goal_state_rows();
     let file_rows_at_kill = a.file_rows();
 
-    // The crash window: both workers hard-crash with the supervisor, with
-    // A's stop tombstone planted back — a supervisor that died between the
-    // kill reply and the cleanup leaves exactly this descriptor (the
-    // pre-kill capture above, with the tombstone fields the interrupted
-    // stop would have persisted).
+    // The crash window: a supervisor that died between the kill reply and
+    // the cleanup leaves exactly this descriptor (the pre-kill capture,
+    // with the tombstone fields the interrupted stop would have persisted).
     let mut tombstoned: Value =
         serde_json::from_str(&planted_content).expect("A's descriptor json");
     tombstoned["stopRequestedAt"] = json!("2026-09-23T00:00:00.000Z");
@@ -443,10 +400,8 @@ fn kill_cancels_goal_and_heartbeat_and_no_wake_revives_the_session() {
     let planted_content = tombstoned.to_string();
     drop(client);
     drop(supervisor);
-    // Kill every worker process the old generation left behind: B's from
-    // its live descriptor, and A's from the captured pre-kill descriptor
-    // (the stop already deleted the live one, so the capture is the only
-    // place its pid survives).
+    // Kill every leftover worker: A's pid only survives in the captured
+    // pre-kill descriptor (the stop already deleted the live one).
     let mut worker_pids: Vec<u64> = Vec::new();
     if let Some(pid) = tombstoned["pid"].as_u64() {
         worker_pids.push(pid);
@@ -477,7 +432,6 @@ fn kill_cancels_goal_and_heartbeat_and_no_wake_revives_the_session() {
     for pid in worker_pids {
         let _ = Command::new("kill").arg("-9").arg(pid.to_string()).status();
     }
-    // A's stop tombstone is in place for the next boot's adoption scan.
     std::fs::write(&planted_path, planted_content).expect("replant the tombstoned descriptor");
     // An unrelated process can claim the stopped worker's stale socket
     // pathname. Its connectable listener must not make the DEAD descriptor
@@ -487,13 +441,9 @@ fn kill_cancels_goal_and_heartbeat_and_no_wake_revives_the_session() {
     let _silent_impostor = UnixListener::bind(&stopped_socket).expect("bind silent impostor");
     std::fs::remove_file(&socket).ok();
 
-    // The second generation: the adoption scan must finish A's stop (the
-    // tombstone) and relaunch B (the plain crash).
     let supervisor = spawn_supervisor(&socket, &agent_dir);
     let mut client = Client::connect(&socket);
 
-    // The tombstoned stop finishes instead of relaunching: the planted
-    // descriptor goes away.
     let deadline = Instant::now() + Duration::from_secs(20);
     while planted_path.exists() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(100));
@@ -503,8 +453,6 @@ fn kill_cancels_goal_and_heartbeat_and_no_wake_revives_the_session() {
         "the tombstoned stop's adoption never finished (the descriptor survived)"
     );
 
-    // The crashed sibling comes back (the adoption relaunch, or the boot
-    // re-arm waking its due heartbeat): the wake model survives crashes.
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let sessions = client.listed_sessions();
@@ -521,8 +469,8 @@ fn kill_cancels_goal_and_heartbeat_and_no_wake_revives_the_session() {
         std::thread::sleep(Duration::from_millis(200));
     }
 
-    // THE ACCEPTANCE: the killed session never revives across the window
-    // (an active `every 10s` heartbeat would have woken it within the window).
+    // THE ACCEPTANCE: an active `every 10s` heartbeat would have woken the
+    // killed session within this window.
     let window = Instant::now() + Duration::from_secs(12);
     while Instant::now() < window {
         let sessions = client.listed_sessions();
@@ -534,9 +482,6 @@ fn kill_cancels_goal_and_heartbeat_and_no_wake_revives_the_session() {
         );
         std::thread::sleep(Duration::from_millis(500));
     }
-    // No continuation for the stopped session: the goal record froze at
-    // the kill (a revived goal loop would have written more rows), and
-    // no new file rows landed after the kill.
     assert_eq!(
         a.goal_state_rows(),
         goal_rows_at_kill,
@@ -547,7 +492,6 @@ fn kill_cancels_goal_and_heartbeat_and_no_wake_revives_the_session() {
         file_rows_at_kill,
         "the stopped session's file grew after the kill"
     );
-    // The durable cancel + archived state held across the restart.
     assert_eq!(a.job_status().as_deref(), Some("cancelled"));
     assert_eq!(a.session_state(), "archived");
     drop(client);

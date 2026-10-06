@@ -1,12 +1,7 @@
-//! The create-open reuse seam e2e: an open of a session file a live
-//! worker already serves answers the LIVE binding (multi-client attach)
-//! instead of launching a second worker over the same file — a launch the
-//! runtime session lease would reject with `Session is already active`
-//! (Kevin's reproducer: opening a saved session whose worker was already
-//! running). Also covers the lease owner id stamp (the rejection the seam
-//! cannot remove must still name the LIVE worker, never an id inherited
-//! from an ancestor environment) and the dead-worker rebind on the create
-//! path (the #2575 supersede, driven by an open of the superseded file).
+//! The create-open reuse seam e2e: an open of a session file a live worker already
+//! serves answers the LIVE binding instead of launching a second worker over the same
+//! file (Kevin's reproducer). Also covers the lease owner id stamp (must name the LIVE
+//! worker) and the dead-worker rebind (#2575, an open of the superseded file).
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -212,8 +207,7 @@ fn session_file_of(client: &mut Client, id: &str, request_id: &str) -> String {
         .to_string()
 }
 
-/// The active id a create response answered (the summary's `id`, the same
-/// field a pane attaches by).
+/// The active id a create response answered (the summary's `id`, what a pane attaches by).
 fn create_session(client: &mut Client, request_id: &str, config: &Value) -> (String, Value) {
     client.send_command(request_id, &json!({ "type": "create", "config": config }));
     let created = client.read_response(request_id);
@@ -226,10 +220,8 @@ fn create_session(client: &mut Client, request_id: &str, config: &Value) -> (Str
     (id, created)
 }
 
-/// Kevin's reproducer, green: opening a saved session whose worker is
-/// already live answers the LIVE binding (the same active id the first
-/// pane holds) — never `Session is already active` — and the roster keeps
-/// exactly one session for the file.
+/// Kevin's reproducer, green: opening a saved session whose worker is already live
+/// answers the LIVE binding — never `Session is already active`.
 #[test]
 fn create_over_a_live_worker_answers_the_live_binding() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -261,9 +253,7 @@ fn create_over_a_live_worker_answers_the_live_binding() {
         .to_string();
     let session_file = session_file_of(&mut first_pane, &live_id, "s1");
 
-    // The reproducer: a second pane opens the SAME saved session. The
-    // daemon must answer the live binding (an attach), not reject the
-    // create with `Session is already active in <stale id>`.
+    // The reproducer: a second pane opens the SAME saved session (must attach, not reject).
     let mut second_pane = Client::connect(&socket);
     second_pane.send_command(
         "c2",
@@ -288,8 +278,7 @@ fn create_over_a_live_worker_answers_the_live_binding() {
         "the open must answer the LIVE binding's active id"
     );
 
-    // The reused binding routes: the second pane attaches by it and a
-    // prompt runs its turn (multi-client attach, not a zombie id).
+    // The reused binding routes: the second pane attaches by it and a prompt runs its turn.
     second_pane.send_command(
         "a2",
         &json!({ "type": "attach", "activeSessionId": reused_id }),
@@ -324,11 +313,6 @@ fn create_over_a_live_worker_answers_the_live_binding() {
     );
 }
 
-/// The lease owner id is stamped per worker (TS daemon-supervisor mints it
-/// at launch): even a daemon that inherited a stale
-/// `PRIME_AGENT_INTERNAL_SESSION_LEASE_OWNER_ID` from an ancestor writes
-/// leases naming the LIVE worker — so a rejection the reuse seam cannot
-/// remove (a genuinely foreign lease holder) names a real binding.
 #[test]
 fn the_lease_owner_names_the_live_worker_not_a_stale_inherited_id() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -347,11 +331,9 @@ fn the_lease_owner_names_the_live_worker_not_a_stale_inherited_id() {
     let (worker_id, _created) = create_session(&mut client, "c1", &create_config);
     let session_file = session_file_of(&mut client, &worker_id, "s1");
 
-    // The lease the live worker wrote for the session file. The lease key
-    // is a hash of the canonical path, but a file acquired before it
-    // existed is keyed by its raw path (the canonicalize fallback), so the
-    // test locates the lease by the owner's sessionPath instead of
-    // recomputing the key.
+    // The lease the live worker wrote for the session file: a file acquired before it
+    // existed is keyed by its raw path (the canonicalize fallback), so the test
+    // locates the lease by the owner's sessionPath.
     let leases_dir = agent_dir.join("session-leases");
     let owner: Value = std::fs::read_dir(&leases_dir)
         .expect("session-leases directory")
@@ -369,10 +351,8 @@ fn the_lease_owner_names_the_live_worker_not_a_stale_inherited_id() {
     );
 }
 
-/// A stale binding (the file's previous worker is dead) keeps the launch
-/// path: the open of the superseded file succeeds, mints the successor,
-/// and the #2575 supersede re-attaches the old pane (the create-open is
-/// never a bare rejection in this case either).
+/// A stale binding (the file's previous worker is dead) keeps the launch path: the open
+/// succeeds, mints the successor, and the #2575 supersede re-attaches the old pane.
 #[test]
 fn create_over_a_dead_workers_file_launches_and_rebinds() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -403,15 +383,13 @@ fn create_over_a_dead_workers_file_launches_and_rebinds() {
         .to_string();
     let session_file = session_file_of(&mut first_pane, &old_id, "s1");
 
-    // The worker dies (registry entry and descriptor gone): the binding
-    // left behind is stale.
+    // The worker dies (registry entry and descriptor gone): the binding is stale.
     let mut driver = Client::connect(&socket);
     driver.send_command("k1", &json!({ "type": "kill", "activeSessionId": old_id }));
     let killed = driver.read_response("k1");
     assert_eq!(killed["success"], true, "kill failed: {killed}");
 
-    // The open of the superseded file succeeds (the dead holder's lease
-    // is reclaimed) and mints the successor binding.
+    // The open of the superseded file succeeds and mints the successor binding.
     driver.send_command(
         "c2",
         &json!({
@@ -432,8 +410,7 @@ fn create_over_a_dead_workers_file_launches_and_rebinds() {
         .to_string();
     assert_ne!(new_id, old_id, "the successor mints a new active id");
 
-    // The supersede notice reaches the pane still attached to the old id
-    // (the #2575 seam, driven by this create).
+    // The supersede notice reaches the pane still attached to the old id (#2575).
     let binding = first_pane.read_line_of_type("session_binding");
     assert_eq!(binding["previousActiveSessionId"], old_id.as_str());
     assert_ne!(
@@ -444,12 +421,6 @@ fn create_over_a_dead_workers_file_launches_and_rebinds() {
     assert_eq!(binding["sessionFile"].as_str(), Some(session_file.as_str()));
 }
 
-/// The per-file open single-flight (TS `openingWorkers`'s join): two
-/// concurrent creates for the same existing-but-unserved session file must
-/// both succeed and answer the SAME live binding — one launches, the
-/// other waits out the launch and reuses its worker — instead of both
-/// reaching the launch where one loses the runtime session lease and
-/// surfaces `Session is already active`.
 #[test]
 fn concurrent_creates_for_one_file_share_a_single_launch() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -475,8 +446,7 @@ fn concurrent_creates_for_one_file_share_a_single_launch() {
     saved.append_session_state("active");
     saved.rewrite().expect("write the saved session");
 
-    // Two panes open the SAME file concurrently: both requests are in
-    // flight before either answers.
+    // Two panes open the SAME file concurrently: both in flight before either answers.
     let mut first = Client::connect(&socket);
     let mut second = Client::connect(&socket);
     first.send_command(
@@ -518,8 +488,6 @@ fn concurrent_creates_for_one_file_share_a_single_launch() {
         "the concurrent opens must share one live binding (one launch, one reuse)"
     );
 
-    // The shared binding routes: the second pane attaches by it and a
-    // prompt runs its turn.
     second.send_command(
         "a-second",
         &json!({ "type": "attach", "activeSessionId": second_id }),

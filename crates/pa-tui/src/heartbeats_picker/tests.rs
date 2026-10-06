@@ -1,6 +1,4 @@
-//! The `/heartbeats` view's unit battery (moved with its concern): the wire-parse
-//! contract, the columned-list geometry, the detail drill-in, and the natural-language
-//! schedule and countdown vocabulary.
+//! The `/heartbeats` view's unit battery.
 
 use super::*;
 use crate::theme::{ColorMode, Theme};
@@ -81,7 +79,6 @@ fn scoping_keeps_own_and_child_sessions() {
         .expect("agent row");
     agent.job.session_id = "other-session".to_string();
     agent.job.active_session_id = "child-live".to_string();
-    // The agent row belongs to a child session: in scope.
     let scoped = scope_heartbeats(
         all.clone(),
         Some("live-1"),
@@ -89,16 +86,12 @@ fn scoping_keeps_own_and_child_sessions() {
         &["child-live".to_string()],
     );
     assert_eq!(scoped.len(), 2);
-    // Without the child, only the session's own row stays.
     let scoped = scope_heartbeats(all, Some("live-1"), Some("sess-1"), &[]);
     assert_eq!(scoped.len(), 1);
     assert_eq!(scoped[0].job.id, "user-1");
-    // No session identity: nothing shows.
     assert!(scope_heartbeats(entries(), None, None, &[]).is_empty());
 }
 
-/// A carried selection (the dock's chosen heartbeat) opens on that
-/// row; anything else falls back to the first.
 #[test]
 fn a_carried_selection_opens_on_that_row() {
     let catalog = entries();
@@ -112,28 +105,20 @@ fn a_carried_selection_opens_on_that_row() {
     assert_eq!(picker.selected_heartbeat_id.as_deref(), Some("user-1"));
 }
 
-/// The list is a columned table: a dim column header naming the
-/// operator's columns (interval, label, next run, status), the rows
-/// aligned under it, and one bottom hint line — no text blobs.
 #[test]
 fn the_list_renders_columned_rows_and_one_hint() {
     let picker = HeartbeatsPicker::new(entries(), None, None, 24);
     let frame = picker.render(&theme(), 70, &kb());
     let text = frame_text(&frame);
     assert!(text.iter().any(|row| row.contains("Heartbeats")));
-    // The title line carries the status counts in the status colors.
     assert!(text.iter().any(|row| row.contains("1 active · 1 paused")));
-    // The dim column header names the four columns.
     let header = text
         .iter()
         .find(|row| row.contains("Interval") && row.contains("Next run"))
         .expect("a column header row");
     assert!(header.contains("Label"));
     assert!(header.contains("Status"));
-    // The rows align under the columns: the schedule expression, the
-    // label, the next-run countdown, and the status word all ride
-    // one row. The fixture's next run is long past, so the
-    // one-second floor renders ("in 1s").
+    // The fixture's next run is long past, so the one-second floor renders ("in 1s").
     let row = text
         .iter()
         .find(|row| row.contains("every 10m"))
@@ -141,10 +126,7 @@ fn the_list_renders_columned_rows_and_one_hint() {
     assert!(row.contains("tick user-1"));
     assert!(row.contains("in 1s"));
     assert!(row.contains("paused"));
-    // The prompt does not blob into the list: the detail drill-in
-    // owns it.
     assert!(!text.iter().any(|row| row.starts_with("  created")));
-    // Exactly one bottom hint line carries every shortcut.
     assert_eq!(
         text.iter().filter(|row| row.contains("Esc close")).count(),
         1,
@@ -161,9 +143,6 @@ fn the_list_renders_columned_rows_and_one_hint() {
     }
 }
 
-/// An override that empties the open-selected or back binding drops
-/// its key from the list hint (the hint never advertises a key the
-/// handler does not take); the pane's core keys keep their labels.
 #[test]
 fn the_list_hint_drops_unbound_keys() {
     let mut cfg = crate::keybindings::KeybindingsConfig::new();
@@ -190,10 +169,9 @@ fn the_list_hint_drops_unbound_keys() {
     );
 }
 
-/// The table fills the full width of the TUI (the operator's
-/// 2026-09-24 ruling): the selected row's wash spans the whole
-/// terminal width, while the columns keep their content-hug geometry
-/// — the column text never stretches to the edge.
+/// The table fills the full width of the TUI (the operator's 2026-09-24
+/// ruling): the selected row's wash spans the terminal width, the columns
+/// keep their content-hug geometry.
 #[test]
 fn the_table_fills_the_full_width() {
     let picker = HeartbeatsPicker::new(entries(), None, None, 24);
@@ -210,8 +188,6 @@ fn the_table_fills_the_full_width() {
         used, 90,
         "the selected row's wash spans the whole terminal width: {used}"
     );
-    // The columns still hug their content: the label text stops
-    // well short of the edge, the wash fills the rest.
     let plain = frame
         .iter()
         .find(|line| {
@@ -223,12 +199,10 @@ fn the_table_fills_the_full_width() {
     assert!(plain.iter().all(|span| span.style.bg.is_none()));
 }
 
-/// The selected row paints the ONE shared selection style (the
-/// operator's 2026-09-28 consistency rule: the heartbeats selection's
-/// background is IDENTICAL to the agents view's and the shell view's
-/// selected rows and the dock's group band): the hover band's own
-/// color, no modifiers — one style constant
-/// (`Theme::selection_row_style`), not a per-surface copy.
+/// The selected row paints the ONE shared selection style (the operator's
+/// 2026-09-28 consistency rule): the same background as the agents view's
+/// and the shell view's selected rows — `Theme::selection_row_style`, not
+/// a per-surface copy.
 #[test]
 fn the_selected_row_paints_the_shared_selection_style() {
     let theme = theme();
@@ -249,9 +223,9 @@ fn the_selected_row_paints_the_shared_selection_style() {
     );
 }
 
-/// The shortcuts ride the pane's last rows with no rule below them
-/// (the operator's 2026-09-24 /model ruling): one blank line of
-/// spacing rides under the hint, never a `─` divider.
+/// The shortcuts ride the pane's last rows with no rule below them (the
+/// operator's 2026-09-24 /model ruling): one blank line under the hint,
+/// never a `─` divider.
 #[test]
 fn the_footer_is_a_blank_below_the_shortcuts_never_a_rule() {
     let picker = HeartbeatsPicker::new(entries(), None, None, 24);
@@ -267,14 +241,11 @@ fn the_footer_is_a_blank_below_the_shortcuts_never_a_rule() {
         "one blank line rides below the shortcuts: {last:?} ({text:?})"
     );
     assert!(!last.contains("\u{2500}"), "no rule below the hint");
-    // The rows below the hint are exactly one blank (the detail
-    // pane's footer shares the shape).
     assert_eq!(
         text.len() - hint_index - 1,
         1,
         "exactly one blank below the hint: {text:?}"
     );
-    // The pane never renders past its viewport budget.
     assert!(frame.len() <= 24);
     let mut drill = HeartbeatsPicker::new(entries(), None, None, 20);
     drill.handle_key("enter", &kb());
@@ -287,39 +258,30 @@ fn the_footer_is_a_blank_below_the_shortcuts_never_a_rule() {
     );
 }
 
-/// The next-run label is natural language: the exact countdowns and
-/// every unit boundary, anchored on one fixed clock (the label's
-/// `now` comes from the same clock the wire timestamps parse with).
+/// The next-run label is natural language, anchored on one fixed clock (the label's `now` comes
+/// from the same clock the wire timestamps parse with).
 #[test]
 fn the_next_run_label_is_natural_language() {
     let now = crate::agents_view_state::iso_to_unix_ms("2026-06-01T12:00:00.000Z")
         .expect("the base parses") as u64;
     let label = |next_run_at: &str| next_run_label(Some(next_run_at), now);
-    // The operator's examples: "in 45s", "in 5m", "in 10h".
     assert_eq!(label("2026-06-01T12:00:45.000Z"), "in 45s");
     assert_eq!(label("2026-06-01T12:05:00.000Z"), "in 5m");
     assert_eq!(label("2026-06-01T22:00:00.000Z"), "in 10h");
-    // Unit boundaries round up into the next unit (TS
-    // `formatHeartbeatCountdown`): 59.5s and 60s read "in 1m", an
-    // hour reads "in 1h", a day reads "in 1d".
+    // Unit boundaries round up into the next unit.
     assert_eq!(label("2026-06-01T12:00:59.500Z"), "in 1m");
     assert_eq!(label("2026-06-01T12:01:00.000Z"), "in 1m");
     assert_eq!(label("2026-06-01T13:00:00.000Z"), "in 1h");
     assert_eq!(label("2026-06-02T12:00:00.000Z"), "in 1d");
     assert_eq!(label("2026-06-03T12:00:00.000Z"), "in 2d");
-    // A due or overdue run clamps to the one-second floor, never
-    // "in 0s".
     assert_eq!(label("2026-06-01T11:59:30.000Z"), "in 1s");
-    // A missing next run keeps the placeholder; a value the clock
-    // cannot parse renders raw.
     assert_eq!(next_run_label(None, now), "\u{2014}");
     assert_eq!(label("soon-ish"), "soon-ish");
 }
 
-/// The interval column renders the human-readable form (the
-/// operator's 2026-09-24 ruling: "cron format is not human
-/// readable"): the interpreted expression rides the column, and the
-/// drill-in's pairs keep the raw cron reachable beside it.
+/// The interval column renders the human-readable form (the operator's
+/// 2026-09-24 ruling: "cron format is not human readable"); the drill-in's
+/// pairs keep the raw cron reachable beside it.
 #[test]
 fn the_interval_column_is_human_readable() {
     assert_eq!(human_schedule("*/2 * * * *"), "every 2 minutes");
@@ -334,13 +296,11 @@ fn the_interval_column_is_human_readable() {
     assert_eq!(human_schedule("*/2 9-17 * * 1-5"), "*/2 9-17 * * 1-5");
     assert_eq!(human_schedule("every 10m"), "every 10m");
     assert_eq!(human_schedule("0 9 * * 8"), "0 9 * * 8");
-    // The bot-round pins: star-only fields read as every-minute, and
-    // whitespace-padded passthroughs trim (never render twice).
+    // Star-only fields read as every-minute; whitespace-padded passthroughs trim (never render
+    // twice).
     assert_eq!(human_schedule("* * * * *"), "every minute");
     assert_eq!(human_schedule(" every 10m "), "every 10m");
 
-    // The column renders the interpreted form; the pairs keep the
-    // raw cron beside it.
     let mut catalog = entries();
     catalog[1].job.schedule_expression = "*/2 * * * *".to_string();
     let mut picker = HeartbeatsPicker::new(catalog, None, None, 24);
@@ -368,12 +328,9 @@ fn the_interval_column_is_human_readable() {
     );
 }
 
-/// Enter on a list row opens the detail drill-in; Enter on an action
-/// row runs it (TS `confirmSelection`).
 #[test]
 fn enter_opens_the_detail_drill_in_and_runs_the_resume_action() {
     let mut picker = HeartbeatsPicker::new(entries(), None, None, 24);
-    // The user row (first) is paused: its first action is resume.
     assert_eq!(
         picker.handle_key("enter", &kb()),
         HeartbeatsPickerAction::None
@@ -395,9 +352,6 @@ fn enter_opens_the_detail_drill_in_and_runs_the_resume_action() {
     );
 }
 
-/// The drill-in renders the full prompt text (wrapped, not
-/// single-lined), which agent created the heartbeat, and the action
-/// rows in the `/mcp` control pattern.
 #[test]
 fn the_detail_renders_the_full_prompt_created_by_and_actions() {
     let mut catalog = entries();
@@ -406,8 +360,6 @@ fn the_detail_renders_the_full_prompt_created_by_and_actions() {
     picker.handle_key("enter", &kb());
     let frame = picker.render(&theme(), 70, &kb());
     let text = frame_text(&frame);
-    // The full prompt wraps over lines: every word renders, on more
-    // than one row, and nothing collapses.
     let joined = text.join("\n");
     for word in [
         "first",
@@ -424,7 +376,6 @@ fn the_detail_renders_the_full_prompt_created_by_and_actions() {
         text.iter().any(|row| row.starts_with("  Prompt")),
         "the prompt block carries its label"
     );
-    // Which agent created it.
     assert!(text
         .iter()
         .any(|row| row.starts_with("  created") && row.contains("Created by you")));
@@ -432,7 +383,6 @@ fn the_detail_renders_the_full_prompt_created_by_and_actions() {
         .iter()
         .any(|row| row.starts_with("  session") && row.contains("the session")));
     assert!(text.iter().any(|row| row.contains("runs")));
-    // The actions.
     assert!(text.iter().any(|row| row.contains("Resume heartbeat")));
     assert!(text.iter().any(|row| row.contains("Stop heartbeat")));
     assert!(text
@@ -474,8 +424,6 @@ fn navigation_moves_the_selection_by_id() {
     assert_eq!(picker.selected_heartbeat_id.as_deref(), Some("user-1"));
 }
 
-/// The detail pane walks its action rows (up/down select the action,
-/// never a heartbeat row).
 #[test]
 fn the_detail_pane_walks_its_action_rows() {
     let mut picker = HeartbeatsPicker::new(entries(), None, None, 24);
@@ -513,7 +461,6 @@ fn a_managed_job_replaces_or_removes_its_row() {
         .heartbeats
         .iter()
         .any(|entry| entry.job.id == "agent-1" && entry.job.status == "paused"));
-    // Stop removes the row and the selection conforms to the first.
     let id = picker.heartbeats[0].job.id.clone();
     let stopped = picker.heartbeats[0].job.clone();
     picker.apply_managed_job(stopped, true);
@@ -524,8 +471,6 @@ fn a_managed_job_replaces_or_removes_its_row() {
     );
 }
 
-/// A failed background refresh keeps the rows (TS stale-while-revalidate):
-/// the tray keeps counting, and only the in-view failure line appears.
 #[test]
 fn a_fetch_error_keeps_the_rows() {
     let mut picker = HeartbeatsPicker::new(entries(), None, None, 24);
@@ -561,9 +506,6 @@ fn a_catalog_refresh_keeps_the_surviving_selection() {
         .any(|row| row.contains("Heartbeat refresh failed: daemon down")));
 }
 
-/// A short viewport shrinks the panes so they never exceed the
-/// terminal budget, and the hint line survives the squeeze (it is
-/// never the clipped row).
 #[test]
 fn short_viewports_never_clip_the_panes() {
     for viewport_rows in [9usize, 10, 12, 14] {
@@ -580,9 +522,8 @@ fn short_viewports_never_clip_the_panes() {
             "the hint survives a {viewport_rows}-row viewport"
         );
     }
-    // The detail pane fits too: the fixed rows (name, schedule, the
-    // two action rows, the hint) always render, and the prompt and
-    // pairs blocks give way.
+    // The fixed rows (name, schedule, the two action rows, the hint) always render; the prompt and
+    // pairs give way.
     let mut picker = HeartbeatsPicker::new(entries(), None, None, 12);
     picker.handle_key("enter", &kb());
     let frame = picker.render(&theme(), 70, &kb());
@@ -591,8 +532,6 @@ fn short_viewports_never_clip_the_panes() {
     assert!(text.iter().any(|row| row.contains("Stop heartbeat")));
 }
 
-/// A long prompt clips with an ellipsis marker row rather than
-/// overspending the viewport.
 #[test]
 fn a_long_prompt_clips_with_a_marker() {
     let mut catalog = entries();
@@ -600,8 +539,8 @@ fn a_long_prompt_clips_with_a_marker() {
         .map(|n| format!("word-{n:02}"))
         .collect::<Vec<_>>()
         .join(" ");
-    // The schedule pair (item 3) rides the block too, so the prompt
-    // needs one more row than the pre-batch fixture budgeted.
+    // The schedule pair (item 3) rides the block too, so the prompt needs one more row than the
+    // fixture budgeted.
     let mut picker = HeartbeatsPicker::new(catalog, None, None, 23);
     picker.handle_key("enter", &kb());
     let frame = picker.render(&theme(), 70, &kb());
@@ -611,14 +550,11 @@ fn a_long_prompt_clips_with_a_marker() {
         text.iter().any(|row| row.trim() == "…"),
         "the clipped tail carries a marker: {text:?}"
     );
-    // The first words render; the last ones do not.
     let joined = text.join(" ");
     assert!(joined.contains("word-01"));
     assert!(!joined.contains("word-40"));
 }
 
-/// A missing next-run pads its cell like the header: the status
-/// column stays under its header when the `—` placeholder renders.
 #[test]
 fn a_missing_next_run_keeps_the_columns_aligned() {
     let mut catalog = entries();
@@ -630,15 +566,12 @@ fn a_missing_next_run_keeps_the_columns_aligned() {
         .iter()
         .find(|row| row.contains("every 10m"))
         .expect("the row");
-    // The status cell sits at the same offset as the header's
-    // (the selected row's half-circle dot starts the cell).
     let header = text
         .iter()
         .find(|row| row.contains("Interval") && row.contains("Next run"))
         .expect("the header");
-    // The display column is a CHAR offset (the glyphs before the
-    // status cell are multi-byte UTF-8; a byte offset would read the
-    // row as misaligned).
+    // The display column is a CHAR offset (the glyphs before the status cell are multi-byte UTF-8;
+    // a byte offset would misalign).
     let column_of =
         |text: &str, needle: &str| text.find(needle).map(|byte| text[..byte].chars().count());
     let (Some(h), Some(r)) = (column_of(header, "Status"), column_of(row, "\u{25d0}")) else {
@@ -647,10 +580,6 @@ fn a_missing_next_run_keeps_the_columns_aligned() {
     assert_eq!(h, r, "the status column aligns: {header:?} vs {row:?}");
 }
 
-/// The pairs shrink before the prompt starves (the bot-round fix and
-/// the documented design order): at a viewport that cannot hold both
-/// the six base pairs and a prompt row, the pairs give rows back so
-/// the drill-in's primary content always renders.
 #[test]
 fn the_pairs_shrink_before_the_prompt_starves() {
     let mut catalog = entries();
@@ -675,9 +604,6 @@ fn the_pairs_shrink_before_the_prompt_starves() {
     assert!(frame.len() <= 19, "the pane fits: {}", frame.len());
 }
 
-/// The schedule pair never displaces the error row (the bot-round
-/// fix): a heartbeat carrying both a schedule fact and a last error
-/// renders every pair — `MAX_DETAIL_ROWS` covers the seven base pairs.
 #[test]
 fn the_schedule_pair_never_hides_the_error_row() {
     let mut catalog = entries();
@@ -702,8 +628,6 @@ fn the_schedule_pair_never_hides_the_error_row() {
     );
 }
 
-/// The prompt block never degrades to a lone marker: a budget of one
-/// renders the first prompt line instead.
 #[test]
 fn a_one_row_prompt_budget_renders_the_first_line() {
     let mut catalog = entries();
@@ -711,8 +635,8 @@ fn a_one_row_prompt_budget_renders_the_first_line() {
         .map(|n| format!("word-{n:02}"))
         .collect::<Vec<_>>()
         .join(" ");
-    // The schedule pair (item 3) rides the block too, so the
-    // one-row prompt budget needs one more viewport row.
+    // The schedule pair (item 3) rides the block too, so the one-row prompt budget needs one more
+    // viewport row.
     let mut picker = HeartbeatsPicker::new(catalog, None, None, 20);
     picker.handle_key("enter", &kb());
     let frame = picker.render(&theme(), 70, &kb());
@@ -725,9 +649,9 @@ fn a_one_row_prompt_budget_renders_the_first_line() {
     );
 }
 
-/// The scroll-indicator row is reserved exactly once: a scrolling
-/// viewport uses every row it can hold (the frame constant excludes
-/// the conditional indicator; `menu_list_layout` reserves it).
+/// The scroll-indicator row is reserved exactly once: a scrolling viewport
+/// uses every row it can hold (the frame constant excludes the conditional
+/// indicator; `menu_list_layout` reserves it).
 #[test]
 fn a_scrolling_viewport_uses_every_row() {
     let mut catalog = entries();
@@ -757,8 +681,6 @@ fn a_scrolling_viewport_uses_every_row() {
     );
 }
 
-/// A double failure (fetch error + action error) reserves both footer
-/// blocks: the list never renders past the viewport.
 #[test]
 fn double_errors_reserve_both_footer_blocks() {
     let mut picker = HeartbeatsPicker::new(entries(), None, None, 14);
@@ -773,8 +695,6 @@ fn double_errors_reserve_both_footer_blocks() {
         .any(|row| row.contains("Error: management failed")));
 }
 
-/// A terminal shorter than the frame itself never renders past its
-/// allocated rows (both panes degrade by truncation).
 #[test]
 fn a_sub_frame_viewport_never_overflows() {
     for viewport_rows in [1usize, 2, 3, 5, 7, 9] {
@@ -796,8 +716,6 @@ fn a_sub_frame_viewport_never_overflows() {
     }
 }
 
-/// A prompt carrying escape sequences renders inert (control
-/// characters scrub before the wrap).
 #[test]
 fn an_escape_sequence_in_the_prompt_never_reaches_the_terminal() {
     let mut catalog = entries();
@@ -810,9 +728,8 @@ fn an_escape_sequence_in_the_prompt_never_reaches_the_terminal() {
     assert!(joined.contains("red"), "the visible text stays");
 }
 
-/// Daemon-supplied catalog fields render inert: an ANSI/OSC sequence
-/// in a schedule expression, status, or session label never reaches
-/// the terminal (the parse boundary scrubs it).
+/// Daemon-supplied catalog fields render inert: an ANSI/OSC sequence in a schedule, status, or
+/// session label never reaches the terminal.
 #[test]
 fn catalog_control_sequences_scrub_at_the_parse_boundary() {
     let data = serde_json::json!({
@@ -839,7 +756,6 @@ fn catalog_control_sequences_scrub_at_the_parse_boundary() {
         "no escapes reach the render: {joined:?}"
     );
     assert!(joined.contains("every 10m"), "the visible schedule stays");
-    // The drill-in's subtitle and pairs stay inert too.
     let data2 = serde_json::json!({
         "heartbeats": [{
             "job": {

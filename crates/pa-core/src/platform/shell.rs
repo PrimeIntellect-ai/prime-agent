@@ -1,10 +1,7 @@
-//! Shell selection for the bash tool and the kernel's `bash()`.
-//!
-//! Unix: explicit path, `/bin/bash`, `which bash`, `sh`. Windows: the TS
-//! resolution order - Git Bash from the canonical install dirs, then
-//! `where bash.exe` with System32 candidates demoted to last (that bash.exe
-//! is the WSL launcher), never PATH for the kernel shell (a repo-controlled
-//! PATH must not pick the kernel shell).
+//! Shell selection for the bash tool and the kernel's `bash()`. Unix:
+//! explicit path, `/bin/bash`, `which bash`, `sh`. Windows: Git Bash from
+//! the canonical install dirs, then `where bash.exe` (System32 candidates
+//! demoted to last — the WSL launcher), never PATH for the kernel shell.
 
 #[cfg(any(unix, windows))]
 use std::path::Path;
@@ -20,8 +17,7 @@ pub struct ShellConfig {
 ///
 /// # Errors
 ///
-/// Returns an error when the explicit custom shell path does not exist;
-/// built-in resolution never fails (a missing bash falls back to `sh`).
+/// Error when the explicit custom shell path does not exist; built-ins never fail.
 #[cfg(unix)]
 pub fn get_shell_config(custom_shell_path: Option<&str>) -> anyhow::Result<ShellConfig> {
     if let Some(path) = custom_shell_path {
@@ -54,16 +50,14 @@ pub fn get_shell_config(custom_shell_path: Option<&str>) -> anyhow::Result<Shell
     })
 }
 
-/// Windows: the TS resolution order (TS `getShellConfig` win32): an explicit
-/// path, then Git Bash in the canonical install dirs (from the `ProgramFiles`
-/// environment), then `where bash.exe` with System32 matches demoted to last
-/// (`System32\bash.exe` is the WSL launcher - it runs Linux-side).
+/// Windows: the TS order: an explicit path, Git Bash in the canonical
+/// install dirs (`ProgramFiles`), then `where bash.exe` with System32
+/// matches demoted to last (that bash.exe is the WSL launcher).
 ///
 /// # Errors
 ///
-/// Returns an error when the explicit shell path does not exist; every
-/// other fallback (Git Bash dirs, `where bash.exe`, `sh`) resolves or
-/// the final error names the classes searched.
+/// Error when the explicit path does not exist; the fallbacks otherwise
+/// resolve or name the classes searched.
 #[cfg(windows)]
 pub fn get_shell_config(custom_shell_path: Option<&str>) -> anyhow::Result<ShellConfig> {
     if let Some(path) = custom_shell_path {
@@ -193,12 +187,10 @@ pub fn resolve_kernel_bash_shell(custom_shell_path: Option<&str>) -> Option<Stri
     }
 }
 
-/// Windows: canonical Git Bash install paths only, never PATH - a
-/// repo-controlled PATH/`where` must not pick the kernel shell (TS
-/// `resolveKernelBashShell` win32). The candidates are hardcoded literals
-/// by design: the `ProgramFiles` variables are ambient attacker-influenceable
-/// input, the same trust-laundering class as PATH. `None` means no shell:
-/// kernel startup must not fail, `bash()` raises its teaching error.
+/// Windows: canonical Git Bash install paths only, never PATH (TS
+/// `resolveKernelBashShell` win32): a repo-controlled PATH must not pick
+/// the kernel shell, and hardcoded candidates avoid ambient attacker-
+/// influenceable `ProgramFiles` input. `None`: `bash()` raises its teaching error.
 #[cfg(windows)]
 pub fn resolve_kernel_bash_shell(custom_shell_path: Option<&str>) -> Option<String> {
     const WINDOWS_GIT_BASH_PATHS: [&str; 2] = [
@@ -226,7 +218,6 @@ pub fn resolve_kernel_bash_shell(custom_shell_path: Option<&str>) -> Option<Stri
 mod windows_tests {
     use super::*;
 
-    /// The TS ordering: System32 (WSL launcher) candidates move last.
     #[test]
     fn system32_candidates_are_demoted_last() {
         let candidates = [
@@ -248,7 +239,6 @@ mod windows_tests {
         );
     }
 
-    /// Without `SystemRoot` the order is preserved unchanged.
     #[test]
     fn without_system_root_the_order_stands() {
         let candidates =

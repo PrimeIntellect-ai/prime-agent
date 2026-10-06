@@ -1,25 +1,13 @@
-//! The live tool-card fold (the streamed tool-call card lifecycle: create-on-identify,
-//! settle on execution start/end, the failed-frame sweep) and the assistant
-//! message decode family (the ordered visible parts, the error rows, the
-//! superseded-attempt ruling) - moved with their concern.
+//! The live tool-card fold (create-on-identify, settle on execution
+//! start/end, the failed-frame sweep) and the assistant message decode
+//! family.
 use super::{AssistantMessage, ChatEntry, MessageBlock, ToolCallCard, ToolResultView, Value};
 
-/// Fold one streamed tool call into the live transcript (TS
-/// `getOrCreatePendingToolComponent` without its async deferral).
-///
-/// A provider announces a tool call before its function name streams in:
-/// the wire `toolCall` block first arrives with an empty `name`, and later
-/// `message_update` frames fill it. A card is therefore only created once
-/// the call is identifiable (`id` non-empty) and named; a card created
-/// earlier would carry the empty name forever (no later event corrects it),
-/// fall through to the generic panel, and render the raw arguments JSON
-/// instead of the tool's own card. An existing card refreshes from the
-/// latest frame — the newest streamed name and arguments win (TS builds the
-/// component against the latest streaming call). A card settled by a failed
-/// frame is not an existing card for this purpose: a reused id re-arms as a
-/// fresh card, the way TS's empty `pendingTools` map forces a new component
-/// (`resetPendingToolState` cleared it) while the old aborted component keeps
-/// its sweep-written result in the transcript.
+/// Fold one streamed tool call into the live transcript: a card is only
+/// created once the call is identifiable AND named — the wire `toolCall`
+/// block first arrives with an empty `name`, and a card created earlier
+/// would carry it forever and render the raw arguments JSON. An existing
+/// card refreshes from the latest frame; a settled card is not a match.
 pub fn apply_streamed_tool_card(
     view: &mut crate::view::AgentView,
     id: &str,
@@ -52,9 +40,8 @@ pub fn apply_streamed_tool_card(
 }
 
 /// TS `message_end`'s failed-frame sweep: every still-pending tool card
-/// settles with the failure text as an error result, and the card drops the
-/// tool's late result frames (`resetPendingToolState` cleared the pending
-/// map the same way — a late `tool_execution_end` finds no component there).
+/// settles with the failure text and drops late result frames
+/// (`resetPendingToolState` cleared the pending map).
 pub fn settle_pending_tool_cards<S: std::hash::BuildHasher + Default>(
     view: &mut crate::view::AgentView,
     pending: &mut std::collections::HashSet<String, S>,
@@ -62,15 +49,11 @@ pub fn settle_pending_tool_cards<S: std::hash::BuildHasher + Default>(
     text: &str,
 ) {
     for tool_call_id in pending.drain() {
-        // Every drained id records as aborted — late frames for a call that
-        // never created a card land on nothing the same way (TS removed the
-        // pending-map entry, and a late `tool_execution_start` finds no
-        // component to re-create).
+        // Every drained id records as aborted — late frames for a call
+        // that never created a card land on nothing the same way.
         aborted.insert(tool_call_id.clone());
-        // The settle targets the newest card carrying the id: a re-armed
-        // invocation pushed its own card, and the older settled card keeps
-        // the previous sweep's result (TS's pending map only ever holds the
-        // current component).
+        // The settle targets the newest card carrying the id; the older
+        // settled card keeps the previous sweep's result.
         if let Some(index) = view
             .chat
             .iter()
@@ -92,14 +75,11 @@ pub fn settle_pending_tool_cards<S: std::hash::BuildHasher + Default>(
     }
 }
 
-/// `tool_execution_start` folded into the live transcript: mark the matching
-/// card running, or create it when the assistant-message frames have not
-/// arrived yet. The daemon-reported tool name is authoritative — it
-/// backfills a card still carrying an empty streamed name, so the card
-/// routes to its tool-specific renderer (TS creates missing components with
-/// `event.toolName`). A card settled by a failed frame is not a match: a
-/// reused id gets a fresh card for its new invocation, exactly like TS's
-/// empty pending map.
+/// `tool_execution_start` folded into the live transcript: mark the
+/// matching card running, or create it when the assistant-message frames
+/// have not arrived yet (the daemon-reported tool name backfills an
+/// empty streamed name). A settled card is not a match: a reused id
+/// gets a fresh card.
 pub fn apply_tool_execution_start(
     view: &mut crate::view::AgentView,
     tool_call_id: &str,
@@ -135,9 +115,8 @@ pub fn apply_tool_execution_start(
 }
 
 /// The failure row a failed assistant message renders (TS
-/// `AssistantMessageComponent.rebuild`): an abort always shows, a provider
-/// `error` only when the message carries no tool calls (their cards carry
-/// the failure then). `None` for settled messages.
+/// `AssistantMessageComponent.rebuild`): an abort always shows; a
+/// provider `error` only without tool calls.
 pub struct AssistantErrorRow {
     /// The rendered row text (provider errors carry the `Error: ` prefix).
     pub text: String,
@@ -145,11 +124,9 @@ pub struct AssistantErrorRow {
     pub aborted: bool,
 }
 
-/// The failed-attempt error row a retry supersedes (SANCTIONED DIVERGENCE
-/// from TS, operator ruling 2026-09-23 — the TS chat keeps one such row per
-/// failed attempt): an error-only assistant entry, no blocks and no tool
-/// calls (their cards carry the failure), not an abort. The episode's
-/// `provider_retry_outcome` row replaces every superseded attempt.
+/// The failed-attempt error row a retry supersedes (SANCTIONED
+/// DIVERGENCE, operator ruling 2026-09-23): an error-only assistant
+/// entry, no blocks, no tool calls, not an abort.
 #[must_use]
 pub fn is_superseded_attempt_row(entry: &ChatEntry) -> bool {
     matches!(
@@ -198,12 +175,9 @@ pub fn assistant_error_row(
 #[must_use]
 pub fn assistant_value_to_entries(message: &Value) -> Vec<ChatEntry> {
     let (blocks, tool_calls) = assistant_message_parts(message);
-    // TS `AssistantMessageComponent.rebuild`: an abort renders its error row
-    // inside the message; a provider error renders only without tool calls
-    // (their cards carry the failure). The component exists for every
-    // assistant message (`message_start` creates one), so a content-less
-    // failed provider attempt still folds into its own error row (TS
-    // `buildConversationComponents` pushes the component unconditionally).
+    // The component exists for every assistant message, so a
+    // content-less failed provider attempt still folds into its own
+    // error row.
     let error = assistant_error_row(message, &tool_calls);
     if blocks.is_empty() && tool_calls.is_empty() && error.is_none() {
         return Vec::new();

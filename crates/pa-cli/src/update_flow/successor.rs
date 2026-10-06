@@ -13,9 +13,8 @@ use serde_json::Value;
 /// How often the boot wait retries the hello handshake.
 const BOOT_POLL: Duration = Duration::from_millis(250);
 
-/// The identity a `daemon_hello` frame carries (TS
-/// `processIdentityFromDaemonHello`): pid, start id, generation, and owner
-/// token.
+/// The identity a `daemon_hello` frame carries (TS `processIdentityFromDaemonHello`): pid, start
+/// id, generation, and owner token.
 pub fn identity_from_hello(hello: &Value) -> UpdateProcessIdentity {
     UpdateProcessIdentity {
         pid: hello
@@ -38,13 +37,11 @@ pub fn identity_from_hello(hello: &Value) -> UpdateProcessIdentity {
     }
 }
 
-/// Spawn the successor supervisor detached (the TS launcher deletes the
-/// worker role env from the inherited environment; the roster path is the
-/// one addition, spec §6).
+/// Spawn the successor supervisor detached (the TS launcher deletes the worker
+/// role env; the roster path is the one addition, spec §6).
 ///
 /// # Errors
-/// Returns an error when the successor supervisor process cannot be
-/// spawned.
+/// Returns an error when the successor supervisor cannot be spawned.
 pub fn spawn_supervisor(
     exe: &Path,
     socket_path: &Path,
@@ -96,15 +93,14 @@ pub async fn wait_for_hello(socket_path: &Path, budget_ms: u64) -> Option<Update
         if now >= deadline {
             return None;
         }
-        // The retry poll never steps past the budget: a silent socket is
-        // waited out to the deadline (TS `waitForHello` bounds the whole
-        // handshake wait, not one retry slice).
+        // The retry poll never steps past the budget: a silent socket is waited
+        // out to the deadline (TS `waitForHello` bounds the whole wait).
         tokio::time::sleep(BOOT_POLL.min(deadline - now)).await;
     }
 }
 
-/// Wait for a process identity to leave the process table (spec §9
-/// `Stopped`: the fence-free pid + start-id poll).
+/// Wait for a process identity to leave the process table (spec §9 `Stopped`: the fence-free pid +
+/// start-id poll).
 pub async fn wait_for_exit(identity: &UpdateProcessIdentity, budget_ms: u64) -> bool {
     let deadline = Instant::now() + Duration::from_millis(budget_ms.max(1));
     loop {
@@ -168,9 +164,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let socket: PathBuf = dir.path().join("silent.sock");
         let started = Instant::now();
-        // The budget spans at least one poll: the loop gives up when the
-        // next poll would overshoot the deadline, so the elapsed time is
-        // poll-granular - never shorter than one poll, never past two.
+        // The budget spans at least one poll: the loop gives up when the next
+        // poll would overshoot, so the elapsed time is poll-granular.
         let identity = wait_for_hello(&socket, (BOOT_POLL * 2).as_millis() as u64).await;
         assert!(identity.is_none());
         assert!(started.elapsed() >= BOOT_POLL);

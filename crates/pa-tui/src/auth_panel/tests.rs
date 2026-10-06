@@ -1,6 +1,5 @@
-//! The auth panel's unit battery (moved with its concern): the request
-//! folds, the paste field, the team picker, the URL block, the per-surface
-//! chrome, the scrub hygiene, and the cancel-signal contract.
+//! The auth panel's unit battery: the request folds, the paste field, the team picker, the URL
+//! block, the per-surface chrome, the scrub hygiene, and the cancel-signal contract.
 
 use super::*;
 use crate::keybindings::KeybindingsManager;
@@ -46,15 +45,12 @@ fn frame_text(panel: &mut AuthPanel) -> Vec<String> {
         .collect()
 }
 
-/// A paste prompt mounted over a panel with its oneshot pair (TS
-/// `armManualInput`'s muted arm prompt).
+/// A paste prompt mounted over a panel with its oneshot pair.
 fn mount_paste() -> (AuthPanel, oneshot::Receiver<Option<String>>) {
     mount_paste_tone(PastePromptTone::Muted)
 }
 
-/// A paste prompt with its own tone (TS `showManualInput` renders the
-/// prompt muted, `showPrompt` renders it as the text-coloured section
-/// title).
+/// A paste prompt with its own tone.
 fn mount_paste_tone(tone: PastePromptTone) -> (AuthPanel, oneshot::Receiver<Option<String>>) {
     let mut panel = AuthPanel::new("Login to Prime Inference");
     let (reply, answer) = oneshot::channel();
@@ -79,8 +75,6 @@ fn mount_teams(
     (panel, answer)
 }
 
-/// TS `dialog.showProgress`: the first line lands under the section
-/// title.
 #[test]
 fn the_first_progress_line_lands_under_the_section_title() {
     let mut panel = AuthPanel::new("Login to Prime Inference");
@@ -99,8 +93,6 @@ fn the_first_progress_line_lands_under_the_section_title() {
         .any(|row| row.contains("Checking existing Prime CLI credentials...")));
 }
 
-/// TS `dialog.showAuth`: the URL renders with its instructions (the
-/// default browser line without them), and the paste field unmounts.
 #[test]
 fn the_auth_url_block_replaces_the_content() {
     let mut panel = AuthPanel::new("Login to Linear");
@@ -137,16 +129,9 @@ fn the_auth_url_block_replaces_the_content() {
     );
 }
 
-/// The paste prompt renders the TS prompt row, the plain `> ` field
-/// with the "Paste value" placeholder, and the auth-actions row;
-/// Enter submits the trimmed value through the oneshot. TS
-/// `addInputField`: a blank row rides between the field and the
-/// actions.
 #[test]
 fn the_paste_prompt_submits_the_typed_value() {
     let (mut panel, mut answer) = mount_paste();
-    // The mounted field shows its placeholder while empty, the prompt
-    // row above it, and the actions row below.
     let rows = frame_text(&mut panel);
     assert!(rows
         .iter()
@@ -171,10 +156,8 @@ fn the_paste_prompt_submits_the_typed_value() {
         rows[0].chars().all(|c| c == '\u{2500}'),
         "the rule opens the panel"
     );
-    // The paste-only panel keeps its own hint row, rendered from the
-    // effective bindings (the MCP token surface's grammar); the
-    // auth-actions row rides only under a shown URL block (TS
-    // `getAuthActionsText` — pinned by the URL block's tests below).
+    // The paste-only panel keeps its own hint row; the auth-actions row rides only under a
+    // shown URL block (pinned by the URL block's tests below).
     assert!(rows
         .iter()
         .any(|row| row.contains("Enter submit  Esc cancel")));
@@ -185,8 +168,6 @@ fn the_paste_prompt_submits_the_typed_value() {
     assert_eq!(answer.try_recv(), Ok(Some("sk-live".to_string())));
 }
 
-/// Esc on the paste prompt cancels the flow (`None`), TS the dialog
-/// cancel.
 #[test]
 fn escape_on_the_paste_prompt_cancels_the_flow() {
     let (mut panel, mut answer) = mount_paste();
@@ -194,10 +175,6 @@ fn escape_on_the_paste_prompt_cancels_the_flow() {
     assert_eq!(answer.try_recv(), Ok(None));
 }
 
-/// TS the token paste panel: an empty submit keeps the field mounted
-/// and shows the notice; the submit that follows still works. The
-/// login dialog's visible field waits silently instead (TS
-/// `armManualInput`'s `while (!value)` loop never shows a notice).
 #[test]
 fn an_empty_paste_submit_shows_the_notice_only_on_the_token_panel() {
     let mut panel = AuthPanel::new("Connect GitHub");
@@ -219,8 +196,6 @@ fn an_empty_paste_submit_shows_the_notice_only_on_the_token_panel() {
     panel.handle_key("enter", &kb(), &mut sink());
     assert_eq!(answer.try_recv(), Ok(Some("k".to_string())));
 
-    // The login dialog's visible field: an empty submit mounts no
-    // notice (the arm loop re-reads the field, TS keeps waiting).
     let (mut panel, mut answer) = mount_paste();
     panel.handle_key("enter", &kb(), &mut sink());
     let rows = frame_text(&mut panel);
@@ -233,15 +208,8 @@ fn an_empty_paste_submit_shows_the_notice_only_on_the_token_panel() {
     assert!(answer.try_recv().is_err(), "nothing answered");
 }
 
-/// The cancel keys run through the effective binding (TS
-/// `LoginDialogComponent.handleInput`): the stock bindings cancel on
-/// ctrl+c (the binding's second default key), and an override that
-/// empties the binding takes ctrl+c with it — the panel never
-/// cancels on a key its binding does not name, so the derived hint
-/// stays truthful.
 #[test]
 fn cancel_runs_through_the_effective_binding() {
-    // The stock bindings: ctrl+c is tui.select.cancel's second key.
     let (mut panel, mut answer) = mount_paste();
     panel.handle_key("ctrl+c", &kb(), &mut sink());
     assert_eq!(
@@ -249,8 +217,6 @@ fn cancel_runs_through_the_effective_binding() {
         Ok(None),
         "ctrl+c cancels through the stock binding"
     );
-    // An emptied cancel binding drops ctrl+c with it: the input
-    // stays mounted, waiting.
     let mut cfg = crate::keybindings::KeybindingsConfig::new();
     cfg.insert("tui.select.cancel".to_string(), Vec::new());
     let kb = KeybindingsManager::with_user_bindings(cfg);
@@ -260,7 +226,6 @@ fn cancel_runs_through_the_effective_binding() {
         answer.try_recv().is_err(),
         "an emptied cancel binding takes ctrl+c with it"
     );
-    // A rebound cancel binding moves the cancel key.
     let mut cfg = crate::keybindings::KeybindingsConfig::new();
     cfg.insert("tui.select.cancel".to_string(), vec!["ctrl+q".to_string()]);
     let kb = KeybindingsManager::with_user_bindings(cfg);
@@ -271,9 +236,6 @@ fn cancel_runs_through_the_effective_binding() {
     assert_eq!(answer.try_recv(), Ok(None), "the rebound key cancels");
 }
 
-/// TS `OAuthPrompt.allowEmpty`: a prompt that allows the blank entry
-/// submits it as a valid answer (the Copilot domain prompt's
-/// "blank for github.com"), without the notice.
 #[test]
 fn an_allow_empty_paste_prompt_submits_the_blank_answer() {
     let mut panel = AuthPanel::new("Login to GitHub Copilot");
@@ -296,8 +258,6 @@ fn an_allow_empty_paste_prompt_submits_the_blank_answer() {
     );
 }
 
-/// TS `McpTokenPastePanelComponent`: a masked field renders bullets,
-/// never the secret.
 #[test]
 fn the_masked_field_renders_bullets_never_the_secret() {
     let mut panel = AuthPanel::new("Connect GitHub");
@@ -323,9 +283,6 @@ fn the_masked_field_renders_bullets_never_the_secret() {
     );
 }
 
-/// The team picker renders the TS `PrimeTeamSelectorComponent`
-/// panel: the title and subtitle, the search field, Personal first
-/// with its meta and the current marker, and the slug/role detail.
 #[test]
 fn the_team_picker_renders_the_ts_rows() {
     let (mut panel, _answer) = mount_teams(vec![acme(), beta()], Some("team-beta"));
@@ -342,8 +299,6 @@ fn the_team_picker_renders_the_ts_rows() {
         .iter()
         .any(|row| row.contains("slug: acme, role: owner")));
     assert!(rows.iter().any(|row| row.contains("role: member")));
-    // The stored selection (Beta) is the current row; the personal
-    // row carries no current marker.
     let beta_row = rows
         .iter()
         .find(|row| row.contains("Beta Team"))
@@ -357,8 +312,6 @@ fn the_team_picker_renders_the_ts_rows() {
     );
 }
 
-/// With no stored selection the personal account is the current row
-/// (TS `getMeta`).
 #[test]
 fn the_personal_row_is_current_without_a_stored_selection() {
     let (mut panel, _answer) = mount_teams(vec![acme()], None);
@@ -368,8 +321,6 @@ fn the_personal_row_is_current_without_a_stored_selection() {
         .any(|row| row.contains("personal account · current")));
 }
 
-/// Down/Enter on the picker answers the selected team (TS
-/// `onSelect`); the personal row answers the personal account.
 #[test]
 fn the_picker_navigates_and_picks() {
     let (mut panel, mut answer) = mount_teams(vec![acme(), beta()], None);
@@ -381,8 +332,6 @@ fn the_picker_navigates_and_picks() {
     assert_eq!(answer.try_recv(), Ok(PrimeTeamPick::PersonalAccount));
 }
 
-/// TS `onCancel`: Esc answers the cancelled pick (the stored
-/// selection stays; the flow resolves the default status).
 #[test]
 fn escape_on_the_picker_answers_the_cancelled_pick() {
     let (mut panel, mut answer) = mount_teams(vec![acme()], None);
@@ -390,9 +339,6 @@ fn escape_on_the_picker_answers_the_cancelled_pick() {
     assert_eq!(answer.try_recv(), Ok(PrimeTeamPick::Cancelled));
 }
 
-/// TS `filterOptions`: the search filters over the personal row's and
-/// the teams' search text (name, slug, role, id); Enter on the
-/// surviving row picks it.
 #[test]
 fn the_picker_search_filters_and_picks_the_surviving_row() {
     let (mut panel, mut answer) = mount_teams(vec![acme(), beta()], None);
@@ -411,7 +357,6 @@ fn the_picker_search_filters_and_picks_the_surviving_row() {
     );
     panel.handle_key("enter", &kb(), &mut sink());
     assert_eq!(answer.try_recv(), Ok(PrimeTeamPick::Team(acme())));
-    // The personal row's search text matches "personal account".
     let (mut panel, _answer) = mount_teams(vec![acme()], None);
     for character in "personal".chars() {
         panel.handle_key(character.to_string().as_str(), &kb(), &mut sink());
@@ -424,8 +369,6 @@ fn the_picker_search_filters_and_picks_the_surviving_row() {
     );
 }
 
-/// A filter that matches nothing renders the TS empty row, and Enter
-/// selects nothing (the reply stays mounted, TS `if (selected)`).
 #[test]
 fn an_empty_filter_renders_the_ts_empty_row_and_selects_nothing() {
     let (mut panel, mut answer) = mount_teams(vec![acme()], None);
@@ -441,9 +384,6 @@ fn an_empty_filter_renders_the_ts_empty_row_and_selects_nothing() {
     );
 }
 
-/// The picker's navigation clamps at both ends (TS
-/// `Math.max(0, ...)` / `Math.min(...)`; no wrap): up from the first
-/// row stays personal, down past the last row stays on it.
 #[test]
 fn the_picker_navigation_clamps_instead_of_wrapping() {
     let (mut panel, mut answer) = mount_teams(vec![acme()], None);
@@ -465,15 +405,10 @@ fn the_picker_navigation_clamps_instead_of_wrapping() {
     );
 }
 
-/// A request with no mounted panel is not an error path for the
-/// handle: the dropped reply cancels the flow (the old terminal
-/// input's EOF contract).
+/// A dropped reply cancels the flow (the old terminal input's EOF contract).
 #[tokio::test]
 async fn a_dropped_prompt_reply_cancels_the_flow() {
     let (tx, rx) = mpsc::unbounded_channel();
-    // The receiving side is gone (the run loop's channel died with
-    // the session): the dropped request's reply cancels the flow —
-    // the paste prompt answers `None`, the picker `Cancelled`.
     drop(rx);
     let handle = AuthPanelHandle::new(tx);
     assert_eq!(
@@ -488,25 +423,20 @@ async fn a_dropped_prompt_reply_cancels_the_flow() {
     );
 }
 
-/// A paste payload lands in the mounted field (never the hidden
-/// editor): the pasted value submits through the oneshot.
 #[test]
 fn a_paste_payload_lands_in_the_mounted_field() {
     let (mut panel, mut answer) = mount_paste();
     panel.handle_paste("  sk-pasted-key  ");
     panel.handle_key("enter", &kb(), &mut sink());
     assert_eq!(answer.try_recv(), Ok(Some("sk-pasted-key".to_string())));
-    // The picker's search accepts pasted text too (TS `MenuSearchInput`).
     let (mut panel, mut answer) = mount_teams(vec![acme()], None);
     panel.handle_paste("acme");
     panel.handle_key("enter", &kb(), &mut sink());
     assert_eq!(answer.try_recv(), Ok(PrimeTeamPick::Team(acme())));
 }
 
-/// Provider-supplied text can never execute terminal control
-/// operations: the panel scrubs control characters out of the title,
-/// the URL block, the instructions, the paste prompt, and the team
-/// rows (the URL is additionally single-line for the OSC 8 wrap).
+/// Provider-supplied text can never execute terminal control operations: the panel scrubs
+/// control characters out of every provider-fed row (the URL is single-line for OSC 8).
 #[test]
 fn provider_text_is_scrubbed_never_a_terminal_sequence() {
     let mut panel = AuthPanel::new("Login to \u{1b}]8;;https://evil.example\u{7}Evil");
@@ -544,8 +474,6 @@ fn provider_text_is_scrubbed_never_a_terminal_sequence() {
     assert!(joined.contains('A'), "the scrubbed name still renders");
 }
 
-/// The OSC 8 link carries the URL as its own display text (an empty
-/// link region would paint an empty row on hyperlink terminals).
 #[test]
 fn the_auth_url_link_carries_the_url_as_display_text() {
     let mut panel = AuthPanel::new("Login to Linear");
@@ -555,16 +483,11 @@ fn the_auth_url_link_carries_the_url_as_display_text() {
         .iter()
         .find(|row| row.contains("https://fixture.example/authorize"))
         .expect("the URL row");
-    // The plain URL renders (hyperlinks off in the test env renders it
-    // unlinked; the hyperlink path wraps the same text inside the
-    // sequence pair).
     assert!(linked.contains("https://fixture.example/authorize"));
 }
 
-/// The session surface's panel chrome is TS `MenuPanel` inline: the
-/// borderMuted rule, the muted one-space title — and NO bottom rule,
-/// NO leading blank (the content's own `startContent` blank opens
-/// the body).
+/// The session surface's panel chrome: the rule, the muted one-space title — and NO bottom
+/// rule, NO leading blank (the content's own `startContent` blank opens the body).
 #[test]
 fn the_session_chrome_is_the_ts_inline_panel() {
     let mut panel = AuthPanel::new("Login to Prime Inference");
@@ -589,7 +512,6 @@ fn the_session_chrome_is_the_ts_inline_panel() {
         !rows.iter().any(|row| row == " Login to Prime Inference  "),
         "no 2-space raw title rides the panel"
     );
-    // No bottom rule: the last row is the content's.
     assert!(
         !rows
             .last()
@@ -598,10 +520,6 @@ fn the_session_chrome_is_the_ts_inline_panel() {
     );
 }
 
-/// The onboarding surface mounts the dialog chrome-less (TS
-/// `loginDialogOptions`: `topRule: false, hideTitle: true` — the
-/// splash's heading names the step): an empty panel renders zero
-/// rows.
 #[test]
 fn the_onboarding_panel_is_chrome_less() {
     let mut panel = AuthPanel::onboarding("Login to Prime Inference");
@@ -624,8 +542,6 @@ fn the_onboarding_panel_is_chrome_less() {
             .any(|row| row.contains("Login to Prime Inference")),
         "no title rides the onboarding dialog: {rows:?}"
     );
-    // The body: the startContent blank, the text-coloured URL, the
-    // section spacer, the muted default browser line, the actions.
     assert_eq!(rows[0], "");
     assert_eq!(rows[1], " https://fixture.example/authorize");
     assert_eq!(rows[2], "");
@@ -636,11 +552,8 @@ fn the_onboarding_panel_is_chrome_less() {
     );
 }
 
-/// TS `showAuth`'s frame with provider instructions: the URL renders
-/// in the text colour (never the accent), the instructions in the
-/// text colour, and a code-carrying line becomes the verification
-/// code block (the muted label, the bold code, the separating
-/// blank).
+/// With provider instructions the URL renders in the text colour (never the accent), and a
+/// code-carrying line becomes the verification code block.
 #[test]
 fn the_url_block_renders_the_ts_instruction_frames() {
     let mut panel = AuthPanel::onboarding("Login to Linear");
@@ -664,11 +577,6 @@ fn the_url_block_renders_the_ts_instruction_frames() {
     assert_eq!(rows[code - 2], "", "the blank separates link and code");
 }
 
-/// TS `addInstructions`' regex (`.` stops at line terminators, `$`
-/// anchors the string's end): a multi-line `Code: 4242-9911\nMore
-/// instructions follow.` payload matches no code arm — the whole
-/// instructions render as provider text, never a verification-code
-/// block over the extra lines.
 #[test]
 fn multi_line_code_instructions_stay_provider_text() {
     assert_eq!(
@@ -697,9 +605,6 @@ fn multi_line_code_instructions_stay_provider_text() {
     );
 }
 
-/// TS `showWaiting` (the Copilot device flow's status): the waiting
-/// line joins below the URL block in the accent colour, above the
-/// actions row, over the section spacer's blank.
 #[test]
 fn the_waiting_line_joins_the_url_block_in_the_accent_colour() {
     let mut panel = AuthPanel::onboarding("Login to GitHub Copilot");
@@ -733,9 +638,6 @@ fn the_waiting_line_joins_the_url_block_in_the_accent_colour() {
     );
 }
 
-/// TS `cancel()` on a URL screen: the actions row advertises the
-/// cancel keys and Esc ends the running login through the flow's
-/// cooperative cancel signal (never a dead hint).
 #[test]
 fn escape_on_a_url_screen_marks_the_flow_cancelled() {
     let mut panel = AuthPanel::onboarding("Login to Prime Inference");
@@ -754,9 +656,6 @@ fn escape_on_a_url_screen_marks_the_flow_cancelled() {
     );
 }
 
-/// TS `copyAuthUrl`: the copy binding on the mounted URL carries the
-/// clipboard outcome into the actions row; a typed plain key stays
-/// field input while the field is visible (the alt arm copies).
 #[test]
 fn the_copy_binding_copies_the_mounted_url_into_the_actions_row() {
     let mut panel = AuthPanel::onboarding("Login to Prime Inference");
@@ -769,8 +668,8 @@ fn the_copy_binding_copies_the_mounted_url_into_the_actions_row() {
             || row.contains("Failed to copy sign-in link")),
         "the copy outcome rides the actions row: {rows:?}"
     );
-    // Without a mounted URL the copy binding does nothing: the plain
-    // `c` lands in the paste field as input (the URL guard holds).
+    // Without a mounted URL the copy binding does nothing: the plain `c` lands in the paste
+    // field as input (the URL guard holds).
     let (mut panel, mut _answer) = mount_paste();
     panel.handle_key("c", &kb(), &mut sink());
     let rows = frame_text(&mut panel);

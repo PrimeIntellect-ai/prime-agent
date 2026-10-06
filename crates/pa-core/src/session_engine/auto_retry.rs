@@ -1,17 +1,7 @@
-//! Interactive provider-failure auto-retry: the session-level retry loop for
-//! user-driven turns (TS `AgentSession` `_handleRetryableError` /
-//! `_retryAfterDelay` / `_finishActiveRetryWithFailure`).
-//!
-//! The one-shot completion helper in [`super::provider_retry`] serves
-//! side questions, compaction, and refinement; this module is the interactive
-//! counterpart that re-issues the whole failed turn. It owns only the retry
-//! decision and the event surface: the caller drives the actual turn (and
-//! removes the failed assistant message from the loop context before
-//! re-issuing, like the TS loop does).
-//!
-//! Retry events are delivered as data so any host (daemon worker, direct
-//! attach) can serialize them onto its own event plane with the TS wire
-//! shape (`auto_retry_start` / `auto_retry_end`).
+//! Interactive provider-failure auto-retry: the session-level retry loop
+//! for user-driven turns ([`super::provider_retry`] is the one-shot helper).
+//! This module owns only the retry decision and the event surface: the
+//! caller drives the actual turn; events are delivered as data.
 
 use std::future::Future;
 
@@ -47,13 +37,10 @@ pub enum AutoRetryEvent {
         max_attempts: u32,
         delay_ms: u64,
         error_message: String,
-        /// Which kind of retry this is (quick retry vs provider switch).
         reason: RetryStartReason,
     },
-    /// `auto_retry_end`: the loop settled. `attempt` is the number of retries
-    /// performed; `final_error` is present exactly when `success` is false;
-    /// `restored_model` is the `"provider/model-id"` primary restored after
-    /// a provider-switch retry succeeded.
+    /// `auto_retry_end`: the loop settled. `final_error` is present exactly
+    /// when `success` is false; `restored_model` is the restored primary.
     End {
         success: bool,
         attempt: u32,
@@ -62,20 +49,12 @@ pub enum AutoRetryEvent {
     },
 }
 
-/// Drive `attempt` under the shared retry policy until it settles.
+/// Drive `attempt` under the shared retry policy until it settles: a turn
+/// with stop reason `Error` is classified against the policy; `emit` observes
+/// retry events, `wait` sleeps one delay (returning `false` aborts).
 ///
-/// `attempt` runs one turn and returns its final assistant message; a turn
-/// whose final message has stop reason `Error` is a provider failure and is
-/// classified against the policy. `emit` observes the retry events as they
-/// happen; `wait` sleeps one delay (returning `false` aborts the loop, like
-/// the TS abort controller). Returns the final assistant message — error or
-/// not — so the caller renders it like every other outcome.
-///
-/// `park` is the quota-park seam (TS #2375): consulted when a
-/// server-requested wait exceeds the policy cap (this port's
-/// `reset-too-far`). A `Some` outcome parks the session — the chain
-/// surfaces the parked status as the final `auto_retry_end` instead of
-/// the give-up — and `None` keeps the immediate give-up.
+/// `park` is the quota-park seam, consulted when a server-requested wait
+/// exceeds the policy cap: `Some` parks the session, `None` gives up.
 ///
 /// # Errors
 ///
@@ -117,13 +96,12 @@ where
         if signal.is_some_and(AbortSignal::is_aborted) {
             return Ok(with_stop_reason_aborted(message));
         }
-        // Non-retryable failures never enter the TS retry bookkeeping: a
-        // permanent failure that follows earlier transient retries only
-        // closes the active retry (`_finishActiveRetryWithFailure`).
+        // Non-retryable failures never enter the retry bookkeeping: a
+        // permanent failure only closes the active retry.
         let non_retryable = is_agent_lifecycle_failure(&message)
             || is_faux_provider_queue_exhausted(&message)
-            // A context overflow can never succeed unchanged (TS
-            // `_isRetryableError`): the compact-and-retry recovery owns it.
+            // A context overflow can never succeed unchanged: the
+            // compact-and-retry recovery owns it.
             || is_context_overflow_failure(&message, context_window)
             || is_unsupported_tool_failure(&message)
             || is_permanent_provider_failure_kind(
@@ -132,16 +110,10 @@ where
                 provider_stream_failure_status(&message),
             );
         if !policy.enabled || non_retryable {
-            // SANCTIONED DIVERGENCE (the 402 diagnosis, operator ruling):
-            // the outcome row is FAILURE-scoped, not episode-scoped. TS
-            // only emits retry events once a retry was attempted, so a
-            // permanent classification on the FIRST attempt settled with
-            // no events at all — the disclosure row the machinery exists
-            // for never fired (the operator's silent empty message). A
-            // provider failure with a recorded stream failure discloses
-            // at attempt 0; the self-managed arms stay silent (the
-            // overflow's compact-and-retry recovery owns its disclosure,
-            // lifecycle and faux failures are not provider failures).
+            // SANCTIONED DIVERGENCE (the 402 diagnosis, operator ruling): the
+            // outcome row is FAILURE-scoped, not episode-scoped. TS emits retry
+            // events only once a retry was attempted; here a provider failure
+            // discloses at attempt 0, the self-managed arms stay silent.
             if retries_performed > 0
                 || (has_provider_stream_failure(&message)
                     && !is_context_overflow_failure(&message, context_window))
@@ -156,8 +128,8 @@ where
             }
             return Ok(message);
         }
-        // TS `_handleRetryableError` bumps the attempt counter before
-        // deciding, so the exhaustion check compares past `max_retries`.
+        // The attempt counter bumps before deciding, so the exhaustion
+        // check compares past `max_retries`.
         retries_performed += 1;
         let delay = provider_retry_delay(
             retries_performed,
@@ -166,16 +138,11 @@ where
         );
         let delay_ms = match delay {
             // Jittered (SANCTIONED DIVERGENCE, operator ruling 2026-09-23):
-            // the jittered value is both waited and reported, so the
-            // interactive countdown stays honest while a fleet of retried
-            // sessions spreads off the same exponential-ladder ticks.
+            // the jittered value is both waited and reported, so the countdown
+            // stays honest while retried sessions spread off the ladder ticks.
             ProviderRetryDelay::Wait { delay_ms } => {
-                // TS routes the server-requested-wait arms to the bounded
-                // wait path BEFORE the quick-retry exhaustion check (the
-                // `waitClass === "quota"` arm precedes the maxRetries
-                // give-up), so the exhaustion arm never preempts the
-                // park decision: a quota-blocked attempt on the final
-                // retry still parks when the reset is too far.
+                // The server-requested-wait arm runs BEFORE the quick-retry
+                // exhaustion check: a quota-blocked final retry still parks.
                 if retries_performed > policy.max_retries {
                     emit(AutoRetryEvent::End {
                         success: false,
@@ -196,8 +163,7 @@ where
                     retry_after_ms.div_ceil(1000),
                     policy.max_retry_delay_ms,
                 );
-                // The park seam is a quota-failure seam (TS parks only
-                // from the wait path's `usage` arm): other
+                // The park seam is a quota-failure seam: other
                 // server-requested waits keep the give-up.
                 let parked = if is_quota_block_failure(&message) {
                     match park.as_deref_mut() {
@@ -208,9 +174,8 @@ where
                     None
                 };
                 let final_error = match parked {
-                    // The turn settles as the park's pause, not its death:
-                    // the parked status replaces the give-up (TS
-                    // `_finishQuotaParkedTurn`'s `finalError`).
+                    // The turn settles as the park's pause, not its
+                    // death: the parked status replaces the give-up.
                     Some(outcome) => outcome.status_message,
                     None => format!(
                         "{abort}: {}",
@@ -248,7 +213,7 @@ where
     }
 }
 
-/// The user-visible error text of a failed turn (TS `errorMessage || "Unknown error"`).
+/// The user-visible error text of a failed turn.
 fn final_error_of(message: &AssistantMessage) -> String {
     message
         .error_message

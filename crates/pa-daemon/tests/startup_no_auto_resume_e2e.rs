@@ -1,28 +1,7 @@
-//! The no-auto-resume contract e2e (the takeover field fixes): a daemon
-//! boot never creates a worker for a session the user did not ask for.
-//!
-//! THE FIELD BUG: the operator's friend installed the Rust port over a
-//! machine the TypeScript product had owned, and on the first Rust daemon
-//! boot a random old session he had not had running came up. The old
-//! spec §6 step-3 "scheduled-work re-arm" ran at EVERY boot (normal boots
-//! included), scanned the shared store's `session-artifacts` for due
-//! active jobs with no live worker, and CREATED a worker for each — so a
-//! TS-era session file with a stale heartbeat row (`status: "active"`,
-//! `nextRunAt` long past) booted itself. The TS product's own wake scan
-//! gates jobs behind the session's durable state and the family walk;
-//! the ungated re-arm did not.
-//!
-//! THE NEW CONTRACT: a session that was not running when the daemon
-//! stopped stays down after the daemon restarts; a schedule fires only
-//! while its session is live (the worker's in-process scheduler, armed
-//! at bind time when the user actually starts the session); due
-//! heartbeats on not-running sessions stay DORMANT and stay surfaced by
-//! the heartbeat catalog (`heartbeats_list`'s passive rows) instead of
-//! auto-firing. The boot only logs how many are dormant.
-//!
-//! The provider is a local always-200 OpenAI-completions mock, so a
-//! wrongly-booted session would run its turn and fail these asserts
-//! loudly (the resume-positive half needs it anyway).
+//! The no-auto-resume contract e2e: a daemon boot never creates a worker
+//! for a session the user did not ask for. A schedule fires only while its
+//! session is live; due heartbeats on not-running sessions stay DORMANT,
+//! surfaced by the heartbeat catalog instead of auto-firing.
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -41,7 +20,6 @@ struct Daemon {
 }
 
 impl Daemon {
-    /// Wait for the supervisor process to exit (the client `shutdown`).
     fn wait_exit(&mut self) {
         let deadline = Instant::now() + Duration::from_secs(10);
         while self.child.try_wait().expect("try wait").is_none() {
@@ -59,7 +37,7 @@ impl Drop for Daemon {
 }
 
 /// One always-200 SSE answer per request (a wrongly-booted session would
-/// turn against it; the resumed session's heartbeat turn does).
+/// turn against it).
 fn spawn_mock(answer: &'static str) -> PathBuf /* url */ {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");
     let url = format!(
@@ -134,16 +112,15 @@ fn spawn_daemon(socket: &Path, agent_dir: &Path) -> Daemon {
         .arg(socket)
         .arg("--agent-dir")
         .arg(agent_dir)
-        // A resumed worker has no create-config model: it falls back to
-        // the process pair, exactly like the TS daemon's default session
-        // config.
+        // A resumed worker has no create-config model: it falls back to the
+        // process pair (like the TS daemon's default session config).
         .env("PRIME_AGENT_MODEL_PROVIDER", "prime-inference")
         .env("PRIME_AGENT_MODEL", "mock-1")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        // A supervisor killed at teardown must not leak its session
-        // workers into later test binaries: the worker's supervisor-lost
-        // exit runs on this short window instead of the 5-minute default.
+        // A supervisor killed at teardown must not leak its session workers
+        // into later test binaries: the worker's supervisor-lost exit runs
+        // on this short window instead of the 5-minute default.
         .env(
             pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
             "15000",
@@ -235,7 +212,6 @@ impl Client {
         }
     }
 
-    /// The live roster (`list`): every resident session's active id.
     fn listed_sessions(&mut self, poll_id: &str) -> Vec<String> {
         self.send_command(poll_id, &json!({ "type": "list" }));
         let list = self.read_response(poll_id);
@@ -272,7 +248,6 @@ fn wait_until<T>(deadline: Duration, mut probe: impl FnMut() -> Option<T>) -> T 
     }
 }
 
-/// One session's transcript through the supervisor route.
 fn messages(client: &mut Client, id: &str, active_session_id: &str) -> String {
     client.send_command(
         id,
@@ -283,12 +258,9 @@ fn messages(client: &mut Client, id: &str, active_session_id: &str) -> String {
     serde_json::to_string(&response["data"]).expect("messages json")
 }
 
-/// A TS-ERA session file (the entry shapes the TypeScript product writes:
-/// the session header, `session_info`, the `session_state` row with the
-/// `{status}` object, a user message) — the shared-store file a fresh
-/// Rust install reads. `state` is the durable lifecycle status TS leaves
-/// on the file ("active" for a session that was never archived, the
-/// shape the old ungated re-arm used to wake).
+/// A TS-era session file (the entry shapes the TypeScript product
+/// writes). `state` is the durable lifecycle status TS leaves on the file
+/// ("active" = never archived, the shape the old ungated re-arm woke).
 fn write_ts_era_session(agent_dir: &Path, session_id: &str, name: &str, state: &str) -> PathBuf {
     let sessions = agent_dir.join("sessions");
     std::fs::create_dir_all(&sessions).expect("sessions dir");
@@ -327,7 +299,7 @@ fn write_ts_era_session(agent_dir: &Path, session_id: &str, name: &str, state: &
 }
 
 /// The session-artifacts `scheduled-jobs.json` store shape (TS
-/// `AgentCronJobStore::forSessionArtifacts`): `{jobs, dispatches}`.
+/// `AgentCronJobStore::forSessionArtifacts`).
 fn write_scheduled_jobs(agent_dir: &Path, session_id: &str, jobs: &[Value]) {
     let partition = agent_dir.join("session-artifacts").join(session_id);
     std::fs::create_dir_all(&partition).expect("artifacts partition");
@@ -364,7 +336,6 @@ fn due_job(
     })
 }
 
-/// Compose JSONL lines without a trailing-blank entry.
 fn json_lines(entries: Vec<Value>) -> String {
     let mut out = String::new();
     for entry in entries {
@@ -400,13 +371,8 @@ fn write_models_json(agent_dir: &Path, url: &Path) {
     .expect("write models.json");
 }
 
-/// THE STARTUP-SCAN NO-AUTO-RESUME TEST: a due scheduled job (a stale
-/// heartbeat AND a plain cron row) never boots its session at daemon
-/// start. The daemon log carries the dormant report instead, the
-/// heartbeat catalog still surfaces the row (dormant, not fired), and
-/// the session file gains nothing. The positive half: once the USER
-/// resumes the session, its schedule arms and the due heartbeat fires
-/// through the live worker's own scheduler.
+/// The positive half: once the USER resumes the session, its schedule
+/// arms and the due heartbeat fires through the live worker's scheduler.
 #[test]
 fn a_due_scheduled_job_never_boots_its_session_at_daemon_start() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -419,7 +385,6 @@ fn a_due_scheduled_job_never_boots_its_session_at_daemon_start() {
     let session_file = write_ts_era_session(&agent_dir, session_id, "the ts era session", "active");
     let file_before = std::fs::read(&session_file).expect("read before");
 
-    // TWO due rows: a stale heartbeat and a plain cron job.
     write_scheduled_jobs(
         &agent_dir,
         session_id,
@@ -455,16 +420,12 @@ fn a_due_scheduled_job_never_boots_its_session_at_daemon_start() {
         "a due scheduled job booted a session at daemon start: {listed:?}"
     );
 
-    // The session file gained NOTHING: no heartbeat prompt row, no cron
-    // prompt row, no state flip.
     let file_after = std::fs::read(&session_file).expect("read after");
     assert_eq!(
         file_before, file_after,
         "the not-running session's file changed at boot"
     );
 
-    // The boot's dormant report: both due jobs named, counted, never
-    // fired.
     let log_path = pa_daemon::paths::daemon_log_path(&socket, &agent_dir);
     let log = std::fs::read_to_string(&log_path).unwrap_or_default();
     for needle in [
@@ -479,9 +440,6 @@ fn a_due_scheduled_job_never_boots_its_session_at_daemon_start() {
         );
     }
 
-    // DORMANT, SURFACED: the heartbeat catalog still lists the passive
-    // heartbeat row (the agents-view surface — "a scheduled heartbeat
-    // exists"), and the cron catalog the cron row.
     client.send_command("hb1", &json!({ "type": "heartbeats_list" }));
     let heartbeats = client.read_response("hb1");
     assert_eq!(heartbeats["success"], true, "{heartbeats}");
@@ -502,9 +460,6 @@ fn a_due_scheduled_job_never_boots_its_session_at_daemon_start() {
         "the dormant cron row must stay surfaced in the catalog: {cron_rows:?}"
     );
 
-    // THE POSITIVE HALF: the user resumes the session — the schedule
-    // arms for a session the user actually starts, and the due heartbeat
-    // fires through the live worker's own scheduler.
     client.send_command(
         "c1",
         &json!({ "type": "create", "sessionPath": session_file.to_string_lossy() }),
@@ -517,8 +472,6 @@ fn a_due_scheduled_job_never_boots_its_session_at_daemon_start() {
         .expect("active id")
         .to_string();
 
-    // The heartbeat prompt row lands in the transcript (the fire
-    // delivers through the live queue) and the mock answers the turn.
     let fired = wait_until(Duration::from_secs(30), || {
         let text = messages(&mut client, "gm1", &active_id);
         (text.contains("the stale heartbeat ping") && text.contains("dormant reply"))
@@ -533,11 +486,7 @@ fn a_due_scheduled_job_never_boots_its_session_at_daemon_start() {
     daemon.wait_exit();
 }
 
-/// THE STALE-HEARTBEAT-DORMANT TEST (the field shape): a TS-era session
-/// file with a due-looking heartbeat — the friend's "random old session"
-/// — stays DOWN across daemon boots and restarts. The active-state
-/// file stays down and surfaced; the archived-state file (a session TS
-/// stopped on purpose) stays down and out of the catalog (TS parity).
+/// The archived-state file (a session TS stopped on purpose) stays down and out of the catalog.
 #[test]
 fn a_stale_ts_era_heartbeat_stays_dormant_across_daemon_restarts() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -580,7 +529,6 @@ fn a_stale_ts_era_heartbeat_stays_dormant_across_daemon_restarts() {
     let live_before = std::fs::read(&live_file).expect("read live");
     let stopped_before = std::fs::read(&stopped_file).expect("read stopped");
 
-    // Boot one.
     let socket = dir.path().join("restart.sock");
     let mut daemon = spawn_daemon(&socket, &agent_dir);
     let (mut client, hello) = Client::connect(&socket);
@@ -590,8 +538,6 @@ fn a_stale_ts_era_heartbeat_stays_dormant_across_daemon_restarts() {
         client.listed_sessions("l1").is_empty(),
         "the stale TS-era heartbeat booted a session on daemon start"
     );
-    // The catalog surfaces the active-state row; the archived session's
-    // row is hidden (the TS parity state gate).
     client.send_command("hb1", &json!({ "type": "heartbeats_list" }));
     let heartbeats = client.read_response("hb1");
     let ids: Vec<&str> = heartbeats["data"]["heartbeats"]
@@ -605,8 +551,6 @@ fn a_stale_ts_era_heartbeat_stays_dormant_across_daemon_restarts() {
     client.shutdown();
     daemon.wait_exit();
 
-    // Boot two: a session that was not running when the daemon stopped
-    // stays DOWN after the daemon restarts.
     let mut daemon2 = spawn_daemon(&socket, &agent_dir);
     let (mut client2, hello2) = Client::connect(&socket);
     assert_eq!(hello2["type"], "daemon_hello");
@@ -616,7 +560,6 @@ fn a_stale_ts_era_heartbeat_stays_dormant_across_daemon_restarts() {
         "the stale TS-era heartbeat booted a session after the daemon restart"
     );
 
-    // Neither file gained a row: nothing fired, nothing woke.
     assert_eq!(
         std::fs::read(&live_file).expect("read live"),
         live_before,

@@ -1,6 +1,6 @@
-//! The telemetry unit battery (moved with its concerns): the scripted
-//! run state machine, the outcome/provider/model/error categories, and the
-//! session-end finalize surface.
+//! The telemetry unit battery: the scripted run state machine, the
+//! outcome/provider/model/error categories, and the session-end finalize
+//! surface.
 use std::time::Duration;
 
 use pa_agent::stream::AssistantMessageEvent;
@@ -257,7 +257,6 @@ async fn emits_aggregate_metrics_without_content() {
         .await
         .is_empty());
 
-    // Session end finalizes the open run and emits the session totals.
     fixture.clock.set(1_200);
     let telemetry = SessionTelemetry::detached(
         fixture.client.clone(),
@@ -305,8 +304,6 @@ async fn emits_aggregate_metrics_without_content() {
     assert_eq!(ended[0]["total_tokens"], serde_json::json!(170));
 }
 
-/// TS "waits for post-run compaction before finalizing run metrics":
-/// a compaction drained after `AgentEnd` still counts into that run.
 #[tokio::test]
 async fn post_run_compaction_counts_into_the_open_run() {
     let fixture = fixture();
@@ -338,8 +335,6 @@ async fn post_run_compaction_counts_into_the_open_run() {
     assert_eq!(runs[0]["compaction_count"], serde_json::json!(1));
 }
 
-/// A compaction with no open run (between runs) does not inflate session
-/// totals — TS counts compactions only while a run exists.
 #[tokio::test]
 async fn compaction_between_runs_is_not_counted() {
     let fixture = fixture();
@@ -373,14 +368,11 @@ async fn compaction_between_runs_is_not_counted() {
     emit(&fixture, AgentEvent::AgentStart);
     telemetry.note_compaction(Some(45));
     let runs = event_properties(&fixture.mock, "agent run completed").await;
-    // Third run has no compaction; second run has none either.
     assert!(runs
         .iter()
         .all(|run| run["compaction_count"] == serde_json::json!(0)));
 }
 
-/// Error and abort outcomes carry the TS `runOutcome` semantics and the
-/// error-category classifier.
 #[tokio::test]
 async fn error_and_aborted_outcomes() {
     let fixture = fixture();
@@ -413,7 +405,6 @@ async fn error_and_aborted_outcomes() {
     assert_eq!(runs[1]["error_category"], serde_json::Value::Null);
 }
 
-/// Error-category classifier matrix (TS `errorCategory`).
 #[test]
 fn error_categories() {
     fn category(error: &str) -> String {
@@ -443,8 +434,6 @@ fn error_categories() {
     );
 }
 
-/// Provider/model categories (TS `telemetryProviderCategory` /
-/// `modelCategory`).
 #[test]
 fn provider_and_model_categories() {
     assert_eq!(provider_category(Some("prime")), "prime");
@@ -584,7 +573,6 @@ async fn build_client_reuses_the_ts_installation_id_and_mirrors() {
     }
 }
 
-/// Two runs in one session: totals merge, per-run events separate.
 #[tokio::test]
 async fn multiple_runs_merge_into_session_totals() {
     let fixture = fixture();
@@ -611,9 +599,6 @@ async fn multiple_runs_merge_into_session_totals() {
     assert_eq!(runs.len(), 2);
 }
 
-/// `agent run started` (v2): fires once per run window, at the right
-/// moment, with the prompt trigger when a user message drives the run
-/// and a `run_index` that pairs it with the completed event.
 #[tokio::test]
 async fn the_prompt_trigger_and_run_index_ride_the_completed_run() {
     let fixture = fixture();
@@ -627,7 +612,6 @@ async fn the_prompt_trigger_and_run_index_ride_the_completed_run() {
     fixture.clock.set(1_000);
     emit(&fixture, AgentEvent::AgentStart);
     emit(&fixture, AgentEvent::TurnStart);
-    // The user message right after AgentStart names the trigger.
     emit(
         &fixture,
         AgentEvent::MessageStart {
@@ -661,15 +645,12 @@ async fn the_prompt_trigger_and_run_index_ride_the_completed_run() {
     assert_eq!(runs[0]["run_index"], serde_json::json!(1));
 }
 
-/// A continuation run (the auto-retry re-entry: no user message inside
-/// the window) reports the continuation trigger.
 #[tokio::test]
 async fn continuation_run_reports_continuation_trigger() {
     let fixture = fixture();
     let assistant = assistant_message();
     emit(&fixture, AgentEvent::AgentStart);
     emit(&fixture, AgentEvent::TurnStart);
-    // No user message: the first model event names the trigger.
     emit(&fixture, message_end_event(assistant));
     emit(
         &fixture,
@@ -857,8 +838,6 @@ async fn a_cancelled_retry_never_absorbs_the_next_turn() {
     assert_eq!(runs[1]["retry_count"], serde_json::json!(0));
 }
 
-/// The enriched `agent run completed` (v2): the run pair id, the
-/// stop reason, the usage completeness and the estimated cost.
 #[tokio::test]
 async fn run_completed_v2_enrichment() {
     let fixture = fixture();
@@ -924,10 +903,9 @@ async fn stream_gap_tracks_the_largest_quiet_stretch() {
     assert_eq!(runs[0]["run_to_first_text_ms"], serde_json::json!(0));
 }
 
-/// The bot-found edges, pinned: the trigger lands on run completed (the
-/// catalog lists it), an aborted run's terminal outcome is the #2117
-/// `cancelled`, a tool failure never touches the model-failure chain,
-/// and a retry give-up never double-counts the chain.
+/// The bot-found edges, pinned: the trigger lands on run completed (the catalog lists it),
+/// an aborted run's terminal outcome is the #2117 `cancelled`, a tool failure never touches
+/// the model-failure chain, and a retry give-up never double-counts the chain.
 #[tokio::test]
 async fn bot_edges_the_trigger_lands_and_terminal_outcome_maps() {
     let fixture = fixture();

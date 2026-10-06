@@ -1,33 +1,12 @@
-//! The resumed-session kernel-state notice (`ipython_state_restored`).
-//!
-//! A resumed session spawns a fresh Python kernel: without a snapshot, the
-//! model would believe it still has access to variables, imports, and
-//! helpers it defined in the earlier run. The kernel's namespace snapshot
-//! (the dill payload in the session's artifact dir) revives them, and the
-//! provisioner's `on_restore` seam reports the outcome here so the model is
-//! told what came back BEFORE the first turn instead of discovering the
-//! gap a turn later.
-//!
-//! Relationship to the compaction notice (`ipython_state`, #230): two
-//! separate surfaces, one shared snapshot machinery. `ipython_state` fires
-//! after a compaction on a kernel that SURVIVED the compaction (same
-//! process, live namespace, pruning disclosure); `ipython_state_restored`
-//! fires when a NEW kernel booted and revived the namespace from disk (a
-//! resume, or a fresh session opened over a snapshot-carrying artifact
-//! dir). Both read the same per-session snapshot dir and the same
-//! `snapshot`/`list_names` kernel requests, but the compaction notice
-//! never restores (the kernel never died) and the restore notice never
-//! prunes (the fresh kernel owns nothing to prune).
-//!
-//! TS reference: `agent-session.ts` `_onIpythonStateRestored` (the
-//! `onRestore` callback of `IpythonKernelProvisioner`), delivered through
-//! `sendCustomMessage(..., { deliverAs: "nextTurn" })`.
+//! The resumed-session kernel-state notice (`ipython_state_restored`): a resumed session
+//! spawns a fresh kernel and the namespace snapshot revives the variables; the
+//! provisioner's `on_restore` seam reports the outcome so the model is told BEFORE
+//! the first turn. The fresh kernel owns nothing, so this notice never prunes.
 
 use pa_types::session::CustomMessage;
 
 use crate::kernel::state_snapshot::RestoreResult;
 
-/// The notice's `customType` (TS `IPYTHON_STATE_RESTORED_CUSTOM_TYPE`).
 pub const IPYTHON_STATE_RESTORED_CUSTOM_TYPE: &str = "ipython_state_restored";
 
 fn now_millis() -> u64 {
@@ -37,9 +16,8 @@ fn now_millis() -> u64 {
         .unwrap_or_default()
 }
 
-/// The notice text (TS `_onIpythonStateRestored`'s builder): the
-/// `[python-state-restored]` header, the revived-or-fresh line, and the
-/// failed-names disclosure.
+/// The notice text: the `[python-state-restored]` header, the
+/// revived-or-fresh line, and the failed-names disclosure.
 #[must_use]
 pub fn notice_content(result: &RestoreResult) -> String {
     let mut lines = vec!["[python-state-restored]".to_string(), String::new()];
@@ -67,10 +45,8 @@ pub fn notice_content(result: &RestoreResult) -> String {
     lines.join("\n")
 }
 
-/// The next-turn notice row: display true, `details.restored` flagging
-/// whether anything revived (TS `sendCustomMessage` with
-/// `deliverAs: "nextTurn"` — the row rides the next admitted turn ahead of
-/// its prompt).
+/// The next-turn notice row: display true, `details.restored` flagging whether anything
+/// revived; the row rides the next admitted turn ahead of its prompt.
 #[must_use]
 pub fn notice_message(result: &RestoreResult) -> CustomMessage {
     CustomMessage {

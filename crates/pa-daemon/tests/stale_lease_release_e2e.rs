@@ -1,24 +1,7 @@
-//! The stale-lease-release e2e (the zombie-holder incident): a worker the
-//! supervisor REVIVES at boot must stay supervised through the process it
-//! spawned - never through the dead pre-restart pid its descriptor carried -
-//! and the exhausted-failure give-up must release the session hold (no live
-//! process of this daemon may outlive the abandoned id while holding the
-//! session's runtime lease).
-//!
-//! The incident being pinned: a revived worker was alive and serving while
-//! the monitor polled the dead pid the descriptor still named, counted six
-//! phantom exits, gave up on the id, and left the live holder orphaned -
-//! every create over the session file then refused with "This session is
-//! currently open in another Rust build of Prime Agent (active in <id>)"
-//! until the NEXT daemon restart's boot reap cleared the orphan. The
-//! operator's sessions were unbootable in the meantime, and both advised
-//! ways out were dead ends: no window existed to continue in (the daemon
-//! had forgotten the holder), and the pid-kill advice asked the operator
-//! to do the daemon's own cleanup by hand.
-//!
-//! The genuine refusals stay intact: a truly live foreign holder still
-//! rejects (the `hold_refusal` e2e), and the create-reuse seam keeps
-//! answering the live worker for every plain open (multi-client attach).
+//! The stale-lease-release e2e: a worker the supervisor revives at boot must
+//! stay supervised through the process it spawned - never through the dead
+//! pre-restart pid its descriptor carried - and the exhausted-failure
+//! give-up must release the session hold.
 #![cfg(target_os = "linux")]
 
 use std::io::{BufRead, BufReader, Write};
@@ -42,10 +25,8 @@ impl Drop for Daemon {
     }
 }
 
-/// A supervisor with a LONG supervisor-lost window: an orphaned worker
-/// must survive every other exit path so only the code under test can be
-/// what stopped it (the harness default 15s window would let a worker
-/// self-exit against a dead socket on its own).
+/// A supervisor with a LONG supervisor-lost window: the harness default 15s
+/// would let an orphaned worker self-exit against a dead socket on its own.
 // The timeout panic path cannot wait on the child; the test process exits
 // immediately afterwards, reaping it.
 #[allow(clippy::zombie_processes)]
@@ -90,8 +71,8 @@ fn process_alive(pid: u32) -> bool {
     !state.starts_with('Z') && !state.starts_with('X')
 }
 
-/// SIGKILL by pid (the tree's e2e pattern: the target is a worker process
-/// the test does not own as a `std` child).
+/// SIGKILL by pid (the target is a worker process the test does not own
+/// as a `std` child).
 fn kill_hard(pid: u32) {
     let status = std::process::Command::new("kill")
         .arg("-9")
@@ -126,7 +107,6 @@ fn child_pids_of(ppid: u32) -> Vec<u32> {
     pids
 }
 
-/// The daemon's rotating log for one socket (the incident's evidence file).
 fn daemon_log(socket: &Path, agent_dir: &Path) -> PathBuf {
     pa_daemon::paths::daemon_log_path(socket, agent_dir)
 }
@@ -135,7 +115,6 @@ fn log_contains(socket: &Path, agent_dir: &Path, needle: &str) -> bool {
     std::fs::read_to_string(daemon_log(socket, agent_dir)).is_ok_and(|log| log.contains(needle))
 }
 
-/// Wait until the daemon log names `needle`, or panic past `budget`.
 fn await_log_line(socket: &Path, agent_dir: &Path, needle: &str, budget: Duration) {
     let deadline = Instant::now() + budget;
     while !log_contains(socket, agent_dir, needle) {
@@ -147,9 +126,8 @@ fn await_log_line(socket: &Path, agent_dir: &Path, needle: &str, budget: Duratio
     }
 }
 
-/// Wait `budget` for the log to STOP gaining `needle` (the give-up storm
-/// window: a fixed sleep makes the test observe the failure cascade
-/// without depending on its exact pacing).
+/// The give-up storm window: a fixed sleep makes the test observe the
+/// failure cascade without depending on its exact pacing.
 fn log_settles_without(socket: &Path, agent_dir: &Path, needle: &str, budget: Duration) {
     std::thread::sleep(budget);
     assert!(
@@ -240,8 +218,6 @@ fn write_script(dir: &Path, name: &str, responses: &[&str]) -> PathBuf {
     script_path
 }
 
-/// One scripted session: create + attach, returning the active session id
-/// (the worker id), its durable file, and the live worker pid.
 fn create_session(
     client: &mut Client,
     dir: &Path,
@@ -288,14 +264,12 @@ fn create_session(
     (session_id, worker_pid)
 }
 
-/// The worker descriptor path for one session on one socket.
 fn descriptor_path(agent_dir: &Path, socket: &Path, session_id: &str) -> PathBuf {
     pa_daemon::descriptor::descriptor_dir(agent_dir, socket).join(format!("{session_id}.json"))
 }
 
-/// One session's durable file path, from its worker descriptor (the create
-/// response's `id` is the ACTIVE session id; the file on disk is named by
-/// the durable session UUID).
+/// The create response's `id` is the ACTIVE session id; the file on disk
+/// is named by the durable session UUID.
 fn session_file_of(agent_dir: &Path, socket: &Path, session_id: &str) -> PathBuf {
     let descriptor = std::fs::read_to_string(descriptor_path(agent_dir, socket, session_id))
         .expect("descriptor");
@@ -308,8 +282,7 @@ fn session_file_of(agent_dir: &Path, socket: &Path, session_id: &str) -> PathBuf
     )
 }
 
-/// The worker's own socket path from its descriptor (every relaunched
-/// epoch of one id binds the same path).
+/// Every relaunched epoch of one id binds the same path.
 fn worker_socket_of(agent_dir: &Path, socket: &Path, session_id: &str) -> PathBuf {
     let descriptor = std::fs::read_to_string(descriptor_path(agent_dir, socket, session_id))
         .expect("descriptor");
@@ -322,16 +295,13 @@ fn worker_socket_of(agent_dir: &Path, socket: &Path, session_id: &str) -> PathBu
     )
 }
 
-/// Whether the worker's socket is serving: a relaunched worker counts as
-/// up only once its endpoint accepts connections. A kill fired mid-boot
-/// would burn the daemon's whole 30s connect budget per cycle (the probe
-/// waits out a socket that never comes up), so the crash loop paces its
-/// kills on this probe instead.
+/// A relaunched worker counts as up only once its endpoint accepts
+/// connections. A kill fired mid-boot would burn the daemon's whole 30s
+/// connect budget per cycle, so the crash loop paces its kills on this probe.
 fn worker_serving(socket_path: &Path) -> bool {
     UnixStream::connect(socket_path).is_ok()
 }
 
-/// The operator's open: a create that targets an existing session file.
 fn open_session_command(
     id: &str,
     session_file: &Path,
@@ -353,11 +323,8 @@ fn open_session_command(
     )
 }
 
-/// The incident's precondition, end to end: a supervisor dies (kill -9)
-/// leaving its worker alive with a fresh `busy` journal record (the
-/// create's - only a hard kill skips the settle), then the worker dies the
-/// same way. The next boot finds a dead worker with interrupted-work
-/// evidence: the boot-revival path's exact entry.
+/// Kill -9 the supervisor and the worker: only a hard kill skips the
+/// settle, leaving the fresh `busy` journal record the boot revival keys on.
 fn crash_daemon_and_worker(daemon: &mut Daemon, worker_pid: u32) {
     daemon.child.kill().expect("kill -9 supervisor");
     let _ = daemon.child.wait();
@@ -369,15 +336,6 @@ fn crash_daemon_and_worker(daemon: &mut Daemon, worker_pid: u32) {
     }
 }
 
-/// The zombie-holder incident, end to end: a daemon dies with its worker
-/// mid-flight, a new daemon boots on the SAME socket and revives the dead
-/// worker - and the revived worker must stay supervised through the
-/// process the revival spawned. The buggy monitor watched the descriptor's
-/// dead pre-restart pid instead: the first poll read as a phantom exit,
-/// the failure loop spawned duplicates until the cap gave up on the id,
-/// and the healthy revived worker was left orphaned - alive, holding the
-/// session's runtime lease, forgotten by the registry, refusing every
-/// create for the file with the "already active in <id>" hold refusal.
 #[test]
 fn the_revived_worker_stays_supervised_and_the_session_reopens() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -395,8 +353,7 @@ fn the_revived_worker_stays_supervised_and_the_session_reopens() {
 
     crash_daemon_and_worker(&mut daemon, worker_pid);
 
-    // The new daemon on the SAME socket: its adoption revives the dead
-    // worker (journal-proven interrupted work, fresh).
+    // The new daemon on the SAME socket: its adoption revives the dead worker.
     let _daemon2 = spawn_supervisor(&socket, &agent_dir);
     await_log_line(
         &socket,
@@ -405,8 +362,7 @@ fn the_revived_worker_stays_supervised_and_the_session_reopens() {
         Duration::from_secs(20),
     );
 
-    // The give-up storm window: the buggy monitor's phantom failures ran
-    // the whole backoff ladder (0.25+0.5+1+2+4s plus restarts) inside
+    // The buggy monitor's whole backoff ladder plus restarts ran inside
     // this budget; a supervised revival logs nothing of the kind.
     log_settles_without(
         &socket,
@@ -421,9 +377,6 @@ fn the_revived_worker_stays_supervised_and_the_session_reopens() {
         Duration::from_millis(200),
     );
 
-    // The operator's open: the session file the revived worker serves.
-    // The reuse seam answers the live binding (multi-client attach); the
-    // buggy tree answered the zombie-holder refusal instead.
     let reopen_script = write_script(dir.path(), "script-reopen.json", &["turn-reopen"]);
     let mut client2 = Client::connect(&socket);
     let (reopen_id, reopen_command) = open_session_command(
@@ -441,9 +394,6 @@ fn the_revived_worker_stays_supervised_and_the_session_reopens() {
     );
 }
 
-/// The exhausted-failure state releases the session hold: a worker that
-/// genuinely crash-loops to the give-up cap leaves the session re-openable
-/// through the very next client create - no refusal, no manual pid kill.
 #[test]
 fn a_worker_that_fails_to_death_releases_the_session_hold() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -459,16 +409,10 @@ fn a_worker_that_fails_to_death_releases_the_session_hold() {
         create_session(&mut client, dir.path(), &sessions_dir, supervisor_pid);
     let session_file = session_file_of(&agent_dir, &socket, &session_id);
 
-    // The crash loop: kill the worker every time it comes back up, until
-    // the supervisor exhausts the cap (each death is real, each relaunch
-    // reclaims the dead holder's stale lease, and the cap gives up on the
-    // id). A kill must land AFTER the relaunch's create replay settles
-    // (the replay's re-registration lands ~1s after the socket binds):
-    // a worker dying mid-replay parks the relaunch until the create
-    // route's own 600s budget instead of the backoff ladder, and the
-    // failure counter never climbs. The pace is a serving grace: the
-    // worker's socket must have served continuously for the grace before
-    // the kill fires.
+    // Kill the worker each time it comes back up until the cap gives up.
+    // A kill must land AFTER the relaunch's create replay settles (~1s
+    // after the socket binds): a worker dying mid-replay parks the
+    // relaunch on the create route's 600s budget instead of the backoff ladder.
     let worker_socket = worker_socket_of(&agent_dir, &socket, &session_id);
     let give_up = format!("session worker {session_id} failed after 6 consecutive failures");
     let replay_grace = Duration::from_secs(4);
@@ -494,15 +438,11 @@ fn a_worker_that_fails_to_death_releases_the_session_hold() {
         std::thread::sleep(Duration::from_millis(200));
     }
 
-    // The give-up settles before the sweep and the reopen run: the log
-    // names the verdict, then (with nothing live left of the id) nothing
-    // further - the session file is free for the next open.
+    // Let the give-up settle (nothing live left of the id) before the reopen.
     std::thread::sleep(Duration::from_secs(2));
 
-    // The operator's reopen: no resident serves the file (the id was
-    // abandoned), so this is a fresh launch over the freed hold. The dead
-    // holder's lease self-heals through the stale-owner reclaim; a live
-    // leftover would bounce this create with the hold refusal.
+    // No resident serves the file (the id was abandoned): the dead holder's
+    // lease self-heals through the stale-owner reclaim.
     let reopen_script = write_script(dir.path(), "script-reopen.json", &["turn-reopen"]);
     let mut client2 = Client::connect(&socket);
     let (reopen_id, reopen_command) = open_session_command(
@@ -520,10 +460,6 @@ fn a_worker_that_fails_to_death_releases_the_session_hold() {
     );
 }
 
-/// The give-up belt: when the supervisor abandons a worker id, no live
-/// process of this daemon may keep carrying that id - a leftover holding
-/// the abandoned identity is reaped identity-gated at the give-up, so the
-/// id (and the session hold its processes took) actually releases.
 #[test]
 fn the_give_up_sweep_reaps_a_live_leftover_of_the_abandoned_id() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -538,11 +474,9 @@ fn the_give_up_sweep_reaps_a_live_leftover_of_the_abandoned_id() {
     let (session_id, worker_pid) =
         create_session(&mut client, dir.path(), &sessions_dir, supervisor_pid);
 
-    // A leftover of the id: a real product worker process (the binary's
-    // `worker` role, the exact argv and env shape the supervisor stamps)
-    // whose active-session env names the session's worker id. It fails
-    // registration (an unknown token) and parks in the registration
-    // backoff - the shape of a process the supervisor lost track of.
+    // A real product worker process whose active-session env names the
+    // session's worker id; it fails registration (an unknown token) and
+    // parks in the registration backoff - a process the supervisor lost track of.
     let mut fake = Command::new(env!("CARGO_BIN_EXE_pa-daemon"))
         .arg("worker")
         .env(pa_daemon::worker::WORKER_ROLE_ENV, "1")
@@ -588,18 +522,13 @@ fn the_give_up_sweep_reaps_a_live_leftover_of_the_abandoned_id() {
         );
         std::thread::sleep(Duration::from_millis(20));
     }
-    // Set apart from the supervisor's own children: the leftover is not
-    // the live session worker.
     assert!(
         !child_pids_of(supervisor_pid).contains(&fake_pid),
         "the leftover must not be a child the supervisor watches"
     );
 
-    // The crash loop to the give-up cap: the sweep runs with the verdict
-    // and must take the leftover down with the abandoned id. Kills pace
-    // on a serving grace past the replay window (a mid-replay death
-    // parks the relaunch on the create route's own budget - see the
-    // fails-to-death test).
+    // The crash loop to the give-up cap: kills pace on a serving grace
+    // past the replay window (see the fails-to-death test).
     let worker_socket = worker_socket_of(&agent_dir, &socket, &session_id);
     kill_hard(worker_pid);
     let give_up = format!("session worker {session_id} failed after 6 consecutive failures");

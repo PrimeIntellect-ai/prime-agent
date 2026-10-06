@@ -19,15 +19,10 @@ use crate::lease::is_process_alive;
 use crate::protocol::{response_failure, response_success, DaemonResponse};
 
 impl Supervisor {
-    /// Complete a tombstoned stop for a worker encountered at adoption —
-    /// the boot scan's descriptor pass and a live re-registration alike
-    /// (TS `adoptOrRecoverWorker`'s `stopRequestedAt` branch: adoption
-    /// finishes the stop, never adopts the worker as healthy). The
-    /// tombstone's variant rides `archive_on_stop`: the kill stop
-    /// (`Some(true)`) is irreversible — its killed close cancels jobs,
-    /// archives the file, and cascades children; the per-session stop
-    /// (`Some(false)`) keeps the session resumable — its graceful
-    /// shutdown close and its schedule-cancel belt are all it owns.
+    /// Complete a tombstoned stop for a worker encountered at adoption: adoption
+    /// finishes the stop, never adopts the worker as healthy. The `archive_on_stop`
+    /// variant rides it: the kill stop is irreversible; the per-session stop keeps
+    /// the session resumable.
     pub(super) async fn finish_tombstoned_stop(
         self: &Arc<Self>,
         resident: &Arc<ResidentWorker>,
@@ -35,11 +30,9 @@ impl Supervisor {
     ) {
         let kill_stop = resident.descriptor.lock().await.archive_on_stop == Some(true);
         if alive {
-            // The worker outlived the stop (a crash between the tombstone
-            // and the forward, or a survivor of the escalation): connect
-            // to it and forward the ORIGINAL stop intent — kill for the
-            // kill stop, shutdown for the resumable per-session stop. A
-            // failed connect degrades to the dead-worker finalize below.
+            // The worker outlived the stop: connect and forward the ORIGINAL stop intent —
+            // kill for the kill stop, shutdown for the resumable stop. A failed connect
+            // degrades to the finalize below.
             resident.intentional_stop.store(true, Ordering::SeqCst);
             // TS stopWorker(force) bounds the graceful IPC leg to one
             // second before process escalation. Auth and stop share that
@@ -70,16 +63,8 @@ impl Supervisor {
         // TS `scheduleWorkerStopFinalization`: the interrupted stop's
         // cleanup re-runs instead of a relaunch, honoring the variant.
         if kill_stop {
-            // The descriptor survives an unsettled finalize (a later boot
-            // retries the archived-state belt); a settled stop still dies
-            // only with a provably-gone process. The forwarded kill
-            // releases the lease without exiting the worker, and the
-            // registration path's refused worker is not yet in the
-            // registry, so the finalize's registry-coverage checks cannot
-            // observe it — the settle is not a death certificate. The
-            // retire pass's escalation is: a survivor keeps its
-            // tombstoned descriptor for the next boot exactly like the
-            // per-session arm, and only a provable death removes it.
+            // The descriptor survives an unsettled finalize; a settled stop still dies
+            // only with a provably-gone process — the settle is not a death certificate.
             let settled = self.finalize_worker_stop(resident, None).await;
             if settled {
                 self.retire_worker_after_stop(resident).await;
@@ -94,16 +79,10 @@ impl Supervisor {
                 ));
             }
         } else {
-            // The per-session stop's durable half is the ephemeral
-            // schedule cancel (no archived-state belt — the session stays
-            // resumable), and the descriptor dies only with a
-            // provably-gone process: the retire pass removes it once the
-            // escalation confirms death and keeps a survivor's tombstone
-            // for the next boot (never orphaning a live lease holder
-            // behind a deleted descriptor). Only an owned (ephemeral)
-            // stop cancels its tree — `stop_worker`'s own gate: a
-            // resident RLM child's preserved jobs must survive a parent's
-            // stop-driven death.
+            // The per-session stop's durable half is the ephemeral schedule cancel (the
+            // session stays resumable), and the descriptor dies only with a provably-gone
+            // process. Only an owned (ephemeral) stop cancels its tree — a resident RLM
+            // child's preserved jobs must survive a parent's stop-driven death.
             if resident.descriptor.lock().await.owner_client_id.is_some() {
                 self.finalize_owned_stop(resident).await;
             }
@@ -173,9 +152,8 @@ impl Supervisor {
             .and_then(|config| config.get("script"))
             .and_then(Value::as_str)
             .map(str::to_string);
-        // Explicit model selection from the create config: carried into the
-        // durable create command so respawned workers resolve the same model
-        // and thinking level.
+        // Explicit model selection from the create config: carried into the durable
+        // create command so respawned workers resolve the same model and thinking level.
         let requested_thinking = match config_object.and_then(|config| config.get("thinking")) {
             None => None,
             Some(Value::String(level)) => match pa_ai::models::thinking_level_from_str(level) {
@@ -212,12 +190,8 @@ impl Supervisor {
                 "Session cannot be both no-session and session-pathed"
             ));
         }
-        // `continueRecent` is refused: a create must name its session
-        // (`sessionPath`) or open one through the agents view. The daemon
-        // never picks a session blindly — a shared session dir can hold any
-        // session, and reopening one revives its context and scheduled jobs
-        // (a sanctioned divergence from the TS worker's continueRecent
-        // arm, which resolves the newest saved session for the cwd).
+        // `continueRecent` is refused: a create must name its session (a sanctioned
+        // divergence from the TS arm, which resolves the newest saved session for the cwd).
         if *continue_recent == Some(true) {
             return Err(anyhow!(
                 "continueRecent is not supported: pass sessionPath to reopen a session, or open one through the agents view"
@@ -249,13 +223,8 @@ impl Supervisor {
         if let Some(thinking) = model_selection.thinking {
             durable_rest.insert("thinking".to_string(), json!(thinking.wire_name()));
         }
-        // RLM recursion identity and the session flags ride the durable
-        // create command so a respawned worker rebuilds the same session.
-        // `thinking` is covered above: the validated wire name goes into the
-        // durable command, never the raw config value, so an invalid level
-        // cannot outlive the create check. `models` rides it too: the
-        // create-time scope replays on a respawn (TS replays the whole
-        // create config).
+        // RLM recursion identity, the session flags, and the create-time scope (`models`)
+        // ride the durable create command so a respawned worker replays the same session.
         for key in [
             "rlmDepth",
             "rlmMaxDepth",
@@ -294,9 +263,8 @@ impl Supervisor {
                 }
             }
         }
-        // The whole subagent runtime identity rides the durable create
-        // command too, so a respawned child keeps its roster identity
-        // (parentPath#childId) across worker restarts.
+        // The whole subagent runtime identity rides the durable create command
+        // too, so a respawned child keeps its roster identity (parentPath#childId).
         if let Some(runtime_metadata) = &runtime_metadata {
             durable_rest.insert("runtimeMetadata".to_string(), runtime_metadata.clone());
         }
@@ -340,9 +308,8 @@ impl Supervisor {
         };
         let descriptor_path = self.descriptor_dir.join(format!("{worker_id}.json"));
         let resident = ResidentWorker::new(worker_id.clone(), descriptor, descriptor_path.clone());
-        // Register the resident before spawning the process: the worker
-        // self-registers on boot, and the registration handler must find its
-        // identity in the registry (registration races the create replay).
+        // Register the resident before spawning: the worker's boot self-registration must
+        // find its identity in the registry (registration races the create replay).
         self.registry.insert(Arc::clone(&resident)).await;
         // An owner whose last connection closed before this insert was
         // missed by its disconnect scan; the arm checks the owner itself.
@@ -360,20 +327,17 @@ impl Supervisor {
             Ok(child) => child,
             Err(error) => {
                 self.registry.remove(&worker_id).await;
-                // The half-launched worker's descriptor dies with the
-                // launch: a restart must not adopt it and replay its
-                // durable create after the client was told the create
-                // failed.
+                // The half-launched worker's descriptor dies with the launch: a restart must
+                // not adopt it and replay its durable create after the client was told
+                // the create failed.
                 let _ = std::fs::remove_file(&descriptor_path);
                 return Err(error);
             }
         };
         if let Err(error) = self.connect_worker(&resident, deadline).await {
-            // Never leave a spawned-but-unwired worker process behind.
             let mut child = child;
             let _ = child.kill().await;
             self.registry.remove(&worker_id).await;
-            // The half-launched worker's descriptor dies with the launch.
             let _ = std::fs::remove_file(&descriptor_path);
             return Err(error);
         }
@@ -394,12 +358,10 @@ impl Supervisor {
         {
             Ok(response) => response,
             Err(error) => {
-                // The connected child dies with the failed create: an
-                // unmanaged survivor would keep the session file while a
-                // retry mints a second worker over it.
+                // The connected child dies with the failed create: an unmanaged survivor
+                // would keep the session file while a retry mints a second worker over it.
                 let _ = child.kill().await;
                 self.registry.remove(&worker_id).await;
-                // The half-launched worker's descriptor dies with the launch.
                 let _ = std::fs::remove_file(&descriptor_path);
                 return Err(error);
             }
@@ -408,21 +370,13 @@ impl Supervisor {
             let _ = child.kill().await;
             let _ = std::fs::remove_file(&descriptor_path);
             self.registry.remove(&worker_id).await;
-            // A typed worker rejection relays verbatim - the typed text is
-            // the user-facing refusal (the session-hold rejection the
-            // lease raises against a live foreign holder) - and the daemon
-            // logs the detected conflict itself, not just the raw
-            // session-worker failure: the rotating log beside the socket
-            // is where a refused create leaves its record. The wrap stays
-            // for untyped failures, whose text is context the raw error
-            // lacks.
+            // A typed worker rejection relays verbatim (the typed text is the user-facing
+            // refusal); the wrap stays for untyped failures.
             return Err(match response.error_info {
                 Some(error_info) => {
                     let message = response.error.clone().unwrap_or_default();
-                    // The typed rejection's text is multi-line (the
-                    // actionable refusal); the log keeps one record per
-                    // line, so only its headline rides the log line (the
-                    // full text reached the client on the wire).
+                    // The typed rejection's text is multi-line; the log keeps one record per
+                    // line, so only its headline rides the log line.
                     let headline = message.lines().next().unwrap_or_default();
                     match &error_info {
                         pa_types::daemon::DaemonErrorInfo::SessionAlreadyActive {
@@ -449,12 +403,8 @@ impl Supervisor {
                 ),
             });
         }
-        // The create response is authoritative: a sessioned create must
-        // carry a non-empty session file before it can succeed (the
-        // descriptor, the spawn ledger, and respawn recovery all key on
-        // it; a create without it would admit a child the roster can
-        // never find again). `no_session` creates are in-memory by
-        // design and stay exempt.
+        // The create response is authoritative: a sessioned create must carry a non-empty
+        // session file; `no_session` creates are in-memory by design.
         let create_summary = response
             .data
             .clone()
@@ -465,9 +415,9 @@ impl Supervisor {
                 .and_then(Value::as_str)
                 .is_some_and(|file| !file.is_empty());
             if !has_session_file {
-                // Never leave the spawned worker behind a degraded create:
-                // the shutdown is graceful, and the awaited kill reaps the
-                // child (the monitor that would own it is not spawned yet).
+                // Never leave the spawned worker behind a degraded create: the shutdown is
+                // graceful, and the awaited kill reaps the child (the monitor that would
+                // own it is not spawned yet).
                 let _ = self.stop_worker(&resident).await;
                 let _ = child.kill().await;
                 let _ = std::fs::remove_file(&descriptor_path);
@@ -481,10 +431,9 @@ impl Supervisor {
                 .get("sessionId")
                 .and_then(Value::as_str)
                 .map(str::to_string);
-            // An empty session file (an in-memory `no_session` session)
-            // must not overwrite the descriptor's session identity: the
-            // durable create stays pathless so a respawned worker
-            // replays the session as in-memory.
+            // An empty session file (an in-memory `no_session` session) must not overwrite
+            // the descriptor's identity: the durable create stays pathless so a respawned
+            // worker replays the session as in-memory.
             if let Some(session_file) = create_summary
                 .get("sessionFile")
                 .and_then(Value::as_str)
@@ -492,16 +441,13 @@ impl Supervisor {
                 .filter(|file| !file.is_empty())
             {
                 descriptor.session_file = Some(session_file.clone());
-                // The durable create command must reopen the same session
-                // file on relaunch, or a respawned worker would create a
-                // fresh session and lose history.
+                // The durable create command must reopen the same session file on relaunch,
+                // or a respawned worker would create a fresh session and lose history.
                 descriptor.create_command.session_path = Some(session_file);
             }
-            // The binding table learns the durable identity here: a create
-            // over a session file another worker owned (the session
-            // re-opened after its worker gave up or stopped) supersedes the
-            // old id, and the supersede notification tells the clients
-            // still attached to it to rebind.
+            // The binding table learns the durable identity here: a create over a session
+            // file another worker owned supersedes the old id, and the notification tells
+            // attached clients to rebind.
             self.record_session_binding(
                 &worker_id,
                 descriptor.root_session_id.as_deref(),
@@ -509,21 +455,17 @@ impl Supervisor {
             );
             persist_worker(&descriptor_path, &descriptor)?;
         }
-        // The create completed with a validated session identity: client
-        // commands may now be routed to this worker (the replacement-aware
-        // route gates on this, so nothing overtakes the session's create).
+        // The create completed with a validated session identity: client commands may
+        // now be routed to this worker — nothing overtakes the session's create.
         resident.note_session_ready();
         let pid = child.id().unwrap_or(0);
         self.spawn_monitor(Arc::clone(&resident), Some(child), u64::from(pid));
         Ok((resident, create_summary))
     }
 
-    /// Persist one subagent deletion (TS `recordRlmSubagentDeletion`): the
-    /// ledger delete record is the topology tombstone, the display file gets
-    /// a status tombstone for hydration. The child's transcript stays (a
-    /// tombstoned-but-undeleted file is the accepted orphan of a failed
-    /// teardown); the row disappears from rosters because live-edge reads
-    /// drop tombstones.
+    /// Persist one subagent deletion (TS `recordRlmSubagentDeletion`): the ledger delete record is
+    /// the topology tombstone, the display file a status tombstone. The transcript stays;
+    /// live-edge reads drop tombstones, so the row disappears from rosters.
     pub(super) async fn tombstone_rlm_child(
         self: &Arc<Self>,
         resident: &Arc<ResidentWorker>,
@@ -573,9 +515,8 @@ impl Supervisor {
         ledger
             .append_delete(&child_id, &session_file, reason)
             .with_context(|| format!("tombstone RLM subagent {child_id}"))?;
-        // The display tombstone keeps the child's identity for hydration
-        // retries; best-effort because the ledger tombstone is the
-        // authority.
+        // The display tombstone keeps the child's identity for hydration retries;
+        // best-effort because the ledger tombstone is the authority.
         let display = crate::rlm_ledger::read_rlm_subagent_display(Path::new(&session_dir));
         let tombstone = crate::rlm_ledger::RlmSubagentDisplayEntry {
             type_tag: "rlm_subagent".to_string(),
@@ -605,26 +546,9 @@ impl Supervisor {
         Ok(())
     }
 
-    /// The plain kill's stop aftermath, run on every route outcome: TS's
-    /// root-kill block wraps the forward in a `finally`
-    /// (daemon-supervisor.ts: `try { response = await
-    /// this.forwardToWorker(...) } finally { await this.stopWorker(...) }`),
-    /// so a kill a hung worker never answers still completes the stop —
-    /// the graceful `shutdown` route bounded by the route budget, then
-    /// [`Self::retire_worker_after_stop`]'s SIGTERM -> SIGKILL ->
-    /// hard-deadline escalation — and the stopped worker's session lease
-    /// frees through the dead-owner reclaim instead of outliving the
-    /// command behind a route that never answers.
-    ///
-    /// The stop runs first and its failure gates the belt: the only
-    /// `Err` [`Self::stop_worker`] takes is the stop tombstone's persist
-    /// (the stop never durably started — TS's `stopWorkerUntracked`
-    /// throws before any teardown), so the worker stays untouched and
-    /// the kill stays retryable. The belt below must never run against
-    /// a live worker: it cancels the session tree's jobs, archives the
-    /// root file, and sweeps a ledger delete's child artifacts while
-    /// the worker's resident is still serving and its transcript may
-    /// still grow.
+    /// The plain kill's stop aftermath, run on every route outcome: TS's root-kill block wraps
+    /// the forward in a `finally`, so a hung worker still completes the stop. The stop's only
+    /// `Err` is the tombstone persist, so the worker stays untouched and the kill retryable.
     pub(super) async fn finish_plain_kill_stop(
         self: &Arc<Self>,
         resident: &Arc<ResidentWorker>,
@@ -637,12 +561,10 @@ impl Supervisor {
             ));
             return;
         }
-        // TS `stopWorkerUntracked`'s archived-stop finalize (the plain
-        // kill's durable half): the killed session tree's scheduled jobs
-        // cancel durably and the root file carries the `archived` state,
-        // so no wake pass can revive the stopped session. A
-        // ledger-tombstoned delete also sweeps the deleted child's
-        // artifacts (TS `deleteRlmSubagentArtifacts`).
+        // The archived-stop finalize (the plain kill's durable half): the killed tree's
+        // scheduled jobs cancel durably and the root file carries the `archived` state, so
+        // no wake pass can revive the session. A ledger-tombstoned delete also sweeps the
+        // child's artifacts.
         let deleted_child = rest
             .get("rlmLedgerDelete")
             .and_then(Value::as_str)
@@ -709,9 +631,8 @@ impl Supervisor {
             }
             pa_core::settings::IdleEviction::Minutes(minutes) => minutes,
         };
-        // The idle claim the worker reported must match the live setting
-        // (a stale ask against a raised threshold is refused; the next
-        // park re-arms).
+        // The idle claim the worker reported must match the live setting (a stale ask
+        // against a raised threshold is refused).
         if let Some(reported) = idle_minutes {
             if reported != threshold {
                 return response_success(Some(command_id), type_name, None);
@@ -761,16 +682,8 @@ impl Supervisor {
         fence: Option<tokio::sync::OwnedSemaphorePermit>,
     ) -> anyhow::Result<()> {
         // The stop's durable intent persists BEFORE the worker is told (TS
-        // `stopWorkerUntracked(removeDescriptor)` ->
-        // `persistWorkerStopTombstone`): a supervisor that dies mid-stop, or
-        // a worker that survives the escalation below, must never be
-        // adopted as healthy by a later boot — the tombstoned descriptor
-        // routes the boot through the stop-finalization path instead. The
-        // per-session stop never archives (the plain kill's earlier
-        // tombstone keeps its archive intent); a persist failure fails the
-        // stop before the shutdown is forwarded, exactly like TS throws
-        // for non-direct-child stops, so the worker's crash-recovery
-        // contract stays intact.
+        // `persistWorkerStopTombstone`): a supervisor that dies mid-stop, or a worker that
+        // survives the escalation, must never be adopted as healthy by a later boot.
         self.persist_stop_tombstone_stop(resident).await?;
         resident.intentional_stop.store(true, Ordering::SeqCst);
         // The stop is intentional: routes waiting out a replacement must
@@ -806,15 +719,11 @@ impl Supervisor {
                 ));
             }
         }
-        // The per-session stop shares the terminal-stop contract: the
-        // descriptor dies only with a provably-gone process, so a worker
-        // that missed the routed shutdown stays adoptable (or is
-        // escalated away) instead of becoming an invisible lease holder.
+        // The per-session stop shares the terminal-stop contract: the descriptor dies only
+        // with a provably-gone process — a worker that missed the shutdown stays adoptable.
         self.retire_worker_after_stop(resident).await;
-        // TS `stopWorkerUntracked`: a client-owned (ephemeral) worker's
-        // scheduled jobs die with the registration
-        // (`cancelEphemeralWorkerScheduledJobs`) — every remove-descriptor
-        // stop of an owned worker, including the degraded-create cleanups.
+        // A client-owned (ephemeral) worker's scheduled jobs die with the
+        // registration (TS `cancelEphemeralWorkerScheduledJobs`).
         let ephemeral = resident.descriptor.lock().await.owner_client_id.is_some();
         if ephemeral {
             self.finalize_owned_stop(resident).await;
@@ -822,46 +731,28 @@ impl Supervisor {
         self.registry.remove(&resident.worker_id).await;
         self.registry.forget(&resident.worker_id).await;
         // The residency change lands in the scheduled-jobs invalidation (TS
-        // `broadcastHeartbeatsChanged`: "every daemon-owned scheduled-job
-        // mutation and worker residency change"): the stopped session's
-        // durable jobs are passive from here on, so a snapshot that
-        // excluded them while the worker was live must not be served for
-        // the rest of the refresh window.
+        // `broadcastHeartbeatsChanged`): the stopped session's durable jobs are passive
+        // from here on, so a snapshot from while it was live must not be served again.
         self.broadcast_heartbeats_changed();
-        // TS `flipWorkerRosterEntriesInactive`: the stopped worker's rows
-        // settle in place (every owned non-ephemeral, non-queued row
-        // passivates and keeps its model/thinking/cwd, the top-level row
-        // included; a tombstoned child, a queued child, and an ephemeral
-        // worker's rows die with the stop). No ledger reseed, no
-        // transcript read.
+        // TS `flipWorkerRosterEntriesInactive`: the stopped worker's rows settle in place —
+        // owned non-ephemeral, non-queued rows passivate and keep their model/thinking/cwd;
+        // tombstoned, queued, and ephemeral rows die with the stop.
         self.passivate_roster_worker(&resident.worker_id, ephemeral)
             .await;
         Ok(())
     }
 
-    /// Delete one stopped worker's descriptor only after its process is
-    /// provably gone (TS `stopWorkerUntracked`'s contract; the shutdown
-    /// pass and the per-session stop share it). A worker that missed the
-    /// routed `shutdown` (a dead connection, a wedged socket, a flush
-    /// outlasting the route budget) gets the identity-gated
-    /// SIGTERM -> SIGKILL escalation; deleting the descriptor of a live
-    /// worker orphans it — nothing on any later daemon can adopt or reap
-    /// it through its identity, while it keeps holding its runtime
-    /// session lease, so every open of its session then refuses with
-    /// `Session is already active in <its id>`.
+    /// Delete one stopped worker's descriptor only after its process is provably gone (TS
+    /// `stopWorkerUntracked`'s contract): deleting the descriptor of a live worker orphans
+    /// it behind its lease.
     pub(super) async fn retire_worker_after_stop(self: &Arc<Self>, resident: &Arc<ResidentWorker>) {
         let (pid, start_id) = {
             let descriptor = resident.descriptor.lock().await;
             (descriptor.pid as u32, descriptor.process_start_id.clone())
         };
-        // An unobservable identity never receives the escalation's
-        // signals (a pid that cannot be proven ours stays untouched);
-        // a live process behind such a pid keeps its tombstoned
-        // descriptor too, exactly like a SIGKILL survivor - the next
-        // boot retries the stop. The unverifiable class covers BOTH a
-        // descriptor without a recorded id and a recorded id the
-        // platform cannot observe right now (the probe returns None
-        // while the process lives).
+        // An unobservable identity never receives the escalation's signals; a live process
+        // behind such a pid keeps its tombstoned descriptor like a SIGKILL survivor (the
+        // next boot retries the stop).
         let alive_unverified = (start_id.is_none()
             || crate::lease::get_process_start_id(pid).is_none())
             && crate::lease::is_process_alive(pid).unwrap_or(false);
@@ -880,35 +771,23 @@ impl Supervisor {
             }
             _ => {
                 let _ = std::fs::remove_file(&resident.descriptor_path);
-                // The identity-pending side record dies with the
-                // descriptor it shadows (an orphaned pending would
-                // shadow the next identity over the same worker id). A
-                // removal failure here is as inert as the descriptor
-                // removal beside it — the retire already provably killed
-                // the worker, so no later boot applies a shadowed record.
+                // The identity-pending side record dies with the descriptor it shadows
+                // (an orphaned pending would shadow the next identity).
                 let _ = crate::descriptor::clear_identity_pending(&resident.descriptor_path);
             }
         }
     }
 }
 
-/// Attach outcome for a `chunked_snapshot` client: the response carries the
-/// snapshot header with an empty transcript plus a `snapshotStream`
-/// descriptor, and the transcript follows as `session_snapshot_begin` /
-/// `session_snapshot_chunk` / `session_snapshot_end` records. A snapshot
-/// that cannot be transferred after the response surfaces as
-/// `session_snapshot_failed` keyed by the same snapshot id.
-/// Probe a worker socket until it accepts connections or the connect budget
-/// runs out. The error names the worker so a stuck launch reports which
-/// session never came up.
+/// Probe a worker socket until it accepts connections or the connect budget runs out; the
+/// error names the worker so a stuck launch reports which session never came up.
 pub(super) async fn probe_worker_socket(
     worker_id: &str,
     socket_path: &Path,
     connect_deadline: tokio::time::Instant,
 ) -> Result<()> {
-    // TS `WORKER_PROBE_BACKOFF_MIN_MS` doubles per retry up to
-    // `WORKER_PROBE_BACKOFF_MAX_MS`; unix keeps the port's flat pause
-    // (see `launch_budget`).
+    // TS `WORKER_PROBE_BACKOFF_MIN_MS` doubles per retry up to `WORKER_PROBE_BACKOFF_MAX_MS`;
+    // unix keeps the port's flat pause (see `launch_budget`).
     #[cfg(not(unix))]
     let mut backoff_ms = WORKER_PROBE_BACKOFF_MIN_MS;
     loop {
@@ -932,11 +811,9 @@ pub(super) async fn probe_worker_socket(
     }
 }
 
-/// The shared worker-connect deadline: probes, connect, and auth must all
-/// fit inside one worker-connect budget from spawn time (the TS default,
-/// or the env override for load-heavy e2e environments). An override past
-/// the platform's representable range falls back to the default budget
-/// instead of panicking the deadline arithmetic.
+/// The shared worker-connect deadline: probes, connect, and auth must all fit inside one
+/// worker-connect budget from spawn time (the TS default, or the env override). An override
+/// past the representable range falls back to the default.
 pub(super) fn worker_connect_deadline() -> tokio::time::Instant {
     let timeout_ms = std::env::var(WORKER_CONNECT_TIMEOUT_ENV)
         .ok()

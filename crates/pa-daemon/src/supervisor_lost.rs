@@ -1,24 +1,7 @@
-//! Worker orphan garbage collection: the supervisor-lost exit monitor, port
-//! of the TS daemon-mode `startSupervisorMonitor` /
-//! `checkSupervisorAvailability` / `exitIfSupervisorOrphanedForTooLong`.
-//!
-//! A session worker outlives its supervisor process: the supervisor spawns
-//! it detached (its own process group), so a supervisor that dies without
-//! a graceful stop — a crash, a SIGKILL from a test harness — leaves the
-//! worker listening on a socket nobody will dial again. The TS product
-//! garbage-collects such workers: while the supervisor socket stays
-//! unreachable and no authenticated supervisor connection is held, the
-//! worker exits after a bounded window instead of lingering forever.
-//! Sessions persist on disk, and a later supervisor spawns fresh workers on
-//! demand, so an unreachable-supervisor worker serves nothing by lingering.
-//!
-//! Divergence from TS, documented: the TS monitor first tries to launch a
-//! replacement supervisor (`launchReplacementSupervisor`) and exits only
-//! when that fails; the Rust port has no replacement-launch machinery yet,
-//! so this monitor implements the TS give-up branch directly (exit after
-//! the window). A supervisor restart inside the window is still seamless:
-//! the socket's return resets the absence timer and the registration link
-//! re-presents the worker's identity.
+//! Worker orphan garbage collection (TS `exitIfSupervisorOrphanedForTooLong`): a worker
+//! whose supervisor died without a graceful stop exits after a bounded unreachable
+//! window (sessions persist on disk). Divergence from TS: this port implements the
+//! give-up branch directly, not the TS replacement-supervisor launch.
 
 use std::path::Path;
 use std::sync::atomic::Ordering;
@@ -54,28 +37,24 @@ fn lost_exit_ms_from(raw: Option<&str>) -> u64 {
         .map_or(DEFAULT_LOST_EXIT_MS, |value| value as u64)
 }
 
-/// Whether the supervisor socket accepts connections (TS
-/// `canConnectToSupervisor`): a connect that lands at all proves a live
-/// supervisor owns the socket.
+/// Whether the supervisor socket accepts connections (TS `canConnectToSupervisor`): a
+/// connect that lands proves a live supervisor owns the socket.
 async fn supervisor_reachable(socket: &Path) -> bool {
     crate::socket::can_connect(socket, CONNECT_TIMEOUT).await
 }
 
-/// Arm the orphan-exit monitor for `worker` (a no-op task spawn; the
-/// monitor runs for the worker process's whole lifetime, like the TS
-/// `startSupervisorMonitor` timer chain).
+/// Arm the orphan-exit monitor for `worker`: it runs for the process's whole lifetime,
+/// like the TS `startSupervisorMonitor` timer chain.
 pub(crate) fn start(worker: Arc<Worker>) {
     tokio::spawn(async move {
         monitor(worker).await;
     });
 }
 
-/// The availability-check loop. Every iteration mirrors the TS
-/// `checkSupervisorAvailability` guard order: a shutdown in flight or a
-/// live authenticated supervisor connection disarms the monitor, a
-/// reachable socket resets the absence timer, and only a socket that has
-/// been unreachable for the whole window with no session work in flight
-/// exits the worker.
+/// The availability-check loop (TS `checkSupervisorAvailability` guard order): a shutdown
+/// in flight or a live supervisor connection disarms, a reachable socket resets the
+/// absence timer, and a socket unreachable for the whole window with no session work
+/// in flight exits the worker.
 async fn monitor(worker: Arc<Worker>) {
     let window = Duration::from_millis(lost_exit_ms());
     let mut absent_since: Option<tokio::time::Instant> = None;
@@ -99,9 +78,8 @@ async fn monitor(worker: Arc<Worker>) {
         }
         let ongoing = worker.core.lock().unwrap().has_ongoing_work();
         if ongoing {
-            // TS `hasOngoingSessionWork`: an active run owns the worker a
-            // little longer; its turn end lets the next availability check
-            // reconsider.
+            // TS `hasOngoingSessionWork`: an active run owns the worker a little
+            // longer; its turn end lets the next check reconsider.
             continue;
         }
         exit_orphaned(&worker, since).await;
@@ -141,9 +119,6 @@ async fn exit_orphaned(worker: &Worker, absent_since: tokio::time::Instant) {
 mod tests {
     use super::*;
 
-    /// The window parse is the TS `workerSupervisorLostExitMs` contract:
-    /// any finite non-negative number wins, everything else (absent,
-    /// garbage, negative, NaN) falls back to the default.
     #[test]
     fn lost_exit_window_parses_the_ts_contract() {
         assert_eq!(lost_exit_ms_from(None), DEFAULT_LOST_EXIT_MS);

@@ -1,4 +1,4 @@
-//! Compact-session tests (moved with their concerns).
+//! Compact-session tests.
 use super::*;
 use pa_types::ai::{AssistantMessage, UserContent};
 
@@ -71,13 +71,6 @@ fn faux_registration() -> pa_ai::faux::FauxProviderRegistration {
     registration
 }
 
-// The family children: the test mass splits by test family (the same
-// tests, the same assertions, zero behavior changes). Each child holds
-// its family's moved blocks byte-identically (in the original file's
-// first-appearance order), `use super::*` re-anchors the two shared
-// fixtures above, and the session_engine module bindings in the facade
-// keep the children's `super::super::` path literals resolving
-// unchanged.
 mod auxiliary_model;
 mod cut_math;
 mod execute_compaction;

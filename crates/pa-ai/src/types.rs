@@ -1,10 +1,7 @@
 //! AI surface types for providers.
 //!
-//! The wire/domain types (messages, content blocks, usage, stream events,
-//! models) live in [`pa_types::ai`] and are re-exported here for provider
-//! code. This module adds the provider-internal option structs
-//! ([`StreamOptions`], [`SimpleStreamOptions`]) and hooks that never cross
-//! the wire, plus small extension helpers over the shared types.
+//! The wire/domain types live in [`pa_types::ai`] and are re-exported here for provider code; this
+//! module adds the provider-internal option structs and hooks that never cross the wire.
 
 use tokio_util::sync::CancellationToken;
 
@@ -28,19 +25,13 @@ pub use pa_types::ai::{
 /// here it is stored as the raw JSON value.
 pub type JsonSchema = serde_json::Value;
 
-// ---------------------------------------------------------------------------
-// User/tool-result block payload view
-// ---------------------------------------------------------------------------
-
 /// Provider payload view of one user/tool-result content block.
 ///
-/// Most provider conversions map a block to either a text part or an image
-/// part. Un-modeled blocks ([`UserOrToolContent::Raw`]: a missing `type` tag,
-/// as persisted by earlier daemon builds, or an unknown kind from a newer
-/// build) never reach the prompt as structured parts - a bare text block maps
-/// to [`UserBlockPayload::Text`], a bare image block to
-/// [`UserBlockPayload::Image`], and anything else to [`UserBlockPayload::Opaque`]
-/// (its JSON, as text) so no content is silently dropped from a request.
+/// Most provider conversions map a block to either a text part or an image part. Un-modeled blocks
+/// ([`UserOrToolContent::Raw`]: a missing `type` tag or an unknown kind) never reach the prompt as
+/// structured parts - a bare text block maps to [`UserBlockPayload::Text`], a bare image block to
+/// [`UserBlockPayload::Image`], and anything else to [`UserBlockPayload::Opaque`] (its JSON, as
+/// text) so no content is silently dropped from a request.
 #[derive(Debug, Clone, PartialEq)]
 pub enum UserBlockPayload<'a> {
     Text(&'a str),
@@ -48,7 +39,6 @@ pub enum UserBlockPayload<'a> {
     Opaque(String),
 }
 
-/// Classify a user/tool-result block for provider payload conversion.
 #[must_use]
 pub fn user_block_payload(block: &UserOrToolContent) -> UserBlockPayload<'_> {
     if let Some(text) = block.text() {
@@ -57,8 +47,8 @@ pub fn user_block_payload(block: &UserOrToolContent) -> UserBlockPayload<'_> {
     if let Some((data, mime_type)) = block.image() {
         return UserBlockPayload::Image { data, mime_type };
     }
-    // Un-modeled without recognized text/image fields: pass the block JSON
-    // through as text so a resumed conversation never silently loses content.
+    // Un-modeled without recognized text/image fields: pass the block JSON through as text so a
+    // resumed conversation never silently loses content.
     let json = match serde_json::to_value(block) {
         Ok(value) => value.to_string(),
         Err(error) => format!("{{\"serialize_error\": {error:?}}}"),
@@ -66,19 +56,15 @@ pub fn user_block_payload(block: &UserOrToolContent) -> UserBlockPayload<'_> {
     UserBlockPayload::Opaque(json)
 }
 
-// ---------------------------------------------------------------------------
-// Hooks
-// ---------------------------------------------------------------------------
-
-/// Hook invoked with the outbound provider payload before sending. Return None
-/// to keep the payload unchanged.
+/// Hook invoked with the outbound provider payload before sending. Return None to keep the payload
+/// unchanged.
 pub type OnPayloadHook =
     std::sync::Arc<dyn Fn(serde_json::Value, &Model) -> Option<serde_json::Value> + Send + Sync>;
 
 /// Hook invoked after the HTTP response is received and before the body is read.
 pub type OnResponseHook = std::sync::Arc<dyn Fn(ProviderResponse, &Model) + Send + Sync>;
 
-/// Options shared by all providers (`StreamOptions` in the TS reference).
+/// Options shared by all providers.
 #[derive(Clone, Default)]
 pub struct StreamOptions {
     pub temperature: Option<f64>,
@@ -136,19 +122,13 @@ impl SimpleStreamOptions {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Extension helpers over the shared wire types
-// ---------------------------------------------------------------------------
-
-/// Provider-side helpers over [`Model`] (the TS `Model` methods live with the
-/// type definition; here they are an extension trait because `Model` itself
-/// is owned by `pa-types`).
+/// Provider-side helpers over [`Model`] (the TS `Model` methods live with the type definition; here
+/// they are an extension trait because `Model` itself is owned by `pa-types`).
 pub trait ModelExt {
     /// Parsed compat overrides for this model, when present.
     fn compat_kind(&self) -> Option<CompatKind>;
-    /// Value mapped for a thinking level (provider-specific string); the outer
-    /// Option is None when the map is absent, the inner when the level is
-    /// unsupported/absent.
+    /// Value mapped for a thinking level (provider-specific string); the outer Option is None when
+    /// the map is absent, the inner when the level is unsupported/absent.
     fn thinking_level_map_value(&self, level: ModelThinkingLevel) -> Option<Option<&String>>;
     /// Whether the model accepts image input blocks.
     fn supports_image_input(&self) -> bool;
@@ -172,16 +152,11 @@ impl ModelExt for Model {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Stop-reason mapping helpers
-// ---------------------------------------------------------------------------
-
 /// Map a [`StopReason`] to the terminal reason of a `done` event.
 ///
 /// # Panics
 ///
-/// Panics for `error`/`aborted`, which only terminate streams through `error`
-/// events.
+/// Panics for `error`/`aborted`, which only terminate streams through `error` events.
 #[must_use]
 pub fn done_reason(reason: StopReason) -> DoneStopReason {
     match reason {
@@ -227,7 +202,7 @@ pub fn zero_model_cost() -> ModelCost {
     }
 }
 
-/// Zeroed usage (the TS `Usage` type is initialized with all-zero fields).
+/// Zeroed usage.
 #[must_use]
 pub fn zeroed_usage() -> Usage {
     Usage::default()

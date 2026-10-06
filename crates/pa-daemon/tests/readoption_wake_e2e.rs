@@ -1,37 +1,16 @@
 //! Re-adoption wake e2e: the wake paths of a session whose worker is
-//! re-adopted across a supervisor kill -9 + relaunch.
-//!
-//! The bash-completion notify path (the kernel's `bash.completed` host
-//! request, TS agent-session.ts's async-bash-completion handler): a
-//! session starts a detached background `bash()` command, goes idle, the
-//! supervisor dies and relaunches (the still-live worker is re-adopted),
-//! and when the command finishes the session must WAKE — the
-//! `[bash-done pid:N exit:M]` row injects as the next turn (the frozen-
-//! watcher incident: the notification never woke the re-adopted
-//! session). The scheduled-jobs wake (an `every 5s` heartbeat) keeps
-//! firing across the same restart.
-//!
-//! Test A runs a live kernel (the prime-agent-runtime `bash`), so it
-//! follows the live-kernel verifiers' ambient-state contract: it honors
-//! `PA_E2E_KERNEL_PYTHON` and skips (with a note) on machines without a
-//! kernel install. Test B is the scripted engine (no kernel).
-// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
-// the full rationale).
-// Stack-resident futures by design on the daemon's hot paths; boxing the
-// call sites for a lint tick is a perf regression with zero correctness gain.
+//! re-adopted across a supervisor kill -9 + relaunch. The bash-completion
+//! notice must WAKE the idle session (`bash.completed`, TS async handler;
+//! the frozen-watcher incident); the scheduled-jobs wake keeps firing.
 #![allow(clippy::large_futures)]
-// 64-bit-only targets; the narrowing casts sit at OS boundaries
-// (pid/fd/time/size) where the values are bounded by the kernel - the
-// dead-guard expect()s would add panic paths where silent wrap was
-// deliberate.
+// 64-bit-only targets; the narrowing casts sit at bounded OS boundaries.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// The fn-length threshold is a style gate, not correctness; the structure
-// campaign owns the god-fn splits as a follow-up.
+// Fn length is a style gate, not correctness.
 #![allow(clippy::too_many_lines)]
 // API-shape opinions, not defects; the surfaces are deliberate.
 #![allow(
@@ -66,8 +45,7 @@ impl Drop for Daemon {
     }
 }
 
-/// The kernel Python with prime-agent-runtime installed; set
-/// `PA_E2E_KERNEL_PYTHON` to point at an explicit interpreter instead.
+/// The kernel Python with prime-agent-runtime installed; `PA_E2E_KERNEL_PYTHON` overrides.
 fn kernel_python() -> Option<PathBuf> {
     if let Some(explicit) = std::env::var_os("PA_E2E_KERNEL_PYTHON") {
         let explicit = PathBuf::from(explicit);
@@ -104,10 +82,8 @@ fn spawn_daemon(socket: &Path, agent_dir: &Path, kernel_python: Option<&Path>) -
         .arg(agent_dir)
         .env_remove("PRIME_API_KEY")
         .env("PRIME_AGENT_CODING_AGENT_DIR", agent_dir)
-        // A supervisor killed at teardown must not leak its session
-        // workers into later test binaries: the worker's supervisor-lost
-        // exit runs on this short window instead of the 5-minute
-        // default. The window is far wider than the restart gap below.
+        // A supervisor killed at teardown must not leak its session workers: the
+        // supervisor-lost exit runs on this short window (far wider than the restart gap below).
         .env(
             pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
             "20000",
@@ -134,9 +110,7 @@ fn spawn_daemon(socket: &Path, agent_dir: &Path, kernel_python: Option<&Path>) -
     panic!("supervisor socket never appeared");
 }
 
-/// The sequential mock provider: one SSE answer per request in order
-/// (the cell-start tool call, the turn-end reply, then the wake reply
-/// every later request reads).
+/// The sequential mock: one SSE answer per request in order.
 fn spawn_mock(next: &'static AtomicUsize) -> PathBuf {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");
     let url = format!(
@@ -185,10 +159,8 @@ fn serve(mut stream: TcpStream, next: &AtomicUsize) -> std::io::Result<()> {
     if content_length > 0 {
         reader.read_exact(&mut body)?;
     }
-    // The scripted sequence: request 1 answers with the ipython tool
-    // call that starts the detached watcher, request 2 ends the turn,
-    // and every later request (the wake turn) answers with the woken
-    // reply.
+    // The scripted sequence: request 1 answers the ipython tool call that starts the
+    // detached watcher, request 2 ends the turn, every later request the woken reply.
     let request = next.fetch_add(1, Ordering::SeqCst);
     let mut payload = String::new();
     let data = match request {
@@ -341,7 +313,6 @@ fn wait_until<T>(deadline: Duration, mut probe: impl FnMut() -> Option<T>) -> T 
     }
 }
 
-/// One live session's create through the supervisor route.
 fn create_session(client: &mut Client, id: &str, dir: &Path, agent_dir: &Path) -> (String, String) {
     let sessions = agent_dir.join("sessions");
     std::fs::create_dir_all(&sessions).expect("sessions dir");
@@ -407,8 +378,8 @@ fn a_detached_bash_completion_wakes_the_idle_session_across_a_supervisor_restart
     )
     .expect("write models.json");
 
-    // First generation: the session starts the detached watcher and goes
-    // idle (the turn settles while `sleep 12` keeps running).
+    // First generation: the session starts the detached watcher and goes idle
+    // (the turn settles while `sleep 12` keeps running).
     let mut supervisor = spawn_daemon(&socket, &agent_dir, Some(&kernel_python));
     let mut client = Client::connect(&socket);
     let (active_id, session_id) = create_session(&mut client, "c1", &dir, &agent_dir);
@@ -433,9 +404,8 @@ fn a_detached_bash_completion_wakes_the_idle_session_across_a_supervisor_restart
         "the first supervisor died mid-test"
     );
 
-    // The supervisor dies hard (kill -9: the worker process survives,
-    // orphaned) and relaunches over the same socket — the adoption scan
-    // re-adopts the live worker.
+    // The supervisor dies hard (kill -9: the worker survives, orphaned) and
+    // relaunches over the same socket — the adoption scan re-adopts it.
     drop(client);
     drop(supervisor);
     std::fs::remove_file(&socket).ok();
@@ -449,9 +419,8 @@ fn a_detached_bash_completion_wakes_the_idle_session_across_a_supervisor_restart
             .then_some(())
     });
 
-    // THE ASSERT: the detached command finishes after the re-adoption and
-    // its completion notice WAKES the idle session — the bash-done row
-    // lands and the woken turn runs to its reply.
+    // THE ASSERT: the detached command finishes after the re-adoption and its completion
+    // notice WAKES the idle session — the bash-done row lands and the woken turn runs to its reply.
     let messages = wait_until(Duration::from_mins(1), || {
         let messages = client.messages(&active_id);
         (messages.contains("bash-done") && messages.contains("woken by the bash-done notice"))
@@ -461,15 +430,14 @@ fn a_detached_bash_completion_wakes_the_idle_session_across_a_supervisor_restart
         messages.contains("[bash-done pid:"),
         "the bash-done notice never landed: {messages}"
     );
-    // The durable row: the async-bash-completion custom entry persisted.
     let file = std::fs::read_to_string(&session_file).expect("session file");
     assert!(
         file.contains("async_bash_completion"),
         "the async_bash_completion row never persisted"
     );
 
-    // Teardown: stop the session through the live supervisor so the
-    // worker (and its kernel + watcher) do not leak past the test.
+    // Teardown: stop the session through the live supervisor so the worker (and
+    // its kernel + watcher) do not leak past the test.
     client.request(
         "k1",
         &json!({ "type": "kill", "activeSessionId": active_id }),
@@ -502,7 +470,6 @@ fn a_heartbeat_keeps_firing_across_a_supervisor_restart() {
     )
     .expect("write faux script");
 
-    // First generation: a scripted session with a 5s heartbeat.
     let supervisor = spawn_daemon(&socket, &agent_dir, None);
     let mut client = Client::connect(&socket);
     let sessions = agent_dir.join("sessions");
@@ -558,13 +525,11 @@ fn a_heartbeat_keeps_firing_across_a_supervisor_restart() {
         "first turn failed: {first_turn}"
     );
 
-    // At least one scheduled fire delivered before the crash.
     let rows_before_restart = wait_until(Duration::from_secs(20), || {
         let rows = session_rows_containing(&session_file, "heartbeat_prompt");
         (rows > 0).then_some(rows)
     });
 
-    // The supervisor dies hard and relaunches; the worker is re-adopted.
     drop(client);
     drop(supervisor);
     std::fs::remove_file(&socket).ok();
@@ -578,9 +543,8 @@ fn a_heartbeat_keeps_firing_across_a_supervisor_restart() {
             .then_some(())
     });
 
-    // THE ASSERT: the heartbeat keeps firing after the re-adoption — the
-    // row count grows past the pre-restart snapshot (a fire delivered by
-    // the re-adopted worker).
+    // THE ASSERT: the heartbeat keeps firing after the re-adoption — the row count
+    // grows past the pre-restart snapshot.
     let grew = wait_until(Duration::from_secs(30), || {
         let rows = session_rows_containing(&session_file, "heartbeat_prompt");
         (rows > rows_before_restart).then_some(rows)
@@ -596,12 +560,8 @@ fn a_heartbeat_keeps_firing_across_a_supervisor_restart() {
     );
 }
 
-/// The boot-time wake interplay with the storm gates (the ~200-agent
-/// boot crash class): one plain boot after a supervisor kill -9 — the
-/// ADOPTED-ALIVE worker with a due heartbeat fires (the wake survives
-/// re-adoption), while the KILLED sibling (archived, jobs cancelled,
-/// stop tombstoned) never resurrects (the #2592/#2642 gates hold; the
-/// parked scheduler wakes only its own session, never a dead one).
+/// Boot-time wake vs the storm gates (the ~200-agent boot crash class): the ADOPTED-ALIVE
+/// worker fires, the KILLED sibling never resurrects (#2592/#2642 gates hold).
 #[test]
 fn a_boot_fires_the_adopted_worker_due_job_and_never_resurrects_the_killed_sibling() {
     let root = tempfile::TempDir::new().expect("temp dir");
@@ -665,8 +625,8 @@ fn a_boot_fires_the_adopted_worker_due_job_and_never_resurrects_the_killed_sibli
         .join("sessions")
         .join(format!("{wake_session}.jsonl"));
 
-    // The wake lane carries the due heartbeat; the dead lane is wire-
-    // killed (its jobs cancel and its file archives — the stop gates).
+    // The wake lane carries the due heartbeat; the dead lane is wire-killed (its
+    // jobs cancel and its file archives — the stop gates).
     let heartbeat = client.request(
         "hb",
         &json!({
@@ -686,15 +646,13 @@ fn a_boot_fires_the_adopted_worker_due_job_and_never_resurrects_the_killed_sibli
     );
     assert_eq!(killed["success"], true, "kill failed: {killed}");
 
-    // At least one fire delivered before the crash.
     let rows_before_restart = wait_until(Duration::from_secs(20), || {
         let rows = session_rows_containing(&wake_file, "heartbeat_prompt");
         (rows > 0).then_some(rows)
     });
 
-    // The supervisor dies hard and relaunches: the wake lane's worker is
-    // adopted alive (its due fire must continue), the killed lane's stop
-    // finishes at the boot scan instead of resurrecting.
+    // The supervisor dies hard and relaunches: the wake lane's worker is adopted
+    // alive, the killed lane's stop finishes at the boot scan instead of resurrecting.
     drop(client);
     drop(supervisor);
     std::fs::remove_file(&socket).ok();
@@ -708,8 +666,8 @@ fn a_boot_fires_the_adopted_worker_due_job_and_never_resurrects_the_killed_sibli
             .then_some(())
     });
 
-    // THE STORM GATE: the killed lane never resurrects across the boot
-    // window, while the adopted worker's due fire keeps landing.
+    // THE STORM GATE: the killed lane never resurrects across the boot window,
+    // while the adopted worker's due fire keeps landing.
     let window = Instant::now() + Duration::from_secs(20);
     while Instant::now() < window {
         let roster = client.listed_sessions();

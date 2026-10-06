@@ -1,37 +1,7 @@
-//! The outbound request-body capture: while request timing is on, the
-//! instrumented payload hook hands each request's final outbound body —
-//! after every transform, exactly what the provider sees, the wire shape
-//! that answers which request fields the provider actually received — to
-//! one bounded background writer that persists it under
-//! `<agentDir>/logs/request-payloads/` (one file per request, newest-`keep`
-//! ring, owner-only modes, best-effort throughout: a read-only or missing
-//! dir never breaks the request it observes).
-//!
-//! One writer serves the whole process: a single thread with a single
-//! bounded queue, armed on the first recorded capture, so the footprint
-//! is one thread, at most [`WRITE_QUEUE_CAPACITY`] queued jobs, and at
-//! most [`REQUEST_PAYLOAD_BUDGET_BYTES`] retained payload bytes, no
-//! matter how many sessions are live. [`RequestPayloadCapture::record`]
-//! never touches the filesystem and reserves its queue slot before the
-//! payload clone: a saturated queue drops the capture at O(1) instead
-//! of paying a copy it would reject; a queue whose retained bytes are
-//! over budget walks the payload once (without allocating) to price it,
-//! then drops without cloning. The writer owns the serialization, the
-//! file writes, and the prune.
-//!
-//! # The confidentiality boundary
-//!
-//! The captured bodies are complete request transcripts, so the capture
-//! refuses rather than leak: on Unix the ring's directory and files are
-//! owner-only through the platform wall (re-applied on every write, even
-//! onto a pre-existing permissive directory), and every path component
-//! from the agent dir down must be a real directory — a symlinked
-//! component would redirect the private-mode writes, so the capture
-//! disables itself instead of following it. On Windows the platform
-//! wall's restriction helpers are inherited-ACL no-ops: rather than
-//! write complete bodies through a possibly permissive inherited ACL,
-//! the capture is disabled there (a documented limitation until the
-//! platform wall gains a restrictive DACL).
+//! The outbound request-body capture: one bounded background writer under
+//! `<agentDir>/logs/request-payloads/`, best-effort throughout. Captured
+//! bodies are complete transcripts: on Unix the ring is owner-only and a
+//! symlinked component disables the capture; on Windows it is disabled.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -43,41 +13,28 @@ use serde_json::{json, Map, Value};
 use crate::platform::perms;
 use crate::session::manager::format_iso;
 
-/// The capture's own battery: the capture is Unix-only (the
-/// confidentiality boundary is not enforceable elsewhere), so its tests
-/// are too.
+/// The capture is Unix-only, so its tests are too.
 #[cfg(all(test, unix))]
 pub(crate) mod tests;
 
-/// Serializes the tests that record through the process's one writer:
-/// the queue is a shared bound, so concurrent recording tests would
-/// saturate each other's queues and drop each other's expected bodies.
-/// A tokio mutex so the async integration tests hold it across awaits
-/// (`lock().await`) while the sync unit tests take `blocking_lock()`.
+/// Serializes the tests that record through the process's one writer
+/// (the shared queue bound would otherwise drop each other's bodies).
 #[cfg(all(test, unix))]
 pub(crate) static WRITER_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// The newest-body ring the capture keeps: one file per request, so
-/// long-context payloads never grow without bound in an always-on
-/// daemon's diagnostics dir.
+/// One file per request, so long-context payloads never grow without
+/// bound in an always-on daemon's diagnostics dir.
 pub(crate) const REQUEST_PAYLOAD_CAPTURE_KEEP: usize = 64;
 
-/// The one write queue's capacity: a writer that falls behind drops the
-/// overflow instead of growing the footprint.
+/// A writer that falls behind drops the overflow instead of growing.
 const WRITE_QUEUE_CAPACITY: usize = REQUEST_PAYLOAD_CAPTURE_KEEP;
 
-/// The retained-bytes bound of the queue: handed-off payloads (and the
-/// one the writer holds) stay resident until serialized and written, so
-/// a stalled writer must not accumulate unbounded memory — a
-/// long-context or large-image request can carry tens of MiB, and the
-/// queue drops anything that would push the retained bytes past this
-/// budget instead of cloning it.
+/// The retained-bytes bound of the queue: a stalled writer must not
+/// accumulate unbounded resident memory.
 pub(crate) const REQUEST_PAYLOAD_BUDGET_BYTES: u64 = 64 * 1024 * 1024;
 
-/// The process-global capture counter: every handed-off body gets its
-/// own file name regardless of which session wiring recorded it (the
-/// wire sequence numbers restart per wiring, and sessions share the
-/// agent dir).
+/// The process-global file-name counter (wire sequence numbers restart
+/// per wiring, and sessions share the agent dir).
 static CAPTURE_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// One queued capture, as the dispatch path hands it off. Unix-only at
@@ -95,46 +52,31 @@ struct CaptureJob {
     now_ms: u128,
     /// The process-unique file-name counter (see [`CAPTURE_SEQ`]).
     capture_seq: u64,
-    /// The payload's byte estimate (see [`payload_bytes`]): the budget
-    /// the writer releases once the body is written.
+    /// The payload's byte estimate (see [`payload_bytes`]): released once written.
     estimate: u64,
 }
 
-/// The process's single capture writer handle: the bounded queue, the
-/// reserve counter of jobs still queued, and the retained-bytes budget.
+/// The process's single capture writer handle.
 struct CaptureWriter {
     sender: SyncSender<CaptureJob>,
-    /// Reserved slots: handed-off jobs the writer has not taken yet. The
-    /// reservation (`fetch_update`) precedes the payload clone, the
-    /// writer's `recv` releases each slot, and a rejected handoff
-    /// releases its own — the counter never underflows and never reports
-    /// saturation without a full queue behind it.
+    /// Reserved slots: the reservation precedes the payload clone; the writer releases each
+    /// slot, a rejected handoff its own — never underflows, saturation needs a full queue.
     queued: Arc<AtomicUsize>,
-    /// The retained payload bytes: queued jobs plus the writer's in-flight
-    /// body. The budget reservation precedes the clone; the writer
-    /// releases each body's estimate once its write settles.
+    /// The retained payload bytes: the budget reservation precedes the
+    /// clone; the writer releases each estimate once its write settles.
     retained: Arc<AtomicU64>,
 }
 
-/// The one writer, armed on the first recorded capture. The thread is
-/// process-owned and detached by design: it lives until process exit,
-/// and an orderly shutdown never waits on it — captures still queued at
-/// exit are lost best-effort (a partial temp file ages out with the
-/// ring), the same contract as the rotating log.
+/// The one writer, armed on the first recorded capture. The detached thread drops captures
+/// still queued at exit best-effort, the same contract as the rotating log.
 static CAPTURE_WRITER: OnceLock<Option<CaptureWriter>> = OnceLock::new();
 
-/// The process's capture writer, arming it on first use: one thread, one
-/// bounded queue. `None` (cached) when the thread cannot spawn — the
-/// capture stays disabled for the process, best-effort by contract.
+/// The process's capture writer, armed on first use: one thread, one bounded queue. `None`
+/// (cached) when the thread cannot spawn — the capture stays disabled, best-effort.
 fn capture_writer() -> Option<&'static CaptureWriter> {
     CAPTURE_WRITER
         .get_or_init(|| {
-            // The confidentiality boundary is only enforceable where the
-            // platform wall can enforce owner-only modes: the wall's
-            // Windows arms are inherited-ACL no-ops, so rather than write
-            // complete request bodies through a possibly permissive
-            // inherited ACL, the capture stays disabled there (see the
-            // module doc).
+            // The wall's Windows arms are inherited-ACL no-ops.
             #[cfg(not(unix))]
             {
                 tracing::debug!(
@@ -171,11 +113,8 @@ fn capture_writer() -> Option<&'static CaptureWriter> {
         .as_ref()
 }
 
-/// The outbound request-body capture: the capture's configuration — which
-/// ring directory each body lands in, how many files it keeps, and the
-/// trust root (`agentDir`) whose path components must all be real
-/// directories before the capture will write — handed to the process's
-/// single writer by the request-timing payload hook.
+/// The capture's configuration — ring directory, keep count, and the
+/// trust root — handed to the single writer by the payload hook.
 #[derive(Debug, Clone)]
 pub(crate) struct RequestPayloadCapture {
     root: PathBuf,
@@ -184,11 +123,8 @@ pub(crate) struct RequestPayloadCapture {
 }
 
 impl RequestPayloadCapture {
-    /// The capture under `<agentDir>/logs/request-payloads/`, keeping the
-    /// newest [`REQUEST_PAYLOAD_CAPTURE_KEEP`] bodies. `agent_dir` is the
-    /// trust root: every component below it must be a real directory (a
-    /// symlinked `logs` or ring dir would redirect the private-mode
-    /// writes, and the capture refuses to follow it).
+    /// The capture under `<agentDir>/logs/request-payloads/`, keeping the newest bodies.
+    /// `agent_dir` is the trust root; the capture refuses to follow a symlink.
     #[must_use]
     pub(crate) fn new(agent_dir: &Path) -> Self {
         Self::at_rooted(
@@ -208,7 +144,6 @@ impl RequestPayloadCapture {
         Self::at_rooted(root, dir, keep)
     }
 
-    /// The capture at an explicit directory under an explicit trust root.
     #[must_use]
     pub(crate) fn at_rooted(
         root: impl Into<PathBuf>,
@@ -222,11 +157,8 @@ impl RequestPayloadCapture {
         }
     }
 
-    /// Hand one request's final outbound body to the writer. Bounded and
-    /// non-blocking: the queue slot is reserved BEFORE the payload clone
-    /// (a saturated queue drops the capture at O(1)), a reservation whose
-    /// handoff the queue rejects is released immediately, and the
-    /// dispatch path never touches the filesystem.
+    /// Hand one request's final outbound body to the writer. Bounded and non-blocking: the
+    /// slot is reserved BEFORE the payload clone; the dispatch path never touches the filesystem.
     pub(crate) fn record(
         &self,
         payload: &Value,
@@ -237,10 +169,8 @@ impl RequestPayloadCapture {
         let Some(writer) = capture_writer() else {
             return;
         };
-        // Reserve the slot first: the counter is the bound the writer
-        // releases from, so it must never depend on the send's
-        // completion (the writer can take the job before any post-send
-        // accounting runs).
+        // Reserve the slot first: the counter is the bound the writer releases from, so it
+        // must never depend on the send's completion.
         let reserved = writer
             .queued
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |queued| {
@@ -250,11 +180,8 @@ impl RequestPayloadCapture {
         if !reserved {
             return;
         }
-        // Reserve the payload's bytes before cloning it: a stalled
-        // writer must not accumulate unbounded resident memory. The
-        // estimate walks the value once without allocating; a body that
-        // would push the retained bytes past the budget drops here —
-        // its slot releases and no copy is made.
+        // Reserve the payload's bytes before cloning it: a stalled writer must not accumulate
+        // unbounded resident memory; a body past the budget drops here, its slot releasing.
         let estimate = payload_bytes(payload);
         let budgeted = writer
             .retained
@@ -285,9 +212,8 @@ impl RequestPayloadCapture {
             estimate,
         };
         if writer.sender.try_send(job).is_err() {
-            // The queue filled inside the reservation window: the job
-            // never queued, so its slot and its bytes free for the next
-            // handoff.
+            // The queue filled inside the reservation window: the job never
+            // queued, so its slot and bytes free for the next handoff.
             writer.queued.fetch_sub(1, Ordering::Relaxed);
             writer.retained.fetch_sub(estimate, Ordering::Relaxed);
         }
@@ -312,17 +238,10 @@ fn drain_writer(queued: &Arc<AtomicUsize>, retained: &Arc<AtomicU64>, jobs: &Rec
 }
 
 /// The payload's byte estimate: an UPPER BOUND on what one accepted
-/// capture allocates — the queue's clone, the envelope's re-clone, and
-/// the serialized bytes — walked once without allocating. Every node
-/// pays its own enum footprint (plus the collection slots), and the
-/// total carries the transient-copies multiplier: the budget is an OOM
-/// guard, so overcounting is the point.
+/// capture allocates; the budget is an OOM guard, so overcounting is the point.
 pub(crate) fn payload_bytes(value: &Value) -> u64 {
-    /// One `Value` node's own footprint (the enum's size).
     const NODE: u64 = 32;
-    /// The transient full-body copies one accepted capture allocates:
-    /// the queued clone, the envelope's clone, and the serialization
-    /// buffer.
+    /// The transient full-body copies one accepted capture allocates.
     const TRANSIENT_COPIES: u64 = 3;
     fn tree(value: &Value) -> u64 {
         match value {
@@ -340,8 +259,7 @@ pub(crate) fn payload_bytes(value: &Value) -> u64 {
     tree(value).saturating_mul(TRANSIENT_COPIES)
 }
 
-/// The capture file's correlation envelope: the same identity fields the
-/// request-timing entries carry, so a capture correlates with its
+/// The capture's correlation envelope: correlates with the request-timing
 /// timeline by sequence number; empty or absent fields stay omitted.
 #[cfg_attr(not(unix), allow(dead_code))]
 fn capture_envelope(job: &CaptureJob) -> Value {
@@ -377,15 +295,13 @@ fn write_capture(root: &Path, dir: &Path, keep: usize, job: &CaptureJob) -> std:
     use std::io::Write;
     refuse_symlinked_components(root, dir)?;
     perms::create_dir_all_private(dir)?;
-    // The directory can pre-exist with permissive modes (a shared
-    // agentDir, a different umask): the restriction re-applies every
-    // write, not only at creation.
+    // The directory can pre-exist with permissive modes (a shared agentDir, a different
+    // umask): the restriction re-applies every write, not only at creation.
     perms::restrict_dir(dir)?;
     let bytes = serde_json::to_vec_pretty(&capture_envelope(job))
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string()))?;
-    // The epoch lead keeps lexical order chronological (the prune's
-    // eviction order); the process-unique counter makes the name unique
-    // across every session wiring sharing the dir.
+    // The epoch lead keeps lexical order chronological; the
+    // process-unique counter keeps the name unique across wirings.
     let name = format!(
         "{}-{}-{:08}.json",
         job.now_ms,
@@ -409,9 +325,8 @@ fn write_capture(root: &Path, dir: &Path, keep: usize, job: &CaptureJob) -> std:
         crate::platform::rename_onto(&temp, &target)
     })();
     if write.is_err() {
-        // The ring ages crash-leftover temps; a failed write cleans up
-        // after itself so repeated failures do not accumulate partial
-        // bodies.
+        // A failed write cleans up its temp so repeated failures do not
+        // accumulate partial bodies.
         let _ = std::fs::remove_file(&temp);
     }
     write?;
@@ -427,11 +342,8 @@ fn write_capture(root: &Path, dir: &Path, keep: usize, job: &CaptureJob) -> std:
 /// makes it, privately), but a symlink ends the capture.
 #[cfg_attr(not(unix), allow(dead_code))]
 fn refuse_symlinked_components(root: &Path, dir: &Path) -> std::io::Result<()> {
-    // Only the components below the trust root are walked: the root
-    // itself is the user's configured agent dir (its own symlinks are
-    // the user's choice); anything not under it is not the capture's
-    // tree and is refused outright. A missing component is fine — the
-    // private create below makes it; a symlinked one is not.
+    // Only the components below the trust root are walked (its own symlinks
+    // are the user's choice); anything not under it is refused outright.
     let mut current = root.to_path_buf();
     for component in dir.strip_prefix(root).map_err(|_| {
         std::io::Error::new(

@@ -1,11 +1,9 @@
-//! The idle-park family (moved with its concern): the parent-owned
-//! kernel release at the idle park and the compacting admission
-//! gate, with the `ReleaseCountingEngine` + `AdmitProbeEngine` fixtures.
+//! The idle-park family: the parent-owned kernel release at the idle
+//! park and the compacting admission gate.
 use super::*;
 
-/// A recording engine for the settled-child kernel release (TS #2483's
-/// inline arm): the runner's park arm fires the trait method, and the
-/// test counts the fires.
+/// A recording engine for the settled-child kernel release: the park arm
+/// fires the trait method; the test counts the fires.
 struct ReleaseCountingEngine {
     releases: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     fired: std::sync::Arc<tokio::sync::Notify>,
@@ -72,17 +70,7 @@ impl SessionEngine for ReleaseCountingEngine {
     }
 }
 
-/// The settled-child kernel release fires from the park arm only for a
-/// parent-owned child (TS #2483's `canPassivateSettledSession`,
-/// worker-side): a depth-1 child with no attached clients releases at
-/// the idle park; a root session, an attached child, and a compacting
-/// child stay resident.
-/// The settled-child kernel release fires from the park arm only for a
-/// parent-owned child (TS #2483's `canPassivateSettledSession`,
-/// worker-side). The test waits for the observable readiness (the
-/// engine's release notification) - the bounded timeout is the
-/// failure bound for the positive arm and the absence bound for the
-/// gated arms (no fixed sleep ever makes a pass).
+/// The bounded timeout is the failure bound (positive arm) and the absence bound (gated arms).
 #[tokio::test]
 async fn the_idle_park_releases_a_parent_owned_childs_kernel_only() {
     struct ParkedProbe {
@@ -107,10 +95,8 @@ async fn the_idle_park_releases_a_parent_owned_childs_kernel_only() {
         let task = tokio::spawn(async move {
             runner.run().await;
         });
-        // The runner parks with no work in flight; the park arm
-        // fires the release when the policy holds and the engine
-        // notifies - the wait is the observable readiness, and the
-        // task tear-down runs after the await resolves either way.
+        // The wait is the observable readiness: the park arm fires the release when
+        // the policy holds; the tear-down runs after the await resolves either way.
         let _ =
             tokio::time::timeout(std::time::Duration::from_millis(2000), fired.notified()).await;
         task.abort();
@@ -125,10 +111,8 @@ async fn the_idle_park_releases_a_parent_owned_childs_kernel_only() {
         1,
         "the park arm must fire the release for a parent-owned child"
     );
-    // A root session, an attached child, and a compacting child stay
-    // resident: the same observable read must NOT fire within the
-    // absence bound (there is no readiness event to await, so the
-    // bound itself is the absence proof).
+    // A root, an attached child, and a compacting child stay resident: no
+    // readiness event exists, so the bound itself is the absence proof.
     let probe = park_with(0, false, false).await;
     assert_eq!(
         probe.releases.load(std::sync::atomic::Ordering::SeqCst),
@@ -149,9 +133,8 @@ async fn the_idle_park_releases_a_parent_owned_childs_kernel_only() {
     );
 }
 
-/// A recording engine for the admission-gate tests: every `run_prompt`
-/// call lands in `prompts` (the served-path probe — a racing admission
-/// reaches the engine, a parked one never does).
+/// A recording engine for the admission-gate tests: every `run_prompt` call
+/// lands in `prompts` (parked admissions never do).
 #[derive(Default)]
 struct AdmitProbeEngine {
     prompts: Mutex<Vec<String>>,
@@ -210,23 +193,15 @@ impl SessionEngine for AdmitProbeEngine {
     }
 }
 
-/// The compacting admission gate (TS `isCompacting` rides
-/// `_isBusyForSessionInput("pump")`'s `externalBusy`): a resume site that
-/// clears the queued-input suspension MID-WINDOW must not admit a racing
-/// turn — the queued item stays parked until the window ends. The
-/// served-path probe is the engine itself: `run_prompt` records every
-/// admission, so a racing turn would appear as a prompt while the window
-/// is open.
+/// A resume site that clears the suspension MID-WINDOW must not admit a racing turn.
 #[tokio::test]
 async fn compacting_window_parks_a_cleared_suspension_until_it_ends() {
     let engine = Arc::new(AdmitProbeEngine::default());
     let runner = burst_runner(Arc::clone(&engine) as Arc<dyn SessionEngine>);
     let (done_tx, mut done_rx) = oneshot::channel();
     {
-        // The mid-compaction shape: the manual compact set the
-        // suspension with the window open, then a resume site (a steer's
-        // `wake: "immediate"` resume, TS `_admitSessionInput`) cleared
-        // the suspension and parked its item — the racing class.
+        // The mid-compaction shape: the suspension is clear while the
+        // window is open, the item parked — the racing class.
         let mut core = runner.core.lock().unwrap();
         core.compacting = true;
         core.queued_input_suspended = false;
@@ -248,8 +223,8 @@ async fn compacting_window_parks_a_cleared_suspension_until_it_ends() {
     let parked = std::sync::Arc::clone(&runner.core);
     let work_notify = std::sync::Arc::clone(&runner.work_notify);
     let running = tokio::spawn(async move { runner.run().await });
-    // The resume site's wake reaches the runner; the gate must park it
-    // again on the compacting term (the suspension is already clear).
+    // The gate parks the wake again on the compacting term (the
+    // suspension is already clear).
     work_notify.notify_one();
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     {
@@ -351,10 +326,8 @@ async fn idle_passivation_window_arms_only_for_idle_unattached_sessions() {
 
 #[tokio::test]
 async fn idle_passivation_refuses_while_the_lanes_hold_undelivered_input() {
-    // TS `isSessionActive`'s pending-prompt-admissions arm (Bugbot's
-    // paused-queued-work finding): a parked steer or follow-up lives only
-    // on the resident worker, so neither the window nor the fire's
-    // fresh-snapshot fence may pass while the lanes hold it.
+    // A parked steer or follow-up lives only on the resident worker, so neither
+    // the window nor the fire's fence may pass while the lanes hold it.
     let dir = tempfile::TempDir::new().unwrap();
     let agent_dir = dir.path().join("agent");
     passivation_settings(&agent_dir, &serde_json::json!(1));
@@ -387,10 +360,8 @@ async fn idle_passivation_refuses_while_the_lanes_hold_undelivered_input() {
         runner.idle_passivation_window().is_none(),
         "a queued steer in the lanes must cancel the window"
     );
-    // The fire's fresh-snapshot fence holds the same arm: the stop
-    // request never leaves (the dead-socket supervisor link answers
-    // errors best-effort, so the observable is the absence of any
-    // local stop — the runner stays parked).
+    // The fire's fresh-snapshot fence holds the same arm: the observable is the
+    // absence of any local stop (the dead-socket link answers best-effort).
     runner.maybe_request_idle_passivation().await;
     assert!(
         runner.core.lock().unwrap().steering.len() == 1,
@@ -425,12 +396,9 @@ async fn idle_passivation_refuses_while_the_lanes_hold_undelivered_input() {
 
 #[tokio::test]
 async fn idle_passivation_fire_rechecks_the_fresh_state_and_reports_the_threshold() {
-    // The fire's fresh-snapshot fence: an attached client (or an armed
-    // scheduled job via the engine gate) cancels the stop request even
-    // when the window armed before the change. The request itself goes
-    // to a dead supervisor socket (the link answers an error), which
-    // the fire swallows best-effort — the observable contract is that
-    // the fire NEVER stops the worker locally and never panics.
+    // The fire's fresh-snapshot fence: an attached client (or an armed scheduled
+    // job via the engine gate) cancels the stop even when the window armed before
+    // the change; the fire never stops the worker locally and never panics.
     let dir = tempfile::TempDir::new().unwrap();
     let agent_dir = dir.path().join("agent");
     passivation_settings(&agent_dir, &serde_json::json!(1));
@@ -446,7 +414,6 @@ async fn idle_passivation_fire_rechecks_the_fresh_state_and_reports_the_threshol
     // The fence: an attached client arrived during the window.
     runner.core.lock().unwrap().attached_client_ids = vec!["client-1".to_string()];
     runner.maybe_request_idle_passivation().await;
-    // No local stop occurred (the runner keeps running; nothing to
-    // observe beyond the absence of a panic and the request never sent —
-    // asserted by the dead-socket link answering errors best-effort).
+    // No local stop occurred (the dead-socket link answers errors
+    // best-effort).
 }

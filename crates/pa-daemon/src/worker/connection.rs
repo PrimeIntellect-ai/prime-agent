@@ -10,17 +10,14 @@ use super::{
     DAEMON_SCHEMA_REVISION, DEFAULT_PRIVATE_FRAME_LIMITS, PEER_COMMAND_NOT_ALLOWED,
 };
 
-/// Result of one connection's authentication command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AuthOutcome {
     Authenticated,
     Failed,
 }
 
-/// One outbound frame: the serialized JSON payload plus its private-frame
-/// `outboundType` (`session_event` or `side_question_event`), mirroring the
-/// TS worker frame header. The supervisor fans frames out per its own
-/// routing (clients attached to the session).
+/// The supervisor fans frames out per its own routing (clients attached
+/// to the session).
 pub(crate) struct OutboundFrame {
     pub(crate) payload: Vec<u8>,
     pub(crate) outbound_type: &'static str,
@@ -46,9 +43,7 @@ impl OutboundFrame {
         }
     }
 
-    /// `heartbeats_changed` (TS daemon-mode `broadcastGlobal`): the store's
-    /// heartbeat-catalog-change notification, re-broadcast daemon-wide by
-    /// the supervisor.
+    /// Re-broadcast daemon-wide by the supervisor.
     pub(crate) fn heartbeats_changed() -> Self {
         OutboundFrame {
             payload: br#"{"type":"heartbeats_changed"}"#.to_vec(),
@@ -57,14 +52,9 @@ impl OutboundFrame {
         }
     }
 
-    /// `model_catalog_changed`: a background catalog refresh changed what
-    /// this worker would answer for `get_model_catalog` (Rust-only
-    /// extension over the TS daemon-mode protocol — TS awaits
-    /// `refreshModelCatalog` inside the request; the no-stall picker-open
-    /// refresh returns the validated snapshot instantly and lands the
-    /// fresh catalog through this broadcast instead). Every client
-    /// re-fetches; an open picker folds the catalog through its stable
-    /// update path, so the selection never flickers.
+    /// `model_catalog_changed`: a background catalog refresh changed what this worker
+    /// would answer for `get_model_catalog` (Rust-only extension: the picker-open
+    /// refresh lands the fresh catalog through this broadcast).
     pub(crate) fn model_catalog_changed() -> Self {
         OutboundFrame {
             payload: br#"{"type":"model_catalog_changed"}"#.to_vec(),
@@ -74,11 +64,9 @@ impl OutboundFrame {
     }
 }
 
-/// The worker's outbound event pump: one sequence-stamped broadcast stream
-/// shared by every frame-emitting path (turns, compaction, side questions,
-/// status lines). Sequences are assigned under a send guard so channel
-/// delivery order matches sequence order, which keeps per-connection flush
-/// positions monotonic.
+/// One sequence-stamped broadcast stream shared by every frame-emitting
+/// path. Sequences are assigned under a send guard so delivery order
+/// matches sequence order (flush positions stay monotonic).
 pub(crate) struct EventPump {
     events: broadcast::Sender<Arc<OutboundFrame>>,
     next_seq: AtomicU64,
@@ -99,7 +87,6 @@ impl EventPump {
         self.events.subscribe()
     }
 
-    /// Stamp the frame with the next sequence and broadcast it.
     pub(crate) fn send(&self, mut frame: OutboundFrame) {
         let _guard = self.send_guard.lock().unwrap();
         frame.seq = self.next_seq.fetch_add(1, Ordering::SeqCst) + 1;
@@ -114,25 +101,17 @@ impl EventPump {
 }
 
 /// One connection's outbound state: the framed writer plus the fan-out's
-/// flush position. The TS worker writes session events synchronously while
-/// a command runs, so its command response always follows them; the Rust
-/// fan-out is a separate task, so response writes wait for the fan-out to
-/// catch up to the sequence they observed (`wait_flushed`), restoring the
-/// same ordering contract: events emitted during a command are written
-/// before the command's response, never after it.
+/// flush position; response writes wait for the fan-out to catch up, so
+/// a command's events precede its response.
 pub(crate) struct ConnectionSink {
     pub(crate) writer:
         Arc<tokio::sync::Mutex<Box<dyn pa_types::platform::transport::AsyncWriteHalf>>>,
-    /// The fan-out's flush position; `FLUSH_CLOSED` once the fan-out ended.
-    /// Watch semantics: a send with zero live receivers is dropped, so
-    /// the sink keeps a permanent receiver and every position update is
-    /// stored even while no response is waiting.
+    /// The fan-out's flush position; `FLUSH_CLOSED` once the fan-out ended
+    /// (the sink's permanent receiver keeps watch sends from dropping).
     flushed: tokio::sync::watch::Sender<u64>,
     _flushed_anchor: tokio::sync::watch::Receiver<u64>,
-    /// The first broadcast sequence this connection's fan-out can receive:
-    /// frames older than this were broadcast before the connection
-    /// subscribed and are never delivered to it, so a gate below `entry_seq`
-    /// is already satisfied.
+    /// The first broadcast sequence this connection can receive: a gate
+    /// below `entry_seq` is already satisfied.
     entry_seq: u64,
 }
 
@@ -185,23 +164,16 @@ impl ConnectionSink {
     }
 }
 
-/// Releases a connection's supervisor claim when the connection ends:
-/// the supervisor-role connection on the worker's socket is the supervisor's
-/// presence proof for the orphan-exit monitor, so its end must decrement
-/// the claim count on every return path. Inspects the role at drop time —
-/// only a connection that authenticated as the supervisor ever claimed.
+/// Releases the connection's supervisor claim on every return path: the
+/// connection is the orphan-exit monitor's presence proof.
 struct SupervisorClaimRelease {
     role: Arc<std::sync::Mutex<crate::peer::ConnectionRole>>,
     claims: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// The connection-scoped session-attach guard: its Drop releases the
-/// connection's registry entry (every retained id, the anonymous
-/// fallback included) and wakes the runner — on EVERY return path of
-/// `handle_connection` (the clean EOF arm, the read errors, the
-/// malformed/oversized frames, the failed auth), closing the fresh
-/// bots' release gaps. A shared client id stays held while any other
-/// live connection retains it (the reconnect shape).
+/// registry entry and wakes the runner on every return path; a shared
+/// id stays held while another live connection retains it.
 struct SessionAttachGuard {
     worker: Arc<Worker>,
     token: String,
@@ -231,21 +203,18 @@ impl Worker {
     ///
     /// # Errors
     ///
-    /// Returns an error when the recovery journal cannot be opened, the
-    /// socket path cannot be prepared, the worker socket cannot be
-    /// bound, or an accept fails.
+    /// Returns an error when the journal cannot be opened, the socket
+    /// cannot be prepared or bound, or an accept fails.
     ///
     /// # Panics
     ///
-    /// Panics when the recovery mutex is poisoned (a holder panicked
-    /// while holding it).
+    /// Panics when the recovery mutex is poisoned.
     pub async fn serve(self: Arc<Self>) -> Result<()> {
         *self.recovery.lock().unwrap() = Some(WorkerRecoveryJournal::open(
             &self.config.recovery_journal_path,
         )?);
-        // A worker spawned under a supervisor arms the orphan-exit monitor
-        // (TS `startSupervisorMonitor`): nobody else reaps it if the
-        // supervisor dies without a graceful stop.
+        // A worker spawned under a supervisor arms the orphan-exit monitor:
+        // nobody else reaps it if the supervisor dies without a graceful stop.
         if !self.config.supervisor_socket_path.as_os_str().is_empty() {
             crate::supervisor_lost::start(self.clone());
         }
@@ -334,15 +303,11 @@ impl Worker {
     async fn handle_connection(self: Arc<Self>, stream: Box<dyn TransportStream>) -> Result<()> {
         let (reader, writer) = stream.split();
         let writer = Arc::new(tokio::sync::Mutex::new(writer));
-        // The connection's event subscription and its entry sequence are
-        // captured together (before any awaited write): every frame the
-        // receiver can see has a sequence at or above `entry_seq`, which is
-        // what the sink's flush barrier gates on.
+        // The subscription and its entry sequence are captured together
+        // (before any awaited write): every frame the receiver can see is at
+        // or above `entry_seq`.
         let subscription = self.events.subscribe();
         let entry_seq = self.events.current_seq() + 1;
-        // The connection's outbound sink: the framed writer plus the
-        // fan-out flush position (response writes wait on it; see
-        // `ConnectionSink`).
         let sink = Arc::new(ConnectionSink::new(Arc::clone(&writer), entry_seq));
         // daemon_hello goes out immediately on every connection. The
         // factory lane's advertisement gate reads the settings file
@@ -398,26 +363,18 @@ impl Worker {
         // fan-out task (streaming is gated on it).
         let role = Arc::new(std::sync::Mutex::new(ConnectionRole::Unauthenticated));
 
-        // Releases the supervisor claim this connection may take (see
-        // `SupervisorClaimRelease`): the claim's lifetime is the
-        // connection's, so every return path (EOF, auth failure, frame
-        // error) goes through the same decrement.
         let _claim_release = SupervisorClaimRelease {
             role: Arc::clone(&role),
             claims: Arc::clone(&self.supervisor_claims),
         };
 
-        // Connection-closed signal: the read loop fires it when the peer is
-        // gone (EOF, auth failure) or drops it on return. The fan-out task
-        // must not outlive the connection - the shared-socket write half it
-        // holds keeps the socket fd open, and a per-connection fd leak here
-        // (probes, direct clients, peer deliveries) ends in EMFILE for a
-        // long-lived worker.
+        // Connection-closed signal. The fan-out must not outlive the
+        // connection: its write half keeps the fd open, and a per-connection
+        // fd leak ends in EMFILE.
         let (closed_tx, closed_rx) = tokio::sync::watch::channel(false);
 
-        // Event fan-out: this connection's subscription to the shared pump.
-        // Only authenticated roles stream: the supervisor always, a session
-        // client only while it holds an attach on the session.
+        // This connection's subscription. Only authenticated roles stream: the
+        // supervisor always, a session client only while attached.
         {
             let worker = Arc::clone(&self);
             let sink = Arc::clone(&sink);
@@ -427,8 +384,7 @@ impl Worker {
                 let mut events = subscription;
                 loop {
                     tokio::select! {
-                        // The read loop ended (or dropped its sender):
-                        // release the subscription and the write half so
+                        // Release the subscription and the write half so
                         // the socket fd closes.
                         changed = closed.changed() => {
                             let _ = changed;
@@ -438,10 +394,8 @@ impl Worker {
                         received = events.recv() => {
                             match received {
                                 Ok(frame) => {
-                                    // A frame this role does not stream still
-                                    // advances the flush position: it cannot be
-                                    // delivered later, so a gated response must not
-                                    // wait for it.
+                                    // A frame this role does not stream still advances the flush
+                                    // position: a gated response must not wait for it.
                                     if role.lock().unwrap().streams_events() {
                                         let active_session_id = active_session_id_of(&frame.payload);
                                         let header = json!({
@@ -472,12 +426,6 @@ impl Worker {
             });
         }
 
-        // The connection's attach-release guard (the fresh bots'
-        // findings: the release must run on EVERY return path - the
-        // clean EOF, the read errors, the malformed frames, the auth
-        // failures - and it is connection-scoped, so a shared client id
-        // survives a reconnect's first close). The guard's Drop releases
-        // the token's registry entry + wakes the runner.
         let connection_token = crate::util::new_display_id();
         let _attach_release = SessionAttachGuard {
             worker: Arc::clone(&self),
@@ -490,10 +438,6 @@ impl Worker {
             let Some(frame) = frame else {
                 // Peer closed: wake the fan-out so it drops the write half.
                 let _ = closed_tx.send(true);
-                // The connection's session attaches release via the
-                // guard's Drop (every return path - this EOF arm, the
-                // read errors, the malformed frames, the auth failures:
-                // the `?` exits drop the guard too).
                 break;
             };
             let command_type = frame
@@ -518,13 +462,11 @@ impl Worker {
             match current_role {
                 ConnectionRole::Unauthenticated => {
                     // The first command authenticates the connection; a
-                    // failed authentication ends it (TS worker branch).
+                    // failed authentication ends it.
                     let outcome = self
                         .authenticate_connection(&command_type, &payload, &request_id, &role, &sink)
                         .await;
                     if outcome == AuthOutcome::Failed {
-                        // Failed auth ends the connection: wake the fan-out
-                        // so it releases the write half (and the fd).
                         let _ = closed_tx.send(true);
                         break;
                     }
@@ -537,16 +479,13 @@ impl Worker {
                             .await;
                         continue;
                     }
-                    // Shutdown stays sequential: the reply must precede the
-                    // exit. Every other command runs concurrently, like the
-                    // TS daemon's async handlers: a long-running command (a
-                    // turn, a compaction) must not block aborts or state
-                    // reads from other clients.
+                    // Shutdown stays sequential: the reply must precede the exit. Every
+                    // other command runs concurrently: a long-running command must not
+                    // block aborts or state reads.
                     if command_type == "shutdown" {
                         let response = self.dispatch(&command_type, &payload).await;
-                        // The reply must precede the exit (the response is
-                        // consumed by the write), so capture the outcome
-                        // before handing the response over.
+                        // The reply must precede the exit, so capture the outcome before
+                        // the write consumes the response.
                         let success = response.success;
                         self.write_response_frame(&sink, &request_id, response)
                             .await;
@@ -567,10 +506,8 @@ impl Worker {
                     });
                 }
                 ConnectionRole::SessionClient { ref session } => {
-                    // The connection token rides the attach/detach payloads
-                    // (the registry keys this connection's retained ids
-                    // by it; a failed attach's release is the idempotent
-                    // no-op).
+                    // The connection token rides the attach/detach payloads; the registry
+                    // keys this connection's retained ids by it.
                     if matches!(command_type.as_str(), "attach" | "detach") {
                         if let Some(object) = payload.as_object_mut() {
                             object.insert("connectionToken".to_string(), json!(connection_token));
@@ -613,9 +550,8 @@ impl Worker {
                     });
                 }
                 ConnectionRole::PeerWorker { ref session } => {
-                    // A peer worker delivers agent messages only, for the
-                    // grant's session; everything else bounces with the TS
-                    // gate string.
+                    // A peer worker delivers agent messages only, for the grant's session;
+                    // everything else bounces with the gate string.
                     if !worker_peer_command_allowed(&command_type, &payload, &session.grant) {
                         let failure = response_failure(
                             Some(&request_id),
@@ -643,9 +579,9 @@ impl Worker {
         Ok(())
     }
 
-    /// Authenticate one connection's first command: `worker_auth` promotes
-    /// the connection to the supervisor role, `peer_auth` to a session
-    /// client role holding a burned single-use grant. Writes the response.
+    /// Authenticate the first command: `worker_auth` promotes the
+    /// connection to the supervisor role, `peer_auth` to a session client
+    /// role holding a burned single-use grant.
     async fn authenticate_connection(
         self: &Arc<Self>,
         command_type: &str,
@@ -678,8 +614,7 @@ impl Worker {
                     .unwrap_or_default()
                     .to_string();
                 // The roster capability is always granted; the peer
-                // transport capability rides on the worker instance
-                // id, like the TS worker.
+                // transport capability rides on the worker instance id.
                 let mut capabilities = vec!["agent_roster".to_string()];
                 if !self.config.worker_instance_id.is_empty() {
                     capabilities.push("direct_peer_transport".to_string());
@@ -759,9 +694,8 @@ impl Worker {
             .context("write private frame")
     }
 
-    /// Write a frame whose payload skips the whole-frame re-buffer (see
-    /// `write_frame_segments`); the response path serializes its payload
-    /// once and hands it straight to the socket.
+    /// Write a frame whose payload skips the whole-frame re-buffer; the
+    /// response path serializes its payload once, straight to the socket.
     pub(crate) async fn write_frame_segments(
         &self,
         writer: &Arc<tokio::sync::Mutex<Box<dyn pa_types::platform::transport::AsyncWriteHalf>>>,
@@ -775,10 +709,7 @@ impl Worker {
     }
 
     /// Write one command response. The response is CONSUMED: its trees and
-    /// the serialized payload drop before the trim, so every transient the
-    /// response path allocated returns to the OS in the phase that peaked
-    /// (before, the response outlived the trim and its freed heap stayed
-    /// in the arenas until the next large phase).
+    /// the serialized payload drop before the trim.
     pub(crate) async fn write_response_frame(
         &self,
         sink: &ConnectionSink,
@@ -786,9 +717,8 @@ impl Worker {
         response: DaemonResponse,
     ) {
         // Flush barrier: every event frame broadcast before this response
-        // reaches the connection's writer first, so a command response
-        // never overtakes the events its command emitted (the TS worker
-        // gets this ordering for free from synchronous writes).
+        // reaches the writer first, so the response never overtakes the
+        // events its command emitted.
         sink.wait_flushed(self.events.current_seq()).await;
         let mut header = json!({
             "kind": "outbound",
@@ -796,11 +726,8 @@ impl Worker {
             "outboundType": "response",
         });
         // The attach family's response header carries the scalars the
-        // supervisor's routed bookkeeping reads (success, the attach's
-        // active session), so the response PAYLOAD can relay to the client
-        // by bytes. The header is the worker socket's own routing frame;
-        // direct-attach clients read it as a JSON object and ignore fields
-        // they do not know.
+        // supervisor's routed bookkeeping reads, so the response PAYLOAD can
+        // relay to the client by bytes.
         if matches!(response.command.as_str(), "attach" | "reattach") {
             header["ok"] = json!(response.success);
             if let Some(active_session_id) = response
@@ -812,9 +739,8 @@ impl Worker {
                 header["activeSessionId"] = json!(active_session_id);
             }
         }
-        // Serialize the line from the borrowed trees (no per-response
-        // payload clone) and write the frame without re-buffering the
-        // payload; the wire bytes are identical to the tree-built line.
+        // Serialize from the borrowed trees (no payload clone) and write
+        // without re-buffering; the wire bytes match the tree-built line.
         let payload = crate::protocol::response_line_bytes(&response);
         let payload_len = payload.len();
         if let Err(error) = self
@@ -823,11 +749,9 @@ impl Worker {
         {
             eprintln!("pa-daemon worker response write failed: {error:#}");
         }
-        // A large frame (an attach snapshot, a full-history tree) carried
-        // big transient Value trees; the frame is out and both the payload
-        // bytes and the response's own trees are freed, so return their
-        // freed heap to the OS instead of letting the arenas hold the
-        // phase's peak for the process lifetime.
+        // The frame is out and the payload bytes and the response's own trees
+        // are freed, so return their freed heap to the OS instead of letting
+        // the arenas hold the phase's peak.
         drop(payload);
         drop(response);
         pa_types::memory_release::trim_freed_heap_if_large(payload_len);
@@ -839,11 +763,8 @@ impl Worker {
         if let Err(response) = self.require_created("attach") {
             return response;
         }
-        // Warm the context-tree cache at every (re)attach (the operators'
-        // Esc agents-view round trip re-attaches): the background walk
-        // fills the cache while the client rebuilds its view, so the
-        // next `/context` finds it ready instead of walking the artifact
-        // tree inline.
+        // Warm the context-tree cache at every (re)attach: the background walk
+        // fills it while the client rebuilds its view.
         self.poke_context_tree_refresh();
         let client_id = payload
             .get("clientId")
@@ -862,11 +783,8 @@ impl Worker {
                         .collect::<Vec<_>>(),
                 )
             });
-        // The supervisor's routed attach carries the CLIENT's own normalized
-        // capability set here (the supervisor forces slim for the
-        // worker-facing behavior but the client result echoes the client's
-        // set); a direct-attach client sends none and keeps the normalized
-        // request set, exactly as before.
+        // The routed attach carries the CLIENT's own capability set;
+        // a direct-attach client sends none.
         let echoed_client_capabilities = payload
             .get("clientCapabilities")
             .and_then(Value::as_array)
@@ -912,12 +830,10 @@ impl Worker {
             .as_ref()
             .map(crate::session_store::SessionFile::messages)
             .unwrap_or_default();
-        // The image-payload elision (the image-heavy session-open fix): a
-        // client that advertised `elide_snapshot_images` reads the
-        // transcript without the base64 payloads (their fallback-only
-        // metadata rows travel in the marker); the client's own set is
-        // the worker-facing `capabilities` here unless the supervisor's
-        // routed attach carried the client's set in `clientCapabilities`.
+        // The image-payload elision: `elide_snapshot_images` clients read the
+        // transcript without base64 payloads; the client's set is
+        // `capabilities` unless the routed attach carried
+        // `clientCapabilities`.
         let client_capabilities = echoed_client_capabilities
             .clone()
             .unwrap_or_else(|| capabilities.clone());
@@ -934,9 +850,8 @@ impl Worker {
         let cursor = json!({ "generation": generation, "sequence": last_event_sequence });
         let summary_value = serde_json::to_value(&summary).unwrap_or(Value::Null);
         let state_value = serde_json::to_value(&state).unwrap_or(Value::Null);
-        // The messages move into the snapshot once: the old `json!` build
-        // deep-copied them here and moved the original into the non-slim
-        // top level, holding two message trees per attach.
+        // The messages move into the snapshot once (avoiding a second
+        // message tree per attach).
         let mut snapshot = json!({
             "activeSessionId": active_session_id,
             "summary": summary_value,
@@ -949,23 +864,19 @@ impl Worker {
         });
         snapshot["messages"] = Value::Array(messages);
         // Slim clients read summary/messages from the snapshot; duplicating
-        // them at the top level would serialize the history twice per attach
-        // (port of `createAttachResult`).
+        // them at the top level would serialize the history twice per attach.
         let slim = capabilities.iter().any(|cap| cap == "slim_attach");
-        // TS `createAttachResult` key order: protocol, activeSessionId,
-        // state?, messages? (non-slim), snapshot, replay,
-        // lastEventSequence, lastEventCursor, client. The JSON map
-        // preserves insertion order (the wire byte order), so the
-        // non-slim keys insert at their TS positions, not appended.
+        // TS `createAttachResult` key order: the JSON map preserves insertion
+        // order (the wire byte order), so non-slim keys insert at their TS
+        // positions, not appended.
         let mut result = json!({
             "protocol": { "name": "prime-agent.daemon", "version": 7 },
             "activeSessionId": active_session_id,
         });
         if !slim {
             result["state"] = summary_value;
-            // The non-slim top-level duplication (same wire bytes as
-            // before): one message tree lives in the snapshot, the
-            // duplicate is cloned out of it.
+            // One message tree lives in the snapshot; the duplicate is
+            // cloned out of it.
             result["messages"] = snapshot["messages"].clone();
         }
         result["snapshot"] = snapshot;
@@ -1049,20 +960,12 @@ impl Worker {
         true
     }
 
-    /// Release one connection's retained attaches (the registry's
-    /// release arm, run from the connection guard's Drop on every return
-    /// path AND the explicit detach command): a shared id leaves the
+    /// Release one connection's retained attaches: a shared id leaves the
     /// core only when no other live connection holds it.
     pub(crate) fn release_session_attachments(&self, token: &str, final_release: bool) {
-        // `final_release` (the guard's Drop) marks the token dead - the
-        // connection is gone, so a late registration from its detached
-        // attach handler is rejected (the round-8 race belt, now
-        // bounded: only FINAL releases enter the set, and the set caps
-        // at 8192 - the round-9 bots' unbounded-growth finding). The
-        // explicit DETACH is NOT final (the round-9 bots' finding: the
-        // connection lives on - a later re-attach on the same
-        // connection must re-register or the close would find no entry
-        // and leak the hold).
+        // `final_release` (the guard's Drop) marks the token dead (the set caps
+        // at 8192); the explicit DETACH is NOT final, so a later re-attach
+        // re-registers.
         if final_release {
             let mut released = self.released_attach_tokens.lock().unwrap();
             // Clear before the insert: the token released right now is
@@ -1110,19 +1013,15 @@ impl Worker {
         // The detaching client's input-pause leases go with the detach
         // (TS worker `detach` arm releases the client's pauses).
         self.release_input_pauses_for_detach(&client_id);
-        // The connection-scoped release first (the token's entry drops
-        // the id — the shared-id reconnect keeps its own hold); the
-        // direct core retain below stays as the detach's own belt (the
-        // explicit detach command is the connection's own intent).
+        // The connection-scoped release first (the shared-id reconnect keeps
+        // its own hold); the direct core retain below stays as the detach's
+        // own belt.
         if let Some(token) = payload.get("connectionToken").and_then(Value::as_str) {
             self.release_session_attachments(token, false);
         }
         let mut core = self.core.lock().unwrap();
-        // The belt is scoped (the fresh bots' sibling-hold finding): the
-        // explicit detach removes the id only when no other live
-        // connection still retains it (a reconnect sharing the client
-        // id keeps its own hold - the same set-membership rule the
-        // registry's release applies).
+        // The detach removes the id only when no other live connection
+        // still retains it.
         let held_elsewhere = self
             .session_attachments
             .lock()
@@ -1133,9 +1032,8 @@ impl Worker {
             core.attached_client_ids.retain(|id| id != &client_id);
         }
         drop(core);
-        // The detach wake: the runner's park computed its idle-passivation
-        // window while this client held the attach; the notify re-arms it
-        // (a now-detached child's window opens for the threshold).
+        // The notify re-arms the runner's idle-passivation window now
+        // that the client detached.
         self.work_notify.notify_one();
         response_success(None, "detach", None)
     }
