@@ -218,10 +218,37 @@ impl Worker {
         if !self.config.supervisor_socket_path.as_os_str().is_empty() {
             crate::supervisor_lost::start(self.clone());
         }
-        crate::socket::prepare_socket_path(&self.config.socket_path).await?;
-        let listener = bind_transport(&self.config.socket_path)
-            .await
-            .with_context(|| format!("bind worker socket {}", self.config.socket_path.display()))?;
+        if let Err(error) = crate::socket::prepare_socket_path(&self.config.socket_path).await {
+            // The no-listener confirmation of the close handshake: an
+            // exit path already parked on the confirmation proceeds (its
+            // `None` identity makes the cleanup a no-op) instead of
+            // waiting on a listener that will never exist.
+            self.listener_closed.notify_one();
+            return Err(error);
+        }
+        let listener = match bind_transport(&self.config.socket_path).await {
+            Ok(listener) => listener,
+            Err(error) => {
+                let error = error.context(format!(
+                    "bind worker socket {}",
+                    self.config.socket_path.display()
+                ));
+                self.listener_closed.notify_one();
+                return Err(error);
+            }
+        };
+        // From the bind on, the close handshake is fully asynchronous:
+        // an exit path firing anywhere in the setup below (a
+        // registration refusal parked in the capture gap, the orphan
+        // monitor, a routed shutdown) parks on the confirmation, which
+        // only this task emits - after the accept loop has consumed the
+        // stored close request and dropped the listener. The close
+        // request's permit stays stored while the loop has not armed
+        // yet, so the loop consumes it as its first event, and the
+        // confirmation always orders an exit path's identity read
+        // behind the capture below: a bound listener's own cleanup
+        // never reads the gap's `None` identity.
+        crate::socket::bind_capture_gap().await;
         // Capture the bound file's identity before anything can replace
         // it (TS daemon-mode.ts:718, the listen callback, between the
         // identity capture and `restrictDaemonSocketPath`): the exit
@@ -230,15 +257,28 @@ impl Worker {
         *self.bound_socket_identity.lock().unwrap() =
             crate::socket::socket_identity(&self.config.socket_path);
         crate::socket::restrict_socket_path(&self.config.socket_path);
-        loop {
-            let stream = match listener.accept().await {
-                Ok(accepted) => {
-                    if std::env::var("PA_DAEMON_DEBUG").is_ok() {
-                        eprintln!("[worker {}] accepted connection", std::process::id());
+        // This loop owns the bound listener and hands its close to the
+        // exit paths (TS daemon-mode.ts:8011-8018 awaits `server.close()`
+        // FIRST and cleans the socket path after): an exiting path
+        // requests the close, the loop drops the listener - releasing
+        // the bind while every already-accepted connection keeps its own
+        // socket - confirms, and parks; the exiting path owns the
+        // process from its confirmation on. The arm order is safe
+        // against wake loss: a close request that fires while an accept
+        // is being handed off leaves its permit stored, and the next
+        // loop iteration consumes it.
+        let accept_error = loop {
+            let stream = tokio::select! {
+                accepted = listener.accept() => match accepted {
+                    Ok(accepted) => {
+                        if std::env::var("PA_DAEMON_DEBUG").is_ok() {
+                            eprintln!("[worker {}] accepted connection", std::process::id());
+                        }
+                        accepted
                     }
-                    accepted
-                }
-                Err(error) => return Err(anyhow!("worker accept: {error}")),
+                    Err(error) => break Some(anyhow!("worker accept: {error}")),
+                },
+                () = self.listener_close_requested.notified() => break None,
             };
             let worker = Arc::clone(&self);
             tokio::spawn(async move {
@@ -246,7 +286,18 @@ impl Worker {
                     eprintln!("pa-daemon worker connection error: {error:#}");
                 }
             });
+        };
+        // The graceful close: drop the bound listener so the bind
+        // releases, confirm to the exiting path, and park forever (the
+        // parked task keeps the runtime - and so the in-flight
+        // connections - alive until the exiting path's `process::exit`
+        // ends them all).
+        drop(listener);
+        self.listener_closed.notify_one();
+        if let Some(error) = accept_error {
+            return Err(error);
         }
+        std::future::pending::<Result<()>>().await
     }
 
     async fn handle_connection(self: Arc<Self>, stream: Box<dyn TransportStream>) -> Result<()> {
@@ -439,7 +490,7 @@ impl Worker {
                         self.write_response_frame(&sink, &request_id, response)
                             .await;
                         if success {
-                            self.exit_after_close();
+                            self.exit_after_close().await;
                         }
                         continue;
                     }

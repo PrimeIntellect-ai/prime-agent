@@ -1,7 +1,7 @@
 //! The child-side half of RLM usage attribution: splitting one child's
 //! session rows into per-origin batches (the engine-side producer owns the rest).
 //!
-//! Origin labels: the task prompt is the first user row (`spawn_task`); later
+//! Origin labels: the task prompt is the spawn kickoff row (`spawn_task`);
 //! user rows are `direct_user`; `error`/`aborted` fold nowhere.
 
 use pa_types::ai::Usage;
@@ -20,26 +20,13 @@ fn message_role(entry: &SessionEntry, role: &str) -> bool {
             == Some(role)
 }
 
-/// The index of the child file's first user row (the task prompt).
-fn first_user_row(entries: &[SessionEntry]) -> Option<usize> {
-    entries.iter().position(|entry| message_role(entry, "user"))
-}
-
 /// The nearest preceding user or agent-session message row labels a completion's origin; non-agent
-/// custom rows and plain user rows (after the task prompt) label `direct_user`.
-fn child_usage_origin(
-    entries: &[SessionEntry],
-    task_prompt_row: Option<usize>,
-    assistant_index: usize,
-) -> ChildUsageOrigin {
+/// custom rows and plain user rows label `direct_user`.
+fn child_usage_origin(entries: &[SessionEntry], assistant_index: usize) -> ChildUsageOrigin {
     for index in (0..assistant_index).rev() {
         let entry = &entries[index];
         if message_role(entry, "user") {
-            return if Some(index) == task_prompt_row {
-                ChildUsageOrigin::SpawnTask
-            } else {
-                ChildUsageOrigin::DirectUser
-            };
+            return ChildUsageOrigin::DirectUser;
         }
         if entry.type_ != "custom_message" {
             continue;
@@ -96,13 +83,12 @@ pub(crate) fn child_usage_batches(
     entries: &[SessionEntry],
     from: usize,
 ) -> (Vec<(ChildUsageOrigin, Usage)>, usize) {
-    let task_prompt_row = first_user_row(entries);
     let mut batches: Vec<(ChildUsageOrigin, Usage)> = Vec::new();
     for (index, entry) in entries.iter().enumerate().skip(from) {
         let Some(usage) = assistant_usage(entry) else {
             continue;
         };
-        let origin = child_usage_origin(entries, task_prompt_row, index);
+        let origin = child_usage_origin(entries, index);
         match batches.iter_mut().find(|(origin_, _)| *origin_ == origin) {
             Some((_, total)) => {
                 pa_core::session_engine::rlm_usage::add_assistant_usage(total, &usage);
@@ -154,6 +140,16 @@ mod tests {
         )
     }
 
+    /// The spawn kickoff row (TS `spawnMessage`: the `agent_message` custom
+    /// row with `details.id "spawn:<id>"`).
+    fn spawn_kickoff_row(id: &str, message: &str) -> SessionEntry {
+        custom_message_row(
+            id,
+            "agent_message",
+            &json!({"id": "spawn:sub-1", "message": message}),
+        )
+    }
+
     fn captured_usage(input: u64, output: u64, total_tokens: u64, cost_total: f64) -> Value {
         json!({
             "input": input, "output": output, "cacheRead": 0, "cacheWrite": 0,
@@ -166,15 +162,15 @@ mod tests {
         serde_json::from_value(entry.fields["message"]["usage"].clone()).unwrap()
     }
 
-    /// The origin walk over a real child-file shape: the first user row is
-    /// the task prompt, an agent-message custom row relabels the origin,
+    /// The origin walk over a real child-file shape: the spawn kickoff row
+    /// is the task prompt, an agent-message custom row relabels the origin,
     /// a later user row is a direct user prompt, and an aborted
     /// completion folds nowhere. The captured numbers verify the
     /// `spawn_task` batch: 50,208 input + 2,929 output, $0.0089957.
     #[test]
     fn origin_walk_and_cursor_over_a_child_file() {
         let entries = vec![
-            user_row("u1"),
+            spawn_kickoff_row("c0", "ship the lane"),
             assistant_row(
                 "a1",
                 &captured_usage(50_208, 2_929, 53_137, 0.008_995_7),
@@ -237,7 +233,7 @@ mod tests {
     #[test]
     fn batches_sum_across_completions_of_one_origin() {
         let entries = vec![
-            user_row("u1"),
+            spawn_kickoff_row("c0", "ship the lane"),
             assistant_row("a1", &captured_usage(10, 5, 0, 0.01), "toolUse"),
             assistant_row("a2", &captured_usage(20, 8, 0, 0.02), "stop"),
         ];
