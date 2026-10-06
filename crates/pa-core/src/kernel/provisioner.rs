@@ -27,7 +27,7 @@ use crate::kernel::manager::{KernelStartOptions, ReplKernelManager};
 use crate::kernel::shared::ExecuteStatus;
 use crate::kernel::shared::{
     ExecuteOptions, HostRequestHandlers, KernelManagerOptions, KernelShutdownOptions,
-    KernelSnapshotConfig,
+    KernelSnapshotConfig, BOOTSTRAP_EXECUTION_TIMEOUT_MS,
 };
 use crate::kernel::state_snapshot::RestoreResult;
 use crate::kernel::state_snapshot::{manifest_path_in, snapshot_path_in};
@@ -1172,12 +1172,13 @@ async fn start_kernel_impl(
     // settles the cell aborted, and the aborted-status arm below tears the
     // kernel down instead of leaking it into a disposed provisioner.
     let bootstrap = manager
-        .execute(
+        .execute_bounded(
             &bootstrap_code,
             ExecuteOptions {
                 signal: Some(dispose_signal.clone()),
                 ..Default::default()
             },
+            Some(BOOTSTRAP_EXECUTION_TIMEOUT_MS),
         )
         .await;
     match bootstrap {
@@ -1249,9 +1250,20 @@ async fn start_kernel_impl(
                     drain_host_requests: true,
                 })
                 .await;
-            return Err(anyhow!(
-                "Failed to initialize rlm runtime in the Python kernel:\n{details}"
-            ));
+            // An aborted bootstrap with a live dispose signal is the bound
+            // firing on a kernel that stopped answering: name the lost
+            // bootstrap instead of a bare runtime failure.
+            let error = if bootstrap.status == ExecuteStatus::Aborted
+                && !dispose_signal.is_aborted()
+            {
+                anyhow!(
+                    "Failed to initialize rlm runtime in the Python kernel: \
+                     the runtime bootstrap did not finish within {BOOTSTRAP_EXECUTION_TIMEOUT_MS}ms:\n{details}"
+                )
+            } else {
+                anyhow!("Failed to initialize rlm runtime in the Python kernel:\n{details}")
+            };
+            return Err(error);
         }
         Err(error) => {
             let (snapshot_policy, _teardown_gate) = hold_snapshot_flush_gate(inner, memo);
@@ -1670,6 +1682,120 @@ mod tests {
         assert!(
             format!("{error:#}").contains("failed to spawn"),
             "ensure must surface the spawn cause: {error:#}"
+        );
+    }
+
+    /// A ready kernel that stops reading stdin must not wedge its bootstrap
+    /// request or the failed boot's shutdown behind a full pipe.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn nonreading_kernel_fails_bootstrap_without_parking_shutdown() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let python = dir.path().join("ready-but-not-reading");
+        std::fs::write(
+            &python,
+            "#!/usr/bin/env python3\nimport json, time\nprint(json.dumps({'event': 'ready', 'protocol': 3, 'python': '3.13.0'}), flush=True)\ntime.sleep(30)\n",
+        )
+        .expect("write fake kernel");
+        std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod fake kernel");
+        let provisioner = IpythonKernelProvisioner::new(
+            dir.path(),
+            IpythonKernelProvisionerOptions {
+                python: Some(python),
+                python_skills: vec![KernelPythonSkill {
+                    name: "oversized".into(),
+                    import_name: "x".repeat(1024 * 1024),
+                    package_path: dir.path().into(),
+                    pyproject_path: dir.path().join("pyproject.toml"),
+                }],
+                ..Default::default()
+            },
+        );
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(9),
+            provisioner.ensure(None, None),
+        )
+        .await
+        .expect("timed out bootstrap must not park during failed-boot cleanup")
+        .expect_err("kernel never reads bootstrap");
+        assert!(format!("{error:#}").contains("runtime bootstrap did not finish"));
+        assert!(!provisioner.has_running_kernel());
+    }
+
+    /// A kernel that answers the ready handshake but never answers the
+    /// bootstrap execute (the wedged-kernel shape: the frame is lost inside
+    /// the kernel) fails `ensure` with the bound's message instead of parking
+    /// forever, tears its kernel down, and does not auto-retry the fatal
+    /// failure.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn silent_bootstrap_fails_bounded_and_leaves_no_kernel() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Speaks protocol v3: answers the ready handshake, stays silent on
+        // every execute (the runtime bootstrap included), and answers the
+        // shutdown frame so a teardown does not wait out its kill deadline.
+        const SILENT_BOOTSTRAP_RUNTIME: &str = r#"#!/usr/bin/env python3
+import json
+import os
+import sys
+
+base = os.path.dirname(os.path.abspath(__file__))
+with open(os.path.join(base, "starts"), "a") as f:
+    f.write("x")
+print(json.dumps({"event": "ready", "protocol": 3, "python": "3.13.0"}), flush=True)
+for line in sys.stdin:
+    try:
+        req = json.loads(line)
+    except Exception:
+        continue
+    if req.get("type") == "shutdown":
+        print(json.dumps({"event": "done", "id": req.get("id"), "status": "ok"}), flush=True)
+        break
+"#;
+
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let python = dir.path().join("fake-kernel");
+        std::fs::write(&python, SILENT_BOOTSTRAP_RUNTIME).expect("write fake runtime");
+        std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod fake runtime");
+        let provisioner = IpythonKernelProvisioner::new(
+            dir.path(),
+            IpythonKernelProvisionerOptions {
+                python: Some(python),
+                ..Default::default()
+            },
+        );
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            provisioner.ensure(None, None),
+        )
+        .await
+        .expect("the bounded bootstrap must settle the boot")
+        .expect_err("a kernel that never answers the bootstrap must not report success");
+        let chain = format!("{outcome:#}");
+        assert!(
+            chain.contains("Failed to initialize rlm runtime"),
+            "{chain}"
+        );
+        assert!(
+            chain.contains(&format!(
+                "the runtime bootstrap did not finish within {BOOTSTRAP_EXECUTION_TIMEOUT_MS}ms"
+            )),
+            "{chain}"
+        );
+        assert!(
+            !provisioner.has_running_kernel(),
+            "the failed boot must tear its kernel down"
+        );
+        assert_eq!(
+            std::fs::metadata(dir.path().join("starts")).map_or(0, |m| m.len()),
+            1,
+            "the fatal classification must not auto-retry the boot"
         );
     }
 }

@@ -645,8 +645,28 @@ impl ReplKernelManager {
     /// Returns an error when the in-flight protocol repair fails, or when the
     /// enqueued execution fails (kernel error, timeout, or aborted request).
     pub async fn execute(&self, code: &str, opts: ExecuteOptions) -> anyhow::Result<ExecuteResult> {
+        self.execute_bounded(code, opts, /*execution_timeout_ms*/ None)
+            .await
+    }
+
+    /// The bounded entry onto the shared execute path: the provisioner's
+    /// runtime bootstrap passes its bound, so a lost bootstrap frame fails
+    /// the boot loudly instead of parking it forever.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the in-flight protocol repair fails, or when the
+    /// enqueued execution fails (kernel error, timeout, or aborted request).
+    pub(crate) async fn execute_bounded(
+        &self,
+        code: &str,
+        opts: ExecuteOptions,
+        execution_timeout_ms: Option<u64>,
+    ) -> anyhow::Result<ExecuteResult> {
         self.wait_for_protocol_repair(opts.signal.as_ref()).await?;
-        let result = self.enqueue_execute(code, opts, None).await?;
+        let result = self
+            .enqueue_execute(code, opts, execution_timeout_ms)
+            .await?;
         if result.result.status == ExecuteStatus::Ok {
             self.schedule_snapshot();
         }
