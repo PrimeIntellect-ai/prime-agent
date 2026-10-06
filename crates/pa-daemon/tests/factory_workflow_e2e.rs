@@ -841,8 +841,11 @@ impl Harness {
         }
     }
 
-    /// Every user-message text the children of one parent session received
-    /// (the rendered prompts, read off disk through the real bridge).
+    /// Every prompt text the children of one parent session received (the
+    /// rendered prompts, read off disk through the real bridge): plain
+    /// user rows, plus the rlm.spawn kickoff rows (custom `agent_message`
+    /// rows whose `details.id` is `spawn:<child id>` — the raw task
+    /// prompt rides `details.message`).
     fn child_prompts(&self, parent_session_id: &str) -> Vec<String> {
         let artifacts = self
             .agent_dir
@@ -868,6 +871,28 @@ impl Harness {
                     let Ok(row) = serde_json::from_str::<Value>(line) else {
                         continue;
                     };
+                    // The spawn kickoff rides prompt admission as the
+                    // parent's custom `agent_message` row (never a user
+                    // row); its `details.message` is the raw task prompt.
+                    if row.get("type").and_then(Value::as_str) == Some("custom_message")
+                        && row.get("customType").and_then(Value::as_str) == Some("agent_message")
+                        && row
+                            .get("details")
+                            .and_then(|details| details.get("id"))
+                            .and_then(Value::as_str)
+                            .is_some_and(|id| id.starts_with("spawn:"))
+                    {
+                        if let Some(text) = row
+                            .get("details")
+                            .and_then(|details| details.get("message"))
+                            .and_then(Value::as_str)
+                        {
+                            if !text.is_empty() {
+                                prompts.push(text.to_string());
+                            }
+                        }
+                        continue;
+                    }
                     if row.get("type").and_then(Value::as_str) != Some("message") {
                         continue;
                     }
