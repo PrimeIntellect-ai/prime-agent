@@ -1,5 +1,5 @@
-//! Paste-marker behavior tests: ports of the TS `editor.test.ts`
-//! "Paste marker atomic behavior" and paste-snapshot suites.
+//! Paste-marker behavior tests: the atomic-marker and paste-snapshot
+//! suites.
 
 use super::*;
 use wrap::{segment_with_markers, word_wrap_line};
@@ -169,7 +169,6 @@ fn typed_marker_like_text_is_not_atomic() {
 
 #[test]
 fn oversized_marker_never_exceeds_the_render_width() {
-    // (before, pasted lines, after, width) — TS `overflowCases`.
     let cases: [(&str, usize, &str, usize); 3] = [
         ("", 47, "", 8),
         (&"b".repeat(35), 27, "bbbb", 54),
@@ -294,8 +293,7 @@ fn only_well_formed_registered_markers_expand() {
 
     // Edited look-alikes, an unregistered id, and a longer id whose head
     // contains `#1` all stay literal; the three well-formed registered
-    // shapes expand (TS builds one regex per registered id, so
-    // `[paste #1` never swallows the head of `[paste #10]`).
+    // shapes expand.
     e.set_text("[paste #1 junk] [paste #10] [paste #1] [paste #1 +5 lines] [paste #1 12 chars]");
     assert_eq!(
         e.get_expanded_text(),
@@ -315,9 +313,7 @@ fn paste_content(e: &Editor, id: usize) -> String {
 #[test]
 fn oversized_marker_re_wraps_visually_and_wrap_resumes_after_it() {
     // TS `wordWrapLine` atomic cases: the marker stays one logical segment
-    // but re-wraps visually at grapheme granularity, and wrapping resumes
-    // normally after it (all through the editor's marker-aware
-    // segmentation).
+    // but re-wraps visually at grapheme granularity.
     let marker = "[paste #1 +20 lines]";
     let line = format!("A{marker}B");
     let segments = segment_with_markers(&line, &|_| true);

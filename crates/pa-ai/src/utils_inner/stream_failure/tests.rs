@@ -57,6 +57,20 @@ fn classifies_provider_error_types() {
         classify_stream_failure(Some("weird"), None),
         StreamFailureKind::Unknown
     );
+    // A 402 classifies by status, before any body-text pattern: the same wallet drain must not fork
+    // on the response body's `error.type` text.
+    assert_eq!(
+        classify_stream_failure(Some("insufficient_credits"), Some(402)),
+        StreamFailureKind::PaymentRequired
+    );
+    assert_eq!(
+        classify_stream_failure(Some("invalid_request_error"), Some(402)),
+        StreamFailureKind::PaymentRequired
+    );
+    assert_eq!(
+        classify_stream_failure(None, Some(402)),
+        StreamFailureKind::PaymentRequired
+    );
 }
 
 #[test]
@@ -76,8 +90,8 @@ fn builds_user_facing_messages() {
 }
 
 /// The classified shape the anthropic/openai-responses providers surface
-/// (`formatStreamFailureMessage`): kind text, parenthesized qualifiers
-/// (provider type and/or status), detail after the colon.
+/// (`formatStreamFailureMessage`): kind text, parenthesized qualifiers (provider type and/or
+/// status), detail after the colon.
 #[test]
 fn classified_message_with_parenthesized_status() {
     let status_only = StreamFailureInfo {
@@ -129,9 +143,8 @@ fn parses_retry_after_headers() {
     assert_eq!(parse_retry_after_ms(&headers), Some(3000));
 }
 
-/// Connection-level failures carry the per-family texts the TS binary
-/// surfaces (verified by the provider-error probe), never classify, and
-/// record the family's `error.name` / `err.code`.
+/// Connection-level failures carry the per-family texts the TS binary surfaces (verified by the
+/// provider-error probe), never classify, and record the family's `error.name` / `err.code`.
 #[test]
 fn connection_error_texts() {
     let connect = ProviderError::Connection(ProviderConnectionError {
@@ -148,14 +161,13 @@ fn connection_error_texts() {
     assert_eq!(timeout.to_string(), "Request timed out.");
     // The classified-format providers surface them verbatim too.
     assert_eq!(format_stream_failure_message(&connect), "Connection error.");
-    // The classification is unknown, like the TS SDK connection errors,
-    // and the openai/anthropic family records no error code.
+    // The classification is unknown, like the TS SDK connection errors, and the openai/anthropic
+    // family records no error code.
     assert_eq!(
         extract_stream_failure_info(&connect),
         StreamFailureInfo::unknown()
     );
-    // The TS Stainless SDK errors do not set `error.name`: JS records
-    // the inherited plain "Error".
+    // The TS Stainless SDK errors do not set `error.name`: JS records the inherited plain "Error".
     assert_eq!(
         diagnostic_error_info(&connect).name.as_deref(),
         Some("Error")
@@ -222,10 +234,9 @@ fn connection_error_texts() {
     );
 }
 
-/// The AWS http2 transport failure texts (TS-binary verified, bedrock
-/// http2 mode): connect-refused stream cancel, pre-response protocol
-/// error, and the mid-stream classes carrying the AWS SDK deserialization
-/// hint.
+/// The AWS http2 transport failure texts (TS-binary verified, bedrock http2 mode): connect-refused
+/// stream cancel, pre-response protocol error, and the mid-stream classes carrying the
+/// deserialization hint.
 #[test]
 fn aws_http2_transport_texts() {
     let profile = || ConnectionErrorProfile::AwsHttp2 {
@@ -240,8 +251,7 @@ fn aws_http2_transport_texts() {
         })
     };
 
-    // Refused connect: the canceled pending stream embeds the node-style
-    // connect cause.
+    // Refused connect: the canceled pending stream embeds the node-style connect cause.
     let connect = error(ConnectionErrorKind::Connect);
     assert_eq!(
         connect.to_string(),
@@ -268,8 +278,7 @@ fn aws_http2_transport_texts() {
         Some("Error")
     );
 
-    // RST_STREAM mid-body: the nghttp2 code name plus the AWS SDK's
-    // deserialization hint.
+    // RST_STREAM mid-body: the nghttp2 code name plus the AWS SDK's deserialization hint.
     let reset = error(ConnectionErrorKind::H2MidStream(H2Failure::StreamReset {
         nghttp2_code: "NGHTTP2_INTERNAL_ERROR".to_string(),
     }));
@@ -297,8 +306,8 @@ fn aws_http2_transport_texts() {
         Some("ERR_HTTP2_SESSION_ERROR")
     );
 
-    // Socket reset/close mid-body: the canceled pending stream plus the
-    // hint (no connect cause — the request had already gone out).
+    // Socket reset/close mid-body: the canceled pending stream plus the hint (no connect cause —
+    // the request had already gone out).
     let canceled = error(ConnectionErrorKind::H2MidStream(H2Failure::Canceled));
     assert_eq!(
         canceled.to_string(),
@@ -311,9 +320,8 @@ fn aws_http2_transport_texts() {
     );
 }
 
-/// The AWS http1 handler's pre-response reset text (TS-binary verified):
-/// node's `read ECONNRESET` recorded under a `TimeoutError` name with the
-/// `ECONNRESET` code.
+/// The AWS http1 handler's pre-response reset text (TS-binary verified): node's `read ECONNRESET`
+/// recorded under a `TimeoutError` name with the `ECONNRESET` code.
 #[test]
 fn aws_http1_reset_text() {
     let reset = ProviderError::Connection(ProviderConnectionError {
@@ -334,9 +342,8 @@ fn aws_http1_reset_text() {
     );
 }
 
-/// Mid-stream protocol failures (h2 framing errors inside the body)
-/// surface the deserialization hint too, like every failure the AWS
-/// SDK's event-stream reader can hit.
+/// Mid-stream protocol failures (h2 framing errors inside the body) surface the deserialization
+/// hint too, like every failure the AWS SDK's event-stream reader can hit.
 #[test]
 fn h2_mid_stream_protocol_hint() {
     let failure = H2Failure::Protocol;
@@ -348,14 +355,13 @@ fn h2_mid_stream_protocol_hint() {
     assert_eq!(h2_failure_message(&failure, false), "Protocol error");
 }
 
-/// The TS `extractStreamFailureParts` fallback chain: a body without an
-/// error type takes the SDK error's own class name, and an error-resolved
-/// retry wait overrides the raw header.
+/// The TS `extractStreamFailureParts` fallback chain: a body without an error type takes the SDK
+/// error's own class name, and an error-resolved retry wait overrides the raw header.
 #[test]
 fn http_error_name_fallback_and_retry_override() {
     let error = ProviderError::Http(ProviderHttpError {
-        // A type-less 429 body, like a google `ApiError` (its error
-        // `code` is numeric): the qualifiers show the class name.
+        // A type-less 429 body, like a google `ApiError` (its error `code` is numeric): the
+        // qualifiers show the class name.
         message: "429 {\"error\":{\"code\":429}}".to_string(),
         status: Some(429),
         body: Some("{\"error\":{\"code\":429}}".to_string()),
@@ -377,8 +383,8 @@ fn http_error_name_fallback_and_retry_override() {
         Some("ApiError")
     );
 
-    // An explicit `err.code` beats both the body type and the class name,
-    // and the error-resolved wait beats the header.
+    // An explicit `err.code` beats both the body type and the class name, and the error-resolved
+    // wait beats the header.
     let mut headers = std::collections::HashMap::new();
     headers.insert("retry-after".to_string(), "1".to_string());
     let error = ProviderError::Http(ProviderHttpError {
@@ -403,10 +409,9 @@ fn http_error_name_fallback_and_retry_override() {
     );
 }
 
-/// The google `ApiError` carrier: the class name is the qualifier and
-/// the classified form carries no detail (the genai `ApiError` exposes
-/// no `.error` object to the TS classifier); unnamed plumbing errors
-/// fall back to the plain JS "Error" the Stainless SDK family records.
+/// The google `ApiError` carrier: the class name is the qualifier and the classified form carries
+/// no detail (the genai `ApiError` exposes no `.error` object to the TS classifier); unnamed
+/// plumbing errors fall back to the plain JS "Error" the Stainless SDK family records.
 #[test]
 fn http_error_records_sdk_name() {
     let mut named = ProviderError::from_http_status_body(
@@ -439,5 +444,43 @@ fn http_error_records_sdk_name() {
     assert_eq!(
         format_stream_failure_message(&unnamed),
         "Provider rejected the request (invalid_request_error, 400): bad"
+    );
+}
+
+/// The stream-drop class: the failure names the class (the telemetry
+/// classifier's `stream_drop` token rides the message) and the detail
+/// names the block the stream was inside (the disclosure the silent
+/// drop class was missing).
+#[test]
+fn stream_drop_failures_disclose_the_class_and_block() {
+    let failure = stream_drop_failure(OpenStreamBlock::Thinking);
+    assert_eq!(failure.info.kind, StreamFailureKind::StreamDrop);
+    assert_eq!(
+        failure.info.provider_error_type.as_deref(),
+        Some("stream_drop")
+    );
+    assert_eq!(
+        failure.message,
+        "Provider dropped the response stream (stream_drop): the stream ended inside a thinking block before the stop signal"
+    );
+    assert_eq!(
+        format_stream_failure_message(&ProviderError::StreamFailure(failure.clone())),
+        failure.message
+    );
+    // The serialized kind is the telemetry/telemetry-classifier token.
+    let kind_json = serde_json::to_value(failure.info.kind).expect("kind serializes");
+    assert_eq!(kind_json, serde_json::json!("stream_drop"));
+
+    assert_eq!(
+        stream_drop_failure(OpenStreamBlock::Text).message,
+        "Provider dropped the response stream (stream_drop): the stream ended inside a text block before the stop signal"
+    );
+    assert_eq!(
+        stream_drop_failure(OpenStreamBlock::ToolCall).message,
+        "Provider dropped the response stream (stream_drop): the stream ended inside a tool-call block before the stop signal"
+    );
+    assert_eq!(
+        stream_drop_failure(OpenStreamBlock::None).message,
+        "Provider dropped the response stream (stream_drop): the stream ended before any response content or stop signal"
     );
 }

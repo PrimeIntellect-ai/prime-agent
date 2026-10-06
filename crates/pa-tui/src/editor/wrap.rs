@@ -13,7 +13,6 @@ pub struct LayoutLine {
     pub source_start: usize,
 }
 
-/// Visual line mapping entry (logical line + segment bounds).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VisualLine {
     pub logical_line: usize,
@@ -21,7 +20,6 @@ pub struct VisualLine {
     pub length: usize,
 }
 
-/// A word-wrapping chunk with logical bounds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextChunk {
     pub text: String,
@@ -45,10 +43,10 @@ pub(crate) fn graphemes(text: &str) -> Vec<Segment> {
                 segment: g.to_string(),
                 index,
             };
-            // Char-scalar offset, mirroring Intl.Segmenter code-unit offsets
-            // in TS. The editor cursor model (`cursor_col`) is char-based, so
-            // every offset that crosses the segment/chunk boundary must be
-            // char-based too; byte offsets are only ever used for slicing.
+            // Char-scalar offset, mirroring Intl.Segmenter code-unit offsets in TS.
+            // The editor cursor model (`cursor_col`) is char-based, so every offset
+            // that crosses the segment/chunk boundary must be char-based too; byte
+            // offsets are only ever used for slicing.
             index += g.chars().count();
             seg
         })
@@ -94,9 +92,8 @@ pub fn is_atomic_marker(seg: &str) -> bool {
 }
 
 /// Parse the well-formed paste marker heading `s` (TS
-/// `PASTE_MARKER_REGEX`): `[paste #<id>]`, `[paste #<id> +<N> lines]`, or
-/// `[paste #<id> <N> chars]`. Returns the parsed id and the marker's byte
-/// length; a malformed head yields `None`.
+/// `PASTE_MARKER_REGEX`): the parsed id and the marker's byte length; a
+/// malformed head yields `None`.
 pub(crate) fn parse_paste_marker(s: &str) -> Option<(usize, usize)> {
     let rest = s.strip_prefix("[paste #")?;
     let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
@@ -214,8 +211,7 @@ struct MarkerSpan {
 
 /// One accepted marker's span at byte `start`: byte offsets slice the
 /// marker text, char-scalar offsets index it in the same space as the
-/// grapheme `Segment.index` values it is matched against (TS:
-/// Intl.Segmenter + matchAll both index by code unit).
+/// grapheme `Segment.index` values it is matched against.
 fn marker_span(text: &str, start: usize, len: usize) -> MarkerSpan {
     let end = start + len;
     MarkerSpan {
@@ -230,7 +226,7 @@ fn char_offset(text: &str, byte: usize) -> usize {
     text.char_indices().take_while(|(b, _)| *b < byte).count()
 }
 
-/// Split a line into word-wrapped chunks (port of wordWrapLine).
+/// Split a line into word-wrapped chunks.
 pub fn word_wrap_line(
     line: &str,
     max_width: usize,
@@ -372,10 +368,9 @@ mod tests {
         assert_eq!(joined, "hello world this wraps");
     }
 
-    // Audit repro: a CJK draft wider than the editor
-    // panicked with `byte index ... is not a char boundary` because
-    // `Segment.index` held grapheme ordinals while `word_wrap_line` sliced
-    // `line` with them as byte offsets.
+    // Audit repro: a CJK draft wider than the editor panicked with
+    // `byte index ... is not a char boundary` (`Segment.index` held grapheme
+    // ordinals while `word_wrap_line` sliced `line` with them as byte offsets).
     #[test]
     fn cjk_wider_than_editor_does_not_panic() {
         let line = "你好世界，这是一段很长的中文文本，超过了编辑器的宽度，会触发换行逻辑。";
@@ -387,11 +382,9 @@ mod tests {
         }
     }
 
-    // Review repro (PR #2600, Macroscope): a lone grapheme wider than
-    // max_width recursed on its own input forever — the TS original dies
-    // with a RangeError (stack overflow) on the same call. It renders as
-    // one oversized chunk instead; multi-grapheme atomic segments keep
-    // the TS grapheme-granular re-wrap (verified against the TS binary).
+    // A lone grapheme wider than max_width recursed on its own input
+    // forever (the TS original dies with a RangeError there);
+    // multi-grapheme atomic segments keep the TS grapheme-granular re-wrap.
     #[test]
     fn oversized_lone_grapheme_wraps_without_recursion() {
         let chunks = word_wrap_line("你", 1, None);
@@ -403,7 +396,6 @@ mod tests {
                 end_index: 1
             }]
         );
-        // Mixed line: each segment gets its own (oversized) chunk.
         let mixed = word_wrap_line("a你b", 1, None);
         assert_eq!(
             mixed,
@@ -425,8 +417,8 @@ mod tests {
                 },
             ]
         );
-        // A multi-grapheme atomic segment still re-wraps at grapheme
-        // granularity (the TS recursion path, pinned to the binary).
+        // A multi-grapheme atomic segment still re-wraps at grapheme granularity (the TS recursion
+        // path).
         let marker = "[image #12]";
         let chunks = word_wrap_line(
             marker,
@@ -487,25 +479,20 @@ mod tests {
 
     #[test]
     fn wide_and_zero_width_graphemes_wrap() {
-        // CJK (width 2) wrapping with word backtracking across spaces.
         assert_wraps_back_to_source("日本語 テキスト は 長い 長い 長い", 6);
-        // Hangul syllables mixed with ASCII words.
         assert_wraps_back_to_source("hello 안녕하세요 world 안녕", 7);
         // Emoji (width 2) ZWJ family and flags: single graphemes, wider than
         // the width-3 budget forces grapheme-granular breaks mid-line.
         assert_wraps_back_to_source("word 👨‍👩‍👧‍👦 word 🇯🇵 end", 3);
         // Combining marks: e + U+0301 is one grapheme of two chars.
         assert_wraps_back_to_source("cafe\u{301} cafe\u{301} cafe\u{301} tail", 4);
-        // Halfwidth katakana voicing mark is width 1 (see width::char_width),
-        // so each cluster is 3 columns. NB: a single grapheme wider than the
-        // viewport re-wraps into itself — the TS binary has the identical
-        // edge (wordWrapLine of one 3-wide cluster at maxWidth < 3), kept
-        // for parity; real editor widths never hit it.
+        // Halfwidth katakana voicing mark is width 1 (see
+        // width::char_width), so each cluster is 3 columns. A single grapheme
+        // wider than the viewport re-wraps into itself — the TS binary has the
+        // identical edge, kept for parity.
         assert_wraps_back_to_source("カ\u{ff9e}キ\u{ff9e}ク\u{ff9e}ケ\u{ff9e}", 3);
-        // A single grapheme wider than the viewport re-wraps visually.
         let chunks = assert_wraps_back_to_source("👨‍👩‍👧‍👦👨‍👩‍👧‍👦👨‍👩‍👧‍👦", 5);
         assert!(chunks.len() >= 2);
-        // Zero-width joiner inside clusters vs plain long ASCII words.
         assert_wraps_back_to_source("aaaaaaaaaa\u{200d}bbbbbbbbbb ccc", 5);
     }
 
@@ -527,8 +514,8 @@ mod tests {
 
     #[test]
     fn marker_segmentation_with_non_ascii_prefix() {
-        // segment_with_markers must index markers in the same space as the
-        // grapheme segments it merges them into.
+        // segment_with_markers must index markers in the same space as the grapheme segments it
+        // merges them into.
         let segs = segment_with_markers("前[paste #1 +2 lines]后", &|_| true);
         assert_eq!(segs.len(), 3);
         assert_eq!(segs[0].segment, "前");
@@ -538,17 +525,12 @@ mod tests {
         assert_eq!(segs[2].segment, "后");
         assert_eq!(segs[2].index, 20); // 1 char prefix + 19-char marker
 
-        // The merged marker stays atomic through word wrap: it re-wraps
-        // visually (g_width > max_width path) with chunk bounds in char
-        // offsets.
+        // The merged marker stays atomic through word wrap (chunk bounds in char offsets).
         let line = "(prefix)[image #1](suffix)";
         let chunks = assert_wraps_back_to_source(line, 6);
         assert!(chunks.len() > 1);
     }
 
-    /// Deterministic mixed-width fuzz corpus: every string must wrap without
-    /// panicking, concatenate back to the source, respect the width budget,
-    /// and keep chunk bounds on char boundaries at every editor width.
     #[test]
     fn fuzz_mixed_width_wrap() {
         let alphabets: [&str; 8] = [
@@ -560,10 +542,10 @@ mod tests {
             "e\u{301}\u{302}x y\u{301}z ", // combining marks
             "\u{200b}\u{feff} zw\u{200d}", // zero-width chars
             "\r\n ",                       // control/whitespace
-                                           // NB: no tab graphemes here — a tab is 3 columns wide, and a
-                                           // single grapheme wider than maxWidth re-wraps into itself.
-                                           // The TS binary has the identical edge (wordWrapLine of one
-                                           // 3-wide grapheme at maxWidth < 3), so it is kept for parity.
+                                           // NB: no tab graphemes here — a tab is 3 columns wide,
+                                           // and a single grapheme wider than maxWidth re-wraps
+                                           // into itself (the TS binary has the identical edge,
+                                           // kept for parity).
         ];
         let mut seed: u64 = 0x2f7f_e921_8843_1a55;
         let mut rng = move || {
@@ -604,15 +586,11 @@ mod tests {
         }
     }
 
-    /// Golden wrap cases generated from the TS `wordWrapLine` (the installed
-    /// parity ground truth, editor.ts:119) over the lane's Unicode corpus —
-    /// CJK, emoji + ZWJ, flags, combining marks, halfwidth voicing marks,
-    /// zero-width joiners, and marker-bearing text (plain-grapheme
+    /// Golden wrap cases generated from the TS `wordWrapLine` (the parity
+    /// ground truth) over the lane's Unicode corpus, with plain-grapheme
     /// segmentation: marker merging belongs to the callers that pass
-    /// `Some(segments)`). Chunk bounds are char-scalar offsets (the TS
+    /// `Some(segments)`. Chunk bounds are char-scalar offsets (the TS
     /// values are UTF-16 code units; converted 1:1 at grapheme boundaries).
-    /// One golden wrap case: the line, the viewport width, and the expected
-    /// chunk sequence (text + char-scalar bounds).
     type WrapCase<'a> = (&'a str, usize, Vec<(&'a str, usize, usize)>);
 
     #[test]
@@ -747,41 +725,30 @@ mod tests {
         }
     }
 
-    /// The marker scan matches the TS regex grammars exactly (editor.ts:44
-    /// segmentWithMarkers): a loose `[paste #1 junk]` head with a VALID id
-    /// is NOT atomic (`PASTE_MARKER_REGEX` rejects it), and a miss advances
-    /// one char so `[[paste #1]]` keeps the INNER marker (matchAll
-    /// semantics), never skipping to the first `]`.
     #[test]
     fn marker_scan_matches_the_ts_regex_grammar() {
-        // Loose paste head: valid id, rejected by the strict grammar.
         let segs = segment_with_markers("[paste #1 junk]", &|_| true);
         assert_eq!(segs.len(), 15, "the loose head must not be atomic");
-        // Loose image head: same rejection.
         let segs = segment_with_markers("[image #1 junk]", &|_| true);
         assert_eq!(segs.len(), 15, "the loose image head must not be atomic");
-        // Double bracket: the inner marker stays atomic (matchAll finds it
-        // at the second `[`); the outer brackets stay plain graphemes.
         let segs = segment_with_markers("[[paste #1]]", &|id| id == 1);
         assert_eq!(segs[0].segment, "[");
         assert_eq!(segs[1].segment, "[paste #1]");
         assert_eq!(segs[1].index, 1);
         assert_eq!(segs[2].segment, "]");
-        // A miss inside a double-bracketed image marker keeps the inner one.
         let segs = segment_with_markers("[[image #1]]", &|_| false);
         assert_eq!(
             segs[1].segment, "[image #1]",
             "inner image marker is atomic"
         );
-        // Invalid paste id: never atomic even with the strict grammar.
         let segs = segment_with_markers("x[paste #9]y", &|id| id == 1);
         assert_eq!(segs.len(), 12, "invalid id must not be atomic");
     }
     #[test]
     fn ascii_wrap_matches_ts_golden() {
-        // Byte-exact ASCII regression: the TS binary's wordWrapLine over a pure
-        // ASCII corpus; chunk text AND indices must match (code units == chars on
-        // ASCII). Guards the wrap-opportunity/backtrack behavior against drift.
+        // Byte-exact ASCII regression against the TS binary's `wordWrapLine`;
+        // chunk text AND indices must match (code units == chars on ASCII).
+        // Guards the wrap-opportunity/backtrack behavior against drift.
         let raw = include_str!("../../tests/fixtures/ascii-wrap-golden.json");
         let cases: Vec<serde_json::Value> = serde_json::from_str(raw).expect("fixture parses");
         assert!(cases.len() >= 100, "corpus shrank: {}", cases.len());

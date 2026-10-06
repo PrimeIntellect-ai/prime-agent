@@ -1,11 +1,7 @@
 //! Code-preview extraction for tool-call cards (`ipython` collapsed line).
-//!
-//! Faithful port of `packages/coding-agent/src/core/tools/code-preview.ts`,
-//! `code-preview-python` and `ipython-cell-code.ts`. The pa-tui dependency
-//! boundary (pa-types only) keeps the session engine out of the UI, so the
-//! display-side preview algorithm lives here; pa-core holds the same
-//! algorithm for its golden-replay corpus. Consolidating the two copies into
-//! pa-types as pure data helpers is a tracked follow-up.
+//! The pa-tui dependency boundary (pa-types only) keeps the session engine
+//! out of the UI, so the display-side preview algorithm lives here; pa-core
+//! holds the same algorithm for its golden-replay corpus.
 
 pub(crate) mod bash;
 mod cell;

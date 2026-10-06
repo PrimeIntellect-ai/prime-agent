@@ -1,16 +1,7 @@
 //! Scope-keyed last-good catalog cache with hourly, coalesced refresh.
 //!
-//! Port of `CatalogCache<T>` in `model-catalog-cache.ts`:
-//! - one last-good snapshot per source URL; a scope change discards the
-//!   previous view entirely (an account's models never leak across scopes);
-//! - `get` serves the validated in-memory snapshot, or loads + re-validates
-//!   the disk snapshot (`{url, scope, fetchedAt, etag?, payload}` written
-//!   atomically at mode 0600);
-//! - `refresh` is fire-and-forget safe: in-flight refreshes coalesce per
-//!   source, hourly gating skips fetches attempted less than an hour ago,
-//!   every failure keeps the last-good snapshot, and 401/403 clears only
-//!   the requesting (non-public) scope;
-//! - `PI_OFFLINE` skips the network entirely.
+//! One last-good snapshot per source URL; a scope change discards the
+//! previous view (an account's models never leak across scopes).
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -29,7 +20,6 @@ pub const PUBLIC_SCOPE: &str = "public";
 /// Parser turning a fetched payload into the cache's value type.
 pub type CatalogParse<T> = Arc<dyn Fn(&serde_json::Value, &str) -> Result<T, String> + Send + Sync>;
 
-/// One validated last-good snapshot (`Snapshot<T>` in the TS reference).
 #[derive(Clone)]
 struct Snapshot<T> {
     scope: String,
@@ -104,7 +94,6 @@ fn now_ms() -> u64 {
 }
 
 impl<T: Clone + Send + Sync + 'static> CatalogCache<T> {
-    /// A cache for `url`, persisted beside `cache_path` when given.
     pub fn new(
         url: &str,
         cache_path: Option<PathBuf>,
@@ -126,12 +115,10 @@ impl<T: Clone + Send + Sync + 'static> CatalogCache<T> {
         }
     }
 
-    /// The source URL this cache fetches.
     pub fn url(&self) -> &str {
         &self.url
     }
 
-    /// The disk cache path, when persistence is enabled.
     pub fn cache_path(&self) -> Option<&Path> {
         self.cache_path.as_deref()
     }
@@ -142,8 +129,7 @@ impl<T: Clone + Send + Sync + 'static> CatalogCache<T> {
     ///
     /// # Panics
     ///
-    /// Panics if the cache mutex is poisoned (another thread panicked while
-    /// holding the lock).
+    /// Panics if the cache mutex is poisoned.
     pub fn get(&self, scope: &str) -> Option<T> {
         let mut state = self.state.lock().unwrap();
         if state.scope.as_deref() == Some(scope) {
@@ -169,12 +155,10 @@ impl<T: Clone + Send + Sync + 'static> CatalogCache<T> {
         }
     }
 
-    /// The scope recorded in the disk snapshot, when one exists (the stored
-    /// header only — no validation, no in-memory promotion): a fresh
-    /// process's first auth-scope observation seeds its comparison from
-    /// it, so a credential change that predates the process is detected.
-    /// `None` when no snapshot is stored, or it belongs to another source
-    /// URL.
+    /// The scope recorded in the disk snapshot, when one exists: a fresh
+    /// process's first auth-scope observation seeds its comparison from it,
+    /// so a credential change that predates the process is detected. `None`
+    /// when no snapshot is stored, or it belongs to another source URL.
     pub fn stored_scope(&self) -> Option<String> {
         let path = self.cache_path.as_ref()?;
         let bytes = std::fs::read(path).ok()?;
@@ -187,8 +171,7 @@ impl<T: Clone + Send + Sync + 'static> CatalogCache<T> {
     ///
     /// # Panics
     ///
-    /// Panics if the cache mutex is poisoned (another thread panicked while
-    /// holding the lock).
+    /// Panics if the cache mutex is poisoned (a panicking thread held it).
     pub fn clear(&self, scope: &str) {
         let mut state = self.state.lock().unwrap();
         if state.scope.as_deref() != Some(scope) {
@@ -209,9 +192,8 @@ impl<T: Clone + Send + Sync + 'static> CatalogCache<T> {
     ///
     /// # Panics
     ///
-    /// Panics if the cache mutex is poisoned (another thread panicked while
-    /// holding the lock). In debug builds, also panics if a refresh
-    /// settles its shared result twice, which the current code never does.
+    /// Panics if the cache mutex is poisoned; in debug builds, also if a refresh
+    /// settles its shared result twice (the current code never does).
     pub async fn refresh(&self, scope: &str, opts: RefreshOptions) -> Option<T> {
         enum Gate<T> {
             Coalesced(Arc<InFlight<T>>),
@@ -256,11 +238,10 @@ impl<T: Clone + Send + Sync + 'static> CatalogCache<T> {
             Gate::Start(inflight, previous, generation) => (inflight, previous, generation),
         };
         // The driver owns the gate's settlement: a caller that drops
-        // `refresh` mid-fetch (a bounded wait timing out) must not leave
-        // the shared `pending` gate set with no settle left to run —
-        // coalesced callers would await a notify that never comes. The
-        // guard resolves the gate as a failed refresh and wakes every
-        // waiter, keeping the fire-and-forget-safe contract.
+        // `refresh` mid-fetch must not leave the shared `pending` gate
+        // set with no settle left to run — coalesced callers would await
+        // a notify that never comes. The guard resolves the gate as a
+        // failed refresh and wakes every waiter.
         let _driver = SettleOnDrop {
             cache: self,
             inflight: Arc::clone(&inflight),
@@ -349,7 +330,6 @@ impl<T: Clone + Send + Sync + 'static> CatalogCache<T> {
         }
     }
 
-    /// Every parse/fetch failure keeps the prior snapshot and returns it.
     fn keep_last_good(&self, scope: &str, generation: u64, opts: &RefreshOptions) -> Option<T> {
         if !self.is_current(scope, generation, opts) {
             return None;
@@ -361,7 +341,6 @@ impl<T: Clone + Send + Sync + 'static> CatalogCache<T> {
             .map(|snapshot| snapshot.models.clone())
     }
 
-    /// Publish a validated snapshot in memory and on disk (mode 0600).
     fn store_snapshot(&self, scope: &str, snapshot: &Snapshot<T>) {
         {
             let mut state = self.state.lock().unwrap();
@@ -414,10 +393,9 @@ impl<T: Clone + Send + Sync + 'static> CatalogCache<T> {
     }
 }
 
-/// The driving refresh's settle guard: when the driver future is dropped
-/// before settling, the shared gate is resolved as a failed refresh
-/// (`None`) and every waiter is woken, so dropped refreshes can never
-/// poison the coalescing gate for later callers.
+/// The driving refresh's settle guard: when the driver is dropped before
+/// settling, the shared gate is resolved as a failed refresh (`None`) and
+/// every waiter is woken.
 struct SettleOnDrop<'a, T: Clone + Send + Sync + 'static> {
     cache: &'a CatalogCache<T>,
     inflight: Arc<InFlight<T>>,
@@ -446,7 +424,6 @@ impl<T: Clone + Send + Sync + 'static> Drop for SettleOnDrop<'_, T> {
     }
 }
 
-/// Await an in-flight refresh's shared result.
 async fn await_inflight<T: Clone>(inflight: Arc<InFlight<T>>) -> Option<T> {
     loop {
         let notified = inflight.notify.notified();
@@ -461,13 +438,9 @@ async fn await_inflight<T: Clone>(inflight: Arc<InFlight<T>>) -> Option<T> {
 }
 
 /// Atomic snapshot write: temp file + rename at mode 0600. The temp file
-/// is unique per writer (`pid` + an in-process counter): the Rust daemon
-/// runs one supervisor and many worker processes against one agent dir,
-/// and a shared temp path would let concurrent fire-and-forget refreshes
-/// truncate each other's temp file and publish a malformed snapshot. With
-/// unique temps every rename publishes one writer's complete bytes (the
-/// TS single-process reference never races here; the multi-process port
-/// must).
+/// is unique per writer (`pid` + an in-process counter): one agent dir is
+/// shared by many processes, and a shared temp path would let concurrent
+/// refreshes truncate each other's temp file and publish a malformed snapshot.
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     if let Some(parent) = path.parent() {
@@ -508,11 +481,8 @@ mod tests {
     use super::*;
 
     /// The multi-process snapshot-write invariant (Macroscope on #2576):
-    /// concurrent `write_atomic` writers publish one writer's complete
-    /// bytes each (unique temp + atomic rename), so a reader racing the
-    /// writers always parses a full document. The pre-fix shared temp path
-    /// let one writer truncate another's temp file after the rename had
-    /// already published it, tearing the published snapshot in place.
+    /// a reader racing concurrent `write_atomic` writers always parses a
+    /// full document.
     #[test]
     fn concurrent_writers_never_publish_a_malformed_snapshot() {
         let dir = tempfile::tempdir().unwrap();

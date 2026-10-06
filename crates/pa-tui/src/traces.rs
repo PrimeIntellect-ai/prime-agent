@@ -1,23 +1,16 @@
-//! The `/traces` command surface (TS `handleTracesCommand` + the
-//! `core/agent-traces.ts` engine's client seam): the trace sharing status
-//! block, the enable/disable settings writes, the preview/upload/login
-//! arms, and the TS outcome rows the engine results format into
-//! (`formatTraceUploadResult`, `formatTracePreview`, the upload-all
-//! summary). The upload engine itself lives in the composition root's
-//! pa-core (the outbox, the request/retry protocol, the browser
-//! challenge); this module owns the TUI shapes and the seam the session
-//! UI drives.
+//! The `/traces` command surface: the status block, the enable/disable
+//! writes, the preview/upload/login arms, and the outcome rows. The
+//! upload engine lives in pa-core; this module owns the shapes and the
+//! seam.
 
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-/// The boxed-future shape of [`TracesCommands`] methods (the same
-/// contract the composition root's other client hooks use).
+/// The boxed-future shape of [`TracesCommands`] methods.
 pub type TracesFuture<T> = Pin<Box<dyn std::future::Future<Output = T> + Send>>;
 
-/// TS `normalizeBaseUrl`: trim, strip trailing slashes, then strip a
-/// trailing `/api/v1` (the base the platform API is known under).
+/// Trim, strip trailing slashes, then strip a trailing `/api/v1`.
 fn normalize_base_url(value: &str) -> String {
     let trimmed = value.trim();
     let stripped = trimmed.trim_end_matches('/');
@@ -28,9 +21,8 @@ fn normalize_base_url(value: &str) -> String {
     stripped
 }
 
-/// TS `resolvePrimeAgentTracesBaseUrl`: the `PRIME_AGENT_TRACES_BASE_URL`
-/// override normalized, else the platform default (the status block's
-/// endpoint row).
+/// The `PRIME_AGENT_TRACES_BASE_URL` override normalized, else the
+/// platform default.
 #[must_use]
 pub fn traces_base_url() -> String {
     match std::env::var("PRIME_AGENT_TRACES_BASE_URL") {
@@ -61,7 +53,7 @@ fn plain(text: impl Into<String>) -> crate::info_commands::ClientSpan {
     }
 }
 
-/// One dim span of a status block line (TS `theme.fg("dim", ...)`).
+/// One dim span of a status block line.
 fn dim(text: impl Into<String>) -> crate::info_commands::ClientSpan {
     crate::info_commands::ClientSpan {
         text: text.into(),
@@ -69,9 +61,8 @@ fn dim(text: impl Into<String>) -> crate::info_commands::ClientSpan {
     }
 }
 
-/// The status block (TS "status" arm): the flag, the credential, the
-/// endpoint, and the session file — one structured line per source line
-/// (the info panel renders them like every other info display).
+/// The status block: the flag, the credential, the endpoint, and the
+/// session file — one line per source line.
 #[must_use]
 pub fn status_block(
     enabled: bool,
@@ -102,8 +93,7 @@ pub fn status_block(
     ]
 }
 
-/// TS `formatTracePreview`'s outcome rows: the structured block the
-/// ready preview renders.
+/// The structured block the ready preview renders.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TracePreviewInfo {
     pub session_file: String,
@@ -120,7 +110,7 @@ pub struct TracePreviewInfo {
     pub truncated: bool,
 }
 
-/// TS `previewAgentTraceFile`'s result, mapped for the block build.
+/// The preview result, mapped for the block build.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TracePreviewOutcome {
     Ready(Box<TracePreviewInfo>),
@@ -130,8 +120,7 @@ pub enum TracePreviewOutcome {
     Failed { message: String },
 }
 
-/// TS `formatTracePreview`: the preview block's structured rows (the
-/// info panel renders them like the status block).
+/// The preview block's structured rows.
 #[must_use]
 pub fn preview_block(info: &TracePreviewInfo) -> Vec<crate::info_commands::ClientLine> {
     let mut rows: Vec<crate::info_commands::ClientLine> = vec![
@@ -184,8 +173,7 @@ pub fn preview_block(info: &TracePreviewInfo) -> Vec<crate::info_commands::Clien
     rows
 }
 
-/// One upload's outcome (TS `AgentTraceUploadResult`, the fields the TS
-/// formatter reads).
+/// One upload's outcome: the fields the formatter reads.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TraceUploadOutcome {
     Uploaded {
@@ -241,8 +229,8 @@ pub enum TraceUploadStatus {
     Failed,
 }
 
-/// One upload's client report: the formatted TS row (with the trace log
-/// path baked in) plus the status tag the arms branch on.
+/// One upload's client report: the formatted TS row (with the log path
+/// baked in) plus the status tag.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TraceUploadReport {
     pub status: TraceUploadStatus,
@@ -250,8 +238,6 @@ pub struct TraceUploadReport {
 }
 
 impl TraceUploadReport {
-    /// TS the upload rows come from `formatTraceUploadResult` (the client
-    /// bakes in the log path); the report carries the outcome's tag.
     #[must_use]
     pub fn new(outcome: &TraceUploadOutcome, log_path: &str) -> Self {
         TraceUploadReport {
@@ -261,8 +247,7 @@ impl TraceUploadReport {
     }
 
     /// The enable arm's upload message: the no-session states answer with
-    /// the TS future-upload line (the enabled setting outlives the empty
-    /// first turn).
+    /// the TS future-upload line (the setting outlives the empty turn).
     #[must_use]
     pub fn enable_message(&self) -> String {
         match self.status {
@@ -274,7 +259,7 @@ impl TraceUploadReport {
     }
 }
 
-/// TS `formatTraceUploadResult`: every outcome's user-visible row.
+/// Every upload outcome's user-visible row.
 #[must_use]
 pub fn format_upload_outcome(outcome: &TraceUploadOutcome, log_path: &str) -> String {
     match outcome {
@@ -327,8 +312,8 @@ pub struct TraceUploadAllReport {
     pub log_path: String,
 }
 
-/// One upload-all note the run loop folds in: the live progress (TS
-/// `onProgress` → `showStatus`) and the settled run.
+/// One upload-all note the run loop folds in: the live progress and
+/// the settled run.
 #[derive(Debug, Clone)]
 pub enum TraceUploadAllNote {
     Progress {
@@ -344,8 +329,7 @@ pub enum TraceUploadAllNote {
 /// The note channel the spawned upload-all run reports through.
 pub type TraceUploadAllNoteSender = tokio::sync::mpsc::UnboundedSender<TraceUploadAllNote>;
 
-/// The cancel handle for a running upload-all (TS the arm's
-/// `AbortController` the clear key fires).
+/// The cancel handle for a running upload-all (TS `AbortController`).
 #[derive(Clone, Default)]
 pub struct TraceUploadCancel {
     flag: Arc<AtomicBool>,
@@ -368,8 +352,8 @@ impl TraceUploadCancel {
         self.flag.load(Ordering::Acquire)
     }
 
-    /// Resolves once cancelled (the composition root bridges this into
-    /// the engine's abort).
+    /// Resolves once cancelled (the composition root bridges into the
+    /// engine's abort).
     pub async fn wait(&self) {
         loop {
             let notified = self.notify.notified();
@@ -381,48 +365,41 @@ impl TraceUploadCancel {
     }
 }
 
-/// The login flow's outcome (TS `AuthenticationResult`'s states, with
-/// the status/error rows the flows report).
+/// The login flow's outcome.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TraceLoginOutcome {
     /// TS `completeProviderAuthentication`'s status row.
     Status(String),
-    /// TS `showError`'s row (`Failed to login to ...`).
+    /// TS `showError`'s row.
     Error(String),
-    /// TS the cancelled dialog (silent).
+    /// The cancelled dialog (silent).
     Cancelled,
 }
 
-/// The trace-sharing state the composition root owns (the settings flag,
-/// the auth store, the upload engine, and the terminal login flow stay
+/// The trace-sharing state the composition root owns (the settings
+/// flag, the auth store, the upload engine, and the login flow stay
 /// above this crate).
 pub trait TracesCommands: Send + Sync {
-    /// The `agentTraces.enabled` setting (TS `getAgentTracesEnabled`).
+    /// The `agentTraces.enabled` setting.
     fn enabled(&self) -> TracesFuture<bool>;
-    /// Set the flag and flush (TS `setAgentTracesEnabled` + `flush()`).
+    /// Set the flag and flush.
     fn set_enabled(&self, enabled: bool) -> TracesFuture<anyhow::Result<()>>;
-    /// The resolved trace credential's label (TS
-    /// `getPrimeAgentTraceCredential`: the env keys, the stored
-    /// `prime-agent-traces` key, and the stored prime-inference
-    /// credential, in that order).
+    /// The resolved trace credential's label: env keys, the stored
+    /// `prime-agent-traces` key, the stored prime-inference credential.
     fn credential(&self) -> TracesFuture<Option<String>>;
-    /// TS `previewCurrentTrace` → `previewAgentTraceFile`.
     fn preview(&self, session_file: Option<&str>) -> TracesFuture<TracePreviewOutcome>;
-    /// TS `uploadCurrentTraceOnce` → `uploadAgentTraceFile` (the
-    /// one-shot upload; `requireEnabled: false`).
+    /// One-shot upload; `requireEnabled: false`.
     fn upload_current(&self, session_file: Option<&str>) -> TracesFuture<TraceUploadReport>;
-    /// TS `uploadAllTraces` → `uploadAllAgentTraces` (the spawned sweep:
-    /// progress notes through the channel, cancellation through the
-    /// handle, the tally when it settles).
+    /// The spawned sweep: progress through the channel, cancellation via
+    /// the handle.
     fn upload_all(
         &self,
         session_dir: Option<&str>,
         progress: TraceUploadAllNoteSender,
         cancel: TraceUploadCancel,
     ) -> TracesFuture<TraceUploadAllReport>;
-    /// TS `runPrimeAgentTracesLogin` (the login flow: the prime-cli
-    /// reuse, the browser challenge, the paste fallback, the credential
-    /// write) driven against the inline auth panel.
+    /// The login flow (prime-cli reuse, the browser challenge, the paste
+    /// fallback, the credential write) against the inline auth panel.
     fn login(&self, panel: crate::auth_panel::AuthPanelHandle) -> TracesFuture<TraceLoginOutcome>;
 }
 
@@ -470,7 +447,6 @@ mod tests {
                     .to_string(),
             ]
         );
-        // The label spans carry the TS dim color.
         let uploads = &block[2];
         assert_eq!(uploads[0].color, Some(crate::theme::ThemeColor::Dim));
         assert_eq!(uploads[0].text, "Automatic uploads: ");
@@ -517,12 +493,10 @@ mod tests {
     #[test]
     fn the_upload_rows_match_the_ts_formatter() {
         let log = "/agent/logs/agent-traces.log";
-        // The uploaded row counts the stored bytes.
         assert_eq!(
             format_upload_outcome(&TraceUploadOutcome::Uploaded { bytes_stored: 42 }, log),
             "Trace uploaded (42 bytes)."
         );
-        // The disabled/unchanged/credential states keep their TS rows.
         assert_eq!(
             format_upload_outcome(&TraceUploadOutcome::Disabled, log),
             "Trace sharing is disabled."
@@ -552,7 +526,6 @@ mod tests {
             ),
             "Trace upload skipped: Session file is missing a valid session header."
         );
-        // The oversize row carries both grouped numbers.
         assert_eq!(
             format_upload_outcome(
                 &TraceUploadOutcome::TooLarge {
@@ -563,7 +536,6 @@ mod tests {
             ),
             "Trace upload skipped: session file is 20,971,521 bytes; limit is 20,971,520 bytes."
         );
-        // A failure carries the HTTP status and the log path.
         assert_eq!(
             format_upload_outcome(
                 &TraceUploadOutcome::Failed {
@@ -584,7 +556,6 @@ mod tests {
             ),
             format!("Trace upload failed: timed out. See {log} for details.")
         );
-        // The 404 row keeps its dedicated TS explanation.
         assert_eq!(
             format_upload_outcome(
                 &TraceUploadOutcome::Failed {
@@ -595,8 +566,6 @@ mod tests {
             ),
             "Trace upload endpoint was not found. The platform API may not be deployed yet, or PRIME_AGENT_TRACES_BASE_URL points at the wrong API."
         );
-        // The report's enable message replaces the no-file states with
-        // the TS future-upload line.
         let report = TraceUploadReport::new(&TraceUploadOutcome::NoSessionFile, log);
         assert_eq!(
             report.enable_message(),
@@ -651,10 +620,8 @@ mod tests {
         assert!(joined.contains("Git commit: abc"));
         assert!(joined.contains("Raw JSONL payload preview"));
         assert!(joined.contains("{\"type\":\"session\"}"));
-        // The dim labels carry the color.
         assert_eq!(block[3][0].color, Some(crate::theme::ThemeColor::Dim));
 
-        // An oversize trace omits the payload with the TS row.
         let oversize = TracePreviewInfo {
             content_preview: String::new(),
             truncated: true,
@@ -673,7 +640,6 @@ mod tests {
             oversize_text.contains("Payload omitted because the trace exceeds the upload limit.")
         );
 
-        // A truncated preview closes with the TS dim row.
         let truncated = TracePreviewInfo {
             content_preview: "...".to_string(),
             truncated: true,

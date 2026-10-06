@@ -1,9 +1,8 @@
-//! Daemon wire protocol: thin adapter over `pa_types::daemon`.
-//!
-//! The shared wire contract lives in `pa-types` (ported from the TS daemon
-//! protocol). This module re-exports it and adds the daemon-side mechanics:
-//! command-envelope parsing with the TS error strings, capability sets, event
-//! meta / replay helpers, and response constructors.
+//! Daemon wire protocol: thin adapter over `pa_types::daemon` — this
+//! module re-exports the shared wire contract and adds the daemon-side
+//! mechanics: command-envelope parsing with the TS error strings,
+//! capability sets, event meta / replay helpers, and response
+//! constructors.
 
 pub use pa_types::daemon::{
     DaemonClosingReason, DaemonCommand, DaemonCommandEnvelope as WireCommandEnvelope,
@@ -18,17 +17,14 @@ use serde_json::Value;
 
 /// Minimum protocol version accepted in command envelopes (TS parity).
 pub const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION: u64 = DAEMON_PROTOCOL_VERSION;
-/// App version reported in `daemon_hello` for stale-daemon detection.
 /// The product version the daemon reports in every `daemon_hello`
-/// (`appVersion`): the TS daemon reports its own `VERSION` constant, and the
-/// CLI's `doctor`/`status` "current" classification compares against the same
-/// value, so this must stay the bare product version (the build identity
-/// marker lives in `runtime.buildId`).
+/// (`appVersion`): the CLI's `doctor`/`status` "current" classification
+/// compares against the same value, so this must stay the bare product
+/// version (the build identity marker lives in `runtime.buildId`).
 pub const DAEMON_APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Command types the daemon recognizes (TS `DAEMON_COMMAND_TYPES`, the 106
-/// client command types in TS declared order, followed by the Rust-native
-/// supervisor/worker frames the Rust daemon additionally accepts).
+/// Command types the daemon recognizes (TS `DAEMON_COMMAND_TYPES` in TS
+/// declared order, followed by the Rust-native supervisor/worker frames).
 pub const KNOWN_COMMAND_TYPES: &[&str] = &[
     "ack_result",
     "list",
@@ -132,7 +128,6 @@ pub const KNOWN_COMMAND_TYPES: &[&str] = &[
     "get_system_prompt",
     "get_tool_definition",
     "set_session_entry_label",
-    "extension_ui_response",
     "prepare_update_restart",
     "retry_worker",
     "restart",
@@ -148,6 +143,7 @@ pub const KNOWN_COMMAND_TYPES: &[&str] = &[
     "get_mcp_connections",
     "set_mcp_static_token",
     "remove_mcp_connection",
+    "mark_anthropic_warning_shown",
 ];
 
 /// Parsed client command envelope.
@@ -184,9 +180,7 @@ impl EnvelopeParseError {
 /// # Errors
 ///
 /// Returns an error when the line is not valid JSON, the envelope is
-/// malformed (missing id, a non-string clientId, a bad command payload),
-/// the protocol is too old, or the command type is unknown
-/// (`EnvelopeParseError`).
+/// malformed, the protocol is too old, or the command type is unknown.
 pub fn parse_daemon_command_line(line: &str) -> Result<DaemonCommandEnvelope, EnvelopeParseError> {
     let value: Value = serde_json::from_str(line)
         .map_err(|e| EnvelopeParseError::Invalid(format!("invalid JSON: {e}")))?;
@@ -300,7 +294,6 @@ pub fn supported_client_capabilities() -> &'static [&'static str] {
     &[
         "attach_snapshot",
         "event_sequence",
-        "extension_ui",
         "slim_attach",
         "chunked_snapshot",
         "client_owned_sessions",
@@ -321,6 +314,7 @@ pub fn default_server_capabilities() -> Vec<DaemonServerCapability> {
                 "side_question_transcript",
                 "transient_bash",
                 "kernel_bash_activity",
+                "factory_activity",
                 "session_input_admission",
                 "prompt_admission_cancellation",
                 "owned_prompt_cancellation",
@@ -347,9 +341,7 @@ pub fn default_server_capabilities() -> Vec<DaemonServerCapability> {
 /// # Errors
 ///
 /// Returns an error when the line is not valid JSON, is not a
-/// `type: "command"` envelope (bare commands fail as protocol-too-old),
-/// the envelope is malformed, the protocol is too old, or the command
-/// type is unknown (`EnvelopeParseError`).
+/// `type: "command"` envelope, the protocol is too old, or the type is unknown.
 pub fn parse_supervisor_command_line(
     line: &str,
 ) -> Result<DaemonCommandEnvelope, EnvelopeParseError> {
@@ -370,7 +362,7 @@ pub fn process_start_id(pid: u32) -> Option<String> {
     pa_types::platform::process::process_start_id(pid)
 }
 
-/// Port of `createDaemonEventMeta`.
+/// Build the daemon event meta (TS `createDaemonEventMeta`).
 pub fn create_daemon_event_meta(
     active_session_id: &str,
     sequence: DaemonEventSequence,
@@ -391,7 +383,7 @@ pub fn create_daemon_event_meta(
     }
 }
 
-/// Port of `createDaemonReplayInfo`.
+/// Build the daemon replay info (TS `createDaemonReplayInfo`).
 #[must_use]
 pub fn create_daemon_replay_info(
     resume_cursor: Option<&DaemonResumeCursor>,
@@ -452,9 +444,8 @@ pub fn create_daemon_replay_info(
     unavailable("event_replay_not_available")
 }
 
-/// Response constructors with the TS shape (`type: "response"` included on
-/// serialize by the `DaemonOutbound::Response` variant; standalone responses
-/// add the tag here).
+/// Response constructors with the TS shape (standalone responses add the
+/// `type: "response"` tag here).
 pub fn response_success(id: Option<&str>, command: &str, data: Option<Value>) -> DaemonResponse {
     DaemonResponse {
         id: id.map(str::to_string),
@@ -468,9 +459,7 @@ pub fn response_success(id: Option<&str>, command: &str, data: Option<Value>) ->
 
 /// A create rejection the worker typed on the wire (`errorInfo`): the
 /// create relay answers the worker's message verbatim, never under the
-/// untyped `session worker create failed:` wrap - the typed text is the
-/// user-facing refusal (the session-hold rejection), and the client
-/// renders or acts on the wire info itself.
+/// untyped `session worker create failed:` wrap.
 #[derive(Debug)]
 pub(crate) struct TypedCreateRejection {
     pub message: String,
@@ -503,11 +492,8 @@ pub fn response_failure(
 
 /// Serialize a standalone response line (`type: "response"`).
 ///
-/// The key order matches the TS wire bytes (`daemon-protocol.ts` `success`/
-/// `failure`): `id`, `type`, `command`, `success`, then `data` or
-/// `error`/`errorInfo`. `type` is inserted at its TS position, not appended:
-/// the JSON map preserves insertion order (the workspace's `serde_json`
-/// runs with `preserve_order`), so a trailing insert would emit the tag last.
+/// The key order matches the TS wire bytes: `id`, `type`, `command`,
+/// `success`, then `data` or `error`/`errorInfo`.
 #[must_use]
 pub fn response_line(response: &DaemonResponse) -> Value {
     let mut obj = serde_json::Map::new();
@@ -539,16 +525,10 @@ pub fn response_line(response: &DaemonResponse) -> Value {
 }
 
 /// Serialize a standalone response line (`type: "response"`) straight to
-/// bytes.
-///
-/// Byte-identical to `serde_json::to_vec(&response_line(response))` — the
-/// same keys in the same TS wire order — but the data tree is borrowed, not
-/// cloned: [`response_line`] inserts `data.clone()` into a fresh map, which
-/// the caller immediately serializes, so every response line paid a
-/// full-payload deep clone on the way to the wire. The worker writes one
-/// response line per command; at MB-class payloads (attach snapshots,
-/// `get_messages` histories) the clone dominated the response path's
-/// transient allocations.
+/// bytes: byte-identical to `serde_json::to_vec(&response_line(response))`,
+/// but the data tree is borrowed, not cloned — [`response_line`] inserts
+/// `data.clone()` into a fresh map, and at MB-class payloads the clone
+/// dominated the response path's allocations.
 #[must_use]
 pub fn response_line_bytes(response: &DaemonResponse) -> Vec<u8> {
     let mut buf = Vec::with_capacity(256);
@@ -559,8 +539,7 @@ pub fn response_line_bytes(response: &DaemonResponse) -> Vec<u8> {
 }
 
 /// Write the response line's wire bytes into `buf`: the TS key order from
-/// [`response_line`], each value serialized in place instead of being
-/// cloned into an intermediate tree first.
+/// [`response_line`], each value serialized in place.
 fn write_response_line(buf: &mut Vec<u8>, response: &DaemonResponse) -> serde_json::Result<()> {
     buf.push(b'{');
     if let Some(id) = &response.id {
@@ -675,6 +654,9 @@ pub fn command_active_session_id(command: &DaemonCommand) -> Option<&str> {
             active_session_id, ..
         }
         | DaemonCommand::CancelRlmChild {
+            active_session_id, ..
+        }
+        | DaemonCommand::FactoryActivity {
             active_session_id, ..
         }
         | DaemonCommand::DeleteRlmSubagent {
@@ -869,7 +851,7 @@ pub fn command_active_session_id(command: &DaemonCommand) -> Option<&str> {
         | DaemonCommand::SetSessionEntryLabel {
             active_session_id, ..
         }
-        | DaemonCommand::ExtensionUiResponse {
+        | DaemonCommand::MarkAnthropicWarningShown {
             active_session_id, ..
         }
         | DaemonCommand::RetryWorker {
@@ -971,6 +953,7 @@ pub fn command_type_name(command: &DaemonCommand) -> &'static str {
         DaemonCommand::TailKernelBash { .. } => "tail_kernel_bash",
         DaemonCommand::KillKernelBash { .. } => "kill_kernel_bash",
         DaemonCommand::CancelRlmChild { .. } => "cancel_rlm_child",
+        DaemonCommand::FactoryActivity { .. } => "factory_activity",
         DaemonCommand::DeleteRlmSubagent { .. } => "delete_rlm_subagent",
         DaemonCommand::WaitForIdle { .. } => "wait_for_idle",
         DaemonCommand::WaitForHeadlessCompletion { .. } => "wait_for_headless_completion",
@@ -1040,7 +1023,7 @@ pub fn command_type_name(command: &DaemonCommand) -> &'static str {
         DaemonCommand::GetSystemPrompt { .. } => "get_system_prompt",
         DaemonCommand::GetToolDefinition { .. } => "get_tool_definition",
         DaemonCommand::SetSessionEntryLabel { .. } => "set_session_entry_label",
-        DaemonCommand::ExtensionUiResponse { .. } => "extension_ui_response",
+        DaemonCommand::MarkAnthropicWarningShown { .. } => "mark_anthropic_warning_shown",
         DaemonCommand::AckResult { .. } => "ack_result",
         DaemonCommand::PrepareUpdateRestart { .. } => "prepare_update_restart",
         DaemonCommand::CommitUpdateRestart { .. } => "commit_update_restart",
@@ -1080,6 +1063,61 @@ mod tests {
             assert!(pa_types::daemon::is_session_plane_daemon_command(kind));
         }
         assert!(default_server_capabilities().contains(&"kernel_bash_activity".to_string()));
+    }
+
+    #[test]
+    fn factory_activity_commands_are_session_scoped() {
+        for (command, action, run_id, spec_id, timeout_ms) in [
+            (
+                serde_json::json!({"type":"factory_activity","activeSessionId":"session","action":"graph"}),
+                "graph",
+                None::<&str>,
+                None::<&str>,
+                None::<u64>,
+            ),
+            (
+                serde_json::json!({"type":"factory_activity","activeSessionId":"session","action":"watch","runId":"run-1","timeoutMs":2000}),
+                "watch",
+                Some("run-1"),
+                None,
+                Some(2000),
+            ),
+            (
+                serde_json::json!({"type":"factory_activity","activeSessionId":"session","action":"run","specId":"review-loop"}),
+                "run",
+                None,
+                Some("review-loop"),
+                None,
+            ),
+            (
+                serde_json::json!({"type":"factory_activity","activeSessionId":"session","action":"stop","runId":"run-1"}),
+                "stop",
+                Some("run-1"),
+                None,
+                None,
+            ),
+        ] {
+            let line = serde_json::json!({"type":"command","id":"c1", "protocol":current_protocol_info(), "command":command}).to_string();
+            let parsed = parse_daemon_command_line(&line).unwrap();
+            assert_eq!(command_type_name(&parsed.command), "factory_activity");
+            assert_eq!(command_active_session_id(&parsed.command), Some("session"));
+            match &parsed.command {
+                DaemonCommand::FactoryActivity {
+                    action: parsed_action,
+                    run_id: parsed_run,
+                    spec_id: parsed_spec,
+                    timeout_ms: parsed_timeout,
+                    ..
+                } => {
+                    assert_eq!(parsed_action.as_str(), action);
+                    assert_eq!(parsed_run.as_deref(), run_id);
+                    assert_eq!(parsed_spec.as_deref(), spec_id);
+                    assert_eq!(*parsed_timeout, timeout_ms);
+                }
+                _ => panic!("expected FactoryActivity"),
+            }
+        }
+        assert!(default_server_capabilities().contains(&"factory_activity".to_string()));
     }
 
     #[test]
@@ -1177,10 +1215,8 @@ mod tests {
         );
     }
 
-    /// TS #2391: the admission gate's preparing-restart refusal keeps the
-    /// TS plain message for old clients and carries the typed
-    /// `update_restarting` info for clients that wait through the
-    /// restart.
+    /// The preparing-restart refusal keeps the TS plain message for old
+    /// clients and carries the typed `update_restarting` info.
     #[test]
     fn update_preparing_refusal_carries_the_typed_error_info() {
         let failure = response_failure(
@@ -1195,9 +1231,6 @@ mod tests {
         );
     }
 
-    /// The standalone response line byte-orders its keys exactly like the
-    /// TS daemon wire bytes (`daemon-protocol.ts` `success`/`failure`):
-    /// id?, type, command, success, then data or error/errorInfo.
     #[test]
     fn response_line_serializes_in_the_ts_key_order() {
         let success = response_success(Some("k1"), "compact", Some(json!({"x": 1})));
@@ -1212,10 +1245,6 @@ mod tests {
         );
     }
 
-    /// The zero-copy response-line serializer must be byte-identical to the
-    /// reference `response_line` + `to_vec` path over every response
-    /// shape: the worker's wire bytes (and the supervisor's client-line
-    /// splice riding on them) depend on it.
     #[test]
     fn response_line_bytes_matches_the_reference_tree_path() {
         let shapes: Vec<DaemonResponse> = vec![
@@ -1268,7 +1297,6 @@ mod tests {
             let reference = serde_json::to_vec(&response_line(response)).unwrap();
             assert_eq!(response_line_bytes(response), reference);
         }
-        // and the exact TS key order for the canonical success form
         assert_eq!(
             String::from_utf8(response_line_bytes(&shapes[0])).unwrap(),
             "{\"id\":\"k1\",\"type\":\"response\",\"command\":\"compact\",\"success\":true,\"data\":{\"x\":1}}"

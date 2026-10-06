@@ -1,20 +1,14 @@
 //! The compiled transport table.
-//!
-//! The compiled model catalog (`pa_ai::models_generated`, ported from the TS
-//! `models.generated.ts`) is the hand-maintained table of transports the
-//! client implements: 42 `(provider, api, baseUrl)` tuples across 31 public
-//! providers, plus the 110 offline Prime Inference entries (live-fetch
-//! domain, one transport tuple of its own). It only changes with a client
-//! release — the catalog can select among these transports but never
-//! introduce one.
+//! `pa_ai::models_generated` is the hand-maintained table of transports
+//! the client implements; it only changes with a client release — the
+//! catalog can select among these but never introduce one.
 
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
 use crate::Model;
 
-/// The compiled catalog, shared as one immutable list (the TS
-/// `installedModels`).
+/// The compiled catalog, shared as one immutable list (TS `installedModels`).
 #[must_use]
 pub fn compiled_models() -> &'static [Model] {
     static COMPILED: LazyLock<Vec<Model>> = LazyLock::new(|| {

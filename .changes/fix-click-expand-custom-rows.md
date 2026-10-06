@@ -1,0 +1,1 @@
+- Clicking a compaction summary, a harness refinement notice, a skill invocation, or an injected prompt (heartbeat, goal, subagent status) in the transcript expands or collapses it again.

@@ -1,11 +1,6 @@
-//! Worker summary/wire unit tests (moved with their concerns).
+//! Worker summary/wire unit tests.
 use super::*;
 
-/// The delivery's relationship label is edge-derived: a subagent
-/// sender whose durable parent edge points at this session is a
-/// child; a subagent from another family never is, no matter its
-/// runtime kind (the mislabeled-ack regression — sibling lanes'
-/// messages must not render "from child:").
 #[test]
 fn sender_child_edge_decides_the_relationship_label() {
     let true_child = json!({
@@ -63,16 +58,13 @@ fn sender_child_edge_decides_the_relationship_label() {
     ));
 }
 
-/// A message-less top-level session is a draft (hidden from the agents
-/// view); a session with messages is live; a resident subagent is live
-/// before its first message (TS `activeLifecycleForSession`).
 #[test]
 fn summary_lifecycle_is_message_based() {
     let empty = SessionCore::test_core(None, "/tmp".to_string());
     assert_eq!(
         session_summary(
             &empty, "default", None, None, /*bash_running=*/ false,
-            /*quota_parked=*/ false
+            /*quota_parked=*/ false, /*subagents_running=*/ false
         )
         .lifecycle,
         "draft"
@@ -82,24 +74,22 @@ fn summary_lifecycle_is_message_based() {
     assert_eq!(
         session_summary(
             &subagent, "default", None, None, /*bash_running=*/ false,
-            /*quota_parked=*/ false
+            /*quota_parked=*/ false, /*subagents_running=*/ false
         )
         .lifecycle,
         "live"
     );
-    // The busy-flip roster delta fires before the store flushes the
-    // admitted prompt; a busy turn is live at that wire moment (TS
-    // reads the runtime's in-memory messages, which already hold it).
+    // The busy-flip roster delta fires before the store flushes the admitted
+    // prompt; a busy turn is live at that wire moment.
     let mut busy = SessionCore::test_core(None, "/tmp".to_string());
     busy.busy = true;
     busy.running_tool_calls.insert("call-1".to_string());
     // `isRunningTools` is the streaming gate over the in-flight tool
-    // set (TS `isStreaming && pendingToolCalls.size > 0`): tools in
-    // flight read true only while the turn streams.
+    // set.
     assert!(
         session_summary(
             &busy, "default", None, None, /*bash_running=*/ false,
-            /*quota_parked=*/ false
+            /*quota_parked=*/ false, /*subagents_running=*/ false
         )
         .is_running_tools
     );
@@ -107,7 +97,7 @@ fn summary_lifecycle_is_message_based() {
     assert!(
         !session_summary(
             &busy, "default", None, None, /*bash_running=*/ false,
-            /*quota_parked=*/ false
+            /*quota_parked=*/ false, /*subagents_running=*/ false
         )
         .is_running_tools
     );
@@ -116,15 +106,15 @@ fn summary_lifecycle_is_message_based() {
     assert!(
         !session_summary(
             &busy, "default", None, None, /*bash_running=*/ false,
-            /*quota_parked=*/ false
+            /*quota_parked=*/ false, /*subagents_running=*/ false
         )
         .is_running_tools
     );
-    // The user bash state rides the summary as its own flag (TS
-    // `session.isBashRunning`).
+    // The user bash state rides the summary as its own flag.
     assert_eq!(
         session_summary(
-            &busy, "default", None, None, /*bash_running=*/ true, /*quota_parked=*/ false
+            &busy, "default", None, None, /*bash_running=*/ true,
+            /*quota_parked=*/ false, /*subagents_running=*/ false
         )
         .is_bash_running,
         Some(true)
@@ -133,7 +123,7 @@ fn summary_lifecycle_is_message_based() {
     assert_eq!(
         session_summary(
             &busy, "default", None, None, /*bash_running=*/ false,
-            /*quota_parked=*/ false
+            /*quota_parked=*/ false, /*subagents_running=*/ false
         )
         .lifecycle,
         "live"
@@ -157,12 +147,159 @@ fn summary_lifecycle_is_message_based() {
             None,
             None,
             /*bash_running=*/ false,
-            /*quota_parked=*/ false
+            /*quota_parked=*/ false,
+            /*subagents_running=*/ false
         )
         .lifecycle,
         "live"
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A session whose own turn ended keeps reporting `working` while any of
+/// its subagents runs (each child counts its own descendants the same
+/// way), so every roster surface classifies it running; with no running
+/// subagents it is idle again. Its own-work flag stays its own.
+#[test]
+fn running_subagents_keep_an_idle_session_working() {
+    let core = SessionCore::test_core(None, "/tmp".to_string());
+    let summary = |subagents_running| {
+        serde_json::to_value(session_summary(
+            &core,
+            "default",
+            None,
+            None,
+            /*bash_running=*/ false,
+            /*quota_parked=*/ false,
+            subagents_running,
+        ))
+        .unwrap()
+    };
+    let classify =
+        |summary: &Value| pa_types::daemon::agent_roster::classify_summary_value(summary, false);
+    let waiting = summary(true);
+    assert_eq!(waiting["activity"], "working");
+    assert_eq!(waiting["hasRunningSubagents"], true);
+    assert_eq!(waiting["isSessionActive"], false);
+    assert_eq!(
+        classify(&waiting),
+        pa_types::daemon::agent_roster::AgentRosterStatus::Running
+    );
+    let done = summary(false);
+    assert_eq!(done["activity"], "idle");
+    assert_eq!(
+        classify(&done),
+        pa_types::daemon::agent_roster::AgentRosterStatus::Idle
+    );
+}
+
+/// The live row's `usage` is the whole-file own-usage fold the saved
+/// row publishes, including spend before the latest compaction and the
+/// compaction's own call.
+#[test]
+fn live_summary_usage_is_the_catalog_fold() {
+    let dir = std::env::temp_dir().join(format!("pa-worker-usage-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("live-usage.jsonl");
+    let usage = |input: u64, output: u64, cost: f64| {
+        json!({
+            "input": input, "output": output, "cacheRead": 0, "cacheWrite": 0,
+            "totalTokens": input + output,
+            "cost": { "input": 0.0, "output": cost, "cacheRead": 0.0, "cacheWrite": 0.0, "total": cost },
+        })
+    };
+    let assistant = |id: &str, parent: &str, cost: f64| {
+        json!({
+            "type": "message", "id": id, "parentId": parent,
+            "timestamp": "2026-09-23T00:00:00.000Z",
+            "message": {
+                "role": "assistant", "provider": "prime-inference",
+                "model": "internal/glm-5.3-fast", "content": [], "stopReason": "stop",
+                "usage": usage(100, 10, cost),
+            },
+        })
+        .to_string()
+    };
+    let user = |id: &str, parent: Option<&str>| {
+        json!({
+            "type": "message", "id": id, "parentId": parent,
+            "timestamp": "2026-09-23T00:00:00.000Z",
+            "message": { "role": "user", "content": "hi" },
+        })
+        .to_string()
+    };
+    let lines = [
+        json!({"type": "session", "version": 3, "id": "s1", "timestamp": "2026-09-23T00:00:00.000Z", "cwd": "/tmp"}).to_string(),
+        user("u1", None),
+        assistant("a1", "u1", 1.0),
+        json!({
+            "type": "compaction", "id": "c1", "parentId": "a1",
+            "timestamp": "2026-09-23T00:00:00.000Z",
+            "summary": "s", "firstKeptEntryId": "u2", "tokensBefore": 100,
+            "usage": usage(20, 2, 0.25),
+        })
+        .to_string(),
+        user("u2", Some("c1")),
+        assistant("a2", "u2", 0.5),
+    ];
+    std::fs::write(&path, format!("{}\n", lines.join("\n"))).unwrap();
+    let store = crate::session_store::SessionFile::open_windowed(&path).unwrap();
+    assert!(
+        store.window.is_some(),
+        "the fixture must serve a windowed open"
+    );
+    let core = SessionCore::test_core(Some(store), "/tmp".to_string());
+    let summary = session_summary(
+        &core, "default", None, None, /*bash_running=*/ false, /*quota_parked=*/ false,
+        /*subagents_running=*/ false,
+    );
+    // The live row equals the saved row, whole-object.
+    let catalog = crate::session_store::read_session_info(&path)
+        .unwrap()
+        .usage
+        .expect("the catalog fold bills the whole file");
+    assert_eq!(
+        json!(summary.usage),
+        json!(catalog),
+        "live and catalog rows agree"
+    );
+    // The whole file's own spend: the pre-cut turn + the summarizer
+    // + the kept turn, tokens folded in.
+    assert_eq!(
+        json!(summary.usage),
+        json!({ "inputTokens": 220, "outputTokens": 22, "cost": 1.75 })
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The live row bills the turn's own spend instead of reporting nothing.
+#[test]
+fn pathless_summary_usage_folds_the_in_memory_entries() {
+    let mut store = crate::session_store::SessionFile::create("/tmp", None, 0);
+    assert!(store.path.as_os_str().is_empty(), "the store is pathless");
+    store.append_message(&json!({
+        "role": "user", "content": "hi", "timestamp": 1u64,
+    }));
+    store.append_message(&json!({
+        "role": "assistant",
+        "content": [{ "type": "text", "text": "done" }],
+        "provider": "p", "model": "m", "stopReason": "stop",
+        "timestamp": 2u64,
+        "usage": {
+            "input": 100, "output": 10, "cacheRead": 0, "cacheWrite": 0,
+            "totalTokens": 110,
+            "cost": { "input": 0.0, "output": 0.5, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.5 },
+        },
+    }));
+    let core = SessionCore::test_core(Some(store), "/tmp".to_string());
+    let summary = session_summary(
+        &core, "default", None, None, /*bash_running=*/ false, /*quota_parked=*/ false,
+        /*subagents_running=*/ false,
+    );
+    assert_eq!(
+        json!(summary.usage),
+        json!({ "inputTokens": 100, "outputTokens": 10, "cost": 0.5 })
+    );
 }
 
 #[test]

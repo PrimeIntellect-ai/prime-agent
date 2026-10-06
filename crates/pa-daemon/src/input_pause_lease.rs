@@ -1,18 +1,7 @@
-//! The supervisor's session input-pause lease bookkeeping (protocol
-//! breadth wave b8): the supervisor arms for `acquire_session_input_pause`
-//! and `release_session_input_pause` (TS daemon-supervisor `case
-//! "acquire_session_input_pause"` / `case "release_session_input_pause"`),
-//! the per-connection state those leases live against (the TS
-//! `sessionInputPauseEpochs` / `detachingInputPauseSessions` maps), and
-//! the detach/reattach/disconnect bookkeeping around them.
-//!
-//! The supervisor owns the lease table; the worker owns the pause itself
-//! (the admission gate in [`crate::session_input_pause`]). The supervisor
-//! rewrite makes the worker's lease key connection-unique -
-//! `JSON.stringify([connectionId, ownerClientId, leaseKey])` - so two
-//! connections of the same protocol client id never share a pause, and it
-//! records the lease so a `detach`, a `reattach`, or a disconnect releases
-//! the worker-side pause with the client.
+//! The supervisor's session input-pause lease bookkeeping: the acquire /
+//! release arms and the detach/reattach/disconnect bookkeeping. The
+//! supervisor owns the lease table, the worker the pause; lease keys are
+//! connection-unique, so two connections of a client never share a pause.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -24,19 +13,17 @@ use crate::backpressure::RouteAdmission;
 use crate::protocol::{response_failure, response_line, response_success};
 use crate::supervisor::{Supervisor, ROUTE_TIMEOUT_MS};
 
-/// Per-client-connection state the pause leases read (TS
-/// `DaemonSocketClient` bookkeeping): the connection identity the lease
-/// keys embed, the epoch a detach bumps (an in-flight acquire invalidates
-/// instead of recording), and the sessions the client is detaching.
+/// Per-client-connection state the pause leases read: the connection
+/// identity the lease keys embed, the epoch a detach bumps (in-flight
+/// acquires invalidate instead of recording), and the detaching sessions.
 pub(crate) struct ClientConnectionState {
     /// Connection-unique id (the TS `connectionIds` entry): one per socket,
     /// distinct from the protocol client id the client may override.
     connection_id: String,
     pause_epoch: AtomicU64,
     detaching_sessions: std::sync::Mutex<HashSet<String>>,
-    /// The connection's prompt-admission registry (wave b9, TS
-    /// `promptAdmissions` per client): the `prompt`/`prompt_and_wait`
-    /// admissions and their cancellation states.
+    /// The connection's prompt-admission registry (TS `promptAdmissions`
+    /// per client): the `prompt`/`prompt_and_wait` admissions.
     pub(crate) prompt_admissions: crate::prompt_admission::PromptAdmissionTable,
 }
 
@@ -121,8 +108,7 @@ impl Supervisor {
     /// `acquire_session_input_pause`: resolve the session, rewrite the
     /// lease key, forward to the worker, and record the lease. The TS
     /// outcome ladder: a detaching session answers the TS error, an
-    /// identical lease answers its existing pause id, a worker failure
-    /// passes through, and an epoch change during the round trip
+    /// identical lease answers its existing pause id, an epoch change
     /// invalidates the acquisition.
     pub(crate) async fn handle_acquire_session_input_pause(
         self: &Arc<Self>,
@@ -150,8 +136,8 @@ impl Supervisor {
         let resident = if let Ok(resident) = self.registry.resolve(active_session_id).await {
             resident
         } else {
-            // The wake-aware resolution of the generic route: a
-            // restore pass may still be bringing the session up.
+            // The wake-aware resolution of the generic route: a restore
+            // pass may still be bringing the session up.
             self.await_restore_target(active_session_id).await;
             if let Ok(resident) = self.registry.resolve(active_session_id).await {
                 resident
@@ -239,10 +225,8 @@ impl Supervisor {
             },
         );
         if invalidated {
-            // The lease is recorded so the disconnect cleanup releases
-            // it, but the client sees the TS invalidation error (the
-            // supervisor re-keyed its connection bookkeeping under the
-            // acquiring round trip).
+            // The lease is recorded so the disconnect cleanup releases it,
+            // but the client sees the TS invalidation error.
             return Self::pause_failure(
                 command_id,
                 type_name,
@@ -254,10 +238,8 @@ impl Supervisor {
 
     /// `release_session_input_pause`: the TS outcome ladder - an unknown
     /// pause id answers the plain success, a lease another connection
-    /// holds answers the ownership error, a lease for another session
-    /// answers the session error, and the owner's release forwards to the
-    /// worker and drops the lease. Concurrent releases coalesce on the
-    /// table lock (the wire outcome matches the TS `releaseTask` share).
+    /// holds answers the ownership error, and the owner's release forwards
+    /// to the worker and drops the lease.
     pub(crate) async fn handle_release_session_input_pause(
         self: &Arc<Self>,
         connection: &Arc<ClientConnectionState>,
@@ -334,8 +316,7 @@ impl Supervisor {
 
     /// The detach bookkeeping around a client `detach` (TS supervisor
     /// detach arm): mark the detaching sessions, bump the connection epoch,
-    /// then (after the routed detach answered) release the client's leases
-    /// for those sessions.
+    /// then release the client's leases for those sessions.
     pub(crate) fn begin_detach_pause_bookkeeping(
         connection: &Arc<ClientConnectionState>,
         active_session_id: Option<&str>,
@@ -351,9 +332,7 @@ impl Supervisor {
     }
 
     /// Release the leases the detaching client holds for the marked
-    /// sessions (TS `releaseClientSessionInputPauses` with the session
-    /// filter); best-effort - a worker that cannot be reached keeps its
-    /// lease entry for the disconnect cleanup.
+    /// sessions (TS `releaseClientSessionInputPauses`); best-effort.
     pub(crate) async fn release_client_pauses_for_sessions(
         &self,
         connection: &Arc<ClientConnectionState>,
@@ -396,8 +375,7 @@ impl Supervisor {
                 }
             }
             // The worker is gone or refused: the lease cannot be released
-            // remotely, so drop the record (TS deletes the entry when the
-            // worker left).
+            // remotely, so drop the record.
             self.input_pauses.leases.lock().await.remove(&pause_id);
         }
     }

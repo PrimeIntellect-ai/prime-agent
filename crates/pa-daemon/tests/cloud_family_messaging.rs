@@ -19,6 +19,7 @@
 //! transport.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -138,17 +139,22 @@ impl CloudFamilyDelivery for TestDelivery {
         Ok(receipt)
     }
 
-    async fn lookup_agent_message(&self, request_id: &str) -> AgentMessageLookup {
-        match self.receiver_receipts.lock().unwrap().get(request_id) {
-            Some(receipt) => AgentMessageLookup::Admitted(receipt.clone()),
-            None => AgentMessageLookup::Unknown,
-        }
+    fn lookup_agent_message(
+        &self,
+        request_id: &str,
+    ) -> impl Future<Output = AgentMessageLookup> + Send {
+        std::future::ready(
+            match self.receiver_receipts.lock().unwrap().get(request_id) {
+                Some(receipt) => AgentMessageLookup::Admitted(receipt.clone()),
+                None => AgentMessageLookup::Unknown,
+            },
+        )
     }
 
-    async fn family_roster(
+    fn family_roster(
         &self,
         for_remote_session_id: &str,
-    ) -> Result<Vec<CloudFamilyRow>, String> {
+    ) -> impl Future<Output = Result<Vec<CloudFamilyRow>, String>> + Send {
         self.roster_calls
             .lock()
             .unwrap()
@@ -156,10 +162,11 @@ impl CloudFamilyDelivery for TestDelivery {
         if self.panic_in_roster.load(Ordering::SeqCst) {
             std::panic::panic_any("simulated crash during the roster read");
         }
-        if let Some(error) = self.roster_error.lock().unwrap().clone() {
-            return Err(error);
-        }
-        Ok(self.rows.clone())
+        let result = match self.roster_error.lock().unwrap().clone() {
+            Some(error) => Err(error),
+            None => Ok(self.rows.clone()),
+        };
+        std::future::ready(result)
     }
 }
 
@@ -182,19 +189,19 @@ impl TestSubmitter {
 }
 
 impl FamilyResultSubmitter for TestSubmitter {
-    async fn submit_family_result(
+    fn submit_family_result(
         &self,
         command_id: &str,
         command: &CloudFamilyCommand,
-    ) -> Result<(), String> {
+    ) -> impl Future<Output = Result<(), String>> + Send {
         if self.fail.load(Ordering::SeqCst) {
-            return Err("tunnel detached".to_string());
+            return std::future::ready(Err("tunnel detached".to_string()));
         }
         self.submitted
             .lock()
             .unwrap()
             .push((command_id.to_string(), command.clone()));
-        Ok(())
+        std::future::ready(Ok(()))
     }
 }
 

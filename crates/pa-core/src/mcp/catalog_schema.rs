@@ -1,13 +1,8 @@
 //! Strict schema for the MCP service catalog: the `plugins/catalog.v2.json`
 //! client contract (spec §1.2) and the user-authored `mcp-services.json`
 //! local sources (v1), both validated with the shipped TS contract
-//! (`packages/ai/src/mcp/catalog.ts` `validateMcpServiceEntry`).
-//!
-//! Whole-file fail-closed: any unknown key, wrong type, or broken invariant
-//! rejects the entire payload — a bad catalog falls back to the last-good
-//! snapshot (`deny_unknown_fields` mirrors the versioned-path discipline:
-//! additive schema changes require a version bump, so old clients keep their
-//! snapshot silently instead of mis-parsing).
+//! (`validateMcpServiceEntry`). Whole-file fail-closed: a bad catalog falls
+//! back to the last-good snapshot.
 
 use serde::Deserialize;
 
@@ -23,9 +18,8 @@ struct CatalogFileEnvelope {
     entries: Vec<McpServiceEntry>,
 }
 
-/// The 14 derived count keys (drift-checked catalog CI side); every key is
-/// informational for the client, so a missing one never fails the payload but
-/// an unknown one does (additive changes need a version bump).
+/// informational so a missing one never fails the payload but an unknown one does (additive changes
+/// need a version bump).
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CatalogCounts {
@@ -63,9 +57,8 @@ pub struct PluginsCatalog {
     pub entries: Vec<McpServiceEntry>,
 }
 
-/// One catalog entry = one reviewed connection (endpoint) of a service
-/// (spec §1.2; TS `McpServiceEntry`). `server` is the stable id, the kernel
-/// dispatch id, and the `mcp:<server>` credential key.
+/// One catalog entry = one reviewed connection of a service (spec §1.2). `server` is the stable id,
+/// the kernel dispatch id, and the `mcp:<server>` credential key.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct McpServiceEntry {
@@ -351,10 +344,8 @@ fn require_https_url(entry_id: &str, field: &str, url: &str) -> Result<String, S
 }
 
 impl McpServiceEntry {
-    /// Structural validation for one entry (TS `validateMcpServiceEntry`):
-    /// id pattern, transport/url consistency, aliases rules, setup honesty,
-    /// and the no-secrets invariant. Unknown keys were already rejected by
-    /// `deny_unknown_fields` at the serde layer.
+    /// Structural validation for one entry (TS `validateMcpServiceEntry`): id pattern,
+    /// transport/url consistency, aliases rules, setup honesty, and the no-secrets invariant.
     pub fn validate(&self) -> Result<(), String> {
         let at = safe_entry_id(&self.server);
         let fail = |message: String| Err(message);
@@ -480,9 +471,8 @@ pub(crate) fn server_id_valid(server: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '-')
 }
 
-/// Parse and validate a plugins catalog payload (v1 local or v2 remote/
-/// bundled). Whole-file fail-closed: any invalid entry rejects the entire
-/// file; callers keep their last-good snapshot on `Err`.
+/// Parse and validate a plugins catalog payload (v1 local or v2 remote/ bundled). Whole-file
+/// fail-closed: any invalid entry rejects the entire file.
 pub fn parse_plugins_catalog(bytes: &[u8]) -> Result<PluginsCatalog, String> {
     // Never echo parser text: it can quote raw (possibly secret) input.
     let envelope: CatalogFileEnvelope = serde_json::from_slice(bytes)
@@ -516,10 +506,8 @@ pub fn parse_plugins_catalog(bytes: &[u8]) -> Result<PluginsCatalog, String> {
     })
 }
 
-/// The compiled legacy built-ins (the offline fallback when no snapshot is
-/// available): the pre-catalog integrations whose ids stay reserved. Data
-/// mirrors the catalog entries for `linear` and `notion` (metadata-reviewed
-/// OAuth dynamic-client services).
+/// The compiled legacy built-ins (the offline fallback when no snapshot is available): the
+/// pre-catalog integrations whose ids stay reserved.
 pub fn compiled_builtin_services() -> Vec<McpServiceEntry> {
     let json = serde_json::json!([
         {
@@ -574,10 +562,8 @@ pub fn compiled_builtin_services() -> Vec<McpServiceEntry> {
 mod tests {
     use super::*;
 
-    /// The REAL shipped catalog payload projected to the v2 client contract
-    /// (the shipped TS bundled catalog, audit evidence stripped per spec
-    /// §1.2: envelope {version, counts, entries}, 68 entries, provenance
-    /// [{"source":"prime"}]).
+    /// The REAL shipped catalog payload projected to the v2 client contract: envelope {version,
+    /// counts, entries}, 68 entries, provenance [{"source":"prime"}]).
     const REAL_PAYLOAD: &str = include_str!("../../tests/fixtures/mcp/plugins-catalog.v2.json");
 
     fn parse(bytes: &[u8]) -> PluginsCatalog {
@@ -590,12 +576,10 @@ mod tests {
         let catalog = parse(REAL_PAYLOAD.as_bytes());
         assert_eq!(catalog.version, 2);
         assert_eq!(catalog.entries.len(), 68, "68 services, 0 failures");
-        // Sorted by server id, unique ids.
         let ids: Vec<&str> = catalog.entries.iter().map(|e| e.server.as_str()).collect();
         let mut sorted = ids.clone();
         sorted.sort_unstable();
         assert_eq!(ids, sorted);
-        // The two legacy built-ins ship metadata-reviewed.
         for server in ["linear", "notion"] {
             let entry = catalog
                 .entries
@@ -608,8 +592,7 @@ mod tests {
                 VerificationStatus::MetadataReviewed
             );
         }
-        // The declared counts match the entries (the catalog CI drift check,
-        //mirrored here over the projection).
+        // The declared counts match the entries (the catalog CI drift check).
         let counts = &catalog.counts;
         assert_eq!(counts.total, Some(68));
         assert_eq!(counts.http, Some(68));
@@ -698,30 +681,25 @@ mod tests {
             "counts": {},
             "entries": [valid_entry("svc-a")]
         });
-        // The clean shape parses.
         parse_plugins_catalog(base.to_string().as_bytes()).expect("clean shape parses");
-        // Envelope unknown key rejects.
         let mut doc = base.clone();
         doc["sources"] = serde_json::json!([]);
         assert!(
             parse_plugins_catalog(doc.to_string().as_bytes()).is_err(),
             "envelope sources key rejects"
         );
-        // Counts unknown key rejects.
         let mut doc = base.clone();
         doc["counts"]["mergedFromBothSources"] = serde_json::json!(1);
         assert!(
             parse_plugins_catalog(doc.to_string().as_bytes()).is_err(),
             "counts unknown key rejects"
         );
-        // Unknown ENTRY key rejects the file.
         let mut doc = base.clone();
         doc["entries"][0]["experimentalNewField"] = serde_json::json!("v3 shape");
         assert!(
             parse_plugins_catalog(doc.to_string().as_bytes()).is_err(),
             "entry unknown key rejects"
         );
-        // Unknown AUTH key rejects the file.
         let mut doc = base;
         doc["entries"][0]["auth"]["alternatives"] = serde_json::json!([]);
         assert!(

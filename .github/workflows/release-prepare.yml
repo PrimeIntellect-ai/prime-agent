@@ -1,0 +1,370 @@
+# The release-PR pattern: the reviewed half of the release flow
+# (RELEASE-FLOW-PROPOSAL.md §1 - deno's shape, run by the fleet, gated like
+# any PR).
+#
+# Two acts, one workflow:
+#
+#   1. PREPARE (workflow_dispatch, input: the version) bumps the workspace
+#      version in Cargo.toml (plus the Cargo.lock member rows, via
+#      `cargo update --workspace --offline`), folds the .changes/ fragments
+#      into the root CHANGELOG.md (scripts/release/fold_changelog.py, the
+#      port of the TS scripts/lib/changelog-fragments.mjs fold), commits to
+#      `release/vX.Y.Z` and opens the release PR (title `release: vX.Y.Z`,
+#      base main). The PR IS the release's review surface: this is where the
+#      changelog gets its final read - where deno's humans "think relevancy
+#      and remove reverts" - and merging it is shipping.
+#
+#   2. TAG (pull_request closed on a merged `release: vX.Y.Z` PR) creates the
+#      annotated tag `vX.Y.Z` at the squash-merge commit via the GitHub API -
+#      GitHub-side tag creation per the operator's security requirement (§2:
+#      NEVER a user PAT, no local tags ever). The tag ref creation is its own
+#      push event, so the existing tag-triggered release.yml takes over
+#      UNCHANGED (§4: build -> promote in the protected `release` environment
+#      -> latest.json + assets + SBOM + SLSA -> the curl URL), and ripgrep's
+#      documented commit+tag push race (Actions missing the tag event when
+#      both are pushed together) disappears by construction: merge and tag
+#      are separate events.
+#
+# The identity that writes is the release-bot GitHub App, never a user PAT -
+# and this is load-bearing, not decoration: events created by the workflow's
+# own GITHUB_TOKEN fire NO downstream workflow runs (GitHub's documented
+# GITHUB_TOKEN recursion guard), so a GITHUB_TOKEN-created tag would never
+# trigger release.yml and a GITHUB_TOKEN-opened PR would show no CI checks.
+# The App's installation token bypasses that guard on both. Until the
+# operator wires the App (the config checklist on the release PR body), the
+# prepare act fails with a config pointer - and the tag act is unreachable
+# by construction (no release PR can be opened without the App).
+#
+# Ref-agnostic by construction: both acts resolve `main` explicitly (the
+# prepare job checks out `main`, the tag job reads the merge commit) and
+# never read the ref the workflow ran on.
+
+name: release-prepare
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "The release version (x.y.z, no v prefix)"
+        required: true
+        type: string
+  pull_request:
+    types: [closed]
+    # The pull_request branches filter applies to the PR's base branch.
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  # The release branch + PR are one resource: serialize prepares; a tag act
+  # (a per-merge follow-up) never contends.
+  group: release-prepare
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: github.event_name == 'workflow_dispatch'
+    name: open the release PR
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - name: Validate the version input
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          [[ "${INPUT_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::version '${INPUT_VERSION}' must be plain x.y.z (nightly -beta.N versions are cut by the nightly cron, never dispatched)"
+            exit 1
+          }
+      - name: The release bot token (a GitHub App installation, never a user PAT)
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.RELEASE_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          # contents: the branch push; pull-requests: opening the release PR.
+          # Setting any permission input narrows the token to exactly these.
+          permission-contents: write
+          permission-pull-requests: write
+      - name: "Check out main (full history: the fold sorts fragments by add-date)"
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: main
+          # A full-history clone is large (the pre-merge rust branch measured
+          # ~94MB on 2026-09-29); a release is rare, and the fold's add-date
+          # ordering reads fragment add-commits anywhere in that history.
+          fetch-depth: 0
+          persist-credentials: false
+      # The pinned SHA is the toolchain pin: this action version has no
+      # `toolchain` input, and its parse step hard-codes 1.98.1. Change the
+      # compiler by changing the SHA; a `toolchain:` input is ignored.
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e
+      - name: Guard the lineage (refuse an existing tag or a below-tip version)
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/v${INPUT_VERSION}" >/dev/null 2>&1; then
+            echo "::error::tag v${INPUT_VERSION} already exists; a release version is never reused"
+            exit 1
+          fi
+          tip_ver="$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -1)"
+          python3 - "$tip_ver" "$INPUT_VERSION" <<'PY'
+          import sys
+          tip, want = sys.argv[1], sys.argv[2]
+          key = lambda v: tuple(int(p) for p in v.split("."))
+          if key(want) < key(tip):
+              sys.exit(f"::error::version {want} is below the workspace version {tip}; the updater refuses downgrades and the lineage never goes back")
+          print(f"release {want} from workspace version {tip} ({'bump' if want != tip else 'the version already carries it; the fold is the release diff'})")
+          PY
+      - name: Bump the workspace version (Cargo.toml + the Cargo.lock member rows)
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          python3 - "$INPUT_VERSION" <<'PY'
+          import sys
+          from pathlib import Path
+          version = sys.argv[1]
+          p = Path("Cargo.toml")
+          text = p.read_text()
+          old_row = next(line for line in text.splitlines() if line.startswith("version = "))
+          new_row = f'version = "{version}"'
+          p.write_text(text.replace(old_row, new_row, 1))
+          print(f"Cargo.toml: {old_row} -> {new_row}")
+          PY
+          # --workspace refreshes ONLY the workspace-member version rows in
+          # Cargo.lock (never registry deps); --offline proves the registry
+          # is never touched for a member-row refresh.
+          cargo update --workspace --offline
+          git diff --stat
+      - name: Fold the .changes/ fragments into the root CHANGELOG.md
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          # The PR body reports the fragment set BEFORE the fold consumes it
+          # (the fold git-rms the fragments it absorbs), and README.md is the
+          # pattern's explanation, never a fragment.
+          find .changes -maxdepth 1 -name '*.md' ! -name 'README.md' -printf '%f\n' 2>/dev/null \
+            | sort > "$RUNNER_TEMP/release-fragments.txt" || true
+          python3 scripts/release/fold_changelog.py --version "${INPUT_VERSION}"
+          git add -A CHANGELOG.md Cargo.toml Cargo.lock
+      - name: Commit the release branch (release/vX.Y.Z off the main tip)
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name "release-prepare"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          base_sha="$(git rev-parse HEAD)"
+          git checkout -q -b "release/v${INPUT_VERSION}"
+          git commit -q -m "release: v${INPUT_VERSION}" -m "Version bump + the .changes/ fragment fold, cut by the release-prepare workflow off the main tip ${base_sha}. Merging this PR ships v${INPUT_VERSION}: the tag act creates the annotated tag at this PR's squash-merge commit, and the tag-triggered release.yml runs the promote gate (the protected release environment)."
+          echo "release/v${INPUT_VERSION} at $(git rev-parse HEAD) (base ${base_sha})"
+      - name: Push the release branch (the App token, one-shot credential helper)
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          RELEASE_BOT_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          # The token rides the environment, never the command line or the
+          # remote URL; the helper exists only for this one push. --force: the
+          # release branch is workflow-owned and regenerable - a re-dispatch
+          # re-runs the bump + fold from the current tip and refreshes the
+          # existing release PR instead of colliding with the old branch.
+          git -c "credential.helper=!f(){ printf 'username=x-access-token\npassword=%s\n' \"${RELEASE_BOT_TOKEN}\"; };f" \
+            push --force origin "release/v${INPUT_VERSION}"
+      - name: Open the release PR (the release's review surface)
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          python3 - "${INPUT_VERSION}" > "$RUNNER_TEMP/release-pr-body.md" <<'PY'
+          import datetime, json, os, pathlib, re, subprocess, sys, textwrap
+          version = sys.argv[1]
+          tag = f"v{version}"
+          repo = json.loads(subprocess.run(
+              ["gh", "repo", "view", "--json", "nameWithOwner"],
+              capture_output=True, text=True, check=True).stdout)["nameWithOwner"]
+          # The fragment list was captured before the fold consumed them.
+          cap = pathlib.Path(os.environ["RUNNER_TEMP"]) / "release-fragments.txt"
+          fragments = sorted(line.strip() for line in cap.read_text().splitlines()
+                              if line.strip()) if cap.is_file() else []
+          section = ""
+          changelog = pathlib.Path("CHANGELOG.md")
+          if changelog.is_file():
+              text = changelog.read_text()
+              m = re.search(rf"## \[{re.escape(version)}\][\s\S]*?(?=\n## \[|$)", text)
+              if m:
+                  section = m.group(0).strip()
+          date = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+          folded = (f"{len(fragments)} fragment(s) folded."
+                     if fragments else
+                     "No `.changes/` fragments were present; the section is empty by record, not by accident.")
+          body = f"""
+          **release: {tag}** - merging this PR ships it.
+
+          ### What this PR is
+
+          The reviewed half of the release flow: the workspace version bump plus the
+          `.changes/` fragment fold. Nothing else lands here - this PR IS the
+          release's review surface (`RELEASE-FLOW-PROPOSAL.md` §1). Review the section
+          below as the changelog's final read; reverting a fragment means deleting its
+          bullet here before merge.
+
+          {folded}
+
+          ### The changelog section
+
+          ```
+          {section if section else f"## [{version}] - {date}  (no fragments were recorded for this release)"}
+          ```
+
+          ### What happens on merge (the flow under the operator's eye)
+
+          1. The tag act of `release-prepare` creates the annotated `{tag}` at this
+             PR's squash-merge commit via the GitHub API (the release-bot App; no
+             user PAT, no local tags).
+          2. `release.yml` (tag-triggered, unchanged) validates tag == Cargo.toml,
+             builds the 5-target matrix (the windows MSVC build included), and
+             `promote` waits for the protected `release` environment approval -
+             **the approval is the publish**.
+          3. On approval: assets + SHA256SUMS + SBOMs + SLSA provenance +
+             `latest.json` land on the `{tag}` GitHub release; the in-app updater
+             (`latest.json`) picks it up, and the curl install lands with the
+             channels lane (the artifact path keeps working meanwhile).
+
+          ### Config checklist (operator org-settings - the machinery is inert until these are wired)
+
+          - [ ] The release-bot GitHub App: Contents: Read & write, installed on
+                `{repo}`; secrets `RELEASE_BOT_CLIENT_ID` + `RELEASE_BOT_PRIVATE_KEY`.
+                (Without it this PR could not have been opened - the guard holds.)
+          - [ ] The `v*` tag protection rule (Settings - Tags): only the release bot
+                and named humans may create/move tags; manual/local tags are refused.
+          - [ ] The `release` environment approvers (Settings - Environments -
+                release): the promotion authority for the promote gate.
+
+          _No tag is cut by opening or reviewing this PR; the tag act runs only after
+          the merge, and the publish itself is gated behind the environment approval.
+          If the tag act's run fails (a transient API error), re-run it from the run
+          page - it is idempotent._
+          """
+          print(textwrap.dedent(body).lstrip("\n"))
+          PY
+          # The refresh path is an explicit retry branch: a successful create
+          # must not fall through to a `gh pr edit` with an empty number
+          # (the `|| ... &&` chain would do exactly that under set -u).
+          if gh pr create \
+            --base main \
+            --head "release/v${INPUT_VERSION}" \
+            --title "release: v${INPUT_VERSION}" \
+            --body-file "$RUNNER_TEMP/release-pr-body.md"; then
+            exit 0
+          fi
+          existing="$(gh pr list --head "release/v${INPUT_VERSION}" --json number --jq '.[0].number')"
+          if [ -z "${existing}" ] || [ "${existing}" = "null" ]; then
+            echo "::error::the release PR could neither be created nor found on branch release/v${INPUT_VERSION}"
+            exit 1
+          fi
+          gh pr edit "${existing}" \
+            --title "release: v${INPUT_VERSION}" \
+            --body-file "$RUNNER_TEMP/release-pr-body.md"
+          echo "the existing release PR #${existing} was refreshed by this re-dispatch"
+
+  tag:
+    # The second act: a merged release PR cuts its annotated tag GitHub-side.
+    # The title prefix is the release marker set by the prepare act; every
+    # other merged PR skips here without touching the release bot.
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.merged == true &&
+      github.event.pull_request.base.ref == 'main' &&
+      startsWith(github.event.pull_request.title, 'release: v')
+    name: "cut the annotated tag vX.Y.Z at the merge commit (GitHub API)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions: {}
+    steps:
+      - name: The release bot token (a GitHub App installation, never a user PAT)
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.RELEASE_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          permission-contents: write
+      - name: Create the annotated tag at the squash-merge commit
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, pathlib, re, sys
+          ev = json.load(open(os.environ["GITHUB_EVENT_PATH"]))
+          m = re.fullmatch(r"release: v(\d+\.\d+\.\d+)", ev["pull_request"]["title"].strip())
+          if not m:
+              sys.exit(f"::error::not a release PR title: {ev['pull_request']['title']!r}")
+          out = {
+              "version": m.group(1),
+              "merge_sha": ev["pull_request"]["merge_commit_sha"],
+              "pr_number": str(ev["pull_request"]["number"]),
+          }
+          # The tag act only serves the prepare flow's own PRs: the head must
+          # be the release branch the prepare act cut (release/vX.Y.Z). A
+          # coincidentally titled PR from any other branch is refused here,
+          # before the release bot is ever touched.
+          head_ref = ev["pull_request"]["head"]["ref"]
+          if head_ref != f"release/v{m.group(1)}":
+              sys.exit(
+                  f"::error::the release PR's head branch must be release/v{m.group(1)} "
+                  f"(the prepare flow's branch), not {head_ref!r} - the tag act does not "
+                  f"serve hand-titled PRs"
+              )
+          state = pathlib.Path(os.environ["RUNNER_TEMP"]) / "release-merge.json"
+          state.write_text(json.dumps(out))
+          PY
+          state="${RUNNER_TEMP}/release-merge.json"
+          version="$(jq -r .version "${state}")"
+          merge_sha="$(jq -r .merge_sha "${state}")"
+          pr_number="$(jq -r .pr_number "${state}")"
+          # tag-check parity (release.yml enforces the same at build time):
+          # the tag must equal the workspace version at the merge commit.
+          cargo_ver="$(gh api "repos/${GITHUB_REPOSITORY}/contents/Cargo.toml?ref=${merge_sha}" \
+            --jq .content | base64 -d | sed -n 's/^version *= *"\([^"]*\)".*/\1/p' | head -1)"
+          if [ "${cargo_ver}" != "${version}" ]; then
+            echo "::error::tag v${version} != Cargo.toml ${cargo_ver} at the merge commit ${merge_sha}; release.yml tag-check would refuse it"
+            exit 1
+          fi
+          # Idempotent ONLY when the existing tag is this release: resolve the
+          # ref (an annotated tag object) down to its commit and require it to
+          # be this PR's merge commit. A same-name tag pointing elsewhere is a
+          # version collision and fails loudly instead of silently skipping.
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/v${version}" \
+               --jq .object.sha > "${RUNNER_TEMP}/tag-object-sha" 2>/dev/null; then
+            tagged="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/$(cat "${RUNNER_TEMP}/tag-object-sha")" --jq .object.sha)"
+            if [ "${tagged}" = "${merge_sha}" ]; then
+              echo "tag v${version} already points at this release's merge commit; nothing to do"
+              exit 0
+            fi
+            echo "::error::tag v${version} already exists at ${tagged}, not this PR's merge commit ${merge_sha}; a release version is never reused - retitle or reversion this PR"
+            exit 1
+          fi
+          # The annotated tag object (codex's convention: 'Release vX.Y.Z'),
+          # then the ref. Two API calls = the tag is created BY GitHub, and
+          # the ref creation is the push event that triggers release.yml.
+          tag_obj="$(gh api -X POST "repos/${GITHUB_REPOSITORY}/git/tags" \
+            -f "tag=v${version}" \
+            -f "message=Release v${version}\n\nReleased by PR #${pr_number} (squash-merge ${merge_sha}) via the release-prepare workflow." \
+            -f "object=${merge_sha}" \
+            -f "type=commit" \
+            --jq .sha)"
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+            -f "ref=refs/tags/v${version}" \
+            -f "sha=${tag_obj}"
+          echo "tag v${version} cut at ${merge_sha}; release.yml (tag-triggered) builds and promotes from here - the release environment approval is the publish gate"

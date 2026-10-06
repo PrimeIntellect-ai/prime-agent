@@ -1,41 +1,7 @@
-//! The session-navigation surface (protocol breadth wave b9): the worker
-//! arms for `new_session`, `switch_session`, and `import_jsonl` (TS
-//! daemon-mode cases over `AgentSessionRuntime.newSession` /
-//! `switchSession` / `importFromJsonl`). All three replace the worker's
-//! live session with another file (the TS runtime's replacement lease
-//! path): the store swaps, the engine's session file moves, and the live
-//! context rebuilds onto the new branch - the same flow `fork` runs
-//! (`branch_navigation.rs`).
-//!
-//! Replacement ruling (TS parity): the whole-runtime replacement flows
-//! retire the old session's runtime first - `teardownForReplacement` ->
-//! `teardownCurrent` -> `session.disposeAsync()` disposes the kernel (a
-//! final namespace snapshot flush, then the `python -m rlm.repl` process
-//! exits) and drops the session object - so the replacement session
-//! rebuilds cold: a fresh kernel (the prewarm fires again at the
-//! replacement), a system prompt built on the new conversation log, and
-//! an empty namespace unless the moved-to session carries its own
-//! snapshot. The TS order is kept: the replacement file is prepared and
-//! validated BEFORE the teardown (a failed prepare - a missing switch
-//! target, a missing import file, a bad fork entry - leaves the old
-//! session, its kernel, and any in-flight work untouched), and the
-//! teardown runs between the prepare and the swap. The tree moves
-//! (`navigate_tree`) are NOT replacements: TS rebuilds the branch
-//! context in place on the live session and the kernel stays warm.
-//!
-//! Responses are the TS `{ cancelled: false }` wire object; a missing input
-//! file answers the TS import error (`File not found: <path>`), and a
-//! stored session cwd that no longer exists answers the TS
-//! `MissingSessionCwdError` text.
-//!
-//! Cwd rebind (TS parity): `switchSession` and `importFromJsonl` rebuild
-//! the runtime with `createRuntime({ cwd: sessionManager.getCwd() })` -
-//! the TARGET session's recorded cwd (an explicit override, else the
-//! stored header cwd, else the process cwd). The worker rebinds onto the
-//! prepared target's cwd between the teardown and the rebuild, so the
-//! rebuilt session's kernel-resident tools (bash/edit) run in the
-//! moved-to session's working directory; `newSession` keeps the live
-//! cwd (TS `createRuntime({ cwd: this.cwd })`).
+//! The worker arms for `new_session`, `switch_session`, and `import_jsonl`:
+//! all three replace the live session with another file, prepared and
+//! validated BEFORE the teardown (a failed prepare leaves the old session
+//! untouched); tree moves are NOT replacements — the kernel stays warm.
 
 use std::sync::{Arc, Mutex};
 
@@ -46,22 +12,15 @@ use crate::protocol::{response_failure, response_success, DaemonErrorInfo, Daemo
 use crate::session_store::{session_file_name, SessionFile};
 use crate::worker::{SessionCore, Worker};
 
-/// A prepared replacement session (TS `SessionManager.open` +
-/// `assertSessionCwdExists`): the opened file, plus the session cwd the
-/// replacement runtime rebinds onto (TS `createRuntime({ cwd:
-/// sessionManager.getCwd() })` — the override or the stored header cwd).
-/// `None` keeps the live cwd: the TS fallthrough is the process cwd, which
-/// is the worker's live cwd already.
+/// A prepared replacement session: the opened file, plus the session cwd the
+/// replacement rebinds onto (override, else stored header); `None` keeps the live cwd.
 pub(crate) struct PreparedReplacement {
     pub(crate) file: SessionFile,
     pub(crate) cwd: Option<String>,
 }
 
-/// The navigation surface: the prepare and swap phases of `fork`'s
-/// replacement flow the three commands share. The teardown between the
-/// phases is the worker's (it owns the turn/compaction settle and the
-/// engine retire), matching the TS split `teardownForReplacement` /
-/// `buildAndApplyReplacement`.
+/// The navigation surface: the prepare and swap phases of the replacement
+/// flow the three commands share.
 pub(crate) struct SessionNavigation {
     engine: Arc<dyn SessionEngine>,
     core: Arc<Mutex<SessionCore>>,
@@ -72,35 +31,32 @@ impl SessionNavigation {
         SessionNavigation { engine, core }
     }
 
-    /// Swap the worker's live session onto `file`: the store, the engine's
-    /// session file, and the rebuilt context (the shared tail of
-    /// `new_session` / `switch_session` / `import_jsonl`). The caller retires
-    /// the previous runtime (the worker's `teardown_for_replacement`)
-    /// before this runs - and rebinds the worker's cwd when the moved-to
-    /// session records another one - so the context park lands on the
-    /// fresh, unbuilt session and its first build adopts the replacement
-    /// branch in the replacement session's cwd.
+    /// Swap the live session onto `file` (store, engine session file, rebuilt
+    /// context). The caller retires the previous runtime and rebinds the cwd
+    /// first, so the context park lands on the fresh session.
     async fn replace_session(&self, file: SessionFile) -> Result<(), String> {
         let branch_entries = file.branch_file_entries();
         let new_path = file.path.clone();
-        {
+        // Prime the new store's usage fold before it enters the core: the
+        // resume summaries read from this cache and fold only the appended tail.
+        let primed = new_path.clone();
+        let _ =
+            tokio::task::spawn_blocking(move || crate::session_store::read_session_info(&primed))
+                .await;
+        let previous = {
             let mut core = self.core.lock().unwrap();
-            core.store = Some(file);
-        }
+            core.store.replace(file)
+        };
+        // The old store's lease release flushes the window and info
+        // sidecars (megabytes for a large session): off the core lock
+        // and the runtime.
+        let _ = tokio::task::spawn_blocking(move || drop(previous)).await;
         self.engine.set_session_file(new_path.clone());
-        // TS re-restores the moved-to session's saved model at its runtime
-        // recreation (`createRuntime` -> `createAgentSession`): the
-        // replacement session resolves to the model its own file pins,
-        // not the previous session's (an explicit flag still wins inside).
-        // No pre-read context here: the replacement's target store is
-        // already installed in the core above, so the restore reads the
-        // file itself (the navigation path's shape is unchanged by the
-        // create-path reuse).
+        // The replacement session resolves to the model its own file pins,
+        // not the previous session's (an explicit flag still wins).
         self.engine.restore_session_model(&new_path, None).await;
         // The replacement retired the runtime, so the rebuild parks on the
-        // fresh, unbuilt session: its first build seeds the goal state
-        // from the moved branch's own rows (the TS constructor's
-        // `_loadPersistedGoalState`), faithful semantics.
+        // fresh session and seeds the goal state from the moved branch's rows.
         rebuild_engine_context(
             &self.engine,
             branch_entries,
@@ -129,12 +85,8 @@ impl SessionNavigation {
         }
     }
 
-    /// `new_session`'s prepare phase (TS `SessionManager.create` +
-    /// `newSession({ parentSession, rlmDepth })` before the runtime
-    /// teardown): a fresh session in the same directory, optionally
-    /// parented on `parentSession` with the current depth. Preparing
-    /// never touches the live session, so a prepare failure leaves it
-    /// untouched - the TS `releaseUncommittedLease` fallthrough.
+    /// `new_session`'s prepare phase: a fresh session in the same directory,
+    /// optionally parented on `parentSession`; a failure never touches the live session.
     #[allow(clippy::result_large_err)]
     pub(crate) fn prepare_new_session(
         &self,
@@ -177,20 +129,15 @@ impl SessionNavigation {
                 ));
             }
         }
-        // TS `newSession` keeps the runtime's cwd (`createRuntime({ cwd:
-        // this.cwd })`): the fresh session runs where the live one did.
+        // TS `newSession` keeps the runtime's cwd: the fresh session runs where the live one did.
         Ok(PreparedReplacement {
             file: fresh,
             cwd: None,
         })
     }
 
-    /// `switch_session`'s prepare phase (TS `SessionManager.open` +
-    /// `assertSessionCwdExists`): open the requested session file and
-    /// check its stored cwd exists. A missing file or a gone cwd fails
-    /// here - before the teardown - so the live session keeps its kernel
-    /// and any in-flight work, exactly like the TS throw out of
-    /// `switchSession` before `teardownForReplacement`.
+    /// `switch_session`'s prepare phase: a missing file or a gone cwd fails
+    /// here, before the teardown, so the live session keeps its kernel.
     #[allow(clippy::result_large_err)]
     pub(crate) fn prepare_switch_session(
         &self,
@@ -207,10 +154,8 @@ impl SessionNavigation {
         self.open_replacement(session_path, cwd_override, "switch_session", None)
     }
 
-    /// `import_jsonl`'s prepare phase (TS `importFromJsonl` before the
-    /// runtime teardown): copy the input file into the session dir and
-    /// open the copy. A missing input file answers the TS import error
-    /// without touching the live session.
+    /// `import_jsonl`'s prepare phase: copy the input file into the session
+    /// dir and open the copy; a missing input answers the TS import error.
     #[allow(clippy::result_large_err)]
     pub(crate) fn prepare_import_jsonl(
         &self,
@@ -235,9 +180,7 @@ impl SessionNavigation {
                 }),
             ));
         }
-        // The destination is the session dir's copy of the imported file
-        // (TS `copyFileSync`); an in-place import (same file) skips the
-        // copy.
+        // The destination is the session dir's copy; an in-place import skips the copy.
         let destination = {
             let core = self.core.lock().unwrap();
             core.store
@@ -282,13 +225,8 @@ impl SessionNavigation {
         )
     }
 
-    /// Open one replacement session file and check its stored cwd exists
-    /// (TS `SessionManager.open` + `assertSessionCwdExists`): the
-    /// `MissingSessionCwdError` text is TS-verbatim. The prepared target
-    /// carries the session cwd the replacement rebinds onto (TS
-    /// `SessionManager.open`'s `cwdOverride ?? header.cwd ?? process.cwd()`
-    /// — the last term is the worker's live cwd, so the empty fallthrough
-    /// keeps it).
+    /// Open one replacement session file and check its stored cwd exists:
+    /// the `MissingSessionCwdError` text is TS-verbatim.
     #[allow(clippy::result_large_err)]
     fn open_replacement(
         &self,
@@ -314,9 +252,8 @@ impl SessionNavigation {
                     let core = self.core.lock().unwrap();
                     core.cwd.clone()
                 };
-                // The typed error info lets clients render the TS
-                // missing-cwd prompt (the issue carries the fallback cwd
-                // the confirm answers with).
+                // The typed error info lets clients render the TS missing-cwd prompt (the issue
+                // carries the fallback cwd).
                 return Err(response_failure(
                     None,
                     command,
@@ -338,9 +275,7 @@ impl SessionNavigation {
 }
 
 /// Rebuild the engine's live context onto the moved session (the same
-/// helper `branch_navigation` runs for forks), with the goal reload rule
-/// riding the rebuild (the replacement flow's fresh build seeds
-/// faithfully, the TS constructor load).
+/// helper `branch_navigation` runs for forks).
 async fn rebuild_engine_context(
     engine: &Arc<dyn SessionEngine>,
     branch_entries: Vec<pa_types::session::FileEntry>,
@@ -354,19 +289,9 @@ async fn rebuild_engine_context(
 }
 
 impl Worker {
-    /// The shared replacement flow (TS `teardownForReplacement` ->
-    /// `buildAndApplyReplacement`): prepare the replacement file, retire
-    /// the live runtime (kernel dispose - the fresh session's kernel
-    /// starts cold), rebind the worker onto the replacement session's cwd
-    /// (TS `createRuntime({ cwd: sessionManager.getCwd() })` - the
-    /// rebind lands between the retire and the rebuild, so the fresh
-    /// session's kernel spawns in the moved-to cwd), swap the store, and
-    /// rebuild the context onto the new branch. After the swap the
-    /// replacement session refreshes its derived state (TS
-    /// `refreshReplacedSessionState`) and rebinds the schedule catalog
-    /// (TS `rebindCronJobsToState`). The fresh session builds in the
-    /// background, so the replacement kernel's prewarm fires at the
-    /// replacement.
+    /// The shared replacement flow: prepare, retire the runtime, rebind the
+    /// cwd (so the fresh kernel spawns in the moved-to cwd), swap the store,
+    /// rebuild the context, refresh the derived state.
     async fn run_session_replacement(
         &self,
         command: &'static str,
@@ -374,19 +299,13 @@ impl Worker {
     ) -> DaemonResponse {
         let target = match prepared {
             Ok(target) => target,
-            // A prepare failure never tore anything down: the live
-            // session, its kernel, and any in-flight work are untouched
-            // (the TS `releaseUncommittedLease` fallthrough).
+            // A prepare failure never tore anything down: the live session is untouched.
             Err(response) => return response,
         };
-        // One replacement at a time: the teardown, the swap, the restore,
-        // and the rebuild below are one serialized critical section, so a
-        // concurrent replacement command never interleaves at the
-        // restore's awaits against this command's session.
+        // One replacement at a time: the teardown, swap, restore, and rebuild
+        // are one critical section against a concurrent replacement.
         let _replacement_gate = self.replacement_gate.lock().await;
-        // TS `teardownForReplacement` rethrows: a failed retire (the
-        // session's own kernel dispose, or a child close) fails the
-        // replacement command with the old runtime already torn down.
+        // A failed retire fails the command with the old runtime already torn down.
         if let Err(error) = self.teardown_for_replacement().await {
             return response_failure(None, command, &format!("{error:#}"), None);
         }
@@ -395,17 +314,39 @@ impl Worker {
         }
         match self.navigation.replace_session(target.file).await {
             Ok(()) => {
-                self.refresh_replaced_session_state();
+                self.refresh_replaced_session_state().await;
                 self.reseed_service_tier_for_replacement();
                 self.bind_scheduled_jobs().await;
                 self.prewarm_replacement_session();
+                // The replacement never pushed a roster delta, so the subscribed
+                // surfaces kept the PREVIOUS session's numbers.
+                self.push_roster_delta();
+                // The pane reporter re-reports for the successor session
+                // (the TS replacement arm: the old instance went silent at
+                // the teardown, the successor force-publishes with its own
+                // session reference immediately — same pane, new session).
+                let (active, session_ref) = {
+                    let core = self.core.lock().unwrap();
+                    (core.busy, Worker::herdr_session_ref(&core))
+                };
+                self.herdr
+                    .lock()
+                    .unwrap()
+                    .session_started(active, session_ref);
                 response_success(None, command, Some(json!({ "cancelled": false })))
             }
-            Err(error) => response_failure(None, command, &error, None),
+            Err(error) => {
+                // A failed replacement tore the old session down without
+                // installing the successor: the reporter goes silent (the
+                // TS `session_shutdown` non-quit arm — never release, the
+                // pane is not the worker's to free here).
+                *self.herdr.lock().unwrap() = crate::herdr::HerdrReporter::default();
+                response_failure(None, command, &error, None)
+            }
         }
     }
 
-    /// `new_session` (the dispatch surface of [`SessionNavigation`]).
+    /// `new_session`.
     pub(crate) async fn handle_new_session(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("new_session") {
             return response;
@@ -465,8 +406,6 @@ mod tests {
         worker
     }
 
-    /// Wire shape: `new_session` answers `{ cancelled: false }` and the
-    /// worker's session moves to the fresh file.
     #[tokio::test]
     async fn new_session_answers_the_ts_cancelled_shape() {
         let worker = created_worker().await;
@@ -474,7 +413,6 @@ mod tests {
             .dispatch("new_session", &json!({ "activeSessionId": "nav-session" }))
             .await;
         assert_eq!(response.data, Some(json!({ "cancelled": false })));
-        // The fresh session carries no history.
         let stats = worker
             .dispatch(
                 "get_session_stats",
@@ -484,8 +422,6 @@ mod tests {
         assert!(stats.success, "{stats:?}");
     }
 
-    /// Wire shape: `switch_session` moves to an existing session file;
-    /// a missing file fails the command.
     #[tokio::test]
     async fn switch_session_replaces_the_store_and_fails_on_missing_files() {
         let worker = created_worker().await;
@@ -506,13 +442,7 @@ mod tests {
         );
     }
 
-    /// The replacement ruling over the dispatch surface (TS
-    /// `teardownForReplacement` order): the teardown runs only after the
-    /// replacement file is prepared - a failed switch target never retires
-    /// the live session - while a successful replacement retires the built
-    /// session (its kernel disposes; the fresh session rebuilds in the
-    /// background, its kernel prewarm firing at the replacement). A tree
-    /// move is not a replacement: the built session stays warm.
+    /// A tree move is not a replacement: the built session stays warm.
     // The faux provider registration is global; the lock must span the
     // awaited turns that consume its queue.
     #[allow(clippy::await_holding_lock)]
@@ -571,9 +501,7 @@ mod tests {
             "the turn built the session"
         );
 
-        // A failed switch prepare leaves the live session untouched: no
-        // teardown ran, so the built session (and its kernel) survive -
-        // the TS `releaseUncommittedLease` fallthrough.
+        // A failed switch prepare leaves the live session untouched: no teardown ran.
         let failed = worker
             .dispatch(
                 "switch_session",
@@ -592,8 +520,7 @@ mod tests {
             "a failed prepare must not retire the session"
         );
 
-        // A tree move is not a replacement: the built session stays
-        // (the kernel stays warm - TS rebuilds the branch in place).
+        // A tree move is not a replacement: the built session stays warm.
         let tree = worker
             .dispatch(
                 "get_session_tree",
@@ -606,9 +533,7 @@ mod tests {
             "a tree move must keep the session warm"
         );
 
-        // A successful replacement retires the built session and
-        // rebuilds it in the background (the fresh session's kernel
-        // prewarm fires at the replacement).
+        // A successful replacement retires the built session and rebuilds it in the background.
         let replaced = worker
             .dispatch("new_session", &json!({ "activeSessionId": session_id }))
             .await;
@@ -641,13 +566,6 @@ mod tests {
             .expect("worker drop join");
     }
 
-    /// The switch cwd rebind (TS `switchSession` -> `createRuntime({ cwd:
-    /// sessionManager.getCwd() })`): the worker moves onto the target
-    /// session's recorded working directory - the wire summary's cwd
-    /// follows - while `new_session` keeps the live cwd (TS
-    /// `createRuntime({ cwd: this.cwd })`), and a target whose stored cwd
-    /// is gone fails at the prepare (TS `MissingSessionCwdError`), leaving
-    /// the live session untouched.
     #[tokio::test]
     async fn switch_session_rebinds_the_worker_cwd_and_new_session_keeps_it() {
         let worker = created_worker().await;
@@ -689,9 +607,8 @@ mod tests {
         let target_cwd = target_cwd.path().to_string_lossy().to_string();
         assert_eq!(state.data.as_ref().unwrap()["cwd"], target_cwd);
 
-        // A target whose stored cwd no longer exists fails at the
-        // prepare (the TS `MissingSessionCwdError` text) - the live
-        // session keeps the rebound cwd and its store.
+        // A target whose stored cwd no longer exists fails at the prepare
+        // (TS `MissingSessionCwdError`); the live session keeps its rebound cwd.
         let gone_dir = tempfile::TempDir::new().expect("gone dir");
         let gone = gone_dir.path().join("gone-target.jsonl");
         std::fs::write(
@@ -730,7 +647,6 @@ mod tests {
             .await;
         assert_eq!(state.data.as_ref().unwrap()["cwd"], target_cwd);
 
-        // `new_session` keeps the live cwd.
         let fresh = worker
             .dispatch("new_session", &json!({ "activeSessionId": "nav-session" }))
             .await;
@@ -741,12 +657,6 @@ mod tests {
         assert_eq!(state.data.as_ref().unwrap()["cwd"], target_cwd);
     }
 
-    /// The fork schedule rebind (TS daemon-mode `fork` case ->
-    /// `rebindCronJobsToState(state)` after `runtime.fork`): the live
-    /// session's scheduled jobs rebind onto the forked session - the
-    /// moved-to file and its header id - so a later restore targets the
-    /// fork, not the source branch; the active session id and cwd stay
-    /// (the fork keeps the runtime cwd, TS `forkFrom(_, this.cwd)`).
     #[tokio::test]
     async fn fork_rebinds_the_scheduled_jobs_onto_the_forked_session() {
         let dir = tempfile::TempDir::new().expect("temp dir");
@@ -816,7 +726,6 @@ mod tests {
             .await;
         assert!(forked.success, "fork failed: {forked:?}");
 
-        // The job followed the fork: its binding is the forked session.
         let (forked_file, forked_id, forked_cwd) = {
             let core = worker.core.lock().unwrap();
             let store = core.store.as_ref().expect("forked store");
@@ -835,8 +744,6 @@ mod tests {
         assert_eq!(jobs[0].cwd, forked_cwd, "{jobs:?}");
     }
 
-    /// Wire shape: `import_jsonl` answers the TS import error for a
-    /// missing input file.
     #[tokio::test]
     async fn import_jsonl_answers_the_ts_file_not_found_error() {
         let worker = created_worker().await;
@@ -851,8 +758,7 @@ mod tests {
             response.error.as_deref(),
             Some("File not found: /tmp/no-such-import.jsonl")
         );
-        // The typed error info lets the client render the TS import
-        // error surface (daemon-errors.ts `serializeDaemonError`).
+        // The typed error info lets the client render the TS import error surface.
         assert_eq!(
             response.error_info,
             Some(DaemonErrorInfo::SessionImportFileNotFound {
@@ -861,15 +767,13 @@ mod tests {
         );
     }
 
-    /// A replacement whose stored cwd is gone answers the TS
-    /// `MissingSessionCwdError` text plus its typed error info (the
-    /// issue carries the fallback cwd the client's confirm answers with).
+    /// The typed issue carries the fallback cwd the client's confirm answers with.
     #[tokio::test]
     async fn import_jsonl_answers_the_ts_missing_cwd_error_info() {
         let dir = std::env::temp_dir().join(format!("pa-import-cwd-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        // The live session persists (the import copies its input into the
-        // live session's directory), so the worker starts on a real file.
+        // The import copies its input into the live session's directory, so the worker starts on a
+        // real file.
         let live = dir.join("live-session.jsonl");
         let mut live_file = SessionFile::create("/tmp", None, 0);
         live_file.set_path(live.clone());

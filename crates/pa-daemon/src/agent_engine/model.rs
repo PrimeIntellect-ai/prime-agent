@@ -8,20 +8,29 @@ use super::{
 };
 
 impl AgentSessionEngine {
-    /// The TS `createAgentSession` startup chain (the no-flagged-model
-    /// arm of [`Self::resolve_registry_model`]): the saved settings
-    /// default, then the featured default, then the first available
-    /// model — resolved against `registry`'s current view.
+    /// The startup chain: the saved settings default, then the featured
+    /// default, then the first available model.
     fn startup_chain_model(&self, registry: &pa_core::models::ModelRegistry) -> Option<Model> {
         let available: Vec<Model> = registry.get_available().into_iter().cloned().collect();
         let all: Vec<Model> = registry.get_all().to_vec();
         let settings =
             pa_core::settings::SettingsManager::create(self.cwd(), &self.config.agent_dir);
+        // The create-time `--models` scope: a fresh session starts on the
+        // saved default when in scope, else the first scoped model.
+        let (scoped_models, is_continuing) = match self
+            .startup_scope
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
+            Some(scope) => (scope.scoped_models, scope.is_continuing),
+            None => (Vec::new(), false),
+        };
         pa_core::models::find_initial_model(&pa_core::models::InitialModelOptions {
             cli_provider: None,
             cli_model: None,
-            scoped_models: &[],
-            is_continuing: false,
+            scoped_models: &scoped_models,
+            is_continuing,
             default_provider: settings.get_default_provider(),
             default_model_id: settings.get_default_model(),
             all_models: &all,
@@ -30,22 +39,9 @@ impl AgentSessionEngine {
         .or_else(|| all.first().cloned())
     }
 
-    /// The runtime-config reset at every session restore (TS
-    /// `switchSession` -> `createRuntime` -> `createAgentSession`): the
-    /// session's model selection returns to the session runtime config
-    /// (the spawn-time fallback folded with the create command's explicit
-    /// flags, TS's merged `sessionConfig`), so a mid-session `/model`
-    /// switch belongs to the session it switched and never to the
-    /// moved-to one — whose own file pins what it should run on.
-    ///
-    /// The cached thinking level is always dropped: it was computed
-    /// against the dropped selection (or the previous session's restored
-    /// model). TS `createAgentSession` resolves the model first and
-    /// clamps the thinking level against it, so the clamp must follow the
-    /// resolution the moved-to session actually runs on — the restore
-    /// re-resolves the level once it has recorded its decision, and the
-    /// first read after a flagged reset (an explicit selection the
-    /// restore returns early for) resolves lazily against that selection.
+    /// The runtime-config reset at every session restore: the create's own
+    /// flags survive every replacement; the cached thinking level drops (the
+    /// clamp follows the moved-to model).
     fn reset_selection_to_spawn_fallback(&self) {
         *self
             .effective_thinking
@@ -70,35 +66,25 @@ impl AgentSessionEngine {
     }
 
     /// The create-time session-model restore (see
-    /// [`SessionEngine::restore_session_model`]): reset the selection to
-    /// the spawn-time fallback (the TS runtime-config reset), read the
-    /// session file's saved model context, give the in-flight
-    /// catalog/auth refreshes the bounded readiness window, and record
-    /// the decision for this file. Explicit spawn flags win (TS
-    /// `options.model`); a session with no saved model keeps the startup
-    /// chain; a restore that still misses after the window records the
-    /// fallback (`model_fallback_message`, never silent).
+    /// [`SessionEngine::restore_session_model`]): reset the selection to the
+    /// spawn-time fallback, read the saved model context, give the in-flight
+    /// refreshes the bounded readiness window, and record the decision.
+    /// Explicit spawn flags win; a miss records the fallback (never silent).
     pub(super) async fn restore_session_model_at(
         &self,
         session_path: &std::path::Path,
         pre_read: Option<crate::engine::SavedSessionContext>,
     ) {
-        // An unpersisted session (an in-memory fork or a no-session
-        // worker's replacement) has no file to read: TS restores its
-        // branch context, whose `model_change` row is the live branch's
-        // own — the model the session already runs on — so the
-        // runtime-config reset must not run with nothing to restore.
+        // An unpersisted session (an in-memory fork or a no-session worker's
+        // replacement) has no file to read: the reset must not run with
+        // nothing to restore.
         if session_path.as_os_str().is_empty() {
             return;
         }
         self.reset_selection_to_spawn_fallback();
-        // TS `buildSessionContext()`: the session file pins the model it
-        // last ran on and the thinking level it last set. A caller that
-        // already read the context off an open store hands it in (TS
-        // reads its loaded entries; the create's own `open_windowed`
-        // already parsed the same rows); otherwise the scan is plain
-        // file work on a potentially large session file — park it on a
-        // blocking thread.
+        // The file pins the model and thinking level. A caller that already
+        // read the context hands it in; otherwise the scan is plain file work on
+        // a potentially large file — park it on a blocking thread.
         let saved = if let Some(saved) = pre_read {
             saved
         } else {
@@ -112,12 +98,9 @@ impl AgentSessionEngine {
             };
             saved
         };
-        // TS `createAgentSession` re-reads the session's saved thinking
-        // level at every boot (`hasThinkingEntry ?
-        // existingSession.thinkingLevel` — sdk.ts) when the runtime config
-        // carries no explicit flag: the moved-to session's pinned level
-        // wins over the settings/medium default. The level re-clamps
-        // against the model below (the reset dropped the cache).
+        // TS `createAgentSession` re-reads the saved thinking level at every
+        // boot when the runtime config carries no explicit flag: the pinned
+        // level wins over the settings/medium default.
         if self.current_selection().thinking.is_none() {
             if let Some(level) = saved.thinking {
                 self.configure_model(EngineModelSelection {
@@ -126,9 +109,9 @@ impl AgentSessionEngine {
                 });
             }
         }
-        // An explicit create flag wins for the MODEL (TS `options.model`)
-        // — the saved thinking above still applies, then the restore skips
-        // the model's readiness window entirely.
+        // An explicit create flag wins for the MODEL — the saved thinking
+        // above still applies, and the restore skips the model's readiness
+        // window entirely.
         if self.current_selection().model.is_some() {
             return;
         }
@@ -149,9 +132,8 @@ impl AgentSessionEngine {
         let (model, fallback_message) = if let Some(restored) = restored {
             (Some((restored.provider, restored.id)), None)
         } else {
-            // The TS `modelFallbackMessage`: the restore miss is on the
-            // record — the startup chain owns the session, and the
-            // summary publishes what happened (never silent).
+            // The restore miss is on the record — the startup chain owns the
+            // session.
             let fallback = self.startup_chain_model(&registry);
             let message = match &fallback {
                 Some(fallback) => format!(
@@ -171,15 +153,9 @@ impl AgentSessionEngine {
             model,
             fallback_message,
         });
-        // The decision is on the record now, so the level must resolve
-        // against the model this session actually runs on (the restored
-        // pin, or the startup chain after a missed window) — TS
-        // `createAgentSession` resolves the model first and clamps the
-        // thinking level against it. A concurrent summary/roster read may
-        // have populated the cache against the startup chain while the
-        // restore was still awaiting: drop the cache once more so the
-        // post-decision resolution wins for every later reader (the reset
-        // dropped it too, but the window in between is concurrent).
+        // The decision is on the record, so the level must resolve against the
+        // model this session runs on; a concurrent read may have populated the
+        // cache against the startup chain, so drop it once more.
         *self
             .effective_thinking
             .write()
@@ -187,14 +163,9 @@ impl AgentSessionEngine {
         let _ = self.effective_thinking();
     }
 
-    /// The restored-from-session resolution for the engine's current
-    /// session file (TS `createAgentSession`'s restored-from-session
-    /// step): a decision computed for this file resolves its pinned model
-    /// through the same exact-match path a flagged selection takes — a
-    /// catalog flap rebuilds the private route template on the same id
-    /// (`build_fallback_model`), never silently drifting to the featured
-    /// default. A decision for another file (a replacement flow that has
-    /// not recomputed yet) is ignored.
+    /// The restored-from-session resolution for the engine's current session
+    /// file: a catalog flap never silently drifts to the featured default; a
+    /// decision for another file is ignored.
     fn restored_model_resolution(
         &self,
         registry: &pa_core::models::ModelRegistry,
@@ -216,20 +187,16 @@ impl AgentSessionEngine {
         pa_core::models::resolve_cli_model(Some(&provider), &model_id, registry.get_all()).model
     }
 
-    /// Emit the daemon model-allowlist refusal's adoption event (schema
-    /// v1 `model refused`) from any of this worker's enforcement seams.
-    /// The telemetry binds to the engine's live cwd, so a session that
-    /// moved directories reports through the current project scope.
+    /// Emit the daemon model-allowlist refusal's adoption event (schema v1
+    /// `model refused`) from any of this worker's enforcement seams.
     pub(crate) fn note_model_refused(&self, surface: &str, selector: &str) {
         self.model_refusal_telemetry
             .note_refused(surface, selector, &self.cwd());
     }
 
     /// Resolve the model through the composed registry, then enforce the
-    /// settings `allowedModels` allowlist: a resolution outside the
-    /// allowlist fails loudly here (the silent-fallback guarantee — the
-    /// startup chain never lands a session on a model the daemon may not
-    /// resolve to), and the refusal emits `model refused`.
+    /// settings `allowedModels` allowlist: a resolution outside the allowlist
+    /// fails loudly here (never a silent fallback), emitting `model refused`.
     pub(super) fn resolve_registry_model(&self) -> anyhow::Result<Model> {
         let model = self.resolve_registry_model_unchecked()?;
         let selector = format!("{}/{}", model.provider, model.id);
@@ -245,23 +212,17 @@ impl AgentSessionEngine {
     }
 
     /// The registry resolution before the allowlist gate: the flagged-model
-    /// arm (TS `resolveCliModel`) or the TS `createAgentSession` startup
-    /// chain.
+    /// arm or the startup chain.
     fn resolve_registry_model_unchecked(&self) -> anyhow::Result<Model> {
         let auth = pa_core::auth::AuthStorage::create(&self.config.agent_dir);
         let mut registry =
             pa_core::models::ModelRegistry::create(auth, self.config.agent_dir.join("models.json"));
         // A fresh registry gates private Prime Inference models out until the
-        // async authorization refresh runs; adopt the on-disk authorization
-        // cache so create-time resolution can pick the session's private
-        // model (e.g. internal/glm-5.3-fast).
+        // async authorization refresh runs; adopt the on-disk cache so
+        // create-time resolution can pick the session's private model.
         registry.load_private_authorization_from_cache();
         let selection = self.current_selection();
         let Some(model_name) = selection.model.as_deref() else {
-            // No flagged model: the restored-from-session decision comes
-            // first (TS `createAgentSession`), then the startup chain —
-            // the saved settings default, then the featured default, then
-            // the first available model.
             if let Some(model) = self.restored_model_resolution(&registry) {
                 return Ok(model);
             }
@@ -272,13 +233,9 @@ impl AgentSessionEngine {
             };
             return Ok(model);
         };
-        // TS `resolveCliModel` resolves against `modelRegistry.getAll()`
-        // — the full catalog, not the auth-configured list ("use *all*
-        // models here, not just models with pre-configured auth. This
-        // allows --api-key to be used for first-time setup"): a saved or
-        // switched model keeps resolving when no provider credential is
-        // visible to the worker, and the turn's run-start auth validation
-        // reports the missing credential with the TS message instead.
+        // The full catalog, not the auth-configured list: a saved or switched
+        // model keeps resolving when no credential is visible; run-start auth
+        // validation reports it.
         let all: Vec<Model> = registry.get_all().to_vec();
         let resolved =
             pa_core::models::resolve_cli_model(selection.provider.as_deref(), model_name, &all);
@@ -295,40 +252,42 @@ impl AgentSessionEngine {
     /// registers once per engine: its queued responses then span the whole
     /// session (multi-turn scripts), instead of replaying from the top on
     /// every model resolution.
+    ///
+    /// The script model serves the session while the selection is unset or
+    /// names it; any other selection resolves through the registry (a
+    /// models.json faux-api model streams through the same registered
+    /// provider).
     pub(crate) fn resolve_model(&self) -> anyhow::Result<Model> {
         if let Some(script) = &self.config.faux_script {
-            if let Some(model) = self.faux_model.get() {
-                return Ok(model.clone());
+            let model = if let Some(model) = self.faux_model.get() {
+                model.clone()
+            } else {
+                let model = faux_model_from_script(script)?;
+                let _ = self.faux_model.set(model.clone());
+                model
+            };
+            let selection = self.current_selection();
+            let names_script_model = selection
+                .provider
+                .as_deref()
+                .is_none_or(|provider| provider == model.provider.as_str())
+                && selection
+                    .model
+                    .as_deref()
+                    .is_none_or(|model_id| model_id == model.id.as_str());
+            if names_script_model {
+                return Ok(model);
             }
-            let model = faux_model_from_script(script)?;
-            let _ = self.faux_model.set(model.clone());
-            return Ok(model);
+            return self.resolve_registry_model();
         }
         self.resolve_registry_model()
     }
 
     /// The session's live model for summarization-side model calls
-    /// (compaction summarizers, branch summaries, side questions, and the
-    /// compaction-triggered refinement): the provider target the built
-    /// session's stream reads per call — the model the session is actually
-    /// running on. TS `_runAutoCompaction` runs its summarizer on
-    /// `this.model`, the session's live model, never a fresh resolution.
-    ///
-    /// [`Self::resolve_model`] consults a registry built from scratch each
-    /// call (startup chain over the live catalog, settings, and auth), so
-    /// two consecutive calls can resolve differently and a summarizer arm
-    /// can land on a provider the session never used — the R8 report: a
-    /// live prime-inference session whose threshold auto-compaction
-    /// resolved to `amazon-bedrock` and failed with "No AWS credentials
-    /// available for Bedrock" while the session's turns kept streaming
-    /// through the target's provider. The turn loop already follows the
-    /// target (the stream reads it per call); the summarizer arms follow
-    /// the same chain.
-    ///
-    /// Falls back to [`Self::resolve_model`] before the session's first
-    /// build (the target is set at build): the same resolution the build
-    /// itself would make, for the surfaces that can run before any turn
-    /// (the `/compact` wire command on a fresh session).
+    /// (compaction, branch summaries, side questions): the provider target
+    /// the stream reads per call — never a fresh resolution
+    /// ([`Self::resolve_model`] can resolve differently). Falls back to it
+    /// before the session's first build.
     pub(crate) fn session_model(&self) -> anyhow::Result<Model> {
         if let Some(target) = self
             .provider_target
@@ -341,14 +300,9 @@ impl AgentSessionEngine {
         self.resolve_model()
     }
 
-    /// The effective session thinking level (the sdk.ts `createAgentSession`
-    /// order): the create-config flag, then the settings default, then
-    /// "medium" — always clamped to what the model supports, where the
-    /// model is the one the session actually runs on (the restored pin
-    /// after a session-model restore, the explicit selection after a
-    /// flagged create); a model that cannot be resolved degrades to
-    /// "off". Resolved once at the create/restore seam and cached so
-    /// summary/state calls stay side-effect-free while turns run.
+    /// The effective session thinking level: the create-config flag, then the
+    /// settings default, then "medium" — clamped to what the model supports; an
+    /// unresolvable model degrades to "off". Resolved once and cached.
     pub(crate) fn effective_thinking(&self) -> pa_types::ai::ModelThinkingLevel {
         if let Some(level) = *self
             .effective_thinking
@@ -357,9 +311,38 @@ impl AgentSessionEngine {
         {
             return level;
         }
-        let requested = self
-            .current_selection()
+        let model = self.resolve_model();
+        let selection = self.current_selection();
+        let requested = selection
             .thinking
+            .or_else(|| {
+                // An unflagged fresh session that starts on a scoped entry
+                // takes that entry's `:thinking` (the explicit `--thinking`
+                // above still wins).
+                if selection.model.is_some() {
+                    return None;
+                }
+                let scope = self
+                    .startup_scope
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
+                scope
+                    .filter(|scope| !scope.is_continuing)?
+                    .scoped_models
+                    .iter()
+                    .find(|scoped| {
+                        model.as_ref().is_ok_and(|model| {
+                            scoped.model.provider == model.provider && scoped.model.id == model.id
+                        })
+                    })?
+                    .thinking_level
+                    .and_then(|level| {
+                        let wire = serde_json::to_value(level).ok()?;
+                        wire.as_str()
+                            .and_then(pa_ai::models::thinking_level_from_str)
+                    })
+            })
             .or_else(|| {
                 let settings =
                     pa_core::settings::SettingsManager::create(self.cwd(), &self.config.agent_dir);
@@ -369,7 +352,7 @@ impl AgentSessionEngine {
             })
             // TS `DEFAULT_THINKING_LEVEL`.
             .unwrap_or(pa_types::ai::ModelThinkingLevel::Medium);
-        let resolved = match self.resolve_model() {
+        let resolved = match model {
             Ok(model) => pa_ai::models::clamp_thinking_level(&model, requested),
             Err(_) => pa_types::ai::ModelThinkingLevel::Off,
         };
@@ -380,13 +363,10 @@ impl AgentSessionEngine {
         resolved
     }
 
-    /// Resolve the request API key for `model`: the create-config key (the
-    /// TS `setRuntimeApiKey` path), else the registry's auth resolution
     /// The request-time api key AND its resolved provider headers (the
     /// selection's own headers lead; the registry resolves the model's
-    /// configured ones otherwise): the provider target carries both, so
-    /// models needing custom or auth headers send them on every
-    /// request — the same resolution `set_model`'s swap applies.
+    /// otherwise): models needing custom or auth headers send them on every
+    /// request.
     pub(crate) fn resolve_request_key_and_headers(
         &self,
         model: &Model,
@@ -399,17 +379,14 @@ impl AgentSessionEngine {
             pa_core::models::ModelRegistry::create(auth, self.config.agent_dir.join("models.json"));
         let resolved = registry.get_api_key_and_headers(model, model.headers.as_ref());
         if let Some(api_key) = &self.current_selection().api_key {
-            // The create-config key override pins the key, never the
-            // headers: the registry's merged headers (the auth storage's
-            // single-owner team header among them) still ship, exactly like
-            // the TS `getApiKeyAndHeaders` override path.
+            // The create-config key override pins the key, never the headers:
+            // the registry's merged headers still ship, exactly like the TS
+            // `getApiKeyAndHeaders` override path.
             return (Some(api_key.clone()), resolved.headers);
         }
         (resolved.api_key, resolved.headers)
     }
 
-    /// (auth storage, then the models.json provider `apiKey` — the same
-    /// sources `getApiKeyAndHeaders` merges in the TS product).
     pub(crate) fn resolve_request_api_key(&self, model: &Model) -> Option<String> {
         if let Some(api_key) = &self.current_selection().api_key {
             return Some(api_key.clone());
@@ -424,24 +401,10 @@ impl AgentSessionEngine {
 }
 
 /// The last persisted `rlm_max_depth_state` custom entry in a session
-/// file (TS `_loadPersistedRlmMaxDepthState`): the chat override a
-/// resumed session re-seeds its depth bound from. `None` when the file
-/// carries no override (or cannot be read - an unreadable file keeps the
-/// create-carried bound, exactly the TS fallthrough).
-///
-/// The fast path reads the file ONCE and parses only the lines carrying
-/// the `rlm_max_depth_state` marker: the reference reader this replaces
-/// paid a whole-file read plus a full `parse_session_entries` walk of
-/// every row for a row the product almost never writes (10/10
-/// stock-fixture opens measured `present=false`; the parse dominated -
-/// 34.5ms on the 10MiB no-boundary fixture, 66ms on the compacted
-/// classes). The contract is exactly the reference's: the whole file
-/// must be valid UTF-8 (an invalid byte voids the override, whatever
-/// the newer rows said), lines iterate in file order newest-first, a
-/// matching row whose `data.maxDepth` does not parse as `u64` does not
-/// stop the scan, and malformed lines are skipped. The reference body
-/// moved verbatim into the differential oracle in
-/// `agent_engine/tests.rs` (`persisted_rlm_max_depth_reference`).
+/// file (TS `_loadPersistedRlmMaxDepthState`): the chat override a resumed
+/// session re-seeds its depth bound from. `None` when absent or unreadable.
+/// Same contract as the reference oracle (`agent_engine/tests.rs`): whole
+/// file valid UTF-8, newest-first, malformed lines skip.
 pub(crate) fn persisted_rlm_max_depth(path: Option<&str>) -> Option<u64> {
     let path = std::path::Path::new(path?);
     let mut bytes = Vec::new();
@@ -454,24 +417,16 @@ pub(crate) fn persisted_rlm_max_depth(path: Option<&str>) -> Option<u64> {
     content
         .lines()
         .rev()
-        // The exact union gate: a matching row's raw text carries either
-        // the `customType` literal or a `\u`-escape. The reference reads
-        // every line through `serde_json` (the decoded row set), and a
-        // JSON-escaped marker character (e.g. `rlm_max_depth_\u0073tate`)
-        // only ever appears as a `\uXXXX` escape in the raw text — the
-        // short escape forms cover no marker character and serde never
-        // letter-escapes — so the union admits every line the reference
-        // could match and `rlm_max_depth_row` judges the candidates by
-        // the decoded fields (no missed rows; the `\u` arm only widens
-        // the parse set, never narrows a match).
+        // The exact union gate: a matching row's raw text carries either the
+        // `customType` literal or a `\u`-escape (serde never letter-escapes),
+        // so the union admits every line the reference could match;
+        // `rlm_max_depth_row` judges the candidates by the decoded fields.
         .filter(|line| line.contains("rlm_max_depth_state") || line.contains("\\u"))
         .find_map(rlm_max_depth_row)
 }
 
-/// One candidate line's depth bound: `Some(depth)` when the line is the
-/// matching custom row with a parseable `data.maxDepth`, `None` when it
-/// is not a match or the bound does not parse (the reference's
-/// `find_map` continues past both).
+/// One candidate line's depth bound: `Some(depth)` for a matching custom
+/// row with a parseable `data.maxDepth`, `None` otherwise.
 fn rlm_max_depth_row(line: &str) -> Option<u64> {
     let value: Value = serde_json::from_str(line.trim()).ok()?;
     if value.get("type").and_then(Value::as_str) != Some("custom") {
@@ -486,18 +441,16 @@ fn rlm_max_depth_row(line: &str) -> Option<u64> {
         .and_then(Value::as_u64)
 }
 
-/// The saved model context of a session file (TS `buildSessionContext`):
-/// the pinned `(provider, model)` the session last ran on and the saved
-/// thinking level — present only when the file carries a
-/// `thinking_level_change` row (TS `hasThinkingEntry`). `None` when the
-/// file cannot be read (the create flow owns that failure).
+/// The saved model context of a session file: the pinned `(provider,
+/// model)` and the saved thinking level, present only when the file carries
+/// a `thinking_level_change` row. `None` when the file cannot be read (the
+/// create flow owns that failure).
 pub(crate) fn saved_session_context(
     path: &std::path::Path,
 ) -> Option<crate::engine::SavedSessionContext> {
-    // Reads the saved (provider, model) + thinking level from the
-    // retained window (plus post-window live rows); unsupported files and
-    // malformed retained rows fall back to the full open inside
-    // `open_windowed`.
+    // Reads the saved (provider, model) + thinking level from the retained
+    // window; unsupported files and malformed retained rows fall back to the
+    // full open inside `open_windowed`.
     let store = crate::session_store::SessionFile::open_windowed(path).ok()?;
     let has_thinking_level = store.has_thinking_level();
     Some(saved_session_context_from_parts(
@@ -507,12 +460,8 @@ pub(crate) fn saved_session_context(
 }
 
 /// The saved context derived from an already-folded `restored_settings()`
-/// value: the create path folds the context once off the store its own
-/// `open_windowed` built and hands the restore its share (TS
-/// `createAgentSession` reads the session's loaded entries once; the
-/// port's second windowed open of the same file and its duplicate fold
-/// are gone). The one derivation serves both entry points, so a pre-read
-/// context and a file-read context are identical by construction.
+/// value: the create path folds the context once, so a pre-read context and a
+/// file-read context are identical by construction.
 pub(crate) fn saved_session_context_from_parts(
     context: &pa_core::session::SessionContext,
     has_thinking_level: bool,
@@ -526,9 +475,8 @@ pub(crate) fn saved_session_context_from_parts(
 }
 
 /// Register the faux provider from a script and return its model. Scripts
-/// carry plain-text responses (strings or `{"text"}` objects) or content-block
-/// arrays (thinking, text, tool calls) so harnesses can script full turns.
-/// Verification harness only; never set by the product.
+/// carry plain-text responses or content-block arrays (thinking, text, tool
+/// calls) so harnesses can script full turns. Verification harness only.
 fn faux_model_from_script(script: &str) -> anyhow::Result<Model> {
     let script: serde_json::Value = serde_json::from_str(script)?;
     let parsed = pa_ai::faux::script::parse_faux_script(&script).map_err(anyhow::Error::msg)?;

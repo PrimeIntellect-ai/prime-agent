@@ -1,13 +1,10 @@
 //! The plain-boot revival regression: only journal-busy workers revive
 use super::*;
 
-/// A plain supervisor boot (no update roster) adopts live workers and
-/// revives only dead ones with durable busy evidence. The idle-at-exit
-/// session completed its turn, so its journal's latest record settled to
-/// `busy: false` (`turn_end` — the state a long-lived daemon accumulates
-/// for every idle session); the busy-at-crash session is killed mid-turn,
-/// so its journal still holds the boot `create` `busy: true` record. Only
-/// the mid-turn one relaunches and re-registers.
+/// A plain supervisor boot revives only dead workers with durable busy
+/// evidence: the idle-at-exit session's journal settled to `busy: false`
+/// (`turn_end`); the busy-at-crash session is killed mid-turn with a
+/// `busy: true` record.
 #[test]
 fn plain_boot_revives_only_journal_busy_workers() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -20,7 +17,6 @@ fn plain_boot_revives_only_journal_busy_workers() {
     wait_socket_ready(&socket);
     let (mut client, _hello) = Client::connect(&socket);
 
-    // Session 0 settles idle: its one turn completes before the kill.
     let script_idle = dir.path().join("journal-idle.json");
     std::fs::write(
         &script_idle,
@@ -59,11 +55,8 @@ fn plain_boot_revives_only_journal_busy_workers() {
     let done = client.read_response("p0");
     assert_eq!(done["success"], true, "idle turn failed: {done}");
 
-    // Session 1 dies busy-at-crash: its scripted turn is still open when
-    // the supervisor and both workers are killed. The turn holds open
-    // through its 30s scripted delay, so the kill lands mid-turn on any
-    // runner pacing (the journal's admission `busy: true` record is the
-    // durable evidence the kill waits for below).
+    // Session 1 dies busy-at-crash: the turn holds open through its 30s
+    // scripted delay, so the kill lands mid-turn on any runner pacing.
     let script_busy = dir.path().join("journal-busy.json");
     let busy_text = "still streaming ".repeat(40);
     std::fs::write(
@@ -111,22 +104,14 @@ fn plain_boot_revives_only_journal_busy_workers() {
     assert_eq!(ack["success"], true, "busy prompt failed: {ack}");
     drop(busy_turn_lines);
     // The busy-at-crash premise is DURABLE EVIDENCE, never stream pacing:
-    // wait for the worker's recovery journal to record the admission
-    // `busy: true` for this session BEFORE the kill. The scripted turn
-    // holds open through its 30s delay, so the journal's latest record
-    // stays busy at the kill on any runner pacing - the loaded-host mode
-    // where the old message_start race let the whole turn settle before
-    // the kill landed (both workers then read idle-at-exit, and the
-    // only-busy-revives signal was lost).
+    // wait for the recovery journal's admission `busy: true` record BEFORE
+    // the kill, or both workers read idle-at-exit and the only-busy-revives
+    // signal is lost.
     wait_for_busy_journal_evidence(&agent_dir, &socket, &busy_session);
 
-    // kill -9 the supervisor, then the workers: the descriptors stay on
-    // disk with dead sockets and the journals keep their last evidence
-    // (idle: a settled `turn_end` busy=false; busy: the boot `create`).
-    // The workers are killed by the supervisor's live children, not the
-    // descriptor pids — a mid-test replacement (crash backoff, a stop
-    // re-finalization) can leave the descriptor stale, and a stale-pid
-    // kill would leave the real worker streaming.
+    // Kill the workers by the supervisor's live children, not the
+    // descriptor pids: a mid-test replacement can leave the descriptor
+    // stale, and a stale-pid kill would leave the real worker streaming.
     let supervisor_pid = daemon.child.id();
     let worker_pids = child_pids_of(supervisor_pid);
     assert_eq!(
@@ -151,14 +136,11 @@ fn plain_boot_revives_only_journal_busy_workers() {
         }
     }
 
-    // Plain boot on the same socket (no update-roster environment).
     let restart_before = pa_daemon::util::now_iso();
     let mut daemon2 = spawn_supervisor(&socket, &agent_dir);
     wait_socket_ready(&socket);
     let log_path = pa_daemon::paths::daemon_log_path(&socket, &agent_dir);
 
-    // The busy-at-crash session (journal busy=true) relaunches and
-    // re-registers; the idle-at-exit session never does.
     let deadline = Instant::now() + Duration::from_secs(15);
     let registered = loop {
         let registered = distinct(workers_registered_since(&log_path, &restart_before));
@@ -174,8 +156,6 @@ fn plain_boot_revives_only_journal_busy_workers() {
     };
     assert_eq!(registered, vec![busy_session.clone()]);
 
-    // The idle-at-exit session is skipped with a log line and stays off
-    // the roster.
     let skip_line = format!("session worker {idle_session} was idle at exit; not revived");
     let deadline = Instant::now() + Duration::from_secs(5);
     while !std::fs::read_to_string(&log_path)
@@ -203,12 +183,9 @@ fn plain_boot_revives_only_journal_busy_workers() {
         "only the busy-at-crash session came back"
     );
 
-    // Shutdown takes the restarted supervisor and the relaunched worker
-    // down (the relaunch persisted the new pid in the descriptor). The
-    // relaunched worker replays the restored queue's turn too, so the
-    // shutdown's flush barrier rides out the scripted delay before its
-    // reply - the budgets below absorb the whole stop pass (the barrier
-    // wait, then the terminal escalation), never a fixed fast exit.
+    // The relaunched worker replays the restored queue's turn, so the
+    // shutdown's flush barrier rides out the scripted delay: the budgets
+    // below absorb the whole stop pass, never a fixed fast exit.
     let relaunched = load_worker_descriptor(&agent_dir, &socket, &busy_session);
     client2.send_command("sd", &json!({ "type": "shutdown" }));
     let shutdown = client2.read_response("sd");

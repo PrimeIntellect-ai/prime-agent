@@ -1,22 +1,6 @@
-//! Whole-file own-usage scan: the single source of truth for a session's
-//! own token/cost summary.
-//!
-//! Port of the TS session-listing fold (`foldSessionScanLine`'s usage arms +
-//! `snapshotSessionInfo`, `core/session-manager.ts`): assistant usage
-//! keyed by entry id, a `child_usage_attributed` entry replacing the raw
-//! block with its latest aggregate while every child block accumulates,
-//! summarization (`compaction` / `branch_summary`) usage added, and all
-//! attributed child usage subtracted. The child's own row carries the
-//! child spend, so recursive rollups never double count. TS's live
-//! `getOwnUsageSummary` documents the same contract: "Whole-file own
-//! spend, identical to the catalog scan so rows never shift at
-//! passivation" (`agent-session.ts`).
-//!
-//! Consumers: the saved-session listing scan (`session_store` feeds one
-//! [`UsageScan`] while parsing each line) and the worker's live own-usage
-//! summary ([`read_own_usage_summary`]). The live side layers only what
-//! never reaches the file — child spend attributed in memory ahead of the
-//! durable entry, and memoization — on top of this fold.
+//! Whole-file own-usage scan: the single source of truth for a session's own
+//! token/cost summary — assistant usage keyed by entry id, aggregates
+//! replacing raw blocks, child spend subtracted so rollups never double count.
 
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -28,9 +12,8 @@ use serde::{Deserialize, Serialize};
 
 use pa_core::session_engine::compaction_exec::{add_assistant_usage, subtract_assistant_usage};
 
-/// TS `SessionUsageSummary` (`sessionUsageSummaryFrom`): the token/cost
-/// summary rows publish. `inputTokens` folds cache reads and writes into
-/// the input total; `cost` is the provider-billed total.
+/// The token/cost summary the rows publish: `inputTokens` folds cache reads
+/// and writes into the input total; `cost` is the provider-billed total.
 ///
 /// `Eq` is manual: `cost` is the f64 under `JsNumber`, and JSON numbers are
 /// always finite (a NaN never round-trips `serde_json`), so equality is
@@ -45,8 +28,7 @@ pub struct SessionUsageSummary {
 
 impl Eq for SessionUsageSummary {}
 
-/// TS `sessionUsageSummaryFrom`: `None` — an absent wire field — when the
-/// session recorded no billable work at all.
+/// `None` (absent wire field) when the session recorded no billable work at all.
 #[must_use]
 pub fn session_usage_summary_from(usage: &Usage) -> Option<SessionUsageSummary> {
     let input_tokens = usage
@@ -63,12 +45,9 @@ pub fn session_usage_summary_from(usage: &Usage) -> Option<SessionUsageSummary> 
     })
 }
 
-/// The per-assistant usage map. TS uses a `Map`: a later write replaces in
-/// place and iteration keeps first-insertion order — the final summary
-/// sums the cost floats in exactly the order TS does. The id index keeps
-/// `set`/`contains` constant-time over that insertion order (a plain
-/// `HashMap` would reorder the sums; a bare vec scan is the O(n²) fold
-/// long sessions would stall on).
+/// The per-assistant usage map: a later write replaces in place and iteration
+/// keeps first-insertion order — the summary sums the cost floats in that
+/// order (a `HashMap` would reorder the sums; a vec scan is the O(n²) stall).
 #[derive(Default, Clone)]
 struct AssistantUsageById {
     entries: Vec<(String, Usage)>,
@@ -92,6 +71,30 @@ impl AssistantUsageById {
             self.index.insert(id.to_string(), self.entries.len());
             self.entries.push((id.to_string(), usage));
         }
+    }
+}
+
+/// The persisted sidecar's per-assistant map: the entries vec in its
+/// insertion order (the fold's float-sum order — the index rebuilds from
+/// it on load, exactly what `set` maintains).
+impl Serialize for AssistantUsageById {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(
+            self.entries
+                .iter()
+                .map(|(id, usage)| (id.as_str(), PersistedUsage::from(*usage))),
+        )
+    }
+}
+
+impl<'de> Deserialize<'de> for AssistantUsageById {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let entries = Vec::<(String, PersistedUsage)>::deserialize(deserializer)?;
+        let mut map = AssistantUsageById::default();
+        for (id, usage) in entries {
+            map.set(&id, Usage::from(usage));
+        }
+        Ok(map)
     }
 }
 
@@ -152,37 +155,122 @@ impl From<ScanUsage> for Usage {
     }
 }
 
-/// The fold's two billable totals (TS PR #2506's `usageTotal`
-/// projection): `own` subtracts every attributed child block (the child's
-/// own row carries it), `total` keeps the child spend (the session-tree
-/// spend including settled children).
+/// The fold's two billable totals: `own` subtracts every attributed child
+/// block, `total` keeps the child spend (the session-tree spend including settled children).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SessionUsageTotals {
     pub own: Usage,
     pub total: Usage,
 }
 
+/// The persisted form of one usage block (the scan-state sidecar's
+/// encoding): token counts unchanged, the five cost floats as
+/// `to_bits()` integers. The workspace's `serde_json` runs without
+/// `float_roundtrip`, and its decimal parse need not round-trip every
+/// shortest-repr float — a one-ulp drift in a persisted block would make
+/// a resumed fold's sums differ from a full scan's. The window sidecar
+/// encodes its floats the same way (pa-core `window_cache::float_bits`).
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedUsage {
+    input: u64,
+    output: u64,
+    cache_read: u64,
+    cache_write: u64,
+    total_tokens: u64,
+    cost_input: u64,
+    cost_output: u64,
+    cost_cache_read: u64,
+    cost_cache_write: u64,
+    cost_total: u64,
+}
+
+impl From<Usage> for PersistedUsage {
+    fn from(usage: Usage) -> Self {
+        Self {
+            input: usage.input,
+            output: usage.output,
+            cache_read: usage.cache_read,
+            cache_write: usage.cache_write,
+            total_tokens: usage.total_tokens,
+            cost_input: usage.cost.input.as_f64().to_bits(),
+            cost_output: usage.cost.output.as_f64().to_bits(),
+            cost_cache_read: usage.cost.cache_read.as_f64().to_bits(),
+            cost_cache_write: usage.cost.cache_write.as_f64().to_bits(),
+            cost_total: usage.cost.total.as_f64().to_bits(),
+        }
+    }
+}
+
+impl From<PersistedUsage> for Usage {
+    fn from(persisted: PersistedUsage) -> Self {
+        Usage {
+            input: persisted.input,
+            output: persisted.output,
+            cache_read: persisted.cache_read,
+            cache_write: persisted.cache_write,
+            total_tokens: persisted.total_tokens,
+            cost: UsageCost {
+                input: JsNumber(f64::from_bits(persisted.cost_input)),
+                output: JsNumber(f64::from_bits(persisted.cost_output)),
+                cache_read: JsNumber(f64::from_bits(persisted.cost_cache_read)),
+                cache_write: JsNumber(f64::from_bits(persisted.cost_cache_write)),
+                total: JsNumber(f64::from_bits(persisted.cost_total)),
+            },
+        }
+    }
+}
+
+/// `#[serde(with)]` for every persisted `Usage` field: the bits encoding
+/// above, behind the plain `Usage` field type.
+mod usage_bits {
+    use super::{PersistedUsage, Usage};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    // serde's `serialize_with` contract pins `&T` - the lint's by-value
+    // form would not be callable as a serde attribute helper.
+    #[allow(clippy::trivially_copy_pass_by_ref)]
+    pub(super) fn serialize<S: Serializer>(
+        value: &Usage,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        PersistedUsage::from(*value).serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Usage, D::Error> {
+        PersistedUsage::deserialize(deserializer).map(Usage::from)
+    }
+}
+
 /// The streaming whole-file own-usage accumulator: feed one entry at a
 /// time in file order, then read [`summary`](Self::summary). Line order is
 /// the fold's authority — an attribution folds only when its target is
 /// already in the map (the assistant entry precedes its children's settle
-/// in the file).
-#[derive(Default, Clone)]
+/// in the file). Serialize is the persisted sidecar's form: every cost
+/// float rides as `to_bits()` ([`PersistedUsage`]) so a resumed fold sums
+/// bit-identical floats to a full scan. Persisted in
+/// `<stem>.info-cache.json`: any change to this fold's semantics or fields
+/// must bump `info_sidecar::INFO_SIDECAR_VERSION`, or old sessions keep
+/// the old build's prefix fold.
+#[derive(Default, Clone, Serialize, Deserialize)]
 pub struct UsageScan {
     assistant_usage_by_id: AssistantUsageById,
+    #[serde(with = "usage_bits")]
     attributed_child_usage: Usage,
+    #[serde(with = "usage_bits")]
     summarization_usage: Usage,
 }
 
 impl UsageScan {
-    /// TS `storeSessionScanState`'s retained-usage accounting: the number of
-    /// per-assistant-message records the scan state keeps resident.
+    /// The per-assistant-message records the scan state keeps resident.
     pub(crate) fn retained_entries(&self) -> usize {
         self.assistant_usage_by_id.len()
     }
 
-    /// TS `foldSessionScanLine`: the raw assistant usage keyed by entry id.
-    /// Only an assistant row with a usage block lands in the map.
+    /// TS `foldSessionScanLine`: the raw assistant usage keyed by entry id (only an assistant
+    /// row with a usage block lands in the map).
     pub(crate) fn fold_message(&mut self, id: &str, role: Option<&str>, usage: Option<Usage>) {
         if role != Some("assistant") {
             return;
@@ -192,11 +280,8 @@ impl UsageScan {
         }
     }
 
-    /// TS `foldSessionScanLine`: a `child_usage_attributed` entry folds
-    /// only when its target is already in the map — the latest aggregate
-    /// replaces the raw block while every child block accumulates. A
-    /// malformed attribution (missing aggregate or child block)
-    /// contributes nothing; well-formed files always carry both.
+    /// A `child_usage_attributed` entry folds only when its target is already
+    /// in the map; a malformed attribution contributes nothing.
     pub(crate) fn fold_child_attribution(
         &mut self,
         target_id: Option<&str>,
@@ -214,17 +299,15 @@ impl UsageScan {
         }
     }
 
-    /// TS `foldSessionScanLine`: a `compaction` or `branch_summary`
-    /// entry's own usage (the summarization call's billed block).
+    /// A `compaction` or `branch_summary` entry's own usage (the summarization's billed block).
     pub(crate) fn fold_summarization(&mut self, usage: Option<Usage>) {
         if let Some(usage) = usage {
             add_assistant_usage(&mut self.summarization_usage, &usage);
         }
     }
 
-    /// The totals behind [`summary`](Self::summary): `own` subtracts the
-    /// attributed child spend, `total` keeps it (the deletion capture reads
-    /// both from the child's frozen file).
+    /// The totals behind [`summary`](Self::summary): `own` subtracts the attributed child spend,
+    /// `total` keeps it (the deletion capture reads both from the child's frozen file).
     #[must_use]
     pub fn totals(&self) -> SessionUsageTotals {
         let mut total = Usage::default();
@@ -237,21 +320,19 @@ impl UsageScan {
         SessionUsageTotals { own, total }
     }
 
-    /// TS `snapshotSessionInfo`'s total: the assistant aggregates plus the
-    /// summarization calls, minus every attributed child block (clamped
-    /// at zero to absorb attribution drift).
+    /// The assistant aggregates plus the summarization calls, minus every
+    /// attributed child block (clamped at zero to absorb attribution drift).
     #[must_use]
     pub fn summary(&self) -> Option<SessionUsageSummary> {
         session_usage_summary_from(&self.totals().own)
     }
 }
 
-/// The standalone scanner's minimal entry parse: only the usage fold's
-/// fields, so unknown (and large) content is skipped by serde.
+/// The standalone scanner's minimal entry parse: only the usage fold's fields.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ScanEntry {
-    #[serde(rename = "type")]
+    #[serde(rename = "type", default)]
     type_: String,
     #[serde(default)]
     id: String,
@@ -277,8 +358,7 @@ struct ScanMessage {
 }
 
 impl ScanEntry {
-    /// The standalone scanner's dispatch: fold this parsed entry into a
-    /// scan (the same fold the listing scan drives).
+    /// Fold this parsed entry into a scan (the same fold the listing scan drives).
     fn fold_into(&self, scan: &mut UsageScan) {
         match self.type_.as_str() {
             "message" => {
@@ -300,8 +380,7 @@ impl ScanEntry {
     }
 }
 
-/// Whole-file scan over every parsable line: invalid lines contribute
-/// nothing, exactly like the listing scan.
+/// Whole-file scan over every parsable line; invalid lines contribute nothing.
 fn scan_file(path: &Path) -> Option<UsageScan> {
     let file = fs::File::open(path).ok()?;
     let mut scan = UsageScan::default();
@@ -324,20 +403,42 @@ fn scan_file(path: &Path) -> Option<UsageScan> {
     Some(scan)
 }
 
-/// Whole-file own usage (the saved-row summary): the worker's live
-/// own-usage summary reads this, so live rows and saved rows never
-/// disagree.
+/// Whole-file own usage (the saved-row summary) for the one-off readers
+/// outside the resumable scan: the saved-delete capture
+/// (`saved_session_commands`), which reads the file once while it is
+/// still alive. The listing surfaces, the worker's live row, and the
+/// spawn ledger's tombstone fallback (`rlm_ledger`) all read the
+/// resumable `session_store::read_session_info` instead.
 #[must_use]
 pub fn read_own_usage_summary(path: &Path) -> Option<SessionUsageSummary> {
     scan_file(path).and_then(|scan| scan.summary())
 }
 
-/// Whole-file own + total usage (the deletion capture reads both from the
-/// child's frozen file: `own` for the child's own row, `total` for the
-/// spend the parent's attribution carries).
+/// Whole-file own + total usage: the deletion capture reads both from the
+/// child's frozen file (own row + the parent's attribution spend).
 #[must_use]
 pub fn read_session_usage(path: &Path) -> Option<SessionUsageTotals> {
     scan_file(path).map(|scan| scan.totals())
+}
+
+/// The same fold over a store's in-memory entries (the pathless worker has
+/// no file to scan, but its live entries carry the rows a flush would write).
+/// An entry that does not parse contributes nothing.
+pub(crate) fn own_usage_summary_of(
+    entries: &[crate::session_store::SessionEntry],
+) -> Option<SessionUsageSummary> {
+    let mut scan = UsageScan::default();
+    for entry in entries {
+        // `type`/`id` live on the envelope (`#[serde(flatten)] fields` keeps only
+        // the rest); the usage-bearing fields deserialize borrowed.
+        let Ok(mut parsed) = ScanEntry::deserialize(&entry.fields) else {
+            continue;
+        };
+        parsed.type_.clone_from(&entry.type_);
+        parsed.id.clone_from(&entry.id);
+        parsed.fold_into(&mut scan);
+    }
+    scan.summary()
 }
 
 #[cfg(test)]
@@ -374,10 +475,8 @@ mod tests {
         })
     }
 
-    /// TS `snapshotSessionInfo` on a parent whose child settled twice: the
-    /// latest aggregate replaces the raw block, every child block
-    /// accumulates, and the summary subtracts the child spend (the child's
-    /// own row carries it — no rollup double count).
+    /// The latest aggregate replaces the raw block, every child block
+    /// accumulates, and the summary subtracts the child spend (no double count).
     #[test]
     fn latest_aggregate_replaces_raw_and_child_usage_accumulates() {
         let summary = scan_summary(&[
@@ -410,9 +509,6 @@ mod tests {
         );
     }
 
-    /// TS folds an attribution only when its target is already in the map:
-    /// an attribution ahead of its assistant entry (or aimed at a missing
-    /// one) contributes nothing.
     #[test]
     fn attribution_without_a_present_target_folds_nothing() {
         let assistant = message(
@@ -436,10 +532,8 @@ mod tests {
                 cost: 0.4
             })
         );
-        // After the assistant entry the same attribution DOES fold: the
-        // aggregate replaces the raw block and the child spend subtracts
-        // back — the same own tokens, at the aggregate/child arithmetic's
-        // float residue (the file-order authority is TS's).
+        // After the assistant entry the same attribution DOES fold — the same
+        // own tokens, at the aggregate/child arithmetic's float residue.
         assert_eq!(
             after,
             Some(SessionUsageSummary {
@@ -450,8 +544,6 @@ mod tests {
         );
     }
 
-    /// `compaction` and `branch_summary` entries carry the summarization
-    /// call's own billed usage into the summary.
     #[test]
     fn summarization_usage_is_added() {
         let summary = scan_summary(&[
@@ -476,9 +568,8 @@ mod tests {
                            "cost": { "input": 0.0, "output": 0.1, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.1 } }
             }),
         ]);
-        // 100 + 200 + 5 + 50 input tokens; 10 + 20 + 5 output. The cost
-        // sums in the fold's order: the summarization blocks accumulate
-        // first ($0.3 + $0.1), then fold into the assistant total.
+        // 100 + 200 + 5 + 50 input tokens; 10 + 20 + 5 output. The cost sums
+        // in the fold's order: the summarization blocks accumulate first.
         assert_eq!(
             summary,
             Some(SessionUsageSummary {
@@ -489,8 +580,6 @@ mod tests {
         );
     }
 
-    /// A session with no billable work publishes no usage field at all
-    /// (TS `sessionUsageSummaryFrom` returns undefined).
     #[test]
     fn no_billable_work_is_none() {
         assert_eq!(scan_summary(&[]), None);
@@ -511,8 +600,6 @@ mod tests {
         );
     }
 
-    /// TS `subtractAssistantUsage` clamps at zero to absorb attribution
-    /// drift (child spend the aggregates never folded).
     #[test]
     fn child_attribution_drift_clamps_at_zero() {
         let summary = scan_summary(&[
@@ -527,13 +614,11 @@ mod tests {
             // Drifted child spend larger than the aggregate folds in.
             attribution("a", usage(900, 90, 0.9), usage(10, 1, 0.1)),
         ]);
-        // The clamp drains the session to no billable work at all, so the
-        // summary is absent (TS `sessionUsageSummaryFrom` → undefined).
+        // The clamp drains the session to no billable work at all, so the summary is absent.
         assert_eq!(summary, None);
     }
 
-    /// The map keeps first-insertion order so the cost sums stay
-    /// bit-identical to the TS `Map` fold (a `HashMap` would reorder them).
+    /// The map keeps first-insertion order so the cost sums stay bit-identical to the TS fold.
     #[test]
     fn cost_sums_follow_insertion_order() {
         let line = |id: &str, cost: f64| {
@@ -552,10 +637,8 @@ mod tests {
         assert_eq!(cost, Some(0.600_000_000_000_000_1));
     }
 
-    /// A persisted partial usage object (`{input, output, totalTokens}`
-    /// without `cacheRead`/`cacheWrite`/`cost`) folds like TS
-    /// `JSON.parse`: the message keeps its row and every absent field
-    /// counts as zero instead of rejecting the whole entry.
+    /// TS `JSON.parse` keeps the row (absent fields count as zero) — the wire shape is
+    /// `{input, output, totalTokens}` without `cacheRead`/`cacheWrite`/`cost`.
     #[test]
     fn partial_usage_objects_keep_the_row() {
         let summary = scan_summary(&[
@@ -576,8 +659,6 @@ mod tests {
         );
     }
 
-    /// Token totals saturate at `u64::MAX` (JS `Infinity`): persisted
-    /// overflow must never panic the scan or wrap to an undercount.
     #[test]
     fn overflowing_usage_saturates_never_panics() {
         let line = |id: &str| {
@@ -602,8 +683,6 @@ mod tests {
         );
     }
 
-    /// The standalone whole-file scan reads the same fold from disk;
-    /// unparsable lines contribute nothing.
     #[test]
     fn read_own_usage_summary_scans_a_file() {
         let dir = std::env::temp_dir().join(format!("session-usage-{}", uuid::Uuid::new_v4()));
@@ -630,12 +709,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The captured-session numeric parity harness (manual run in the gate
-    /// VM): `SAVED_USAGE_FIXTURE=<captured .jsonl> cargo test --ignored`.
-    /// The devbox parent fixture (228 entries, six attributions onto one
-    /// target) pins the whole fold against the TS-computed summary of the
-    /// same file: own spend only — the attributed child spend (input
-    /// 50,208 / output 2,929 / $0.0089957) stays on the child rows.
+    /// The captured-session numeric parity harness (manual run in the gate VM):
+    /// `SAVED_USAGE_FIXTURE=<captured .jsonl> cargo test --ignored`. The devbox
+    /// fixture pins the fold against the TS-computed summary: own spend only —
+    /// the attributed child spend stays on the child rows.
     #[test]
     #[ignore = "needs a captured session fixture (SAVED_USAGE_FIXTURE)"]
     fn captured_session_summary_matches_the_ts_fold() {

@@ -1,12 +1,7 @@
 //! Export theme resolution: a theme file to the CSS custom properties the
-//! export template consumes. Port of the TS exporter's theme pipeline
-//! (`getResolvedThemeColors`, `getThemeExportColors`, and the export-color
-//! derivation) over the bundled theme data ([`pa_types::themes`]) and custom
-//! theme files under `<agent-dir>/themes/`.
-//!
-//! Pure functions only: the terminal-side theme rendering (ANSI colors,
-//! surface blending) is pa-tui's; this module only produces the CSS strings
-//! embedded into an exported HTML file.
+//! export template consumes, over the bundled theme data
+//! ([`pa_types::themes`]) and custom files under `<agent-dir>/themes/`.
+//! Pure functions only; terminal-side rendering is pa-tui's.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -40,8 +35,6 @@ struct ExportBackgrounds {
 const DEFAULT_DARK_TEXT: &str = "#e5e5e7";
 const DEFAULT_LIGHT_TEXT: &str = "#000000";
 
-/// A parsed theme file: the name it advertises, its variables, colors, and
-/// the export background overrides.
 struct ExportThemeJson {
     name: String,
     vars: Map<String, Value>,
@@ -75,9 +68,8 @@ enum ResolvedColor {
     Css(String),
 }
 
-/// Resolve one color value against the theme variables (TS `resolveVarRefs`):
-/// numbers, empty strings, and hex colors pass through; anything else is a
-/// variable reference, resolved transitively with cycle detection.
+/// Resolve one color value against the theme variables: numbers and hex colors pass through;
+/// anything else is a variable reference, resolved transitively with cycle detection.
 fn resolve_var_refs(value: &Value, vars: &Map<String, Value>) -> Result<ResolvedColor> {
     match value {
         Value::Number(index) => Ok(ResolvedColor::Ansi256(as_index(index)?)),
@@ -126,8 +118,8 @@ fn as_index(value: &serde_json::Number) -> Result<u64> {
         .ok_or_else(|| anyhow!("Invalid color value: {value}"))
 }
 
-/// Convert an ANSI-256 index to a hex color (TS `ansi256ToHex`): the basic 16
-/// (approximate terminal values), the 6x6x6 cube, and the grayscale ramp.
+/// Convert an ANSI-256 index to a hex color: the basic 16 (approximate
+/// terminal values), the 6x6x6 cube, and the grayscale ramp.
 fn ansi256_to_hex(index: u64) -> String {
     const BASIC_COLORS: [&str; 16] = [
         "#000000", "#800000", "#008000", "#808000", "#000080", "#800080", "#008080", "#c0c0c0",
@@ -150,16 +142,15 @@ fn ansi256_to_hex(index: u64) -> String {
     format!("#{gray:02x}{gray:02x}{gray:02x}")
 }
 
-/// A resolved color as a CSS color string: ANSI-256 indices become hex, and
-/// empty values (the terminal default) become the theme's default text
-/// color (TS `getResolvedThemeColors`).
+/// A resolved color as a CSS color string: ANSI-256 indices become hex, and empty
+/// values (the terminal default) become the theme's default text color.
 fn css_color(color: ResolvedColor, light: bool) -> String {
     match color {
         ResolvedColor::Ansi256(index) => ansi256_to_hex(index),
         ResolvedColor::Css(value) => {
             if value.is_empty() {
-                // The terminal's default fg color; the export falls back to
-                // plain black/white like the TS default-text choice.
+                // The terminal's default fg color falls back to plain
+                // black/white.
                 if light {
                     DEFAULT_LIGHT_TEXT.to_string()
                 } else {
@@ -172,8 +163,8 @@ fn css_color(color: ResolvedColor, light: bool) -> String {
     }
 }
 
-/// The theme file for `name`: a built-in (bundled data) or a custom theme
-/// file under `<agent-dir>/themes/<name>.json` (TS `loadThemeJson`).
+/// The theme file for `name`: a built-in, or a custom theme under
+/// `<agent-dir>/themes/<name>.json`.
 fn load_theme_json(name: &str, agent_dir: &Path) -> Result<ExportThemeJson> {
     let raw = if let Some(builtin) = pa_types::themes::builtin_theme_json(name) {
         builtin.to_string()
@@ -220,9 +211,8 @@ fn parse_theme_json(raw: &str) -> Result<ExportThemeJson> {
     })
 }
 
-/// The default theme when settings carry none (TS `getDefaultTheme`): a
-/// light terminal background (`COLORFGBG`) selects the light theme, and
-/// everything else gets the Prime dark-first default.
+/// The default theme when settings carry none: a light terminal background
+/// (`COLORFGBG`) selects the light theme, everything else gets Prime.
 pub(crate) fn default_theme_name() -> String {
     if detect_light_terminal_background(std::env::var("COLORFGBG").ok().as_deref()) {
         "light".to_string()
@@ -231,8 +221,8 @@ pub(crate) fn default_theme_name() -> String {
     }
 }
 
-/// `COLORFGBG` background detection (TS `detectBackgroundFromColorFgBg`):
-/// the background palette slot is 8+ for light terminals.
+/// `COLORFGBG` detection: the background palette slot is 8+ for light
+/// terminals.
 fn detect_light_terminal_background(value: Option<&str>) -> bool {
     let Some(value) = value else { return false };
     let mut parts = value.split(';');
@@ -266,7 +256,7 @@ fn parse_color(color: &str) -> Option<(u8, u8, u8)> {
     }
 }
 
-/// Relative luminance, 0-1 (TS `getLuminance`, WCAG).
+/// Relative luminance, 0-1 (WCAG).
 fn luminance(r: u8, g: u8, b: u8) -> f64 {
     let to_linear = |c: u8| {
         let s = f64::from(c) / 255.0;
@@ -279,18 +269,15 @@ fn luminance(r: u8, g: u8, b: u8) -> f64 {
     0.2126 * to_linear(r) + 0.7152 * to_linear(g) + 0.0722 * to_linear(b)
 }
 
-/// Brighten (`factor > 1`) or darken (`factor < 1`) a parsed color (TS
-/// `adjustBrightness`).
+/// Brighten (`factor > 1`) or darken (`factor < 1`) a parsed color.
 fn adjust_brightness(color: (u8, u8, u8), factor: f64) -> String {
     let channel = |c: u8| ((f64::from(c) * factor).round().clamp(0.0, 255.0)) as u8;
     let (r, g, b) = color;
     format!("rgb({}, {}, {})", channel(r), channel(g), channel(b))
 }
 
-/// The export backgrounds derived from the theme's user-message background
-/// (TS `deriveExportColors`): a light base darkens the page slightly, a dark
-/// base lightens it, and the info row shifts toward the theme's tint.
-/// Unparseable colors fall back to the dark neutrals the TS exporter uses.
+/// The export backgrounds: a light base darkens the page, a dark base lightens it; unparseable
+/// colors fall back to the TS exporter's dark neutrals.
 fn derive_export_colors(base_color: &str) -> ExportBackgrounds {
     let Some((r, g, b)) = parse_color(base_color) else {
         return ExportBackgrounds {
@@ -318,10 +305,8 @@ fn derive_export_colors(base_color: &str) -> ExportBackgrounds {
     }
 }
 
-/// Resolve the export theme (TS `generateThemeVars` + the background
-/// substitutions in `generateHtml`): every theme color plus the refinement
-/// colors as `--key: value;` lines, then the export backgrounds (the
-/// theme's explicit `export` section, else the derived ones).
+/// Resolve the export theme: every theme color plus the refinement colors as `--key: value;` lines,
+/// then the export backgrounds.
 pub(crate) fn resolve_export_theme(
     theme_name: Option<&str>,
     agent_dir: &Path,
@@ -382,10 +367,7 @@ pub(crate) fn resolve_export_theme(
 mod tests {
     use super::*;
 
-    /// The bundled prime theme resolves its accent and export backgrounds
-    /// exactly like the TS exporter: `--accent: #7c6faf;` through the
-    /// `primary` variable, and the export section's `bg`/`surface`/`panel`
-    /// references resolved to their hex values.
+    /// The bundled prime theme resolves like the TS exporter.
     #[test]
     fn prime_theme_resolves_like_the_ts_exporter() {
         let theme = resolve_export_theme(Some("prime"), Path::new("/nonexistent-agent-dir"))
@@ -397,8 +379,6 @@ mod tests {
         assert_eq!(theme.info_bg, "#151518");
     }
 
-    /// ANSI-256 palette indices resolve to their hex approximations (TS
-    /// `ansi256ToHex`).
     #[test]
     fn ansi256_colors() {
         assert_eq!(ansi256_to_hex(196), "#ff0000");
@@ -412,10 +392,8 @@ mod tests {
         assert!(theme.theme_vars.contains("--error: #cc6666;"));
     }
 
-    /// A custom theme under `<agent-dir>/themes/<name>.json` loads (variables
-    /// resolved, the terminal-default color mapped to the theme's default
-    /// text color, the `export` override honored), and an unknown theme name
-    /// is the TS error.
+    /// A custom theme under `<agent-dir>/themes/<name>.json` loads (variables resolved, the
+    /// `export` override honored); an unknown name errors.
     #[test]
     fn custom_theme_discovery_and_not_found() {
         let dir = tempfile::TempDir::new().expect("temp dir");
@@ -440,9 +418,6 @@ mod tests {
         assert_eq!(error.to_string(), "Theme not found: missing");
     }
 
-    /// Without an explicit theme the default is the COLORFGBG-detected one
-    /// (TS `getDefaultTheme`): light terminals get `light`, everything else
-    /// `prime`.
     #[test]
     fn default_theme_detection() {
         assert!(!detect_light_terminal_background(Some("15;0")));
@@ -452,9 +427,6 @@ mod tests {
         assert!(!detect_light_terminal_background(Some("bogus")));
     }
 
-    /// Export backgrounds derive from `userMessageBg` when the theme has no
-    /// `export` section: a dark base lightens (0.7/0.85) and the info
-    /// background shifts per-channel (TS `deriveExportColors`).
     #[test]
     fn derived_export_colors() {
         let dir = tempfile::TempDir::new().expect("temp dir");
@@ -480,8 +452,6 @@ mod tests {
         );
     }
 
-    /// Light themes flip the derivation direction and the default text
-    /// color, and carry the light refinement pair.
     #[test]
     fn light_theme_derivation() {
         let dir = tempfile::TempDir::new().expect("temp dir");
@@ -500,15 +470,12 @@ mod tests {
         assert!(theme.theme_vars.contains("--refinementHeader: #7146ab;"));
     }
 
-    /// Brightness adjustment clamps channels to 0-255 (TS `adjustBrightness`).
     #[test]
     fn adjust_brightness_clamps() {
         assert_eq!(adjust_brightness((255, 0, 10), 1.2), "rgb(255, 0, 12)");
         assert_eq!(adjust_brightness((10, 10, 10), 0.5), "rgb(5, 5, 5)");
     }
 
-    /// Circular and missing variable references are errors, not silent
-    /// fallbacks.
     #[test]
     fn var_reference_errors() {
         let dir = tempfile::TempDir::new().expect("temp dir");

@@ -1,13 +1,5 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
-// by design on hot paths (boxing 130 fns is allocation-churn with zero
-// correctness gain); the fn-length threshold is a style gate, not
-// correctness (the harness fns are intentionally linear); 64-bit targets -
-// the narrowing sits at OS/protocol boundaries where the values are
-// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
-// guarded parses), and checked conversions would add panic paths where
-// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
-// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
-// dossier for the conductor).
+// large_futures: stack futures on hot paths by design. too_many_lines: style gate
+// only. Casts: 64-bit targets; narrowing sits at bounded OS/protocol boundaries.
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -19,11 +11,8 @@
 
 //! End-to-end daemon-command tests: spawn the real `pa-daemon` supervisor on a
 //! temp socket, drive `prime-agent` list/stop/rename against it, and diff the
-//! output against goldens captured from the installed TS `prime-agent` binary
-//! (v0.9.5). A second test spawns the TS daemon itself and runs both CLIs
-//! against it, asserting identical output for the commands both CLIs share
-//! (send and schedule parity is exercised there because the Rust supervisor
-//! does not implement those commands yet).
+//! output against goldens captured from the installed TS `prime-agent` binary.
+//! A second test spawns the TS daemon itself and runs both CLIs against it.
 //!
 //! Goldens (captured from the live TS binary, protocol 7):
 //!
@@ -60,12 +49,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-/// Environment keys this box's own prime-agent worker sets; they must not leak
-/// into spawned daemons or their session workers. `PI_PACKAGE_DIR` is
-/// scrubbed too: it overrides both binaries' package-manifest resolution,
-/// and a value pointing at the Rust checkout (where gate runners point it
-/// for kernel-runtime resolution) makes the TS CLI read a nonexistent
-/// `package.json` and exit before it can serve anything.
+/// Env keys this box's own worker sets; they must not leak into spawned
+/// daemons. `PI_PACKAGE_DIR` too: a Rust-checkout value kills the TS CLI.
 const SCRUB_ENV: [&str; 10] = [
     "PRIME_AGENT_INTERNAL_DAEMON_WORKER",
     "PRIME_AGENT_INTERNAL_DAEMON_WORKER_TOKEN",
@@ -80,9 +65,7 @@ const SCRUB_ENV: [&str; 10] = [
 ];
 
 /// Locate the built `pa-daemon` binary next to this crate's `prime-agent`
-/// binary. Cargo builds bins of the crate under test only, so this resolves
-/// under the workspace gate (`cargo test --workspace`) and asks for an
-/// explicit build otherwise.
+/// binary (cargo builds the tested crate's bins only).
 fn daemon_binary() -> PathBuf {
     let profile_dir = Path::new(env!("CARGO_BIN_EXE_prime-agent"))
         .parent()
@@ -141,10 +124,8 @@ fn spawn_daemon(binary: &Path, socket: &Path, agent_dir: &Path) -> Daemon {
     for key in SCRUB_ENV {
         command.env_remove(key);
     }
-    // A supervisor killed at teardown must not leak its session workers
-    // into later test binaries: the worker's supervisor-lost exit (TS
-    // `exitIfSupervisorOrphanedForTooLong`) runs on this short window
-    // instead of the 5-minute default.
+    // A supervisor killed at teardown must not leak its session workers: the
+    // supervisor-lost exit runs on this short window, not the 5-minute default.
     command.env(
         pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
         "15000",
@@ -163,8 +144,7 @@ fn spawn_daemon(binary: &Path, socket: &Path, agent_dir: &Path) -> Daemon {
     panic!("supervisor socket never appeared");
 }
 
-/// A raw JSONL protocol client, mirroring the harness in
-/// `crates/pa-daemon/tests/supervisor_e2e/main.rs`.
+/// A raw JSONL protocol client, mirroring the `supervisor_e2e` harness.
 struct Wire {
     reader: BufReader<UnixStream>,
     writer: UnixStream,
@@ -212,10 +192,9 @@ impl Wire {
             .set_read_timeout(Some(Duration::from_millis(100)))
             .expect("set timeout");
         loop {
-            line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("daemon closed the connection"),
-                Ok(_) if line.trim().is_empty() => {}
+                Ok(_) if line.trim().is_empty() => line.clear(),
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse daemon line"),
                 Err(_) if Instant::now() < deadline => {}
                 Err(error) => panic!("timed out waiting for daemon line: {error}"),
@@ -234,8 +213,7 @@ impl Wire {
     }
 }
 
-/// Create one session on the daemon (the scripted engine for the Rust
-/// supervisor, a real session worker for the TS one).
+/// Create one session (the scripted engine for the Rust supervisor, a real worker for the TS one).
 fn create_session(
     wire: &mut Wire,
     id: &str,
@@ -263,8 +241,7 @@ fn create_session(
         .to_string()
 }
 
-/// Run a CLI binary in an isolated environment (agent dir + TMPDIR point into
-/// the temp dir so the default socket path resolves inside it too).
+/// Run a CLI in an isolated env (agent dir + TMPDIR point into the temp dir).
 fn run_cli(binary: &Path, dir: &Path, agent_dir: &Path, args: &[&str]) -> Output {
     let mut command = Command::new(binary);
     command
@@ -286,8 +263,7 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
-/// Replace volatile tokens (age buckets, hex ids, uuids, timestamps) so outputs
-/// captured at different moments compare equal.
+/// Replace volatile tokens (ages, hex ids, uuids, timestamps) so outputs compare equal.
 fn normalize(text: &str) -> String {
     text.split('\n')
         .map(|line| {
@@ -307,11 +283,15 @@ fn normalize_token(token: &str) -> String {
     if let Some(stripped) = token.strip_suffix(',') {
         return format!("{},", normalize_token(stripped));
     }
-    if is_age(token) || is_clock(token) || token == "AM" || token == "PM" {
-        return "<time>".to_string();
-    }
+    // The strict, fixed-length id shapes are matched first: a 12-char hex
+    // display id can read as an age (eleven digits plus a `d` suffix), and
+    // the age matcher would otherwise fold it into `<time>` and break the
+    // golden on a legal id draw.
     if is_hex_id(token) || is_uuid(token) || is_iso_timestamp(token) || is_local_date(token) {
         return "<timestamp>".to_string();
+    }
+    if is_age(token) || is_clock(token) || token == "AM" || token == "PM" {
+        return "<time>".to_string();
     }
     token.to_string()
 }
@@ -354,6 +334,20 @@ fn is_clock(token: &str) -> bool {
         && parts
             .iter()
             .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
+}
+
+#[test]
+fn hex_display_id_normalizes_as_a_timestamp_even_when_it_reads_as_an_age() {
+    // The display id is the last 12 hex chars of a random uuid, so one
+    // draw in ~2800 is eleven digits plus `d` — the exact shape of the
+    // age matcher. It is an id, and must fold into `<timestamp>` (the
+    // CI flake this regression test pins; the real ages keep `<time>`).
+    assert_eq!(normalize_token("12345678901d"), "<timestamp>");
+    assert_eq!(normalize_token("b72ad7009b11"), "<timestamp>");
+    assert_eq!(normalize_token("3s"), "<time>");
+    assert_eq!(normalize_token("2h"), "<time>");
+    assert_eq!(normalize_token("10:34:59"), "<time>");
+    assert_eq!(normalize_token("PM"), "<time>");
 }
 
 /// Recursively sort object keys so TS (insertion order) and Rust (sorted) JSON
@@ -411,9 +405,7 @@ impl CliPair {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Rust end-to-end: pa-daemon + prime-agent
-// ---------------------------------------------------------------------------
 
 #[test]
 fn rust_daemon_cli_commands_end_to_end() {
@@ -426,7 +418,6 @@ fn rust_daemon_cli_commands_end_to_end() {
     let daemon = spawn_daemon(&daemon_binary(), &socket, &agent_dir);
     let socket_str = socket.to_string_lossy().to_string();
 
-    // Golden: empty list (TS binary output).
     let list = run_cli(
         &cli,
         dir.path(),
@@ -444,7 +435,6 @@ fn rust_daemon_cli_commands_end_to_end() {
     );
     assert_eq!(stdout(&list_all), "No agents.\n");
 
-    // Golden: unknown list option (TS binary error).
     let bogus = run_cli(
         &cli,
         dir.path(),
@@ -454,7 +444,6 @@ fn rust_daemon_cli_commands_end_to_end() {
     assert_eq!(bogus.status.code(), Some(1));
     assert_eq!(stderr(&bogus), "Error: Unknown list option: --bogus\n");
 
-    // Golden: empty sessions table messages (TS binary output).
     let sessions_empty = run_cli(
         &cli,
         dir.path(),
@@ -472,7 +461,6 @@ fn rust_daemon_cli_commands_end_to_end() {
     );
     assert_eq!(stdout(&sessions_all), "No agents.\n");
 
-    // Golden: unknown sessions option (TS binary error).
     let sessions_bogus = run_cli(
         &cli,
         dir.path(),
@@ -485,7 +473,6 @@ fn rust_daemon_cli_commands_end_to_end() {
         "Error: Unknown sessions option: --bogus\n"
     );
 
-    // One scripted session.
     let script = dir.path().join("script.json");
     std::fs::write(
         &script,
@@ -503,7 +490,6 @@ fn rust_daemon_cli_commands_end_to_end() {
     );
     assert_eq!(session.len(), 12, "short active id: {session}");
 
-    // Golden: single-row table shape (header from the TS binary).
     let list = run_cli(
         &cli,
         dir.path(),
@@ -544,9 +530,8 @@ fn rust_daemon_cli_commands_end_to_end() {
     }
 
     // Golden: the sessions operator table over the live session (TS binary
-    // shape): the header, the named row, and its idle status; the
-    // last-heard mark, activity, error, and usage cells stay empty for a
-    // healthy idle session that never recorded a spend.
+    // shape): the last-heard, activity, error, and usage cells stay empty for
+    // a healthy idle session.
     let sessions_table = run_cli(
         &cli,
         dir.path(),
@@ -566,7 +551,7 @@ fn rust_daemon_cli_commands_end_to_end() {
     );
 
     // The sessions --json dump is the same list RPC data (the sessions
-    // command reuses it, TS `runSessions`).
+    // command reuses it).
     let sessions_json = run_cli(
         &cli,
         dir.path(),
@@ -576,7 +561,6 @@ fn rust_daemon_cli_commands_end_to_end() {
     let parsed: Value = serde_json::from_str(&stdout(&sessions_json)).expect("valid json sessions");
     assert_eq!(parsed["sessions"][0]["sessionName"], "parity");
 
-    // Golden: rename output (TS binary).
     let rename = run_cli(
         &cli,
         dir.path(),
@@ -586,7 +570,6 @@ fn rust_daemon_cli_commands_end_to_end() {
     assert_eq!(rename.status.code(), Some(0), "{}", stderr(&rename));
     assert_eq!(stdout(&rename), format!("Renamed {session} to renamed\n"));
 
-    // Golden: stop output (TS binary).
     let stop = run_cli(
         &cli,
         dir.path(),
@@ -604,7 +587,6 @@ fn rust_daemon_cli_commands_end_to_end() {
     );
     assert_eq!(stdout(&list), "No active agents.\n");
 
-    // Golden: unknown selector error (TS binary).
     let stop_missing = run_cli(
         &cli,
         dir.path(),
@@ -628,9 +610,8 @@ fn rust_daemon_cli_commands_end_to_end() {
     assert_eq!(normalized.lines().count(), 2, "saved row after kill");
     assert!(normalized.contains("<timestamp>"), "{normalized}");
 
-    // send_message by the stopped worker's active id answers with the TS
-    // unknown-session error: active ids are not durable, and the catalog
-    // keys saved sessions by session id and name only.
+    // send_message by the stopped worker's active id answers the unknown-session
+    // error: active ids are not durable; the catalog keys saved sessions by id and name.
     let send = run_cli(
         &cli,
         dir.path(),
@@ -643,10 +624,8 @@ fn rust_daemon_cli_commands_end_to_end() {
         format!("Error: Unknown active session: {session}\n")
     );
 
-    // The saved-session wake (messaging-7): sending by the saved session's
-    // NAME wakes it - the supervisor catalog-resolves the selector, spawns
-    // a worker over the persisted file, and delivers; the CLI renders the
-    // TS golden `Sent to <name>`.
+    // The saved-session wake (messaging-7): sending by the NAME wakes it — the
+    // catalog-resolves the selector, spawns a worker, and delivers.
     let send_wake = run_cli(
         &cli,
         dir.path(),
@@ -674,9 +653,7 @@ fn cli_connect_error_matches_ts_golden() {
         ],
     );
     assert_eq!(output.status.code(), Some(1));
-    // Golden (TS): `Error: Failed to connect to the Prime Agent daemon:
-    // connect ENOENT <path>. Socket: <path>. Daemon log:
-    // <agent-dir>/logs/<socket-basename>.<8-hex>.log.`
+
     let text = stderr(&output).trim_end().to_string();
     let expected_prefix = format!(
         "Error: Failed to connect to the Prime Agent daemon: connect ENOENT {missing}. Socket: {missing}. Daemon log: ",
@@ -709,16 +686,11 @@ fn cli_connect_error_matches_ts_golden() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Schedule CLI usage surface: no daemon, validation fires first
-// ---------------------------------------------------------------------------
 
-/// The schedule commands' usage errors fire in the public router's
-/// validation, before any daemon request, and every valid invocation passes
-/// validation and reaches the connection attempt. The goldens are the TS
-/// binary's byte-identical output; `--daemon-socket` before the command
-/// rotates into the schedule operands, a shape the TS CLI rejects with the
-/// same usage error.
+/// The schedule commands' usage errors fire in the router's validation, before
+/// any daemon request (`--daemon-socket` before the command rotates into the
+/// operands; the TS CLI rejects the same shape).
 #[test]
 fn schedule_usage_errors_and_valid_invocations() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -763,8 +735,7 @@ fn schedule_usage_errors_and_valid_invocations() {
         assert_eq!(stderr(&out), golden, "{args:?}");
     }
 
-    // Valid invocations pass validation and fail only at the connection
-    // attempt (the temp TMPDIR holds no daemon socket): no usage message.
+    // Valid shapes pass validation and fail only at the connection attempt.
     let valid_shapes = [
         vec!["schedule", "list"],
         vec!["schedule", "list", "--all"],
@@ -785,9 +756,7 @@ fn schedule_usage_errors_and_valid_invocations() {
     }
 }
 
-// ---------------------------------------------------------------------------
 // TS differential: both CLIs against the same TS daemon
-// ---------------------------------------------------------------------------
 
 #[test]
 fn ts_daemon_differential_cli_output() {
@@ -801,13 +770,11 @@ fn ts_daemon_differential_cli_output() {
     let work = dir.path().join("work");
     std::fs::create_dir_all(&sessions).expect("sessions dir");
     std::fs::create_dir_all(&work).expect("work dir");
-    // The `schedule` command cannot take --daemon-socket (TS parity), so the
-    // daemon must live on the default socket path under the temp TMPDIR.
+    // `schedule` cannot take --daemon-socket (TS parity); the daemon uses the default path.
     std::env::set_var("TMPDIR", dir.path());
     let socket = pa_daemon::socket::default_daemon_socket_path();
-    // The TS daemon does not create the socket's parent directory on bind
-    // (the Rust supervisor does), so the default-path socket needs the
-    // directory to exist before the TS daemon is spawned.
+    // The TS daemon does not create the socket's parent on bind (the Rust
+    // supervisor does), so the parent must exist first.
     std::fs::create_dir_all(socket.parent().expect("socket parent")).expect("socket parent dir");
     let mut daemon_command = Command::new(&ts);
     daemon_command
@@ -815,10 +782,8 @@ fn ts_daemon_differential_cli_output() {
         .arg("daemon")
         .arg("--daemon-socket")
         .arg(&socket)
-        // The TS CLI resolves its package manifest by walking up from the
-        // working directory and stops at the repository root; a Rust
-        // checkout has no package.json there, so the daemon must run from
-        // the scratch work dir (no manifest anywhere up the walk).
+        // The TS CLI resolves its manifest by walking up from the cwd; a Rust
+        // checkout has no package.json, so run from the scratch work dir.
         .current_dir(&work)
         .env("PRIME_AGENT_CODING_AGENT_DIR", &agent_dir)
         .env("TMPDIR", dir.path())
@@ -827,9 +792,7 @@ fn ts_daemon_differential_cli_output() {
     for key in SCRUB_ENV {
         daemon_command.env_remove(key);
     }
-    // Teardown symmetry with the Rust daemon: the TS worker's orphan-exit
-    // window is the same env var (wire parity), so a killed TS supervisor
-    // reaps its workers on the same short bound.
+    // Teardown symmetry: the TS worker's orphan-exit window is the same env var.
     daemon_command.env(
         pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
         "15000",
@@ -873,8 +836,7 @@ fn ts_daemon_differential_cli_output() {
         failures.push(format!("list --json: ts {ts_json} vs rs {rs_json}"));
     }
 
-    // The sessions operator table (TS #2422): the same list RPC rendered as
-    // the one-line-per-agent table, plus its flag surface.
+    // The sessions operator table (TS #2422): the same list RPC as the one-line table.
     compare(
         &mut failures,
         &["sessions"],
@@ -905,12 +867,9 @@ fn ts_daemon_differential_cli_output() {
         ));
     }
 
-    // Both renames target the same session with the same new name.
     let rename: Vec<&str> = vec!["rename", primary.as_str(), "parity-renamed"];
     compare(&mut failures, &rename, &rename, "rename");
-    // Sends start a real turn on the target, so the second send to the same
-    // session queues; each CLI sends the first message to its own session and
-    // must render the same delivered receipt.
+    // Sends start a real turn, so each CLI sends to its own session; same receipt shape.
     let ts_send = run_cli(
         &ts,
         dir.path(),
@@ -966,9 +925,7 @@ fn ts_daemon_differential_cli_output() {
         &["schedule", "list", "--json"],
         "schedule list --json",
     );
-    // Cancel round-trip: the two adds above stored one job per CLI. Each
-    // CLI cancels one of them and both render the same receipt, then the
-    // same emptied list.
+    // Cancel round-trip: each CLI cancels one job and both render the same emptied list.
     let ts_schedule_json = run_cli(&ts, dir.path(), &agent_dir, &["schedule", "list", "--json"]);
     let job_ids: Vec<String> = serde_json::from_str::<Value>(&stdout(&ts_schedule_json))
         .expect("schedule list json")
@@ -991,10 +948,6 @@ fn ts_daemon_differential_cli_output() {
         &["schedule", "list"],
         "schedule list after cancel",
     );
-    // Usage parity: the errors fire in the public router's validation,
-    // before any daemon request, and both CLIs render them identically.
-    // `--daemon-socket` before the command rotates into the schedule
-    // operands; the TS CLI rejects that shape with the same usage error.
     let socket_arg = socket.to_string_lossy().to_string();
     compare(
         &mut failures,
@@ -1038,16 +991,13 @@ fn ts_daemon_differential_cli_output() {
         ],
         "daemon-socket before schedule cancel",
     );
-    // TS stops the primary session, the Rust CLI stops the secondary one:
-    // both must print the same golden output.
+    // TS stops the primary session, the Rust CLI the secondary: same golden output.
     let ts_stop_args: Vec<&str> = vec!["stop", primary.as_str()];
     let rust_stop_args: Vec<&str> = vec!["stop", tertiary.as_str()];
     compare(&mut failures, &ts_stop_args, &rust_stop_args, "stop");
 
-    // Saved-session wake on the TS daemon (ground truth): each CLI sends to
-    // a session stopped earlier by its own name; both must wake it and
-    // render the delivered receipt (`Sent to <name>`). Different targets,
-    // so the compared observable is the delivered-receipt line shape.
+    // Saved-session wake on the TS daemon: each CLI sends to its own stopped session;
+    // the compared observable is the receipt line shape.
     let ts_wake = run_cli(
         &ts,
         dir.path(),

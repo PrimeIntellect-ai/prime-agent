@@ -1,6 +1,4 @@
-//! Package command validation and help, ported from
-//! `package-manager-cli.ts` (`handlePackageCommand`, `parsePackageCommand`,
-//! `printPackageCommandHelp`).
+//! Package command validation and help.
 
 use pa_core::packages::{PackageManager, ProgressEvent, ProgressEventKind, UserOrProject};
 use pa_core::update::version::UpdateChannel;
@@ -56,7 +54,6 @@ impl PackageCommand {
     }
 }
 
-/// What `update` targets: Prime Agent itself, installed packages, or both.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum UpdateTarget {
     All,
@@ -380,9 +377,8 @@ fn print_package_command_help(command: PackageCommand) {
     }
 }
 
-/// Run a package command, mirroring `handlePackageCommand`: validation and
-/// help here, the package manager subsystem below, and the update case's
-/// self target through the native self-update flow (`crate::self_update`).
+/// Validation and help here, the package manager subsystem below, and the
+/// update case's self target through the native self-update flow.
 pub fn handle_package_command(args: &[String]) -> PackageCommandOutcome {
     let Some(options) = parse_package_command(args) else {
         return PackageCommandOutcome { exit_code: None };
@@ -436,9 +432,8 @@ pub fn handle_package_command(args: &[String]) -> PackageCommandOutcome {
         return fail(conflict, Some(&format!("Usage: {}", command.usage())));
     }
     if options.restart_coordinator {
-        // The detached coordinator mode (spec §4): this process adopts the
-        // staged status file and drives the FSM to a terminal state. The
-        // invocation is CLI-internal (the update command spawns it).
+        // The detached coordinator mode (spec §4): this process adopts the staged
+        // status file and drives the FSM to a terminal state.
         let (Some(socket), Some(status_path)) = (
             options.restart_daemon_socket.clone(),
             options.restart_status_path,
@@ -489,7 +484,6 @@ pub fn handle_package_command(args: &[String]) -> PackageCommandOutcome {
         );
     }
 
-    // Everything past this point runs the package manager subsystem.
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let agent_dir = get_agent_dir();
     let mut settings = pa_core::settings::SettingsManager::create(&cwd, &agent_dir);
@@ -510,9 +504,7 @@ pub fn handle_package_command(args: &[String]) -> PackageCommandOutcome {
         UserOrProject::User
     };
 
-    // The TS `handlePackageCommand` shape: one outcome per case, the exit
-    // code the case itself decides (the update case's two halves compose
-    // abort/no-change codes of their own).
+    // One outcome per case, the exit code the case itself decides.
     match command {
         PackageCommand::Install => {
             let source = options.source.as_deref().expect("checked above");
@@ -551,13 +543,10 @@ pub fn handle_package_command(args: &[String]) -> PackageCommandOutcome {
     }
 }
 
-/// The `package update` case (TS `handlePackageCommand`'s update case):
-/// the nightly-switch confirmation runs before any update work so declining
-/// changes nothing, then the extensions half, then the self target through
-/// the same native flow `prime-agent update` runs — never a stub. The
-/// extensions half runs first (TS order); a self-update the binary's
-/// installation does not support surfaces the flow's installer-ownership
-/// message instead of a misleading refusal.
+/// The `package update` case: the nightly-switch confirmation runs before any
+/// update work so declining changes nothing, then the extensions half, then the
+/// self target through the native flow. An unsupported self-update surfaces the
+/// installer-ownership message instead of a misleading refusal.
 fn run_package_update(
     manager: &mut PackageManager,
     options: PackageCommandOptions,
@@ -702,9 +691,8 @@ mod tests {
         assert!(parse(&["remove", "--nightly"]).invalid_option.is_some());
     }
 
-    /// An empty package-manager store in its own sandbox: no configured
-    /// packages, so the extensions half is a no-op and the self target is
-    /// the only thing under observation.
+    /// An empty package-manager store in its own sandbox: the extensions half is
+    /// a no-op and the self target is the only thing under observation.
     fn sandbox_manager(dir: &std::path::Path, update_channel: Option<&str>) -> PackageManager {
         let cwd = dir.join("cwd");
         let agent_dir = dir.join("agent");
@@ -751,8 +739,8 @@ mod tests {
         }
     }
 
-    /// The self-update invocation the flags produce (no direct-install
-    /// payload: the package path cannot carry `--archive`).
+    /// The self-update invocation the flags produce (no direct-install payload:
+    /// the package path cannot carry `--archive`).
     fn expected_invocation(
         force: bool,
         rollback: bool,

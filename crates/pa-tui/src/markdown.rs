@@ -1,7 +1,7 @@
-//! Markdown rendering ported from `packages/tui/src/components/markdown.ts`
-//! (the block/inline subset that appears in agent sessions: headings,
-//! paragraphs, fenced code, lists, blockquotes, hr, and inline emphasis,
-//! code, and links). Emits styled `Line`s for ratatui instead of ANSI strings.
+//! Markdown rendering ported from `packages/tui/src/components/markdown.ts` (the block/inline
+//! subset that appears in agent sessions: headings, paragraphs, fenced code, lists, blockquotes,
+//! hr, and inline emphasis, code, and links). Emits styled `Line`s for ratatui instead of ANSI
+//! strings.
 
 mod geometry;
 pub(crate) use geometry::{markdown_row_count, markdown_row_count_tagged};
@@ -16,8 +16,8 @@ use crate::{Line, Span};
 use ratatui::style::{Modifier, Style};
 use ratatui::text as rt;
 
-/// Styling hooks resolved from a theme (plus the settings-driven
-/// `code_block_indent`; not `Copy` because of the indent `String`).
+/// Styling hooks resolved from a theme (plus the settings-driven `code_block_indent`; not
+/// `Copy` because of the indent `String`).
 #[derive(Debug, Clone)]
 pub struct MarkdownStyle {
     pub body: Style,
@@ -34,15 +34,11 @@ pub struct MarkdownStyle {
     pub bold: Modifier,
     pub italic: Modifier,
     pub strikethrough: Modifier,
-    /// The fenced-code indent string (`markdown.codeBlockIndent` in
-    /// settings, TS `codeBlockIndent` on the markdown theme; default "  ").
+    /// The fenced-code indent string (`markdown.codeBlockIndent` in settings; default " ").
     pub code_block_indent: String,
-    /// The `syntax*` palette for fenced-code token colors (TS
-    /// `highlightCode`, cli-highlight over the highlight.js grammar).
-    /// `None` renders every code line uniform in `code_block` — the TS
-    /// no-valid-language fallback, and the quiet thinking theme (TS
-    /// `getThinkingMarkdownTheme` replaces `highlightCode` with dim
-    /// uniform lines).
+    /// The `syntax*` palette for fenced-code token colors (TS `highlightCode`, cli-highlight
+    /// over the highlight.js grammar). `None` renders every code line uniform in `code_block`
+    /// — the TS no-valid-language fallback, and the quiet thinking theme.
     pub(crate) syntax: Option<crate::tool_card::highlight::SyntaxPalette>,
 }
 
@@ -71,16 +67,11 @@ impl MarkdownStyle {
             quote_border: theme.fg_style(C::MdQuoteBorder),
             hr: theme.fg_style(C::MdHr),
             list_bullet: theme.fg_style(C::MdListBullet),
-            // The TS source styles `**bold**`/`*ital*`/`~~strike~~` (and the
-            // heading taper) through chalk; in the deployed TS binary the
-            // chalk modifiers never reach the wire — only its raw-ANSI
-            // colors render (probe vs the installed 0.9.5 binary: headings
-            // `#`-`######` render in mdHeading alone, inline strong/em/strike
-            // render plain, inline code stays colored). The same evidence
-            // shape as the link label's dropped underline (see
-            // `legacy_link_row_is_underlined_and_shows_the_url`): the
-            // markers survive parsing (run boundaries stay intact) but carry
-            // no modifier.
+            // The TS source styles `**bold**`/`*ital*`/`~~strike~~` (and the heading taper)
+            // through chalk; in the deployed TS binary the chalk modifiers never reach the
+            // wire — only its raw-ANSI colors render (probe vs the installed 0.9.5 binary:
+            // headings render in mdHeading alone, inline strong/em/strike render plain, inline
+            // code stays colored). The markers survive parsing but carry no modifier.
             bold: Modifier::empty(),
             italic: Modifier::empty(),
             strikethrough: Modifier::empty(),
@@ -98,9 +89,8 @@ pub fn render_markdown(text: &str, width: usize, style: &MarkdownStyle) -> Vec<L
     render_markdown_tagged(text, width, style, "", &mut MarkdownBlockCache::default())
 }
 
-/// Cached render with a style discriminator (see [`MarkdownBlockCache`]):
-/// the same raw text rendered under different styles (the dim thinking
-/// block) must not hit the other style's rows.
+/// Cached render with a style discriminator (see [`MarkdownBlockCache`]): the same raw text
+/// rendered under different styles (the dim thinking block) must not hit the other style's rows.
 pub fn render_markdown_tagged(
     text: &str,
     width: usize,
@@ -117,11 +107,9 @@ pub fn render_markdown_tagged(
     let blocks = parse_blocks(&normalized);
     for (i, block) in blocks.iter().enumerate() {
         let next = blocks.get(i + 1);
-        // A blank source line separates blocks: TS's lexer emits one `space`
-        // token per blank run and `renderToken` pushes one empty row for it
-        // (markdown.ts `case "space"`). `parse_blocks` skips the blank
-        // source lines, so the row is emitted here, ahead of the block it
-        // precedes; adjacent blocks keep their `blank_after` row.
+        // A blank source line separates blocks: TS's lexer emits one `space` token per blank
+        // run and `renderToken` pushes one empty row for it; `parse_blocks` skips the blank
+        // source lines, so the row is emitted here, ahead of the block it precedes.
         if block.sep_blank {
             lines.push(Vec::new());
         }
@@ -138,51 +126,41 @@ pub fn render_markdown_tagged(
                 rendered.shrink_to_fit();
                 cache.0.insert(key, rendered);
             }
-            // The final block renders straight into the caller's buffer:
-            // every `render_block` path only appends to `out`.
+            // The final block renders into the caller's buffer: every render path only appends.
             None => render_block(block, next, content_width, style, &mut lines),
         }
     }
     lines
 }
 
-/// Per-block render cache (TS `Markdown.blockCache`, markdown.ts): a
-/// streaming append re-renders only the changing final block — every
-/// earlier block replays its rendered rows by [`BlockKey`] instead of
-/// re-running inline styling, wrapping, and code highlighting. Entries
-/// are never pruned within a message: the cache is shared by the entry's
-/// text and thinking renders, so TS's per-render `nextCache` swap would
-/// evict the other block's entries every frame. Size stays bounded
-/// without it — entries are keyed by settled (non-final) blocks (raw
-/// text that no later append can change), the whole map drops when the
-/// message settles (`view.rs`) or the layout width or render options
-/// change (`prepare_layout`), and the final block is never cached:
-/// while streaming, appended text can reinterpret an open block
-/// (unterminated fences, growing lists).
+/// Per-block render cache (TS `Markdown.blockCache`): a streaming append re-renders only
+/// the changing final block — every earlier block replays its rendered rows by [`BlockKey`]
+/// instead of re-running inline styling, wrapping, and code highlighting. Entries are never
+/// pruned within a message: the cache is shared by the entry's text and thinking renders, so
+/// TS's per-render `nextCache` swap would evict the other block's entries every frame. Size
+/// stays bounded without it — entries are keyed by settled (non-final) blocks, the whole map
+/// drops when the message settles (`view.rs`) or the layout width or render options change,
+/// and the final block is never cached (appended text can reinterpret an open block).
 #[derive(Default)]
 pub struct MarkdownBlockCache(std::collections::HashMap<BlockKey, Vec<Line>>);
 
-/// The cache key: every `render_block` input a streamed append can
-/// change — the style discriminator (the dim thinking block), the width,
-/// the parsed block itself, and the following block's trailing-blank
-/// effect. Keying on the parsed `BlockKind` covers each of the block's
-/// own render inputs structurally (list `ordered`/`start`, the code
-/// lang), so a field added later is covered automatically.
+/// The cache key: every `render_block` input a streamed append can change — the style discriminator
+/// (the dim thinking block), the width, the parsed block itself, and the following block's
+/// trailing-blank effect. Keying on the parsed `BlockKind` covers each of the block's own render
+/// inputs structurally, so a field added later is covered automatically.
 #[derive(PartialEq, Eq, Hash)]
 struct BlockKey {
     style_tag: String,
     width: usize,
     kind: BlockKind,
     lines: Vec<String>,
-    /// `render_block`'s only reads of the next block:
-    /// `[blank_after(next, false), blank_after(next, true)]`.
+    /// `render_block`'s only reads of the next block: `[blank_after(next, false), blank_after(next,
+    /// true)]`.
     blank_after: [bool; 2],
 }
 
-/// The one cacheability rule shared by render and count (TS `useCache =
-/// cacheable && i < tokens.length - 1`): every block but the last is
-/// cacheable; the final one returns `None` because appended text can
-/// still reinterpret it.
+/// The one cacheability rule shared by render and count (TS `useCache = cacheable && i <
+/// tokens.length - 1`): every block but the last is cacheable; the final one returns `None`.
 fn block_cache_key(
     style_tag: &str,
     blocks: &[Block],
@@ -252,7 +230,6 @@ fn parse_blocks(text: &str) -> Vec<Block> {
                 .take_while(|l| l.trim().is_empty())
                 .count()
                 > 0;
-        // Fenced code
         if let Some(fence) = trimmed.strip_prefix("```") {
             let lang = if fence.is_empty() {
                 None
@@ -273,7 +250,6 @@ fn parse_blocks(text: &str) -> Vec<Block> {
             });
             continue;
         }
-        // Heading
         let hashes = trimmed.chars().take_while(|&c| c == '#').count();
         if hashes > 0 && trimmed.len() > hashes && trimmed.as_bytes()[hashes] == b' ' {
             blocks.push(Block {
@@ -284,7 +260,6 @@ fn parse_blocks(text: &str) -> Vec<Block> {
             i += 1;
             continue;
         }
-        // hr
         if is_hr(trimmed) {
             blocks.push(Block {
                 kind: BlockKind::Hr,
@@ -294,7 +269,6 @@ fn parse_blocks(text: &str) -> Vec<Block> {
             i += 1;
             continue;
         }
-        // Quote
         if let Some(q) = trimmed.strip_prefix('>') {
             let mut qlines = vec![q.trim_start().to_string()];
             i += 1;
@@ -318,7 +292,6 @@ fn parse_blocks(text: &str) -> Vec<Block> {
             });
             continue;
         }
-        // List
         if let Some(marker) = list_marker(trimmed) {
             let (ordered, start) = marker;
             let mut items: Vec<String> = Vec::new();
@@ -350,8 +323,7 @@ fn parse_blocks(text: &str) -> Vec<Block> {
             });
             continue;
         }
-        // Table (marked's table rule: header row + delimiter row +
-        // body rows; tried after the other block starts).
+        // Table (marked's rule: header + delimiter + body rows; after the other block starts).
         if crate::markdown_table::is_table_start(trimmed, src_lines.get(i + 1)) {
             let table = crate::markdown_table::parse_table_block(&src_lines, &mut i);
             blocks.push(Block {
@@ -364,17 +336,12 @@ fn parse_blocks(text: &str) -> Vec<Block> {
             });
             continue;
         }
-        // Paragraph: consume until blank line or new block marker. TS's
-        // marked lexes the whole run as ONE paragraph token but its inline
-        // renderer preserves each soft newline (`applyTextWithNewlines`
-        // joins with `\n`, and the width pass breaks there), so the source
-        // lines are kept — each renders as its own row, still one block
-        // (no `space` rows between them).
+        // Paragraph: consume until blank line or new block marker. TS's marked lexes the whole run
+        // as ONE paragraph token but its inline renderer preserves each soft newline, so the source
+        // lines are kept — each renders as its own row, still one block.
         let mut para_lines = vec![trimmed.to_string()];
-        // The block's last source line keeps its trailing whitespace (the
-        // TS lexer's paragraph token carries it; the rendered row ends
-        // `stream. ` with the space inside the styled span — probe vs the
-        // TS binary, the expanded compaction summary).
+        // The block's last source line keeps its trailing whitespace (probe vs the TS binary: the
+        // compaction summary's last row ends "stream. " with the space inside the styled span).
         let mut last_raw = line;
         i += 1;
         while i < src_lines.len() {
@@ -394,7 +361,6 @@ fn parse_blocks(text: &str) -> Vec<Block> {
             last_raw = l;
             i += 1;
         }
-        // The trailing whitespace rides on the block's LAST source line.
         let last = para_lines.last_mut().expect("paragraph has a line");
         last.push_str(&last_raw[last_raw.trim_end().len()..]);
         blocks.push(Block {
@@ -442,13 +408,10 @@ fn marker_width(t: &str) -> usize {
     }
 }
 
-/// The fence languages the port highlights. TS `highlightCode` validates
-/// through cli-highlight's `supportsLanguage` = highlight.js
-/// `getLanguage(name)`, which lowercases and matches the grammar's
-/// registered names and aliases: python 10.7.3 registers `python` with
-/// aliases `py`, `gyp`, `ipython`. `lang` here is marked's whole trimmed
-/// info string, so ```` ```python foo=1 ```` stays uniform (hljs has no such
-/// language); only these exact spellings highlight.
+/// The fence languages the port highlights. TS `highlightCode` validates through highlight.js
+/// `getLanguage(name)`, which lowercases and matches the grammar's registered names and aliases
+/// (python registers `python` with `py`, `gyp`, `ipython`). `lang` here is marked's whole trimmed
+/// info string, so ```` ```python foo=1 ```` stays uniform; only these exact spellings highlight.
 fn is_highlighted_lang(lang: &str) -> bool {
     matches!(
         lang.to_ascii_lowercase().as_str(),
@@ -456,11 +419,10 @@ fn is_highlighted_lang(lang: &str) -> bool {
     )
 }
 
-/// The block's highlighted lines (TS `theme.highlightCode(text, lang)`:
-/// one highlight.js pass over the whole block, so multi-line strings
-/// carry across lines; the fallback paths — no palette (the quiet
-/// thinking theme), an unsupported language, or no language — render
-/// `None` so the caller keeps the uniform `mdCodeBlock` rows).
+/// The block's highlighted lines (TS `theme.highlightCode(text, lang)`: one highlight.js
+/// pass over the whole block, so multi-line strings carry across lines; the fallback paths —
+/// no palette, an unsupported language, or no language — render `None` so the caller keeps
+/// the uniform `mdCodeBlock` rows).
 fn highlighted_code_lines(
     block: &Block,
     lang: Option<&str>,
@@ -480,6 +442,58 @@ fn highlighted_code_lines(
     ))
 }
 
+/// The block's unwrapped rows (TS `renderCodeBlock`): the indent outside
+/// each highlighted or uniform code line; an empty block is one indented
+/// empty row. Paint wraps these rows and the count measures the same rows.
+fn code_rows(block: &Block, lang: Option<&str>, style: &MarkdownStyle) -> Vec<Line> {
+    let indent = style.code_block_indent.as_str();
+    let lines = highlighted_code_lines(block, lang, style).unwrap_or_else(|| {
+        block
+            .lines
+            .iter()
+            .map(|line| vec![Span::styled(line.clone(), style.code_block)])
+            .collect()
+    });
+    if lines.is_empty() {
+        return vec![vec![Span::raw(indent)]];
+    }
+    lines
+        .into_iter()
+        .map(|line| {
+            let mut row: Line = vec![Span::raw(indent)];
+            row.extend(line);
+            row
+        })
+        .collect()
+}
+
+/// Heading spans: inline-rendered, tapered to the heading color with
+/// the link affordance kept — an underlined label stays underlined and
+/// the URL bracket keeps its dim `link_url` slot, tracked by origin
+/// (the inline pass reports the bracket indices). A code or body span
+/// that merely renders in the `link_url` style (a theme whose colors
+/// collide) tapers to the heading color like any other span. Shared by
+/// the paint path and the row count, so a wrapped heading counts
+/// exactly what it paints.
+fn heading_spans(text: &str, style: &MarkdownStyle) -> Vec<Span> {
+    let (mut spans, url_slots) = inline::render_inline_with_url_slots(text, style);
+    // The slot indices arrive ascending, so one cursor walks them in
+    // step with the span iteration — a link-heavy heading stays linear.
+    let mut url_slot = 0;
+    for (i, s) in spans.iter_mut().enumerate() {
+        if url_slots.get(url_slot) == Some(&i) {
+            url_slot += 1;
+            continue;
+        }
+        let underlined = s.style.add_modifier.contains(Modifier::UNDERLINED);
+        s.style = style.heading;
+        if underlined {
+            s.style = s.style.add_modifier(Modifier::UNDERLINED);
+        }
+    }
+    spans
+}
+
 fn render_block(
     block: &Block,
     next: Option<&Block>,
@@ -490,25 +504,20 @@ fn render_block(
     let blank_after = |exclude_lists| geometry::blank_after(next, exclude_lists);
     match &block.kind {
         BlockKind::Heading => {
-            // The TS source tapers headings by level (h1 bold+underline,
-            // h2/h3 bold, h4 bold+italic, h5/h6 italic), all through
-            // chalk; in the deployed TS binary the chalk modifiers never
-            // reach the wire, so every level renders in the heading color
-            // alone (probe vs the installed 0.9.5 binary: `# H1`, `## H2`,
-            // and `### H3` all render bare mdHeading).
+            // The TS source tapers headings by level (h1 bold+underline, h2/h3 bold, h4
+            // bold+italic, h5/h6 italic), all through chalk; in the deployed TS binary the
+            // chalk modifiers never reach the wire, so every level renders in the heading
+            // color alone (probe vs the installed 0.9.5 binary).
             let text = block.lines.first().cloned().unwrap_or_default();
-            let mut spans = render_inline(&text, style);
-            for s in &mut spans {
-                s.style = style.heading;
-            }
-            out.push(spans);
+            let spans = heading_spans(&text, style);
+            wrap_spans(&spans, width, style.heading, out);
             if blank_after(false) {
                 out.push(Vec::new());
             }
         }
         BlockKind::Paragraph => {
-            // Each soft-break line renders and wraps on its own (TS's
-            // paragraph token carries the newlines through the width pass).
+            // Each soft-break line renders and wraps on its own (TS's paragraph token
+            // carries the newlines through the width pass).
             for text in &block.lines {
                 let spans = render_inline(text, style);
                 wrap_spans(&spans, width, style.body, out);
@@ -523,29 +532,11 @@ fn render_block(
             // outside the styled code line, each source line rendered with
             // the codeBlock style. The theme's `codeBlockBorder` hook exists
             // in the TS MarkdownTheme too and is unused by the renderer on
-            // both sides.
-            let indent = style.code_block_indent.as_str();
-            match highlighted_code_lines(block, lang.as_deref(), style) {
-                Some(code_lines) => {
-                    for line in code_lines {
-                        let mut row: Line = vec![Span::raw(indent)];
-                        row.extend(line);
-                        out.push(row);
-                    }
-                }
-                None => {
-                    for line in &block.lines {
-                        out.push(vec![
-                            Span::raw(indent),
-                            Span::styled(line.clone(), style.code_block),
-                        ]);
-                    }
-                }
-            }
-            if block.lines.is_empty() {
-                // An empty block still renders one indented empty line
-                // (TS maps a lone codeBlock("")).
-                out.push(vec![Span::raw(indent)]);
+            // both sides. TS `renderBlock` then wraps every code row
+            // (wrapTextWithAnsi), so a continuation row starts at column 0
+            // with no re-added indent.
+            for row in code_rows(block, lang.as_deref(), style) {
+                wrap_spans(&row, width, style.code_block, out);
             }
             if blank_after(false) {
                 out.push(Vec::new());
@@ -621,9 +612,8 @@ fn wrap_spans_into(spans: &[Span], width: usize, out: &mut geometry::WrapOutput<
         return;
     }
     // tokens: (text, style); alternating words and whitespace-run gaps. TS
-    // `splitIntoTokensWithAnsi` keeps each whitespace RUN whole (a run at a
-    // span boundary joins the previous gap token), never collapsing it to a
-    // single space.
+    // `splitIntoTokensWithAnsi` keeps each whitespace RUN whole (a run at a span boundary
+    // joins the previous gap token), never collapsing it to a single space.
     let mut tokens: Vec<(String, Style)> = Vec::new();
     for span in spans {
         let mut word = String::new();
@@ -651,9 +641,8 @@ fn wrap_spans_into(spans: &[Span], width: usize, out: &mut geometry::WrapOutput<
         let (text, style) = &tokens[i];
         let w = str_width(text);
         if col + w > width && out.has_content {
-            // A wrapped row never carries its trailing gap: TS
-            // wrapTextWithAnsi drops the boundary space, so the styled
-            // content ends at the last word and the plain padding follows.
+            // A wrapped row never carries its trailing gap: TS wrapTextWithAnsi drops the boundary
+            // space, so the styled content ends at the last word and the plain padding follows.
             out.finish_row(/*trim*/ true);
             col = 0;
             // drop leading whitespace at the new line start
@@ -666,29 +655,22 @@ fn wrap_spans_into(spans: &[Span], width: usize, out: &mut geometry::WrapOutput<
         // at zero width (OSC 8 sequences must never split mid-sequence)
         let style = *style;
         let mut rest: &str = text.as_str();
-        // The break loop used to re-measure `str_width(&rest)` and clone the
-        // remaining tail on EVERY emitted row, so one unbroken token longer
-        // than the wrap width (a padded fixture row, a base64 blob, a long
-        // path) wrapped in O(token_len * rows) time — the first transcript
-        // frame of a resumed session paid seconds per megabyte of such
-        // tokens. The remaining width is tracked arithmetically instead:
-        // measured once (the caller's `w`), decremented by each row's
-        // emitted width, with `rest` sliced in place (no tail clones). For
-        // content whose per-char widths sum to its grapheme width — every
-        // printable-ASCII/escape/tab token, the catastrophic class — the
-        // arithmetic is exact; a row split inside a multi-char grapheme
-        // cluster is the one non-additive case, so a tentative exit is
-        // confirmed against one true measure before the leftover is
-        // pushed (the correctness backstop, never the hot path: an exact
-        // run leaves at most `width` columns to re-measure).
+        // The remaining width is tracked arithmetically: measured once (the caller's `w`),
+        // decremented by each row's emitted width, with `rest` sliced — never re-measured per row
+        // (an unbroken token longer than the wrap width would otherwise wrap in O(token_len * rows)
+        // time). For content whose per-char widths sum to its grapheme width — every
+        // printable-ASCII/escape/tab token, the catastrophic class — the arithmetic is exact; a row
+        // split inside a multi-char grapheme cluster is the one non-additive case, so a tentative
+        // exit is confirmed against one true measure before the leftover is pushed (the correctness
+        // backstop, never the hot path).
         let mut rest_width = w;
         loop {
             if rest_width + col <= width {
                 if str_width(rest) + col <= width {
                     break;
                 }
-                // A non-additive cluster split drifted the arithmetic:
-                // re-sync from the true measure and keep breaking.
+                // A non-additive cluster split drifted the arithmetic: re-sync from the
+                // true measure and keep breaking.
                 rest_width = str_width(rest);
             }
             let mut take = String::new();
@@ -760,17 +742,16 @@ fn wrap_quote(spans: &[Span], width: usize, style: &MarkdownStyle, out: &mut Vec
     }
 }
 
-/// Convert our Line type to ratatui text for rendering. OSC zone markers and
-/// OSC 8 hyperlink sequences are stripped: ratatui has no escape-sequence
-/// support and would count their bytes as visible cells (the paint path
-/// re-emits them: zone markers per row, links via `HyperlinkWriter`).
+/// Convert our Line type to ratatui text for rendering. OSC zone markers and OSC 8
+/// hyperlink sequences are stripped: ratatui has no escape-sequence support and would count
+/// their bytes as visible cells (the paint path re-emits them).
 #[must_use]
 pub fn to_ratatui_line(line: &Line) -> rt::Line<'static> {
     let mut stripped = line.clone();
     crate::osc133::strip(&mut stripped);
     crate::hyperlinks::strip_osc8(&mut stripped);
-    // TS `applyLineResets` normalizes every painted line right before the
-    // differential paint (Thai/Lao AM decomposition, tabs to three spaces).
+    // TS `applyLineResets` normalizes every painted line right before the differential
+    // paint (Thai/Lao AM decomposition, tabs to three spaces).
     let spans: Vec<rt::Span<'static>> = stripped
         .iter()
         .map(|s| rt::Span::styled(crate::width::normalize_terminal_output(&s.content), s.style))

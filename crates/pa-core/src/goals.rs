@@ -1,20 +1,15 @@
 //! Thread goals: state model, validation, host-response serialization, and
-//! the goal-context continuation prompts. Port of core/goals.ts.
+//! the goal-context continuation prompts.
 
 use serde::{Deserialize, Serialize};
 
-/// Custom message type persisting the goal state in the session JSONL.
 pub const GOAL_STATE_CUSTOM_TYPE: &str = "thread_goal_state";
-/// Custom message type for goal continuation prompts.
 pub const GOAL_CONTEXT_CUSTOM_TYPE: &str = "goal_context";
 pub const GOAL_CONTEXT_PREVIEW_LABEL: &str = "Goal context";
 pub const GOAL_SKILL_NAME: &str = "goal";
 pub const MAX_THREAD_GOAL_OBJECTIVE_CHARS: usize = 4000;
 
-// The wire/persisted `GoalState` and `GoalStatus` vocabulary lives in
-// pa-types (shared with the attached surfaces); this module owns the goal
-// engine: validation, accounting, host responses, and continuation
-// prompts. The slug (`"budget_limited"`) is `GoalStatus::slug`.
+// The wire vocabulary lives in pa-types (shared with the attached surfaces).
 pub use pa_types::goal::{empty_goal_state, GoalState, GoalStatus};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,24 +70,18 @@ pub struct GoalContextDetails {
     pub continuations_used: u64,
 }
 
-/// The goal-update dedupe's age-invariant projection: the creation-based
-/// timer recomputes `time_used_seconds` from the wall clock on every read
-/// (the operator's ruling), so the age must not participate in an
-/// "unchanged state" comparison — an unchanged goal would otherwise
-/// re-emit `goal_update` every time a second boundary passes between two
-/// reads. Emit the real state; dedupe on this projection.
+/// The goal-update dedupe's age-invariant projection: the creation-based timer recomputes
+/// `time_used_seconds` from the wall clock (the operator's ruling), so the age must not participate
+/// in an "unchanged state" comparison.
+#[must_use]
 pub fn goal_update_dedupe_projection(state: &GoalState) -> GoalState {
     let mut projected = state.clone();
     projected.time_used_seconds = 0;
     projected
 }
 
-/// Clamp counters and derive `active` from the status. Backfills
-/// `created_at` for goals persisted before the creation-based timer
-/// contract (operator ruling 2026-09-28): a goal without `created_at`
-/// adopts its `updated_at` as the creation time, so rows persisted
-/// before the contract read a sane age instead of no age. The empty
-/// state (no goal id, no objective) never fabricates a creation time.
+/// Clamp counters and derive `active` from the status. Backfills `created_at` (operator ruling
+/// 2026-09-28): a goal without `created_at` adopts its `updated_at`.
 #[must_use]
 pub fn normalize_goal_state(goal: GoalState) -> GoalState {
     let created_at = match goal.created_at {
@@ -115,8 +104,7 @@ pub fn normalize_goal_state(goal: GoalState) -> GoalState {
 ///
 /// # Errors
 ///
-/// Returns an error when the objective is empty after trimming or longer
-/// than the objective character limit.
+/// Returns an error when the objective is empty after trimming or too long.
 pub fn validate_goal_objective(value: &str) -> anyhow::Result<String> {
     let objective = value.trim();
     if objective.is_empty() {
@@ -144,10 +132,73 @@ pub fn validate_goal_budget(value: Option<u64>) -> anyhow::Result<Option<u64>> {
     Ok(value)
 }
 
-/// Token accounting delta for one usage event.
 #[must_use]
 pub fn goal_token_delta_for_usage(input: i64, output: i64) -> u64 {
     input.max(0) as u64 + output.max(0) as u64
+}
+
+/// The restore-resurrection guard: the newest `thread_goal_state` row is `active`, but a terminal
+/// provider failure settled after it. Returns the failure's error text for the caller to adopt as
+/// the goal's terminal state. Newest-first: no goal row means only the newest assistant row counts.
+pub fn stale_active_goal_failure(entries: &[pa_types::session::FileEntry]) -> Option<String> {
+    let mut newest_assistant: Option<&pa_types::ai::AssistantMessage> = None;
+    for entry in entries.iter().rev() {
+        match entry {
+            pa_types::session::FileEntry::Custom { payload, .. }
+                if payload.custom_type == GOAL_STATE_CUSTOM_TYPE =>
+            {
+                let Some(data) = payload.data.as_ref() else {
+                    continue;
+                };
+                if !is_persisted_goal_state(data) {
+                    continue;
+                }
+                let Ok(state) = serde_json::from_value::<GoalState>(data.clone()) else {
+                    continue;
+                };
+                if state.status != GoalStatus::Active {
+                    return None;
+                }
+                return newest_assistant.and_then(wire_terminal_provider_failure);
+            }
+            pa_types::session::FileEntry::Message {
+                message: pa_types::session::AgentMessage::Assistant(assistant),
+                ..
+            } if newest_assistant.is_none() => {
+                newest_assistant = Some(assistant);
+            }
+            _ => {}
+        }
+    }
+    newest_assistant.and_then(wire_terminal_provider_failure)
+}
+
+/// The wire form of terminal-provider-failure predicate: the failure text when the assistant row
+/// settled as terminal. The quota-park class keeps the goal.
+fn wire_terminal_provider_failure(message: &pa_types::ai::AssistantMessage) -> Option<String> {
+    if message.stop_reason != pa_types::ai::StopReason::Error {
+        return None;
+    }
+    // The diagnostic only excludes the quota-park class: an error-stop row WITHOUT a provider
+    // diagnostic is still terminal.
+    let kind = message.diagnostics.as_ref().and_then(|diagnostics| {
+        diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.type_ == "provider_stream_failure")
+            .and_then(|diagnostic| diagnostic.details.as_ref())
+            .and_then(|details| details.get("kind"))
+            .and_then(serde_json::Value::as_str)
+    });
+    if kind == Some("rate_limit") {
+        return None;
+    }
+    Some(
+        message
+            .error_message
+            .clone()
+            .filter(|error| !error.is_empty())
+            .unwrap_or_else(|| "Assistant response failed".to_string()),
+    )
 }
 
 /// Whether a JSON value round-trips as a well-formed persisted goal state.
@@ -216,8 +267,7 @@ pub fn goal_host_response(goal: &GoalState, include_completion_report: bool) -> 
 ///
 /// # Errors
 ///
-/// Returns an error when the goal has no objective, or when the goal context
-/// details cannot be serialized.
+/// Returns an error when the goal has no objective or its context cannot be serialized.
 pub fn create_goal_context_message(
     goal: &GoalState,
     kind: GoalContextKind,
@@ -365,6 +415,8 @@ mod tests {
             time_used_seconds: 120,
             continuations_used: 3,
             created_at: Some(1),
+            no_progress_streak: None,
+            no_progress_turn_ms: None,
             updated_at: Some(2),
             last_reason: None,
             last_error: None,
@@ -426,7 +478,6 @@ mod tests {
         assert_eq!(serialized.status, GoalStatus::Active);
         assert_eq!(response.remaining_tokens, Some(600));
         assert_eq!(response.completion_budget_report, None);
-        // Completion report only for complete goals on request.
         let mut done = goal;
         done.status = GoalStatus::Complete;
         done.tokens_used = 900;
@@ -435,7 +486,6 @@ mod tests {
             done_response.completion_budget_report.as_deref(),
             Some("Goal achieved. Report final budget usage to the user: tokens used: 900 of 1000; time used: 120 seconds.")
         );
-        // Idle state yields an empty response.
         let empty = goal_host_response(&empty_goal_state(), true);
         assert_eq!(empty.goal, None);
         assert_eq!(empty.remaining_tokens, None);
@@ -457,7 +507,6 @@ mod tests {
         assert!(text.contains("- status: active"));
         assert!(text.contains("- remaining tokens: 600"));
         assert!(text.contains("await goal.complete()"));
-        // Budget-limit and objective-updated prompts.
         let budget = create_goal_context_message(&goal, GoalContextKind::BudgetLimit).unwrap();
         let UserContent::Text(budget_text) = &budget.content else {
             panic!("expected text content");
@@ -482,7 +531,6 @@ mod tests {
         };
         assert!(!escaped_text.contains("</objective><inject>"));
         assert!(escaped_text.contains("&lt;/objective&gt;&lt;inject&gt;"));
-        // No objective -> error.
         let mut bare = goal;
         bare.objective = None;
         assert!(create_goal_context_message(&bare, GoalContextKind::Continuation).is_err());
@@ -500,5 +548,143 @@ mod tests {
         assert_eq!(format_goal_usage(&unbudgeted).as_deref(), Some("120s"));
         unbudgeted.time_used_seconds = 0;
         assert_eq!(format_goal_usage(&unbudgeted), None);
+    }
+
+    /// A persisted goal-state custom entry wrapping `state`.
+    fn goal_state_entry(state: &GoalState) -> pa_types::session::FileEntry {
+        let data = serde_json::to_value(state).unwrap();
+        pa_types::session::FileEntry::Custom {
+            payload: pa_types::session::CustomEntry {
+                custom_type: GOAL_STATE_CUSTOM_TYPE.to_string(),
+                data: Some(data),
+                rest: serde_json::Map::default(),
+            },
+            base: pa_types::session::EntryBase {
+                id: None,
+                parent_id: None,
+                timestamp: None,
+                rest: serde_json::Map::default(),
+            },
+        }
+    }
+
+    /// A durable failed provider turn (the wire assistant row).
+    fn error_turn_entry(
+        kind: &str,
+        status: Option<u16>,
+        error: &str,
+    ) -> pa_types::session::FileEntry {
+        pa_types::session::FileEntry::Message {
+            message: pa_types::session::AgentMessage::Assistant(pa_types::ai::AssistantMessage {
+                content: Vec::new(),
+                api: "openai-completions".to_string(),
+                provider: "test".to_string(),
+                model: "m".to_string(),
+                response_model: None,
+                response_id: None,
+                diagnostics: Some(vec![pa_types::ai::AssistantMessageDiagnostic {
+                    type_: "provider_stream_failure".to_string(),
+                    timestamp: 0,
+                    error: None,
+                    details: Some(
+                        serde_json::json!({
+                            "kind": kind,
+                            "status": status,
+                        })
+                        .as_object()
+                        .cloned()
+                        .unwrap_or_default(),
+                    ),
+                }]),
+                usage: pa_types::ai::Usage::default(),
+                stop_reason: pa_types::ai::StopReason::Error,
+                stop_reason_raw: None,
+                error_message: Some(error.to_string()),
+                timestamp: 0,
+                rest: serde_json::Map::default(),
+            }),
+            base: pa_types::session::EntryBase {
+                id: None,
+                parent_id: None,
+                timestamp: None,
+                rest: serde_json::Map::default(),
+            },
+        }
+    }
+
+    /// The restore-resurrection scan: the newest active goal row with a
+    /// terminal failure settled after it.
+    #[test]
+    fn stale_active_goal_failure_scan() {
+        let active = goal_state_entry(&active_goal());
+        let mut finished = active_goal();
+        finished.status = GoalStatus::Error;
+        finished.active = false;
+        let finished = goal_state_entry(&finished);
+        let failure = error_turn_entry("invalid_request", Some(402), "402 Insufficient balance");
+        let rate_limited =
+            error_turn_entry("rate_limit", Some(429), "429 Too many concurrent requests");
+
+        // The interrupted settle: the active mint row, then the corpse.
+        assert_eq!(
+            stale_active_goal_failure(&[active.clone(), failure.clone()]),
+            Some("402 Insufficient balance".to_string())
+        );
+        // The quota-park class keeps the goal: not stale.
+        assert_eq!(
+            stale_active_goal_failure(&[active.clone(), rate_limited]),
+            None
+        );
+        let healthy = pa_types::session::FileEntry::Message {
+            message: pa_types::session::AgentMessage::Assistant(pa_types::ai::AssistantMessage {
+                content: vec![pa_types::ai::AssistantContentBlock::Text(
+                    pa_types::ai::TextContent {
+                        text: "progress".to_string(),
+                        text_signature: None,
+                        rest: serde_json::Map::default(),
+                    },
+                )],
+                api: "openai-completions".to_string(),
+                provider: "test".to_string(),
+                model: "m".to_string(),
+                response_model: None,
+                response_id: None,
+                diagnostics: None,
+                usage: pa_types::ai::Usage::default(),
+                stop_reason: pa_types::ai::StopReason::Stop,
+                stop_reason_raw: None,
+                error_message: None,
+                timestamp: 0,
+                rest: serde_json::Map::default(),
+            }),
+            base: pa_types::session::EntryBase {
+                id: None,
+                parent_id: None,
+                timestamp: None,
+                rest: serde_json::Map::default(),
+            },
+        };
+        assert_eq!(stale_active_goal_failure(&[active.clone(), healthy]), None);
+        assert_eq!(
+            stale_active_goal_failure(&[active.clone(), failure.clone(), finished.clone()]),
+            None
+        );
+        // The goal restarted after the failure: the active row is newer.
+        assert_eq!(stale_active_goal_failure(&[failure, active.clone()]), None);
+        // A diagnostic-less error row is still terminal: the diagnostic
+        // only excludes the quota-park class.
+        let mut bare_failure = error_turn_entry("invalid_request", Some(402), "402 no diagnostic");
+        if let pa_types::session::FileEntry::Message {
+            message: pa_types::session::AgentMessage::Assistant(assistant),
+            ..
+        } = &mut bare_failure
+        {
+            assistant.diagnostics = None;
+        }
+        assert_eq!(
+            stale_active_goal_failure(&[active, bare_failure]),
+            Some("402 no diagnostic".to_string())
+        );
+        assert_eq!(stale_active_goal_failure(&[finished]), None);
     }
 }
