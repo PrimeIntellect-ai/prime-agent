@@ -18,7 +18,7 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -331,6 +331,13 @@ type WitnessFd = ();
 #[derive(Debug)]
 pub struct LockDir {
     path: PathBuf,
+    /// Whether this guard's removal was already handled (a guarded
+    /// removal or an abandonment set it): Drop's plain release runs at
+    /// most once, so a successor's fresh lock at the vacated path never
+    /// sees a second rmdir - while the guard still drops NORMALLY (its
+    /// heap fields freed, its registry entry unregistered), never
+    /// forgotten whole.
+    finished: AtomicBool,
     /// The lock directory's identity captured at acquisition (the inode;
     /// TS `guardIno`), `None` where the platform cannot observe it.
     owned: Option<u64>,
@@ -503,6 +510,7 @@ impl LockDir {
             owned,
             owned_mtime: Mutex::new(probe),
             witness,
+            finished: AtomicBool::new(false),
             path,
         })
     }
@@ -1184,11 +1192,13 @@ impl LockDir {
             // own staleness sweep, exactly like the stolen case.
         }
         self.abandon_witness();
-        #[cfg(unix)]
-        {
-            unregister_locally_held(&self.path);
-        }
-        std::mem::forget(self);
+        // The removal decision is settled: mark the guard finished so its
+        // Drop never runs the plain release again (a successor's fresh
+        // lock at the vacated path must not see a second rmdir), then let
+        // the guard DROP NORMALLY - the fields (the path buffer, the mtime
+        // record) are freed and the registry entry unregisters in Drop,
+        // never leaked whole by a forget.
+        self.finished.store(true, Ordering::Relaxed);
     }
 
     /// Whether a lock path's occupant carries this guard's own `flock`
@@ -1212,11 +1222,10 @@ impl LockDir {
     /// released: that would delete the successor's lock.").
     pub fn disarm(mut self) {
         self.abandon_witness();
-        #[cfg(unix)]
-        {
-            unregister_locally_held(&self.path);
-        }
-        std::mem::forget(self);
+        // Marked finished: Drop's plain release is suppressed (the
+        // abandoned artifact stays at the path), and the guard still drops
+        // normally - fields freed, registry entry unregistered.
+        self.finished.store(true, Ordering::Relaxed);
     }
 
     /// Close the live-holder witness handle (a no-op on platforms without
@@ -1228,7 +1237,12 @@ impl LockDir {
 
 impl Drop for LockDir {
     fn drop(&mut self) {
-        self.release();
+        // The plain release runs at most once: a guarded removal or an
+        // abandonment marked the guard finished, and its successor's fresh
+        // lock at the vacated path must never see a second rmdir.
+        if !self.finished.swap(true, Ordering::Relaxed) {
+            self.release();
+        }
         #[cfg(unix)]
         {
             unregister_locally_held(&self.path);
