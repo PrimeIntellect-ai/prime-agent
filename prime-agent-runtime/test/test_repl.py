@@ -128,6 +128,21 @@ class ReplTest(unittest.TestCase):
         self.addCleanup(self.repl.close)
         self.ready_event, self.ready_ms = self.repl.ready()
 
+    def enabled_factory_repl(self) -> ReplProcess:
+        """One repl whose kernel runs with the factory opt-in gate enabled:
+        the agent dir points at a temp dir whose settings.json carries the
+        enabled setting in the real shape (the same file `/factory on`
+        writes and the daemon's lane advertisement reads), so the
+        out-of-band lane answers through the live gate instead of reading
+        whatever the host machine's settings happen to say."""
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        with open(os.path.join(temp.name, "settings.json"), "w", encoding="utf-8") as handle:
+            json.dump({"factory": {"enabled": True}}, handle)
+        repl = ReplProcess(env={"PRIME_AGENT_CODING_AGENT_DIR": temp.name})
+        self.addCleanup(repl.close)
+        return repl
+
     def test_bash_activity_is_available_while_cell_is_running(self):
         self.repl.send({"type": "execute", "id": "cell", "code": "from rlm import bash\nimport asyncio\nh = bash('echo ready; sleep 20'); await asyncio.sleep(20)"})
         # Wait for the activity start display before requesting list.
@@ -166,6 +181,39 @@ class ReplTest(unittest.TestCase):
         self.assertEqual(event["event"], "error")
         self.assertEqual(event["ename"], "ProtocolError")
         self.assertIn("256", event["evalue"])
+
+    def test_factory_activity_is_available_while_cell_is_running(self):
+        repl = self.enabled_factory_repl()
+        repl.send({"type": "execute", "id": "cell", "code": "import asyncio\nawait asyncio.sleep(20)"})
+        # The factory graph answers out of band while the cell runs: no
+        # live runs exist yet, so the graph action lists the empty registry.
+        repl.send({"type": "factory_activity", "id": "g", "action": "graph"})
+        listed = repl.until_done("g")[-1]
+        self.assertEqual(listed["status"], "ok")
+        self.assertEqual(listed["result"]["runs"], [])
+        # unknown-run watch answers with the error reply (not a hang)
+        repl.send({"type": "factory_activity", "id": "w", "action": "watch", "runId": "nope", "timeoutMs": 100})
+        missing = repl.until_done("w")[-1]
+        self.assertEqual(missing["status"], "error")
+        self.assertIn("unknown factory run", missing["reason"])
+        repl.send({"type": "interrupt", "id": "cell"})
+        repl.until_done("cell")
+
+    def test_factory_activity_rejects_malformed_frames(self):
+        for frame, fragment in (
+            ({"type": "factory_activity", "id": "b", "action": "bogus"}, "unknown factory activity action"),
+            ({"type": "factory_activity", "id": "x" * 300, "action": "graph"}, "256"),
+            (
+                {"type": "factory_activity", "id": "t", "action": "watch", "runId": "r", "timeoutMs": "soon"},
+                "timeoutMs",
+            ),
+            ({"type": "factory_activity", "id": "n", "action": "graph", "runId": 5}, "runId"),
+        ):
+            self.repl.send(frame)
+            event = self.repl.read_event()
+            self.assertEqual(event["event"], "error", frame)
+            self.assertEqual(event["ename"], "ProtocolError")
+            self.assertIn(fragment, event["evalue"], frame)
 
     def test_ready_handshake_and_startup_time(self):
         self.assertEqual(self.ready_event["event"], "ready")

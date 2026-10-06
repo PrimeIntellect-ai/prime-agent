@@ -8,11 +8,12 @@ use super::launch_budget::{
 };
 #[cfg(not(unix))]
 use super::launch_budget::{WORKER_PROBE_BACKOFF_MAX_MS, WORKER_PROBE_BACKOFF_MIN_MS};
+use super::routing::WORKER_REQUEST_TIMEOUT_MS;
 use super::{
     anyhow, create_command_payload, json, persist_worker, socket, util, Arc, Context,
     DaemonCommand, DaemonWorkerDescriptor, DaemonWorkerLifecycle, DurableDaemonCreateCommand,
     Duration, EngineModelSelection, Map, Ordering, Path, ResidentWorker, Result, RouteAdmission,
-    Supervisor, TempSync, TypedCreateRejection, Value, LONG_ROUTE_TIMEOUT_MS, ROUTE_TIMEOUT_MS,
+    Supervisor, TempSync, TypedCreateRejection, Value, ROUTE_TIMEOUT_MS,
 };
 use crate::lease::is_process_alive;
 use crate::protocol::{response_failure, response_success, DaemonResponse};
@@ -334,6 +335,9 @@ impl Supervisor {
         // self-registers on boot, and the registration handler must find its
         // identity in the registry (registration races the create replay).
         self.registry.insert(Arc::clone(&resident)).await;
+        // An owner whose last connection closed before this insert was
+        // missed by its disconnect scan; the arm checks the owner itself.
+        self.schedule_owned_worker_cleanup(&resident).await;
         let deadline = self.connect_deadline();
         // A failed launch never leaves its half-registered resident behind:
         // a later stale-id rebind (or resolve) must not select a worker
@@ -374,7 +378,7 @@ impl Supervisor {
                 &resident,
                 "create",
                 create_payload,
-                LONG_ROUTE_TIMEOUT_MS,
+                WORKER_REQUEST_TIMEOUT_MS,
                 RouteAdmission::SupervisorInternal,
             )
             .await

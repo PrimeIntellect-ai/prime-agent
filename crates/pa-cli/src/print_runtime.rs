@@ -66,8 +66,8 @@ impl crate::mode::Runtime for PrintRuntime {
                     }
                 }
             }
-            // ACP mode: a thin JSON-RPC stdio transport over the same
-            // in-process session engine the print mode uses.
+            // ACP mode: a thin JSON-RPC stdio transport over a daemon
+            // session.
             AppMode::Acp => match run_acp_mode(options) {
                 Ok(code) => Ok(code),
                 Err(error) => {
@@ -89,9 +89,11 @@ impl crate::mode::Runtime for PrintRuntime {
     }
 }
 
-/// The ACP headless mode: build the in-process session engine the same way
-/// the print mode does, then serve the ACP JSON-RPC surface over stdio until
-/// the client disconnects.
+/// The ACP headless mode (TS main.ts, `useDaemonClient`): ensure a
+/// supervisor is listening (spawning one detached), create the daemon
+/// session the CLI session flags select, and serve the ACP surface over it
+/// until the client disconnects. Any startup failure is an `Error:` exit 1
+/// before the first ACP frame.
 fn run_acp_mode(options: &RunOptions) -> Result<i32, String> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -102,113 +104,131 @@ fn run_acp_mode(options: &RunOptions) -> Result<i32, String> {
 
 async fn acp_mode_main(options: &RunOptions) -> Result<i32, String> {
     // The disclosure prints on the ACP client's stderr before any
-    // transport starts, so a daemon-attached run shows it too (TS pushes
-    // the daemon-created session's diagnostics to the client; the Rust
-    // stderr surface prints it here without that round-trip).
+    // transport starts (TS pushes the daemon-created session's diagnostics
+    // to the client; the Rust stderr surface prints it here).
     crate::telemetry_notice::print_if_due(&options.config);
-    // TS `shouldUseDaemonClient` is true for the ACP mode: the daemon is
-    // the preferred transport, and the in-process engine stays the
-    // fallback when no daemon can be reached or served.
-    if let Some(exit_code) = try_daemon_attached_acp(options).await {
-        return Ok(exit_code);
-    }
-    let config = &options.config;
-    let engine = build_headless_engine_parts(options, "acp").await?;
-    let exit_code = pa_daemon::acp::run_acp_mode(pa_daemon::acp::AcpOptions {
-        engine: std::sync::Arc::new(engine.engine),
-        actual_cwd: config.cwd.clone(),
+    // Flag > env > default: the same `PRIME_AGENT_DAEMON_SOCKET` contract
+    // as every other mode (the `prime-agent` launcher written by
+    // install-rust.sh pins that env, so the ACP path must honor it or it
+    // would target the TypeScript default socket and treat the schema
+    // mismatch as a stale daemon).
+    let socket_path = crate::config::resolve_daemon_socket_path(options.daemon_socket.as_deref());
+    crate::interactive_mode::ensure_daemon_running(&socket_path, &options.config.cwd)
+        .await
+        .map_err(|error| format!("{error:#}"))?;
+    let (actual_cwd, create) = daemon_acp_create(options)?;
+    pa_daemon::acp::daemon::run_daemon_attached_acp_mode(pa_daemon::acp::daemon::DaemonAcpOptions {
+        socket_path,
+        actual_cwd,
         product_version: crate::config::version().to_string(),
-        model: Some(engine.model),
-        api_key: engine.api_key,
-        agent_dir: config.agent_dir.clone(),
-        provider_target: engine.provider_target,
-        autonomous_config: options
-            .config
-            .autonomous
-            .as_ref()
-            .map(autonomous_runtime_config),
+        create,
     })
     .await
-    .map_err(|error| format!("{error:#}"))?;
-    Ok(exit_code)
+    .map_err(|error| format!("{error:#}"))
 }
 
-/// Try the daemon-attached ACP transport: ensure a supervisor is
-/// listening (spawning one detached, TS daemon-launch semantics), then
-/// serve the ACP surface over a client-owned daemon session. `None` means
-/// the daemon path is unavailable and the in-process engine serves the
-/// connection instead (the failure is logged to stderr, never stdout).
-async fn try_daemon_attached_acp(options: &RunOptions) -> Option<i32> {
-    if std::env::var_os("PRIME_AGENT_FAUX_SCRIPT").is_some() {
-        return None;
-    }
-    // Flag > env > default: the ACP transport resolves the same
-    // `PRIME_AGENT_DAEMON_SOCKET` contract as every other mode (the
-    // `prime-agent` launcher written by install-rust.sh pins that env,
-    // so the ACP path must honor it or it would target the TypeScript
-    // default socket and treat the schema mismatch as a stale daemon).
-    let socket_path = crate::config::resolve_daemon_socket_path(options.daemon_socket.as_deref());
-    let cwd = options.config.cwd.clone();
-    let result = async {
-        crate::interactive_mode::ensure_daemon_running(&socket_path, &cwd)
-            .await
-            .map_err(|error| format!("{error:#}"))?;
-        let config = &options.config;
-        // The session flags the in-process engine honors, under the TS
-        // `runtimeConfigFromArgs` names. `--api-key` stays off: the
-        // in-process path ignores it too, and the create config is persisted.
-        let mut create_config = serde_json::json!({ "cwd": config.cwd.display().to_string() });
-        if let Some(provider) = &config.provider {
-            create_config["provider"] = serde_json::json!(provider);
-        }
-        if let Some(model) = &config.model {
-            create_config["model"] = serde_json::json!(model);
-        }
-        if let Some(thinking) = config.thinking {
-            create_config["thinking"] = serde_json::json!(thinking.wire_name());
-        }
-        if let Some(system_prompt) = &config.system_prompt {
-            create_config["systemPrompt"] = serde_json::json!(system_prompt);
-        }
-        if !config.append_system_prompt.is_empty() {
-            create_config["appendSystemPrompt"] = serde_json::json!(config.append_system_prompt);
-        }
-        for (key, paths) in [
-            ("skills", &config.skills),
-            ("promptTemplates", &config.prompt_templates),
-        ] {
-            if !paths.is_empty() {
-                create_config[key] = paths
-                    .iter()
-                    .map(|path| path.display().to_string())
-                    .collect::<Vec<_>>()
-                    .into();
-            }
-        }
-        if let Some(autonomous) = &config.autonomous {
-            create_config["autonomous"] = serde_json::json!(autonomous_runtime_config(autonomous));
-        }
-        pa_daemon::acp::daemon::run_daemon_attached_acp_mode(
-            pa_daemon::acp::daemon::DaemonAcpOptions {
-                socket_path,
-                actual_cwd: config.cwd.clone(),
-                product_version: crate::config::version().to_string(),
-                create_config,
-            },
+/// The ACP daemon session's create (TS main.ts `defaultSessionConfig` +
+/// the startup create): the session the flags select, client-owned only
+/// for `--no-session`, plus the session's cwd. The worker opens and
+/// leases the selected file itself.
+fn daemon_acp_create(
+    options: &RunOptions,
+) -> Result<(std::path::PathBuf, pa_types::daemon::DaemonCommand), String> {
+    use pa_types::daemon::DaemonSessionLifecycle;
+    let config = &options.config;
+    let session_dir = replacement_session_dir(options);
+    let (cwd, session_path, lifecycle) = if options.session.no_session {
+        (
+            config.cwd.clone(),
+            None,
+            DaemonSessionLifecycle::ClientOwned,
         )
-        .await
-        .map_err(|error| format!("{error:#}"))
+    } else {
+        let (cwd, session_path) = match select_headless_session(options)? {
+            HeadlessSession::Fork(source) => {
+                let fork = pa_core::session::manager::SessionManager::fork_from(
+                    &source,
+                    &config.cwd,
+                    &session_dir,
+                )?;
+                (
+                    config.cwd.clone(),
+                    fork.get_session_file().map(std::path::Path::to_path_buf),
+                )
+            }
+            HeadlessSession::Open(path) => (
+                stored_session_cwd(&path, &config.cwd, explicit_cwd_override(options))?,
+                Some(path),
+            ),
+            HeadlessSession::Fresh => (config.cwd.clone(), None),
+        };
+        (cwd, session_path, DaemonSessionLifecycle::Resident)
+    };
+    // The CLI session flags, under the TS `runtimeConfigFromArgs`
+    // names. `--api-key` stays off: the create config is persisted.
+    let mut create_config = serde_json::json!({
+        "cwd": cwd.display().to_string(),
+        "sessionDir": session_dir.display().to_string(),
+        // The telemetry execution mode (TS main.ts `executionMode: appMode`).
+        "executionMode": "acp",
+    });
+    if let Some(provider) = &config.provider {
+        create_config["provider"] = serde_json::json!(provider);
     }
-    .await;
-    match result {
-        Ok(code) => Some(code),
-        Err(error) => {
-            eprintln!(
-                "prime-agent: daemon-attached ACP unavailable, using in-process mode: {error}"
-            );
-            None
+    if let Some(model) = &config.model {
+        create_config["model"] = serde_json::json!(model);
+    }
+    if let Some(thinking) = config.thinking {
+        create_config["thinking"] = serde_json::json!(thinking.wire_name());
+    }
+    if let Some(system_prompt) = &config.system_prompt {
+        create_config["systemPrompt"] = serde_json::json!(system_prompt);
+    }
+    if !config.append_system_prompt.is_empty() {
+        create_config["appendSystemPrompt"] = serde_json::json!(config.append_system_prompt);
+    }
+    for (key, paths) in [
+        ("skills", &config.skills),
+        ("promptTemplates", &config.prompt_templates),
+    ] {
+        if !paths.is_empty() {
+            create_config[key] = paths
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .into();
         }
     }
+    if let Some(autonomous) = &config.autonomous {
+        create_config["autonomous"] = serde_json::json!(autonomous_runtime_config(autonomous));
+    }
+    // Verification seam (the interactive mode's contract): a scripted daemon
+    // session from a script FILE path. The product never sets it.
+    if let Some(script) = std::env::var_os("PRIME_AGENT_FAUX_SCRIPT") {
+        create_config["script"] = serde_json::Value::String(script.to_string_lossy().to_string());
+    }
+    // Verification seam (the TS child runtime inherits the parent's
+    // `sessionConfig`): a scripted parent session's children run this script
+    // FILE. The product never sets it.
+    if let Some(child_script) = std::env::var_os("PRIME_AGENT_FAUX_CHILD_SCRIPT") {
+        create_config["childScript"] =
+            serde_json::Value::String(child_script.to_string_lossy().to_string());
+    }
+    let create = pa_types::daemon::DaemonCommand::Create {
+        id: None,
+        session_path: session_path.map(|path| path.display().to_string()),
+        continue_recent: None,
+        no_session: options.session.no_session.then_some(true),
+        name: None,
+        config: Some(create_config),
+        telemetry_disabled: crate::mode::create_telemetry_disabled(config),
+        runtime_metadata: None,
+        lifecycle: Some(lifecycle),
+        env: None,
+        launch_env: None,
+        rest: serde_json::Map::default(),
+    };
+    Ok((cwd, create))
 }
 
 /// The RPC headless mode: build the in-process session engine the print
@@ -417,7 +437,7 @@ async fn print_mode_main(options: &RunOptions) -> Result<i32, String> {
 /// network; verification harness only, never set by the product.
 ///
 /// The switchable provider target the session's stream reads per call
-/// (shared with the ACP mode, whose picker model switches swap it live).
+/// (shared with the RPC mode, whose picker model switches swap it live).
 pub type ProviderTargetSlot = std::sync::Arc<std::sync::RwLock<Option<ProviderTarget>>>;
 
 /// The assembled headless engine plus the model and request auth it runs
@@ -428,7 +448,7 @@ struct HeadlessEngine {
     model: Model,
     api_key: Option<String>,
     /// The live provider target: the stream reads it per call, and the
-    /// ACP mode's picker switches swap it (TS `setModel`'s stream
+    /// RPC mode's picker switches swap it (TS `setModel`'s stream
     /// re-registration; `set_model` swaps it without rebuilding the
     /// session).
     provider_target: ProviderTargetSlot,
@@ -619,6 +639,7 @@ async fn build_headless_engine_with(
     );
     let engine = pa_core::session_engine::engine::create_session(
         pa_core::session_engine::engine::SessionEngineConfig {
+            on_late_sent_agent_message: None,
             cron_store: None,
             semantic_edges,
             telemetry,
@@ -1000,10 +1021,81 @@ fn resolve_thinking_level(
     map_thinking_level(clamped)
 }
 
-/// The headless session-manager resolution, mirroring the flag order of
-/// TS `createSessionManager` (noSession -> fork -> resume -> continue ->
-/// create). `--no-session` never reaches here: the caller passes `None` to
-/// the engine, which builds the in-memory manager itself. The opened
+/// The headless session selection, in the flag order of TS
+/// `createSessionManager` (noSession -> fork -> resume -> continue ->
+/// create). `--no-session` never reaches here: its callers skip the
+/// selection.
+enum HeadlessSession {
+    /// Fork this source session into a fresh file.
+    Fork(std::path::PathBuf),
+    /// Open this existing session file.
+    Open(std::path::PathBuf),
+    Fresh,
+}
+
+/// main.ts `explicitCwdOverride`: with --cwd, the flag's directory wins
+/// over the stored session cwd on resume.
+fn explicit_cwd_override(options: &RunOptions) -> Option<&std::path::Path> {
+    options
+        .session
+        .cwd_from_flag
+        .then_some(options.config.cwd.as_path())
+}
+
+fn select_headless_session(options: &RunOptions) -> Result<HeadlessSession, String> {
+    let cwd = &options.config.cwd;
+    let session_dir = replacement_session_dir(options);
+    // TS `createSessionManager`'s fork arm: every resolution shape forks —
+    // a GLOBAL session is exactly what --fork is for (a different
+    // project's session copied into this cwd) — with no daemon-active
+    // guard: the copy writes a fresh file, never the hosted source.
+    if let Some(selector) = &options.session.fork {
+        // A leading `~` expands against the home dir (the resume
+        // selector's convention; the interactive fork arm matches).
+        let expanded = crate::config::expand_tilde_path(selector);
+        let selector = expanded.to_string_lossy();
+        let resolved = resolve_session_path(&selector, cwd, &session_dir)
+            .map_err(|error| render_selector_error(&error))?;
+        let source = match resolved {
+            ResolvedSession::Path(path)
+            | ResolvedSession::Local(path)
+            | ResolvedSession::Global { path, .. } => path,
+        };
+        return Ok(HeadlessSession::Fork(source));
+    }
+    if let Some(selector) = &options.session.resume {
+        let resolved = resolve_session_path(selector, cwd, &session_dir)
+            .map_err(|error| render_selector_error(&error))?;
+        return match resolved {
+            ResolvedSession::Path(path) | ResolvedSession::Local(path) => {
+                Ok(HeadlessSession::Open(
+                    std::path::absolute(&path).map_err(|error| error.to_string())?,
+                ))
+            }
+            ResolvedSession::Global {
+                path: _,
+                cwd: session_cwd,
+            } => {
+                // Headless modes have no fork prompt; mirror the TS non-TTY path.
+                Err(format!(
+                    "session {selector} belongs to a different project ({}). Pass --fork {selector} to use it here, or run from that project's directory.",
+                    session_cwd.display()
+                ))
+            }
+        };
+    }
+    if options.session.continue_recent {
+        // Absolute like the resume arm (TS `setSessionFile` resolves it).
+        if let Some(path) = find_most_recent_session_for_cwd(&session_dir, cwd) {
+            return Ok(HeadlessSession::Open(
+                std::path::absolute(&path).map_err(|error| error.to_string())?,
+            ));
+        }
+    }
+    Ok(HeadlessSession::Fresh)
+}
+
+/// The in-process session manager for the selected session. The opened
 /// session's runtime lease returns alongside (a long-lived connection
 /// holds it on the engine handle; the one-shot modes forget it for the
 /// process lifetime).
@@ -1016,74 +1108,28 @@ fn build_session_manager_with_lease(
     ),
     String,
 > {
-    use pa_core::session::manager::SessionManager;
     let cwd = options.config.cwd.clone();
-    let session_dir = options
-        .session
-        .session_dir
-        .clone()
-        .unwrap_or_else(|| options.config.agent_dir.join("sessions"));
-    // TS `createSessionManager`'s fork arm: every resolution shape forks —
-    // a GLOBAL session is exactly what --fork is for (a different
-    // project's session copied into this cwd) — with no daemon-active
-    // guard: the copy writes a fresh file, never the hosted source.
-    if let Some(selector) = &options.session.fork {
-        // A leading `~` expands against the home dir (the resume
-        // selector's convention; the interactive fork arm matches).
-        let expanded = crate::config::expand_tilde_path(selector);
-        let selector = expanded.to_string_lossy();
-        let resolved = resolve_session_path(&selector, &cwd, &session_dir)
-            .map_err(|error| render_selector_error(&error))?;
-        let source = match resolved {
-            ResolvedSession::Path(path)
-            | ResolvedSession::Local(path)
-            | ResolvedSession::Global { path, .. } => path,
-        };
-        let manager = SessionManager::fork_from(&source, &cwd, &session_dir)?;
-        // The materialized fork leases its own file before the engine
-        // writes it (the fresh-session rule): another process resuming
-        // the new file can never become a second writer while this
-        // engine appends — the source was only read, never leased.
-        return Ok(lease_fresh_manager(manager));
+    let session_dir = replacement_session_dir(options);
+    match select_headless_session(options)? {
+        HeadlessSession::Fork(source) => {
+            let manager =
+                pa_core::session::manager::SessionManager::fork_from(&source, &cwd, &session_dir)?;
+            // The materialized fork leases its own file before the engine
+            // writes it (the fresh-session rule): another process resuming
+            // the new file can never become a second writer while this
+            // engine appends — the source was only read, never leased.
+            Ok(lease_fresh_manager(manager))
+        }
+        HeadlessSession::Open(path) => {
+            let lease = session_open_guard(options.daemon_socket.as_deref(), &path)?;
+            // A failed open's early return drops the lease (released),
+            // never leaving an orphaned hold behind.
+            let manager =
+                open_session_file(&path, &session_dir, &cwd, explicit_cwd_override(options))?;
+            Ok((manager, Some(lease)))
+        }
+        HeadlessSession::Fresh => Ok(fresh_session_with_lease(&cwd, &session_dir)),
     }
-    // main.ts `explicitCwdOverride`: with --cwd, the flag's directory wins
-    // over the stored session cwd on resume.
-    let explicit_cwd_override = options.session.cwd_from_flag.then_some(cwd.as_path());
-    if let Some(selector) = &options.session.resume {
-        let resolved = resolve_session_path(selector, &cwd, &session_dir)
-            .map_err(|error| render_selector_error(&error))?;
-        return match resolved {
-            ResolvedSession::Path(path) | ResolvedSession::Local(path) => {
-                let lease = session_open_guard(options.daemon_socket.as_deref(), &path)?;
-                // A failed open's early return drops the lease (released),
-                // never leaving an orphaned hold behind.
-                let manager = open_session_file(&path, &session_dir, &cwd, explicit_cwd_override)?;
-                Ok((manager, Some(lease)))
-            }
-            ResolvedSession::Global {
-                path: _,
-                cwd: session_cwd,
-            } => {
-                // Print mode has no fork prompt; mirror the TS non-TTY path.
-                Err(format!(
-                    "session {selector} belongs to a different project ({}). Pass --fork {selector} to use it here, or run from that project's directory.",
-                    session_cwd.display()
-                ))
-            }
-        };
-    }
-    if options.session.continue_recent {
-        let most_recent = find_most_recent_session_for_cwd(&session_dir, &cwd);
-        return match most_recent {
-            Some(path) => {
-                let lease = session_open_guard(options.daemon_socket.as_deref(), &path)?;
-                let manager = open_session_file(&path, &session_dir, &cwd, explicit_cwd_override)?;
-                Ok((manager, Some(lease)))
-            }
-            None => Ok(fresh_session_with_lease(&cwd, &session_dir)),
-        };
-    }
-    Ok(fresh_session_with_lease(&cwd, &session_dir))
 }
 
 /// Build a FRESH persisted manager and lease its eagerly selected file
@@ -1244,6 +1290,23 @@ fn open_session_file(
     fallback_cwd: &std::path::Path,
     explicit_cwd_override: Option<&std::path::Path>,
 ) -> Result<pa_core::session::manager::SessionManager, String> {
+    let session_cwd = stored_session_cwd(path, fallback_cwd, explicit_cwd_override)?;
+    Ok(pa_core::session::manager::SessionManager::open(
+        &session_cwd,
+        session_dir,
+        path,
+    ))
+}
+
+/// The cwd an opened session runs in: the explicit override (main.ts
+/// `explicitCwdOverride`), else the stored session cwd, else the
+/// fallback. A session stored against a deleted directory must not
+/// silently continue somewhere else (main.ts `getMissingSessionCwdIssue`).
+fn stored_session_cwd(
+    path: &std::path::Path,
+    fallback_cwd: &std::path::Path,
+    explicit_cwd_override: Option<&std::path::Path>,
+) -> Result<std::path::PathBuf, String> {
     let session_cwd = explicit_cwd_override.map_or_else(
         || {
             let header = pa_core::session::manager::read_session_header(path);
@@ -1254,21 +1317,15 @@ fn open_session_file(
         },
         std::path::Path::to_path_buf,
     );
-    let manager = pa_core::session::manager::SessionManager::open(&session_cwd, session_dir, path);
-    // main.ts getMissingSessionCwdIssue: a session stored against a deleted
-    // directory must not silently continue somewhere else.
-    if !manager.get_cwd().exists() {
-        let session_file = manager
-            .get_session_file()
-            .map(|path| format!("\nSession file: {}", path.display()))
-            .unwrap_or_default();
+    if !session_cwd.exists() {
         return Err(format!(
-            "Stored session working directory does not exist: {}{session_file}\nCurrent working directory: {}",
-            manager.get_cwd().display(),
+            "Stored session working directory does not exist: {}\nSession file: {}\nCurrent working directory: {}",
+            session_cwd.display(),
+            path.display(),
             fallback_cwd.display()
         ));
     }
-    Ok(manager)
+    Ok(session_cwd)
 }
 
 /// Render a selector failure with the main.ts formatting: the error message
@@ -1674,6 +1731,7 @@ async fn build_faux_engine_with(
     // tests can verify persistence without the network.
     let engine = pa_core::session_engine::engine::create_session(
         pa_core::session_engine::engine::SessionEngineConfig {
+            on_late_sent_agent_message: None,
             cron_store: None,
             // Faux verification harness: no product telemetry.
             semantic_edges: None,

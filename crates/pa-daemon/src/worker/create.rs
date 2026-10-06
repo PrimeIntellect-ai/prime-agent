@@ -1,9 +1,9 @@
 //! Session creation and reuse on the worker: the create command's
 //! construction of the live session.
 use super::{
-    default_server_capabilities, json, paths, response_failure, response_success,
-    restore_queue_snapshot, session_file_name, Arc, EngineModelSelection, Result,
-    RlmSessionIdentity, SessionEngine, SessionFile, VecDeque, Worker,
+    json, paths, response_failure, response_success, restore_queue_snapshot, session_file_name,
+    Arc, EngineModelSelection, Result, RlmSessionIdentity, SessionEngine, SessionFile, VecDeque,
+    Worker,
 };
 
 use serde::Deserialize as _;
@@ -735,6 +735,18 @@ impl Worker {
                 children.set_delete_notifier(std::sync::Arc::new(move |child_id| {
                     cache.invalidate_child(child_id);
                 }));
+                let core = std::sync::Arc::clone(&self.core);
+                let events = self.events.clone();
+                children.set_child_update_sink(std::sync::Arc::new(move |mut child| {
+                    if let Some(parent_id) = core.lock().unwrap().rlm_child_id.clone() {
+                        child["parentId"] = json!(parent_id);
+                    }
+                    crate::user_bash::emit_session_event_frame(
+                        &core,
+                        &events,
+                        json!({ "type": "rlm_child_update", "child": child }),
+                    );
+                }));
             }
         }
         let mut data = serde_json::to_value(&summary).unwrap_or(Value::Null);
@@ -830,8 +842,10 @@ pub(super) fn active_session_id_of(payload: &[u8]) -> String {
         .unwrap_or_default()
 }
 
-pub(super) fn worker_server_capabilities() -> Vec<String> {
-    default_server_capabilities()
+pub(super) fn worker_server_capabilities(agent_dir: &std::path::Path) -> Vec<String> {
+    // The factory lane advertises only while its opt-in gate reads
+    // enabled (`factory.enabled`, default off).
+    crate::factory_activity::advertised_server_capabilities(agent_dir)
 }
 
 /// RLM depth fields of a create payload: `(depth, max_depth)`. Values must

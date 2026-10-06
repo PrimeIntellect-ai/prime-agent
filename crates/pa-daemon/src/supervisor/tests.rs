@@ -1,5 +1,8 @@
 use super::*;
 
+use proptest::prelude::*;
+use proptest::test_runner::RngSeed;
+
 /// The cargo test config sets `DO_NOT_TRACK=1`; the daemon's live
 /// recording gate reads it (env before settings). Tests that exercise
 /// gated daemon-event paths hold this guard while the three override
@@ -996,6 +999,93 @@ async fn first_signal_drains_a_settling_turn_and_rejects_new_work() {
     pump.abort();
 }
 
+/// A turn-long client route rides TS's 24 h worker-request budget
+/// (`WORKER_REQUEST_TIMEOUT_MS`, daemon-supervisor.ts:204), not the
+/// invented ten-minute cap: a `prompt_and_wait` whose worker answers a
+/// virtual hour later still succeeds.
+#[tokio::test(start_paused = true)]
+async fn a_prompt_and_wait_route_outlives_the_old_ten_minute_cap() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let options = SupervisorOptions {
+        socket_path: dir.path().join("daemon.sock"),
+        agent_dir: dir.path().join("agent"),
+    };
+    let supervisor = Arc::new(Supervisor::new(options).expect("supervisor"));
+    let descriptor: DaemonWorkerDescriptor = serde_json::from_value(serde_json::json!({
+        "version": 2,
+        "workerId": "w-longroute",
+        "pid": 0,
+        "socketPath": "/tmp/none.sock",
+        "recoveryJournalPath": "/tmp/none.jsonl",
+        "supervisorSocketPath": "/tmp/none.sock",
+        "authenticationToken": "test",
+        "rootActiveSessionId": "w-longroute",
+        "createdAt": "t",
+        "updatedAt": "t",
+        "lifecycle": "ready",
+        "createCommand": {},
+        "consecutiveFailures": 0,
+    }))
+    .expect("descriptor");
+    let descriptor_dir = dir.path().join("descriptors");
+    std::fs::create_dir_all(&descriptor_dir).unwrap();
+    let resident = Arc::new(ResidentWorker::new(
+        "w-longroute".to_string(),
+        descriptor,
+        descriptor_dir.join("w-longroute.descriptor.json"),
+    ));
+    // The fake worker holds the turn for a virtual hour — past the old
+    // ten-minute cap, inside the 24 h worker-request budget.
+    let (cmd_tx, mut cmd_rx) = mpsc::channel::<WorkerRequest>(1);
+    *resident.cmd_tx.lock().await = Some(cmd_tx);
+    let pump_resident = Arc::clone(&resident);
+    tokio::spawn(async move {
+        let request = cmd_rx.recv().await.expect("the route lands the prompt");
+        tokio::time::sleep(Duration::from_hours(1)).await;
+        let reply = pump_resident
+            .pending
+            .lock()
+            .await
+            .remove(&request.request_id)
+            .expect("the routed prompt holds a reply slot");
+        let _ = reply.send(WorkerReply::Typed(crate::protocol::response_success(
+            None,
+            "prompt_and_wait",
+            None,
+        )));
+    });
+    supervisor.registry.insert(Arc::clone(&resident)).await;
+    resident.note_connection_live();
+    resident.note_session_ready();
+    let (targeted_tx, _targeted_rx) = tokio::sync::mpsc::channel::<Arc<Value>>(16);
+    let attached = subscribers::ClientSubscriptions::new("c".to_string(), targeted_tx);
+    let command: DaemonCommand = serde_json::from_value(serde_json::json!({
+        "type": "prompt_and_wait",
+        "activeSessionId": "w-longroute",
+        "message": "go",
+    }))
+    .expect("command");
+    let route = {
+        let supervisor = Arc::clone(&supervisor);
+        tokio::spawn(async move {
+            supervisor
+                .route_client_command(
+                    &command,
+                    "c",
+                    &attached,
+                    "p-1".to_string(),
+                    "prompt_and_wait".to_string(),
+                    None,
+                )
+                .await
+        })
+    };
+    let (lines, stop) = route.await.expect("the route task lives");
+    assert!(!stop);
+    let line = lines.first().expect("the route answers with one line");
+    assert_eq!(line["success"], json!(true));
+}
+
 /// Every signal that finds a shutdown already in flight is the force
 /// request: the drain's own second signal, a signal racing the
 /// shutdown command's gate, and a signal racing an update exit - the
@@ -1896,4 +1986,98 @@ async fn off_window_daemon_events_never_count_into_the_summary() {
         Some(&Value::from(1)),
         "the off-window attach never counts"
     );
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 64,
+        rng_seed: RngSeed::Fixed(0x1145_2f6a),
+        ..ProptestConfig::default()
+    })]
+
+    // The live rename ladder: TS `routeClientCommand` wraps the forward in the name reservation.
+    #[test]
+    fn live_renames_reserve_family_names(
+        rows in prop::collection::vec(
+            (prop::sample::select(vec!["delta", "kilo"]), 0u32..=2, 0u8..=1),
+            1..=4,
+        ),
+        (requested, pad) in (prop::sample::select(vec!["delta", "kilo"]), any::<bool>()),
+        kind in prop::sample::select(vec!["rename", "set_session_name"]),
+        pre_reserved in prop::bool::weighted(0.25),
+    ) {
+        let requested = if pad { format!(" {requested} ") } else { requested.to_string() };
+        let trimmed = requested.trim();
+        let (_, target_depth, target_parent) = *rows.last().expect("the last row");
+        // TS sameAgentSessionNameParent: depth-0 rows share one scope.
+        let conflict = rows[..rows.len() - 1].iter().any(|(name, depth, parent)| {
+            *name == trimmed
+                && *depth == target_depth
+                && (target_depth == 0 || *parent == target_parent)
+        });
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("the per-case runtime");
+        runtime.block_on(async {
+            let dir = tempfile::TempDir::new().expect("case dir");
+            let agent_dir = dir.path().join("agent");
+            let sessions_dir = agent_dir.join("sessions");
+            std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
+            let parents = [sessions_dir.join("pa.jsonl"), sessions_dir.join("pb.jsonl")];
+            let options = SupervisorOptions { socket_path: dir.path().join("d.sock"), agent_dir };
+            let supervisor = Arc::new(Supervisor::new(options).expect("supervisor"));
+            let active = format!("r{}-live", rows.len() - 1);
+            for (index, (name, depth, parent)) in rows.iter().enumerate() {
+                let summary = json!({
+                    "sessionId": format!("r{index}"), "activeSessionId": format!("r{index}-live"),
+                    "runtimeKind": "subagent", "rlmDepth": depth, "sessionName": name,
+                    "parentSessionPath": parents[*parent as usize].to_string_lossy(),
+                });
+                supervisor.write_roster_summary(&summary, Some(format!("r{index}-live").as_str()));
+            }
+            let descriptor = serde_json::from_value::<DaemonWorkerDescriptor>(json!({
+                "version": 2, "workerId": &active, "pid": 4242, "socketPath": "/tmp/none.sock",
+                "recoveryJournalPath": "/tmp/none.jsonl", "supervisorSocketPath": "/tmp/none.sock",
+                "authenticationToken": "token", "rootActiveSessionId": &active, "createdAt": "t",
+                "updatedAt": "t", "lifecycle": "ready", "createCommand": {},
+                "consecutiveFailures": 0,
+            }))
+            .expect("descriptor");
+            let resident = ResidentWorker::new(active.clone(), descriptor, PathBuf::from("none"));
+            supervisor.registry.insert(resident.clone()).await;
+            // Retired: a forward past the ladder fails fast with WORKER_NOT_CONNECTED.
+            resident.note_retired();
+            let pre_key = pre_reserved.then(|| {
+                let scope = supervisor
+                    .live_session_name_scope(&active, trimmed.into())
+                    .expect("the target's own roster row");
+                let key = reservation_key(&scope);
+                supervisor.pending_session_names.lock().unwrap().insert(key.clone());
+                key
+            });
+            let command: DaemonCommand = serde_json::from_value(
+                json!({"type": kind, "activeSessionId": &active, "name": &requested}),
+            )
+            .expect("command");
+            let (queue_tx, _queue_rx) = tokio::sync::mpsc::channel(4);
+            let attached = subscribers::ClientSubscriptions::new("conn".to_string(), queue_tx);
+            let type_name = command_type_name(&command).to_string();
+            let (lines, stop) = supervisor
+                .route_client_command(&command, "client", &attached, "c1".into(), type_name, None)
+                .await;
+            prop_assert!(!stop);
+            prop_assert_eq!(&lines[0]["success"], &json!(false));
+            let expected = if conflict || pre_key.is_some() {
+                format!("Agent name \"{trimmed}\" is unavailable: an agent of that name already exists at depth {target_depth} under this parent")
+            } else {
+                WORKER_NOT_CONNECTED.to_string()
+            };
+            prop_assert_eq!(lines[0]["error"].as_str(), Some(expected.as_str()));
+            let pending = supervisor.pending_session_names.lock().unwrap().clone();
+            let expected_pending: std::collections::HashSet<String> = pre_key.into_iter().collect();
+            prop_assert_eq!(pending, expected_pending);
+            Ok(())
+        })?;
+    }
 }

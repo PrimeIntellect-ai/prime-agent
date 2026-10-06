@@ -20,8 +20,8 @@ pub(crate) const BARE_SKILL_INVOCATION_INSTRUCTION: &str = "The user invoked thi
 
 impl AgentSessionEngine {
     /// Build the engine: the shared async runtime, the model selection
-    /// (create config, else the process env pair), the supervisor link, the
-    /// children registry, and the MCP store.
+    /// (create config), the supervisor link, the children registry, and the
+    /// MCP store.
     ///
     /// # Errors
     ///
@@ -35,23 +35,11 @@ impl AgentSessionEngine {
     pub fn new(config: AgentEngineConfig) -> anyhow::Result<Self> {
         let runtime = crate::async_safe_runtime::AsyncSafeRuntime::new_multi_thread()?;
         let session_file = std::sync::Mutex::new(config.session_file.clone());
-        // Process-level fallback: the create config, else the worker env
-        // pair. A create command with explicit wire flags overrides both.
-        let thinking = config.thinking;
-        let selection = if config.provider.is_some() || config.model.is_some() {
-            EngineModelSelection {
-                provider: config.provider.clone(),
-                model: config.model.clone(),
-                api_key: config.api_key.clone(),
-                thinking,
-            }
-        } else {
-            EngineModelSelection {
-                provider: std::env::var("PRIME_AGENT_MODEL_PROVIDER").ok(),
-                model: std::env::var("PRIME_AGENT_MODEL").ok(),
-                api_key: None,
-                thinking,
-            }
+        let selection = EngineModelSelection {
+            provider: config.provider.clone(),
+            model: config.model.clone(),
+            api_key: config.api_key.clone(),
+            thinking: config.thinking,
         };
         // One shared supervisor-link client for the worker: agent messaging
         // and supervisor-backed RLM children multiplex the same connection
@@ -164,6 +152,7 @@ impl AgentSessionEngine {
             config,
             mcp,
             published_goal: std::sync::Mutex::new(None),
+            late_agent_message_sink: std::sync::Mutex::new(None),
             goal_runtime: std::sync::Mutex::new(None),
             pending_goal_continuation: std::sync::Mutex::new(None),
             goal_budget_crossed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -895,6 +884,32 @@ impl AgentSessionEngine {
         engine.bash_activity(action, activity_id, lines).await
     }
 
+    /// One factory activity over this session's kernel (the `/factory`
+    /// view's lane); never builds a new session/kernel.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no session kernel is running ("Kernel is
+    /// not running"), the preflight fails, or the kernel's own factory
+    /// activity call fails.
+    pub async fn factory_activity(
+        &self,
+        action: &str,
+        run_id: Option<&str>,
+        spec_id: Option<&str>,
+        timeout_ms: Option<u64>,
+    ) -> anyhow::Result<Value> {
+        let engine = self
+            .session
+            .lock()
+            .await
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!(pa_types::daemon::KERNEL_NOT_RUNNING_MESSAGE))?;
+        engine
+            .factory_activity(action, run_id, spec_id, timeout_ms)
+            .await
+    }
+
     /// Build the core session once (same once-only rule as `session_agent`),
     /// through the same guarded funnel.
     pub(crate) fn ensure_core_session(&self, model: &Model) -> anyhow::Result<()> {
@@ -1130,7 +1145,13 @@ impl AgentSessionEngine {
             .lock()
             .expect("semantic identity lock")
             .clone();
+        let on_late_sent_agent_message = self
+            .late_agent_message_sink
+            .lock()
+            .expect("late agent message sink lock")
+            .clone();
         pa_core::session_engine::engine::create_session(SessionEngineConfig {
+            on_late_sent_agent_message,
             semantic_edges,
             telemetry,
             cwd,

@@ -44,7 +44,7 @@ use crate::rlm_children::{ParentIdentity, SupervisorChildSessions, DEFAULT_RLM_M
 // the child module at the same tree position (agent_engine::tests); the
 // FAUX_TEST_LOCK re-export keeps the facade's FAUX_TEST_LOCK paths stable
 // for the sibling test modules (overflow_compaction, compact_autorefine,
-// session_navigation, acp/{autorefine,compaction_arms,goal_continuation}).
+// session_navigation).
 #[cfg(test)]
 pub(crate) mod tests;
 
@@ -153,6 +153,8 @@ pub struct AgentSessionEngine {
     /// emits on state change, so unchanged states (e.g. `/goal status`)
     /// stay silent.
     pub(crate) published_goal: std::sync::Mutex<Option<pa_core::goals::GoalState>>,
+    pub(crate) late_agent_message_sink:
+        std::sync::Mutex<Option<pa_core::LateSentAgentMessageHandler>>,
     /// The session's goal driver and session-manager handles, mirrored from
     /// the core session at build time: the core session's own mutex is held
     /// across a turn's admission, so goal checks inside emit callbacks

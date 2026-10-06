@@ -591,17 +591,7 @@ fn build_tui_options(
         // gates the completion marker, and the auth handle serves the
         // not-ready branch's sign-in steps.
         onboarding,
-        // Only Some(true) rides the wire (TS `telemetryDisabled`), and only
-        // for an environment opt-out: a settings opt-out stays the live
-        // switch the session's client re-reads, so `/telemetry on`
-        // resumes the running session instead of waiting for a new one.
-        telemetry_disabled: matches!(
-            pa_core::session_engine::telemetry::telemetry_switch(
-                &pa_core::settings::SettingsManager::create(&config.cwd, &config.agent_dir)
-            ),
-            pa_core::session_engine::telemetry::TelemetrySwitch::Env { enabled: false, .. }
-        )
-        .then_some(true),
+        telemetry_disabled: crate::mode::create_telemetry_disabled(config),
         // `/mcp login` / `/mcp logout`: the client-side auth flows run in
         // this process (the TS interactive client's placement) and persist
         // through the shared auth store the daemon's sessions read.

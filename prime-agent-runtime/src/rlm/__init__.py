@@ -9,7 +9,15 @@ from pathlib import Path
 from typing import Any
 
 from .bash import BashHandle, BashResult, bash
-from .factory import FACTORY_HELP, resume_factory, run_factory, status_factory, stop_factory
+from .factory import (
+    FACTORY_HELP,
+    graph_factory,
+    resume_factory,
+    run_factory,
+    status_factory,
+    stop_factory,
+    watch_factory,
+)
 from .harness import HarnessEntry, HarnessScope, HarnessState, RefinementEvent, get_harness_state
 
 _NOT_CALLABLE_MESSAGE = "'rlm' is not callable; spawn a child with: handle = await rlm.spawn('sub-task', name='worker')"
@@ -328,8 +336,8 @@ async def list_subagents() -> list[RLMSubagent]:
     return [_subagent_from_payload(entry) for entry in entries]
 
 
-def _collect_target_selector(target: Any) -> str:
-    """Normalize a collect target: spawn handle, subagent row, or a name/id string."""
+def _collect_target_selector(target: Any, what: str = "collect target") -> str:
+    """Normalize a child selector: spawn handle, subagent row, or a name/id string."""
     if isinstance(target, RLMSpawnHandle):
         return target.rlm_child_id
     if isinstance(target, RLMSubagent):
@@ -337,7 +345,7 @@ def _collect_target_selector(target: Any) -> str:
     if isinstance(target, str) and target.strip():
         return target.strip()
     raise TypeError(
-        f"collect target must be RLMSpawnHandle, RLMSubagent, or non-empty str, got {type(target).__name__}"
+        f"{what} must be RLMSpawnHandle, RLMSubagent, or non-empty str, got {type(target).__name__}"
     )
 
 
@@ -479,6 +487,26 @@ async def delete_subagent(target: str | RLMSubagent | RLMSpawnHandle) -> RLMSuba
     return _subagent_from_payload(payload.get("subagent"), "rlm.delete_subagent")
 
 
+async def rename(new_name: str, *, session_id: str | RLMSpawnHandle | RLMSubagent | None = None) -> str:
+    """Rename this session or one of its direct children.
+
+    Omitting ``session_id`` renames the current session. A spawn handle, a
+    ``list_subagents()`` row, or a session id string renames a direct child;
+    child names are rejected. Names follow spawn rules, must be unique among
+    siblings, and the renamed session sees a transcript notice.
+    """
+    if not isinstance(new_name, str):
+        raise TypeError(f"new_name must be str, got {type(new_name).__name__}")
+    payload: dict[str, Any] = {"name": new_name}
+    if session_id is not None:
+        payload["session_id"] = _collect_target_selector(session_id, "session_id")
+    reply = await host_request("rlm.rename", payload)
+    name = reply.get("name")
+    if not isinstance(name, str):
+        raise RuntimeError("rlm.rename returned an invalid name")
+    return name
+
+
 class _HarnessProxy:
     """Resolve the harness state against the current environment on every access.
 
@@ -529,7 +557,8 @@ _harness_state = _HarnessProxy()
 
 
 class _RLMFactoryNamespace:
-    """Run stored state-machine factories: rlm.factory.run/status/stop/resume.
+    """Run stored state-machine factories: rlm.factory.run/status/stop/resume,
+    plus graph/watch for live monitoring.
 
     ``run('<spec_id>')`` validates a stored factory entry (machine form, or
     dag sugar that compiles to one), enters the entry states up to the
@@ -546,6 +575,15 @@ class _RLMFactoryNamespace:
     ``prime-agent factory list | import | export`` manages the library (a
     broken machine names its exact errors; a missing one lists what the
     library has).
+
+    ``graph()`` returns the machine structure fused with live runtime state
+    (``status()``'s data plus the static graph): pass a live run id for one
+    run's snapshot, a stored spec id for the static structure, or nothing
+    for every live run. ``watch('<run_id>', timeout)`` blocks until the
+    run's state/instance shape changes or the timeout elapses (bounded),
+    then returns the same snapshot with ``changed`` — an agent can stream
+    progress and drive orchestration programmatically, and the emitted
+    graph model renders as ASCII or genuine Mermaid from one shape.
 
     The factory is opt-in: while the ``factory.enabled`` setting is off (the
     default; the user turns it on with ``/factory on``), every call above
@@ -568,6 +606,12 @@ class _RLMFactoryNamespace:
 
     async def resume(self, run_id: str) -> dict[str, Any]:
         return await resume_factory(run_id)
+
+    async def graph(self, ref: str | None = None) -> dict[str, Any]:
+        return graph_factory(ref)
+
+    async def watch(self, run_id: str, timeout: float = 0.0) -> dict[str, Any]:
+        return await watch_factory(run_id, timeout)
 
     def help(self) -> str:
         """Return the embedded factory authoring reference and API guide."""
@@ -609,6 +653,14 @@ class _RLMNamespace:
 
     async def delete_subagent(self, target: str | RLMSubagent | RLMSpawnHandle) -> RLMSubagent:
         return await delete_subagent(target)
+
+    async def rename(
+        self,
+        new_name: str,
+        *,
+        session_id: str | RLMSpawnHandle | RLMSubagent | None = None,
+    ) -> str:
+        return await rename(new_name, session_id=session_id)
 
     async def collect(self, targets: Any = None, *, timeout_ms: int = 0) -> list[RLMChildResult]:
         return await collect(targets, timeout_ms=timeout_ms)
@@ -662,6 +714,7 @@ __all__ = [
     "host_request",
     "list_subagents",
     "progress_note",
+    "rename",
     "rlm",
     "spawn",
 ]

@@ -201,7 +201,12 @@ fn spawn_supervisor_detached(socket_path: &Path, spawn_cwd: &Path, exe: &Path) -
         // lease this daemon's workers write — TS `daemon-launch.ts`
         // deletes the same var before spawning the supervisor.
         .env_remove(pa_daemon::lease::SESSION_LEASE_OWNER_ID_ENV);
-    // Detached: own process group, reaped by init, survives this CLI.
+    // A daemon must not share the launching TUI's terminal session: a
+    // session-wide terminal cleanup could hang it up after the TUI exits.
+    // On Unix, setsid also creates its own process group.
+    #[cfg(unix)]
+    pa_core::platform::process::set_new_session(&mut command);
+    #[cfg(not(unix))]
     pa_core::platform::process::set_new_process_group(&mut command);
     command
         .spawn()

@@ -263,6 +263,11 @@ async fn run_interactive_surface(
     let (auth_panel_tx, mut auth_panel_rx) =
         mpsc::unbounded_channel::<crate::auth_panel::AuthPanelRequest>();
     let (bash_tx, mut bash_rx) = mpsc::unbounded_channel::<crate::session_ui::BashActivityUpdate>();
+    // Background factory refreshes (the factory page's watch+graph
+    // cadence and the dock count's poll) report here; the loop folds them
+    // into the session — the open page's panels and the dock's count.
+    let (factory_tx, mut factory_rx) =
+        mpsc::unbounded_channel::<crate::session_ui::FactoryUpdate>();
     // Background slash-command-catalog refreshes (`get_commands`) report
     // here; the loop folds the session's skill commands into the
     // autocomplete provider.
@@ -345,12 +350,19 @@ async fn run_interactive_surface(
     // clear rides the first draw's single flush, which carries the
     // complete frame — no splash flash, no panel appearing late over a
     // half-open view.
-    if !headless
+    //
+    // The same predicate names the surface the opening phase below may
+    // repaint: a NEW chat's chrome already mounted (its echo frames
+    // paint at the frame scheduler's cadence), while a held surface
+    // (a direct open into an existing session) and headless capture
+    // runs never paint during the open — the first draw stays the
+    // open's content frame.
+    let opening_paints = !headless
         && matches!(
             &options.session,
             SessionSelection::New | SessionSelection::NewChild { .. }
-        )
-    {
+        );
+    if opening_paints {
         if let Some(renderer) = renderer.is_terminal_mut() {
             crate::app::draw(renderer, &mut view)?;
         }
@@ -363,61 +375,296 @@ async fn run_interactive_surface(
     // single attempt. The first attempt reuses the pre-mount connection; a
     // retry reconnects fresh. Only the open waits — once the session is up,
     // the reconnect loop owns the mid-chat restart window.
+    //
+    // The open runs as a BACKGROUND task: the opening phase below serves
+    // keystrokes while it completes. TS `init()` runs `ui.start()` (the
+    // input surface is live) and awaits `rebindCurrentSession()` on an
+    // already-serving event loop; the port's old shape ran the whole open
+    // pipeline before the run loop took its first input, so time-to-type
+    // waited on the create, the attach, the dock folds, and every daemon
+    // readiness behind them (the operator's input-latency report: first
+    // frame 40-52ms, keystroke echo ~250ms later warm, ~0.6-1.6s cold).
     let mut first_connection = Some((client, events));
-    let open_outcome = crate::update_restart_wait::wait_through_update_restart(
-        route == SessionOpenRoute::AgentsView,
-        crate::update_restart_wait::DAEMON_UPDATE_RESTART_OPEN_WAIT_MS,
-        crate::update_restart_wait::DAEMON_UPDATE_RESTART_OPEN_RETRY_MS,
-        || {
-            // The attempt future owns everything it touches (an `async
-            // move` over clones taken here): an `FnMut` closure's captures
-            // may not escape into the returned future, so the synchronous
-            // body moves the pieces out instead.
-            let first = first_connection.take();
-            let options = options.clone();
-            let notes_tx = notes_tx.clone();
-            let compaction_abort_tx = compaction_abort_tx.clone();
-            let prompt_tx = prompt_tx.clone();
-            let share_tx = share_tx.clone();
-            let reload_tx = reload_tx.clone();
-            let traces_upload_tx = traces_upload_tx.clone();
-            let update_tx = update_tx.clone();
-            let catalog_tx = catalog_tx.clone();
-            let auth_panel_tx = auth_panel_tx.clone();
-            let heartbeats_tx = heartbeats_tx.clone();
-            let bash_tx = bash_tx.clone();
-            let commands_tx = commands_tx.clone();
-            async move {
-                let (client, events) = match first {
-                    Some(first) => first,
-                    None => DaemonClient::connect(&options.socket_path)
-                        .await
-                        .with_context(|| "the interactive UI could not attach to the daemon")?,
+    let mut open_task = {
+        let options = options.clone();
+        let notes_tx = notes_tx.clone();
+        let compaction_abort_tx = compaction_abort_tx.clone();
+        let prompt_tx = prompt_tx.clone();
+        let share_tx = share_tx.clone();
+        let reload_tx = reload_tx.clone();
+        let traces_upload_tx = traces_upload_tx.clone();
+        let update_tx = update_tx.clone();
+        let catalog_tx = catalog_tx.clone();
+        let auth_panel_tx = auth_panel_tx.clone();
+        let heartbeats_tx = heartbeats_tx.clone();
+        let bash_tx = bash_tx.clone();
+        let factory_tx = factory_tx.clone();
+        let commands_tx = commands_tx.clone();
+        let waits_through_update_restart = route == SessionOpenRoute::AgentsView;
+        tokio::spawn(async move {
+            crate::update_restart_wait::wait_through_update_restart(
+                waits_through_update_restart,
+                crate::update_restart_wait::DAEMON_UPDATE_RESTART_OPEN_WAIT_MS,
+                crate::update_restart_wait::DAEMON_UPDATE_RESTART_OPEN_RETRY_MS,
+                || {
+                    // The attempt future owns everything it touches (an
+                    // `async move` over clones taken here): an `FnMut`
+                    // closure's captures may not escape into the returned
+                    // future, so the synchronous body moves the pieces out
+                    // instead.
+                    let first = first_connection.take();
+                    let options = options.clone();
+                    let notes_tx = notes_tx.clone();
+                    let compaction_abort_tx = compaction_abort_tx.clone();
+                    let prompt_tx = prompt_tx.clone();
+                    let share_tx = share_tx.clone();
+                    let reload_tx = reload_tx.clone();
+                    let traces_upload_tx = traces_upload_tx.clone();
+                    let update_tx = update_tx.clone();
+                    let catalog_tx = catalog_tx.clone();
+                    let auth_panel_tx = auth_panel_tx.clone();
+                    let heartbeats_tx = heartbeats_tx.clone();
+                    let bash_tx = bash_tx.clone();
+                    let factory_tx = factory_tx.clone();
+                    let commands_tx = commands_tx.clone();
+                    async move {
+                        let (client, events) = match first {
+                            Some(first) => first,
+                            None => DaemonClient::connect(&options.socket_path)
+                                .await
+                                .with_context(|| {
+                                    "the interactive UI could not attach to the daemon"
+                                })?,
+                        };
+                        let session = SessionUi::open(
+                            client,
+                            &options,
+                            notes_tx,
+                            compaction_abort_tx,
+                            prompt_tx,
+                            share_tx,
+                            reload_tx,
+                            update_tx,
+                            traces_upload_tx,
+                            catalog_tx,
+                            auth_panel_tx,
+                            crate::session_ui::ActivityUpdates {
+                                heartbeats: heartbeats_tx,
+                                bash: bash_tx,
+                                factory: factory_tx,
+                                commands: commands_tx,
+                            },
+                        )
+                        .await?;
+                        Ok((events, session))
+                    }
+                },
+            )
+            .await
+        })
+    };
+    // The opening phase: the input surface serves keystrokes while the
+    // open task runs (AGENTS.md "Performance and the critical path": the
+    // input box mounts and accepts keystrokes without waiting on
+    // daemon/kernel/config readiness that is not user-visible work).
+    // Editor-level keys echo into the mounted startup chrome at the frame
+    // scheduler's cadence; everything else (submits, commands, overlay
+    // keys) queues in `pending` — the same deque the run loop drains —
+    // so typed-ahead is delivered, in order, the moment the open lands:
+    // never lost, never errored. The open's own result (success or the
+    // daemon-refusal arms below) is unchanged; only the WAIT moved off
+    // the input path.
+    //
+    // ORDERING (the contract the headless plans pin): the editor always
+    // holds a PREFIX of the user's input stream. The first input that
+    // must queue (a submit, an overlay key, a mouse report) parks the
+    // echo path for the rest of the phase — every later input queues
+    // behind it, so a typed `H` can never land in the editor ahead of a
+    // queued `ctrl+home` the user pressed first.
+    let mut pending: VecDeque<UiInput> = VecDeque::new();
+    // Base parity for the stash restore (finding #3): a session-reopen
+    // launch (Resume/Attach — the shape that can carry a stashed draft)
+    // never accepts typed-ahead into the editor during the open. The
+    // fold's `restore_prompt_stash_on_open` gates on the editor being
+    // EMPTY, so echoing into it pre-restore would silently consume the
+    // restore (the draft stays stashed while the typed-ahead sits in its
+    // place). A reopen's typed-ahead queues instead and dispatches
+    // through the editor AFTER the fold's restore — base ordering
+    // exactly. A NEW session owns no stash, so its launches keep the
+    // echo path (headless new-session plans included: no stash exists to
+    // protect).
+    let mut echoing = matches!(
+        &options.session,
+        SessionSelection::New | SessionSelection::NewChild { .. }
+    );
+    let mut ui_input_closed = false;
+    let mut last_render_at: Option<Instant> = None;
+    let mut render_deadline: Option<Instant> = None;
+    let mut opening_dirty = false;
+    // A first-run onboarding task owns the pane BEFORE the chat surface:
+    // the phase below consumes `ui_rx` itself once the open lands (it
+    // needs the session, so it cannot run during the opening phase). The
+    // opening loop must therefore not touch the channel on an onboarding
+    // launch — the login/trace dialogs' keystrokes stay queued in the
+    // channel for the phase to consume in order, exactly the base
+    // ordering for this flow (the editor-level echo service below is the
+    // chat chrome's surface, the pane a New chat's open actually mounts).
+    let opening_serves_input = options.onboarding.is_none();
+    let open_outcome = loop {
+        tokio::select! {
+            // The open completing is the phase's exit; the failure arms
+            // below run against the same error exactly as before.
+            open_result = &mut open_task => {
+                break match open_result {
+                    Ok(outcome) => outcome,
+                    Err(join_error) => Err(anyhow::anyhow!(
+                        "the session open task failed: {join_error}"
+                    )),
                 };
-                let session = SessionUi::open(
-                    client,
-                    &options,
-                    notes_tx,
-                    compaction_abort_tx,
-                    prompt_tx,
-                    share_tx,
-                    reload_tx,
-                    update_tx,
-                    traces_upload_tx,
-                    catalog_tx,
-                    auth_panel_tx,
-                    crate::session_ui::ActivityUpdates {
-                        heartbeats: heartbeats_tx,
-                        bash: bash_tx,
-                        commands: commands_tx,
-                    },
-                )
-                .await?;
-                Ok((events, session))
             }
-        },
-    )
-    .await;
+            maybe_input = async {
+                if ui_input_closed {
+                    std::future::pending::<Option<UiInput>>().await
+                } else {
+                    ui_rx.recv().await
+                }
+            }, if opening_serves_input => {
+                match maybe_input {
+                    None => {
+                        // The reader side is gone: park the arm instead of
+                        // hot-spinning on the instantly-ready closed
+                        // channel while the open task still runs.
+                        ui_input_closed = true;
+                    }
+                    Some(input) => match input {
+                        UiInput::Key(key) => {
+                            if let Some(id) = crate::keys::key_event_to_id(&key) {
+                                // `app.exit` on the empty editor (default
+                                // ctrl+d) is the one exit that must not
+                                // wait out the open: hand the terminal
+                                // back now (the open task dies with the
+                                // runtime; the daemon-side create, if it
+                                // already ran, leaves a resumable session
+                                // exactly like an exit right after the
+                                // open). A queue already holding input
+                                // keeps the exit's ordering instead: the
+                                // exit dispatches with the rest.
+                                if view
+                                    .editor
+                                    .keybindings()
+                                    .matches(&id, "app.exit")
+                                    && view.editor.get_text().is_empty()
+                                    && echoing
+                                {
+                                    exit_guard.arm_for_exit();
+                                    renderer.finish(&mut view, false);
+                                    return Ok(InteractiveOutcome {
+                                        frames: Vec::new(),
+                                        ..Default::default()
+                                    });
+                                }
+                                // Pure editor keys echo now (the TS
+                                // editor path) while the stream is still a
+                                // clean prefix — but only when the
+                                // effective keymap leaves the key to the
+                                // editor fallback (finding #1): a key the
+                                // post-open dispatch would claim for an
+                                // app/session action keeps its normal
+                                // route, queued behind the open and
+                                // dispatched through the full
+                                // keymap-aware ladder at the fold, instead
+                                // of becoming a stray editor motion (the
+                                // misroute: default `left` on the empty
+                                // editor is `app.agents.back`, and a
+                                // user-bound space or single char runs its
+                                // bound action). The first queue parks
+                                // the echo path so later keys cannot jump
+                                // it.
+                                let editor_motion = matches!(
+                                    id.as_str(),
+                                    "backspace" | "delete" | "left" | "right" | "space"
+                                ) || id.chars().count() == 1;
+                                if echoing
+                                    && editor_motion
+                                    && !crate::session_ui::opening_echo_key_claimed(
+                                        view.editor.keybindings(),
+                                        &id,
+                                        &view.editor,
+                                    )
+                                {
+                                    view.editor.handle_input(&id);
+                                    opening_dirty = true;
+                                } else {
+                                    echoing = false;
+                                    pending.push_back(UiInput::Key(key));
+                                }
+                            }
+                        }
+                        UiInput::Paste(text) => {
+                            if echoing {
+                                let _ = view.editor.handle_paste(&text);
+                                opening_dirty = true;
+                            } else {
+                                pending.push_back(UiInput::Paste(text));
+                            }
+                        }
+                        UiInput::Resize => {
+                            // Geometry is order-insensitive, so the resize
+                            // always applies now: the same update the run
+                            // loop's resize arm performs, so the editor lays
+                            // its window out against the new row count and
+                            // the echo frames below paint at the new
+                            // geometry instead of the stale one.
+                            if let Ok((_width, height)) = crossterm::terminal::size() {
+                                view.set_terminal_rows(height);
+                            }
+                            opening_dirty = true;
+                        }
+                        other => {
+                            echoing = false;
+                            pending.push_back(other);
+                        }
+                    },
+                }
+                // The echo frame coalesces on the run loop's own
+                // MIN_RENDER_INTERVAL: a typing burst paints as one
+                // frame, a lone key paints immediately.
+                if opening_paints && opening_dirty {
+                    let now = Instant::now();
+                    if last_render_at
+                        .is_none_or(|at| now.duration_since(at) >= MIN_RENDER_INTERVAL)
+                    {
+                        if let Some(renderer) = renderer.is_terminal_mut() {
+                            crate::app::draw(renderer, &mut view)?;
+                        }
+                        last_render_at = Some(now);
+                        opening_dirty = false;
+                        render_deadline = None;
+                    } else {
+                        render_deadline =
+                            last_render_at.map(|at| at + MIN_RENDER_INTERVAL);
+                    }
+                }
+            }
+            // The coalesced echo frame's deadline (armed only while a
+            // dirty frame waits out the render interval).
+            () = async {
+                match render_deadline {
+                    Some(deadline) => {
+                        tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+                    }
+                    None => std::future::pending::<()>().await,
+                }
+            }, if render_deadline.is_some() => {
+                render_deadline = None;
+                if let Some(renderer) = renderer.is_terminal_mut() {
+                    crate::app::draw(renderer, &mut view)?;
+                }
+                last_render_at = Some(Instant::now());
+                opening_dirty = false;
+            }
+        }
+    };
     let ((mut events, mut session), waited_for_update_restart) = match open_outcome {
         Ok(opened) => opened,
         Err(error) => {
@@ -658,8 +905,25 @@ async fn run_interactive_surface(
             .await?;
     }
 
-    let mut pending: VecDeque<UiInput> = VecDeque::new();
+    // The fold's first frame must land before the opening phase's
+    // typed-ahead queue dispatches: base painted it between the fold and
+    // the first input (the select round-trip owns one frame per
+    // iteration), and a pre-loaded queue would otherwise starve it — the
+    // queued inputs would paint only their own deltas over a state the
+    // verifier never saw rendered.
+    if !pending.is_empty() && session.dirty {
+        if let Some(renderer) = renderer.is_terminal_mut() {
+            crate::app::draw(renderer, &mut view)?;
+        } else {
+            renderer.render_headless(&mut session, &mut view);
+        }
+        session.dirty = false;
+    }
+
+    // `pending` rides in from the opening phase: typed-ahead inputs
+    // queued behind the open dispatch first, in order.
     let mut last_bash_refresh = Instant::now();
+    let mut last_factory_refresh = Instant::now();
     // The enhanced-key modes settle once (kitty answer or fallback) and
     // report one adoption event; headless runs hold pipes and never probe.
     let mut enhanced_keys_pending = renderer.is_terminal();
@@ -1314,6 +1578,7 @@ async fn run_interactive_surface(
         let autocomplete_pending = view.editor.has_pending_autocomplete();
         let auto_scroll_armed = session.selection_auto_scroll_armed();
         let bash_refresh_wanted = session.kernel_bash_supported();
+        let factory_refresh_wanted = session.factory_activity_supported();
         // A settle waiting out a member is pending work like the
         // autocomplete park: the gate runs at the loop top, so its
         // re-check (and the settle bound's expiry) needs this arm's
@@ -1624,6 +1889,11 @@ async fn run_interactive_surface(
             maybe_bash = bash_rx.recv() => {
                 if let Some(update) = maybe_bash {
                     session.apply_bash_activity(update, &mut view);
+                }
+            }
+            maybe_factory = factory_rx.recv() => {
+                if let Some(update) = maybe_factory {
+                    session.apply_factory_update(update, &mut view);
                 }
             }
             maybe_commands = commands_rx.recv() => {
@@ -1985,6 +2255,24 @@ async fn run_interactive_surface(
             } => {
                 last_bash_refresh = Instant::now();
                 session.spawn_bash_activity_refresh();
+            }
+            () = async {
+                // The factory lane's 2s poll: the bash poll's cadence
+                // and gate, armed on daemons that advertise the
+                // factory lane. The poll runs whether or not the page
+                // is open (the dock's factory count stays live); an
+                // open page adds its selected run's watch ahead of the
+                // graph inside the same serialized cycle.
+                if !factory_refresh_wanted {
+                    std::future::pending::<()>().await;
+                }
+                tokio::time::sleep_until(
+                    tokio::time::Instant::from_std(last_factory_refresh + Duration::from_secs(2)),
+                )
+                .await;
+            } => {
+                last_factory_refresh = Instant::now();
+                session.spawn_factory_refresh();
             }
             _frame = async {
                 match render_deadline {

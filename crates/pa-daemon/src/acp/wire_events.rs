@@ -1,9 +1,7 @@
 //! Daemon session-event mapping: the TS `acpUpdatesForSessionEvent` port
 //! for the wire shapes a daemon worker streams (`message_start/update/end`,
-//! `tool_execution_*`, `compaction_end`, `goal_update`, ...). The
-//! daemon-attached ACP transport rides this instead of the in-process
-//! loop-event projection (`events.rs`): same ACP frames, different producer
-//! side.
+//! `tool_execution_*`, `bash_*`, `compaction_end`, `goal_update`, ...): the
+//! ACP frames the daemon worker's session events produce.
 //!
 //! Events with no ACP counterpart (`turn_end`, `auto_retry_*`,
 //! `agent_begin/end`, `session_action_update`) map to nothing, exactly like
@@ -11,16 +9,20 @@
 
 use serde_json::{json, Value};
 
-use super::events::{AcpToolKind, AcpToolStatus, IPYTHON_TOOL_NAME};
 use super::meta::{prime_agent_meta, PrimeAgentCompactionMeta, PrimeAgentSessionMeta};
-use super::types::{AcpSessionUpdate, TextBlock};
+use super::types::{AcpSessionUpdate, AcpToolKind, AcpToolStatus, TextBlock};
+
+/// The model-facing Python REPL tool.
+const IPYTHON_TOOL_NAME: &str = "ipython";
 
 /// Correlates streamed chunks with their owning assistant message (the
-/// daemon stream carries the delta on `assistantMessageEvent`).
+/// daemon stream carries the delta on `assistantMessageEvent`) and bash
+/// output chunks with the run that produced them.
 #[derive(Debug, Default)]
 pub struct WireMappingState {
     next_assistant_message_sequence: u64,
     active_assistant_message_id: Option<String>,
+    active_bash_run_id: Option<String>,
 }
 
 impl WireMappingState {
@@ -190,6 +192,64 @@ pub fn wire_updates(event: &Value, state: &mut WireMappingState) -> Vec<AcpSessi
             };
             vec![update]
         }
+        // User-level bash runs outside the tool-call lifecycle: a synthetic
+        // tool call keyed by run id keeps the streamed chunks addressable.
+        "bash_start" => {
+            let command = event
+                .get("command")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let run_id = event
+                .get("runId")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            state.active_bash_run_id.clone_from(&run_id);
+            vec![AcpSessionUpdate::ToolCall {
+                tool_call_id: bash_tool_call_id(run_id),
+                title: command.clone(),
+                kind: AcpToolKind::Execute,
+                status: AcpToolStatus::InProgress,
+                raw_input: json!({ "command": command }),
+            }]
+        }
+        "bash_output" => {
+            let chunk = event
+                .get("chunk")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            vec![AcpSessionUpdate::ToolCallUpdate {
+                tool_call_id: bash_tool_call_id(state.active_bash_run_id.clone()),
+                status: Some(AcpToolStatus::InProgress),
+                content: Some(vec![super::types::ToolCallContent::new(chunk)]),
+                meta: None,
+            }]
+        }
+        "bash_end" => {
+            let run_id = event
+                .get("runId")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            if state.active_bash_run_id == run_id {
+                state.active_bash_run_id = None;
+            }
+            let completed = event.get("exitCode").and_then(Value::as_i64) == Some(0)
+                && !event
+                    .get("cancelled")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+            vec![AcpSessionUpdate::ToolCallUpdate {
+                tool_call_id: bash_tool_call_id(run_id),
+                status: Some(if completed {
+                    AcpToolStatus::Completed
+                } else {
+                    AcpToolStatus::Failed
+                }),
+                content: None,
+                meta: None,
+            }]
+        }
         "goal_update" => {
             let goal = event.get("goal");
             vec![AcpSessionUpdate::SessionInfoUpdate {
@@ -232,19 +292,143 @@ pub fn wire_updates(event: &Value, state: &mut WireMappingState) -> Vec<AcpSessi
                 }),
             }]
         }
+        "rlm_child_update" => {
+            let child = event.get("child");
+            vec![AcpSessionUpdate::SessionInfoUpdate {
+                meta: prime_agent_meta(&PrimeAgentSessionMeta {
+                    subagents: Some(vec![super::meta::PrimeAgentSubagentMeta {
+                        id: child
+                            .and_then(|child| child.get("id"))
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        session_name: child
+                            .and_then(|child| child.get("sessionName"))
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        status: child
+                            .and_then(|child| child.get("status"))
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        model: child
+                            .and_then(|child| child.get("model"))
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        depth: None,
+                        token_count: child
+                            .and_then(|child| child.get("tokenCount"))
+                            .and_then(Value::as_u64),
+                        error: child
+                            .and_then(|child| child.get("error"))
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                    }]),
+                    ..Default::default()
+                }),
+            }]
+        }
+        "refine_complete" => {
+            let result = event.get("result");
+            let changes = result
+                .and_then(|result| result.get("appliedEdits"))
+                .and_then(Value::as_array)
+                .map(|edits| {
+                    edits
+                        .iter()
+                        .filter(|edit| edit.get("applied") == Some(&json!(true)))
+                        .filter_map(|edit| {
+                            let action = edit.get("action").and_then(Value::as_str)?;
+                            let kind = edit.get("kind").and_then(Value::as_str)?;
+                            let id = edit.get("id").and_then(Value::as_str)?;
+                            Some(format!("{action} {kind}:{id}"))
+                        })
+                        .collect::<Vec<String>>()
+                });
+            vec![AcpSessionUpdate::SessionInfoUpdate {
+                meta: prime_agent_meta(&PrimeAgentSessionMeta {
+                    refinement: Some(super::meta::PrimeAgentRefinementMeta {
+                        status: "complete".to_string(),
+                        summary: result
+                            .and_then(|result| result.get("summary"))
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        changes,
+                        error: None,
+                    }),
+                    ..Default::default()
+                }),
+            }]
+        }
+        "refine_failed" => {
+            vec![AcpSessionUpdate::SessionInfoUpdate {
+                meta: prime_agent_meta(&PrimeAgentSessionMeta {
+                    refinement: Some(super::meta::PrimeAgentRefinementMeta {
+                        status: "failed".to_string(),
+                        summary: None,
+                        changes: None,
+                        error: event
+                            .get("error")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                    }),
+                    ..Default::default()
+                }),
+            }]
+        }
+        "ipython_sent_agent_message" => {
+            let message = event.get("message");
+            vec![AcpSessionUpdate::SessionInfoUpdate {
+                meta: prime_agent_meta(&PrimeAgentSessionMeta {
+                    agent_message: Some(super::meta::PrimeAgentAgentMessageMeta {
+                        tool_call_id: event
+                            .get("toolCallId")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        target: message
+                            .and_then(|message| message.get("target"))
+                            .and_then(|target| {
+                                target
+                                    .get("sessionName")
+                                    .or_else(|| target.get("sessionId"))
+                            })
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        delivery_status: message
+                            .and_then(|message| message.get("deliveryStatus"))
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                    }),
+                    ..Default::default()
+                }),
+            }]
+        }
         _ => Vec::new(),
     }
 }
 
+/// The synthetic tool-call id of a user-level bash run:
+/// `prime-agent-bash-<runId>`; a run without an id keys the bare prefix
+/// (TS `bashToolCallId`).
+fn bash_tool_call_id(run_id: Option<String>) -> String {
+    match run_id {
+        Some(run_id) => format!("prime-agent-bash-{run_id}"),
+        None => "prime-agent-bash".to_string(),
+    }
+}
+
 /// TS `toolResultText`: the text of a tool result, wherever the engine
-/// carries it.
+/// carries it. Empty text blocks drop out before the join and an empty
+/// text yields `None`, so no update carries empty content (the TS call
+/// site's `text ? { content } : {}`).
 fn tool_result_text(result: Option<&Value>) -> Option<String> {
     let result = result?;
     if let Some(text) = result.as_str() {
-        return Some(text.to_string());
+        return (!text.is_empty()).then(|| text.to_string());
     }
     if let Some(output) = result.get("output").and_then(Value::as_str) {
-        return Some(output.to_string());
+        return (!output.is_empty()).then(|| output.to_string());
     }
     let content = result.get("content")?.as_array()?;
     let parts: Vec<String> = content
@@ -259,6 +443,7 @@ fn tool_result_text(result: Option<&Value>) -> Option<String> {
                 })
                 .flatten()
         })
+        .filter(|text| !text.is_empty())
         .collect();
     (!parts.is_empty()).then(|| parts.join("\n"))
 }
@@ -470,5 +655,204 @@ mod tests {
             "message": { "role": "user" },
         }))
         .is_none());
+    }
+
+    #[test]
+    fn empty_tool_results_carry_no_content() {
+        let mut state = WireMappingState::default();
+        let updates = wire_updates(
+            &json!({
+                "type": "tool_execution_end",
+                "toolCallId": "t1",
+                "result": { "output": "" },
+                "isError": false,
+            }),
+            &mut state,
+        );
+        let value = serde_json::to_value(&updates[0]).unwrap();
+        assert_eq!(value["sessionUpdate"], "tool_call_update");
+        assert_eq!(value["status"], "completed");
+        assert!(value.get("content").is_none(), "no empty content: {value}");
+    }
+
+    #[test]
+    fn empty_text_blocks_drop_out_of_the_joined_result() {
+        let mut state = WireMappingState::default();
+        let updates = wire_updates(
+            &json!({
+                "type": "tool_execution_end",
+                "toolCallId": "t1",
+                "result": { "content": [
+                    { "type": "text", "text": "" },
+                    { "type": "text", "text": "a" },
+                ] },
+                "isError": false,
+            }),
+            &mut state,
+        );
+        let value = serde_json::to_value(&updates[0]).unwrap();
+        assert_eq!(value["content"][0]["content"]["text"], "a");
+    }
+
+    fn namespaced(update: &AcpSessionUpdate) -> Value {
+        update.to_bare_value()["_meta"]["ai.primeintellect.prime-agent"].clone()
+    }
+
+    #[test]
+    fn rlm_child_update_maps_to_the_subagents_meta() {
+        let mut state = WireMappingState::default();
+        let updates = wire_updates(
+            &json!({
+                "type": "rlm_child_update",
+                "child": {
+                    "id": "child-1",
+                    "parentId": "node-1",
+                    "activeSessionId": "child-live",
+                    "sessionName": "worker-a",
+                    "model": "z-ai/glm-5.3-flash",
+                    "label": "run the lane task",
+                    "status": "running",
+                    "durationMs": 500,
+                    "sessionDir": "/sessions/child-1",
+                },
+            }),
+            &mut state,
+        );
+        let value = updates[0].to_bare_value();
+        assert_eq!(value["sessionUpdate"], "session_info_update");
+        assert_eq!(
+            namespaced(&updates[0])["subagents"],
+            json!([{
+                "id": "child-1",
+                "sessionName": "worker-a",
+                "status": "running",
+                "model": "z-ai/glm-5.3-flash",
+            }])
+        );
+        let updates = wire_updates(
+            &json!({
+                "type": "rlm_child_update",
+                "child": {
+                    "id": "child-2",
+                    "status": "cancelled",
+                    "error": "Deleted by parent orchestrator",
+                },
+            }),
+            &mut state,
+        );
+        assert_eq!(
+            namespaced(&updates[0])["subagents"],
+            json!([{
+                "id": "child-2",
+                "status": "cancelled",
+                "error": "Deleted by parent orchestrator",
+            }])
+        );
+    }
+
+    #[test]
+    fn refine_complete_maps_the_applied_edits_changes() {
+        let mut state = WireMappingState::default();
+        let updates = wire_updates(
+            &json!({
+                "type": "refine_complete",
+                "result": {
+                    "id": "ref-1",
+                    "summary": "applied 2 edits",
+                    "appliedEdits": [
+                        { "action": "create", "kind": "memory", "id": "x", "applied": true },
+                        { "action": "update", "kind": "skill", "id": "y", "applied": true },
+                        { "action": "delete", "kind": "prompt", "id": "z", "applied": false },
+                    ],
+                },
+            }),
+            &mut state,
+        );
+        assert_eq!(
+            namespaced(&updates[0])["refinement"],
+            json!({
+                "status": "complete",
+                "summary": "applied 2 edits",
+                "changes": ["create memory:x", "update skill:y"],
+            })
+        );
+        let updates = wire_updates(
+            &json!({
+                "type": "refine_complete",
+                "result": { "id": "ref-2", "summary": "no edits" },
+            }),
+            &mut state,
+        );
+        assert_eq!(
+            namespaced(&updates[0])["refinement"],
+            json!({ "status": "complete", "summary": "no edits" })
+        );
+    }
+
+    #[test]
+    fn refine_failed_maps_the_error_meta() {
+        let mut state = WireMappingState::default();
+        let updates = wire_updates(
+            &json!({ "type": "refine_failed", "error": "Summarization failed: no responses" }),
+            &mut state,
+        );
+        assert_eq!(
+            namespaced(&updates[0])["refinement"],
+            json!({ "status": "failed", "error": "Summarization failed: no responses" })
+        );
+    }
+
+    #[test]
+    fn ipython_sent_agent_message_maps_the_target_fallback() {
+        let mut state = WireMappingState::default();
+        let updates = wire_updates(
+            &json!({
+                "type": "ipython_sent_agent_message",
+                "toolCallId": "t7",
+                "message": {
+                    "id": "agentmsg_1",
+                    "message": "Ping.",
+                    "deliveryStatus": "delivered",
+                    "target": {
+                        "activeSessionId": "peer-live",
+                        "sessionId": "peer-session",
+                        "sessionName": "Worker",
+                    },
+                },
+            }),
+            &mut state,
+        );
+        assert_eq!(
+            namespaced(&updates[0])["agentMessage"],
+            json!({
+                "toolCallId": "t7",
+                "target": "Worker",
+                "deliveryStatus": "delivered",
+            })
+        );
+        let updates = wire_updates(
+            &json!({
+                "type": "ipython_sent_agent_message",
+                "toolCallId": "t8",
+                "message": {
+                    "id": "agentmsg_2",
+                    "message": "Ping.",
+                    "deliveryStatus": "queued",
+                    "target": {
+                        "activeSessionId": "peer-live",
+                        "sessionId": "peer-session",
+                    },
+                },
+            }),
+            &mut state,
+        );
+        assert_eq!(
+            namespaced(&updates[0])["agentMessage"],
+            json!({
+                "toolCallId": "t8",
+                "target": "peer-session",
+                "deliveryStatus": "queued",
+            })
+        );
     }
 }

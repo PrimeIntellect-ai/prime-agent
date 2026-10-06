@@ -44,8 +44,8 @@ use create::{active_session_id_of, worker_server_capabilities};
 // does not use it), so the unused-import lint is allowed deliberately here.
 #[allow(unused_imports)]
 pub(crate) use summary::{
-    compact_action_label, emit_worker_event_with, push_roster_delta, session_snapshot,
-    session_summary, RosterPushContext,
+    compact_action_label, emit_worker_event_with, persist_custom_row, push_roster_delta,
+    session_snapshot, session_summary, RosterPushContext,
 };
 use turn::TurnRunner;
 
@@ -92,9 +92,9 @@ use crate::peer::{
 };
 use crate::protocol::{
     create_daemon_event_meta, create_daemon_replay_info, current_protocol_info,
-    default_client_capabilities, default_server_capabilities, normalize_client_capabilities,
-    response_failure, response_success, DaemonOutbound, DaemonResponse, DaemonResumeCursor,
-    DaemonSessionClosedReason, DAEMON_APP_VERSION, DAEMON_SCHEMA_ID, DAEMON_SCHEMA_REVISION,
+    default_client_capabilities, normalize_client_capabilities, response_failure, response_success,
+    DaemonOutbound, DaemonResponse, DaemonResumeCursor, DaemonSessionClosedReason,
+    DAEMON_APP_VERSION, DAEMON_SCHEMA_ID, DAEMON_SCHEMA_REVISION,
 };
 use crate::registration::RegistrationHandle;
 use crate::session_store::{session_file_name, SessionFile};
@@ -131,7 +131,7 @@ pub struct Worker {
     /// carries the counter's value for the supervisor's stale-delta gate.
     roster_delta_sequence: std::sync::Arc<std::sync::atomic::AtomicU64>,
     pub(crate) work_notify: Arc<Notify>,
-    idle_notify: Arc<Notify>,
+    pub(crate) idle_notify: Arc<Notify>,
     /// The per-connection session-attach registry (the fresh bots'
     /// release findings): connection tokens -> the client ids their
     /// `attach` retained. The release is connection-scoped on EVERY
@@ -623,6 +623,22 @@ impl Worker {
                     );
                 });
                 concrete.set_goal_admission(probe, sink, queue_purge);
+                let late_core = Arc::clone(&core);
+                let late_events = Arc::clone(&events);
+                concrete.set_late_agent_message_sink(std::sync::Arc::new(
+                    move |tool_call_id, message| {
+                        let wire = pa_core::sent_agent_message_json(&message);
+                        crate::user_bash::emit_session_event_frame(
+                            &late_core,
+                            &late_events,
+                            serde_json::json!({
+                                "type": "ipython_sent_agent_message",
+                                "toolCallId": tool_call_id,
+                                "message": wire,
+                            }),
+                        );
+                    },
+                ));
                 // The settled-child kernel release's registered-jobs gate
                 // (TS #2483's `canPassivateSettledSession`
                 // `hasRegisteredCronJob`): the release defers while this
@@ -901,6 +917,47 @@ impl Worker {
 /// level: sequence + meta under the core lock, then one broadcast (the
 /// free-standing form of `Worker::emit_worker_event`, shared with the
 /// goal admission sink).
+pub(crate) fn refine_complete_event(
+    result: &pa_core::refinement::RefinementResult,
+) -> serde_json::Value {
+    json!({
+        "type": "refine_complete",
+        "result": serde_json::to_value(result).unwrap_or(Value::Null),
+    })
+}
+
+/// Send a background refinement result only if the session that started
+/// the review is still current. Hold the core lock through the broadcast so
+/// navigation cannot move the event onto a different session.
+fn emit_refinement_event_for_session(
+    core: &Arc<Mutex<SessionCore>>,
+    events: &Arc<EventPump>,
+    review_session_id: &str,
+    event: Value,
+) -> bool {
+    let mut core = core.lock().unwrap();
+    if core.store.as_ref().map(SessionFile::session_id) != Some(review_session_id) {
+        return false;
+    }
+    let sequence = core.last_event_sequence + 1;
+    core.last_event_sequence = sequence;
+    let meta = crate::protocol::create_daemon_event_meta(
+        &core.active_session_id,
+        sequence,
+        None,
+        Some(&core.generation),
+    );
+    let outbound = crate::protocol::DaemonOutbound::SessionEvent {
+        active_session_id: core.active_session_id.clone(),
+        event,
+        meta: Some(meta),
+        rest: Map::default(),
+    };
+    let payload = serde_json::to_vec(&outbound).unwrap_or_default();
+    events.send(OutboundFrame::session_event(payload));
+    true
+}
+
 /// Record one durable custom row of the background compact-trigger
 /// review and broadcast its `message_start`/`message_end` pair (the TS
 /// `_emit` for rows the session appends outside a turn): the same shape

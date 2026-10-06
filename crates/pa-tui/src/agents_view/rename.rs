@@ -38,14 +38,14 @@ pub(super) enum RenameTarget {
 
 impl AgentsViewMode {
     /// The selected row's rename target and name prefill (TS
-    /// `enterRenameMode`'s gate, :1868-1888): a top-level agent row with
-    /// a live session or a saved file. One definition of "renameable" —
-    /// the enter arm and the hint slot both read it.
+    /// `enterRenameMode`'s gate, :1868-1888): an agent or subagent row
+    /// with a live session or a saved file. One definition of
+    /// "renameable" — the enter arm and the hint slot both read it.
     pub(super) fn rename_target(&self) -> Option<(RenameTarget, String)> {
         let row = self
             .rows
             .get(self.selected)
-            .filter(|row| row.kind == RowKind::Agent)?;
+            .filter(|row| matches!(row.kind, RowKind::Agent | RowKind::Subagent))?;
         let active = row
             .summary
             .get("activeSessionId")
@@ -82,12 +82,12 @@ impl AgentsViewMode {
     /// preamble took it before the rename arm ran.
     pub(super) fn enter_rename_mode(&mut self) {
         let Some((target, name)) = self.rename_target() else {
-            // An agent row with neither target reports (TS :1876-1878);
-            // any other selection stays silent (:1871).
+            // An agent or subagent row with neither target reports (TS
+            // :1876-1878); any other selection stays silent (:1871).
             if self
                 .rows
                 .get(self.selected)
-                .is_some_and(|row| row.kind == RowKind::Agent)
+                .is_some_and(|row| matches!(row.kind, RowKind::Agent | RowKind::Subagent))
             {
                 self.set_status("This session cannot be renamed");
             }
@@ -208,6 +208,7 @@ pub(super) fn spawn_rename_dispatch(
                 id: None,
                 active_session_id: active_session_id.clone(),
                 name: rename.name.clone(),
+                renamed_by: None,
                 rest: serde_json::Map::default(),
             },
             // TS `renameDaemonSavedSession` in the view context sends

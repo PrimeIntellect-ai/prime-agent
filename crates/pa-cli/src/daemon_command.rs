@@ -341,6 +341,7 @@ fn run_rename(client: &mut DaemonClient, args: &[String], json: bool) -> Result<
         id: None,
         active_session_id,
         name: name.clone(),
+        renamed_by: None,
         rest: serde_json::Map::new(),
     })?;
     let data = require_success(response)?.unwrap_or(Value::Null);

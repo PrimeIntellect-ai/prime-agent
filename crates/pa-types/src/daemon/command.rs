@@ -329,6 +329,12 @@ pub enum DaemonCommand {
         id: Option<String>,
         active_session_id: String,
         name: String,
+        /// Who directed the rename (`renamedBy` on the wire, TS
+        /// `AgentFamilyRelationship` — only `"parent"` is sent): set when a
+        /// parent session renames one of its direct children, so the
+        /// renamed session's transcript notice can name it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        renamed_by: Option<String>,
         #[serde(flatten)]
         rest: JsonMap,
     },
@@ -546,6 +552,23 @@ pub enum DaemonCommand {
         id: Option<String>,
         active_session_id: String,
         activity_id: String,
+        #[serde(flatten)]
+        rest: JsonMap,
+    },
+    /// The `/factory` view's bridge lane over the session kernel's factory
+    /// executor (`graph`/`status`/`watch`/`run`/`stop`/`resume`).
+    /// Rust-native extension, advertised by the `factory_activity` capability.
+    FactoryActivity {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        active_session_id: String,
+        action: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        spec_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<u64>,
         #[serde(flatten)]
         rest: JsonMap,
     },

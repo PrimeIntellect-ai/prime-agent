@@ -480,4 +480,85 @@ mod tests {
             "the review consumed the queued decline"
         );
     }
+
+    #[test]
+    fn refine_session_command_emits_the_refine_events() {
+        let _faux = FAUX_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let plan = r#"{"summary":"one edit","edits":[{"action":"create","kind":"memory","id":"m1","title":"t","content":"c"}]}"#;
+        let (engine, _dir) = trigger_engine(&json!({ "responses": [ {"text": plan} ] }), 1, true);
+        let mut events: Vec<EngineEvent> = Vec::new();
+        let execution = crate::session_commands::run_session_command(
+            &engine,
+            &refine_command(),
+            &mut |event| {
+                events.push(event);
+                true
+            },
+        );
+        assert!(execution.is_some(), "the /refine command ran");
+        let results: Vec<&serde_json::Value> = events
+            .iter()
+            .filter_map(|event| match event {
+                EngineEvent::RefineComplete { result } => Some(result),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(results.len(), 1, "events: {events:?}");
+        assert_eq!(results[0]["summary"], "one edit");
+        assert_eq!(results[0]["appliedEdits"][0]["applied"], json!(true));
+        let complete_index = events
+            .iter()
+            .position(|event| matches!(event, EngineEvent::RefineComplete { .. }))
+            .expect("the complete event");
+        let result_row_index = events
+            .iter()
+            .rposition(|event| matches!(
+                event,
+                EngineEvent::CustomMessage(row) if row["customType"] == "session_slash_command_result"
+            ))
+            .expect("the result row");
+        assert!(
+            complete_index < result_row_index,
+            "the event precedes the result row: {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| !matches!(event, EngineEvent::RefineFailed { .. })),
+            "a successful run emits no failure: {events:?}"
+        );
+
+        let (engine, _dir) =
+            trigger_engine(&json!({ "responses": [ {"text": "not json"} ] }), 1, true);
+        let mut events: Vec<EngineEvent> = Vec::new();
+        crate::session_commands::run_session_command(&engine, &refine_command(), &mut |event| {
+            events.push(event);
+            true
+        });
+        let errors: Vec<String> = events
+            .iter()
+            .filter_map(|event| match event {
+                EngineEvent::RefineFailed { error } => Some(error.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(errors.len(), 1, "events: {events:?}");
+        assert_eq!(errors[0], "Refiner did not return a JSON object");
+        assert!(
+            events
+                .iter()
+                .all(|event| !matches!(event, EngineEvent::RefineComplete { .. })),
+            "a failed run emits no completion: {events:?}"
+        );
+    }
+
+    fn refine_command() -> pa_core::session_engine::slash_commands::SessionSlashCommand {
+        use pa_core::session_engine::slash_commands::{
+            parse_session_command, SlashCommandRegistry,
+        };
+        parse_session_command(&SlashCommandRegistry::builtin(), "/refine")
+            .expect("the test text is a session command")
+    }
 }
