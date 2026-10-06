@@ -457,13 +457,13 @@ fn recording_worker() -> (Worker, std::sync::Arc<std::sync::Mutex<Vec<String>>>)
     (worker, marks)
 }
 
-async fn created_recording_worker() -> (
-    Worker,
-    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
-) {
+async fn created_recording_worker() -> (Worker, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
     let (worker, marks) = recording_worker();
     let created = worker
-        .dispatch("create", &json!({ "noSession": true, "cwd": "/tmp", "name": "target" }))
+        .dispatch(
+            "create",
+            &json!({ "noSession": true, "cwd": "/tmp", "name": "target" }),
+        )
         .await;
     assert!(created.success, "create failed: {created:?}");
     (worker, marks)
@@ -562,7 +562,14 @@ async fn refused_deliveries_never_mark_the_child_replied() {
     let (worker, marks) = created_recording_worker().await;
     worker.agent_digest.configure_pin("digest").unwrap();
     let dir = tempfile::TempDir::new().unwrap();
-    worker.core.lock().unwrap().store.as_mut().unwrap().set_path(dir.path().to_path_buf());
+    worker
+        .core
+        .lock()
+        .unwrap()
+        .store
+        .as_mut()
+        .unwrap()
+        .set_path(dir.path().to_path_buf());
     let response = deliver_from(&worker, "must not mark", child_sender()).await;
     assert!(
         !response.success,
