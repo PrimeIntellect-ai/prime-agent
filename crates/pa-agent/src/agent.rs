@@ -744,6 +744,9 @@ impl AgentInner {
         Fut: std::future::Future<Output = anyhow::Result<()>>,
     {
         let run_signal = claim.controller.signal();
+        // The finish section's own handle on the same controller: the
+        // executor consumes `run_signal`.
+        let finish_signal = claim.controller.signal();
 
         {
             let mut shared = self.shared.lock().await;
@@ -774,7 +777,7 @@ impl AgentInner {
                 // turn): they fold into the next admitted run's polls,
                 // never the idle pump, so an aborted finish keeps the
                 // wake clear even with rows queued.
-                let has_queued = !run_signal.is_aborted()
+                let has_queued = !finish_signal.is_aborted()
                     && (self.steering_queue.lock().unwrap().has_items()
                         || self.follow_up_queue.lock().unwrap().has_items());
                 self.idle_queued_tx.send_modify(|armed| *armed = has_queued);
