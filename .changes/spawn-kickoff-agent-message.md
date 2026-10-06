@@ -1,0 +1,1 @@
+- A spawned subagent's kickoff task now renders as an agent message from the parent (labeled `[task from parent]`) instead of an unlabeled user message, and spawn prompts are no longer expanded as slash commands or prompt templates, matching the TypeScript version.
