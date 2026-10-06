@@ -40,6 +40,19 @@ fn held_by_this_process() -> &'static Mutex<std::collections::HashSet<PathBuf>> 
     HELD.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
 }
 
+/// The canonical registry key for a lock path: equivalent spellings of
+/// one directory (a symlinked component, macOS `/tmp` vs
+/// `/private/tmp`, a case-folded name) resolve to one key, so an aliased
+/// `acquire_at` cannot bypass the same-process check on the per-process
+/// `flock` platforms. Falls back to the raw spelling when the path
+/// cannot be resolved (the registry stores the key taken at
+/// registration, so an unresolvable probe merely misses - it can never
+/// name a held lock's alias that no longer resolves).
+#[cfg(unix)]
+fn registry_key(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 /// Same-process contention: the path is registered while a witness of
 /// this process holds it.
 #[cfg(unix)]
@@ -47,7 +60,7 @@ fn locally_held(path: &Path) -> bool {
     held_by_this_process()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .contains(path)
+        .contains(&registry_key(path))
 }
 
 /// Register a witnessed path as held by this process.
@@ -347,6 +360,15 @@ pub struct LockDir {
     /// lifetime and closes with it, so a crashed holder's witness
     /// vanishes with its process - the crash-oracle contract.
     witness: Option<WitnessFd>,
+    /// The canonical registry key this guard registered under (unix,
+    /// witnessed acquires only): stored at registration so `Drop`'s
+    /// unregistration cannot recompute it once the lock directory is
+    /// gone (a vanished path canonicalizes to nothing, and a recomputed
+    /// miss would wedge the path's registry entry in place forever).
+    /// The key is the canonical spelling - aliases of the held directory
+    /// share it, so the same-process check cannot be bypassed by an
+    /// equivalent path.
+    held_key: Option<PathBuf>,
     /// The (sec, nsec) mtime probe this guard last wrote (proper-lockfile's
     /// `lock.mtime`: the updater records the exact value its `utimes` call
     /// wrote, and its `isMtimeOurs` equality - a lock whose observed mtime
@@ -459,11 +481,13 @@ impl LockDir {
     /// silent success on a foreign directory.
     ///
     /// The comparison is exact equality on the (sec, nsec) pair, no
-    /// tolerance: the probe writes the pair verbatim through
-    /// `utimensat`/`SetFileTime`, the stat round trip preserves it
-    /// (`mtime_matches_the_proper_lockfile_probe_shape` pins the shape),
-    /// and proper-lockfile's `isMtimeOurs` is the same exact `getTime()`
-    /// compare. Verified only where the inode is observable: an
+    /// tolerance: the probe is the stored value `create`'s read-back
+    /// recorded (proper-lockfile's own record-what-stat-said semantics),
+    /// so a coarse-resolution filesystem's rounding is compared
+    /// stored-vs-stored and cannot self-reject, while a successor's
+    /// rmdir+mkdir landing between the read-back and this stat swaps in a
+    /// pair the recorded one never equals - proper-lockfile's
+    /// `isMtimeOurs` is the same exact `getTime()` compare. Verified only where the inode is observable: an
     /// unstat'able directory keeps the TS `guardIno === undefined`
     /// convention (timer-driven detection only), and a platform without a
     /// probe has no value to compare.
@@ -477,6 +501,12 @@ impl LockDir {
             (None, _) | (_, None) => true,
         };
         if !adopted {
+            // The artifact at the path is verifiably foreign here (the
+            // recorded probe no longer matches its mtime), so it is never
+            // ours to remove - the FAT-granularity finding's orphan never
+            // arises now that the probe is the stored mtime (the coarse
+            // filesystem adopts instead of rejecting), and a rival's
+            // replacement must stay untouched.
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 format!("Lock file is already being held: {}", path.display()),
@@ -518,13 +548,18 @@ impl LockDir {
             None
         };
         #[cfg(unix)]
-        if witness.is_some() {
-            register_locally_held(&path);
+        let held_key = witness.as_ref().map(|_| registry_key(&path));
+        #[cfg(not(unix))]
+        let held_key: Option<PathBuf> = None;
+        #[cfg(unix)]
+        if let Some(key) = &held_key {
+            register_locally_held(key);
         }
         Ok(LockDir {
             owned,
             owned_mtime: Mutex::new(probe),
             witness,
+            held_key,
             finished: AtomicBool::new(false),
             path,
         })
@@ -661,9 +696,13 @@ impl LockDir {
     }
 
     /// The mkdir is the acquisition signal: EEXIST is the only collision.
-    /// Returns the probe the write stamped - the mtime half of the
-    /// acquisition identity (proper-lockfile's probe hands its `stat.mtime`
-    /// back to the lock object the same way).
+    /// Returns the mtime the FILESYSTEM stored - read back after the
+    /// probe write, proper-lockfile's own record-what-stat-said semantics
+    /// (its probe hands `stat.mtime` back to the lock object): a
+    /// coarse-resolution filesystem (FAT, coarse unix mounts) rounds the
+    /// requested pair, so recording the requested value would make every
+    /// acquisition self-reject on the stored-vs-recorded compare; the
+    /// recorded value is the stored one, and the compare stays exact.
     #[cfg(unix)]
     fn create(path: &Path) -> io::Result<Option<(i64, i64)>> {
         fs::create_dir(path)?;
@@ -673,12 +712,16 @@ impl LockDir {
             let _ = fs::remove_dir(path);
             return Err(error);
         }
-        Ok(Some((sec, nanos)))
+        Self::read_back_probe(path)
     }
 
     /// The mkdir is the acquisition signal; the mtime probe makes the
     /// staleness judgment meaningful on NTFS too (directory mtimes would
     /// otherwise sit on the second, and stale takeovers would misjudge).
+    /// The probe recorded is the value the filesystem stored - the same
+    /// read-back as the unix arm, so FAT's coarse granularity (a
+    /// requested `next second + 5ms` lands on the 2s grid) does not
+    /// self-reject the acquisition it just made.
     #[cfg(windows)]
     fn create(path: &Path) -> io::Result<Option<(i64, i64)>> {
         fs::create_dir(path)?;
@@ -688,7 +731,21 @@ impl LockDir {
             let _ = fs::remove_dir(path);
             return Err(error);
         }
-        Ok(Some((sec, nanos)))
+        Self::read_back_probe(path)
+    }
+
+    /// The stored mtime after the probe write - the recorded half of the
+    /// acquisition identity. A read-back failure unwinds the acquisition
+    /// (never an unverified artifact).
+    fn read_back_probe(path: &Path) -> io::Result<Option<(i64, i64)>> {
+        let Some(stored) = Self::observed_mtime(path) else {
+            let _ = fs::remove_dir(path);
+            return Err(io::Error::other(format!(
+                "the lock directory at {} cannot be stat'ed",
+                path.display()
+            )));
+        };
+        Ok(Some(stored))
     }
 
     #[cfg(not(any(unix, windows)))]
@@ -1362,10 +1419,16 @@ impl Drop for LockDir {
         if !self.finished.swap(true, Ordering::Relaxed) {
             self.release();
         }
+        // Unregistered by the STORED registration key: the lock directory
+        // may already be gone (a guarded removal released it, a takeover
+        // replaced it), and a recomputed canonical key would miss - the
+        // entry would wedge the path's same-process check forever.
         #[cfg(unix)]
-        {
-            unregister_locally_held(&self.path);
+        if let Some(key) = &self.held_key {
+            unregister_locally_held(key);
         }
+        #[cfg(not(unix))]
+        let _ = &self.held_key;
     }
 }
 
@@ -1451,6 +1514,53 @@ mod tests {
                     .unwrap()
                     .as_millis()
         );
+    }
+
+    /// The recorded probe is the value the FILESYSTEM stored, not the
+    /// one the write requested (macroscope's coarse-granularity finding:
+    /// a rounding filesystem self-rejected every acquisition it made;
+    /// proper-lockfile records the stat'ed mtime, and so does `create`
+    /// now).
+    #[test]
+    fn the_recorded_probe_is_the_stored_mtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("auth.json");
+        std::fs::write(&file, "{}").unwrap();
+        let guard = LockDir::acquire(&file, MIN_STALE).unwrap();
+        let stored = LockDir::observed_mtime(&lock_of(&file));
+        assert_eq!(
+            *guard.owned_mtime.lock().unwrap(),
+            stored,
+            "the probe identity is the stored mtime, whatever the filesystem rounded it to"
+        );
+    }
+
+    /// An equivalent alias of a held path (a symlinked component) is the
+    /// SAME held lock (macroscope's alias finding: a path-spelling key
+    /// let a second same-process acquire bypass the registry and
+    /// stale-reclaim the first guard's live directory on the per-process
+    /// flock platforms): the canonical registry key answers the alias
+    /// with contention, and the path is free again once the guard drops.
+    #[test]
+    #[cfg(unix)]
+    fn an_aliased_acquire_at_still_sees_same_process_contention() {
+        let dir = tempfile::tempdir().unwrap();
+        let alias_parent = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(dir.path(), alias_parent.path().join("link")).unwrap();
+        let lock = dir.path().join("registry.guard");
+        let aliased = alias_parent.path().join("link").join("registry.guard");
+        let first = LockDir::acquire_at(&lock, MIN_STALE).unwrap();
+        let Err(error) = LockDir::acquire_at(&aliased, MIN_STALE) else {
+            panic!("the aliased path is the same held lock");
+        };
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock,
+            "same-process contention, never a reclaim of the live guard"
+        );
+        drop(first);
+        let _second = LockDir::acquire_at(&aliased, MIN_STALE)
+            .expect("the dropped guard's path acquires cleanly through the alias");
     }
 
     #[test]
