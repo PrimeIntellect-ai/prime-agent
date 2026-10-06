@@ -23,9 +23,8 @@ impl pa_tui::update_command::UpdateCommands for ClientUpdate {
                     let agent_dir = crate::config::get_agent_dir();
                     let settings = pa_core::settings::SettingsManager::create(&cwd, &agent_dir);
                     if !crate::mode::telemetry_disabled(&settings) {
-                        let client = pa_core::session_engine::telemetry::build_client(
-                            &settings, &agent_dir,
-                        );
+                        let client =
+                            pa_core::session_engine::telemetry::build_client(&settings, &agent_dir);
                         pa_telemetry::UpdateHomebrewRefusal {
                             kind: kind.as_str(),
                         }
