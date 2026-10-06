@@ -203,8 +203,9 @@ impl Supervisor {
 
     /// Test-only: pin this supervisor's pre-ready admission budget so
     /// the deadline state machine's tests can fire the budget without
-    /// waiting the production 120 seconds.
-    #[cfg(test)]
+    /// waiting the production 120 seconds. Unix only: its caller is
+    /// the unix-gated stale-signal oracle.
+    #[cfg(all(test, unix))]
     pub(crate) fn pin_tcp_pre_ready_timeout_for_tests(&self, timeout: Duration) {
         *self
             .tcp_pre_ready_budget
