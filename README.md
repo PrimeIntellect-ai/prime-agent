@@ -49,8 +49,10 @@ curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
 On Windows, install from PowerShell:
 
 ```powershell
-irm https://app.primeintellect.ai/prime-agent/install.ps1 | iex
+irm https://raw.githubusercontent.com/PrimeIntellect-ai/prime-agent/main/install.ps1 | iex
 ```
+
+Windows builds ship on the beta channel for now; when the stable channel has no Windows build, the installer falls back to the beta channel and says so. Only this copy of `install.ps1` comes from GitHub — the version pointers, platform tarballs, and checksums it downloads come from the release channel's own base.
 
 ## Why Prime Agent
 
