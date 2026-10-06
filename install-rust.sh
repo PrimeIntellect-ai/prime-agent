@@ -1004,6 +1004,37 @@ esac
 # route probes real Windows files - uv.exe, not uv.
 uv_name="uv"
 if [ "$WINDOWS" = "yes" ]; then uv_name="uv.exe"; fi
+# The PATH scan's candidate names match the child's own executable
+# search (ensure_uv): the bare name first, then on Windows the SUPPORTED
+# PATHEXT entries in PATHEXT order - the defaults only when PATHEXT
+# names none.
+uv_path_candidates="uv"
+if [ "$WINDOWS" = "yes" ]; then
+  # PATHEXT entries are parsed as literal semicolon-delimited strings with
+  # END-ONLY trimming (the child's own parse: whitespace inside an entry
+  # keeps it unsupported), lowercased, filtered to the supported set in
+  # PATHEXT order; the defaults apply only when PATHEXT names none.
+  uv_path_exts=""
+  uv_pathtext_rest="${PATHEXT:-}"
+  while [ -n "$uv_pathtext_rest" ]; do
+    uv_pathtext_entry="${uv_pathtext_rest%%;*}"
+    if [ "$uv_pathtext_entry" = "$uv_pathtext_rest" ]; then
+      uv_pathtext_rest=""
+    else
+      uv_pathtext_rest="${uv_pathtext_rest#*;}"
+    fi
+    uv_pathtext_entry="${uv_pathtext_entry#"${uv_pathtext_entry%%[![:space:]]*}"}"
+    uv_pathtext_entry="${uv_pathtext_entry%"${uv_pathtext_entry##*[![:space:]]}"}"
+    uv_pathtext_entry="$(printf '%s' "$uv_pathtext_entry" | tr 'A-Z' 'a-z')"
+    case "$uv_pathtext_entry" in
+      .com|.exe|.bat|.cmd) uv_path_exts="$uv_path_exts $uv_pathtext_entry" ;;
+    esac
+  done
+  [ -n "$uv_path_exts" ] || uv_path_exts=" .com .exe .bat .cmd"
+  for uv_path_ext in $uv_path_exts; do
+    uv_path_candidates="$uv_path_candidates uv$uv_path_ext"
+  done
+fi
 # THE UV TARGET KNOB (the ps1's own PRIME_AGENT_UV_BIN_DIR): an operator-
 # set dir wins (a packaged install keeps uv inside its own tree, the e2e
 # harnesses point it at their scratch dir so a run never touches the
@@ -1087,12 +1118,14 @@ uv_on_path() {
     # An EMPTY component means the CURRENT DIRECTORY in the child's PATH
     # resolution semantics - the scan searches it, never skips it.
     [ -n "$uv_on_path_entry" ] || uv_on_path_entry="."
-    # An executable FILE (never a searchable directory that merely shares
-    # the name).
-    [ -f "${uv_on_path_entry}/${uv_name}" ] || continue
-    [ -x "${uv_on_path_entry}/${uv_name}" ] || continue
-    uv_on_path_bin="${uv_on_path_entry}/${uv_name}"
-    return 0
+    # Within one PATH entry the scan iterates the candidate names in the
+    # child's own order; an executable regular FILE wins.
+    for uv_on_path_name in $uv_path_candidates; do
+      [ -f "${uv_on_path_entry}/${uv_on_path_name}" ] || continue
+      [ -x "${uv_on_path_entry}/${uv_on_path_name}" ] || continue
+      uv_on_path_bin="${uv_on_path_entry}/${uv_on_path_name}"
+      return 0
+    done
   done
   return 1
 }

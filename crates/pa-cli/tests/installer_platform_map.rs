@@ -515,8 +515,23 @@ fn install_rust_sh_honors_the_uv_bin_dir_knob() {
         "the knob must refuse the PATH separator (a target with a colon corrupts every PATH export and prepend)"
     );
     assert!(
-        text.contains("uv_on_path()") && text.contains("uv_on_path_entry") && text.contains("[ -f \"${uv_on_path_entry}/${uv_name}\" ]"),
+        text.contains("uv_on_path()") && text.contains("uv_on_path_entry") && text.contains("[ -f \"${uv_on_path_entry}/${uv_on_path_name}\" ]"),
         "the sh's uv-on-PATH check must SCAN PATH for an executable file itself: command -v also reports exported shell FUNCTIONS (and a bare-name result can hit a cwd decoy), which no child process can resolve"
+    );
+    assert!(
+        text.contains("uv_path_exts=\" .com .exe .bat .cmd\"")
+            && text.contains("uv_pathtext_rest=\"${PATHEXT:-}\"")
+            && text.contains("uv_pathtext_entry=\"${uv_pathtext_rest%%;*}\"")
+            && text.contains("tr 'A-Z' 'a-z'"),
+        "the Windows candidate list must be BUILT from the effective supported PATHEXT parsed as literal semicolon-delimited entries with END-ONLY trimming (the child's windows_executable_candidates: str::trim cuts the ends, whitespace inside an entry stays part of it), in PATHEXT order, defaults only as fallback - no word splitting or glob expansion anywhere"
+    );
+    assert!(
+        text.contains("uv_path_candidates=\"uv\""),
+        "the bare name rides first (the child tries it first)"
+    );
+    assert!(
+        text.contains("for uv_on_path_name in $uv_path_candidates"),
+        "the scan iterates the candidate names within each PATH entry, mirroring the child's search"
     );
     assert!(
         !text.contains("for uv_on_path_entry in $PATH"),
