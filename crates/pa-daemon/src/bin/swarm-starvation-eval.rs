@@ -628,6 +628,7 @@ fn drive_trial(
     // panicking in `Duration::from_secs_f64`.
     let deadline = trial_deadline(config.timeout_minutes);
     let mut answer_text = None;
+    let mut timed_out = false;
     loop {
         let text = command_data(
             client,
@@ -643,6 +644,10 @@ fn drive_trial(
             break;
         }
         if deadline.is_some_and(|at| Instant::now() >= at) {
+            // The schedule cut the trial off, not the model: scored below
+            // as its own class so the report never reads a cut-off as a
+            // missing final ANSWER.
+            timed_out = true;
             break;
         }
         std::thread::sleep(Duration::from_secs(2));
@@ -666,12 +671,27 @@ fn drive_trial(
     .and_then(|usage| usage.get("tokens"))
     .and_then(Value::as_u64);
 
+    let snapshot = snapshot_from_transcript(&messages, context_tokens);
     let expected: Vec<u64> = secrets.iter().map(|secret| u64::from(*secret)).collect();
     let answer = parse_answer_line(answer_text.as_deref());
     let task_success = answer.as_deref() == Some(expected.as_slice());
-    let instant_fail = rate_limit_failure(&messages);
+    // The ANSWER check alone cannot tell where the numbers came from: every
+    // child prompt (secret included) rides in the orchestrator's own prompt,
+    // so a correct ANSWER with zero arrivals was assembled without any child
+    // REPORT — a crewless run is not a swarm measurement and must not pass.
+    // A schedule cut-off gets its own class first (children may still have
+    // been mid-REPORT at the deadline, so the arrivals count alone would
+    // misread a cut-off as crewless), and the rate-limit class stays first
+    // as before.
+    let instant_fail = rate_limit_failure(&messages)
+        .or_else(|| {
+            timed_out.then(|| "schedule timeout: no ANSWER line before the deadline".to_string())
+        })
+        .or_else(|| {
+            (snapshot.arrivals.total == 0)
+                .then(|| "crewless trial: no child REPORT arrived".to_string())
+        });
 
-    let snapshot = snapshot_from_transcript(&messages, context_tokens);
     Ok(trial_result_from_snapshot(
         config,
         size,
@@ -921,7 +941,121 @@ mod tests {
         );
         let report = std::fs::read_to_string(out_dir.path().join("report.md")).expect("report.md");
         assert!(report.contains("| 1 | 1 |"), "{report}");
-        assert!(report.contains("inconclusive"), "{report}");
+        // The scripted trial answers correctly with no children and no
+        // arrivals, so the row is the crewless class the fold reports; the
+        // unbounded wait itself still ended on the ANSWER, not a deadline.
+        assert!(
+            report.contains("crewless trial: no child REPORT arrived"),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn a_crewless_trial_cannot_pass() {
+        // The orchestrator prompt embeds every child prompt verbatim, so the
+        // model can emit the correct ANSWER without ever forming a crew.
+        // With its own assistant step scripted, the defense lines are all
+        // measured at a 0% share — without the crewless check this row
+        // passes the whole sweep.
+        let (seed, size, trial) = (1, 1, 1);
+        let secret = seeded_secrets(seed + 31 * size + trial, 1)[0];
+        let daemon = fake_daemon(vec![
+            ("create", json!({ "activeSessionId": "s-eval" })),
+            ("prompt", json!({})),
+            (
+                "get_last_assistant_text",
+                json!({ "text": format!("ANSWER: {secret}") }),
+            ),
+            ("get_rlm_children", json!({ "children": [] })),
+            (
+                "get_messages",
+                json!({ "messages": [
+                    json!({ "role": "assistant", "usage": { "input": 100, "output": 50 } }),
+                ] }),
+            ),
+            (
+                "get_session_stats",
+                json!({ "contextUsage": { "tokens": 1_000 } }),
+            ),
+            ("kill", json!(null)),
+        ]);
+        let out_dir = tempfile::TempDir::new().expect("out dir");
+        let config = test_config(out_dir.path(), 1, 15.0);
+
+        run(&daemon.socket, &config).expect("the crewless trial is a row");
+
+        let raw = std::fs::read_to_string(out_dir.path().join("report.json")).expect("report.json");
+        let json: Value = serde_json::from_str(&raw).expect("report.json parses");
+        let rows = json["results"].as_array().expect("results array");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        // The ANSWER itself matched, so the task column stays honest; the
+        // verdict column carries why the row still cannot pass.
+        assert_eq!(rows[0]["task_success"], true, "{rows:?}");
+        assert_eq!(
+            rows[0]["instant_fail"], "crewless trial: no child REPORT arrived",
+            "{rows:?}"
+        );
+        assert_eq!(rows[0]["verdict"], "fail", "{rows:?}");
+        let report = std::fs::read_to_string(out_dir.path().join("report.md")).expect("report.md");
+        assert!(report.contains("1/1 trials failed"), "{report}");
+        assert!(
+            report.contains("crewless trial: no child REPORT arrived"),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn a_schedule_timeout_is_reported_as_its_own_class() {
+        // The poll deadline cuts the trial off with no ANSWER: the row must
+        // record the cut-off, or it reads exactly like a wrong final answer.
+        let daemon = fake_daemon(vec![
+            ("create", json!({ "activeSessionId": "s-eval" })),
+            ("prompt", json!({})),
+            (
+                "get_last_assistant_text",
+                json!({ "text": "still collecting child reports" }),
+            ),
+            ("get_rlm_children", json!({ "children": [] })),
+            (
+                "get_messages",
+                json!({ "messages": [
+                    json!({ "role": "assistant", "usage": { "input": 100, "output": 50 } }),
+                ] }),
+            ),
+            (
+                "get_session_stats",
+                json!({ "contextUsage": { "tokens": 1_000 } }),
+            ),
+            ("kill", json!(null)),
+        ]);
+        let out_dir = tempfile::TempDir::new().expect("out dir");
+        // A zero-minute timeout: the first poll already hits the deadline.
+        let config = test_config(out_dir.path(), 1, 0.0);
+
+        run(&daemon.socket, &config).expect("the timed-out trial is a row");
+
+        let commands = daemon.drain_until_killed("s-eval");
+        assert!(
+            commands
+                .iter()
+                .any(|command| command["type"] == "get_last_assistant_text"),
+            "the poll loop ran: {commands:?}"
+        );
+        let raw = std::fs::read_to_string(out_dir.path().join("report.json")).expect("report.json");
+        let json: Value = serde_json::from_str(&raw).expect("report.json parses");
+        let rows = json["results"].as_array().expect("results array");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0]["task_success"], false, "{rows:?}");
+        assert_eq!(
+            rows[0]["instant_fail"], "schedule timeout: no ANSWER line before the deadline",
+            "{rows:?}"
+        );
+        assert_eq!(rows[0]["verdict"], "fail", "{rows:?}");
+        let report = std::fs::read_to_string(out_dir.path().join("report.md")).expect("report.md");
+        assert!(
+            report.contains("schedule timeout: no ANSWER line before the deadline"),
+            "{report}"
+        );
     }
 
     fn args(values: &[&str]) -> Vec<String> {
