@@ -1001,10 +1001,7 @@ impl LockDir {
     /// occupant's retry. The fd is the claim's lifetime: dropped when
     /// the reclaim returns.
     #[cfg(unix)]
-    fn claim_occupant(
-        path: &Path,
-        stale_after: Duration,
-    ) -> io::Result<Option<std::os::fd::OwnedFd>> {
+    fn claim_occupant(path: &Path, stale_after: Duration) -> io::Result<std::os::fd::OwnedFd> {
         use std::os::fd::AsRawFd;
         use std::os::unix::fs::MetadataExt;
         loop {
@@ -1022,26 +1019,31 @@ impl LockDir {
             let held = unsafe { libc::flock(dir.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
             if held != 0 {
                 let error = io::Error::last_os_error();
-                return match error.kind() {
-                    io::ErrorKind::WouldBlock => Err(io::Error::new(
-                        io::ErrorKind::WouldBlock,
-                        format!("Lock file is already being held: {}", path.display()),
-                    )),
+                match error.kind() {
+                    io::ErrorKind::WouldBlock => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::WouldBlock,
+                            format!("Lock file is already being held: {}", path.display()),
+                        ));
+                    }
                     // The NFS emulation signature (an unwitnessable
-                    // filesystem - see [`LockDir::witness_fd`]): no claim
-                    // is possible and none is needed (nothing on this
-                    // filesystem carries a witness); the takeover runs
-                    // the flock-free path below on the same fd's
-                    // staleness re-judge.
+                    // filesystem - see [`LockDir::witness_fd`]): the flock
+                    // pin is impossible here, but the mtime-only claim
+                    // still runs its FULL re-validation below - the
+                    // fd-vs-occupant identity check and the fd's own
+                    // staleness re-judge are plain stat/mtime reads that
+                    // work on NFS (proper-lockfile's own re-validate is
+                    // the mtime check) - so the degraded claim is
+                    // re-validated exactly like the flocked one, only
+                    // unpinned.
                     io::ErrorKind::PermissionDenied => {
                         tracing::warn!(
-                            "the directory lock cannot take an exclusive flock at {} (an NFS-style filesystem: the takeover claim degrades to the mtime-only protocol)",
+                            "the directory lock cannot take an exclusive flock at {} (an NFS-style filesystem: the takeover claim degrades to the unpinned mtime-only re-validation)",
                             path.display()
                         );
-                        Ok(None)
                     }
-                    _ => Err(error),
-                };
+                    _ => return Err(error),
+                }
             }
             let claimed = fs::metadata(path).map(|metadata| metadata.ino());
             let fd_metadata = dir.metadata();
@@ -1061,7 +1063,7 @@ impl LockDir {
                             format!("Lock file is already being held: {}", path.display()),
                         ));
                     }
-                    return Ok(Some(dir.into()));
+                    return Ok(dir.into());
                 }
                 // The occupant changed under the claim (or vanished, or
                 // the stat failed): the fd's flock released with this
