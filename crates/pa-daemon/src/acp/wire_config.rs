@@ -75,7 +75,7 @@ pub(super) async fn handle_set_config_option(
     // `sessionCloseInFlight`).
     let live = {
         let guard = state.lock().await;
-        !guard.session_close_in_flight
+        guard.session_close_done.is_none()
             && guard
                 .session
                 .as_ref()

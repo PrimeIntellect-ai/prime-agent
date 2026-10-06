@@ -194,13 +194,14 @@ pub fn should_compact(
 }
 
 /// The effective requested output budget of the session's next model call:
-/// the per-request default `min(model.maxTokens, 32000)`, plus the thinking
-/// budget budget-folding providers (Anthropic/Bedrock models without
-/// adaptive thinking) add on top of it for the session's reasoning level,
-/// capped at the model's declared max output; 0 when the model declares no
-/// max output. The combined input+output ceiling reserves what the request
-/// will actually claim, or a budget-folded request can overflow while the
-/// trigger still says "not due".
+/// the per-request default output budget (an explicitly configured
+/// `maxTokens` unchanged; a catalog value `min(model.maxTokens, 32000)`),
+/// plus the thinking budget budget-folding providers (Anthropic/Bedrock
+/// models without adaptive thinking) add on top of it for the session's
+/// reasoning level, capped at the model's declared max output; 0 when the
+/// model declares no max output. The combined input+output ceiling reserves
+/// what the request will actually claim, or a budget-folded request can
+/// overflow while the trigger still says "not due".
 #[must_use]
 pub fn request_output_budget(
     model: &pa_types::ai::Model,

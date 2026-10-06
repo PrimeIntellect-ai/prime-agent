@@ -85,6 +85,7 @@ fn agent_model() -> pa_agent::types::Model {
         cost: pa_agent::types::UsageCost::default(),
         context_window: 1_000_000,
         max_tokens: 128_000,
+        max_tokens_explicit: false,
     }
 }
 

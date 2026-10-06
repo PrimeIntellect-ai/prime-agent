@@ -152,6 +152,7 @@ impl AgentSessionEngine {
             config,
             mcp,
             published_goal: std::sync::Mutex::new(None),
+            late_agent_message_sink: std::sync::Mutex::new(None),
             goal_runtime: std::sync::Mutex::new(None),
             pending_goal_continuation: std::sync::Mutex::new(None),
             goal_budget_crossed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -1144,7 +1145,13 @@ impl AgentSessionEngine {
             .lock()
             .expect("semantic identity lock")
             .clone();
+        let on_late_sent_agent_message = self
+            .late_agent_message_sink
+            .lock()
+            .expect("late agent message sink lock")
+            .clone();
         pa_core::session_engine::engine::create_session(SessionEngineConfig {
+            on_late_sent_agent_message,
             semantic_edges,
             telemetry,
             cwd,
