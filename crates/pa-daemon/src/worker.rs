@@ -11,7 +11,7 @@ pub(crate) use config::WorkerConfig;
 // import.
 #[allow(unused_imports)]
 use env::KillCloseReason;
-mod input;
+pub(crate) mod input;
 mod lifecycle;
 mod summary;
 
@@ -26,10 +26,10 @@ pub use queue::QueuePriority;
 pub(crate) use queue::{
     admit_autonomous_follow_up, admit_bash_completion_notice, admit_goal_follow_up,
     checkpoint_queue_recovery, enqueue_priority, gather_delivery_batch, parse_custom_message,
-    parse_prompt_images, queue_lanes, restore_queue_snapshot, restored_turn_policy,
-    withdraw_bash_completion_notice, QueueCheckpoint, QueueLanes, QueuedItem, TurnPolicy,
-    TurnSettle, ABORTED_TURN_SETTLE_ERROR, PROMPT_ABORTED_BEFORE_DELIVERY, QUEUED_INPUT_SUSPENDED,
-    QUEUED_PROMPT_DELETED, SIDE_QUESTION_SETTLE_TIMEOUT,
+    parse_prompt_images, queue_lanes, record_queue_checkpoint_locked, restore_queue_snapshot,
+    restored_turn_policy, withdraw_bash_completion_notice, QueueCheckpoint, QueueLanes, QueuedItem,
+    TurnPolicy, TurnSettle, ABORTED_TURN_SETTLE_ERROR, PROMPT_ABORTED_BEFORE_DELIVERY,
+    QUEUED_INPUT_SUSPENDED, QUEUED_PROMPT_DELETED, SIDE_QUESTION_SETTLE_TIMEOUT,
 };
 
 mod create;
@@ -480,6 +480,7 @@ impl Worker {
                             QueueCheckpoint::Settle {
                                 operation: "queue_purged",
                             },
+                            None,
                         );
                     });
                 concrete.set_autonomous_queue_purge(autonomous_purge);
@@ -539,6 +540,7 @@ impl Worker {
                         QueueCheckpoint::Settle {
                             operation: "queue_purged",
                         },
+                        None,
                     );
                 });
                 concrete.set_goal_admission(probe, sink, queue_purge);
@@ -978,6 +980,8 @@ mod worker_resume_settings_tests;
 
 #[cfg(test)]
 mod agent_message_tests;
+#[cfg(all(test, unix))]
+mod cloud_inbox_tests;
 
 #[cfg(test)]
 mod prompt_image_tests;

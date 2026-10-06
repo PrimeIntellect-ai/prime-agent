@@ -13,9 +13,9 @@
 //! the TS record cap, so an unacked full log stalls exactly like TS.
 
 use std::collections::VecDeque;
-use std::fs::{self, File, OpenOptions};
-use std::io::{BufWriter, Write};
-use std::path::{Path, PathBuf};
+use std::fs::File;
+use std::io::{BufWriter, Read, Write};
+use std::path::Path;
 
 use anyhow::{anyhow, Context, Result};
 use pa_types::daemon::cloud::{
@@ -36,34 +36,84 @@ const EVENTS_FILE: &str = "outbox-events.ndjson";
 /// NDJSON envelope per request event, fsync'd on append before admission is
 /// reported. A crash may leave only the final append truncated; the reload
 /// repairs it by dropping the partial line.
+#[derive(Debug)]
 pub struct FamilyRequestLog {
-    directory: PathBuf,
     session_id: String,
     events: Vec<CloudFamilyEvent>,
     max_records: usize,
     max_event_bytes: usize,
+    /// The PINNED VERIFIED parent directory handle: every leaf
+    /// operation resolves relative to this inode (openat, `O_NOFOLLOW`),
+    /// so a writable ancestor cannot redirect a check that already
+    /// passed. Off unix the log never opens (the private-parent
+    /// validator fails closed).
+    parent: File,
 }
 
 impl FamilyRequestLog {
     /// Open (or create) the request log under `directory`, loading and
     /// validating the durable events.
     ///
+    /// The parent directory carries a strict private-placement
+    /// invariant: a missing chain is created private, a pre-existing
+    /// parent owned by the effective user is tightened to 0700 through a
+    /// verified handle, and a symlink or foreign-owned parent is
+    /// rejected — the envelope stores the message body in plaintext, and
+    /// a parent writable by others could redirect the appends.
+    /// Platforms without the owner/mode probes FAIL CLOSED (keyed-journal
+    /// parity) until the platform ACL proof exists. On unix the validated
+    /// parent is PINNED as a verified open directory handle and every
+    /// leaf operation below resolves relative to that inode (openat,
+    /// `O_NOFOLLOW`): a parent or ancestor swapped after this open
+    /// cannot redirect anything.
+    ///
     /// # Errors
     ///
-    /// Returns an error when the directory cannot be created, the log is
-    /// corrupt (digest, envelope, or sequence gap), or the repair write of a
-    /// crash-truncated tail fails.
+    /// Returns an error when the directory cannot be established as
+    /// owner-private, the log is corrupt (digest, envelope, or sequence
+    /// gap), or the repair write of a crash-truncated tail fails.
     pub fn open(directory: &Path, session_id: &str, max_records: usize) -> Result<Self> {
-        fs::create_dir_all(directory).with_context(|| format!("create {}", directory.display()))?;
-        let mut log = Self {
-            directory: directory.to_path_buf(),
-            session_id: session_id.to_string(),
-            events: Vec::new(),
-            max_records,
-            max_event_bytes: pa_types::daemon::cloud::CLOUD_MAX_MESSAGE_BYTES,
-        };
-        log.load()?;
-        Ok(log)
+        #[cfg(unix)]
+        {
+            let events_path = directory.join(EVENTS_FILE);
+            let parent = crate::journal::establish_private_journal_parent(&events_path)?;
+            crate::journal::validate_private_journal_parent(&events_path)?;
+            let mut log = Self {
+                session_id: session_id.to_string(),
+                events: Vec::new(),
+                max_records,
+                max_event_bytes: pa_types::daemon::cloud::CLOUD_MAX_MESSAGE_BYTES,
+                parent,
+            };
+            // Private from its first write (the creation mode below); a
+            // file left at the umask-default mode by an older build moves
+            // to a fresh private inode HERE, through the pinned handle.
+            crate::journal::migrate_private_journal_file_at(&log.parent, EVENTS_FILE)?;
+            log.load()?;
+            Ok(log)
+        }
+        #[cfg(not(unix))]
+        {
+            let events_path = directory.join(EVENTS_FILE);
+            crate::journal::validate_private_journal_parent(&events_path)?;
+            anyhow::bail!("the request outbox requires a platform-proven private parent")
+        }
+    }
+
+    /// The pinned verified parent handle: every leaf operation resolves
+    /// relative to this inode, so a writable ancestor cannot redirect a
+    /// check that already passed. Off unix the family logs never open,
+    /// so this accessor fails closed too.
+    #[cfg(unix)]
+    fn pinned_parent(&self) -> Result<&File> {
+        Ok(&self.parent)
+    }
+
+    /// Off-unix arm of [`FamilyRequestLog::pinned_parent`]: the family
+    /// logs require a platform-proven private parent.
+    #[cfg(not(unix))]
+    fn pinned_parent(&self) -> Result<&File> {
+        anyhow::bail!("the request outbox requires a platform-proven private parent")
     }
 
     /// Append one request durably: the event is built, canonicalized, size
@@ -96,13 +146,18 @@ impl FamilyRequestLog {
         }
         let mut line = envelope;
         line.push('\n');
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(self.events_path())
-            .with_context(|| format!("open {}", self.events_path().display()))?;
+        // The pinned openat append: the leaf resolves relative to the
+        // verified parent inode with `O_NOFOLLOW` (a replaced or
+        // symlinked leaf refuses the append) and is created owner-only.
+        // The parent syncs after every append (the keyed append's belt):
+        // a newly created leaf's directory entry is otherwise not
+        // crash-durable.
+        let parent = self.pinned_parent()?;
+        let mut file = pa_core::platform::private_fs::open_append_at(parent, EVENTS_FILE)
+            .with_context(|| format!("open {EVENTS_FILE}"))?;
         file.write_all(line.as_bytes())?;
         file.sync_all()?;
+        parent.sync_all()?;
         self.events.push(event.clone());
         Ok(event)
     }
@@ -144,10 +199,6 @@ impl FamilyRequestLog {
         self.events.is_empty()
     }
 
-    fn events_path(&self) -> PathBuf {
-        self.directory.join(EVENTS_FILE)
-    }
-
     fn envelope(&self, event: &CloudFamilyEvent) -> Result<String> {
         let event_value = serde_json::to_value(event)?;
         let canonical = canonical_json(&json!({
@@ -173,10 +224,29 @@ impl FamilyRequestLog {
     }
 
     fn load(&mut self) -> Result<()> {
-        let path = self.events_path();
-        let Ok(content) = fs::read_to_string(&path) else {
-            File::create(&path).with_context(|| format!("create {}", path.display()))?;
-            return Ok(());
+        let parent = self.pinned_parent()?;
+        let content = match pa_core::platform::private_fs::open_read_at(parent, EVENTS_FILE) {
+            Ok(mut file) => {
+                let mut content = String::new();
+                file.read_to_string(&mut content)?;
+                content
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // A fresh outbox: the empty private file keeps the
+                // first-append path uniform (read errors other than a
+                // missing file propagate — corruption never truncates).
+                // The created entry is synced — a fresh leaf's NAME is
+                // not durable until its directory entry is.
+                drop(pa_core::platform::private_fs::create_replace_at(
+                    parent,
+                    EVENTS_FILE,
+                )?);
+                parent.sync_all()?;
+                return Ok(());
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("read {EVENTS_FILE}"));
+            }
         };
         let mut lines: Vec<&str> = content.split('\n').collect();
         let ended = content.ends_with('\n');
@@ -218,10 +288,11 @@ impl FamilyRequestLog {
     /// Rewrite the log with the given canonical envelope lines, durably
     /// (temp file, fsync, rename), repairing a truncated tail in place.
     fn rewrite(&mut self, lines: &[&str]) -> Result<()> {
-        let path = self.events_path();
-        let temp = path.with_extension("ndjson.tmp");
+        let parent = self.pinned_parent()?;
+        let temp = format!("{EVENTS_FILE}.tmp-{}", std::process::id());
         {
-            let file = File::create(&temp).with_context(|| format!("create {}", temp.display()))?;
+            let file = pa_core::platform::private_fs::create_replace_at(parent, &temp)
+                .with_context(|| format!("create {temp}"))?;
             let mut writer = BufWriter::new(file);
             for line in lines {
                 writer.write_all(line.as_bytes())?;
@@ -230,13 +301,16 @@ impl FamilyRequestLog {
             writer.flush()?;
             writer.get_ref().sync_all()?;
         }
-        fs::rename(&temp, &path).with_context(|| format!("persist {}", path.display()))?;
+        pa_core::platform::private_fs::rename_at(parent, &temp, EVENTS_FILE)
+            .with_context(|| format!("persist {EVENTS_FILE}"))?;
+        parent.sync_all()?;
         Ok(())
     }
 }
 
 /// One durably-admitted request slot: the request id plus its journaled
 /// answer once one exists.
+#[derive(Debug)]
 struct ResultSlot {
     request_id: String,
     result: Option<CloudFamilyCommand>,
@@ -262,10 +336,19 @@ struct ResultSlot {
 /// the request outbox's record cap — the largest replay span — so a
 /// replayed request always finds its journal state (TS's dedupe was 256
 /// ephemeral in-memory ids, crash-blind; the durable window closes that).
+#[derive(Debug)]
 pub struct FamilyResultLog {
-    path: PathBuf,
     slots: VecDeque<ResultSlot>,
     max_remembered: usize,
+    /// The journal's leaf name inside its parent (the pinned-relative
+    /// operations address it; the path stays for messages).
+    leaf: String,
+    /// The PINNED VERIFIED parent directory handle: every leaf
+    /// operation resolves relative to this inode (openat, `O_NOFOLLOW`),
+    /// so a writable ancestor cannot redirect a check that already
+    /// passed. Off unix the journal never opens (the private-parent
+    /// validator fails closed).
+    parent: File,
 }
 
 /// What `admit` found on disk for one request id.
@@ -283,23 +366,101 @@ impl FamilyResultLog {
     /// and their answers. A crash-truncated or malformed tail is skipped,
     /// like the recovery journals.
     ///
+    /// The parent directory carries the same strict private-placement
+    /// invariant as the request log: a missing chain is created private,
+    /// a pre-existing own parent is tightened through a verified handle,
+    /// and a symlink or foreign-owned parent is rejected. Platforms
+    /// without the owner/mode probes FAIL CLOSED (keyed-journal parity)
+    /// until the platform ACL proof exists. On unix the validated parent
+    /// is PINNED as a verified open directory handle and every leaf
+    /// operation resolves relative to that inode (openat, `O_NOFOLLOW`):
+    /// a parent or ancestor swapped after this open cannot redirect
+    /// anything.
+    ///
     /// # Errors
     ///
-    /// Returns an error when the parent directory cannot be created.
+    /// Returns an error when the parent directory cannot be established
+    /// as owner-private.
     pub fn open(path: &Path) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
+        #[cfg(unix)]
+        {
+            let parent = crate::journal::establish_private_journal_parent(path)?;
+            crate::journal::validate_private_journal_parent(path)?;
+            let Some(leaf) = path.file_name().and_then(std::ffi::OsStr::to_str) else {
+                anyhow::bail!("the family result journal needs a file name");
+            };
+            let leaf = leaf.to_string();
+            // Private from its first write (the creation mode below); a
+            // file left at the umask-default mode by an older build moves
+            // to a fresh private inode HERE, through the pinned handle.
+            crate::journal::migrate_private_journal_file_at(&parent, &leaf)?;
+            // A crash-torn trailing append is repaired before any append
+            // can glue onto it (which would strand the record forever);
+            // mid-file corruption fails closed — the journal's history
+            // is never silently dropped.
+            let contents = match pa_core::platform::private_fs::open_read_at(&parent, &leaf) {
+                Ok(mut file) => {
+                    let mut contents = Vec::new();
+                    file.read_to_end(&mut contents)?;
+                    contents
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+                Err(error) => return Err(error).with_context(|| format!("read {leaf}")),
+            };
+            let (valid_lines, tail) =
+                crate::cloud_family::inbox::parse_journal_lines(&contents, path)?;
+            match tail {
+                crate::cloud_family::inbox::JournalTail::Clean => {}
+                crate::cloud_family::inbox::JournalTail::TornTail => {
+                    let mut records = Vec::with_capacity(valid_lines.len());
+                    for line in &valid_lines {
+                        records.push(
+                            serde_json::from_str::<Value>(line)
+                                .map_err(|error| anyhow!("repair parse: {error}"))?,
+                        );
+                    }
+                    crate::journal::rewrite_records_at(&parent, &leaf, &records)?;
+                }
+                crate::cloud_family::inbox::JournalTail::MidFile => {
+                    return Err(anyhow!(
+                        "family result journal {} is corrupted mid-file; refusing to rewrite history",
+                        path.display()
+                    ));
+                }
+            }
+            let mut log = Self {
+                slots: VecDeque::new(),
+                // The dedupe window must cover the largest possible replay
+                // span — the request outbox's own record cap — so every
+                // replayable request finds its journal state.
+                max_remembered: DEFAULT_OUTBOX_RECORDS,
+                leaf,
+                parent,
+            };
+            log.load_lines(&valid_lines);
+            Ok(log)
         }
-        let mut log = Self {
-            path: path.to_path_buf(),
-            slots: VecDeque::new(),
-            // The dedupe window must cover the largest possible replay
-            // span — the request outbox's own record cap — so every
-            // replayable request finds its journal state.
-            max_remembered: DEFAULT_OUTBOX_RECORDS,
-        };
-        log.load();
-        Ok(log)
+        #[cfg(not(unix))]
+        {
+            crate::journal::validate_private_journal_parent(path)?;
+            anyhow::bail!("the family result journal requires a platform-proven private parent")
+        }
+    }
+
+    /// The pinned verified parent handle: every leaf operation resolves
+    /// relative to this inode, so a writable ancestor cannot redirect a
+    /// check that already passed. Off unix the family logs never open,
+    /// so this accessor fails closed too.
+    #[cfg(unix)]
+    fn pinned_parent(&self) -> Result<&File> {
+        Ok(&self.parent)
+    }
+
+    /// Off-unix arm of [`FamilyResultLog::pinned_parent`]: the family
+    /// logs require a platform-proven private parent.
+    #[cfg(not(unix))]
+    fn pinned_parent(&self) -> Result<&File> {
+        anyhow::bail!("the family result journal requires a platform-proven private parent")
     }
 
     /// The journaled answer for `request_id`, newest first.
@@ -323,8 +484,9 @@ impl FamilyResultLog {
         if self.slot(request_id).is_some() {
             return Ok(Admission::Already);
         }
-        crate::journal::append_record(
-            &self.path,
+        crate::journal::append_record_at(
+            self.pinned_parent()?,
+            &self.leaf,
             &json!({"version": 1, "type": "admitted", "requestId": request_id}),
         )?;
         self.push_slot(request_id.to_string(), None);
@@ -349,8 +511,9 @@ impl FamilyResultLog {
         if self.result(&request_id).is_some() {
             return Ok(());
         }
-        crate::journal::append_record(
-            &self.path,
+        crate::journal::append_record_at(
+            self.pinned_parent()?,
+            &self.leaf,
             &json!({"version": 1, "type": "result", "requestId": request_id, "command": command}),
         )?;
         if let Some(slot) = self.slot_mut(&request_id) {
@@ -405,15 +568,13 @@ impl FamilyResultLog {
                 std::iter::once(admitted).chain(result)
             })
             .collect();
-        let _ =
-            crate::journal::rewrite_records(&self.path, &records, crate::journal::Finalize::Synced);
+        let _ = self
+            .pinned_parent()
+            .and_then(|parent| crate::journal::rewrite_records_at(parent, &self.leaf, &records));
     }
 
-    fn load(&mut self) {
-        let Ok(content) = fs::read_to_string(&self.path) else {
-            return;
-        };
-        for line in content.lines() {
+    fn load_lines(&mut self, valid_lines: &[String]) {
+        for line in valid_lines {
             let Ok(record) = serde_json::from_str::<Value>(line) else {
                 // A crash may leave only the final append truncated.
                 continue;
@@ -443,5 +604,451 @@ impl FamilyResultLog {
                 _ => {}
             }
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    /// The macOS temp root resolves through /var (a symlink); the strict
+    /// no-symlink placement policy requires the ORIGINAL path to be
+    /// symlink-free, so the tests canonicalize their legitimate temp
+    /// paths at the call site (the product keeps no exception).
+    fn temp_root(dir: &tempfile::TempDir) -> std::path::PathBuf {
+        std::fs::canonicalize(dir.path()).unwrap()
+    }
+
+    /// The request outbox carries the message body in PLAINTEXT (the TS
+    /// envelope), so its inode must be private from the first write — the
+    /// umask-default 0644 file was readable through any traversable path
+    /// (the review's finding in the #3145 substrate).
+    #[cfg(unix)]
+    #[test]
+    fn request_outbox_is_private_from_its_first_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let outbox = temp_root(&dir).join("nested-outbox");
+        let mut log = FamilyRequestLog::open(&outbox, "sess_priv", 50).unwrap();
+        log.append(CloudFamilyEventPayload::AgentMessageRequest {
+            request_id: "msgreq_priv".to_string(),
+            from_remote_session_id: "remote_child".to_string(),
+            target_selector: "sibling".to_string(),
+            message: "the plaintext body".to_string(),
+        })
+        .unwrap();
+        let events = outbox.join("outbox-events.ndjson");
+        let content = fs::read_to_string(&events).unwrap();
+        assert!(
+            content.contains("the plaintext body"),
+            "the envelope stores the message in plaintext: {content}"
+        );
+        assert_eq!(
+            pa_core::platform::perms::file_mode(&events),
+            Some(0o600),
+            "the plaintext outbox inode is private from its first write"
+        );
+        assert_eq!(
+            pa_core::platform::perms::file_mode(&outbox),
+            Some(0o700),
+            "the created outbox directory is private"
+        );
+    }
+
+    /// A legacy outbox written at the umask-default mode (the base
+    /// substrate's shape) migrates to a fresh private inode at open: the
+    /// bytes are preserved verbatim, the inode changes, and appends after
+    /// the swap replay.
+    #[cfg(unix)]
+    #[test]
+    fn legacy_loose_outbox_migrates_to_a_fresh_private_inode() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let dir = tempfile::tempdir().unwrap();
+        let mut log = FamilyRequestLog::open(&temp_root(&dir), "sess_priv", 50).unwrap();
+        log.append(CloudFamilyEventPayload::AgentMessageRequest {
+            request_id: "msgreq_priv".to_string(),
+            from_remote_session_id: "remote_child".to_string(),
+            target_selector: "sibling".to_string(),
+            message: "the plaintext body".to_string(),
+        })
+        .unwrap();
+        let events = temp_root(&dir).join("outbox-events.ndjson");
+        // The old shape: the same file at the umask-default 0644.
+        fs::set_permissions(&events, fs::Permissions::from_mode(0o644)).unwrap();
+        let before = fs::symlink_metadata(&events).unwrap();
+        let bytes = fs::read(&events).unwrap();
+
+        let reopened = FamilyRequestLog::open(&temp_root(&dir), "sess_priv", 50).unwrap();
+
+        let after = fs::symlink_metadata(&events).unwrap();
+        assert_ne!(
+            (after.dev(), after.ino()),
+            (before.dev(), before.ino()),
+            "the legacy loose outbox moves to a fresh private inode"
+        );
+        assert_eq!(pa_core::platform::perms::file_mode(&events), Some(0o600));
+        assert_eq!(
+            fs::read(&events).unwrap(),
+            bytes,
+            "history is preserved byte-for-byte"
+        );
+        assert_eq!(reopened.tail_sequence(), 1, "the migrated record replays");
+        // The private inode keeps serving: an append after the swap
+        // survives a reopen.
+        log.append(CloudFamilyEventPayload::FamilyRosterRequest {
+            request_id: "famreq_priv".to_string(),
+            from_remote_session_id: "remote_child".to_string(),
+        })
+        .unwrap();
+        assert_eq!(
+            FamilyRequestLog::open(&temp_root(&dir), "sess_priv", 50)
+                .unwrap()
+                .tail_sequence(),
+            2,
+            "the post-swap append lands and replays"
+        );
+    }
+
+    /// The result journal's first write is private, and a legacy loose
+    /// file migrates to a fresh private inode with its admissions
+    /// intact.
+    #[cfg(unix)]
+    #[test]
+    fn result_journal_is_private_and_migrates_a_legacy_loose_file() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_root(&dir).join("family-results.jsonl");
+        let mut log = FamilyResultLog::open(&path).unwrap();
+        log.admit("msgreq_r1").unwrap();
+        assert_eq!(
+            pa_core::platform::perms::file_mode(&path),
+            Some(0o600),
+            "the result journal inode is private from its first write"
+        );
+        // The old shape: the same file at the umask-default 0644.
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        let before = fs::symlink_metadata(&path).unwrap();
+        let reopened = FamilyResultLog::open(&path).unwrap();
+        let after = fs::symlink_metadata(&path).unwrap();
+        assert_ne!(
+            (after.dev(), after.ino()),
+            (before.dev(), before.ino()),
+            "the legacy loose result journal moves to a fresh private inode"
+        );
+        assert_eq!(pa_core::platform::perms::file_mode(&path), Some(0o600));
+        assert_eq!(
+            reopened.uncertain(),
+            vec!["msgreq_r1".to_string()],
+            "the migrated admission replays"
+        );
+    }
+
+    /// The private-placement invariant (the follow-up review): a symlink
+    /// parent is rejected BEFORE anything is touched — the target is
+    /// never tightened through the link — and a pre-existing loose own
+    /// parent is tightened, not left writable by others.
+    #[cfg(unix)]
+    #[test]
+    fn family_logs_enforce_a_private_parent() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        // The symlinked parent: rejected for both logs, and the target's
+        // mode is never touched.
+        let target = temp_root(&root).join("target");
+        fs::create_dir_all(&target).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
+        let link = temp_root(&root).join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        FamilyRequestLog::open(&link, "sess_priv", 50)
+            .expect_err("the O_NOFOLLOW open refuses the symlinked parent");
+        FamilyResultLog::open(&link.join("family-results.jsonl"))
+            .expect_err("the O_NOFOLLOW open refuses the symlinked parent");
+        assert_eq!(
+            pa_core::platform::perms::file_mode(&target),
+            Some(0o755),
+            "the symlink target is never tightened"
+        );
+        // A pre-existing loose own parent is tightened at open.
+        let loose = temp_root(&root).join("loose");
+        fs::create_dir_all(&loose).unwrap();
+        fs::set_permissions(&loose, fs::Permissions::from_mode(0o755)).unwrap();
+        FamilyRequestLog::open(&loose, "sess_priv", 50).unwrap();
+        assert_eq!(
+            pa_core::platform::perms::file_mode(&loose),
+            Some(0o700),
+            "the loose own parent is tightened at open"
+        );
+    }
+
+    /// The append's nofollow discipline: a replaced (symlinked) outbox
+    /// path refuses the append instead of writing the plaintext body
+    /// through it.
+    #[cfg(unix)]
+    #[test]
+    fn outbox_append_refuses_a_replaced_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut log = FamilyRequestLog::open(&temp_root(&dir), "sess_priv", 50).unwrap();
+        let events = temp_root(&dir).join("outbox-events.ndjson");
+        let sink = temp_root(&dir).join("attacker-sink");
+        fs::write(&sink, "").unwrap();
+        fs::remove_file(&events).unwrap();
+        std::os::unix::fs::symlink(&sink, &events).unwrap();
+        log.append(CloudFamilyEventPayload::AgentMessageRequest {
+            request_id: "msgreq_priv".to_string(),
+            from_remote_session_id: "remote_child".to_string(),
+            target_selector: "sibling".to_string(),
+            message: "the plaintext body".to_string(),
+        })
+        .expect_err("the O_NOFOLLOW openat refuses the replaced leaf");
+        assert_eq!(
+            fs::read_to_string(&sink).unwrap(),
+            "",
+            "no plaintext is written through the replaced path"
+        );
+    }
+
+    /// The pinned-handle proof (the follow-up review's writable-ancestor
+    /// race): a parent replaced AFTER the open — a rename through a
+    /// mutable ancestor plants a fresh, perfectly valid private
+    /// directory at the old path — cannot redirect anything. The
+    /// append lands in the ORIGINAL pinned inode (found under the
+    /// moved path), and the decoy at the old path stays empty.
+    #[test]
+    fn outbox_append_lands_in_the_pinned_parent_despite_a_swapped_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let outbox = temp_root(&root).join("outbox");
+        let mut log = FamilyRequestLog::open(&outbox, "sess_priv", 50).unwrap();
+        fs::rename(&outbox, temp_root(&root).join("moved")).unwrap();
+        fs::create_dir_all(&outbox).unwrap();
+        fs::set_permissions(&outbox, fs::Permissions::from_mode(0o700)).unwrap();
+        log.append(CloudFamilyEventPayload::AgentMessageRequest {
+            request_id: "msgreq_priv".to_string(),
+            from_remote_session_id: "remote_child".to_string(),
+            target_selector: "sibling".to_string(),
+            message: "the plaintext body".to_string(),
+        })
+        .expect("the pinned parent keeps serving the append");
+        let moved = fs::read_to_string(temp_root(&root).join("moved").join("outbox-events.ndjson"))
+            .unwrap();
+        assert!(
+            moved.contains("the plaintext body"),
+            "the record lives in the pinned (moved) inode: {moved}"
+        );
+        assert!(
+            !outbox.join("outbox-events.ndjson").exists(),
+            "the decoy at the swapped path received nothing"
+        );
+    }
+
+    /// The trusted-namespace placement policy (the follow-up review's
+    /// integrity finding): an ancestor that could MOVE the verified
+    /// directory between runs makes the placement non-durable, so an
+    /// attacker-mutable ancestor (group/other-writable, sticky-less) is
+    /// rejected at open — and a sticky ancestor (the POSIX /tmp
+    /// contract: only the entry's owner may rename it) is accepted.
+    #[test]
+    fn family_logs_reject_an_attacker_mutable_ancestor() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        for loose_mode in [0o777, 0o770, 0o702] {
+            // The mutable ancestor is INTERMEDIATE: the open tightens the
+            // log's own parent, and the placement policy then refuses the
+            // chain that could move it between runs.
+            let movable = temp_root(&root).join(format!("loose-{loose_mode:o}"));
+            fs::create_dir_all(movable.join("outbox")).unwrap();
+            fs::set_permissions(&movable, fs::Permissions::from_mode(loose_mode)).unwrap();
+            let error = FamilyRequestLog::open(&movable.join("outbox"), "sess_priv", 50)
+                .expect_err("an attacker-mutable ancestor fails closed");
+            assert!(
+                format!("{error:#}").contains("writable by others"),
+                "the mutability policy rejects the placement: {error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn family_logs_accept_a_sticky_ancestor() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        // A sticky intermediate (the POSIX /tmp contract: only the entry's
+        // owner may rename it) cannot move another user's entries, so the
+        // placement stays durable.
+        let sticky = temp_root(&root).join("sticky");
+        fs::create_dir_all(sticky.join("outbox")).unwrap();
+        fs::set_permissions(&sticky, fs::Permissions::from_mode(0o1777)).unwrap();
+        let mut log = FamilyRequestLog::open(&sticky.join("outbox"), "sess_priv", 50)
+            .expect("the sticky ancestor cannot move another user's entries");
+        log.append(CloudFamilyEventPayload::AgentMessageRequest {
+            request_id: "msgreq_priv".to_string(),
+            from_remote_session_id: "remote_child".to_string(),
+            target_selector: "sibling".to_string(),
+            message: "the plaintext body".to_string(),
+        })
+        .unwrap();
+        let content =
+            fs::read_to_string(sticky.join("outbox").join("outbox-events.ndjson")).unwrap();
+        assert!(content.contains("the plaintext body"));
+    }
+
+    /// The reviewer's retargeting hole: an INTERMEDIATE symlink component
+    /// in the ORIGINAL path (the parent's path RESOLVES through an
+    /// attacker-retargetable link — even inside a sticky directory,
+    /// where the link is the attacker's own entry) is refused by the
+    /// strict original-component walk, even though the pinned handle
+    /// holds the resolved real directory.
+    #[test]
+    fn family_logs_reject_a_symlink_component_in_the_original_path() {
+        let root = tempfile::tempdir().unwrap();
+        let real = temp_root(&root).join("real-outbox");
+        fs::create_dir_all(&real).unwrap();
+        let link = temp_root(&root).join("retargetable");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        // The pinned handle resolves through the symlink into the real
+        // directory — the walk then refuses the symlink component itself.
+        FamilyRequestLog::open(&link.join("outbox"), "sess_priv", 50)
+            .expect_err("a symlink component in the original path fails closed");
+        FamilyResultLog::open(&link.join("outbox").join("family-results.jsonl"))
+            .expect_err("a symlink component in the original path fails closed");
+    }
+
+    /// The no-mutation-on-untrusted-path invariant (the reviewer's
+    /// rejected-path side effect): an attacker symlink component
+    /// targeting an OWNED SHARED directory is refused with the victim
+    /// untouched — no 0700 tighten through the link, no created outbox
+    /// inside it — despite the pinned establishment resolving through
+    /// it before the refusal.
+    #[test]
+    fn a_rejected_symlink_path_leaves_the_shared_target_untouched() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let victim = temp_root(&root).join("victim");
+        fs::create_dir_all(&victim).unwrap();
+        fs::set_permissions(&victim, fs::Permissions::from_mode(0o755)).unwrap();
+        let link = temp_root(&root).join("retargetable");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+        FamilyRequestLog::open(&link, "sess_priv", 50)
+            .expect_err("the symlink component is refused");
+        assert_eq!(
+            pa_core::platform::perms::file_mode(&victim),
+            Some(0o755),
+            "the shared target's mode is never tightened through the rejected path"
+        );
+        let entries: Vec<_> = fs::read_dir(&victim).unwrap().collect();
+        assert!(
+            entries.is_empty(),
+            "nothing is created inside the target through the rejected path"
+        );
+    }
+
+    /// The result journal's appends ride the same pinned handle: the
+    /// admission lands in the original (moved) inode and the decoy
+    /// stays empty.
+    #[test]
+    fn result_journal_append_lands_in_the_pinned_parent_despite_a_swapped_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let parent = temp_root(&root).join("results-dir");
+        fs::create_dir_all(&parent).unwrap();
+        let path = parent.join("family-results.jsonl");
+        let mut log = FamilyResultLog::open(&path).unwrap();
+        fs::rename(&parent, temp_root(&root).join("moved")).unwrap();
+        fs::create_dir_all(&parent).unwrap();
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+        log.admit("msgreq_swap")
+            .expect("the pinned parent keeps serving the admission");
+        let moved = fs::read_to_string(temp_root(&root).join("moved").join("family-results.jsonl"))
+            .unwrap();
+        assert!(
+            moved.contains("msgreq_swap"),
+            "the admission lives in the pinned (moved) inode: {moved}"
+        );
+        assert!(
+            !parent.join("family-results.jsonl").exists(),
+            "the decoy at the swapped path received nothing"
+        );
+    }
+
+    /// The crash-torn trailing append: the tail is repaired (truncated to
+    /// its valid records) before any append can glue onto it, and the
+    /// post-repair append replays cleanly.
+    #[test]
+    fn torn_tail_is_repaired_and_never_glued() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_root(&dir).join("family-results.jsonl");
+        let mut log = FamilyResultLog::open(&path).unwrap();
+        log.admit("msgreq_t1").unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        let first_line = content.lines().next().expect("the admitted record");
+        // The crash: a torn partial line at the tail.
+        std::fs::write(&path, format!("{first_line}\n{{\"torn")).unwrap();
+        let reloaded = FamilyResultLog::open(&path).unwrap();
+        assert_eq!(reloaded.uncertain(), vec!["msgreq_t1".to_string()]);
+        let repaired = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !repaired.contains("torn"),
+            "the torn fragment was truncated: {repaired}"
+        );
+        // The next append lands on the clean boundary and replays.
+        let mut reloaded = reloaded;
+        let command = pa_types::daemon::cloud::CloudFamilyCommand {
+            payload: pa_types::daemon::cloud::CloudFamilyCommandPayload::AgentMessageResult {
+                request_id: "msgreq_t1".to_string(),
+                ok: true,
+                receipt: None,
+                error: None,
+            },
+        };
+        reloaded.record(command).unwrap();
+        let reopened = FamilyResultLog::open(&path).unwrap();
+        assert!(
+            reopened.uncertain().is_empty(),
+            "the answer replays cleanly"
+        );
+    }
+
+    /// Mid-file corruption fails closed: the journal is never opened and
+    /// its history is never silently rewritten.
+    #[test]
+    fn mid_file_corruption_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_root(&dir).join("family-results.jsonl");
+        let mut log = FamilyResultLog::open(&path).unwrap();
+        log.admit("msgreq_m1").unwrap();
+        drop(log);
+        let valid = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, format!("{{garbage\n{valid}")).unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            FamilyResultLog::open(&path).is_err(),
+            "mid-file corruption fails closed"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            before,
+            "the corrupted file is never rewritten"
+        );
+    }
+}
+
+/// Platforms without the owner/mode probes fail closed: the family logs
+/// never open on inherited ACLs alone (keyed-journal parity).
+#[cfg(all(test, not(unix)))]
+mod off_unix_tests {
+    use super::*;
+
+    #[test]
+    fn family_logs_fail_closed_off_unix() {
+        let dir = std::env::temp_dir().join(format!("pa-family-off-unix-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(
+            FamilyRequestLog::open(&dir, "sess_off", 10).is_err(),
+            "the request outbox fails closed off unix"
+        );
+        assert!(
+            FamilyResultLog::open(&dir.join("family-results.jsonl")).is_err(),
+            "the result journal fails closed off unix"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

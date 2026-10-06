@@ -237,13 +237,41 @@ pub(crate) fn checkpoint_queue_recovery(
     recovery: &std::sync::Mutex<Option<WorkerRecoveryJournal>>,
     core_lock: &std::sync::Mutex<SessionCore>,
     checkpoint: QueueCheckpoint,
+    cloud_admission: Option<(&str, &Value)>,
 ) {
     let mut guard = recovery.lock().unwrap();
     let Some(journal) = guard.as_mut() else {
         return;
     };
-    // The lanes are read under the recovery lock (a microsecond core hold —
-    // never across the journal's fsyncs): no persist interleaves this read.
+    // The unkeyed local path keeps its pre-existing best-effort
+    // checkpoint policy: a failed append skips the checkpoint (the
+    // in-memory queue stays; the durable evidence simply did not land).
+    // Only the cloud-keyed path fails closed on the same error.
+    let _ = record_queue_checkpoint_locked(journal, core_lock, checkpoint, cloud_admission);
+}
+
+/// The checkpoint recorder for a caller already holding the recovery
+/// lock: the cloud-keyed agent-message delivery admits its request id in
+/// the same locked section as the enqueue, so two concurrent deliveries
+/// under one key cannot both become visible.
+///
+/// # Panics
+///
+/// Panics when the core lock is poisoned (a holder panicked while holding
+/// it).
+pub(crate) fn record_queue_checkpoint_locked(
+    journal: &mut WorkerRecoveryJournal,
+    core_lock: &std::sync::Mutex<SessionCore>,
+    checkpoint: QueueCheckpoint,
+    cloud_admission: Option<(&str, &Value)>,
+) -> anyhow::Result<()> {
+    // The lanes are read under the recovery lock (a microsecond core
+    // hold — never across the journal's fsyncs, which would block every
+    // concurrent command behind the write): every queue mutation that
+    // persists lands its own snapshot under this same recovery lock, so
+    // no persist can interleave between this read and the appends, and a
+    // mutating non-persist (a runner pop) is corrected by the next
+    // checkpoint's fresh read.
     let (active_session_id, session_id, session_file, lanes, turn_in_flight) = {
         let core = core_lock.lock().unwrap();
         (
@@ -269,9 +297,16 @@ pub(crate) fn checkpoint_queue_recovery(
             operation,
         ),
     };
-    // The verdict never publishes over a snapshot that did not
-    // persist: the pair rides ONE durable append.
-    let _ = journal.record_queue_checkpoint(
+    // The verdict never publishes over a snapshot that did not persist:
+    // busy=true evidence must not promise a queue the journal cannot
+    // replay (a skipped settled verdict keeps the previous record — the
+    // worst case parks like any uncheckpointed session). The pair rides
+    // ONE durable append — the snapshot line and the verdict line share a
+    // single journal flush, landing together or not at all (the unchanged
+    // verdict keeps appending the snapshot alone, exactly like the
+    // sequential form); a failed batch lands neither record, so the
+    // checkpoint is simply skipped.
+    journal.record_queue_checkpoint(
         &active_session_id,
         &session_id,
         session_file.as_deref(),
@@ -279,7 +314,8 @@ pub(crate) fn checkpoint_queue_recovery(
         operation,
         &lanes.steering,
         &lanes.follow_up,
-    );
+        cloud_admission,
+    )
 }
 
 pub(crate) fn queue_lanes(core: &SessionCore) -> QueueLanes {
@@ -429,6 +465,7 @@ pub(crate) fn admit_autonomous_follow_up(
         QueueCheckpoint::Admitted {
             operation: "follow_up_queued",
         },
+        None,
     );
     work_notify.notify_waiters();
 }
@@ -491,6 +528,7 @@ pub(crate) fn admit_goal_follow_up(
                 Lane::FollowUp => "follow_up_queued",
             },
         },
+        None,
     );
     // The runner re-checks the queue at its loop head, so the minted
     // turn runs as the next admitted turn.
@@ -561,6 +599,7 @@ pub(crate) fn admit_bash_completion_notice(
         QueueCheckpoint::Admitted {
             operation: "steer_queued",
         },
+        None,
     );
     work_notify.notify_one();
 }
@@ -599,6 +638,7 @@ pub(crate) fn withdraw_bash_completion_notice(
             QueueCheckpoint::Settle {
                 operation: "queue_purged",
             },
+            None,
         );
     }
 }

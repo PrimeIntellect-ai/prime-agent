@@ -5,6 +5,7 @@
 pub mod browser;
 pub mod lock_dir;
 pub mod perms;
+pub mod private_fs;
 pub mod process;
 pub mod shell;
 
