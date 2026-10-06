@@ -7,7 +7,7 @@ use crate::keybindings::KeybindingsManager;
 /// The single-line search input (TS `Input`): value, cursor, undo stack,
 /// and an Emacs-style kill ring. Dispatch happens through the shared
 /// keybinding manager; the model selector owns when keys reach it.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct SearchInput {
     value: String,
     /// Cursor position in characters.
@@ -45,8 +45,7 @@ impl SearchInput {
         self.cursor
     }
 
-    /// TS `setValue`: the cursor never moves past the new value (the
-    /// caret-clamp behavior is pinned by
+    /// The cursor never moves past the new value (pinned by
     /// `set_value_keeps_the_cursor_inside_the_value`).
     #[cfg(test)]
     pub(crate) fn set_value(&mut self, value: &str) {
@@ -54,11 +53,9 @@ impl SearchInput {
         self.cursor = self.cursor.min(self.value.chars().count());
     }
 
-    /// Prefill a fresh filter from a typed partial (`/model <partial>` +
-    /// Tab): the value lands whole and the caret sits at its end, so the
-    /// next keystroke extends the filter and Backspace deletes the tail.
-    /// Unlike `set_value` (TS `setValue`), which only clamps a caret
-    /// already placed inside the value.
+    /// Prefill a fresh filter from a typed partial (`/model <partial>` + Tab): the value lands
+    /// whole and the caret sits at its end. Unlike `set_value`, which only clamps a caret already
+    /// placed inside the value.
     pub(crate) fn prefill(&mut self, value: &str) {
         self.value = value.to_string();
         self.cursor = self.value.chars().count();
@@ -232,22 +229,35 @@ impl SearchInput {
             self.move_word_forward();
             return;
         }
-        // Regular character input: printable characters only, one char at a
-        // time (control sequences never reach the value).
-        if let [character] = key.chars().collect::<Vec<char>>()[..] {
-            if !character.is_control() {
-                self.push_type_undo(character);
-                self.insert_at_cursor(&character.to_string());
-            }
+        // Regular character input (TS `Input.handleInput`'s printable arm):
+        // TS reads the raw space byte; the port gets the `space` key id,
+        // which `decode_printable` maps back.
+        if let Some(character) =
+            crate::editor::decode_printable(key).and_then(|text| text.chars().next())
+        {
+            self.push_type_undo(character);
+            self.insert_at_cursor(&character.to_string());
         }
     }
 
     /// A whole-word paste (bracketed paste, newlines stripped like TS).
+    /// Control bytes never reach the value — the editor's `handle_paste`
+    /// filters them — so an ESC/OSC sequence riding a paste cannot be
+    /// stored in the query and re-emitted to the terminal on the next
+    /// render of the field.
     pub(crate) fn paste(&mut self, text: &str) {
-        self.last_action = LastAction::None;
-        self.push_undo();
         let mut clean = text.replace(['\r', '\n'], "");
         clean = clean.replace('\t', "    ");
+        clean = clean.chars().filter(|c| !c.is_control()).collect();
+        // A payload that filters to nothing (control-only bytes, empty
+        // bracketed paste) changes nothing: no undo step is pushed, so
+        // the next undo still undoes the typing (the editor's
+        // `handle_paste` rule).
+        if clean.is_empty() {
+            return;
+        }
+        self.last_action = LastAction::None;
+        self.push_undo();
         self.insert_at_cursor(&clean);
     }
 
@@ -313,42 +323,19 @@ impl SearchInput {
             .collect();
     }
 
-    /// Word-boundary walk (TS `moveWordBackwards`): pop the trailing
-    /// whitespace graphemes of the before-cursor slice, then the
-    /// punctuation or word run in front of them. The slice is segmented
-    /// standalone, exactly like the TS original, so the run starts at the
-    /// grapheme that ends at the cursor and a mid-cluster cursor
-    /// classifies the partial cluster the same way TS does.
+    /// Word-boundary walk (`moveWordBackwards`): pop the trailing whitespace graphemes of the
+    /// before-cursor slice, then the punctuation or word run in front of them. The slice is
+    /// segmented standalone, like TS, so a mid-cluster cursor classifies the partial cluster the
+    /// same way TS does.
     fn move_word_backward(&mut self) {
-        use unicode_segmentation::UnicodeSegmentation;
         if self.cursor == 0 {
             return;
         }
         let before: String = self.chars()[..self.cursor].iter().collect();
-        let mut graphemes: Vec<&str> = before.graphemes(true).collect();
-        while graphemes.last().is_some_and(|g| g.chars().any(is_ws)) {
-            let g = graphemes.pop().expect("last checked Some");
-            self.cursor -= g.chars().count();
-        }
-        let Some(last) = graphemes.last().copied() else {
-            return;
-        };
-        let punctuation_run = last.chars().any(is_punct);
-        while let Some(g) = graphemes.last().copied() {
-            if punctuation_run {
-                if !g.chars().any(is_punct) {
-                    break;
-                }
-            } else if g.chars().any(is_ws) || g.chars().any(is_punct) {
-                break;
-            }
-            graphemes.pop();
-            self.cursor -= g.chars().count();
-        }
+        self.cursor = word_walk_start(&before);
     }
 
-    /// Word-boundary walk forward (TS `moveWordForwards`), grapheme by
-    /// grapheme.
+    /// Word-boundary walk forward, grapheme by grapheme.
     fn move_word_forward(&mut self) {
         let ends = self.grapheme_ends();
         let mut idx = ends.partition_point(|e| *e <= self.cursor);
@@ -413,6 +400,37 @@ fn is_punct(c: char) -> bool {
     crate::width::is_punctuation_char(c)
 }
 
+/// The word walk TS `moveWordBackwards` runs on a before-cursor slice:
+/// the char index where the run in front of the trailing whitespace
+/// starts, the last grapheme's class deciding whether the run is
+/// punctuation or word characters. The slice is segmented standalone,
+/// exactly like the TS original, so the run starts at the grapheme that
+/// ends the slice; an all-whitespace slice walks to 0. Shared by the
+/// search input's cursor walk and the plain-string word deletes that
+/// hold the caret at the slice's end.
+pub(crate) fn word_walk_start(text: &str) -> usize {
+    use unicode_segmentation::UnicodeSegmentation;
+    let mut graphemes: Vec<&str> = text.graphemes(true).collect();
+    while graphemes.last().is_some_and(|g| g.chars().any(is_ws)) {
+        graphemes.pop();
+    }
+    let Some(last) = graphemes.last().copied() else {
+        return 0;
+    };
+    let punctuation_run = last.chars().any(is_punct);
+    while let Some(g) = graphemes.last().copied() {
+        if punctuation_run {
+            if !g.chars().any(is_punct) {
+                break;
+            }
+        } else if g.chars().any(is_ws) || g.chars().any(is_punct) {
+            break;
+        }
+        graphemes.pop();
+    }
+    graphemes.iter().map(|g| g.chars().count()).sum()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -430,6 +448,52 @@ mod tests {
         input
     }
 
+    /// The `space` key id types a space: TS `Input.handleInput`'s
+    /// regular-character arm reads the RAW space byte (0x20, printable),
+    /// while this port receives TS's `space` key id, so the same printable
+    /// decode that maps it back feeds the value.
+    #[test]
+    fn the_space_key_id_types_a_space() {
+        let mut input = typed("a");
+        input.handle_key("space", &kb());
+        input.handle_key("b", &kb());
+        assert_eq!(input.value(), "a b");
+        assert_eq!(input.cursor(), 3);
+        // Backspace walks the typed characters back out, space included.
+        input.handle_key("backspace", &kb());
+        assert_eq!(input.value(), "a ");
+        input.handle_key("backspace", &kb());
+        assert_eq!(input.value(), "a");
+    }
+
+    /// A paste's control bytes never reach the value (the editor's
+    /// `handle_paste` filters them): an ESC/OSC sequence riding a
+    /// bracketed paste would otherwise be stored in the query and
+    /// re-emitted to the terminal on the next render of the field.
+    #[test]
+    fn paste_rejects_control_bytes() {
+        let mut input = typed("a");
+        input.paste("\u{1b}]8;;https://evil.example\u{7}b\u{7f}");
+        // The ESC/BEL/DEL bytes are dropped (the payload's printable
+        // characters stay text, like the editor's paste filter): no
+        // control byte survives into the value, so the field's render
+        // can never re-emit a terminal control sequence.
+        assert_eq!(input.value(), "a]8;;https://evil.exampleb");
+        assert!(!input.value().chars().any(char::is_control));
+    }
+
+    /// A control-only paste filters to nothing and changes nothing: no
+    /// empty undo step is pushed (the editor's `handle_paste` rule), so
+    /// the next undo still undoes the typing.
+    #[test]
+    fn a_control_only_paste_leaves_the_undo_stack_alone() {
+        let mut input = typed("ab");
+        input.paste("\u{1b}\u{7}");
+        assert_eq!(input.value(), "ab");
+        input.handle_key("ctrl+-", &kb());
+        assert_eq!(input.value(), "", "undo removes the typing, not a no-op");
+    }
+
     #[test]
     fn typing_moves_the_cursor_and_backspace_deletes() {
         let mut input = typed("abc");
@@ -438,7 +502,6 @@ mod tests {
         input.handle_key("backspace", &kb());
         assert_eq!(input.value(), "ab");
         assert_eq!(input.cursor(), 2);
-        // Forward delete at the end is a no-op.
         input.handle_key("delete", &kb());
         assert_eq!(input.value(), "ab");
         input.handle_key("left", &kb());
@@ -449,8 +512,8 @@ mod tests {
 
     #[test]
     fn undo_restores_the_previous_snapshot() {
-        // Word-typed continuations share one snapshot: undo rewinds the
-        // whole word, then the whole line (TS `pushUndo` boundaries).
+        // Word-typed continuations share one snapshot: undo rewinds the whole
+        // word, then the whole line (TS `pushUndo` boundaries).
         let mut input = typed("model picker");
         input.handle_key("ctrl+-", &kb());
         assert_eq!(input.value(), "model");
@@ -471,13 +534,13 @@ mod tests {
     #[test]
     fn consecutive_kills_accumulate_into_one_ring_entry() {
         let mut input = typed("alpha beta gamma");
-        // Two consecutive backward word kills accumulate: the second kill
-        // prepends into the first entry (TS kill-ring `accumulate`).
+        // Two consecutive backward word kills accumulate into the first entry
+        // (TS kill-ring `accumulate`).
         input.handle_key("ctrl+w", &kb());
         input.handle_key("ctrl+w", &kb());
         assert_eq!(input.value(), "alpha ");
-        // A line kill still rides the same kill chain: the whole line
-        // becomes one entry, so yank pastes it back in one piece.
+        // A line kill still rides the same kill chain: the whole line becomes
+        // one entry.
         input.handle_key("ctrl+u", &kb());
         assert_eq!(input.value(), "");
         input.handle_key("ctrl+y", &kb());
@@ -497,10 +560,8 @@ mod tests {
         input.handle_key("ctrl+a", &kb());
         input.handle_key("ctrl+k", &kb());
         assert_eq!(input.value(), "");
-        // Yank pastes the newest entry (the line kill)...
         input.handle_key("ctrl+y", &kb());
         assert_eq!(input.value(), "alpha ");
-        // ...yank-pop replaces it with the next-oldest (the word kill).
         input.handle_key("alt+y", &kb());
         assert_eq!(input.value(), "beta");
     }
@@ -511,7 +572,6 @@ mod tests {
         input.handle_key("home", &kb());
         input.handle_key("ctrl+k", &kb());
         assert_eq!(input.value(), "");
-        // Restore by yank to rebuild, then delete from the start.
         let mut input = typed("one two three");
         input.handle_key("ctrl+u", &kb());
         assert_eq!(input.value(), "");
@@ -521,8 +581,8 @@ mod tests {
 
     #[test]
     fn cursor_word_walks_stop_at_boundaries() {
-        // Punctuation is its own word class (TS `isPunctuationChar`):
-        // `mock-1` walks to the hyphen, not past it.
+        // Punctuation is its own word class (`isPunctuationChar`): `mock-1`
+        // walks to the hyphen, not past it.
         let mut input = typed("mock-1 picker");
         input.handle_key("ctrl+a", &kb());
         input.handle_key("alt+f", &kb());
@@ -541,10 +601,8 @@ mod tests {
         assert_eq!(input.cursor(), 0);
     }
 
-    /// A prefill from a typed partial (`/model gp` + Tab) continues where
-    /// the user stopped: the caret sits at the end, typing extends the
-    /// filter, and Backspace deletes the tail — unlike `set_value`, which
-    /// leaves the caret at its old column (0 on a fresh input).
+    /// A prefill from a typed partial continues where the user stopped (caret at the end; Backspace
+    /// deletes the tail) — unlike `set_value`, which leaves the caret at its old column.
     #[test]
     fn prefill_places_the_caret_at_the_end() {
         let mut input = SearchInput::new();
@@ -565,9 +623,8 @@ mod tests {
         assert_eq!(input.value(), "mock    12");
     }
 
-    /// Grapheme-model parity (TS `Input`, components/input.ts:18): the
-    /// cursor, deletion, and word motion operate on whole grapheme
-    /// clusters, never single chars of a multi-char cluster.
+    /// Grapheme-model parity: the cursor, deletion, and word motion operate
+    /// on whole grapheme clusters, never single chars of a multi-char cluster.
     #[test]
     fn backspace_deletes_whole_grapheme_clusters() {
         // e + combining acute is one cluster: one backspace removes both.
@@ -611,14 +668,13 @@ mod tests {
 
     #[test]
     fn word_motion_walks_graphemes() {
-        // Word-right over a value with combining marks and an astral
-        // cluster: the run ends at the punctuation boundary, whole
-        // clusters at a time (TS moveWordForwards walks segmenter data).
+        // Word-right over a value with combining marks and an astral cluster:
+        // the run ends at the punctuation boundary, whole clusters at a time.
         let mut input = SearchInput::new();
         input.set_value("wo\u{301}rd\u{1f600}  next");
         input.handle_key("home", &kb());
-        // Word-right stops before the trailing spaces (TS moveWordForwards
-        // only skips LEADING whitespace).
+        // Word-right stops before the trailing spaces (`moveWordForwards` only
+        // skips LEADING whitespace).
         input.handle_key("ctrl+right", &kb());
         assert_eq!(
             input
@@ -637,8 +693,8 @@ mod tests {
                 .collect::<String>(),
             "wo\u{301}rd\u{1f600}  next"
         );
-        // Word-left lands on the start of "next" (leading spaces skipped by
-        // the next move), then walks the whole word run to the start.
+        // Word-left lands on the start of "next" (leading spaces skipped by the
+        // next move).
         input.handle_key("ctrl+left", &kb());
         assert_eq!(
             input
@@ -659,16 +715,13 @@ mod tests {
         input.handle_key("end", &kb());
         input.handle_key("ctrl+w", &kb());
         assert_eq!(input.value(), "cafe\u{301} ");
-        // The killed text is one kill-ring entry (the whole cluster run).
         input.handle_key("ctrl+y", &kb());
         assert_eq!(input.value(), "cafe\u{301} done");
     }
 
-    // Review repro (PR #2600, Cursor Bugbot + Macroscope): word-back must
-    // classify the grapheme the cursor sits after. TS `moveWordBackwards`
-    // pops runs from the end of the standalone-segmented before-cursor
-    // slice; from the end of "abc!" it stops before the punctuation run
-    // (column 3), never at 0, and Ctrl-W kills only "!".
+    /// Review repro (PR #2600, Cursor Bugbot + Macroscope): word-back must classify the grapheme
+    /// the cursor sits after. From the end of "abc!" it stops before the punctuation run (column
+    /// 3), never at 0, and Ctrl-W kills only "!".
     #[test]
     fn word_back_classifies_the_grapheme_at_the_cursor() {
         let mut input = typed("abc!");
@@ -697,13 +750,10 @@ mod tests {
         assert_eq!(emoji.cursor(), 0);
     }
 
-    // A mid-cluster cursor walks the before-cursor slice exactly like TS
-    // (standalone segmentation). Pasting a lone combining mark, moving
-    // Home, and typing "e" leaves the cursor inside the "e\u{301}" cluster:
-    // backspace deletes the standalone "e" and orphans the mark in BOTH
-    // implementations (TS `handleBackspace` segments value[..cursor]), and
-    // word-back walks the "e" word run to the start. The (value, cursor)
-    // pairs are pinned against the TS binary via the real input.ts class.
+    /// A mid-cluster cursor walks the before-cursor slice exactly like TS (standalone
+    /// segmentation): pasting a lone combining mark, moving Home, and typing "e" orphans the mark
+    /// in BOTH implementations. The (value, cursor) pairs are pinned against the TS binary via the
+    /// real input.ts class.
     #[test]
     fn mid_cluster_cursor_walks_the_before_cursor_slice() {
         let mut input = SearchInput::new();

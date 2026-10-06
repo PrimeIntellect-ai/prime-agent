@@ -1,12 +1,10 @@
-//! Pure action planners for the discovery commands (TS `planReap` /
-//! `planShutdownAll` / `planShutdownConfirmation`): no side effects, unit-
-//! tested in isolation from the executors.
+//! Pure action planners for the discovery commands: no side effects,
+//! unit-tested in isolation from the executors.
 
 use std::collections::HashMap;
 
 use super::{DaemonInfo, DaemonStatus};
 
-/// One planned action for a discovered daemon (TS `ReapAction`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ReapActionKind {
     RemoveFile,
@@ -22,10 +20,10 @@ pub(crate) struct ReapAction {
     pub reason: Option<String>,
 }
 
-/// What `doctor --fix` may do with each discovered daemon (pure; TS
-/// `planReap`). Only clearly-safe targets are touched: orphaned socket
-/// files, and reachable idle daemons on non-default sockets. The default
-/// daemon, and any daemon with live sessions, are never touched.
+/// What `doctor --fix` may do with each discovered daemon (pure). Only
+/// clearly-safe targets are touched: orphaned socket files, and
+/// reachable idle daemons on non-default sockets. The default daemon,
+/// and any daemon with live sessions, are never touched.
 pub(crate) fn plan_reap(daemons: &[DaemonInfo], force: bool) -> Vec<ReapAction> {
     let mut pid_counts: HashMap<u32, usize> = HashMap::new();
     for daemon in daemons {
@@ -36,9 +34,8 @@ pub(crate) fn plan_reap(daemons: &[DaemonInfo], force: bool) -> Vec<ReapAction> 
     daemons
         .iter()
         .map(|daemon| {
-            // An orphan socket file has no owning process, so removing it is
-            // safe even on the default path (a stale daemon.sock left by a
-            // crash) — decided before the default guard.
+            // An orphan socket file has no owning process, so removing it is safe even
+            // on the default path (a stale daemon.sock left by a crash).
             if daemon.status == DaemonStatus::OrphanFile {
                 return ReapAction {
                     kind: ReapActionKind::RemoveFile,
@@ -100,9 +97,8 @@ pub(crate) fn plan_reap(daemons: &[DaemonInfo], force: bool) -> Vec<ReapAction> 
         .collect()
 }
 
-/// What `shutdown` does with each discovered daemon (pure; TS
-/// `planShutdownAll`): orphan files go, unreachable ones only with `force`,
-/// everything reachable is asked to stop.
+/// What `shutdown` does with each discovered daemon (pure): orphan files go,
+/// unreachable ones only with `force`, reachable ones are asked to stop.
 pub(crate) fn plan_shutdown_all(daemons: &[DaemonInfo], force: bool) -> Vec<ReapAction> {
     daemons
         .iter()
@@ -316,7 +312,7 @@ mod tests {
     }
 }
 
-/// The confirmation decision for `shutdown` (TS `planShutdownConfirmation`).
+/// The confirmation decision for `shutdown`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ShutdownConfirmationPlan {
     None,

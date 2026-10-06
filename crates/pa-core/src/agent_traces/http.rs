@@ -1,14 +1,11 @@
-//! The HTTP transport concern (moved with its concern): the response and
-//! error records, the injectable `TraceHttp` trait + the reqwest transport,
-//! the URI-component encoding, the response message, the Retry-After
-//! parse, and the retry backoff (TS prime-http.ts's surface).
+//! The HTTP transport concern: the response and error records, the injectable
+//! `TraceHttp` trait + the reqwest transport, the URI-component encoding, the
+//! Retry-After parse, and the retry backoff.
 
 use super::*;
 use std::future::Future;
 use std::pin::Pin;
 
-/// One PUT's answer (TS `Response`'s surface the upload reads): the
-/// status, the body text, and the `Retry-After` header.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraceHttpResponse {
     pub status: u16,
@@ -16,8 +13,6 @@ pub struct TraceHttpResponse {
     pub retry_after: Option<String>,
 }
 
-/// The transport's failure modes (TS `isRetriableNetworkError`'s classes):
-/// the request timeout, a cancel, or a transport error with its message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TraceHttpError {
     TimedOut { timeout_ms: u64 },
@@ -26,7 +21,6 @@ pub enum TraceHttpError {
 }
 
 impl TraceHttpError {
-    /// TS `describeError`'s message for each class.
     #[must_use]
     pub fn message(&self) -> String {
         match self {
@@ -39,8 +33,7 @@ impl TraceHttpError {
     }
 }
 
-/// The upload's HTTP transport (TS's injectable `fetchFn` + the abort
-/// signal plumbing of `fetchWithTimeout`).
+/// The upload's injectable HTTP transport.
 pub trait TraceHttp: Send + Sync {
     fn put<'a>(
         &'a self,
@@ -52,9 +45,7 @@ pub trait TraceHttp: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<TraceHttpResponse, TraceHttpError>> + Send + 'a>>;
 }
 
-/// The production transport (reqwest over rustls, the catalog fetch's
-/// shape): the PUT with its headers, the client timeout, and a cancel
-/// that ends the in-flight request.
+/// The production transport (reqwest, the catalog fetch's shape).
 pub struct ReqwestTraceHttp;
 
 impl TraceHttp for ReqwestTraceHttp {
@@ -112,8 +103,8 @@ impl TraceHttp for ReqwestTraceHttp {
     }
 }
 
-/// TS `encodeURIComponent` (every byte outside the JS unreserved set
-/// escapes).
+/// TS `encodeURIComponent`: every byte outside the JS unreserved set
+/// escapes.
 #[must_use]
 pub fn encode_uri_component(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
@@ -139,9 +130,8 @@ pub fn encode_uri_component(value: &str) -> String {
     out
 }
 
-/// TS `readResponseMessage` (prime-http.ts): the error body's
-/// `error.message`, `detail`, or `message`, the raw text, or the status
-/// phrase.
+/// The error body's `error.message`, `detail`, or `message`, the raw
+/// text, or the status phrase.
 pub fn read_response_message(status: u16, body: &str) -> String {
     if body.trim().is_empty() {
         return reqwest::StatusCode::from_u16(status)
@@ -174,8 +164,7 @@ pub fn read_response_message(status: u16, body: &str) -> String {
     body.trim().to_string()
 }
 
-/// TS `retryAfterDelay`: the `Retry-After` seconds, or an HTTP date,
-/// clamped to `cap_ms`.
+/// The `Retry-After` seconds, or an HTTP date, clamped to `cap_ms`.
 #[must_use]
 pub fn retry_after_delay(retry_after: Option<&str>, cap_ms: u64) -> Option<u64> {
     let value = retry_after?.trim();
@@ -193,8 +182,8 @@ pub fn retry_after_delay(retry_after: Option<&str>, cap_ms: u64) -> Option<u64> 
     Some(delta.min(cap_ms))
 }
 
-/// RFC 1123 (HTTP-date) parsing for `Retry-After` (TS `Date.parse`'s HTTP
-/// subset): `Sun, 06 Nov 1994 08:49:37 GMT`.
+/// RFC 1123 (HTTP-date) parsing for `Retry-After`:
+/// `Sun, 06 Nov 1994 08:49:37 GMT`.
 fn parse_http_date(value: &str) -> Option<u64> {
     let rest = value
         .split_once(',')
@@ -235,8 +224,6 @@ fn parse_http_date(value: &str) -> Option<u64> {
     Some((days as u64) * 86_400_000 + hour * 3_600_000 + minute * 60_000 + second * 1000)
 }
 
-/// TS `traceUploadRetryDelay`: the exponential backoff with the ±20%
-/// jitter.
 pub(super) fn trace_upload_retry_delay(retry_index: u32) -> u64 {
     let exponential = (TRACE_UPLOAD_RETRY_BASE_DELAY_MS * (1_u64 << retry_index.min(16)))
         .min(TRACE_UPLOAD_RETRY_MAX_DELAY_MS) as f64;
@@ -245,16 +232,13 @@ pub(super) fn trace_upload_retry_delay(retry_index: u32) -> u64 {
     (exponential * jitter_multiplier).round().max(0.0) as u64
 }
 
-/// `Math.random()` (the only TS randomness the engine uses).
+/// TS `Math.random()` (the only randomness the engine uses).
 fn rand_fraction() -> f64 {
     let mut bytes = [0u8; 8];
     let _ = getrandom::fill(&mut bytes);
     u64::from_le_bytes(bytes) as f64 / u64::MAX as f64
 }
 
-/// The retriable transport classes (TS `isRetriableNetworkError`'s list
-/// covers every connection failure; the abort and the timeout message
-/// keep their own classes).
 pub(super) fn is_retriable_transport_error(error: &TraceHttpError) -> bool {
     matches!(
         error,
@@ -262,6 +246,6 @@ pub(super) fn is_retriable_transport_error(error: &TraceHttpError) -> bool {
     )
 }
 
-/// The retriable HTTP statuses (TS `RETRIABLE_HTTP_STATUSES`; 429 is
-/// deliberately absent — the caller reschedules instead).
+/// The retriable HTTP statuses; 429 is deliberately absent — the caller
+/// reschedules instead.
 pub(super) const RETRIABLE_HTTP_STATUSES: [u16; 6] = [408, 425, 500, 502, 503, 504];

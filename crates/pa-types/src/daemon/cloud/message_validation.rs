@@ -268,7 +268,11 @@ fn events_problem(value: &Value) -> Option<String> {
 /// TS `submitProblem`. A canonicalization failure of a validated request is
 /// unreachable (the arm checks cap every nested value); the Rust form
 /// surfaces it as the `cloudRequestJsonProblem` string instead of the TS
-/// uncaught throw.
+/// uncaught throw. Deliberate parity: the request size is NOT bounded here
+/// — the pinned TS `submitProblem` never calls
+/// `cloudRequestJsonProblem` (see
+/// [`super::request_validation::cloud_request_json_problem`]); the size
+/// bound stays the submit constructor's invariant.
 fn submit_problem(value: &Value) -> Option<String> {
     let base = first_problem([
         expect_fields(

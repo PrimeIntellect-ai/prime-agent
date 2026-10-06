@@ -366,16 +366,16 @@ fn family_info_and_send_message_validation() {
 #[test]
 fn receipt_canonical_problem_bounds() {
     let receipt = CloudAgentMessageReceipt {
-        id: "agentmsg_9".to_string(),
-        delivery_status: CloudAgentMessageDeliveryStatus::Delivered,
+        id: Some("agentmsg_9".to_string()),
+        delivery_status: Some(CloudAgentMessageDeliveryStatus::Delivered),
         rest: serde_json::from_str(r#"{"source":"agent","message":"m","deliveryMode":"steer"}"#)
             .unwrap(),
     };
     assert_eq!(receipt.canonical_problem(), None);
 
     let oversized = CloudAgentMessageReceipt {
-        id: "agentmsg_9".to_string(),
-        delivery_status: CloudAgentMessageDeliveryStatus::Queued,
+        id: Some("agentmsg_9".to_string()),
+        delivery_status: Some(CloudAgentMessageDeliveryStatus::Queued),
         rest: {
             let mut map = serde_json::Map::new();
             map.insert("padded".to_string(), json!("x".repeat(2048)));
@@ -385,5 +385,69 @@ fn receipt_canonical_problem_bounds() {
     assert_eq!(
         oversized.canonical_problem().unwrap(),
         "request.receipt exceeds 2048 bytes"
+    );
+}
+
+/// The wire domain of an `agent_message_result` receipt is any
+/// canonical-JSON object (TS `cloudRequestProblem`; the empty object is
+/// protocol-valid — the TS-recorded corpus case
+/// `agent_message_result_ok_empty_receipt` pins it), so the typed carrier
+/// deserializes every object, extracts the deliverer's `id` /
+/// `deliveryStatus` only when present and well-formed, and keeps
+/// everything else verbatim in `rest`.
+#[test]
+fn receipt_carries_the_protocol_domain() {
+    rt::<CloudFamilyCommand>(
+        r#"{"kind":"agent_message_result","requestId":"msgreq_3","ok":true,"receipt":{}}"#,
+    );
+    rt::<CloudFamilyCommand>(
+        r#"{"kind":"agent_message_result","requestId":"msgreq_4","ok":true,"receipt":{"id":42,"deliveryStatus":"bogus","note":"kept"}}"#,
+    );
+
+    let empty: CloudFamilyCommand = serde_json::from_str(
+        r#"{"kind":"agent_message_result","requestId":"msgreq_3","ok":true,"receipt":{}}"#,
+    )
+    .unwrap();
+    let CloudFamilyCommandPayload::AgentMessageResult {
+        receipt: Some(empty),
+        ..
+    } = empty.payload
+    else {
+        panic!("agent_message_result payload");
+    };
+    assert_eq!(empty.id, None);
+    assert_eq!(empty.delivery_status, None);
+    assert_eq!(Value::Object(empty.rest), json!({}));
+
+    let mistyped: CloudFamilyCommand = serde_json::from_str(
+        r#"{"kind":"agent_message_result","requestId":"msgreq_4","ok":true,"receipt":{"id":42,"deliveryStatus":"bogus","note":"kept"}}"#,
+    )
+    .unwrap();
+    let CloudFamilyCommandPayload::AgentMessageResult {
+        receipt: Some(mistyped),
+        ..
+    } = mistyped.payload
+    else {
+        panic!("agent_message_result payload");
+    };
+    assert_eq!(mistyped.id, None);
+    assert_eq!(mistyped.delivery_status, None);
+    assert_eq!(
+        Value::Object(mistyped.rest),
+        json!({"id": 42, "deliveryStatus": "bogus", "note": "kept"})
+    );
+
+    let real: CloudFamilyCommand = serde_json::from_str(MESSAGE_RESULT_OK).unwrap();
+    let CloudFamilyCommandPayload::AgentMessageResult {
+        receipt: Some(real),
+        ..
+    } = real.payload
+    else {
+        panic!("agent_message_result payload");
+    };
+    assert_eq!(real.id.as_deref(), Some("agentmsg_9"));
+    assert_eq!(
+        real.delivery_status,
+        Some(CloudAgentMessageDeliveryStatus::Delivered)
     );
 }

@@ -317,3 +317,50 @@ fn validator_problem_strings_spot_checks() {
         "request exceeds 131072 bytes"
     );
 }
+
+/// Deliberate parity, pinned: the pinned TS `submitProblem` validates a
+/// submit through `cloudRequestProblem` and the digest only — it never
+/// calls `cloudRequestJsonProblem` — so an oversized but per-field-valid
+/// request (here a `family_roster_result` under the row cap and the 1 MiB
+/// frame cap) is protocol-valid wire input. Wiring the size bound into
+/// submit validation would reject frames the TS accepts; the bound stays
+/// the submit constructor's invariant.
+#[test]
+fn oversized_request_passes_submit_validation() {
+    let long_path = "p".repeat(CLOUD_MAX_PATH_CHARS);
+    let entries: Vec<Value> = (0..24)
+        .map(|index| {
+            json!({
+                "id": format!("sess_{index}"),
+                "depth": index,
+                "status": "running",
+                "sessionPath": long_path,
+                "parentSessionPath": long_path,
+            })
+        })
+        .collect();
+    let request = json!({
+        "kind": "family_roster_result",
+        "requestId": "famreq_big",
+        "entries": entries,
+    });
+    let encoded = canonical_json(&request).expect("canonical");
+    assert!(
+        encoded.len() > CLOUD_MAX_REQUEST_JSON_CHARS,
+        "fixture must exceed the request bound"
+    );
+    assert_eq!(cloud_request_problem(&request), None);
+    assert_eq!(
+        cloud_request_json_problem(&request).unwrap(),
+        "request exceeds 131072 bytes"
+    );
+    let submit = json!({
+        "type": "submit",
+        "sessionId": "sess_1",
+        "generation": 1,
+        "commandId": "cmd_big",
+        "request": request,
+        "digest": cloud_request_digest(&request).expect("digest"),
+    });
+    assert_eq!(cloud_message_problem(&submit), None);
+}

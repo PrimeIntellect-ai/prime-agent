@@ -1,10 +1,8 @@
 //! The interactive MCP OAuth login flow and its refresh path.
 //!
 //! One login: discover the server's OAuth metadata, register (or take) a
-//! client, run the PKCE authorization-code flow against a local callback
-//! server while racing a manual paste, exchange the code for tokens, and
-//! hand back endpoint-bound credentials for `auth.json`. Refresh validates
-//! every binding before asking the stored token endpoint again.
+//! client, run the PKCE flow against a local callback server while racing a
+//! manual paste, and hand back endpoint-bound credentials.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -46,8 +44,7 @@ pub trait McpLoginUi: Send + Sync {
     /// The authorization URL to open in a browser, plus instructions.
     fn on_auth(&self, url: &str, instructions: &str);
     /// Ask the user for one line of input (the callback fallback when no
-    /// manual-paste surface exists). An error means the login was
-    /// cancelled or the surface went away.
+    /// manual-paste surface exists). An error means the login was cancelled.
     fn on_prompt(
         &self,
         message: &str,
@@ -65,9 +62,8 @@ fn now_ms() -> i64 {
         .map_or(i64::MAX, |elapsed| elapsed.as_millis() as i64)
 }
 
-/// Build the credential the flow persists. A missing `expires_in` defaults
-/// to one hour; some servers omit `refresh_token` on refresh, so the prior
-/// one is kept.
+/// Build the credential the flow persists. A missing `expires_in` defaults to one hour; some
+/// servers omit `refresh_token`, so the prior one is kept.
 fn to_credentials(
     token: TokenResponse,
     token_endpoint: &str,
@@ -117,16 +113,12 @@ enum ManualOutcome {
     Failed(anyhow::Error),
 }
 
-/// Run one interactive login for a server; the returned credential is
-/// ready to persist under `mcp:<server>`.
+/// Run one interactive login; the returned credential is ready to persist under `mcp:<server>`.
 ///
 /// # Errors
 ///
-/// Returns an error when the discovery document cannot be fetched, the
-/// server supports neither dynamic client registration nor a configured
-/// client id, client registration fails, the callback server cannot start,
-/// the authorization URL cannot be built, the pasted redirect is invalid or
-/// its state mismatches, or the token exchange fails.
+/// Returns an error when discovery, registration, the callback server, the
+/// paste validation, or the token exchange fails.
 pub async fn mcp_login(
     http: &dyn OAuthHttp,
     config: &McpOAuthConfig,
@@ -194,10 +186,9 @@ pub async fn mcp_login(
          final redirect URL here.",
     );
 
-    // Race the local callback server against a manual paste (a browser on
-    // another machine). A real paste cancels the callback waiter; manual
-    // cancellation settles it after a short grace so an in-flight browser
-    // redirect can win first.
+    // Race the local callback server against a manual paste. A real paste cancels the callback
+    // waiter; manual cancellation settles it after a short grace so an in-flight browser redirect
+    // can win first.
     let mut manual_task = ui.on_manual_code_input().map(|manual| {
         let callback = Arc::clone(&callback);
         let state = state.clone();
@@ -213,9 +204,8 @@ pub async fn mcp_login(
                     ManualOutcome::Code(CallbackCode { code, state })
                 }
                 Err(error) => {
-                    // A validation error on a real paste (bad state, no
-                    // code) is a genuine failure the caller surfaces; a
-                    // cancelled surface is not.
+                    // A validation error on a real paste is a genuine failure the caller surfaces;
+                    // a cancelled surface is not.
                     let genuine = error.to_string().contains("state mismatch")
                         || error.to_string().contains("authorization code");
                     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -293,15 +283,12 @@ pub async fn mcp_login(
 ///
 /// # Errors
 ///
-/// Returns an error when the stored credential is not OAuth, is no longer
-/// bound to the same endpoint, resource, issuer, or token endpoint, carries
-/// no refresh token, when discovery fails or changed modes, or when the
-/// token exchange fails.
+/// Returns an error when the stored credential is not OAuth, no longer bound to the same endpoint
+/// or token endpoint, carries no refresh token, or discovery or the token exchange fails.
 ///
 /// # Panics
 ///
-/// The `expect` on the discovery resource is unreachable: the discovery-mode
-/// check above it already rejects a mode mismatch.
+/// The `expect` on the discovery resource is unreachable.
 pub async fn mcp_refresh_token(
     http: &dyn OAuthHttp,
     config: &McpOAuthConfig,
@@ -489,9 +476,8 @@ mod tests {
         body.to_string()
     }
 
-    /// A login UI with a manual-paste surface: the paste is derived from
-    /// the authorization URL the way a user would (their own redirect URL
-    /// plus the code), or a fixed input when set.
+    /// A login UI with a manual-paste surface: the paste is derived from the authorization URL the
+    /// way a user would, or a fixed input when set.
     struct TestUi {
         auth_url: Mutex<String>,
         manual: Mutex<Option<String>>,
@@ -602,8 +588,8 @@ mod tests {
         }
     }
 
-    /// PRM metadata, its issuer's metadata, DCR, and the token endpoint —
-    /// the full Plane-style login through a manual paste.
+    /// The full Plane-style login through a manual paste: PRM, issuer
+    /// metadata, DCR, and the token endpoint.
     #[tokio::test]
     async fn discovers_protected_resource_metadata_and_external_issuer() {
         let http = ScriptedHttp::new(vec![
@@ -690,7 +676,6 @@ mod tests {
         assert!(body.contains(&encoded_resource));
     }
 
-    /// Origin-level discovery when the server serves no RFC 9728 metadata.
     #[tokio::test]
     async fn origin_level_metadata_without_protected_resource() {
         let origin_prm = "https://srv.test/.well-known/oauth-protected-resource/mcp";
@@ -750,7 +735,6 @@ mod tests {
         );
     }
 
-    /// A `WWW-Authenticate` resource pointer wins over the derived location.
     #[tokio::test]
     async fn www_authenticate_pointer_preferred() {
         let pointer = "https://metadata.example/resources/plane";
@@ -814,7 +798,6 @@ mod tests {
         assert!(!urls.contains(&PLANE_PRM_URL.to_string()));
     }
 
-    /// Metadata for a different resource fails closed.
     #[tokio::test]
     async fn protected_resource_mismatch_fails() {
         let http = ScriptedHttp::new(vec![
@@ -836,7 +819,6 @@ mod tests {
         assert!(error.contains("resource does not exactly match"), "{error}");
     }
 
-    /// An issuer that does not exactly match the PRM-selected one fails.
     #[tokio::test]
     async fn prm_selected_issuer_must_match_exactly() {
         let http = ScriptedHttp::new(vec![
@@ -931,7 +913,6 @@ mod tests {
         }
     }
 
-    /// Servers without a registration endpoint need a pre-registered id.
     #[tokio::test]
     async fn dynamic_registration_unavailable_fails_clearly() {
         let meta = serde_json::json!({
@@ -952,7 +933,6 @@ mod tests {
         assert!(error.contains("dynamic client registration"), "{error}");
     }
 
-    /// A redirected token POST fails instead of following the redirect.
     #[tokio::test]
     async fn redirected_token_post_rejected() {
         let credentials = AuthCredential::Oauth {
@@ -981,8 +961,8 @@ mod tests {
         assert!(error.contains("Token request to"), "{error}");
     }
 
-    /// Refresh keeps the stored bindings and the resource indicator, and
-    /// keeps the prior refresh token when the server omits a new one.
+    /// Refresh keeps the stored bindings, the resource indicator, and the
+    /// prior refresh token when the server omits a new one.
     #[tokio::test]
     async fn refresh_validates_bindings() {
         let credentials = AuthCredential::Oauth {
@@ -1149,9 +1129,8 @@ mod tests {
         assert!(!urls.contains(&PLANE_TOKEN.to_string()));
     }
 
-    /// A genuine paste validation error surfaces; a cancelled paste keeps
-    /// the browser path alive for a grace period, then reports a missing
-    /// code.
+    /// A genuine paste validation error surfaces; a cancelled paste keeps the browser path alive,
+    /// then reports a missing code.
     #[tokio::test]
     async fn manual_paste_state_mismatch_surfaces() {
         let http = ScriptedHttp::new(vec![
@@ -1170,7 +1149,6 @@ mod tests {
                 &json_response(&serde_json::json!({ "client_id": "c" })),
             ),
         ]);
-        // The paste carries someone else's state.
         let ui = std::sync::Arc::new(TestUi::with_manual_input(
             "http://localhost:53700/callback?code=stolen&state=other",
         ));
@@ -1181,7 +1159,6 @@ mod tests {
         assert!(error.contains("OAuth state mismatch"), "{error}");
     }
 
-    /// A pre-registered client id skips dynamic registration.
     #[tokio::test]
     async fn pre_registered_client_skips_registration() {
         let http = ScriptedHttp::new(vec![

@@ -1,9 +1,7 @@
 //! Environment variable API key resolution.
-//! Ported from `packages/ai/src/env-api-keys.ts`.
 
 use std::path::PathBuf;
 
-/// Environment variable names that can provide an API key for a provider.
 #[must_use]
 pub fn get_api_key_env_vars(provider: &str) -> Option<Vec<&'static str>> {
     match provider {
@@ -44,9 +42,8 @@ pub fn get_api_key_env_vars(provider: &str) -> Option<Vec<&'static str>> {
     }
 }
 
-/// Find configured environment variables that can provide an API key for a
-/// provider. Ambient credential sources (AWS profiles, Google ADC) are
-/// intentionally excluded here; see `get_env_api_key`.
+/// Find configured env vars for a provider. Ambient credential sources (AWS profiles, Google ADC)
+/// are intentionally excluded; see `get_env_api_key`.
 pub fn find_env_keys(provider: &str) -> Option<Vec<String>> {
     let env_vars = get_api_key_env_vars(provider)?;
     let found: Vec<String> = env_vars
@@ -61,9 +58,8 @@ pub fn find_env_keys(provider: &str) -> Option<Vec<String>> {
     }
 }
 
-/// Get an API key for a provider from known environment variables.
-/// Returns the sentinel "<authenticated>" for providers configured through
-/// ambient credential sources (Google Vertex ADC, Amazon Bedrock profiles).
+/// Get an API key for a provider from known environment variables. Returns the sentinel
+/// "<authenticated>" for ambient credential sources (Google Vertex ADC, Amazon Bedrock profiles).
 #[must_use]
 pub fn get_env_api_key(provider: &str) -> Option<String> {
     if let Some(keys) = find_env_keys(provider) {

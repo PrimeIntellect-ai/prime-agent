@@ -1,6 +1,4 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28) - this target's own
-// crate root: the same bounded-boundary disposition as src/lib.rs
-// (large_futures/too_many_lines/the cast family; details there).
+// Pedantic-gate dispositions as src/lib.rs (large_futures/too_many_lines/casts).
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -10,30 +8,11 @@
     clippy::cast_precision_loss
 )]
 
-//! Verifier integration tests for the kernel snapshot lifecycle (TS
-//! `state-snapshot.ts` + `IpythonKernelProvisioner`'s `snapshotDir` /
-//! `onRestore` seams, agent-session.ts's `hasSnapshot` prewarm arm):
-//!
-//! - a persisted session that runs cells and ends (the dispose kernel
-//!   teardown) leaves a `kernel-state.dill` snapshot in its artifact dir;
-//! - a resumed session PREWARMS from the snapshot alone (the config flag
-//!   stays off — only `hasSnapshot` fires the boot), so the boot lands
-//!   before the first prompt and reports `cold: false` through the
-//!   `kernel bootstrap` telemetry;
-//! - the first `ipython` call in the resumed session sees the old
-//!   variables WITHOUT re-running the setup cell — the namespace revived;
-//! - the `ipython_state_restored` notice (TS `_onIpythonStateRestored`,
-//!   `deliverAs: "nextTurn"`) rides the next admitted turn and lands
-//!   durably, naming what came back;
-//! - a fresh session without a snapshot and without the config prewarm
-//!   stays lazy (no boot, no event).
-//!
-//! The kernel Python is ambient product state (the auto-bootstrapped
-//! kernel venv); like `kernel_lifecycle.rs`, these tests skip (with a
-//! note) on machines without a live install so the suite stays hermetic
-//! elsewhere. `PA_CORE_KERNEL_PYTHON` points at an explicit interpreter.
+//! Verifier integration tests for the kernel snapshot lifecycle: a persisted session leaves a
+//! `kernel-state.dill` snapshot, and a resumed session prewarms from the snapshot alone so its
+//! first `ipython` call sees the old variables. The kernel Python is ambient; skipped if absent.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use pa_ai::faux::{
@@ -50,8 +29,7 @@ use pa_core::settings::SettingsManager;
 use pa_types::session::FileEntry;
 
 /// The faux provider registry is process-global and the tests drive it:
-/// the std lock serializes them (they are the only contenders, so holding
-/// it across awaits is safe).
+/// the std lock serializes them (the only contenders).
 static FAUX_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// The kernel Python with prime-agent-runtime installed (see
@@ -141,49 +119,19 @@ fn agent_model(model: &pa_types::ai::Model) -> pa_agent::types::Model {
     json_round_trip(model).expect("model conversion")
 }
 
-/// Every `kernel bootstrap` telemetry event flushed to the local mirror so
-/// far (`<agentDir>/telemetry.jsonl`, the transparency sink).
-async fn kernel_bootstrap_events(
-    client: &pa_telemetry::TelemetryClient,
-    agent_dir: &Path,
-) -> Vec<serde_json::Value> {
-    client.flush().await.expect("telemetry flush");
-    let mirror = agent_dir.join("telemetry.jsonl");
-    let body = std::fs::read_to_string(&mirror).unwrap_or_default();
-    body.lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .filter(|event| {
-            event.get("name").and_then(serde_json::Value::as_str) == Some("kernel bootstrap")
-        })
-        .collect()
-}
-
-/// One property of a telemetry event (the payload lives under
-/// `properties`).
-fn event_prop<'a>(event: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
-    event.get("properties").and_then(|props| props.get(key))
-}
-
-/// Wait for a specific boot to report: a background task flushes the
-/// `kernel bootstrap` event on the client's interval, and an agent dir can
-/// already carry earlier sessions' boot events — so the wait matches on
-/// the `cold` flag rather than "any event".
-async fn wait_for_boot(
-    client: &pa_telemetry::TelemetryClient,
-    agent_dir: &Path,
-    cold: bool,
-) -> serde_json::Value {
+/// Wait for the session's kernel to boot: running, and (for a revived
+/// boot, `cold: false`) with the snapshot restore applied.
+async fn wait_for_boot(engine: &pa_core::session_engine::engine::SessionEngine, cold: bool) {
     let deadline = Instant::now() + Duration::from_mins(1);
     loop {
-        let events = kernel_bootstrap_events(client, agent_dir).await;
-        if let Some(event) = events.iter().find(|event| {
-            event_prop(event, "cold").and_then(serde_json::Value::as_bool) == Some(cold)
-        }) {
-            return event.clone();
+        if let Some(provisioner) = engine.kernel_provisioner_weak().upgrade() {
+            if provisioner.has_running_kernel() && (cold || provisioner.last_restore().is_some()) {
+                return;
+            }
         }
         assert!(
             Instant::now() < deadline,
-            "the kernel never reported a cold={cold} bootstrap: {events:?}"
+            "the kernel never reported a cold={cold} boot"
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
@@ -225,8 +173,7 @@ async fn run_turn(engine: &pa_core::session_engine::engine::SessionEngine, text:
     engine.session.agent().wait_for_idle().await;
 }
 
-/// The session test fixtures: isolated agent dir, sessions dir, cwd, and
-/// the telemetry client.
+/// The session test fixtures: isolated agent dir, sessions dir, cwd, and the telemetry client.
 struct Fixture {
     dir: tempfile::TempDir,
     agent_dir: PathBuf,
@@ -273,17 +220,15 @@ impl Fixture {
                 client: self.client.clone(),
                 execution_mode: Some("test".to_string()),
                 now: None,
+                telemetry_enabled: None,
             }),
             ..Default::default()
         }
     }
 }
 
-/// The full lifecycle: a session defines kernel state and ends (dispose
-/// flushes the final snapshot), a resumed session prewarms from the
-/// snapshot with the config flag OFF, and its FIRST ipython call sees the
-/// old namespace without re-running the setup — with the restore notice
-/// riding the turn.
+/// The full lifecycle: a session defines kernel state and ends, a resumed session prewarms with the
+/// config flag OFF, and its FIRST ipython call sees the old namespace.
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn session_end_then_resume_prewarms_and_revives_the_namespace() {
@@ -295,7 +240,6 @@ async fn session_end_then_resume_prewarms_and_revives_the_namespace() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let fixture = fixture();
 
-    // ---- Session one: define state through a real ipython cell, then end.
     let faux_one = faux_session(vec![
         ipython_tool_call_step(
             "call-setup",
@@ -318,7 +262,6 @@ async fn session_end_then_resume_prewarms_and_revives_the_namespace() {
         results.iter().any(|text| text.contains("setup done")),
         "the setup cell must have run: {results:?}"
     );
-    // The session end (the daemon's dispose seam): the final snapshot flush.
     engine.dispose_kernel().await;
 
     // The snapshot landed in the session's artifact dir (TS
@@ -331,12 +274,11 @@ async fn session_end_then_resume_prewarms_and_revives_the_namespace() {
     let snapshot = artifact_dir.join("kernel-state.dill");
     assert!(
         snapshot.exists(),
-        "snapshot {snapshot:?} must exist after dispose"
+        "kernel-state.dill must exist in the session artifact dir after dispose"
     );
     drop(engine);
 
-    // ---- Session two: RESUME the same session file with the prewarm
-    // config flag off. Only `hasSnapshot` (the TS arm) may fire the boot.
+    // Session two: RESUME with the prewarm config flag off; only `hasSnapshot` may fire the boot.
     let faux_two = faux_session(vec![
         ipython_tool_call_step("call-read", "print(marker)"),
         text_step("read back"),
@@ -356,16 +298,11 @@ async fn session_end_then_resume_prewarms_and_revives_the_namespace() {
     // completes here, BEFORE any prompt, so the first ipython call is a
     // warm hit. `cold: false` is the revived-boot report (a snapshot
     // existed to restore).
-    let restored_boot = wait_for_boot(&fixture.client, &fixture.agent_dir, false).await;
+    wait_for_boot(&resumed, false).await;
     let ready_elapsed = session_open.elapsed();
-    assert_eq!(
-        event_prop(&restored_boot, "outcome").and_then(serde_json::Value::as_str),
-        Some("success"),
-        "the restored boot must have succeeded"
-    );
     // The warm-hit bound: the boot finished before this assertion ran; a
     // generous ceiling only (the sandbox may be loaded), the structural
-    // claim is "ready before the first prompt", proven by the event.
+    // claim is "ready before the first prompt", proven by the boot.
     assert!(
         ready_elapsed < Duration::from_mins(1),
         "resume boot took too long: {ready_elapsed:?}"
@@ -380,9 +317,8 @@ async fn session_end_then_resume_prewarms_and_revives_the_namespace() {
         "the resumed namespace must revive: {results:?}"
     );
 
-    // The restore notice rode the turn and landed durably, naming what
-    // came back (TS `_onIpythonStateRestored`, display row with the
-    // `restored` details flag).
+    // The restore notice rode the turn and landed durably, naming what came back (TS
+    // `_onIpythonStateRestored`, display row with the `restored` details flag).
     let entries = resumed.session.entries().await;
     let notice = entries
         .iter()
@@ -417,7 +353,7 @@ async fn session_end_then_resume_prewarms_and_revives_the_namespace() {
 }
 
 /// The prewarm arm does not over-fire: a FRESH session (no snapshot) with
-/// the config flag off stays lazy — no boot, no `kernel bootstrap` event.
+/// the config flag off stays lazy — no boot.
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn fresh_session_without_snapshot_stays_lazy_without_the_flag() {
@@ -434,16 +370,16 @@ async fn fresh_session_without_snapshot_stays_lazy_without_the_flag() {
         .await
         .expect("create the lazy session");
 
-    // Long enough for a wrongly-fired prewarm to boot and report; the
-    // lazy session reports nothing.
+    // Long enough for a wrongly-fired prewarm to boot and report; the lazy session reports nothing.
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
-        let events = kernel_bootstrap_events(&fixture.client, &fixture.agent_dir).await;
         assert!(
-            events.is_empty(),
-            "a fresh session without a snapshot must not prewarm: {events:?}"
+            !engine
+                .kernel_provisioner_weak()
+                .upgrade()
+                .is_some_and(|provisioner| provisioner.has_running_kernel()),
+            "a fresh session without a snapshot must not prewarm"
         );
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
-    let _ = engine;
 }

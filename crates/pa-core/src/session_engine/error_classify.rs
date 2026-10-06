@@ -1,18 +1,10 @@
 //! The #2117 error classifier: a failed model call's message becomes a
 //! fixed (category, subtype, code, `http_status`) tuple plus a fixed
-//! diagnostic, with the message policy keeping raw provider text out.
-//!
-//! Classification order (the TS `classifyTelemetryError`): structured
-//! evidence first - a bounded HTTP status, then a recognized safe error
-//! code - then the reviewed fixed-string message set, then nothing: an
-//! unmatched message classifies as subtype `unknown` with the generic
-//! diagnostic, and the raw text never uploads (only its length and a
-//! redaction flag). Reviewed fixed strings are the ONLY message text that
-//! may ride an event; they are application-authored, never provider text.
+//! diagnostic; raw provider text never uploads. Order: a bounded HTTP
+//! status, then a safe error code, then the reviewed fixed-string set.
 
-/// The fixed diagnostic messages per subtype (#2117
-/// `TELEMETRY_ERROR_MESSAGES`). These are the only error descriptions
-/// eligible for upload.
+/// The fixed diagnostic messages per subtype (#2117 `TELEMETRY_ERROR_MESSAGES`):
+/// the only error descriptions eligible for upload.
 pub const ERROR_DIAGNOSTICS: &[(&str, &str)] = &[
     ("credential_missing", "No API key found for [provider]."),
     (
@@ -56,6 +48,10 @@ pub const ERROR_DIAGNOSTICS: &[(&str, &str)] = &[
         "Provider returned a malformed response.",
     ),
     (
+        "stream_drop",
+        "The provider ended the response stream without a stop signal.",
+    ),
+    (
         "context_limit",
         "The request exceeded the model context limit.",
     ),
@@ -76,8 +72,7 @@ pub const ERROR_DIAGNOSTICS: &[(&str, &str)] = &[
 ];
 
 /// The reviewed fixed-string error messages (#2117
-/// `TELEMETRY_SAFE_ERROR_MESSAGES`): a message that matches one of these
-/// exactly may ride the event as `error_message`.
+/// `TELEMETRY_SAFE_ERROR_MESSAGES`): an exact match may ride as `error_message`.
 const REVIEWED_MESSAGES: &[(&str, &str)] = &[
     ("cancelled", "Request was aborted"),
     ("cancelled", "The operation was aborted."),
@@ -105,9 +100,8 @@ const REVIEWED_MESSAGES: &[(&str, &str)] = &[
     ("filesystem_error", "Auth storage lock was compromised"),
 ];
 
-/// The safe error codes and their subtypes (#2117 `CODE_SUBTYPES`): a
-/// code token in the message classifies the error; the message text
-/// itself never uploads.
+/// The safe error codes and their subtypes (#2117 `CODE_SUBTYPES`): a code
+/// token classifies the error; the message text itself never uploads.
 const CODE_SUBTYPES: &[(&str, &str)] = &[
     ("invalid_api_key", "credential_invalid"),
     ("invalid_token", "credential_invalid"),
@@ -140,6 +134,7 @@ const CODE_SUBTYPES: &[(&str, &str)] = &[
     ("content_filter", "refusal"),
     ("safety", "refusal"),
     ("malformed_response", "malformed_response"),
+    ("stream_drop", "stream_drop"),
     ("context_length_exceeded", "context_limit"),
     ("context_window_exceeded", "context_limit"),
     ("ECONNRESET", "network_error"),
@@ -163,8 +158,8 @@ const CODE_SUBTYPES: &[(&str, &str)] = &[
     ("ELOCKED", "filesystem_error"),
 ];
 
-/// The subtype's legacy category (#2117 `SUBTYPE_CATEGORIES`): structured
-/// evidence names the category too, never the raw message wording.
+/// The subtype's legacy category: structured evidence names the
+/// category, never the raw message wording.
 fn subtype_category(subtype: &str) -> &'static str {
     match subtype {
         "credential_missing"
@@ -172,7 +167,7 @@ fn subtype_category(subtype: &str) -> &'static str {
         | "credential_expired"
         | "authentication_rejected" => "authentication",
         "quota_exceeded" | "rate_limited" => "rate_limit",
-        "network_error" => "network",
+        "network_error" | "stream_drop" => "network",
         "timeout" => "timeout",
         "provider_unavailable" => "provider_unavailable",
         "context_limit" => "context_limit",
@@ -181,14 +176,14 @@ fn subtype_category(subtype: &str) -> &'static str {
 }
 
 /// Whether the subtype's failures are retryable by the auto-retry policy
-/// (the classifier's static verdict; the retry seam corroborates it with
-/// the actual retry observations).
+/// (the classifier's static verdict).
 fn subtype_retryable(subtype: &str) -> bool {
     matches!(
         subtype,
         "quota_exceeded"
             | "rate_limited"
             | "network_error"
+            | "stream_drop"
             | "timeout"
             | "provider_unavailable"
             | "malformed_response"
@@ -218,8 +213,8 @@ pub struct ErrorClassification {
 }
 
 /// Classify one failed call's error message. The message itself never
-/// uploads: only the fixed tuples, the diagnostic, and - when the text is
-/// a reviewed fixed string - that exact string.
+/// uploads: only the fixed tuples, the diagnostic, and a reviewed string.
+#[must_use]
 pub fn classify_error_message(message: &str) -> ErrorClassification {
     let diagnostic = |subtype: &str| {
         ERROR_DIAGNOSTICS
@@ -253,10 +248,9 @@ pub fn classify_error_message(message: &str) -> ErrorClassification {
             retryable: subtype_retryable(subtype),
         };
     }
-    // 2. A recognized safe error code token names the subtype. The
-    // match runs case-insensitively in both directions (a lowercase
-    // message carries `econnreset`; the reported code keeps its canonical
-    // spelling).
+    // 2. A recognized safe error code token names the subtype. The match
+    // runs case-insensitively in both directions; the code keeps its
+    // canonical spelling.
     let lowered = message.to_ascii_lowercase();
     if let Some((code, subtype)) = CODE_SUBTYPES.iter().find(|(code, _)| {
         let lowered_code = code.to_ascii_lowercase();
@@ -303,8 +297,7 @@ pub fn classify_error_message(message: &str) -> ErrorClassification {
     }
 }
 
-/// A bounded `[45]dd` HTTP status in the text (digit-bounded, the TS
-/// `\b5\d\d\b` shape generalized to 4xx).
+/// A digit-bounded `[45]dd` HTTP status in the text.
 fn bounded_http_status(message: &str) -> Option<u64> {
     let bytes = message.as_bytes();
     for index in 0..bytes.len() {
@@ -321,8 +314,9 @@ fn bounded_http_status(message: &str) -> Option<u64> {
         // (durations in the message text) never read as statuses.
         let unit_after = index + 3 < bytes.len() && bytes[index + 3].is_ascii_alphabetic();
         if !digit_before && !digit_after && !unit_after {
-            let status =
-                (bytes[index] - b'0') as u64 * 100 + (b - b'0') as u64 * 10 + (c - b'0') as u64;
+            let status = u64::from(bytes[index] - b'0') * 100
+                + u64::from(b - b'0') * 10
+                + u64::from(c - b'0');
             return Some(status);
         }
     }
@@ -345,7 +339,6 @@ mod tests {
         assert_eq!(classification.category, "rate_limit");
         assert_eq!(classification.classification_source, "http_status");
         assert!(classification.retryable);
-        // The raw text never rides the classification.
         assert!(classification.safe_message.is_none());
         assert!(!classification.diagnostic.contains("API Error"));
     }
@@ -356,7 +349,6 @@ mod tests {
         assert_eq!(bounded_http_status("error 4012 nope"), None);
         assert_eq!(bounded_http_status("14043"), None);
         assert_eq!(bounded_http_status("no status at all"), None);
-        // Durations in the text never read as statuses.
         assert_eq!(bounded_http_status("timed out after 500ms"), None);
         assert_eq!(bounded_http_status("retry in 429s"), None);
         assert_eq!(bounded_http_status("wait 30m"), None);
@@ -395,11 +387,37 @@ mod tests {
         let aborted = classify("Request was aborted");
         assert_eq!(aborted.subtype, "cancelled");
         assert!(pa_telemetry::ERROR_SUBTYPES.contains(&aborted.subtype));
-        // A near-miss uploads nothing.
         let near_miss = classify("Provider rate limit exceeded for model glm-4.6");
         assert!(near_miss.safe_message.is_none());
         assert_eq!(near_miss.classification_source, "unknown");
         assert_eq!(near_miss.subtype, "unknown");
+    }
+
+    #[test]
+    fn stream_drop_messages_classify_as_the_stream_drop_category() {
+        // The provider's drop disclosure (pa-ai `stream_drop_failure`):
+        // every block detail names the same class.
+        let classification = classify(
+            "Provider dropped the response stream (stream_drop): the stream ended inside a thinking block before the stop signal"
+        );
+        assert_eq!(classification.subtype, "stream_drop");
+        assert_eq!(classification.category, "network");
+        assert_eq!(classification.code, Some("stream_drop"));
+        assert_eq!(classification.classification_source, "typed_error");
+        assert!(classification.retryable);
+        // The raw message never uploads; the fixed diagnostic rides.
+        assert!(classification.safe_message.is_none());
+        assert_eq!(
+            classification.diagnostic,
+            "The provider ended the response stream without a stop signal."
+        );
+        assert!(pa_telemetry::ERROR_SUBTYPES.contains(&classification.subtype));
+        // The empty-stream variant classifies identically.
+        let empty = classify(
+            "Provider dropped the response stream (stream_drop): the stream ended before any response content or stop signal"
+        );
+        assert_eq!(empty.subtype, "stream_drop");
+        assert!(empty.retryable);
     }
 
     #[test]

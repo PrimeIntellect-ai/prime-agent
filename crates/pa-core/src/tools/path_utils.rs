@@ -1,6 +1,4 @@
 //! Path expansion and resolution helpers.
-//!
-//! Port of `packages/coding-agent/src/core/tools/path-utils.ts` (POSIX behavior).
 
 use std::path::Path;
 
@@ -62,8 +60,7 @@ fn normalize_at_prefix(file_path: &str) -> &str {
     file_path.strip_prefix('@').unwrap_or(file_path)
 }
 
-/// Expand a leading `~` (and, on Windows, `~\\`) to the user's home
-/// directory (TS `expandPath`).
+/// Expand a leading `~` (and, on Windows, `~\\`) to the user's home directory.
 pub fn expand_path(file_path: &str) -> String {
     let home = pa_types::platform::home_dir().map(|home| home.to_string_lossy().into_owned());
     expand_path_platform(file_path, home.as_deref())
@@ -86,7 +83,7 @@ fn expand_path_platform(file_path: &str, home: Option<&str>) -> String {
 }
 
 /// Node `path.join(a, b)` for the expansion: `path.posix.join` on POSIX,
-/// `path.win32.join` on Windows (TS `expandPath` picks per platform).
+/// `path.win32.join` on Windows.
 fn path_join(a: &str, b: &str) -> String {
     #[cfg(windows)]
     {
@@ -149,8 +146,7 @@ fn win32_join(a: &str, b: &str) -> String {
 }
 
 /// Node `path.resolve(base, path)`: `path.win32.resolve` on Windows,
-/// `path.posix.resolve` on POSIX - TS `resolveToCwd` calls the
-/// platform-picked module, so a `C:\...` input stays absolute here and
+/// `path.posix.resolve` on POSIX - a `C:\...` input stays absolute here and
 /// a relative tail resolves against the tool's cwd on both platforms.
 pub fn node_path_resolve(base: &str, path: &str) -> String {
     #[cfg(windows)]
@@ -202,8 +198,7 @@ fn posix_node_path_resolve(base: &str, path: &str) -> String {
     joined
 }
 
-/// Node `path.isAbsolute`: `path.win32.isAbsolute` on Windows,
-/// `path.posix.isAbsolute` on POSIX.
+/// Node `path.isAbsolute`: `path.win32.isAbsolute` on Windows, `path.posix.isAbsolute` on POSIX.
 fn is_absolute(p: &str) -> bool {
     #[cfg(windows)]
     {
@@ -241,9 +236,7 @@ fn win32_is_absolute(p: &str) -> bool {
 
 /// Node `path.js` `normalizeString` (the win32 module's): lexical folding
 /// of `.` and `..` over separator-split segments. `allow_above_root` keeps
-/// leading `..` segments (a relative tail); otherwise they clamp at the
-/// root. Repeated separators collapse; a trailing separator does not
-/// survive.
+/// leading `..` segments (a relative tail); otherwise they clamp at the root.
 #[cfg(any(windows, test))]
 fn win32_normalize_string(path: &str, allow_above_root: bool) -> String {
     let chars: Vec<char> = path.chars().collect();
@@ -318,21 +311,18 @@ fn win32_normalize_string(path: &str, allow_above_root: bool) -> String {
     res
 }
 
-/// Node `path.win32.resolve(base, path)`: right-to-left resolution with
-/// drive tracking - a device-relative `D:file` tail resolves against that
-/// drive's working directory (Node's `=<device>` environment convention,
-/// then the process cwd when it sits on the drive, else the drive root) -
-/// plus UNC roots and lexical `.`/`..` normalization over `/`- and
-/// `\`-separated segments. Step-for-step the Node `path.js` algorithm;
-/// the fixture tests below pin it against Node's own outputs.
+/// Node `path.win32.resolve(base, path)`: right-to-left resolution with drive
+/// tracking - a device-relative `D:file` tail resolves against that drive's
+/// working directory (Node's `=<device>` convention, then the process cwd when it
+/// sits on the drive, else the drive root) - plus UNC roots and lexical `.`/`..`
+/// normalization; the fixture tests below pin it against Node's own outputs.
 #[cfg(any(windows, test))]
 fn win32_node_path_resolve(base: &str, path: &str) -> String {
     win32_resolve_with(base, path, &win32_device_cwd)
 }
 
-/// Node's drive-specific cwd lookup: the `=<device>` environment
-/// convention, else the process cwd (the caller's drive check decides
-/// whether the answer applies).
+/// Node's drive-specific cwd lookup: the `=<device>` environment convention,
+/// else the process cwd (the caller's drive check decides whether the answer applies).
 #[cfg(any(windows, test))]
 fn win32_device_cwd(device: &str) -> String {
     std::env::var_os(format!("={device}")).map_or_else(
@@ -367,11 +357,6 @@ fn win32_resolve_with(base: &str, path: &str, device_cwd: &dyn Fn(&str) -> Strin
                 .to_string_lossy()
                 .into_owned()
         } else {
-            // Windows has drive-specific current working directories. A
-            // resolved drive letter without an absolute path resolves
-            // against that drive's cwd (Node's `=<device>` convention),
-            // else the process cwd - unless the process cwd itself sits
-            // on a different drive, where the drive root is the answer.
             let candidate = device_cwd(&resolved_device);
             let same_drive = candidate
                 .get(..2)
@@ -438,8 +423,7 @@ fn win32_resolve_with(base: &str, path: &str, device_cwd: &dyn Fn(&str) -> Strin
             if resolved_device.is_empty() {
                 resolved_device = device;
             } else if !device.eq_ignore_ascii_case(&resolved_device) {
-                // This path points to another device so it is not
-                // applicable.
+                // This path points to another device so it is not applicable.
                 continue;
             }
         }
@@ -525,7 +509,6 @@ mod tests {
         );
         assert_eq!(expand_path_platform("/abs", Some("/home/u")), "/abs");
         assert_eq!(expand_path_platform("rel", Some("/home/u")), "rel");
-        // Non-breaking space after ~/ becomes a regular space.
         assert_eq!(
             expand_path_platform("~/\u{00A0}x", Some("/home/u")),
             "/home/u/ x"
@@ -537,9 +520,8 @@ mod tests {
         assert_eq!(expand_path_platform("@~/f", Some("/h")), "/h/f");
     }
 
-    /// POSIX dispatcher semantics; the win32 sibling lives below (the
-    /// dispatcher is platform-picked, so a POSIX expectation is a
-    /// not-windows test).
+    /// POSIX dispatcher semantics; the win32 sibling lives below (the dispatcher is
+    /// platform-picked, so a POSIX expectation is a not-windows test).
     #[test]
     #[cfg(not(windows))]
     fn resolve_relative() {
@@ -558,14 +540,11 @@ mod tests {
         assert_eq!(node_path_resolve("/a/b", "..//x"), "/a/x");
     }
 
-    /// The Node fixture table for `path.win32.resolve` and
-    /// `path.win32.isAbsolute`, generated against Node itself
-    /// (`node -e` over the same inputs). The port must match Node's
-    /// outputs exactly: the edit tool resolves user paths through
-    /// this on Windows (TS `resolveToCwd` uses the platform module).
-    /// Deterministic rows only - the device-relative fallback reads the
-    /// process cwd when the `=<device>` convention is unset, which a
-    /// parallel test cannot pin.
+    /// The Node fixture table for `path.win32.resolve` and `path.win32.isAbsolute`,
+    /// generated against Node itself (`node -e` over the same inputs); the port must
+    /// match exactly (the edit tool resolves user paths through this on Windows).
+    /// Deterministic rows only - the device-relative fallback reads the process cwd
+    /// when the `=<device>` convention is unset, which a parallel test cannot pin.
     #[test]
     fn win32_resolve_matches_node_outputs() {
         let cases = [
@@ -623,11 +602,8 @@ mod tests {
         }
     }
 
-    /// Node's drive-specific cwd convention: a device-relative tail
-    /// resolves against that drive's cwd when the convention answers
-    /// (Node's `=<device>` fallback order), and against the DRIVE ROOT
-    /// when the answered cwd sits on a different drive (the injected
-    /// lookup keeps the test off the process environment).
+    /// Node's drive-specific cwd convention: a device-relative tail resolves against
+    /// that drive's cwd, or the DRIVE ROOT when it sits on a different drive.
     #[test]
     fn win32_resolve_honors_the_drive_cwd_convention() {
         assert_eq!(
@@ -637,9 +613,7 @@ mod tests {
             }),
             r"Q:\custom\rel\f.txt"
         );
-        // A drive cwd on a DIFFERENT drive is not the answer: the drive
-        // root is (Node's `path.charCodeAt(2) === CHAR_BACKWARD_SLASH`
-        // guard).
+        // A drive cwd on a DIFFERENT drive is not the answer: the drive root is.
         assert_eq!(
             win32_resolve_with(r"C:\cwd", r"Q:rel\f.txt", &|_| r"D:\other".to_string()),
             r"Q:\rel\f.txt"

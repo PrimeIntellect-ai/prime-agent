@@ -32,3 +32,32 @@ and the reader share the process-global event-reader lock, and a park would
 starve them — and its stop flag is now observed through `Waker::wake()` at
 teardown instead of a poll tick. Behavior on the wire (events, parse order,
 chunk boundaries, handoff) is unchanged; only the idle wait's wakeup rate is.
+
+# The verdict time per terminal class (2026-09-29, kitty-verdict-time lane)
+
+The probe's conclusion time was characterized on a real pty per class
+(`kitty_verdict_time_e2e`'s sweep mode, VM feq0mhg7yk19ycrk2ytuhuww at the
+tip; rows in the lane's record):
+
+* A kitty terminal concludes at its flags reply (push at answer+~6ms).
+* A DA1-answering non-kitty terminal — the COMMON non-kitty class; real
+  tmux 3.2a answers DA1 in 15-24us and never answers the flags query
+  (1001ms silence, 10/10); real screen 4.09 answers in 15-33us —
+  concludes at the DA1 arrival (the window measured CLOSED from +20ms
+  with the answer at +15ms; a flags reply at +20..+80ms never upgrades),
+  so a raced mode transition lands with its dispatch (offset+2ms) instead
+  of the deadline.
+* A fully-silent pty (no DA1 ever — CI harnesses) is the only class that
+  pays the deadline: the raced teardown pins at 249-251ms at every
+  in-window offset, and the upgrade cliff sits at 240-250ms.
+
+The 250ms bound is therefore TWO contracts at once: the silent class's
+verdict bound, and the late-kitty catch window — a kitty terminal over a
+slow hop answers its flags at RTT (this fleet's own single public hop
+measures 24-29ms; the intercontinental SSH classes ride 80-250ms),
+inside today's window and outside any 50ms cut. A flat deadline cut is
+rejected on that misclassification distribution: it would silently drop
+the enhancement for the RTT>50ms class (the product's primary remote-SSH
+deployment shape) while buying only the silent class's raced-transition
+stall, which no user rides. The timed contract is locked by
+`crates/pa-cli/tests/kitty_verdict_time_e2e.rs`.

@@ -24,6 +24,10 @@ uuid = { version = "1", features = ["v4", "v7"] }
 [dev-dependencies]
 filetime = "0.2"
 tempfile = "3"
+socket2 = "0.6"
+# The supervisor property suite draws sibling rosters for the live
+# rename ladder; the plain std features are enough (no fork/timeout).
+proptest = { workspace = true }
 # Test-only: `ModelCatalog::with_urls` + the compiled offline Prime
 # Inference entries build the loopback catalog the session-model restore
 # tests script (the pa-core tests/common pattern, in-crate), and the

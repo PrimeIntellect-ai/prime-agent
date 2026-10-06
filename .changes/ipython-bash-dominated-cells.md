@@ -1,0 +1,1 @@
+- An ipython cell that mostly runs shell commands now shows as `bash` in its collapsed card, with its first `bash()` command and how many more it ran, including commands run through helper functions.

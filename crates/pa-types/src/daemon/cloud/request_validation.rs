@@ -210,7 +210,14 @@ pub fn cloud_request_problem(value: &Value) -> Option<String> {
 }
 
 /// TS `cloudRequestJsonProblem`: maximum encoded bytes of one canonical
-/// request payload; enforced alongside digests.
+/// request payload; enforced alongside digests. Parity note: the pinned
+/// TS exports this without a single call site in `protocol.ts` — its
+/// `submitProblem` validates a submit through `cloudRequestProblem` and
+/// the digest only, so the wire accepts canonical requests over
+/// [`CLOUD_MAX_REQUEST_JSON_CHARS`] bytes. The Rust mirrors that exactly
+/// (submit validation never bounds request size): the bound is the
+/// submit constructor's invariant, not the validator's, and wiring it
+/// into submit would reject frames the pinned TS accepts.
 #[must_use]
 pub fn cloud_request_json_problem(value: &Value) -> Option<String> {
     match canonical_json(value) {

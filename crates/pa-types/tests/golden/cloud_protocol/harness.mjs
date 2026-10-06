@@ -311,6 +311,15 @@ const requests = [
 		name: "agent_message_result_ok",
 		value: { kind: "agent_message_result", requestId: "msgreq_1", ok: true, receipt: { id: "agentmsg_9", deliveryStatus: "delivered" } },
 	},
+	// The wire domain of a receipt is any canonical-JSON object: the empty
+	// object is protocol-valid (the validator requires only ok/receipt
+	// pairing, objectness, canonicalizability, and the size cap — never
+	// the deliverer's id/deliveryStatus fields), so the Rust typed carrier
+	// must deserialize it too.
+	{
+		name: "agent_message_result_ok_empty_receipt",
+		value: { kind: "agent_message_result", requestId: "msgreq_5", ok: true, receipt: {} },
+	},
 	{ name: "agent_message_result_err", value: { kind: "agent_message_result", requestId: "msgreq_2", ok: false, error: "unknown target" } },
 ];
 

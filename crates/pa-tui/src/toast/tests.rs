@@ -4,7 +4,6 @@ fn now() -> Instant {
     Instant::now()
 }
 
-/// A toast starts active, expires after its TTL, and pruning drops it.
 #[test]
 fn toasts_expire_on_their_ttl() {
     let mut toasts = Toasts::default();
@@ -16,7 +15,6 @@ fn toasts_expire_on_their_ttl() {
     assert!(toasts.entries.is_empty());
 }
 
-/// Pruning with nothing to drop reports no change.
 #[test]
 fn pruning_a_fresh_stack_reports_no_change() {
     let mut toasts = Toasts::default();
@@ -25,7 +23,6 @@ fn pruning_a_fresh_stack_reports_no_change() {
     assert_eq!(toasts.entries.len(), 1);
 }
 
-/// The stack keeps the newest toasts and caps at the limit.
 #[test]
 fn the_stack_caps_at_the_limit() {
     let mut toasts = Toasts::default();
@@ -36,9 +33,6 @@ fn the_stack_caps_at_the_limit() {
     assert_eq!(texts, vec!["toast 1", "toast 2", "toast 3"]);
 }
 
-/// Consecutive repeats of the same action COALESCE: the toast stack
-/// holds one entry, its TTL resets (the repeat keeps it alive), and
-/// its label carries the count bump.
 #[test]
 fn consecutive_repeats_coalesce_into_one_toast() {
     let mut toasts = Toasts::default();
@@ -49,8 +43,8 @@ fn consecutive_repeats_coalesce_into_one_toast() {
     assert_eq!(labels.len(), 1, "three copies are one toast, not rows");
     assert_eq!(labels[0], "Copied to clipboard (x3)");
     assert_eq!(toasts.entries.len(), 1);
-    // The TTL reset: half the TTL twice stays inside a refreshed
-    // window (an unrefreshed toast expires before the second half).
+    // Half the TTL twice stays inside a refreshed window (unrefreshed
+    // expires before the second half).
     toasts.age_by(TOAST_TTL / 2);
     toasts.push("Copied to clipboard");
     toasts.age_by(TOAST_TTL / 2);
@@ -61,8 +55,6 @@ fn consecutive_repeats_coalesce_into_one_toast() {
     );
 }
 
-/// A repeat AFTER the previous toast's TTL starts a fresh window: no
-/// count bump for a confirmation the user has already seen expire.
 #[test]
 fn a_repeat_after_the_ttl_starts_a_fresh_toast() {
     let mut toasts = Toasts::default();
@@ -76,9 +68,6 @@ fn a_repeat_after_the_ttl_starts_a_fresh_toast() {
     );
 }
 
-/// Distinct actions keep their own toasts; a repeat of one of them
-/// coalesces into THAT toast (it is the toast the user last triggered)
-/// and moves it to the bottom of the stack.
 #[test]
 fn distinct_actions_stack_and_a_repeat_coalesces_into_its_own_toast() {
     let mut toasts = Toasts::default();
@@ -104,9 +93,6 @@ fn distinct_actions_stack_and_a_repeat_coalesces_into_its_own_toast() {
     );
 }
 
-/// The overlay composites a compact right-aligned pill over the row:
-/// the covered row's own content survives outside the pill's columns
-/// — the toast never spans the whole row.
 #[test]
 fn the_pill_keeps_the_covered_rows_content() {
     let mut frame = vec![line_of("row content that stays visible underneath")];
@@ -134,8 +120,6 @@ fn the_pill_keeps_the_covered_rows_content() {
     );
 }
 
-/// Right-aligned: the pill sits at the row's right edge and the rows
-/// outside the stack stay untouched.
 #[test]
 fn the_pill_lands_right_aligned_and_leaves_other_rows_alone() {
     let width = 20;
@@ -158,10 +142,8 @@ fn the_pill_lands_right_aligned_and_leaves_other_rows_alone() {
         })
         .collect();
     let col = width - crate::width::str_width(&pill);
-    // The composite closes any open link region before the pill's cells
-    // unconditionally, so the composited row's text carries the close
-    // ahead of the pill (a zero-width sequence: the visible columns stay
-    // the pill at the row's right edge).
+    // The unconditional close rides ahead of the pill (a zero-width
+    // sequence: the visible columns stay the pill at the right edge).
     assert_eq!(
         rendered[2],
         format!(
@@ -176,8 +158,6 @@ fn the_pill_lands_right_aligned_and_leaves_other_rows_alone() {
     assert_eq!(rendered[3], "x".repeat(width));
 }
 
-/// A label wider than the frame truncates instead of wrapping past
-/// the frame edge.
 #[test]
 fn an_overlong_pill_truncates_to_the_frame_width() {
     let mut frame = vec![line_of("row")];
@@ -196,7 +176,6 @@ fn an_overlong_pill_truncates_to_the_frame_width() {
     );
 }
 
-/// A stack taller than the frame's rows overlays only what fits.
 #[test]
 fn a_tall_stack_overlays_only_what_fits() {
     let mut frame = vec![line_of("row"); 2];
@@ -205,9 +184,6 @@ fn a_tall_stack_overlays_only_what_fits() {
     assert!(frame[1].iter().any(|span| span.content.contains("two")));
 }
 
-/// A covered row keeps its leading OSC 133 zone markers: shell
-/// integration's turn-boundary jumps keep working while the toast is
-/// visible over the row (the follow-hint composite's rule).
 #[test]
 fn a_covered_row_keeps_its_zone_markers() {
     let mut frame = vec![line_of("row"); 2];
@@ -228,17 +204,10 @@ fn a_covered_row_keeps_its_zone_markers() {
     assert!(row_text.contains("Copied"));
 }
 
-/// The end bound keeps the overlay inside the transcript window, and a
-/// window shorter than the stack keeps the NEWEST toasts: the third
-/// toast never lands on the dock's first row, and the latest
-/// acknowledgment is the one that stays visible.
 #[test]
 fn the_end_bound_keeps_the_newest_inside_the_window() {
     let mut frame = vec![line_of("row"); 4];
     let toasts = vec!["one".to_string(), "two".to_string(), "three".to_string()];
-    // Transcript window: rows 1..3 (end 3); the window holds two
-    // toasts, so the NEWEST two overlay and the dock row stays
-    // untouched.
     overlay_toasts(&mut frame, 1, 3, &toasts, 10, Style::default());
     assert!(
         !frame[1].iter().any(|span| span.content.contains("one")),
@@ -254,8 +223,6 @@ fn the_end_bound_keeps_the_newest_inside_the_window() {
     );
 }
 
-/// A styled span keeps the pill's style (the composite must not restyle
-/// the covered row's own spans).
 #[test]
 fn the_pill_carries_its_style() {
     use ratatui::style::Color;
@@ -269,9 +236,6 @@ fn the_pill_carries_its_style() {
     assert_eq!(pill.style, style);
 }
 
-/// A short covered row keeps the pill at the right edge: the composited
-/// prefix pads up to the pill column (the Macroscope short-row
-/// finding), so the row spans the full width with the pill at its end.
 #[test]
 fn a_short_covered_row_keeps_the_pill_at_the_right_edge() {
     let width = 60;
@@ -302,14 +266,12 @@ fn a_short_covered_row_keeps_the_pill_at_the_right_edge() {
 }
 
 /// A wide cluster clipping at the pill's column pads to the column
-/// (the Bugbot straddle finding): the pill never shifts off the right
-/// edge.
+/// (the Bugbot straddle finding).
 #[test]
 fn a_wide_cluster_at_the_pill_column_still_places_the_pill_at_the_edge() {
     let width = 20;
-    // Four double-width clusters cover columns 0..8; the pill column
-    // is 18 minus the pill width, so the prefix clips mid-cluster and
-    // pads the rest of the way.
+    // Four double-width clusters cover columns 0..8; the pill column is
+    // 18 minus the pill width, so the prefix clips mid-cluster and pads.
     let pill = " ok ".to_string();
     let col = width - crate::width::str_width(&pill);
     let clusters = "\u{65e5}".repeat(col / 2 + 1);
@@ -334,9 +296,8 @@ fn a_wide_cluster_at_the_pill_column_still_places_the_pill_at_the_edge() {
     );
 }
 
-/// A covered hyperlink keeps its OSC 8 pair while the toast is up
-/// (the Macroscope escape-stripping finding): the prefix slice keeps
-/// the zero-width escapes in its column range.
+/// A covered hyperlink keeps its OSC 8 pair while the toast is up (the
+/// Macroscope escape-stripping finding).
 #[test]
 fn a_covered_hyperlink_keeps_its_osc8_pair() {
     let url = "https://example.invalid/docs";
@@ -367,13 +328,10 @@ fn a_covered_hyperlink_keeps_its_osc8_pair() {
     assert!(rendered.contains("the docs"));
 }
 
-/// A link region the pill cuts OPEN closes before the pill: the
-/// pill's cells must not inherit the hyperlink.
 #[test]
 fn a_link_cut_open_by_the_pill_closes_before_the_pill() {
-    // (The close is unconditional, so a row whose link never closes
-    // in-row and a row carrying a wrapped link's region behave the
-    // same - see the carried-region test below.)
+    // The close is unconditional, so an unclosed in-row link and a
+    // carried wrapped-link region behave the same.
     let url = "https://example.invalid/long";
     let row_text = format!(
         "{}the linked words{}",
@@ -402,8 +360,6 @@ fn a_link_cut_open_by_the_pill_closes_before_the_pill() {
         close_at < pill_at,
         "the link closes before the pill: {rendered:?}"
     );
-    // The closing sequence rides at the pill's column: the covered
-    // content ends at the column and the region closes exactly there.
     let before_pill = &rendered[..pill_at];
     assert_eq!(
         crate::width::str_width(before_pill),
@@ -412,19 +368,15 @@ fn a_link_cut_open_by_the_pill_closes_before_the_pill() {
     );
 }
 
-/// A link region CARRIED in from the row above (a wrapped link: the
-/// covered row holds the continuation text without its own OSC 8
-/// pair, and the writer's regions resume at the next row's column 0)
-/// never leaks into the pill: the composite's close lands before the
-/// pill's cells whatever the covered row itself says (Macroscope's
-/// wrapped-continuation finding).
+/// A link region CARRIED in from the row above (the writer's regions
+/// resume at the next row's column 0) never leaks into the pill.
 #[test]
 fn a_carried_link_region_closes_before_the_pill() {
     let width = 80;
     let pill = " Copied to clipboard ".to_string();
     let col = width - crate::width::str_width(&pill);
     // Continuation text of a link opened on the row above: no OSC 8
-    // escapes inside this row at all.
+    // escapes in this row.
     let mut frame = vec![line_of("continuation of the wrapped link's label text")];
     overlay_toasts(
         &mut frame,

@@ -1,53 +1,18 @@
-//! RLM children lifecycle on a hard-killed parent worker: the supervisor's
-//! parent-death cleanup e2e (the #246 documented adjacent gap).
-//!
-//! TS ground truth (`packages/coding-agent/src/modes/daemon/daemon-mode.ts`):
-//! RLM children are hosted IN the parent's process, so they die with it -
-//! a `SIGKILLed` parent session takes its children down, and the durable
-//! spawn ledger keeps each closed child as a passive roster row
-//! (`getChildActiveSessionStates` joins children by
-//! `metadata.parentActiveSessionId`; `closeChildSessions` is the cascade).
-//! The Rust redesign hosts each child as its own supervisor-owned worker
-//! process, and the #246 close runs inside the parent worker's teardown
-//! paths - all bypassed by SIGKILL. So the supervisor's worker-death
-//! monitoring performs the close: on an unexpected exit, every resident
-//! worker whose durable create names the dead worker as its parent stops
-//! with it (a plain stop like the #246 close: no ledger tombstone, so the
-//! spawn edge and the passive roster row survive), routed through the
-//! child worker's own kill handler so grandchildren cascade.
-//!
-//! Verified end to end against a real supervisor, a real parent worker
-//! session whose kernel cell spawns the child through the product
-//! `rlm.spawn` surface, and a scripted child worker kept mid-run:
-//!
-//! 1. `SIGKILLing` the parent worker closes the spawned child: its worker
-//!    leaves the supervisor roster, its session file archives, the
-//!    respawned parent's `get_rlm_children` reads empty, and the `list
-//!    --all` surface shows the child as a passive ledger row (the spawn
-//!    edge survived - the close is a stop, not a delete).
-//! 2. `SIGKILLing` the parent KEEPS an `rlm.create_session` depth-0 root
-//!    session running: the close touches parent-linked children only.
-//!
-//! The parent's kernel Python is ambient product state; like the other
-//! live-kernel verifiers these tests skip (with a note) on machines
-//! without a live install.
-// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
-// the full rationale).
-// Stack-resident futures by design on the daemon's hot paths; boxing the
-// call sites for a lint tick is a perf regression with zero correctness gain.
+//! RLM children on a hard-killed parent worker (the #246 adjacent gap): TS hosts children
+//! IN the parent's process, so a `SIGKILLed` parent takes them down; the Rust redesign hosts
+//! each child as its own worker and the #246 close lives in the parent's teardown paths,
+//! all bypassed by SIGKILL — so the supervisor's worker-death monitoring performs the close
+//! (a plain stop; grandchildren cascade). Tests skip without a live kernel install.
+// Stack-resident futures by design; boxing for a lint tick is a perf regression.
 #![allow(clippy::large_futures)]
-// 64-bit-only targets; the narrowing casts sit at OS boundaries
-// (pid/fd/time/size) where the values are bounded by the kernel - the
-// dead-guard expect()s would add panic paths where silent wrap was
-// deliberate.
+// 64-bit-only targets; narrowing casts sit at bounded OS/protocol boundaries.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// The fn-length threshold is a style gate, not correctness; the structure
-// campaign owns the god-fn splits as a follow-up.
+// Fn length is a style gate, not correctness.
 #![allow(clippy::too_many_lines)]
 // API-shape opinions, not defects; the surfaces are deliberate.
 #![allow(
@@ -64,6 +29,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+use pa_core::session_engine::semantic_edges::SemanticEdgeLedgerEvent as LedgerEvent;
+
 use serde_json::{json, Value};
 
 struct Daemon {
@@ -79,8 +46,7 @@ impl Drop for Daemon {
     }
 }
 
-// The timeout panic path cannot wait on the child; the test process exits
-// immediately afterwards, reaping it.
+// The timeout panic path cannot wait on the child; the test exits and reaps it.
 #[allow(clippy::zombie_processes)]
 fn spawn_supervisor(socket: &Path, agent_dir: &Path, kernel_python: &Path) -> Daemon {
     let binary = env!("CARGO_BIN_EXE_pa-daemon");
@@ -97,10 +63,8 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path, kernel_python: &Path) -> Da
         .env_remove("PRIME_API_KEY")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        // A supervisor killed at teardown must not leak its session workers
-        // into later test binaries: the worker's supervisor-lost exit (TS
-        // `exitIfSupervisorOrphanedForTooLong`) runs on this short window
-        // instead of the 5-minute default.
+        // A supervisor killed at teardown must not leak its session workers into later
+        // test binaries: the supervisor-lost exit runs here.
         .env(
             pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
             "15000",
@@ -113,8 +77,7 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path, kernel_python: &Path) -> Da
     }
 }
 
-/// The kernel Python with prime-agent-runtime installed; set
-/// `PA_E2E_KERNEL_PYTHON` to point at an explicit interpreter instead.
+/// The kernel Python; `PA_E2E_KERNEL_PYTHON` points at an explicit interpreter instead.
 fn kernel_python() -> Option<PathBuf> {
     if let Some(explicit) = std::env::var_os("PA_E2E_KERNEL_PYTHON") {
         let explicit = PathBuf::from(explicit);
@@ -189,10 +152,9 @@ impl Client {
             .set_read_timeout(Some(Duration::from_millis(100)))
             .expect("set timeout");
         loop {
-            line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => {}
+                Ok(_) if line.trim().is_empty() => line.clear(),
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse response line"),
                 Err(error) => {
                     assert!(
@@ -232,8 +194,7 @@ fn wait_until<T>(
     }
 }
 
-/// The supervisor roster's resident session summaries (the plain `list`
-/// wire surface).
+/// The supervisor roster's resident session summaries (the plain `list` wire surface).
 fn roster_summaries(client: &mut Client, id: &str) -> Vec<Value> {
     client.send_command(id, &json!({ "type": "list" }));
     let list = client.read_response(id);
@@ -244,8 +205,7 @@ fn roster_summaries(client: &mut Client, id: &str) -> Vec<Value> {
         .expect("sessions array")
 }
 
-/// The `list --all` surface: resident summaries plus the passive ledger
-/// rows (TS `buildSessionList`).
+/// The `list --all` surface: resident summaries plus the passive ledger rows.
 fn all_roster_summaries(client: &mut Client, id: &str) -> Vec<Value> {
     client.send_command(id, &json!({ "type": "list", "all": true }));
     let list = client.read_response(id);
@@ -290,12 +250,15 @@ fn run_turn(client: &mut Client, session_id: &str, message: &str, id: &str) {
     assert_eq!(idle["success"], true, "wait_for_idle failed: {idle}");
 }
 
-/// Poll for a kernel cell's receipt content (the cell writes its verdict).
+/// Poll for a kernel cell's receipt content (the cell writes its verdict;
+/// an empty read is the create-before-write window, not a verdict yet).
 fn await_receipt(receipt: &Path) -> String {
     let deadline = Instant::now() + Duration::from_mins(1);
     loop {
         if let Ok(content) = std::fs::read_to_string(receipt) {
-            return content;
+            if !content.is_empty() {
+                return content;
+            }
         }
         assert!(
             Instant::now() < deadline,
@@ -326,9 +289,8 @@ fn create_session_cell(receipt: &Path, error_receipt: &Path) -> String {
     )
 }
 
-/// The child's scripted engine: one held response keeps its task turn
-/// running while the parent dies, so the death close lands on a live child
-/// (TS closes running children - abort, archive, dispose).
+/// The child's scripted engine: one held response keeps its task turn running while
+/// the parent dies, so the death close lands on a live child.
 fn write_child_script(dir: &Path) -> PathBuf {
     let script = dir.join("child.json");
     std::fs::write(
@@ -359,10 +321,8 @@ fn write_parent_script(dir: &Path, first_cell: &str) -> PathBuf {
     script
 }
 
-/// Create a scripted parent session through the supervisor. The create's
-/// `childScript` (the harness seam mirroring the TS child runtime's
-/// inherited `sessionConfig`) makes every `rlm.spawn` child a scripted
-/// worker.
+/// Create a scripted parent session through the supervisor. The create's `childScript`
+/// (the harness seam for the TS inherited `sessionConfig`) makes every child scripted.
 fn create_parent(
     client: &mut Client,
     dir: &Path,
@@ -390,10 +350,8 @@ fn create_parent(
     created["data"].clone()
 }
 
-/// The parent worker's process id, read from its durable descriptor (the
-/// supervisor persists the live pid at every spawn). The environ check
-/// guards the kill against a stale pid: the process we SIGKILL must be
-/// the worker that owns `parent_id`.
+/// The parent worker's process id, read from its durable descriptor; the environ check
+/// guards the kill against a stale pid.
 fn parent_worker_pid(agent_dir: &Path, socket: &Path, parent_id: &str) -> u32 {
     let descriptor_path =
         pa_daemon::descriptor::descriptor_dir(agent_dir, socket).join(format!("{parent_id}.json"));
@@ -427,9 +385,10 @@ fn sigkill(pid: u32) {
 /// A parent worker killed with SIGKILL cannot run any teardown (#246's
 /// closes all live in the worker), so the supervisor's death monitoring
 /// closes its resident children: the spawned child's worker leaves the
-/// roster, its session archives, the respawned parent's registry reads
-/// empty, and the child stays visible as a passive ledger row (the close
-/// is a plain stop - the spawn edge survives, no delete record).
+/// roster, its session archives, the respawned parent relists the child
+/// as a settled row from the surviving spawn edge, and the child stays
+/// visible as a passive ledger row (the close is a plain stop - the
+/// spawn edge survives, no delete record).
 #[test]
 fn sigkill_closes_the_spawned_child_and_passivates_the_row() {
     let Some(kernel_python) = kernel_python() else {
@@ -458,8 +417,7 @@ fn sigkill_closes_the_spawned_child_and_passivates_the_row() {
         .to_string();
     let parent_session_id = parent["sessionId"].as_str().expect("parent session id");
 
-    // Turn 1: the kernel cell spawns the child through the parent's own
-    // registry (the `rlm.spawn` host surface).
+    // Turn 1: the kernel cell spawns the child through the parent's registry.
     run_turn(&mut client, &parent_id, "spawn the kid", "t1");
     let spawned: Value =
         serde_json::from_str(&await_receipt(&spawn_receipt)).expect("spawn receipt json");
@@ -477,8 +435,7 @@ fn sigkill_closes_the_spawned_child_and_passivates_the_row() {
         std::fs::read_to_string(&spawn_error).unwrap_or_default()
     );
 
-    // The child runs: its worker session is resident in the supervisor and
-    // tracked in the parent's registry.
+    // The child runs: resident in the supervisor and tracked in the parent's registry.
     let child_row = wait_until(&mut client, Duration::from_mins(1), |client| {
         let rows = rlm_children_rows(client, "g1", &parent_id);
         rows.into_iter()
@@ -499,8 +456,7 @@ fn sigkill_closes_the_spawned_child_and_passivates_the_row() {
     let pid = parent_worker_pid(&agent_dir, &socket, &parent_id);
     sigkill(pid);
 
-    // The supervisor's death monitoring closes the child: its worker
-    // leaves the resident roster.
+    // The supervisor's death monitoring closes the child: its worker leaves the roster.
     wait_until(&mut client, Duration::from_mins(1), |client| {
         let summaries = roster_summaries(client, "l2");
         summaries
@@ -509,12 +465,8 @@ fn sigkill_closes_the_spawned_child_and_passivates_the_row() {
             .then_some(())
     });
 
-    // The close is the shutdown-close shape (TS's in-process child dies
-    // with its parent worker without a close; the Rust worker must be
-    // told, and the `shutdown` reason keeps the child's resume entry):
-    // the child's session file keeps its live state and its scheduled
-    // jobs, so the wake model can still own reviving it later — it is
-    // NOT archived like a killed close (the stop lifecycle lane).
+    // The close is the shutdown-close shape: the `shutdown` reason keeps the child's resume
+    // entry — NOT archived like a killed close (the stop lifecycle lane).
     let child_session_file = {
         let child_dir = agent_dir
             .join("session-artifacts")
@@ -535,26 +487,17 @@ fn sigkill_closes_the_spawned_child_and_passivates_the_row() {
         "the parent-death close keeps the child's resume entry (no archive): {child_session}"
     );
 
-    // The respawned parent's registry is fresh: the parent died before it
-    // could track anything, and the death close owns its children now.
-    // (get_rlm_children fails while the worker restarts; poll for the
-    // respawned answer.)
+    // The respawned parent reseeds the spawn edge the death close kept.
+    // Its display still says running, so TS exposes the interrupted task
+    // as error rather than presenting it as a completed child.
     wait_until(&mut client, Duration::from_mins(1), |client| {
-        client.send_command(
-            "g3",
-            &json!({ "type": "get_rlm_children", "activeSessionId": parent_id }),
-        );
-        let response = client.read_response("g3");
-        (response["success"] == true
-            && response["data"]["children"]
-                .as_array()
-                .is_some_and(std::vec::Vec::is_empty))
-        .then_some(())
+        rlm_children_rows(client, "g3", &parent_id)
+            .into_iter()
+            .find(|row| row["id"] == json!(child_id) && row["status"] == "error")
     });
 
-    // The passive row per TS: the spawn edge survived the close (a stop,
-    // not a delete), so `list --all` shows the child as a passive ledger
-    // row under the parent.
+    // The passive row per TS: the spawn edge survived the close (a stop, not a delete),
+    // so `list --all` shows the child under the parent.
     let passive_row = wait_until(&mut client, Duration::from_secs(30), |client| {
         all_roster_summaries(client, "l3")
             .into_iter()
@@ -565,8 +508,7 @@ fn sigkill_closes_the_spawned_child_and_passivates_the_row() {
     assert_eq!(passive_row["isSessionActive"], false);
     assert_eq!(passive_row["parentActiveSessionId"], json!(parent_id));
 
-    // The ledger carried the close as a stop, never a delete: the spawn
-    // record stands and no tombstone exists.
+    // The ledger carried the close as a stop, never a delete: no tombstone exists.
     let ledger_dir = agent_dir.join(pa_daemon::rlm_ledger::RLM_LEDGER_DIR);
     let ledger = std::fs::read_dir(&ledger_dir)
         .expect("ledger dir")
@@ -584,12 +526,9 @@ fn sigkill_closes_the_spawned_child_and_passivates_the_row() {
     );
 }
 
-/// `rlm.create_session` depth-0 root sessions are NOT parent-linked (TS
-/// `createRlmRootSession` builds a root `ActiveSessionState` with no
-/// `parentActiveSessionId`), so `getChildActiveSessionStates` never
-/// matches them: a created root session survives the parent's hard death
-/// (the supervisor restarts the parent and the root keeps running),
-/// while the parent's own registry reads empty.
+/// `rlm.create_session` depth-0 roots are NOT parent-linked (TS `createRlmRootSession`
+/// carries no `parentActiveSessionId`, so `getChildActiveSessionStates` never matches
+/// them): a created root survives the parent's hard death.
 #[test]
 fn sigkill_keeps_a_created_root_session_running() {
     let Some(kernel_python) = kernel_python() else {
@@ -649,8 +588,7 @@ fn sigkill_keeps_a_created_root_session_running() {
     // close touches parent-linked children only.
     let pid = parent_worker_pid(&agent_dir, &socket, &parent_id);
     sigkill(pid);
-    // The respawn (and with it the death close) settles before the
-    // registry reads empty.
+    // The respawn (and with it the death close) settles before the registry reads empty.
     wait_until(&mut client, Duration::from_mins(1), |client| {
         client.send_command(
             "g1",
@@ -664,12 +602,233 @@ fn sigkill_keeps_a_created_root_session_running() {
         .then_some(())
     });
 
-    // The created root session is still resident and running: the close
-    // touches parent-linked children only (TS `getChildActiveSessionStates`).
+    // The created root session is still resident: the close touches parent-linked children only.
     let survivor = wait_until(&mut client, Duration::from_secs(30), |client| {
         roster_summaries(client, "l2")
             .into_iter()
             .find(|summary| summary["activeSessionId"] == json!(root_active_session_id))
     });
     assert_eq!(survivor["sessionName"], "rootkid");
+}
+
+/// The kernel cell of the spawn turn for the semantic-edge e2e: spawn one
+/// RLM child through the product surface and record its id + session dir.
+fn semantic_spawn_cell(receipt: &Path, error_receipt: &Path) -> String {
+    format!(
+        "import json, traceback\ntry:\n    handle = await rlm.spawn(\"child task text\", name=\"kid\")\n    open({receipt:?}, \"w\").write(json.dumps({{\"rlm_child_id\": handle.rlm_child_id, \"session_dir\": str(handle.session_dir)}}))\n    print(handle.rlm_child_id)\nexcept Exception:\n    open({error_receipt:?}, \"w\").write(traceback.format_exc())\n    raise",
+        receipt = receipt.display().to_string(),
+        error_receipt = error_receipt.display().to_string(),
+    )
+}
+
+/// Parse one semantic-edge ledger file into its events. A file that does
+/// not exist yet reads as empty: the settle poll runs ahead of the
+/// parent's return recording.
+fn semantic_ledger(path: &Path) -> Vec<LedgerEvent> {
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    contents
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_str(line).expect("ledger line"))
+        .collect()
+}
+
+/// A spawned child's ledger names the spawning request, and the parent
+/// records the child's return before its next request starts (TS
+/// `semanticParentSessionId`/`spawnedByRequestId` +
+/// `recordChildReturned`; the spawn runs mid-turn through the product
+/// `rlm.spawn` surface, and both engines are real over the faux
+/// provider).
+#[test]
+fn a_spawned_child_ledger_names_its_spawning_request_and_the_parent_records_the_return() {
+    let Some(kernel_python) = kernel_python() else {
+        return;
+    };
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    let socket = dir.path().join("supervisor.sock");
+    let receipts = dir.path().join("receipts");
+    std::fs::create_dir_all(&receipts).expect("receipts dir");
+    let spawn_receipt = receipts.join("spawn.json");
+    let spawn_error = receipts.join("spawn.error");
+
+    // A real-engine child over the faux provider (the same engine choice
+    // as the parent): it builds a session, records its own ledger, and
+    // settles with its scripted reply.
+    let child_script = dir.path().join("child.json");
+    std::fs::write(
+        &child_script,
+        json!({
+            "engine": "faux",
+            "responses": [ { "text": "child reply", "delayMs": 30 } ],
+        })
+        .to_string(),
+    )
+    .expect("write child script");
+    let parent_script = write_parent_script(
+        dir.path(),
+        &semantic_spawn_cell(&spawn_receipt, &spawn_error),
+    );
+    let _daemon = spawn_supervisor(&socket, &agent_dir, &kernel_python);
+    wait_socket_ready(&socket);
+    let (mut client, hello) = Client::connect(&socket);
+    assert_eq!(hello["type"], "daemon_hello");
+    let parent = create_parent(&mut client, dir.path(), &parent_script, &child_script, "c1");
+    let parent_id = parent["activeSessionId"]
+        .as_str()
+        .or_else(|| parent["id"].as_str())
+        .expect("parent active session id")
+        .to_string();
+    let parent_session_id = parent["sessionId"]
+        .as_str()
+        .expect("parent session id")
+        .to_string();
+    let parent_session_file = parent["sessionFile"]
+        .as_str()
+        .expect("parent session file")
+        .to_string();
+
+    // Turn 1: the kernel cell spawns the child mid-turn through the
+    // product `rlm.spawn` surface.
+    run_turn(&mut client, &parent_id, "spawn the kid", "t1");
+    let spawned: Value =
+        serde_json::from_str(&await_receipt(&spawn_receipt)).expect("spawn receipt json");
+    assert!(
+        !spawn_error.exists(),
+        "the spawn cell failed: {}",
+        std::fs::read_to_string(&spawn_error).unwrap_or_default()
+    );
+    let child_id = spawned["rlm_child_id"]
+        .as_str()
+        .expect("child id")
+        .to_string();
+    let child_session_dir = spawned["session_dir"]
+        .as_str()
+        .expect("child session dir")
+        .to_string();
+
+    // The child settles (its scripted reply ends its run), then its
+    // no-reply notice rides the parent's follow-up route.
+    // The registry row carries the RAW run status (`done`, not the
+    // kernel roster's `completed`).
+    let settle_deadline = Instant::now() + Duration::from_mins(2);
+    loop {
+        if rlm_children_rows(&mut client, "g1", &parent_id)
+            .into_iter()
+            .any(|row| row["id"] == json!(child_id) && row["status"] == "done")
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < settle_deadline,
+            "the child never settled: rows {:?}; agent dir {}",
+            rlm_children_rows(&mut client, "g1", &parent_id),
+            agent_dir.display()
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    // The ledger paths are spelled independently of the product's
+    // derivation on purpose: byte-compatible LOCATIONS are part of the TS
+    // parity contract this e2e pins.
+    let parent_ledger_path = std::path::Path::new(&parent_session_file)
+        .parent()
+        .and_then(Path::parent)
+        .map(|sessions| sessions.join("session-artifacts").join(&parent_session_id))
+        .map(|artifacts| artifacts.join("semantic-edges.jsonl"))
+        .expect("parent ledger path");
+    let child_ledger_path = Path::new(&child_session_dir).join("semantic-edges.jsonl");
+    // The registry marks `done` before the parent records the return, and
+    // the notice's follow-up turn starts later still: poll until the
+    // parent ledger holds the return AND a later request (the same
+    // deadline; the terminal shape, not a fixed delay).
+    let (parent_ledger, child_ledger) = loop {
+        let parent_ledger = semantic_ledger(&parent_ledger_path);
+        let child_ledger = semantic_ledger(&child_ledger_path);
+        let returned_at = parent_ledger
+            .iter()
+            .position(|event| matches!(event, LedgerEvent::ChildReturned { .. }));
+        let next_turn_started = returned_at.is_some_and(|at| {
+            parent_ledger[at + 1..]
+                .iter()
+                .any(|event| matches!(event, LedgerEvent::RequestStarted { .. }))
+        });
+        if next_turn_started {
+            break (parent_ledger, child_ledger);
+        }
+        assert!(
+            Instant::now() < settle_deadline,
+            "the parent never recorded the return and its notice turn: parent {parent_ledger:?}; child {child_ledger:?}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    };
+
+    // The parent's first turn is the spawning request (the cell runs
+    // inside it, so the anchor names it).
+    let spawning_request = parent_ledger
+        .iter()
+        .find_map(|event| match event {
+            LedgerEvent::RequestStarted {
+                request_id,
+                compaction_id: None,
+                ..
+            } => Some(request_id.clone()),
+            _ => None,
+        })
+        .expect("the parent's first request_started");
+    let child_session_id = child_ledger_session_id(&child_ledger);
+    assert_eq!(
+        child_ledger.first(),
+        Some(&LedgerEvent::SessionRegistered {
+            session_id: child_session_id.clone(),
+            parent_session_id: Some(parent_session_id),
+            spawned_by_request_id: Some(spawning_request.clone()),
+        })
+    );
+    let child_last_committed = child_ledger
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            LedgerEvent::RequestFinished { request_id } => Some(request_id.clone()),
+            _ => None,
+        })
+        .expect("the child committed its reply turn");
+    // The parent recorded the child's return with the child's last
+    // committed request, after the spawning turn committed and BEFORE the
+    // notice's follow-up turn minted the parent's next request (the
+    // pending edge must exist before that turn's request_started).
+    let returned_at = parent_ledger
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                LedgerEvent::ChildReturned {
+                    session_id: _,
+                    child_session_id: returned_child,
+                    request_id,
+                } if returned_child == &child_session_id && request_id == &child_last_committed
+            )
+        })
+        .unwrap_or_else(|| panic!("the parent recorded the child's return: {parent_ledger:?}"));
+    assert!(
+        parent_ledger[..returned_at]
+            .iter()
+            .any(|event| matches!(event, LedgerEvent::RequestFinished { request_id } if request_id == &spawning_request)),
+        "the spawning turn committed before the return: {parent_ledger:?}"
+    );
+}
+
+/// The durable session id the child's `session_registered` names (the
+/// parent-side `child_returned` assertions pin the same id across both
+/// ledgers).
+fn child_ledger_session_id(ledger: &[LedgerEvent]) -> String {
+    ledger
+        .iter()
+        .find_map(|event| match event {
+            LedgerEvent::SessionRegistered { session_id, .. } => Some(session_id.clone()),
+            _ => None,
+        })
+        .expect("the child registered")
 }

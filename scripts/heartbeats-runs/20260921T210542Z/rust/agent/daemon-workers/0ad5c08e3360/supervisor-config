@@ -1,5 +1,0 @@
-{
-  "version": 1,
-  "socketPath": "/root/hbv6/20260921T210542Z/rust/daemon.sock",
-  "defaultSessionDir": "/root/hbv6/20260921T210542Z/rust/agent/sessions"
-}

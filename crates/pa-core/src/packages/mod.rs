@@ -1,13 +1,7 @@
-//! Package manager subsystem: install/remove/list/update of `npm:`, git, and
-//! local-dir package sources against the settings store, plus the
-//! configured-npm/git child-process flows.
-//!
-//! Session resource resolution lives here as well: `PackageManager::resolve`
-//! produces the ranked skill/prompt/theme/extension paths sessions consume.
-//!
-//! Non-goals: the extension
-//! *runner* (loading/executing extension modules) and Prime Agent
-//! self-updates.
+//! Package manager subsystem: install/remove/list/update of `npm:`, git,
+//! and local-dir package sources against the settings store, plus the
+//! configured-npm/git child-process flows and session resource resolution.
+//! Non-goals: loading/executing session-resource code and self-updates.
 
 mod git;
 mod manager;
@@ -26,8 +20,8 @@ pub use manager::{
     ProgressAction, ProgressEvent, ProgressEventKind, UserOrProject,
 };
 pub use resolve::{
-    MetadataSource, MissingSourceAction, PathMetadata, ResolveExtensionOptions, ResolvedPaths,
-    ResolvedResource, ResourceOrigin, ResourceType,
+    MetadataSource, MissingSourceAction, PathMetadata, ResolvedPaths, ResolvedResource,
+    ResourceOrigin, ResourceType,
 };
 pub use source::{parse_git_url, GitSource, LocalSource, NpmSource, ParsedSource, SourceScope};
 
@@ -82,10 +76,9 @@ fn home_dir() -> PathBuf {
     pa_types::platform::home_dir().unwrap_or_else(|| PathBuf::from("/"))
 }
 
-/// The workspace root at compile time (source-checkout layout): pa-core
-/// lives at `<root>/crates/pa-core`.
-/// Compile-time workspace root (`<root>/crates/pa-core` ancestors), shared by
-/// every package-dir resolution that falls back to the source-checkout layout.
+/// The compile-time workspace root (source-checkout layout): pa-core lives
+/// at `<root>/crates/pa-core`; every package-dir resolution that falls back
+/// to the source-checkout layout shares it.
 pub(crate) fn source_checkout_root() -> Option<&'static std::path::Path> {
     static ROOT: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
     ROOT.get_or_init(|| {
@@ -115,9 +108,8 @@ pub(crate) fn get_bundled_skills_dir() -> PathBuf {
     packaged
 }
 
-/// Stable temporary directory for resolve-only package installs:
-/// `/tmp/pi-extensions/<prefix>/<hash8>/<suffix?>` (the hash keys on
-/// prefix+suffix so the same source always maps to one checkout).
+/// Stable temporary directory for resolve-only package installs (the hash
+/// keys on prefix+suffix so the same source always maps to one checkout).
 pub(crate) fn temporary_dir(prefix: &str, suffix: Option<&str>) -> PathBuf {
     use sha2::{Digest, Sha256};
 

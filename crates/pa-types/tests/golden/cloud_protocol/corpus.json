@@ -756,6 +756,17 @@
 			"digest": "sha256:fda99a161b8817883ed7547f08b189564be4a8ac2384ed0b4d06468913114e48"
 		},
 		{
+			"name": "agent_message_result_ok_empty_receipt",
+			"value": {
+				"kind": "agent_message_result",
+				"requestId": "msgreq_5",
+				"ok": true,
+				"receipt": {}
+			},
+			"canonical": "{\"kind\":\"agent_message_result\",\"ok\":true,\"receipt\":{},\"requestId\":\"msgreq_5\"}",
+			"digest": "sha256:cb8f88dff572b05a1e6f7a325a47d69ca1e8d2d5a1d740ccbdeb6f6c5412fc68"
+		},
+		{
 			"name": "agent_message_result_err",
 			"value": {
 				"kind": "agent_message_result",

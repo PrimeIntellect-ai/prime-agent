@@ -32,8 +32,6 @@ async fn serves_200_bodies_with_etags_and_sends_catalog_headers() {
     assert!(recorded.contains("accept: application/json"), "{recorded}");
     assert!(recorded.contains("cache-control: no-cache"), "{recorded}");
 
-    // With a cached etag, the request carries If-None-Match and a 304 maps
-    // to NotModified.
     let server2 = common::MockServer::start(vec![not_modified()]).await;
     let outcome = fetcher
         .fetch(&server2.url("/models/catalog.v1.json"), Some("\"v-1\""))

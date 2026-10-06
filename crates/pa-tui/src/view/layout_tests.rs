@@ -22,8 +22,8 @@ fn row_pack_expands_byte_exact() {
     ];
     let pack = RowPack::pack(&rows).expect("representable rows pack");
     assert_eq!(pack.len(), rows.len());
-    // every range expands to the exact original spans: same boundaries,
-    // same styles, same content bytes (empty spans included).
+    // every range expands to the exact original spans (empty spans
+    // included).
     assert_eq!(pack.range(0, rows.len()), rows);
     assert_eq!(pack.range(0, 1), rows[0..1].to_vec());
     assert_eq!(pack.range(1, 3), rows[1..3].to_vec());
@@ -33,10 +33,8 @@ fn row_pack_expands_byte_exact() {
 
 #[test]
 fn row_pack_expands_every_range_byte_exact_with_many_styles() {
-    // The style-table and running-offset encodings must be invisible:
-    // a row set with more distinct styles than any single entry uses in
-    // practice, long spans past the u16 range, repeated styles, empty
-    // rows, and empty spans, expanded over EVERY contiguous range.
+    // The style-table and running-offset encodings must be invisible: many distinct styles,
+    // long spans, repeated styles, empty rows, empty spans, over EVERY contiguous range.
     let styles: Vec<ratatui::style::Style> = (0..48u8)
         .map(|i| {
             let mut style = ratatui::style::Style::new();
@@ -116,10 +114,8 @@ fn cached_packed_rows_render_identical_to_a_fresh_layout() {
         aborted: false,
     })));
     let reference = v.render_frame(37, 24);
-    // a second render replays the packed cache: byte-identical rows.
     let replayed = v.render_frame(37, 24);
     assert_eq!(reference, replayed);
-    // a width change re-renders from scratch and matches the same bytes.
     let mut fresh = view();
     fresh.push_entry(ChatEntry::User {
         text: "hello wrapped text ".repeat(9),
@@ -232,7 +228,6 @@ fn cold_tail_detail_cycles_and_nearby_scroll_are_bounded_for_100k_entries() {
     ENTRY_RENDERS.with(|count| count.set(0));
     view.render_frame(80, 24);
     assert!(ENTRY_RENDERS.with(std::cell::Cell::get) < 30);
-    // Visited rows remain cached for scrolling back; unseen rows remain raw.
 }
 
 #[test]
@@ -297,17 +292,15 @@ fn paused_detail_toggle_revisits_only_the_window_for_100k_entries() {
     view.detail = Detail::All;
     view.render_frame(80, 24);
     // Zero off-window visits: the paused toggle re-renders the walked
-    // window under the new detail without measuring the transcript
-    // around it.
+    // window without measuring the transcript around it.
     assert!(ENTRY_VISITS.with(std::cell::Cell::get) < 40);
 }
 
 #[test]
 fn paused_detail_round_trip_restores_the_window_without_a_walk() {
     let mut view = view();
-    // The round trip starts from the collapsed overview level — the
-    // scenario pins its own start (the startup level is the middle
-    // details since TS #2447).
+    // The round trip starts from the collapsed overview level; the
+    // scenario pins its own start.
     view.detail = Detail::Overview;
     for index in 0..200 {
         view.push_entry(ChatEntry::Assistant(Box::new(AssistantMessage {
@@ -590,11 +583,8 @@ fn height_cache_tracks_mutations_and_spacing_in_all_details() {
 
 #[test]
 fn a_push_after_a_user_row_folds_at_its_own_slot() {
-    // [T x5, USER, tail rows...]: the window pauses with a selection
-    // on the tail rows, then one tool card lands after the user row.
-    // The append folds at the push's own tail slot and the selection
-    // keeps its content; the walk must not treat the new rows as
-    // inserted above the selection's content, or the copy jumps.
+    // [T x5, USER, tail rows...]: one tool card lands after the user row; the append folds at
+    // the push's own tail slot and the selection keeps its content.
     let card = |id: &str| {
         ChatEntry::Tool(Box::new(crate::chat::ToolCallCard {
             id: id.to_string(),
@@ -654,8 +644,7 @@ fn a_push_after_a_user_row_folds_at_its_own_slot() {
 #[test]
 fn an_orphan_result_keeps_its_own_row() {
     // Two real calls plus an unmatched wire result: the orphan keeps
-    // its standalone card row (it is not a call) in the collapsed
-    // view, exactly like every other activity item.
+    // its standalone card row in the collapsed view.
     let mut view = view();
     view.detail = Detail::Overview;
     for index in 0..2 {
@@ -694,11 +683,8 @@ fn an_orphan_result_keeps_its_own_row() {
 
 #[test]
 fn a_card_push_folds_at_the_pushed_slot() {
-    // [user, status rows..., T]: the window pauses with a selection on
-    // a card row, then one more card lands at the tail. The push owns
-    // its own slot exactly like a plain append - a walk that folds
-    // through an earlier entry would treat the new rows as inserted
-    // above the selection's content, so the copy would jump.
+    // [user, status rows..., T]: one more card lands at the tail; the push owns its own slot
+    // exactly like a plain append.
     let card = |id: &str| {
         ChatEntry::Tool(Box::new(crate::chat::ToolCallCard {
             id: id.to_string(),
@@ -746,7 +732,6 @@ fn a_card_push_folds_at_the_pushed_slot() {
     assert!(view.begin_selection(row, 0));
     view.extend_active_selection(row, 80);
     let expected = row_text(&frame, row).trim_end().to_string();
-    // The push: a second card lands at the tail.
     view.push_entry(card("a1"));
     view.render_frame(80, 12);
     view.render_frame(80, 12);
@@ -759,11 +744,8 @@ fn a_card_push_folds_at_the_pushed_slot() {
 
 #[test]
 fn a_card_growth_folds_at_its_own_slot() {
-    // [status rows..., T x2]: the window pauses with a selection on a
-    // card row, then the card MUTATES in place (its output grows).
-    // The mutation folds at the card's own slot exactly like every
-    // other self-contained mutation; a walk that folds through an
-    // earlier entry would make the copy jump.
+    // [status rows..., T x2]: the card MUTATES in place; the mutation folds at the card's own
+    // slot exactly like every other self-contained mutation.
     let card = |id: &str| {
         ChatEntry::Tool(Box::new(crate::chat::ToolCallCard {
             id: id.to_string(),
@@ -808,7 +790,6 @@ fn a_card_growth_folds_at_its_own_slot() {
     assert!(view.begin_selection(row, 0));
     view.extend_active_selection(row, 80);
     let expected = row_text(&frame, row).trim_end().to_string();
-    // The mutation: the LAST card's output grows.
     view.prepare_entry_mutation(31);
     if let ChatEntry::Tool(owned) = &mut view.chat[31] {
         owned.result = Some(crate::chat::ToolResultView {
@@ -832,10 +813,8 @@ fn a_card_growth_folds_at_its_own_slot() {
 
 #[test]
 fn a_card_pop_folds_at_the_popped_slot() {
-    // [status rows..., T x2]: the window pauses with a selection on a
-    // card row, then the LAST card pops (the retry-episode collapse).
-    // The shrink folds at the popped card's own slot - a walk that
-    // folds through an earlier entry would make the copy jump.
+    // [status rows..., T x2]: the LAST card pops (the retry-episode collapse); the shrink
+    // folds at the popped card's own slot.
     let card = |id: &str| {
         ChatEntry::Tool(Box::new(crate::chat::ToolCallCard {
             id: id.to_string(),
@@ -897,12 +876,8 @@ fn a_card_pop_folds_at_the_popped_slot() {
 
 #[test]
 fn a_replayed_result_into_a_pending_card_folds_its_row_delta() {
-    // [status rows..., T x2 (a pair of QUEUED cards)]: the window
-    // pauses with a selection on a card row, then the result REPLAYS
-    // into the pending card - the card's rows grow when the result
-    // lands. The replay prepares the sparse fold (exactly like the
-    // live settle path), so the tail-anchored window keeps its
-    // geometry and the selection stays on the card's rows.
+    // [status rows..., T x2 (a pair of QUEUED cards)]: the result REPLAYS into the pending card,
+    // preparing the sparse fold exactly like the live settle path.
     let queued_card = |id: &str| {
         ChatEntry::Tool(Box::new(crate::chat::ToolCallCard {
             id: id.to_string(),
@@ -934,7 +909,6 @@ fn a_replayed_result_into_a_pending_card_folds_its_row_delta() {
         .unwrap();
     assert!(view.begin_selection(row, 0));
     view.extend_active_selection(row, 80);
-    // The replay: the result lands on the pending card.
     view.push(crate::session::TranscriptItem::ToolResult {
         tool_call_id: "b1".to_string(),
         tool_name: "bash".to_string(),
@@ -954,11 +928,8 @@ fn a_replayed_result_into_a_pending_card_folds_its_row_delta() {
 
 #[test]
 fn a_background_shell_card_stays_uncached() {
-    // An ipython cell whose final result carries a still-running
-    // background shell keeps its card LIVE: the summary line renders the
-    // working icon (CardStatus::Running while the shell has no exit
-    // code), so the rows re-render on every pulse frame instead of
-    // caching the first paint.
+    // An ipython cell whose final result carries a still-running background shell keeps its
+    // card LIVE (the summary line renders the working icon).
     let card = |id: &str, shell: bool| {
         ChatEntry::Tool(Box::new(crate::chat::ToolCallCard {
             id: id.to_string(),
@@ -1006,12 +977,8 @@ fn a_background_shell_card_stays_uncached() {
 
 #[test]
 fn an_assistant_growth_folds_at_its_own_slot() {
-    // [T x5, ASSISTANT(text), tail rows...]: the window pauses with a
-    // selection on the tail rows, then the assistant STREAMS (a block
-    // grows). The growth folds at the assistant's own slot, exactly
-    // like every other self-contained mutation; a fold through an
-    // earlier entry would treat the streamed rows as inserted above
-    // the selection's content, so the copy would jump mid-answer.
+    // [T x5, ASSISTANT(text), tail rows...]: the assistant STREAMS (a block grows); the growth
+    // folds at the assistant's own slot, exactly like every other self-contained mutation.
     let card = |id: &str| {
         ChatEntry::Tool(Box::new(crate::chat::ToolCallCard {
             id: id.to_string(),
@@ -1065,7 +1032,6 @@ fn an_assistant_growth_folds_at_its_own_slot() {
     assert!(view.begin_selection(row, 0));
     view.extend_active_selection(row, 80);
     let expected = row_text(&frame, row).trim_end().to_string();
-    // The streaming grow: the answer gains a block.
     view.prepare_entry_mutation(5);
     if let ChatEntry::Assistant(message) = &mut view.chat[5] {
         message

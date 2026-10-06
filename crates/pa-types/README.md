@@ -36,7 +36,6 @@ Daemon wire mechanics shared by the serving side (pa-daemon) and clients (pa-tui
   into CSS variables). Everything built on top of the files — terminal
   color rendering, export CSS generation, custom-theme discovery — belongs
   to the consuming crates.
-- `extension_rpc`: the private, versioned NDJSON-over-stdio protocol between the pa-core extension host and the Node sidecar (handshake, RPC envelopes, registration payloads, `ExtensionError`). Both ends ship in the same release, so these types are strict (no catch-alls).
 
 - `daemon::cloud`: the cloud session wire vocabulary (TS `protocol.ts`,
   protocol v3, `origin/feat/direct-cloud-sandbox @ 193d42bf`): the frame

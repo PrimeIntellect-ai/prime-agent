@@ -116,19 +116,64 @@ pub enum CloudAgentMessageDeliveryStatus {
     Queued,
 }
 
-/// The validated receipt payload inside an `agent_message_result` (TS
-/// validates a receipt as a canonical-JSON object of at most
-/// [`CLOUD_MAX_RECEIPT_RESULT_CHARS`] bytes; `id` and `deliveryStatus` are
-/// the fields the local deliverer checks). Remaining receipt fields
-/// (`source`, `target`, `from`, `message`, `deliveredAt`/`queuedAt`,
-/// `deliveryMode`, `receiverRole`) round-trip untouched through `rest`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// The receipt payload inside an `agent_message_result`, kept exactly as
+/// wide as the wire: TS `cloudRequestProblem` accepts any canonical-JSON
+/// object of at most [`CLOUD_MAX_RECEIPT_RESULT_CHARS`] bytes — the empty
+/// object is protocol-valid (pinned by the TS-recorded corpus case
+/// `agent_message_result_ok_empty_receipt`) — so the typed form
+/// deserializes every JSON object and never rejects a protocol-valid
+/// receipt. `id` and `deliveryStatus` are extracted when present and
+/// well-formed; the local deliverer sets both on every real receipt (TS
+/// `AgentSessionMessageReceipt`). Everything else — including mistyped
+/// spellings of those two fields — round-trips verbatim through `rest`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudAgentMessageReceipt {
-    pub id: String,
-    pub delivery_status: CloudAgentMessageDeliveryStatus,
-    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty", flatten)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery_status: Option<CloudAgentMessageDeliveryStatus>,
+    #[serde(skip_serializing_if = "serde_json::Map::is_empty", flatten)]
     pub rest: JsonMap,
+}
+
+impl<'de> Deserialize<'de> for CloudAgentMessageReceipt {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // Any JSON object is in the wire domain (the validator rejects
+        // non-objects with the TS problem string); the deliverer's fields
+        // are extracted only when present and well-formed.
+        let mut rest = JsonMap::deserialize(deserializer)?;
+        let id = match rest.get("id") {
+            Some(serde_json::Value::String(id)) => {
+                let id = id.clone();
+                rest.remove("id");
+                Some(id)
+            }
+            _ => None,
+        };
+        let delivery_status = match rest.get("deliveryStatus") {
+            Some(serde_json::Value::String(status)) => match status.as_str() {
+                "delivered" => {
+                    rest.remove("deliveryStatus");
+                    Some(CloudAgentMessageDeliveryStatus::Delivered)
+                }
+                "queued" => {
+                    rest.remove("deliveryStatus");
+                    Some(CloudAgentMessageDeliveryStatus::Queued)
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        Ok(Self {
+            id,
+            delivery_status,
+            rest,
+        })
+    }
 }
 
 impl CloudAgentMessageReceipt {

@@ -1,10 +1,6 @@
-//! `get_session_stats` over the worker session store: port of
-//! `AgentSession.getSessionStats` / `getContextUsage` (TS
-//! `core/agent-session.ts`, shapes from `core/session-stats.ts`) and the
-//! `estimateContextTokens` / `estimateTokens` heuristics from
-//! the same code serves scripted and real engine sessions. The token-estimate
-//! helpers live in `pa_types::usage` (shared with pa-core's `compact.status`
-//! host request).
+//! `get_session_stats` over the worker session store, serving scripted and
+//! real engine sessions. The token-estimate helpers live in
+//! `pa_types::usage` (shared with pa-core's `compact.status` host request).
 
 use serde_json::{json, Value};
 
@@ -14,24 +10,11 @@ use crate::session_store::{SessionEntry, SessionFile};
 
 /// Compute the `get_session_stats` response data for one session file.
 /// `context_window` is the engine model's context window; `None` (or zero)
-/// omits `contextUsage`, matching TS sessions without a model.
+/// omits `contextUsage`.
 ///
-/// TS `getSessionStats` sums `state.messages` — the in-memory
-/// conversation, which after a compaction holds only what the latest
-/// compaction kept (the session reloads at the boundary, so the
-/// pre-boundary ancestry is gone from the active transcript; the
-/// saved-list rows and the `/context` totals stay whole-file cumulative
-/// on their own walks). TS `buildSessionContext` walks the leaf-to-root
-/// PATH only, so the token/cost totals walk the ACTIVE BRANCH
-/// (gap-bridged: a ghost-parent gap — one lost append — never drops
-/// spend the session really logged) from the latest compaction's
-/// `firstKeptEntryId` onward: a `branch_to` that moved away from a fork
-/// leaves the abandoned sibling rows OUT of the rebuilt in-memory list,
-/// and a compaction sitting on that abandoned branch never bounds the
-/// active one. The summarizer's own usage rides the `compaction` entry,
-/// never a message, so it stays out of the active totals. `contextUsage`
-/// keeps the strict branch — the context estimate mirrors what the
-/// model actually sees.
+/// The token/cost totals walk the ACTIVE BRANCH (gap-bridged) from the
+/// latest compaction's `firstKeptEntryId` onward; the summarizer's own
+/// usage rides the `compaction` entry. `contextUsage` keeps the strict branch.
 pub fn session_stats(store: &SessionFile, context_window: Option<u64>) -> Value {
     let branch = store.branch();
     let messages: Vec<&Value> = branch
@@ -83,15 +66,9 @@ pub fn session_stats(store: &SessionFile, context_window: Option<u64>) -> Value 
             _ => {}
         }
     }
-    // A windowed store never loads the discarded prefix, but without a
-    // compaction boundary the kept region covers the whole chain: TS
-    // `getSessionStats` sums `state.messages`, which still holds those
-    // rows — the window is a load optimization, not a session state, so
-    // the active totals must equal the full store's walk. The window
-    // walk's older-path stats carry exactly the discarded prefix's
-    // on-chain spend (attribution-folded). With a boundary, the retained
-    // region IS the kept region: the discarded prefix is pre-cut
-    // ancestry TS drops, and nothing is added.
+    // The window is a load optimization, not a session state: without a
+    // compaction boundary the kept region covers the whole chain, and with
+    // a boundary the retained region IS the kept region.
     let mut older_total_messages = 0u64;
     if boundary.is_none() {
         if let Some(window) = &store.window {
@@ -109,7 +86,6 @@ pub fn session_stats(store: &SessionFile, context_window: Option<u64>) -> Value 
         }
     }
     let total_messages = durable_messages.len() as u64 + older_total_messages;
-    let costs = session_cost_split(store);
     let mut stats = json!({
         "sessionFile": store.path.display().to_string(),
         "sessionId": store.session_id(),
@@ -126,11 +102,6 @@ pub fn session_stats(store: &SessionFile, context_window: Option<u64>) -> Value 
             "total": input + output + cache_read + cache_write,
         },
         "cost": cost,
-        "totalCost": costs.total,
-        // The split behind the title's own + subagent aggregate pair:
-        // the two halves sum to `totalCost`.
-        "ownCost": costs.own,
-        "subagentsCost": costs.subagents,
     });
     if let Some(usage) = context_usage(&branch, &messages, context_window) {
         stats["contextUsage"] = usage;
@@ -138,97 +109,15 @@ pub fn session_stats(store: &SessionFile, context_window: Option<u64>) -> Value 
     stats
 }
 
-/// The whole-session spend split into the session's own bill and its
-/// descendant subagents' aggregate (the top bar's ask: the title shows
-/// `"$own + $subagents (subagents)"`, both labeled — the agents view's
-/// collapsed-row aggregate is the same rule over its forest records).
-/// `total` is the pre-split `totalCost` fold: the `/context` root
-/// `totalUsage`'s fold over the gap-bridged branch — cumulative across
-/// compactions, priced per record (model switches and cache classes
-/// correct by construction) — plus a windowed store's discarded-prefix
-/// cost, so the two halves sum to what the title showed before the
-/// split. Attributed child spend rides the parent's assistant rows (the
-/// child-usage attribution fold lands descendant costs there, including
-/// a deleted child's spend attributed before its deletion), so the walk
-/// already carries every subagent's bill; `subagents` is the attributed
-/// half — the retained region's own/total attribution gap plus the
-/// discarded prefix's captured child batches.
-struct SessionCostSplit {
-    own: f64,
-    subagents: f64,
-    total: f64,
-}
-
-fn session_cost_split(store: &SessionFile) -> SessionCostSplit {
-    let branch = store.branch_bridged();
-    let all_entries = store.entries();
-    let (own_usage, total_usage) =
-        crate::state_getters::compute_own_and_total_usage(&branch, all_entries);
-    let usage_cost = |usage: &Value| {
-        usage
-            .get("cost")
-            .and_then(|cost| cost.get("total"))
-            .and_then(Value::as_f64)
-            .unwrap_or_default()
-    };
-    let retained_own = usage_cost(&own_usage);
-    let retained_total = usage_cost(&total_usage);
-    // The retained region's subagent spend is the attribution gap (the
-    // own fold clamps at zero, so the difference is never negative).
-    let retained_subagents = retained_total - retained_own;
-    // The discarded prefix: its folded assistant rows plus the
-    // `compaction` / `branch_summary` spend — the in-window walk bills
-    // the retained region's summarizer rows, and the prefix's must
-    // land here or the full-session total undercounts (the
-    // summarizer's usage rides the entry, never a message — the
-    // window stats' message fold alone misses them). The prefix's
-    // captured child batches are the subagent half of the same folded
-    // rows.
-    let (prefix, prefix_subagents) = match store.window.as_ref() {
-        Some(window) => {
-            let stats = &window.older_path_stats;
-            (
-                stats.cost + stats.summarization_cost,
-                stats.attributed_child_cost,
-            )
-        }
-        None => (0.0, 0.0),
-    };
-    // The prefix's own half clamps at zero: attribution drift (or a
-    // malformed batch) can push the child sums past the rows the walk
-    // counted, and the full reader's own fold clamps per field the
-    // same way — `ownCost` never goes negative, the aggregate never
-    // exceeds the counted bill, and the pair still sums to `totalCost`.
-    let prefix_subagents = prefix_subagents.min(prefix);
-    SessionCostSplit {
-        own: retained_own + (prefix - prefix_subagents),
-        subagents: retained_subagents + prefix_subagents,
-        total: retained_total + prefix,
-    }
-}
-
-/// The messages TS `state.messages` holds after the latest compaction:
-/// TS `buildSessionContext` walks the leaf-to-root PATH (the active
-/// branch only) and keeps the messages from the latest compaction's
-/// `firstKeptEntryId` onward — a sibling branch written after the
-/// boundary (a `branch_to` moved away from it) is NOT in the rebuilt
-/// in-memory list. The walk therefore follows the active branch,
-/// gap-bridged (a lost append must not drop spend the session really
-/// logged — the accounting bridge), restricted to the kept region; a
-/// compaction sitting off the active branch (one written on the branch
-/// that was moved away from) never bounds the active list, exactly like
-/// the TS path walk that only sees its own ancestry's compaction.
-/// Returns the kept-region messages and the boundary position (`None`
-/// without a chain compaction — the whole chain is kept).
+/// The messages after the latest ON-CHAIN compaction: the active branch,
+/// gap-bridged, restricted to the kept region (an off-chain compaction never
+/// bounds it). Returns the messages and the boundary position (`None` = all kept).
 fn kept_region_messages(store: &SessionFile) -> (Vec<&Value>, Option<usize>) {
     let entries = store.entries();
     let chain = store.branch_bridged_positions();
-    // The latest compaction ON THE CHAIN bounds the kept region (TS
-    // `buildSessionContext` records the last compaction along its path);
-    // its `firstKeptEntryId` names the first row the post-compaction
-    // reload keeps. A torn write that lost the boundary row falls back to
-    // the compaction entry itself: the rows after it are the
-    // post-compaction transcript.
+    // The latest compaction ON THE CHAIN bounds the kept region; its
+    // `firstKeptEntryId` names the first row the post-compaction reload keeps.
+    // A torn write that lost the boundary row falls back to the compaction entry.
     let boundary = chain
         .iter()
         .rev()
@@ -282,10 +171,9 @@ fn tool_call_count(message: &Value) -> u64 {
         .unwrap_or_default()
 }
 
-/// Estimated context usage (TS `getContextUsage`): the last valid assistant
-/// usage plus trailing message estimates, `null` tokens right after a
-/// compaction without a usable post-compaction usage. `None` when the
-/// context window is unknown.
+/// Estimated context usage: the last valid assistant usage plus trailing
+/// message estimates; `null` tokens right after a compaction without a usable
+/// post-compaction usage; `None` when the context window is unknown.
 fn context_usage(
     branch: &[&SessionEntry],
     messages: &[&Value],
@@ -293,13 +181,11 @@ fn context_usage(
 ) -> Option<Value> {
     let context_window = context_window.filter(|window| *window > 0)?;
 
-    // The latest compaction entry on the branch, if any (TS
-    // `getLatestCompactionEntry`).
+    // The latest compaction entry on the branch, if any (TS `getLatestCompactionEntry`).
     let compaction_index = branch.iter().rposition(|entry| entry.type_ == "compaction");
     if let Some(compaction_index) = compaction_index {
         // Only usage from an assistant that responded after the compaction
-        // boundary is trustworthy: earlier usage reflects the pre-compaction
-        // context size.
+        // boundary is trustworthy (earlier usage reflects the old context size).
         let post_compaction_usage = branch
             .iter()
             .rev()
@@ -347,9 +233,6 @@ fn context_usage(
     }))
 }
 
-/// `totalTokens` when present, else the four-field sum (TS
-/// `calculateContextTokens` over the raw usage object).
-// The unit battery lives in the child module (session_stats::tests); its
-// use-super glob resolves through this facade's bindings and re-exports.
+/// `totalTokens` when present, else the four-field sum.
 #[cfg(test)]
 mod tests;

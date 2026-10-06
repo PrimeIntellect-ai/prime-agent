@@ -169,7 +169,7 @@ impl CloudFamilyResponder {
                             request_id: request_id.clone(),
                             ok: false,
                             receipt: None,
-                            error: Some(truncate_utf16(error, 2000)),
+                            error: Some(truncate_utf16(&error, 2000)),
                         },
                     },
                 }
@@ -249,7 +249,7 @@ impl CloudFamilyResponder {
 
 /// TS `message.slice(0, 2000)`: truncate at a UTF-16 unit boundary so the
 /// answer error never exceeds the TS slice, whatever the error's content.
-fn truncate_utf16(text: String, units: usize) -> String {
+fn truncate_utf16(text: &str, units: usize) -> String {
     let mut result = String::new();
     let mut count = 0usize;
     for character in text.chars() {

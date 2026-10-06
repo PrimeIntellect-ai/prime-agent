@@ -30,8 +30,7 @@ fn defaults_match_ts() {
 fn user_rebind_supersedes_scope_default() {
     let kb = KeybindingsManager::with_user_bindings(cfg(&[("app.tools.expand", &["ctrl+e"])]));
     assert!(kb.matches("ctrl+e", "app.tools.expand"));
-    // ctrl+e is also editor cursorLineEnd default in the same scope:
-    // claimed => removed there.
+    // ctrl+e is also editor cursorLineEnd default in the same scope: claimed => removed there.
     assert!(!kb.matches("ctrl+e", "tui.editor.cursorLineEnd"));
     assert!(kb.matches("end", "tui.editor.cursorLineEnd"));
 }
@@ -80,9 +79,9 @@ fn reports_direct_user_binding_conflicts() {
         ("tui.input.submit", &["ctrl+x"]),
         ("tui.select.confirm", &["ctrl+x"]),
     ]));
-    // TS preserves the config's insertion order; the Rust config store
-    // is a BTreeMap, so the claimants list is deterministic by binding
-    // id ("tui.input.submit" sorts first, the TS config order too).
+    // TS preserves the config's insertion order; the Rust config store is a BTreeMap, so
+    // the claimants list is deterministic by binding id ("tui.input.submit" sorts first,
+    // the TS config order too).
     assert_eq!(
         kb.get_conflicts(),
         &[KeybindingConflict {
@@ -163,10 +162,9 @@ fn unknown_user_ids_stay_but_never_resolve() {
     );
 }
 
-/// The prompt-editor-keybinds additions (documented divergence from
-/// the TS table): redo, the selection families, the doc/paragraph
-/// jumps, cut/copy, and transpose resolve with their defaults, and a
-/// user override replaces them like any other binding.
+/// The prompt-editor-keybinds additions (documented divergence from the TS table): redo,
+/// the selection families, the doc/paragraph jumps, cut/copy, and transpose resolve with
+/// their defaults, and a user override replaces them like any other binding.
 #[test]
 fn editor_keybind_parity_defaults_resolve() {
     let kb = KeybindingsManager::new();
@@ -176,9 +174,8 @@ fn editor_keybind_parity_defaults_resolve() {
     assert!(kb.matches("shift+alt+right", "tui.editor.selectWordRight"));
     assert!(kb.matches("shift+end", "tui.editor.selectLineEnd"));
     assert!(kb.matches("shift+alt+down", "tui.editor.selectParagraphDown"));
-    // `shift+ctrl+down` is the viewport-follow key: it must not also
-    // claim the editor's paragraph-select (the session dispatch owns
-    // it first, so binding both would make the editor default dead).
+    // `shift+ctrl+down` is the viewport-follow key: it must not also claim the editor's
+    // paragraph-select (binding both would make the editor default dead).
     assert!(!kb.matches("shift+ctrl+down", "tui.editor.selectParagraphDown"));
     assert!(kb.matches("ctrl+t", "tui.editor.transposeChars"));
     assert!(kb.matches("ctrl+x", "tui.editor.cutSelection"));
@@ -193,10 +190,8 @@ fn editor_keybind_parity_defaults_resolve() {
     assert!(!rebound.matches("ctrl+shift+z", "tui.editor.redo"));
 }
 
-/// The list-edge jump defaults (the operator's top/bottom
-/// navigation): home/end and their ctrl/super variants select the
-/// first/last row. The agents view handles them; home/end stay line
-/// motion for every editor-scope consumer.
+/// The list-edge jump defaults (the operator's top/bottom navigation): home/end and their
+/// ctrl/super variants select the first/last row.
 #[test]
 fn list_edge_jump_defaults_resolve() {
     let kb = KeybindingsManager::new();
@@ -216,11 +211,9 @@ fn list_edge_jump_defaults_resolve() {
     assert!(kb.matches("end", "tui.editor.cursorLineEnd"));
 }
 
-/// The heartbeats shortcut is gone (the operator's 2026-09-24
-/// directive: "Remove the shortcut of ctrl+r for heartbeats btw"):
-/// ctrl+r binds nothing by default (the /heartbeats command and the
-/// activity dock's heartbeats group own the open paths), and the
-/// rebind-freeing test no longer keeps an app-scope claim for it.
+/// The heartbeats shortcut is gone (the operator's 2026-09-24 directive: "Remove the shortcut of
+/// ctrl+r for heartbeats btw"): ctrl+r binds nothing by default (the /heartbeats command and the
+/// activity dock's heartbeats group own the open paths).
 #[test]
 fn ctrl_r_is_unbound_by_default() {
     let kb = KeybindingsManager::new();
@@ -416,8 +409,8 @@ fn startup_migration_skips_missing_file() {
 
 #[test]
 fn editor_claims_free_app_defaults_in_editor_scope() {
-    // TS keybindings-migration.test: explicit editor bindings win over
-    // same-scope application defaults.
+    // TS keybindings-migration.test: explicit editor bindings win over same-scope
+    // application defaults.
     let kb = KeybindingsManager::with_user_bindings(cfg(&[
         ("tui.editor.cursorUp", &["up", "ctrl+o"]),
         ("tui.editor.cursorDown", &["down", "ctrl+n"]),
@@ -455,8 +448,8 @@ fn formats_key_text() {
 
 #[test]
 fn formats_alt_label_per_platform() {
-    // TS formatKeyPart: darwin renders `alt` as `Option` (the macOS
-    // keyboard row), every other platform keeps `Alt`.
+    // TS formatKeyPart: darwin renders `alt` as `Option` (the macOS keyboard
+    // row), every other platform keeps `Alt`.
     assert_eq!(
         format_key_text_on("alt+b", LabelPlatform::Macos),
         "Option+B"
@@ -466,8 +459,8 @@ fn formats_alt_label_per_platform() {
         format_key_text_on("shift+alt+left", LabelPlatform::Macos),
         "Shift+Option+\u{2190}"
     );
-    // Multiple bindings split by `/` keep their platform label per part,
-    // and control is never relabeled as Cmd.
+    // Multiple bindings split by `/` keep their platform label per part, and control
+    // is never relabeled as Cmd.
     assert_eq!(
         format_key_text_on("alt+o/ctrl+o", LabelPlatform::Macos),
         "Option+O/Ctrl+O"

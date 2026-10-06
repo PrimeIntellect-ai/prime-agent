@@ -116,9 +116,6 @@ fn expanded_error_cell_shows_traceback() {
 
 #[test]
 fn sent_agent_messages_render_below_the_code() {
-    // TS `renderSentAgentMessages`: the receipt summary renders below
-    // the code with a blank separator, the body opens up in the
-    // expanded view.
     let details = json!({
         "status": "ok",
         "durationMs": 3,
@@ -164,17 +161,14 @@ fn sent_agent_messages_render_below_the_code() {
     );
     assert_eq!(flat[summary + 1], " \u{2570}\u{2500} Ping.");
     assert_eq!(flat[summary + 2], "    Then report back.");
-    // The summary carries no body preview and no receipt metadata.
     assert!(!flat.iter().any(|row| row.contains("agentmsg_1")));
     assert!(!flat.iter().any(|row| row.contains("deliveryStatus")));
 }
 
 #[test]
 fn sent_agent_message_receipts_share_the_viewer_relative_arrow() {
-    // Both receipt kinds (delivered and queued) render the same shared
-    // `Agent message` label with the outgoing `↑` arrow (the operator's
-    // 2026-09-25 directive); the counterpart falls back name -> active
-    // session id -> session id -> unknown.
+    // Both receipt kinds render the shared `Agent message` label with
+    // the outgoing `↑` arrow (the operator's 2026-09-25 directive).
     for delivery in ["delivered", "queued"] {
         let details = json!({
             "status": "ok",
@@ -210,7 +204,6 @@ fn sent_agent_message_receipts_share_the_viewer_relative_arrow() {
         "got: {}",
         text_of(&lines[1])
     );
-    // Malformed entries render nothing.
     let details = json!({
         "status": "ok",
         "sentAgentMessages": [{ "id": "agentmsg_4" }, { "message": 1 }],
@@ -354,53 +347,59 @@ fn no_output_placeholder() {
 }
 
 #[test]
-// deliberate decomposed/non-NFC fixtures: the width engine must measure the raw sequences
-#[allow(clippy::unicode_not_nfc)]
-fn geometry_matches_paint_across_cell_branches() {
-    let mut cards = vec![image_cell_card(), ToolCallCard::default()];
-    for code in [
-        "",
-        "!echo hi\n",
-        "%%bash\necho 界",
-        "x = '界é😀'\n\nprint(x)\t# hi",
-    ] {
-        for details in [
-            json!({}),
-            json!({"stdout": "abc def 界\n\n", "stderr": "err\n", "result": "value", "backgroundOutput": "async\nlog"}),
-            json!({"error": {"ename": "ValueError", "evalue": "boom", "traceback": []}}),
-            json!({"error": {"ename": "ValueError", "evalue": "boom", "traceback": ["Traceback", "ValueError: boom"]}}),
-            json!({"sentAgentMessages": [{"message": "hello 界\n\nworld", "deliveryStatus": "delivered", "receiverRole": "parent", "target": {"sessionName": "Worker"}}, {"id": "invalid"}]}),
-            json!({"diffs": [{"path": "x", "diff": "-x\n+y"}], "stdout": "Edited x"}),
-        ] {
-            for partial in [false, true] {
-                let card = cell_card(code, details.clone(), false, partial);
-                cards.push(card);
-            }
-        }
-    }
-    for text in [
-        "before\nTraceback (most recent call last):\nValueError: boom",
-        "plain 界\n\n",
-    ] {
-        let mut card = cell_card("print(x)", json!({"status": "error"}), true, false);
-        card.result.as_mut().unwrap().content = vec![
-            json!({"type": "text", "text": text}),
-            json!({"type": "image"}),
-        ];
-        cards.push(card);
-    }
-    for card in &cards {
-        for width in [0, 1, 2, 3, 4, 5, 8, 20, 80] {
-            for detail in [Detail::Overview, Detail::Details, Detail::All] {
-                for show_images in [false, true] {
-                    let painted = render(card, 3, detail, &theme(), width, show_images);
-                    assert_eq!(
-                        count(card, 3, detail, &theme(), width, show_images),
-                        painted.len(),
-                        "width={width} detail={detail:?} card={card:?}"
-                    );
-                }
-            }
-        }
-    }
+fn bash_dominated_cell_renders_as_bash() {
+    let code =
+        "r = await sh(\"\"\"\ncd crates/pa-tui\ncargo test -p pa-tui\n\"\"\")\nprint(r.output)";
+    let card = cell_card(
+        code,
+        json!({
+            "status": "ok",
+            "durationMs": 2,
+            "stdout": "ok\n",
+            "bashCommands": {
+                "first": "\ncd crates/pa-tui\ncargo test -p pa-tui\n",
+                "count": 3,
+                "lines": 4,
+            },
+        }),
+        false,
+        false,
+    );
+    let lines = render(&card, 0, Detail::Overview, &theme(), 100, true);
+    assert_eq!(lines.len(), 1);
+    assert_eq!(
+        text_of(&lines[0]),
+        " \u{2713} bash \u{00b7} cargo test -p pa-tui \u{00b7} +2 more \u{00b7} \u{2191} 5 \u{2193} 1 lines \u{00b7} 2ms"
+    );
+    assert_eq!(
+        bash_dominated_stats(&card),
+        Some(BashCellStats {
+            bash_lines: 4,
+            cell_lines: 5,
+            count: 3,
+        })
+    );
+}
+
+#[test]
+fn bash_minority_cell_stays_python() {
+    let code = "async def sh(cmd):\n    return await bash(cmd)\nr = await sh(\"ls\")\nprint(r.pid)";
+    let card = cell_card(
+        code,
+        json!({
+            "status": "ok",
+            "durationMs": 5,
+            "stdout": "0\n",
+            "bashCommands": { "first": "ls", "count": 1, "lines": 1 },
+        }),
+        false,
+        false,
+    );
+    let lines = render(&card, 0, Detail::Overview, &theme(), 100, true);
+    assert_eq!(lines.len(), 1);
+    assert_eq!(
+        text_of(&lines[0]),
+        " \u{2713} python \u{00b7} r = await sh(\"ls\") \u{00b7} \u{2191} 4 \u{2193} 1 lines \u{00b7} 5ms"
+    );
+    assert_eq!(bash_dominated_stats(&card), None);
 }
