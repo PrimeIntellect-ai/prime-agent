@@ -168,24 +168,6 @@ pub async fn bind_transport(path: &Path) -> Result<Box<dyn TransportListener>> {
     Ok(Box::new(listener))
 }
 
-/// Bind a TCP listening endpoint at `address` (the tailnet mesh listener).
-///
-/// The caller resolves and validates the bind host first (the daemon's
-/// TCP arm resolves flag > env > settings > the machine's Tailscale
-/// address and refuses wildcard defaults), so this bind never widens past
-/// what the resolution policy allowed.
-///
-/// # Errors
-///
-/// Returns an error when binding the listener fails (a busy port, an
-/// unusable interface, missing permissions).
-pub async fn bind_tcp_transport(
-    address: std::net::SocketAddr,
-) -> Result<Box<dyn TransportListener>> {
-    let listener = tokio::net::TcpListener::bind(address).await?;
-    Ok(Box::new(listener))
-}
-
 /// Connect to the endpoint at `path` asynchronously.
 ///
 /// # Errors
