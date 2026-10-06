@@ -1,12 +1,7 @@
 //! Bundled snapshot loading: the second step of the no-cold-start chain.
-//!
-//! Ported from `bundled-model-catalog.ts`: the packaged assets
-//! (`models.bundled.json` + `mcp-services.bundled.json`) are generated at
-//! build time and shipped beside the executable (a damaged installation
-//! still offers the compiled model definitions). The models asset is parsed
-//! with the strict schema, pinned to compiled transports, and joined with
-//! the compiled offline Prime Inference entries so onboarding works before
-//! the first credentialed fetch.
+//! The packaged assets ship beside the executable; the models asset joins
+//! the compiled offline Prime Inference entries (onboarding works before
+//! the first credentialed fetch).
 
 use std::path::{Path, PathBuf};
 
@@ -16,13 +11,11 @@ use crate::schema::{parse_model_catalog, InvalidEntries};
 use crate::transports;
 use crate::Model;
 
-/// The packaged models asset file name.
 pub const PACKAGED_MODEL_CATALOG_FILE: &str = "models.bundled.json";
 
 /// The packaged MCP services asset file name (parsed by the plugins lane).
 pub const PACKAGED_MCP_CATALOG_FILE: &str = "mcp-services.bundled.json";
 
-/// Location of the bundled catalog assets.
 #[derive(Debug, Clone)]
 pub struct BundledAssets {
     dir: PathBuf,
@@ -58,7 +51,6 @@ impl BundledAssets {
         Self { dir: dir.into() }
     }
 
-    /// The directory the assets are read from.
     #[must_use]
     pub fn dir(&self) -> &Path {
         &self.dir
@@ -79,8 +71,7 @@ impl BundledAssets {
 }
 
 /// Load + pin the bundled models snapshot. `None` (missing/damaged asset)
-/// falls back to the compiled model definitions; the same shape TS
-/// `loadBundledModels` catches for.
+/// falls back to the compiled model definitions.
 #[must_use]
 pub fn load_bundled_models(asset: &str, templates: &PinnedTemplates) -> Option<Vec<Model>> {
     let payload: serde_json::Value = serde_json::from_str(asset).ok()?;

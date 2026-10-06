@@ -1,16 +1,7 @@
-//! System-prompt assembly for the RLM harness. The prompt is layered:
-//!
-//! - the **cached static prefix** is the composition of the human-editable
-//!   layer files ([`layers`]): core harness description, mandatory usage,
-//!   opinionated guidelines, and the per-model map. It never varies per
-//!   session, so providers can cache it.
-//! - the **dynamic tail** carries everything session-specific (packages,
-//!   project context, skills inventory, MCP servers, environment, role) and
-//!   is appended after the static prefix, in that order.
-//!
-//! `system_prompt_breakdown` exposes the per-layer segments so the CLI can
-//! dump exactly what the model sees; the cache-safety and tool-surface guard
-//! tests pin the boundary and the documented API surface.
+//! System-prompt assembly: a **cached static prefix** of the human-editable
+//! layer files ([`layers`]) that never varies per session (providers can
+//! cache it), then a **dynamic tail** with everything session-specific, in
+//! that order.
 
 pub mod layers;
 

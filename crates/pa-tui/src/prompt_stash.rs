@@ -1,46 +1,34 @@
-//! Client-owned prompt stash store (TS `prompt-stash-state.ts`): the
-//! per-session editor-draft stash one TUI process shares across its chat
-//! views.
-//!
-//! A draft left behind on a session switch belongs to the session it was
-//! typed in. The store keeps it (the marker text plus the pasted images its
-//! markers reference) keyed by the session's stable id; a chat that opens
-//! that session again finds it and puts it back into the editor. A session
-//! that already holds an unrestored draft keeps it queued behind the new
-//! head, so a chain of switches never drops an older draft.
+//! Client-owned prompt stash store: the per-session editor-draft stash one TUI process shares
+//! across its chat views. A draft left on a session switch belongs to the session it was typed in —
+//! the store keeps it keyed by the session's stable id, and a chat that reopens the session puts it
+//! back, queuing a new head in front of an unrestored draft so a chain of switches never drops an
+//! older draft.
 
 use std::collections::HashMap;
 
 use crate::editor::EditorPasteSnapshot;
 use crate::image_load::LoadedImage;
 
-/// One stashed editor draft: the marker text plus the collapsed-paste and
-/// image registries its markers reference (TS `PromptStash`).
+/// One stashed editor draft: the marker text plus the collapsed-paste and image registries its
+/// markers reference.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PromptStash {
-    /// The editor text, `[paste #N ...]` and `[image #N]` markers
-    /// included.
     pub text: String,
-    /// The collapsed pastes the text's markers reference (TS
-    /// `pasteSnapshot`, captured by `snapshotPromptStashFrom`): without
-    /// it a restored draft's paste markers would stay literal instead of
-    /// expanding on submit.
+    /// The collapsed pastes the text's markers reference: without it a restored
+    /// draft's paste markers would stay literal instead of expanding on submit.
     pub paste_snapshot: Option<EditorPasteSnapshot>,
     /// The referenced images, in marker order, keyed by marker id.
     pub images: Vec<(u64, LoadedImage)>,
-    /// The auto-stash of a session switch: restored into the editor the
-    /// next time the session's chat opens (TS `restoreOnOpen`).
+    /// The auto-stash of a session switch: restored into the editor the next
+    /// time the session's chat opens.
     pub restore_on_open: bool,
 }
 
-/// One session's stash state (TS `PromptStashState`): the head draft plus
-/// the drafts queued behind it. Only the head can be restored on open; a
-/// restore pops it and promotes the queue's next draft to the head.
+/// One session's stash state: the head draft plus the drafts queued behind it. Only the head
+/// restores on open; a restore pops it and promotes the queue's next draft to the head.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct PromptStashState {
-    /// The restore candidate (TS `stash`).
     pub stash: Option<PromptStash>,
-    /// The older drafts queued behind the head (TS `queuedStashes`).
     pub queued_stashes: Vec<PromptStash>,
 }
 
@@ -50,9 +38,8 @@ impl PromptStashState {
         self.stash.is_none() && self.queued_stashes.is_empty()
     }
 
-    /// Stash `draft` as the session's head: an existing unrestored head
-    /// (and its queue) lines up behind it, keeping its own restore
-    /// semantics (TS `stashDraftForAgentsView`).
+    /// Stash `draft` as the session's head: an existing unrestored head (and
+    /// its queue) lines up behind it, keeping its own restore semantics.
     pub fn stash_draft_head(&mut self, draft: PromptStash) {
         let mut ordered = Vec::with_capacity(self.queued_stashes.len() + 1);
         if let Some(existing) = self.stash.take() {
@@ -79,11 +66,9 @@ impl PromptStashState {
         head
     }
 
-    /// Take the head draft when it is a restore-on-open auto-stash (TS
-    /// `restorePromptStashOnOpen`'s `restoreOnOpen` gate: a manual stash
-    /// never lands on an open or a switch — only its own key restores
-    /// it), promoting the next queued draft to the head. The caller owns
-    /// the editor-empty condition.
+    /// Take the head draft when it is a restore-on-open auto-stash (a manual stash never lands on
+    /// an open or a switch — only its own key restores it), promoting the next queued draft. The
+    /// caller owns the editor-empty condition.
     pub fn take_head_restore_on_open(&mut self) -> Option<PromptStash> {
         if !self
             .stash
@@ -96,24 +81,22 @@ impl PromptStashState {
     }
 }
 
-/// The per-process store (TS `ClientPromptStashStore`): each chat binds the
-/// state of the session it renders; a binding that ends up empty releases
-/// with it. Entry identity is the map slot, so a release can only drop the
-/// state the binding created — never a draft another view stashed.
+/// The per-process store: each chat binds the state of the session it renders; a binding that ends
+/// up empty releases with it. Entry identity is the map slot, so a release can only drop the state
+/// the binding created.
 #[derive(Debug, Default)]
 pub struct PromptStashStore {
     states: HashMap<String, PromptStashState>,
 }
 
 impl PromptStashStore {
-    /// The state of `session_id`, created empty on first touch (TS
-    /// `forSession`).
+    /// The state of `session_id`, created empty on first touch.
     pub(crate) fn for_session(&mut self, session_id: &str) -> &mut PromptStashState {
         self.states.entry(session_id.to_string()).or_default()
     }
 
-    /// Release `session_id` when its state is empty (TS `release`): a
-    /// session holding drafts keeps them for the next view that binds it.
+    /// Release `session_id` when its state is empty; a session holding drafts
+    /// keeps them for the next view that binds it.
     pub(crate) fn release(&mut self, session_id: &str) {
         if self
             .states
@@ -209,10 +192,8 @@ mod tests {
 
     #[test]
     fn take_head_restores_a_manual_stash_and_promotes_the_queue() {
-        // TS `restorePromptStashIfEditorEmpty`'s manual arm (the
-        // `app.prompt.stash` key): the head returns whatever its restore
-        // semantics — a manual stash (restore_on_open unset) restores
-        // here, while `take_head_restore_on_open` leaves it waiting.
+        // The manual arm (`app.prompt.stash`): the head returns whatever its restore semantics — a
+        // manual stash restores here, while `take_head_restore_on_open` leaves it waiting.
         let mut store = PromptStashStore::default();
         let state = store.for_session("a");
         state.stash = Some(draft("manual draft", false));
@@ -233,9 +214,8 @@ mod tests {
 
     #[test]
     fn an_auto_head_queues_a_manual_stash_behind_it() {
-        // TS `stashDraftForAgentsView`'s ordering with a manual stash
-        // held: the agents-view exit's auto head queues in front, the
-        // manual draft keeps its key-only semantics behind it.
+        // The agents-view exit's auto head queues in front of a held manual
+        // stash, which keeps its key-only semantics behind it.
         let mut store = PromptStashStore::default();
         let state = store.for_session("a");
         state.stash = Some(draft("manual draft", false));
@@ -291,9 +271,8 @@ mod tests {
 
     #[test]
     fn stashed_paste_snapshot_round_trips_with_the_text() {
-        // TS `PromptStash.pasteSnapshot`: a collapsed draft keeps its
-        // id/content registry through the stash, so the restored marker
-        // still expands on submit.
+        // A collapsed draft keeps its id/content registry through the stash,
+        // so the restored marker still expands on submit.
         let mut store = PromptStashStore::default();
         let state = store.for_session("a");
         let content = (0..20)

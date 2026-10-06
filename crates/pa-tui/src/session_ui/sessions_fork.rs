@@ -1,5 +1,5 @@
-//! The sessions concern: the `/tree` and `/fork` selectors and the tree
-//! navigation, `/clone`, and the session resume/list/switch surfaces.
+//! The `/tree` and `/fork` selectors and the tree navigation, `/clone`, and
+//! the session resume/list/switch surfaces.
 use super::{
     anyhow, info_commands, key_event_to_id, AgentView, DaemonClient, DaemonCommand, DockFold,
     Duration, InfoContent, InteractiveOptions, KeyEvent, Map, RebuildKind, Result,
@@ -9,13 +9,10 @@ use super::{
 use pa_types::daemon::DaemonSessionLifecycle;
 
 impl SessionUi {
-    // ------------------------------------------------------------------
     // Session-tree navigation (/tree, /fork, /clone)
-    // ------------------------------------------------------------------
 
-    /// Open the `/tree` selector over the session tree (TS
-    /// `showTreeSelector`); `initial_selected` re-opens with the previous
-    /// selection after a cancelled branch summary.
+    /// Open the `/tree` selector over the session tree; `initial_selected`
+    /// re-opens with the previous selection after a cancelled branch summary.
     pub(super) async fn open_tree_selector(
         &mut self,
         view: &mut AgentView,
@@ -101,7 +98,7 @@ impl SessionUi {
                 summarize,
                 custom_instructions,
             } => {
-                // Selecting the current leaf is a no-op (TS).
+                // Selecting the current leaf is a no-op.
                 let leaf = view
                     .tree_selector
                     .as_ref()
@@ -120,8 +117,6 @@ impl SessionUi {
         Ok(())
     }
 
-    /// The `navigate_tree` request and its rendering (TS
-    /// `_navigateTreeUnderPause` + `renderTreeNavigation`).
     async fn navigate_tree(
         &mut self,
         target_id: &str,
@@ -152,8 +147,7 @@ impl SessionUi {
             }
         };
         if data.get("aborted").and_then(Value::as_bool) == Some(true) {
-            // The branch summary was cancelled: re-open the tree selector
-            // with the same selection (TS).
+            // The branch summary was cancelled: re-open with the same selection.
             self.note("Branch summarization cancelled", view);
             return self.open_tree_selector(view, Some(target_id)).await;
         }
@@ -162,8 +156,7 @@ impl SessionUi {
             return Ok(());
         }
         self.rebuild_transcript(view).await;
-        // A user-message target re-enters its text in the editor when it is
-        // empty (TS `renderTreeNavigation`).
+        // A user-message target re-enters its text in the editor when it is empty.
         if let Some(editor_text) = data.get("editorText").and_then(Value::as_str) {
             if view.editor.get_text().trim().is_empty() {
                 view.editor.set_text(editor_text);
@@ -174,8 +167,7 @@ impl SessionUi {
         Ok(())
     }
 
-    /// Open the `/fork` selector over the session's user messages (TS
-    /// `showUserMessageSelector`).
+    /// Open the `/fork` selector over the session's user messages.
     pub(super) async fn open_fork_selector(&mut self, view: &mut AgentView) -> Result<()> {
         let data = self
             .bounded_request(
@@ -241,8 +233,7 @@ impl SessionUi {
         Ok(())
     }
 
-    /// The `fork` request (TS `AgentSessionRuntime.fork`): the worker
-    /// copies the path into a new session and switches to it.
+    /// The worker copies the path into a new session and switches to it.
     async fn fork(
         &mut self,
         entry_id: &str,
@@ -282,7 +273,7 @@ impl SessionUi {
         Ok(())
     }
 
-    /// `/clone` (TS `handleCloneCommand`): fork at the current leaf.
+    /// Fork at the current leaf.
     pub(super) async fn handle_clone_command(&mut self, view: &mut AgentView) -> Result<()> {
         let data = self
             .bounded_request(
@@ -310,8 +301,7 @@ impl SessionUi {
     }
 
     /// `/resume <selector>`: a session file path, an `<id>.jsonl` under the
-    /// sessions dir, or a live daemon session id (attach). Mirrors the CLI
-    /// selector resolution in `interactive_mode.rs`.
+    /// sessions dir, or a live daemon session id (attach).
     pub(super) fn resolve_resume_selector(&self, selector: &str) -> Option<SessionSelection> {
         let selector = selector.trim();
         if selector.is_empty() {
@@ -362,9 +352,8 @@ impl SessionUi {
             update_commands: self.update_commands.clone(),
             telemetry: self.telemetry.clone(),
             keybindings: self.keybindings.clone(),
-            // The `/new` run keeps this process's stash store: a draft
-            // stashed for the fresh session survives into the next chat
-            // view that binds it.
+            // The `/new` run keeps this process's stash store: a draft stashed for the fresh
+            // session survives into the next chat view that binds it.
             prompt_stash: self.prompt_stash.clone(),
             // `/new` starts a fresh root session: no depth label.
             session_rlm_depth: None,
@@ -395,11 +384,8 @@ impl SessionUi {
             .unwrap_or_default();
         self.list_rows = sorted_session_rows(sessions);
         let sessions = &self.list_rows;
-        // The listing renders in the read-only info panel (the
-        // operator's 2026-09-26 directive): it no longer lands in the
-        // transcript as a multi-line status row. The row content is
-        // unchanged — `/switch <n|id>` still resolves against the same
-        // cached rows.
+        // The listing renders in the read-only info panel (the operator's 2026-09-26 directive);
+        // `/switch <n|id>` still resolves against the same cached rows.
         let raw = |text: String| vec![info_commands::ClientSpan { text, color: None }];
         let mut rows = vec![raw("live sessions:".to_string())];
         if sessions.is_empty() {
@@ -448,24 +434,18 @@ impl SessionUi {
             self.note("already attached to that session", view);
             return Ok(());
         }
-        // The draft in the editor belongs to the session being left: stash
-        // it as that session's restore-on-reopen head and clear the editor,
-        // so the switch lands on an empty prompt (the draft returns on a
-        // switch back).
+        // The draft in the editor belongs to the session being left: stash it as that session's
+        // restore-on-reopen head so the switch lands on an empty prompt.
         self.stash_draft_for_switch(view);
         match self.attach_session(&id, DockFold::FirstFrame).await {
             Ok(()) => {
                 // The switched-to session's context usage rode the
-                // attach snapshot, so the rebuilt tray shows it without
-                // a blocking stats round-trip on the switch path.
+                // attach snapshot.
                 self.rebuild_view(view, &RebuildKind::Rebind);
                 self.note(&format!("switched to session {id}"), view);
-                // The switched-to session's own restore head (if one was
-                // stashed earlier) lands after the switch note, so the
-                // restore status is the row the back-to-back rewrite keeps
-                // (TS `showStatus` last-wins). Like a chat's opening
-                // restore, only an auto restore-on-open head lands here —
-                // a manually stashed draft waits for its own key.
+                // The switched-to session's own restore head lands after the switch note, so the
+                // restore status is the row the back-to-back rewrite keeps. Only an auto
+                // restore-on-open head lands here — a manually stashed draft waits for its own key.
                 self.restore_prompt_stash_if_editor_empty(view, true);
             }
             Err(error) => {
@@ -476,15 +456,13 @@ impl SessionUi {
     }
 }
 
-/// Deterministic list order: most recently active first (missing activity
-/// timestamps last), so `/switch <n>` targets are stable between `/list`
-/// renders.
-/// The terminal's current column count (TS `this.ui.terminal.columns` for
-/// the goal status detail suffix); 80 when the size is unavailable.
+/// The terminal's current column count; 80 when the size is unavailable.
 pub(super) fn terminal_columns() -> usize {
     crossterm::terminal::size().map_or(80, |(columns, _)| columns as usize)
 }
 
+/// Most recently active first (missing activity timestamps last), so
+/// `/switch <n>` targets are stable between `/list` renders.
 fn sorted_session_rows(mut sessions: Vec<Value>) -> Vec<Value> {
     let activity_of = |row: &Value| -> String {
         row.get("lastActivityAt")
@@ -510,9 +488,7 @@ fn sorted_session_rows(mut sessions: Vec<Value>) -> Vec<Value> {
     sessions
 }
 
-/// Send a `create` command and return the new session's active id. A
-/// non-empty selection picks the reopen form: `continueRecent` or an
-/// explicit saved-session path.
+/// Send a `create` command and return the new session's active id.
 pub(super) async fn create_session(
     client: &DaemonClient,
     options: &InteractiveOptions,
@@ -541,9 +517,8 @@ pub(super) async fn create_session(
         .request_ok(DaemonCommand::Create {
             id: None,
             session_path,
-            // A create names its session (`sessionPath`) or opens one
-            // through the agents view; `continueRecent` stays absent
-            // (TS wire shape — the supervisor refuses it).
+            // `continueRecent` stays absent (TS wire shape — the supervisor refuses
+            // it).
             continue_recent: None,
             no_session: options.no_session.then_some(true),
             name: None,
@@ -574,19 +549,15 @@ pub(super) async fn create_session(
         .ok_or_else(|| anyhow!("the daemon did not report a session id for the new session"))
 }
 
-/// A create refusal for a session file another holder already owns
-/// names the holder and the next steps (the operator-directed
-/// descriptive session-open error) instead of stopping at the bare
-/// lease id. Any other failure propagates unchanged.
+/// A create refusal for an owned session file names the holder and the next steps instead of
+/// stopping at the bare lease id; any other failure propagates unchanged.
 async fn describe_session_open_failure(
     client: &DaemonClient,
     error: anyhow::Error,
     session_path: Option<String>,
 ) -> anyhow::Error {
-    // Only a typed daemon rejection decorates (transport failures pass
-    // through unchanged), and the RAW rejection message is what gets
-    // decorated — the typed wrapper's own display adds the framing
-    // prefix exactly once.
+    // Only a typed daemon rejection decorates, and the RAW rejection message is what gets decorated
+    // — the typed wrapper's display adds the framing prefix exactly once.
     let Some((rejected, error_info)) = error
         .downcast_ref::<crate::daemon_client::RequestRejected>()
         .map(|rejected| (rejected.message.clone(), rejected.error_info.clone()))
@@ -599,9 +570,8 @@ async fn describe_session_open_failure(
     let Some(path) = session_path.map(std::path::PathBuf::from) else {
         return error;
     };
-    // The live-roster probe is best-effort and BOUNDED: a stalled `list`
-    // must not hold the refusal for the daemon's full request timeout —
-    // the startup hands off to the agents view promptly either way.
+    // The live-roster probe is best-effort and BOUNDED: a stalled `list` must
+    // not hold the refusal — the startup hands off to the agents view promptly.
     let rows: Vec<Value> = tokio::time::timeout(
         std::time::Duration::from_secs(3),
         client.request_ok(DaemonCommand::List {
@@ -622,22 +592,17 @@ async fn describe_session_open_failure(
     // fallback (a relative resume path can miss the canonical row).
     let holder = crate::session_open_error::holder_from_roster(&rows, &path)
         .or_else(|| crate::session_open_error::holder_by_id(&rows, &owner));
-    // The daemon's ORIGINAL refusal line stays verbatim (never
-    // reconstructed from a possibly-relative caller path) and the holder
-    // guidance rides the same line — the agents-view handoff renders the
-    // notice on a single status line, so a multiline decoration would
-    // hide the holder and the next steps.
+    // The daemon's ORIGINAL refusal line stays verbatim and the holder guidance rides the same
+    // line: the agents-view handoff renders the notice on a single status line.
     let message =
         crate::session_open_error::decorate_interactive_refusal(&rejected, holder, &owner);
-    // The refusal stays a typed `RequestRejected`: `is_daemon_rejection`
-    // keeps classifying it (the interactive open hands off to the agents
-    // view with the notice instead of exiting the client).
+    // The refusal stays a typed `RequestRejected`: `is_daemon_rejection` keeps classifying it (the
+    // open hands off to the agents view with the notice instead of exiting).
     anyhow::Error::new(crate::daemon_client::RequestRejected {
         command: "create".to_string(),
         message,
-        // The typed refusal info rides the decorated refusal unchanged
-        // (an `update_restarting` create refusal never reaches this
-        // decorator: `owner_from_refusal` passes it through untouched).
+        // The typed refusal info rides unchanged (an `update_restarting` refusal
+        // never reaches this decorator: `owner_from_refusal` passes it through).
         error_info,
     })
 }

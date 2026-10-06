@@ -1,30 +1,18 @@
-//! Supervisor kill -9 restart e2e: sessions must survive a supervisor death
-//! (invariable: a supervisor restart must not lose sessions). Three scripted
-//! sessions with active streams, `kill -9` the supervisor, assert the worker
-//! processes/sockets and their in-flight turns survive, restart the
-//! supervisor on the same socket path, and assert all three workers
-//! re-register within a bounded window, the roster rebuilds, and a scripted
-//! turn completes through an attach to the rebuilt roster.
-//!
-//! Linux-only e2e (`AF_UNIX` sockets, `kill -9` semantics): compiles to
-//! nothing elsewhere, like the other pa-daemon e2e verifiers.
-// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
-// the full rationale).
-// Stack-resident futures by design on the daemon's hot paths; boxing the
-// call sites for a lint tick is a perf regression with zero correctness gain.
+//! Supervisor kill -9 restart e2e: sessions must survive a supervisor death.
+//! Three scripted sessions, kill -9 the supervisor, assert workers and their
+//! in-flight turns survive, restart on the same socket, and assert
+//! re-registration, the rebuilt roster, and a scripted turn.
+// Stack-resident futures by design on the daemon's hot paths.
 #![allow(clippy::large_futures)]
-// 64-bit-only targets; the narrowing casts sit at OS boundaries
-// (pid/fd/time/size) where the values are bounded by the kernel - the
-// dead-guard expect()s would add panic paths where silent wrap was
-// deliberate.
+// Narrowing casts sit at OS boundaries (pid/fd/time/size) where the kernel
+// bounds the values.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// The fn-length threshold is a style gate, not correctness; the structure
-// campaign owns the god-fn splits as a follow-up.
+// Style gate only, not correctness.
 #![allow(clippy::too_many_lines)]
 // API-shape opinions, not defects; the surfaces are deliberate.
 #![allow(
@@ -72,9 +60,8 @@ fn spawn_supervisor_env(socket: &Path, agent_dir: &Path, extra_env: &[(&str, Str
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         // A supervisor killed at teardown must not leak its session workers
-        // into later test binaries: the worker's supervisor-lost exit (TS
-        // `exitIfSupervisorOrphanedForTooLong`) runs on this short window
-        // instead of the 5-minute default.
+        // into later test binaries: the worker's supervisor-lost exit runs
+        // on this short window instead of the 5-minute default.
         .env(
             pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
             "15000",
@@ -116,7 +103,6 @@ fn process_alive(pid: u32) -> bool {
     !state.starts_with('Z') && !state.starts_with('X')
 }
 
-/// Pids whose parent is `ppid`.
 fn child_pids_of(ppid: u32) -> Vec<u32> {
     let mut pids = Vec::new();
     let entries = std::fs::read_dir("/proc").expect("read /proc");
@@ -224,9 +210,6 @@ impl Client {
         }
     }
 
-    /// The first buffered-or-live outbound line of `line_type`. Buffered
-    /// lines of other types stay buffered; live lines of other types are
-    /// skipped, like a filtering read loop.
     fn next_line_of_type(
         &mut self,
         lines: &mut std::collections::VecDeque<Value>,
@@ -290,7 +273,6 @@ impl WorkerClient {
         (header, payload)
     }
 
-    /// One request/response round trip with a fresh request id.
     fn request(&mut self, command_type: &str, payload: &Value) -> Value {
         static NEXT_REQUEST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let request_id = format!(
@@ -333,7 +315,6 @@ fn read_exact_timeout(stream: &mut UnixStream, buffer: &mut [u8], deadline: Inst
     }
 }
 
-/// One persisted worker descriptor, as written by the supervisor.
 #[derive(Clone)]
 struct WorkerDescriptor {
     worker_id: String,
@@ -342,11 +323,9 @@ struct WorkerDescriptor {
     token: String,
 }
 
-/// Wait until the worker's recovery journal holds the admission `busy:
-/// true` record for one session (the durable busy-at-crash evidence): the
-/// kill that follows provably lands mid-turn, whatever the runner's
-/// pacing does to the stream (the loaded-host failure mode where the
-/// whole turn settled before the kill and the revival signal was lost).
+/// Wait until the recovery journal holds the admission `busy: true` record
+/// (the durable busy-at-crash evidence): the kill that follows provably
+/// lands mid-turn, whatever the runner's pacing does to the stream.
 fn wait_for_busy_journal_evidence(agent_dir: &Path, socket: &Path, session_id: &str) {
     let journal_path = pa_daemon::descriptor::descriptor_dir(agent_dir, socket)
         .join(format!("{session_id}.recovery.jsonl"));
@@ -389,7 +368,6 @@ fn load_worker_descriptor(agent_dir: &Path, socket: &Path, worker_id: &str) -> W
     }
 }
 
-/// Worker ids with a registration log line at or after `since`.
 fn workers_registered_since(log_path: &Path, since: &str) -> Vec<String> {
     let Ok(content) = std::fs::read_to_string(log_path) else {
         return Vec::new();
@@ -428,10 +406,9 @@ fn distinct(values: Vec<String>) -> Vec<String> {
     values
 }
 
-// The restart regression families live in the child modules at the same
-// tree position (supervisor_restart_e2e::{plain_boot, restart, revival,
-// update_boot}); every child's use-super glob resolves through this
-// root's harness, and the ONE test binary stays one CI shard unit.
+// The restart regression families live in the child modules (same tree
+// position); every child's use-super glob resolves through this root's
+// harness, and the one test binary stays one CI shard unit.
 mod plain_boot;
 mod restart;
 mod revival;

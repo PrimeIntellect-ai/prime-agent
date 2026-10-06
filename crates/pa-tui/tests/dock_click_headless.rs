@@ -1,39 +1,22 @@
 //! Headless e2e for the dock's hover + click affordances (operator
-//! directive 2026-09-29): a mock supervisor serves one attached session
-//! whose heartbeat catalog and kernel-bash registry mount the activity
-//! dock, and the headless harness feeds byte-identical SGR reports
-//! through the same decode-and-dispatch path a terminal's mouse takes.
-//!
-//! Verifies the affordance pass's click contract: a plain click on a
-//! dock group segment opens that group's own view (the focused Enter
-//! route — the heartbeats view, the bash view, the scoped agents view
-//! for subagents), a plain click on the tray's `← manage` hint hands
-//! the pane to the agents view (the hinted left-arrow action), and the
-//! `?1003` hover motions ride the same path without disturbing the
-//! click grammar.
+//! directive 2026-09-29): a plain click on a dock group segment opens
+//! that group's view, and a click on the tray's `← manage` hint hands
+//! the pane to the agents view; hover motions ride the same path.
 #![cfg(unix)]
-// Pedantic-gate exceptions (every other pedantic warning in this crate is
-// fixed in place; each exception carries its one-line justification):
-// - the casts: terminal-layout arithmetic narrows structurally bounded
-//   values (screen coordinates, byte counts, timestamps); guarded
-//   conversions would add panic paths the bounds guarantee away.
+// Casts: structurally bounded terminal-layout arithmetic; guarded conversions add panic paths.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// - the render routes are flat tables (one arm per route); splitting them
-//   would add indirection without changing the flow.
+// Render routes are flat tables (one arm per route); splitting adds indirection.
 #![allow(clippy::too_many_lines)]
-// - widget state structs carry independent flag bits; a nested struct
-//   would add indirection without changing the shape.
+// Widget state structs carry independent flag bits.
 #![allow(clippy::struct_excessive_bools, clippy::fn_params_excessive_bools)]
-// - the futures are bounded by the surface's lifetime; boxing them would
-//   add an allocation to the steady-state loop.
+// Futures are bounded by the surface's lifetime; boxing adds a steady-state allocation.
 #![allow(clippy::large_futures)]
-// - the wrappers preserve a uniform Result-returning API surface; unwrap
-//   removals would ripple through the callers without changing behavior.
+// The wrappers preserve a uniform Result-returning API surface.
 #![allow(clippy::unnecessary_wraps)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -41,8 +24,8 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 
-/// Mouse tracking is process-global state, so the headless runs serialize
-/// (each asserts on the tracking-active branch it drives).
+/// Mouse tracking is process-global state, so the headless runs serialize (each asserts on the
+/// tracking-active branch it drives).
 static RUN_LOCK: Mutex<()> = Mutex::new(());
 
 fn run_lock() -> MutexGuard<'static, ()> {
@@ -58,9 +41,8 @@ use pa_tui::interactive::{
 };
 use serde_json::{json, Value};
 
-/// The SGR reports a real terminal sends: a left press, a release, and
-/// the `?1003` buttonless motion report (base code 3 + the motion bit
-/// — 35) the hover affordance rides.
+/// The SGR reports a real terminal sends: a left press, a release, and the `?1003` buttonless
+/// motion report (base code 3 + the motion bit — 35) the hover affordance rides.
 fn press(col: usize, row: usize) -> String {
     format!("\x1b[<0;{col};{row}M")
 }
@@ -84,17 +66,16 @@ impl MockSupervisor {
         }
     }
 
-    /// Serve one connection: attach the session, then answer the loop's
-    /// requests — the heartbeat catalog and the kernel-bash registry
-    /// carry the rows that mount the activity dock.
+    /// Serve one connection: the heartbeat catalog and the kernel-bash registry carry the rows that
+    /// mount the activity dock.
     fn serve(self) {
         let (stream, _) = self.listener.accept().expect("accept");
         let write_stream = stream.try_clone().expect("clone mock socket");
         let mut writer = write_stream;
         let mut reader = BufReader::new(stream);
 
-        // The kernel-bash capability gate: the dock's bash rows fold
-        // only when the daemon advertises the registry.
+        // The kernel-bash capability gate: the dock's bash rows fold only when the daemon
+        // advertises the registry.
         let hello = json!({
             "type": "daemon_hello",
             "protocol": { "name": "prime-agent.daemon", "version": 7 },
@@ -158,10 +139,8 @@ impl MockSupervisor {
                 }
                 "heartbeats_list" => {
                     write_json(&mut writer, &heartbeat_data(id));
-                    // A live goal rides the attach's first-frame fold as
-                    // a session event (the daemon's push): the dock's
-                    // goal group mounts with its row, the click surface's
-                    // fourth group.
+                    // A live goal rides the attach's first-frame fold as a session event: the
+                    // dock's goal group mounts with its row, the click surface's fourth group.
                     write_json(&mut writer, &goal_event());
                 }
                 "list_kernel_bash" => {
@@ -202,8 +181,8 @@ fn write_json(writer: &mut UnixStream, value: &Value) {
     writer.flush().expect("flush mock frame");
 }
 
-/// The slim attach result with a one-prompt transcript: the dock mounts
-/// under the editor and the window holds the exchange.
+/// The slim attach result with a one-prompt transcript: the dock mounts under the editor and the
+/// window holds the exchange.
 fn attach_data(id: &str) -> Value {
     let messages = vec![
         json!({ "role": "user", "content": "run it", "timestamp": 1u64 }),
@@ -245,9 +224,8 @@ fn attach_data(id: &str) -> Value {
     })
 }
 
-/// One scoped heartbeat (the session's own catalog row): the dock's
-/// heartbeats group reads one live job, and the heartbeats view renders
-/// the label a click on the group opens.
+/// One scoped heartbeat: the dock's heartbeats group reads one live job (the heartbeats view's
+/// label a click on the group opens).
 fn heartbeat_data(id: &str) -> Value {
     json!({
         "type": "response",
@@ -276,9 +254,8 @@ fn heartbeat_data(id: &str) -> Value {
     })
 }
 
-/// The `goal_update` session event: an actively-pursued goal mounts the
-/// dock's goal group (the elapsed-time label) and the goal panel the
-/// group's click opens.
+/// The `goal_update` session event: an actively-pursued goal mounts the dock's goal group (the
+/// elapsed-time label) and the panel its click opens.
 fn goal_event() -> Value {
     json!({
         "type": "session_event",
@@ -298,9 +275,8 @@ fn goal_event() -> Value {
     })
 }
 
-/// One running kernel bash row: the dock's shells group reads one live
-/// run, and the bash view renders the command a click on the group
-/// opens.
+/// One running kernel bash row: the dock's shells group reads one live run (the bash view's command
+/// a click on the group opens).
 fn bash_data(id: &str) -> Value {
     json!({
         "type": "response",
@@ -357,8 +333,8 @@ fn options(socket: PathBuf) -> InteractiveOptions {
     }
 }
 
-/// Run the headless plan against a fresh mock supervisor and return the
-/// outcome. Holds the run lock: mouse tracking is process-global.
+/// Run the headless plan and return the outcome. Holds the run lock: mouse tracking is
+/// process-global.
 fn run_plan(steps: Vec<HeadlessStep>) -> pa_tui::interactive::InteractiveOutcome {
     let _guard = run_lock();
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -382,9 +358,8 @@ fn run_plan(steps: Vec<HeadlessStep>) -> pa_tui::interactive::InteractiveOutcome
     outcome
 }
 
-/// The settled open (the frames up to the dock's `needle` render):
-/// every probe test starts here to locate the dock row's rendered
-/// cells.
+/// The settled open (the frames up to the dock's `needle` render): every probe test starts here to
+/// locate the dock row's rendered cells.
 fn settled_frames(needle: &str) -> Vec<String> {
     let outcome = run_plan(vec![
         HeadlessStep::WaitIdle { timeout_ms: 30_000 },
@@ -396,8 +371,7 @@ fn settled_frames(needle: &str) -> Vec<String> {
     outcome.frames
 }
 
-/// The last frame holding a needle and the needle's (row, column)
-/// within it — the rendered coordinates a mouse report targets.
+/// The last frame holding a needle and its (row, column) — a mouse report's target coordinates.
 fn locate(frames: &[String], needle: &str) -> Option<(usize, usize)> {
     frames
         .iter()
@@ -410,16 +384,14 @@ fn locate(frames: &[String], needle: &str) -> Option<(usize, usize)> {
         .next_back()
 }
 
-/// The needle's VISIBLE column (the display cell the mouse targets):
-/// the dock row's glyphs are multi-byte, so the byte offset a `find`
-/// returns would land wide of the marked cell.
+/// The needle's VISIBLE column (the display cell the mouse targets): the dock row's glyphs are
+/// multi-byte, so the byte offset a `find` returns would land wide of the marked cell.
 fn visible_col(line: &str, needle: &str) -> Option<usize> {
     let byte = line.find(needle)?;
     Some(line[..byte].chars().map(pa_tui::width::char_width).sum())
 }
 
-/// A plain click on the heartbeats group segment opens the heartbeats
-/// view — the focused Enter's exact dispatch, arrived at by the mouse.
+/// The focused Enter's dispatch, arrived at by the mouse.
 #[test]
 fn a_click_on_the_heartbeats_group_opens_the_heartbeats_view() {
     let frames = settled_frames("1 heartbeat");
@@ -448,7 +420,6 @@ fn a_click_on_the_heartbeats_group_opens_the_heartbeats_view() {
     );
 }
 
-/// A plain click on the shells group segment opens the bash view.
 #[test]
 fn a_click_on_the_shells_group_opens_the_bash_view() {
     let frames = settled_frames("1 shell");
@@ -473,9 +444,7 @@ fn a_click_on_the_shells_group_opens_the_bash_view() {
     );
 }
 
-/// A plain click on the subagents group segment hands the pane to the
-/// SCOPED agents view (the dock's Enter route for subagents): the run
-/// exits with the agents-view handoff carrying this session's scope.
+/// The handoff carries this session's scope.
 #[test]
 fn a_click_on_the_subagents_group_hands_off_to_the_scoped_agents_view() {
     let frames = settled_frames("1 heartbeat");
@@ -500,9 +469,7 @@ fn a_click_on_the_subagents_group_hands_off_to_the_scoped_agents_view() {
     assert_eq!(scope.session_id.as_deref(), Some("sess-1"));
 }
 
-/// A plain click on the tray's `← manage` hint performs the hinted
-/// action: the left arrow's agents-back handoff, the GLOBAL agents
-/// view (no scope).
+/// The left arrow's agents-back handoff — the GLOBAL agents view, no scope.
 #[test]
 fn a_click_on_the_manage_hint_hands_off_to_the_agents_view() {
     let frames = settled_frames("1 heartbeat");
@@ -526,8 +493,7 @@ fn a_click_on_the_manage_hint_hands_off_to_the_agents_view() {
     );
 }
 
-/// A plain click on the goal group segment opens the read-only goal
-/// panel (the dock's Enter route for the goal row).
+/// The dock's Enter route for the goal row.
 #[test]
 fn a_click_on_the_goal_group_opens_the_goal_panel() {
     let frames = settled_frames("Pursuing goal");
@@ -552,11 +518,8 @@ fn a_click_on_the_goal_group_opens_the_goal_panel() {
     );
 }
 
-/// The hint's click keeps the key's gate: with a draft in the editor
-/// the left arrow is the caret motion, not the agents-back handoff, so
-/// the click on the hint opens nothing either — the draft stays in the
-/// editor (Macroscope: the unconditional dispatch stashed a draft the
-/// key would have left in place).
+/// The hint's click keeps the key's gate: with a draft the left arrow is the caret motion, not
+/// the agents-back handoff (Macroscope: the unconditional dispatch stashed a draft).
 #[test]
 fn a_click_on_the_manage_hint_with_a_draft_opens_nothing() {
     let frames = settled_frames("manage");
@@ -590,9 +553,7 @@ fn a_click_on_the_manage_hint_with_a_draft_opens_nothing() {
     );
 }
 
-/// A click on the separator between two dock groups opens nothing: the
-/// gap between the segments is inert, exactly the cells the click
-/// surface never recorded.
+/// The gap between segments is inert — the cells the click surface never recorded.
 #[test]
 fn a_click_on_the_separator_between_groups_opens_nothing() {
     let frames = settled_frames("1 heartbeat");
@@ -629,9 +590,6 @@ fn a_click_on_the_separator_between_groups_opens_nothing() {
     );
 }
 
-/// The `?1003` hover motions ride the dock's rows without disturbing
-/// the click grammar: motions across the groups, the hint, and the
-/// editor, then a plain click — the group still opens its view.
 #[test]
 fn hover_motions_across_the_dock_never_disturb_the_click() {
     let frames = settled_frames("1 heartbeat");
@@ -643,14 +601,12 @@ fn hover_motions_across_the_dock_never_disturb_the_click() {
             needle: "1 heartbeat".to_string(),
             timeout_ms: 10_000,
         },
-        // Hover motions across the dock groups, the hint, and the
-        // editor surface (the buttonless reports the real terminal
-        // sends under any-event tracking).
+        // Hover motions across the dock groups, the hint, and the editor surface (the buttonless
+        // reports the real terminal sends under any-event tracking).
         HeadlessStep::Mouse(motion(dock_col + 4, dock_row + 1)),
         HeadlessStep::Mouse(motion(hint_col + 2, hint_row + 1)),
         HeadlessStep::Mouse(motion(10, hint_row - 1)),
         HeadlessStep::Mouse(motion(dock_col + 4, dock_row + 1)),
-        // The click still fires after the hover interleaving.
         HeadlessStep::Mouse(press(dock_col + 4, dock_row + 1)),
         HeadlessStep::Mouse(release(dock_col + 4, dock_row + 1)),
         HeadlessStep::WaitRender {

@@ -1,17 +1,11 @@
-//! The queries concern (moved with its concern): the derived state +
-//! accessor arm - the active context and history snapshot, the branch
-//! scans, the window-backed reads, and the getters.
+//! The queries concern: derived state + accessors - the active context and
+//! history snapshot, the branch scans, the window-backed reads, and the getters.
 
 use super::{FileEntry, Path, RefineTranscriptParts, SessionHeader, SessionManager, SessionTree};
 
 impl SessionManager {
-    /// The active compacted context without hydrating old message bodies.
-    ///
-    /// An attached window contributes only its walk-resolved settings
-    /// overlay: the transcript comes from `file_entries` (the one-copy
-    /// authority since `adopt_window` moves the walk's trees in). The
-    /// window's own trees are detached at adoption, so asking the window
-    /// for a context would walk an empty window.
+    /// The active compacted context without hydrating old message bodies: an
+    /// attached window contributes only its settings overlay.
     #[must_use]
     pub fn active_context(&self) -> super::SessionContext {
         let mut context = super::build_session_context(&self.file_entries, self.get_leaf_id());
@@ -25,19 +19,14 @@ impl SessionManager {
         }
         context
     }
-    /// Capture a historical read request while locked; await it after releasing
-    /// the session mutex. Current unpersisted rows are merged into the snapshot.
-    /// A full-history window under the session's sole runtime lease serves
-    /// the retained rows directly instead of re-reading and re-parsing a
-    /// file whose rows the manager already holds.
+    /// Capture a historical read request while locked; await it after
+    /// releasing the session mutex. A full-history window under the sole
+    /// lease serves the retained rows directly.
     ///
     /// # Errors
     ///
-    /// The returned future errors when reading the session file fails, or
-    /// when the file read panics and the blocking task fails to join. When
-    /// the manager holds no windowed store — or holds the sole lease over
-    /// a full-history window — the retained entries are returned without
-    /// touching the disk.
+    /// The future errors when the file read or blocking join fails; the
+    /// retained arms never touch the disk.
     pub fn history_snapshot(
         &self,
     ) -> impl std::future::Future<Output = anyhow::Result<Vec<FileEntry>>> + Send + 'static {
@@ -46,15 +35,8 @@ impl SessionManager {
             .as_ref()
             .map(|window| window.source_path().to_owned());
         let retained = self.file_entries.clone();
-        // Full-history fast path (the shared-window pattern): when the
-        // window's walk retained every file row and this manager holds the
-        // session's sole runtime lease, the historical read would re-read
-        // and re-parse a file whose rows are all already resident — the
-        // file's rows are exactly `retained`'s persisted subset, and the
-        // retained copy also carries the current unpersisted tail the
-        // read would have to merge back in. Without the lease another
-        // writer may have appended out of band, so the gate stays closed
-        // and the historical read runs.
+        // Full-history fast path: the retained copy is exactly the file's rows
+        // plus the unpersisted tail; without the lease the gate stays closed.
         let fast_path = self
             .window
             .as_ref()
@@ -84,31 +66,19 @@ impl SessionManager {
         }
     }
 
-    /// Extract the refine transcript's consumed artifacts (see
-    /// [`RefineTranscriptParts`]) without materializing an owned copy of
-    /// every entry: the message rows the refine prompt serializes, and
-    /// the in-session refinement history the audit scan reads. A
-    /// windowless manager — and a full-history window under the
-    /// session's sole runtime lease — serves both straight from the
-    /// retained rows; a boundary window keeps the historical read, since
-    /// its pre-window conversation and audit rows live only on disk, and
-    /// moves the messages out of the read's parse result instead of
-    /// re-cloning them.
-    ///
-    /// Capture while the session lock is held; await after releasing it,
-    /// like [`Self::history_snapshot`].
+    /// Extract the refine transcript's consumed artifacts without an owned
+    /// copy of every entry (see [`RefineTranscriptParts`]); a boundary window
+    /// keeps the historical read (its pre-window rows live only on disk).
+    /// Capture while locked; await after releasing it, like [`Self::history_snapshot`].
     ///
     /// # Errors
     ///
-    /// The returned future errors when the historical read fails (see
-    /// [`Self::history_snapshot`]); the retained-serving arms cannot
-    /// fail.
+    /// Errors when the historical read fails ([`Self::history_snapshot`]);
+    /// the retained arms cannot fail.
     ///
     /// # Panics
     ///
-    /// The read arm's `expect` cannot fire: it is reached only when the
-    /// retained-serving arms did not run, and the snapshot is captured in
-    /// exactly that case.
+    /// The read arm's `expect` cannot fire: it runs only when the retained arms did not.
     pub fn refine_transcript_parts(
         &self,
     ) -> impl std::future::Future<Output = anyhow::Result<RefineTranscriptParts>> + Send + 'static
@@ -223,21 +193,19 @@ impl SessionManager {
     }
 
     /// The branch's newest un-resumed quota park, reachable without
-    /// hydration (TS `_restoreQuotaPark`'s scan, newest first): the
-    /// loaded active branch entries first, then — for a windowed store —
-    /// the window's pre-boundary metadata records.
+    /// hydration (newest first): the loaded active branch entries first,
+    /// then — for a windowed store — the window's pre-boundary metadata.
     #[must_use]
     pub fn latest_quota_park(
         &self,
     ) -> Option<crate::session_engine::provider_park::PersistedQuotaPark> {
         use crate::session_engine::provider_park::{scan_quota_park_entries, BranchParkScan};
-        // The loaded branch is a borrow scan (once per build); the windowed
-        // fallback below reads the older metadata records line by line.
+        // The loaded branch is a borrow scan; the windowed fallback below
+        // reads the older metadata records line by line.
         let branch: Vec<FileEntry> = self.active_branch_entries().into_iter().cloned().collect();
         match scan_quota_park_entries(&branch) {
             BranchParkScan::Park(park) => return Some(park),
-            // A newer resume entry ends the episode; older records cannot
-            // restore a park behind it.
+            // A newer resume entry ends the episode; older records restore nothing.
             BranchParkScan::Resumed => return None,
             BranchParkScan::None => {}
         }
@@ -280,13 +248,10 @@ impl SessionManager {
             })
     }
 
-    /// The restore-resurrection guard over this branch (the 402
-    /// diagnosis's (d)): `Some(failure_text)` when the branch's newest
-    /// goal-state row is `active` but a terminal provider failure
-    /// (stop reason `error`, not the quota-park class) settled after it
-    /// — the interrupted terminal settle's stale-active marker. A
-    /// rehydrating driver adopts the failure as the goal's terminal
-    /// state instead of resurrecting the active row.
+    /// The restore-resurrection guard: `Some(failure_text)` when the newest
+    /// goal-state row is `active` but a terminal provider failure (stop
+    /// reason `error`, not quota park) settled after it; the rehydrating
+    /// driver adopts the failure as the goal's terminal state.
     #[must_use]
     pub fn stale_active_goal_failure(&self) -> Option<String> {
         let branch: Vec<FileEntry> = self.active_branch_entries().into_iter().cloned().collect();
@@ -334,9 +299,8 @@ impl SessionManager {
     ///
     /// # Errors
     ///
-    /// Returns an error when the full-history hydration of the windowed
-    /// store fails. A manager without a window is already hydrated and
-    /// succeeds without touching the disk.
+    /// Error when the window's full-history hydration fails; a windowless
+    /// manager is already hydrated.
     pub async fn ensure_full_history(&mut self) -> anyhow::Result<()> {
         let Some(window) = self.window.as_mut() else {
             return Ok(());
@@ -361,8 +325,8 @@ impl SessionManager {
         self.window = None;
         Ok(())
     }
-    /// Session artifact directory (`dirname(sessionDir)/session-artifacts/<id>`,
-    /// TS `getSessionArtifactDir`); only persisted sessions have one.
+    /// Session artifact directory (`dirname(sessionDir)/session-artifacts/<id>`);
+    /// only persisted sessions have one.
     #[must_use]
     pub fn get_session_artifact_dir(&self) -> Option<std::path::PathBuf> {
         self.persist
@@ -395,12 +359,11 @@ impl SessionManager {
         self.session_file.as_deref()
     }
 
-    /// Entries excluding the session header (TS `getEntries()`).
+    /// Entries excluding the session header.
     ///
     /// # Panics
     ///
-    /// Asserts that the manager holds no windowed store: hydrate the full
-    /// session history first.
+    /// Asserts that the manager holds no windowed store: hydrate the full session history first.
     #[must_use]
     pub fn get_entries(&self) -> Vec<FileEntry> {
         assert!(
@@ -418,8 +381,7 @@ impl SessionManager {
     ///
     /// # Panics
     ///
-    /// Asserts that the manager holds no windowed store: hydrate the full
-    /// session history first.
+    /// Asserts that the manager holds no windowed store: hydrate the full session history first.
     #[must_use]
     pub fn get_all_entries(&self) -> &[FileEntry] {
         assert!(
@@ -478,8 +440,7 @@ impl SessionManager {
     ///
     /// # Panics
     ///
-    /// Asserts that the manager holds no windowed store: hydrate the full
-    /// session history first.
+    /// Asserts that the manager holds no windowed store: hydrate the full session history first.
     #[must_use]
     pub fn get_tree(&self) -> SessionTree {
         assert!(
@@ -492,8 +453,7 @@ impl SessionManager {
     ///
     /// # Panics
     ///
-    /// Asserts that the manager holds no windowed store: hydrate the full
-    /// session history first.
+    /// Asserts that the manager holds no windowed store: hydrate the full session history first.
     #[must_use]
     pub fn get_entry_by_id(&self, id: &str) -> Option<&FileEntry> {
         assert!(
@@ -507,8 +467,7 @@ impl SessionManager {
     ///
     /// # Panics
     ///
-    /// Asserts that the manager holds no windowed store: hydrate the full
-    /// session history first.
+    /// Asserts that the manager holds no windowed store: hydrate the full session history first.
     #[must_use]
     pub fn get_label(&self, target_id: &str) -> Option<String> {
         assert!(
@@ -522,8 +481,7 @@ impl SessionManager {
     ///
     /// # Panics
     ///
-    /// Asserts that the manager holds no windowed store: hydrate the full
-    /// session history first.
+    /// Asserts that the manager holds no windowed store: hydrate the full session history first.
     #[must_use]
     pub fn get_label_timestamp(&self, target_id: &str) -> Option<String> {
         assert!(

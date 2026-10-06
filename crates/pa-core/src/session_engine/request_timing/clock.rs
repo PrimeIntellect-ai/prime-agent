@@ -1,7 +1,6 @@
-//! The per-request clock concern (moved with its concern): the request
-//! identity + usage records (`RequestInfo`, `TimingUsage` with its From
-//! impl moving whole), the outcome + timing state machine, and the phase
-//! entries' emit (TS `RequestTiming`).
+//! The per-request clock: the request identity + usage records, the
+//! outcome + timing state machine, and the phase entries' emit (TS
+//! `RequestTiming`).
 
 use super::{
     elapsed_ms, json, round_ms, Instant, Map, Mutex, PromptBuildTiming, RequestTimingLog,
@@ -9,8 +8,7 @@ use super::{
 };
 use pa_agent::types::Usage;
 
-/// Provider request identity fields shared by every phase entry (TS
-/// `RequestTimingRequestInfo`).
+/// Provider request identity fields shared by every phase entry.
 #[derive(Debug, Clone)]
 struct RequestInfo {
     model: String,
@@ -37,8 +35,7 @@ impl RequestInfo {
     }
 }
 
-/// Final usage carried by the summary (TS `{input, output, cacheRead,
-/// cacheWrite}`).
+/// Final usage carried by the summary.
 #[derive(Debug, Clone, Copy)]
 struct TimingUsage {
     input: u64,
@@ -69,8 +66,7 @@ impl TimingUsage {
     }
 }
 
-/// The summary outcome (TS `emitSummary(outcome: "done" | "aborted" |
-/// "failed")`).
+/// The summary outcome ("done" | "aborted" | "failed").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Outcome {
     Done,
@@ -88,9 +84,9 @@ impl Outcome {
     }
 }
 
-/// Mutable phase clock for one provider request (TS `RequestTiming`).
-/// Created at the streamFn seam; phase transitions are logged as they
-/// happen so a hung request shows the last completed phase in the live log.
+/// Mutable phase clock for one provider request (TS `RequestTiming`);
+/// phase transitions are logged as they happen so a hung request shows
+/// the last completed phase in the live log.
 #[derive(Debug)]
 pub(super) struct RequestTiming {
     request_seq: u64,

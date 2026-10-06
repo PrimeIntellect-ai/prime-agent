@@ -1,6 +1,4 @@
 //! models.json: custom providers/models, provider and per-model overrides.
-//! Port of the config schema, `stripJsonComments`, `validateConfig`,
-//! `parseModels`, `applyModelOverride`, and `mergeCompat`.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -154,7 +152,6 @@ pub struct ModelsConfig {
     pub providers: BTreeMap<String, ProviderConfig>,
 }
 
-/// Result of loading models.json.
 #[derive(Debug, Default)]
 pub struct CustomModelsResult {
     pub models: Vec<Model>,
@@ -174,20 +171,18 @@ pub struct ProviderOverride {
 ///
 /// # Errors
 ///
-/// Returns a human-readable error string when the document is not valid
-/// JSON after comment and trailing-comma stripping.
+/// Human-readable error when the document is not valid JSON after stripping.
 pub fn parse_models_config(content: &str) -> Result<ModelsConfig, String> {
     let stripped = strip_json_comments(content);
     serde_json::from_str(&stripped).map_err(|error| format!("Invalid models.json: {error}"))
 }
 
-/// Port of `validateConfig`: semantic checks beyond the schema.
+/// Semantic checks beyond the schema.
 ///
 /// # Errors
 ///
-/// Returns a human-readable error string when a custom provider lacks the
-/// required base URL, API key, or API kind, or defines a model with a
-/// missing id or a zero `contextWindow`/`maxTokens`.
+/// Error when a provider lacks its base URL, API key, or API kind, or a
+/// model lacks an id or zero limits.
 pub fn validate_config(
     config: &ModelsConfig,
     built_in_providers: &dyn Fn(&str) -> bool,
@@ -307,7 +302,6 @@ pub fn merge_compat(base: Option<&ModelCompat>, over: Option<ModelCompat>) -> Op
     Some(ModelCompat { raw: merged })
 }
 
-/// Deep-merge a model override into a model.
 #[must_use]
 pub fn apply_model_override(model: &Model, over: &ModelOverride) -> Model {
     let mut result = model.clone();
@@ -370,7 +364,6 @@ pub fn apply_model_override(model: &Model, over: &ModelOverride) -> Model {
     result
 }
 
-/// Parse models.json into custom models + override maps.
 pub fn load_custom_models(
     content: &str,
     built_in_providers: &dyn Fn(&str) -> bool,
@@ -394,7 +387,6 @@ pub fn load_custom_models(
 
     let mut result = CustomModelsResult::default();
     for (provider_name, provider_config) in &config.providers {
-        // Provider-level override.
         if provider_config.base_url.is_some() || provider_config.compat.is_some() {
             result.provider_overrides.insert(
                 provider_name.clone(),
@@ -404,13 +396,11 @@ pub fn load_custom_models(
                 },
             );
         }
-        // Per-model overrides.
         if let Some(overrides) = &provider_config.model_overrides {
             result
                 .model_overrides
                 .insert(provider_name.clone(), overrides.clone());
         }
-        // Custom models.
         let model_defs = provider_config.models.as_deref().unwrap_or_default();
         if model_defs.is_empty() {
             continue;
@@ -440,9 +430,8 @@ pub fn load_custom_models(
                 provider: provider_name.clone(),
                 base_url,
                 reasoning: model_def.reasoning.unwrap_or(false),
-                // TS `thinkingLevelMap: modelDef.thinkingLevelMap`: the
-                // definition's map is the model's, parsed from the same
-                // wire names the override merge uses.
+                // The definition's `thinkingLevelMap` is the model's,
+                // parsed from the same wire names the override merge uses.
                 thinking_level_map: model_def.thinking_level_map.as_ref().and_then(|map| {
                     serde_json::from_value::<pa_types::ai::ThinkingLevelMap>(
                         serde_json::to_value(map).ok()?,
@@ -491,10 +480,8 @@ mod tests {
             r#"{ "providers": { "custom": { "baseUrl": "http://x", "models": [ { "id": "m" } ] } } }"#,
         )
         .unwrap();
-        // Custom provider without apiKey fails.
         let error = validate_config(&config, &|_| false).unwrap_err();
         assert!(error.contains("apiKey"));
-        // Built-in providers are exempt.
         assert!(validate_config(&config, &|p| p == "custom").is_ok());
     }
 
@@ -517,10 +504,6 @@ mod tests {
         assert_eq!(result.models[0].context_window, 128_000);
     }
 
-    /// TS `thinkingLevelMap: modelDef.thinkingLevelMap`: a model
-    /// definition's map is the model's, so a locally-defined route that
-    /// declares addressable thinking levels keeps them (the definition's
-    /// levels drive `/effort` through the shared thinking helpers).
     #[test]
     fn parses_a_custom_model_definition_thinking_level_map() {
         let result = load_custom_models(
@@ -640,7 +623,6 @@ mod tests {
         assert_eq!(merged.name, "Renamed");
         assert_eq!(merged.context_window, 2000);
         assert_eq!(merged.cost.output.0, 9.0);
-        // Untouched cost fields survive.
         assert_eq!(merged.cost.input.0, 1.0);
     }
 }

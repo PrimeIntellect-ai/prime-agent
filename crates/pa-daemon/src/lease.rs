@@ -1,10 +1,7 @@
-//! Session leases (port of core/session-lease.ts).
-//!
-//! One process may host one runtime per canonical session file. A lease is a
-//! directory `<agent-dir>/session-leases/<sha256(path)>.lock` containing
-//! `owner.json`; acquisition is an atomic rename of a candidate directory, and
-//! stale owners (dead pid, or a recycled pid whose start identity changed) are
-//! reclaimed. A separate guard lock serializes lease updates.
+//! Session leases: one process may host one runtime per canonical session
+//! file — a lease is `<agent-dir>/session-leases/<sha256(path)>.lock`
+//! containing `owner.json`, acquired by an atomic rename; stale owners are
+//! reclaimed, and a guard lock serializes lease updates.
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
@@ -31,24 +28,22 @@ struct LeaseOwner {
 }
 
 /// Error matching the TS wire shape (`session_already_active`): `Display`
-/// keeps the TS message byte-identical; the user-facing rendering lives in
-/// [`crate::hold_refusal`] (the TS/Rust co-existence refusal).
+/// keeps the TS message byte-identical; the rendering lives in
+/// [`crate::hold_refusal`].
 #[derive(Debug, thiserror::Error)]
 #[error("Session is already active in {owner}: {session_path}")]
 pub struct SessionAlreadyActiveError {
     pub session_path: String,
     pub active_session_id: Option<String>,
     pub owner: String,
-    /// The live holder's pid (the error is raised only against a live
-    /// owner): what the refusal's holder classification resolves into a
-    /// product flavor (this Rust build vs the TypeScript product).
+    /// The live holder's pid: what the refusal's holder classification
+    /// resolves into a product flavor.
     pub holder_pid: Option<u32>,
 }
 
 impl SessionAlreadyActiveError {
-    /// The typed wire info for the refusal (`session_already_active`, the
-    /// TS `serializeDaemonError` shape): the raw fields a client renders
-    /// or acts on itself, carried beside the user-facing refusal text.
+    /// The typed wire info for the refusal (`session_already_active`,
+    /// the TS `serializeDaemonError` shape).
     #[must_use]
     pub fn error_info(&self) -> pa_types::daemon::DaemonErrorInfo {
         pa_types::daemon::DaemonErrorInfo::SessionAlreadyActive {
@@ -63,8 +58,7 @@ impl SessionAlreadyActiveError {
             active_session_id: owner
                 .and_then(|o| o.active_session_id.clone())
                 .filter(|id| !id.is_empty()),
-            // An owner without a session id is still identifiable by its
-            // pid (the descriptive session-open error surfaces it).
+            // An owner without a session id is still identifiable by its pid.
             owner: owner
                 .and_then(|o| o.active_session_id.clone())
                 .filter(|id| !id.is_empty())
@@ -93,8 +87,6 @@ pub fn get_process_start_id(pid: u32) -> Option<String> {
 }
 
 /// True only for a process that is actually running: zombies do not count.
-/// Errors when the platform cannot answer (the caller treats an unverifiable
-/// owner as alive rather than reclaiming its lease).
 ///
 /// # Errors
 ///
@@ -157,13 +149,10 @@ fn owner_alive(owner: &LeaseOwner) -> bool {
 }
 
 /// Whether a failed candidate-onto-lease-directory rename means the lease
-/// directory already exists (TS `isRenameTargetContention`).
-///
-/// POSIX: renaming onto an existing directory raises EEXIST/ENOTEMPTY.
-/// Windows: the same race surfaces as EPERM/EACCES instead, so those count
-/// as contention only when the target actually exists - a real permission
-/// problem must still propagate. EBUSY (a destination held open by
-/// antivirus/indexer) is never contention: TS leaves it out.
+/// directory already exists (TS `isRenameTargetContention`): POSIX raises
+/// EEXIST/ENOTEMPTY; Windows surfaces the same race as EPERM/EACCES, so
+/// those count only when the target actually exists - a real permission
+/// problem must still propagate.
 fn is_rename_target_contention(
     directory: &Path,
     error: &std::io::Error,
@@ -182,11 +171,9 @@ fn is_rename_target_contention(
 /// (TS `reclaimStaleLease` caps at 8 with a `10ms * attempt` backoff).
 const WIN32_RECLAIM_ATTEMPTS: u32 = 8;
 
-/// Whether a failed stale-reclaim rename deserves another attempt on the
-/// given platform, and how long to wait first (`10ms * attempt`). `None`
-/// means the failure surfaces. Attempts are 1-based; only the win32
-/// destination-busy family (EPERM/EACCES via `PermissionDenied`, EBUSY via
-/// raw `ERROR_SHARING_VIOLATION`/`ERROR_LOCK_VIOLATION`) retries.
+/// Whether a failed stale-reclaim rename deserves another attempt, and
+/// how long to wait first (`10ms * attempt`); `None` means the failure
+/// surfaces. Only the win32 destination-busy family retries.
 fn reclaim_retry_delay_ms(
     platform_windows: bool,
     error: &std::io::Error,
@@ -241,28 +228,18 @@ const THROUGH_STALE_SLACK: Duration = Duration::from_millis(500);
 /// How long a guard acquisition waits for a foreign holder.
 #[derive(Clone, Copy)]
 enum GuardWait {
-    /// The fast budget. The release and append paths hold the guard only
-    /// for their own sub-millisecond bookkeeping, so a guard that stays
-    /// busy for longer belongs to a genuinely stuck peer and surfaces
-    /// as a failure instead of stalling the caller.
+    /// The fast budget: the release and append paths hold the guard only
+    /// for sub-millisecond bookkeeping; a longer-busy guard fails fast.
     Fast,
-    /// Outlast the stale window: a holder killed mid-mutation (kill -9)
-    /// can never release its guard, so an acquisition on the create/open
-    /// path must survive until the stale reclaim instead of failing
-    /// while the reclaim is still seconds away.
+    /// Outlast the stale window: a holder killed mid-mutation can never
+    /// release its guard, so the acquisition survives until the reclaim.
     ThroughStale,
 }
 
-/// Serialize lease-directory mutations with a guard directory lock.
-///
-/// The guard is a bare `<lease>.guard` directory: TS (`proper-lockfile`)
-/// reclaims a foreign guard by rmdir, so it must stay empty on every
-/// platform. The holder removes it when the action ends; a holder that
-/// dies mid-action leaves it behind, and only the `STALE_GUARD_AFTER`
-/// mtime window reclaims it (a bare guard carries no holder identity to
-/// consult). `GuardWait` picks whether an acquisition outlives that
-/// window - a fresh guard of a dead holder blocks a session open forever
-/// if the open gives up first.
+/// Serialize lease-directory mutations with a guard directory lock: a
+/// bare `<lease>.guard` directory (it must stay empty — TS reclaims a
+/// foreign guard by rmdir); only the `STALE_GUARD_AFTER` mtime window
+/// reclaims one left by a dead holder.
 fn with_lease_guard<T>(
     directory: &Path,
     wait: GuardWait,
@@ -285,9 +262,8 @@ fn with_lease_guard<T>(
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 // Every contention consumes the budget, stale or not: a
-                // reclaim that keeps failing (permissions, or a peer
-                // re-creating the guard) must burn out like any other
-                // busy guard instead of spinning past the deadline.
+                // reclaim that keeps failing must burn out instead of
+                // spinning past the deadline.
                 attempt += 1;
                 let exhausted = match deadline {
                     Some(deadline) => std::time::Instant::now() >= deadline,
@@ -297,17 +273,9 @@ fn with_lease_guard<T>(
                     break;
                 }
                 // Stale guard: a holder that died without cleanup. The
-                // bare guard carries no holder identity (TS reclaims a
-                // foreign guard by rmdir, so it must stay empty), so the
-                // lease's owner is the stand-in: steal only when the
-                // owner is provably dead or the lease never finished
-                // acquiring. A live owner may hold the guard mid-append,
-                // and taking it would break the append's exactly-one-
-                // commit serialization; the one contender a dead owner
-                // still allows - another acquirer racing this one - is
-                // tolerated by acquire's own contention retries. A
-                // successful reclaim retries immediately; anything else
-                // falls through to the cadence so it stays paced.
+                // bare guard carries no holder identity, so the lease's
+                // owner is the stand-in: steal only when the owner is
+                // provably dead (a live owner may hold the guard mid-append).
                 if crate::paths::mtime_age(&guard).is_some_and(|age| age > STALE_GUARD_AFTER)
                     && match read_owner(directory) {
                         Ok(Some(owner)) => !owner_alive(&owner),
@@ -420,21 +388,14 @@ impl SessionLease {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveLeaseOwner {
     pub pid: u32,
-    /// The owner's recorded active session id, when it carries one (the TS
-    /// product and this port both stamp it): the holder identity the
+    /// The owner's recorded active session id: the holder identity the
     /// session-hold refusal names.
     pub active_session_id: Option<String>,
 }
 
-/// Whether a live process holds the session file's runtime lease: read the
-/// shared `session-leases` ownership record (never acquiring, never
-/// reclaiming) and keep only a provably-live owner. The lease table is the
-/// one cross-daemon ownership record a shared agent dir offers, so the
-/// automatic revival paths (boot adoption, the scheduled-work re-arm)
-/// probe it before spawning a rival worker over a file another daemon's
-/// worker already serves — one owning daemon. A dead owner, a missing
-/// record, or an unreadable one answers `None` (a stale record is not
-/// live ownership).
+/// Whether a live process holds the session file's runtime lease: read
+/// the shared `session-leases` record (never acquiring, never reclaiming);
+/// a dead, missing, or unreadable owner answers `None`.
 #[must_use]
 pub fn live_lease_owner(agent_dir: &Path, session_path: &Path) -> Option<LiveLeaseOwner> {
     let directory = lease_directory(agent_dir, session_path);
@@ -453,10 +414,8 @@ pub fn live_lease_owner(agent_dir: &Path, session_path: &Path) -> Option<LiveLea
 ///
 /// # Errors
 ///
-/// Returns an error when the runtime acquire fails (another live owner
-/// holds the lease, the lease guard stays busy past its wait budget, or
-/// the lease directory or owner files cannot be created); the `Ok(None)`
-/// answers never error.
+/// Returns an error when the runtime acquire fails (another live owner,
+/// a busy guard past its budget, or unwritable lease files).
 pub fn acquire_session_lease(
     session_path: Option<&Path>,
     agent_dir: &Path,
@@ -470,18 +429,15 @@ pub fn acquire_session_lease(
     acquire_runtime_session_lease(session_path, agent_dir).map(Some)
 }
 
-/// Acquire mandatory runtime ownership before opening or writing a session.
-/// The runtime acquire the daemon's workers use (ungated by the test
-/// env flag): the CLI print-mode guard shares it so a resume either
-/// atomically owns the file's runtime lease or answers the refusal -
-/// no observe-then-open window for a second writer.
+/// Acquire mandatory runtime ownership before opening or writing a
+/// session: the runtime acquire the daemon's workers use (ungated by
+/// the test env flag). The CLI print-mode guard shares it, so a resume
+/// either atomically owns the file or answers the refusal.
 ///
 /// # Errors
 ///
-/// Returns an error when another live owner already holds the lease
-/// (`SessionAlreadyActiveError`), when the lease guard stays busy past
-/// its wait budget, or when the lease directory or owner files cannot be
-/// created.
+/// Returns an error when another live owner holds the lease, the guard
+/// stays busy past its budget, or the lease files cannot be created.
 pub fn acquire_runtime_session_lease(
     session_path: &Path,
     agent_dir: &Path,
@@ -491,10 +447,7 @@ pub fn acquire_runtime_session_lease(
     fs::create_dir_all(&root)?;
     let directory = lease_directory(agent_dir, &canonical);
 
-    // The open path outlasts the stale window: a guard left by a holder
-    // killed mid-mutation can never be released by its dead owner, and
-    // failing the relaunch while the stale reclaim is still seconds away
-    // would leave a kill -9'd session unrevivable for the whole window.
+    // The open path outlasts the stale window (see `GuardWait::ThroughStale`).
     with_lease_guard(&directory, GuardWait::ThroughStale, || {
         for _ in 0..3 {
             let token = uuid::Uuid::new_v4().to_string();
@@ -658,11 +611,9 @@ mod tests {
         let lease = acquire_session_lease(Some(&session), &dir)
             .unwrap()
             .unwrap();
-        // Second holder conflicts.
         let err = acquire_session_lease(Some(&session), &dir).unwrap_err();
         assert!(err.to_string().contains("already active"));
         lease.release();
-        // Released lease can be acquired again.
         let second = acquire_session_lease(Some(&session), &dir)
             .unwrap()
             .unwrap();
@@ -671,10 +622,8 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// The state a kill -9 mid-mutation leaves behind: a lease owned by
-    /// a dead process plus a brand-new guard its dead holder can never
-    /// remove. The open path must wait out the stale window and reclaim
-    /// both instead of failing while the reclaim is still seconds away.
+    /// A kill -9 mid-mutation leaves a dead owner plus a brand-new guard
+    /// it can never remove; the open path waits out the stale window.
     #[test]
     fn create_path_outlasts_a_fresh_guard_of_a_dead_holder() {
         let dir = tempfile::tempdir().unwrap();
@@ -701,17 +650,14 @@ mod tests {
         std::fs::create_dir(format!("{}.guard", directory.display())).unwrap();
         let started = std::time::Instant::now();
         let lease = acquire_runtime_session_lease(&path, dir.path()).unwrap();
-        // The guard was brand new: a fresh guard is never stolen early,
-        // so success proves the open waited out the stale window. The
-        // guard ages from its creation, a hair before `started`, so the
-        // bound allows that setup gap.
+        // The guard was brand new (never stolen early), so success proves
+        // the open waited out the stale window.
         let elapsed = started.elapsed();
         assert!(
             elapsed >= STALE_GUARD_AFTER.saturating_sub(Duration::from_millis(250)),
             "the fresh guard was not waited out: {elapsed:?}"
         );
-        // Generous ceiling: the reclaim fires right after the window, and
-        // only a scheduler stall between iterations can stretch the gap.
+        // Generous ceiling: only a scheduler stall can stretch the gap.
         assert!(
             elapsed < STALE_GUARD_AFTER + THROUGH_STALE_SLACK + Duration::from_secs(10),
             "the stale reclaim overran its window: {elapsed:?}"
@@ -719,11 +665,8 @@ mod tests {
         lease.release();
     }
 
-    /// A guard past the stale window whose lease owner is alive is never
-    /// stolen: the open path waits out its deadline and fails instead of
-    /// breaking the live owner's append serialization (the bare guard
-    /// carries no identity, so the owner's liveness is all a steal can
-    /// consult).
+    /// A stale guard of a live owner is never stolen: the open path fails
+    /// at its deadline instead of breaking the live owner's append.
     #[cfg(unix)]
     #[test]
     fn stale_guard_of_a_live_owner_is_never_stolen() {
@@ -766,8 +709,6 @@ mod tests {
         lease.release();
     }
 
-    /// A stale-guard reclaim whose removal keeps failing must burn the
-    /// budget instead of spinning past it on immediate retries.
     #[cfg(unix)]
     #[test]
     fn stale_guard_reclaim_failure_stays_bounded() {
@@ -775,8 +716,7 @@ mod tests {
         let path = dir.path().join("session.jsonl");
         std::fs::write(&path, "{}\n").unwrap();
         // A dead owner (pid 0) whose guard reads stale but can never be
-        // reclaimed: `remove_dir_all` on a plain file fails on every
-        // retry, root included, so the open must pace itself out.
+        // reclaimed: `remove_dir_all` on a plain file fails on every retry.
         let owner = LeaseOwner {
             version: 1,
             token: "dead-holder".to_owned(),
@@ -817,9 +757,6 @@ mod tests {
         let _ = fs::remove_dir_all(&directory);
     }
 
-    /// The append path keeps the fast budget: a fresh foreign guard
-    /// fails the append promptly instead of stalling the turn for the
-    /// whole stale window.
     #[test]
     fn append_fails_fast_behind_a_fresh_guard() {
         let dir = tempfile::tempdir().unwrap();

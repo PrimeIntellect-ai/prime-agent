@@ -1,8 +1,6 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures by
-// design on hot paths; 64-bit targets - the narrowing sits at OS/protocol
-// boundaries where the values are bounded (pid syscalls, epoch/elapsed
-// milliseconds), and checked conversions would add panic paths where silent
-// wrap was deliberate.
+// large_futures: stack-resident futures on hot paths by design.
+// too_many_lines: style gate. Casts: 64-bit targets; narrowing sits at
+// bounded OS/protocol boundaries.
 #![allow(
     clippy::large_futures,
     clippy::cast_possible_truncation,
@@ -12,10 +10,9 @@
     clippy::too_many_lines
 )]
 
-//! The pty harness: one recording mock terminal (the master reader), the
-//! pty's termios differential, the mock supervisor the surfaces attach
-//! to, and the child-mode plumbing (this binary re-executed under the
-//! pty as the product under test).
+//! The pty harness: the recording mock terminal, the termios differential,
+//! the mock supervisor, and the child-mode plumbing (this binary
+//! re-executed under the pty as the product under test).
 
 use std::io::{BufRead, Read, Write};
 use std::os::fd::{AsRawFd, OwnedFd};
@@ -36,19 +33,14 @@ use crate::{
     CHILD_MODE_ENV, CHILD_SOCKET_ENV, CHILD_TERM, KITTY_ANSWER, KITTY_FLAGS_PUSH, KITTY_QUERY,
 };
 
-// ---------------------------------------------------------------------------
-// The pty harness
-// ---------------------------------------------------------------------------
+// The pty harness.
 
-/// One pty-backed product child: a mock-supervisor socket it attaches
-/// to (when the surface needs one), a raw pty whose master the harness
-/// reads non-blockingly, and a termios snapshot taken before the child
-/// spawns (the raw-mode differential rides on it).
+/// One pty-backed product child: a mock-supervisor socket, a raw pty, and a
+/// pre-spawn termios snapshot.
 pub(crate) struct DifferentialHarness {
     pub(crate) child: Child,
     pub(crate) master: PtyReader,
-    /// The mock-supervisor listener the harness owns (a route may shut
-    /// it down to refuse later connections).
+    /// A route may shut it down to refuse later connections.
     listener: Option<std::os::unix::net::UnixListener>,
     _server: Option<std::thread::JoinHandle<()>>,
     /// The mock socket's path (the refusal determinism polls it).
@@ -58,9 +50,8 @@ pub(crate) struct DifferentialHarness {
 }
 
 impl DifferentialHarness {
-    /// Spawn a child (this binary re-executed in a child mode) on a
-    /// fresh pty against a mock supervisor that answers every daemon
-    /// request except the ones a route stalls.
+    /// Spawn a child (this binary re-executed in a child mode) on a fresh
+    /// pty against a mock supervisor that answers everything but the stall.
     pub(crate) fn start(spec: &ChildSpec) -> DifferentialHarness {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let socket = dir.path().join("tui.sock");
@@ -83,8 +74,7 @@ impl DifferentialHarness {
         .expect("open pty");
         let before = Termios::capture(pty.master.as_raw_fd());
         let child = spawn_child(spec, &socket, &pty.slave);
-        // The child needs the socket and the temp dir for its lifetime;
-        // the whole tree dies with the child at teardown.
+        // The child needs the socket and the temp dir for its lifetime.
         std::mem::forget(dir);
         DifferentialHarness {
             child,
@@ -104,9 +94,7 @@ impl DifferentialHarness {
         self.master.write(payload);
     }
 
-    /// A write that tolerates the child being gone (the late-answer
-    /// route's answer can race the process death — when the child is
-    /// already out, there is no terminal left to re-arm).
+    /// A write that tolerates the child being gone (the answer can race the process death).
     pub(crate) fn try_write(&mut self, payload: &[u8]) {
         self.master.try_write(payload);
     }
@@ -140,22 +128,16 @@ impl DifferentialHarness {
         }
     }
 
-    /// Answer the kitty query like a kitty terminal: wait for the query
-    /// and require the flags push before anything else.
+    /// Answer the kitty query like a kitty terminal (query, answer, push).
     pub(crate) fn answer_kitty_query(&mut self) {
         self.wait_from_start(KITTY_QUERY, "the kitty capability query");
         self.write(KITTY_ANSWER);
         self.wait_from_start(KITTY_FLAGS_PUSH, "the kitty flags push");
     }
 
-    /// Refuse every later daemon connection (the roster-failure route:
-    /// the agents view's connect behind the chat handoff fails).
-    /// Shutting the listener's socket down fails the serve thread's
-    /// pending accept; the thread then drops its listener, and once no
-    /// live descriptor remains every later connect gets ECONNREFUSED.
-    /// Already-served connections (the chat's) stay alive on their own
-    /// threads. The refusal is polled to determinism: the route proceeds
-    /// only once the socket truly refuses.
+    /// Refuse every later daemon connection (the roster-failure route): the
+    /// shutdown fails the pending accept; once no live descriptor remains,
+    /// later connects get ECONNREFUSED while served ones stay alive.
     pub(crate) fn refuse_later_connections(&mut self) {
         if let Some(listener) = self.listener.take() {
             // SAFETY: `shutdown` only invalidates the listening socket's
@@ -176,10 +158,8 @@ impl DifferentialHarness {
         }
     }
 
-    /// The whole-route assertion: the child exited, the byte stream is
-    /// drained, and the terminal state it leaves equals the state it
-    /// received — the mode ledger is empty AND the pty's termios is
-    /// byte-equal to the pre-spawn snapshot.
+    /// The whole-route assertion: the child exited, the ledger is empty,
+    /// and the termios equals the pre-spawn snapshot.
     pub(crate) fn assert_terminal_state_restored(&mut self, context: &str) {
         self.drain_until_quiet(10);
         let stream = self.output();
@@ -205,8 +185,7 @@ impl DifferentialHarness {
 impl Drop for DifferentialHarness {
     fn drop(&mut self) {
         // A panicking wait must never leak the pty child: it owns the
-        // controlling terminal of its own session and outlives the
-        // harness.
+        // controlling terminal of its own session.
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -223,8 +202,7 @@ pub(crate) fn harness_lock() -> std::sync::MutexGuard<'static, ()> {
     }
 }
 
-/// Non-blocking reader over the pty master, collecting the raw byte
-/// stream the child writes (the recording mock terminal's tape).
+/// Non-blocking reader over the pty master (the mock terminal's tape).
 pub(crate) struct PtyReader {
     pub(crate) file: std::fs::File,
     pub(crate) output: Vec<u8>,
@@ -248,9 +226,8 @@ impl PtyReader {
         self.file.write_all(payload).expect("write to the pty");
     }
 
-    /// A write that tolerates the child being gone: a closed pty master
-    /// fails with EIO, and the route that injects an answer around the
-    /// exit treats "the child died first" as no answer, not a failure.
+    /// A write that tolerates the child being gone: a closed master fails
+    /// with EIO — no answer, not a failure.
     pub(crate) fn try_write(&mut self, payload: &[u8]) {
         let _ = self.file.write_all(payload);
         let _ = self.file.flush();
@@ -273,8 +250,7 @@ impl PtyReader {
         }
     }
 
-    /// Drain the master until the needle appears in the output collected
-    /// since the given mark, bounded by a generous harness deadline.
+    /// Drain the master until the needle appears since the given mark.
     pub(crate) fn wait_from(&mut self, mark: usize, needle: &[u8], what: &str) {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
@@ -307,13 +283,11 @@ pub(crate) fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> 
         .position(|window| window == needle)
 }
 
-// ---------------------------------------------------------------------------
-// The termios differential
-// ---------------------------------------------------------------------------
+// The termios differential.
 
 /// The pty's line-discipline state (raw mode lives here — the escape
-/// stream cannot show it). Captured via the master fd: a pty pair shares
-/// one termios, so the master reads the slave's line discipline.
+/// stream cannot show it). A pty pair shares one termios, so the master
+/// reads the slave's discipline.
 pub(crate) struct Termios {
     iflag: libc::tcflag_t,
     oflag: libc::tcflag_t,
@@ -356,37 +330,23 @@ impl Termios {
     }
 
     /// Whether the line discipline runs software flow control (IXON): the
-    /// flow e2e's routes are meaningless without it — a Ctrl+S byte must
-    /// be able to stop the tty for the stop-state contracts to prove
-    /// anything.
-    ///
-    /// The termios-process e2e binary's routes assert it; the
-    /// differential's own routes do not, so the method carries the
-    /// dead-code allow for that binary.
+    /// termios-process e2e needs it; this binary's routes do not (the dead-code allow).
     #[allow(dead_code)]
     pub(crate) fn input_flow_control_on(&self) -> bool {
         self.iflag & libc::IXON != 0
     }
 }
 
-// ---------------------------------------------------------------------------
-// The mock supervisor
-// ---------------------------------------------------------------------------
+// The mock supervisor.
 
-/// One attached session behind a mock supervisor socket (the frame
-/// contract the kitty-release e2e harness serves): `daemon_hello`, a
-/// `create` + `attach` pair with a small transcript, and a catch-all
-/// for everything else. The stalled command types (`list`) are answered
-/// by silence — the bounded request hangs, the loop wedges, and the
-/// force-quit watchdog has its case.
+/// One attached session behind a mock supervisor socket: `daemon_hello`, a
+/// `create` + `attach` pair with a small transcript, a catch-all, and
+/// stalls answered by silence (the force-quit wedge).
 pub(crate) struct MockSupervisor;
 
 impl MockSupervisor {
-    /// One listener, every connection served on its own thread: the
-    /// accept loop must never block inside a connection (a shutdown of
-    /// the listener fails the pending accept instantly — the
-    /// roster-failure route's refusal is deterministic), and a served
-    /// connection (the chat's) stays alive while the loop moves on.
+    /// One listener, every connection on its own thread: the accept loop
+    /// must never block inside a connection.
     pub(crate) fn serve(
         listener: &std::os::unix::net::UnixListener,
         stall: &'static [&'static str],
@@ -435,8 +395,7 @@ impl MockSupervisor {
                 .unwrap_or_default()
                 .to_string();
             if stall.contains(&command_type.as_str()) {
-                // Answered by silence: the caller's bounded request hangs
-                // (the force-quit route's wedge).
+                // Answered by silence: the caller's bounded request hangs.
                 continue;
             }
             match command_type.as_str() {
@@ -484,9 +443,8 @@ pub(crate) fn write_json(writer: &mut std::os::unix::net::UnixStream, value: &Va
     writer.flush().expect("flush mock frame");
 }
 
-/// The attach snapshot: a small transcript whose last row carries a URL,
-/// so the paint (and the exit flush) exercise the OSC 8 hyperlink pairs
-/// the ledger balances.
+/// The attach snapshot: a small transcript whose last row carries a
+/// URL (the OSC 8 hyperlink pairs).
 pub(crate) fn attach_data(id: &str) -> Value {
     let messages: Vec<Value> = (0..4)
         .map(|index| {
@@ -533,13 +491,10 @@ pub(crate) fn attach_data(id: &str) -> Value {
     })
 }
 
-// ---------------------------------------------------------------------------
-// The child modes (this binary re-executed as the product under test)
-// ---------------------------------------------------------------------------
+// The child modes (this binary re-executed as the product under test).
 
-/// One child route's spawn spec: the surface mode, the daemon commands
-/// the mock answers by silence (the force-quit wedge), and the extra
-/// env the mode reads (the replay fixture, the selector flags).
+/// One child route's spawn spec: the surface mode, the commands the mock
+/// answers by silence (the wedge), and the extra env the mode reads.
 pub(crate) struct ChildSpec {
     mode: &'static str,
     stall: &'static [&'static str],
@@ -567,9 +522,8 @@ impl ChildSpec {
 }
 
 /// A child of this very binary, re-executed with the pty slave as its
-/// terminal — and its CONTROLLING terminal (`setsid` + `TIOCSCTTY`):
-/// crossterm's raw-mode and event reads go through `/dev/tty`, which
-/// must be the pty regardless of the runner's own session.
+/// terminal AND controlling terminal (`setsid` + `TIOCSCTTY`): crossterm's
+/// raw-mode and event reads go through `/dev/tty`.
 pub(crate) fn spawn_child(spec: &ChildSpec, socket: &Path, slave: &OwnedFd) -> Child {
     // Runs between fork and exec in the child: become a session leader
     // and claim the pty slave as the controlling terminal.
@@ -606,8 +560,7 @@ pub(crate) fn spawn_child(spec: &ChildSpec, socket: &Path, slave: &OwnedFd) -> C
         .stdout(slave_as_stdio(slave))
         .stderr(slave_as_stdio(slave));
     // SAFETY: the pre_exec hook is the supported std seam for
-    // session/terminal setup; it runs post-fork pre-exec in the child
-    // only and cannot allocate.
+    // session/terminal setup; it runs post-fork pre-exec in the child only and cannot allocate.
     unsafe {
         command.pre_exec(move || claim_controlling_tty(slave_fd));
     }
@@ -628,20 +581,15 @@ pub(crate) fn child_mode_test_name(mode: &str) -> &'static str {
     }
 }
 
-/// Silence the child-mode run's own epilogue: libtest prints its result
-/// lines AFTER the surface fn returns, and its reporter writes SGR
-/// colors and `ESC(B` charset designations on the same pty the
-/// differential audits. The PRODUCT's bytes are done by then; the
-/// reporter's are noise — redirect stdout and stderr to /dev/null so
-/// the recorded tape ends at the surface's own restore.
+/// Silence the child-mode run's own epilogue: libtest's reporter writes SGR
+/// colors and `ESC(B` designations on the audited pty, after the product's bytes are done.
 pub(crate) fn quiet_child_epilogue() {
     let null = std::fs::OpenOptions::new()
         .write(true)
         .open("/dev/null")
         .expect("/dev/null");
     // SAFETY: dup2 only swaps this process's fd 1/2 after the surface
-    // work is done; the pty slave behind them stays owned by the
-    // harness's master.
+    // work is done; the pty slave behind them stays owned by the harness's master.
     unsafe {
         libc::dup2(null.as_raw_fd(), 1);
         libc::dup2(null.as_raw_fd(), 2);

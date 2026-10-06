@@ -1,40 +1,22 @@
 //! Headless e2e for the announced non-update daemon closing (TS #2458):
-//! the operator's own daemon shutdown used to drop every attached window —
-//! `daemon_closing` without an update only painted a note and the pane
-//! rode the daemon down. The pane must arm the bounded shutdown recovery
-//! at the notice and reconnect when the daemon comes back on the same
-//! socket path: the waiting row, the version-honest reconnected banner
-//! (the restarted daemon's `appVersion`), and the successor's durable-id
-//! reattach are all pinned — and the hiccup loop's rows must never fire.
-//!
-//! TS parity anchor: `reconnectAfterShutdown` reconnects to the same socket
-//! path and re-attaches the same session by durable identity
-//! (packages/coding-agent/src/modes/agent-connection/daemon-agent-connection.ts),
-//! with the interactive mode's `formatDaemonReconnectBanner` reporting the
-//! restart honestly.
+//! the pane must arm the bounded shutdown recovery at the notice and
+//! reconnect when the daemon returns on the same socket path (TS
+//! `reconnectAfterShutdown`: same path, same durable session id).
 #![cfg(unix)]
-// Pedantic-gate exceptions (every other pedantic warning in this crate is
-// fixed in place; each exception carries its one-line justification):
-// - the casts: terminal-layout arithmetic narrows structurally bounded
-//   values (screen coordinates, byte counts, timestamps); guarded
-//   conversions would add panic paths the bounds guarantee away.
+// Casts: structurally bounded terminal-layout arithmetic; guarded conversions add panic paths.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// - the render routes are flat tables (one arm per route); splitting them
-//   would add indirection without changing the flow.
+// Render routes are flat tables (one arm per route); splitting adds indirection.
 #![allow(clippy::too_many_lines)]
-// - widget state structs carry independent flag bits; a nested struct
-//   would add indirection without changing the shape.
+// Widget state structs carry independent flag bits.
 #![allow(clippy::struct_excessive_bools, clippy::fn_params_excessive_bools)]
-// - the futures are bounded by the surface's lifetime; boxing them would
-//   add an allocation to the steady-state loop.
+// Futures are bounded by the surface's lifetime; boxing adds a steady-state allocation.
 #![allow(clippy::large_futures)]
-// - the wrappers preserve a uniform Result-returning API surface; unwrap
-//   removals would ripple through the callers without changing behavior.
+// The wrappers preserve a uniform Result-returning API surface.
 #![allow(clippy::unnecessary_wraps)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -50,15 +32,14 @@ use pa_tui::interactive::{
 };
 use serde_json::{json, Value};
 
-/// The wait for the recovered banner: the shutdown recovery's fixed poll
-/// finds the successor well inside this bound.
+/// The wait for the recovered banner: the shutdown recovery's fixed poll finds the successor well
+/// inside this bound.
 const BANNER_WAIT_MS: u64 = 10_000;
 /// One mock generation's accept window.
 const ACCEPT_WAIT_MS: u64 = 10_000;
 
-/// The first daemon generation: serve the startup create/attach, then
-/// announce the non-update closing and exit — the operator's `shutdown`
-/// as every attached window reads it.
+/// The first daemon generation: serve the startup create/attach, then announce the non-update
+/// closing and exit.
 struct FirstGeneration {
     listener: UnixListener,
 }
@@ -73,15 +54,13 @@ impl FirstGeneration {
         FirstGeneration { listener }
     }
 
-    /// Serve until the announced closing, then free the socket path for
-    /// the successor.
+    /// Serve until the announced closing, then free the socket path for the successor.
     fn serve(self, socket: &Path) {
         let stream = accept(&self.listener, "the first daemon never saw the client");
         let mut writer = stream.try_clone().expect("clone first daemon socket");
         let mut reader = BufReader::new(stream);
         write_json(&mut writer, &daemon_hello(None));
-        // Answer the startup create + attach and the one mounted turn,
-        // then announce and die — the operator's shutdown mid-chat.
+        // Answer the startup create + attach and the one mounted turn, then announce and die.
         let mut line = String::new();
         loop {
             line.clear();
@@ -121,13 +100,9 @@ impl FirstGeneration {
                     write_json(&mut writer, &attach_data(id));
                 }
                 "prompt" => {
-                    // The turn stays mid-flight when the daemon announces
-                    // its non-update closing and exits — the operator's
-                    // shutdown does not wait for turns (and the live-turn
-                    // shape keeps this test's recovery subject isolated
-                    // from the turn-settling stats refresh, whose
-                    // dead-socket send is pinned separately by
-                    // daemon_shutdown_turn_end_headless.rs).
+                    // The turn stays mid-flight when the daemon announces and exits — the
+                    // operator's shutdown does not wait for turns (the sibling turn-end e2e
+                    // pins the turn-settling stats refresh).
                     write_json(&mut writer, &success_response(id, "prompt"));
                     let question = command
                         .get("message")
@@ -178,8 +153,7 @@ impl FirstGeneration {
                 _ => write_json(&mut writer, &success_response(id, &command_type)),
             }
         }
-        // Dropping the socket closes the connection; the listener goes
-        // with the scope so the successor can bind the same path again.
+        // Dropping the socket closes the connection; the listener frees the path for the successor.
         drop(writer);
         drop(reader);
         drop(self.listener);
@@ -187,9 +161,8 @@ impl FirstGeneration {
     }
 }
 
-/// The successor daemon generation: back on the SAME socket path with its
-/// own version, serving the reattach and recording every `attach` it
-/// sees.
+/// The successor daemon generation: back on the SAME socket path with its own version, serving the
+/// reattach and recording every `attach` it sees.
 struct SuccessorDaemon {
     listener: UnixListener,
     /// The reattach requests the successor served (the durable-id pin).
@@ -246,8 +219,8 @@ impl SuccessorDaemon {
     }
 }
 
-/// Accept one connection, bounded: a mock that never sees its client is a
-/// broken mock, not a slow one.
+/// Accept one connection, bounded: a mock that never sees its client is a broken mock, not a slow
+/// one.
 fn accept(listener: &UnixListener, what: &str) -> UnixStream {
     let deadline = std::time::Instant::now() + Duration::from_millis(ACCEPT_WAIT_MS);
     loop {
@@ -265,9 +238,8 @@ fn accept(listener: &UnixListener, what: &str) -> UnixStream {
     }
 }
 
-/// The supervisor hello; `app_version` is the version the restarted daemon
-/// reports (the first generation reports none — the banner reads only the
-/// successor's).
+/// The supervisor hello; `app_version` is the version the restarted daemon reports (the first
+/// generation reports none — the banner reads only the successor's).
 fn daemon_hello(app_version: Option<&str>) -> Value {
     let mut hello = json!({
         "type": "daemon_hello",
@@ -291,8 +263,8 @@ fn success_response(id: &str, command: &str) -> Value {
     })
 }
 
-/// One streamed session event, routed like the daemon's event pump routes
-/// it (the `session_event` envelope keyed by the active session).
+/// One streamed session event, routed like the daemon's event pump routes it (the `session_event`
+/// envelope keyed by the active session).
 fn write_session_event(writer: &mut UnixStream, event: &Value) {
     write_json(
         writer,
@@ -388,18 +360,13 @@ fn options_with_session(socket: PathBuf, session: SessionSelection) -> Interacti
     }
 }
 
-/// The operator's daemon restart recovers an attached window (TS #2458):
-/// the announced non-update closing arms the bounded shutdown recovery,
-/// the pane stays mounted while it waits, and the restarted daemon's
-/// reattach lands — the version-honest banner is the visible end state.
-/// Without the recovery the pane rode the hiccup loop instead: its rows
-/// ("the daemon connection closed — reconnecting…", "reconnected to the
-/// daemon") and their 10-minute window, never the announced-closing
-/// semantics this test pins.
+/// The operator's daemon restart recovers an attached window (TS #2458): the announced non-update
+/// closing arms the bounded shutdown recovery, the pane stays mounted while it waits, and the
+/// restarted daemon's reattach lands.
 #[test]
 fn an_announced_shutdown_reconnects_when_the_daemon_comes_back() {
-    // The ambient TMUX variable adds a startup notice to the transcript;
-    // scrub it so the run is the same inside tmux and out.
+    // The ambient TMUX variable adds a startup notice; scrub it so runs are the same inside tmux
+    // and out.
     std::env::remove_var("TMUX");
     let dir = tempfile::TempDir::new().expect("temp dir");
     let socket = dir.path().join("tui.sock");
@@ -409,8 +376,8 @@ fn an_announced_shutdown_reconnects_when_the_daemon_comes_back() {
     let successor_socket = socket.clone();
     let successor_version = env!("CARGO_PKG_VERSION").to_string();
     let handle = std::thread::spawn(move || {
-        // The first daemon's lifetime, then the successor's — the
-        // stop-and-restart the operator performs.
+        // The first daemon's lifetime, then the successor's — the stop-and-restart the operator
+        // performs.
         first.serve(&successor_socket);
         let successor = SuccessorDaemon::bind(&successor_socket, successor_version, recorder);
         successor.serve();
@@ -424,10 +391,8 @@ fn an_announced_shutdown_reconnects_when_the_daemon_comes_back() {
         steps: vec![
             HeadlessStep::Type("hello".to_string()),
             HeadlessStep::Key(enter()),
-            // The barrier arms before the shutdown can even fire (the
-            // daemon answers the submitted turn with the closing), so the
-            // recovery banner - which cannot render before the 100ms poll
-            // - is always a post-barrier frame.
+            // The barrier arms before the shutdown can even fire (the daemon answers the submitted
+            // turn with the closing), so the recovery banner is always a post-barrier frame.
             HeadlessStep::WaitRender {
                 needle: "Daemon restarted (v".to_string(),
                 timeout_ms: BANNER_WAIT_MS,
@@ -443,13 +408,12 @@ fn an_announced_shutdown_reconnects_when_the_daemon_comes_back() {
     let outcome = outcome.expect("the recovered run returns normally");
     let all = outcome.frames.join("\n");
 
-    // TS #2458's waiting row: the announced closing armed the bounded
-    // shutdown recovery (not the hiccup loop).
+    // TS #2458's waiting row: the announced closing armed the bounded shutdown recovery (not the
+    // hiccup loop).
     assert!(
         all.contains("the Prime Agent daemon shut down; waiting for it to come back"),
         "the shutdown recovery armed at the notice:\n{all}"
     );
-    // The recovered window reports the restart version-honestly.
     let equal_banner = format!(
         "Daemon restarted (v{}) - reconnected",
         env!("CARGO_PKG_VERSION")
@@ -458,8 +422,6 @@ fn an_announced_shutdown_reconnects_when_the_daemon_comes_back() {
         all.contains(&equal_banner),
         "the version-honest banner for the equal-version successor:\n{all}"
     );
-    // The hiccup loop never fired: the announced closing owns the
-    // recovery.
     assert!(
         !all.contains("the daemon connection closed — reconnecting"),
         "the announced closing must not fall back to the hiccup loop:\n{all}"
@@ -468,8 +430,8 @@ fn an_announced_shutdown_reconnects_when_the_daemon_comes_back() {
         !all.contains("reconnected to the daemon"),
         "the hiccup loop's recovery row must not appear:\n{all}"
     );
-    // The successor saw the reattach: the same session, by DURABLE id
-    // (the active id can change across a restart, TS #2458).
+    // The successor saw the reattach: the same session, by DURABLE id (the active id can change
+    // across a restart, TS #2458).
     let requests = attach_requests.lock().unwrap().clone();
     let attached_by_durable_id = requests
         .iter()
@@ -478,7 +440,6 @@ fn an_announced_shutdown_reconnects_when_the_daemon_comes_back() {
         attached_by_durable_id,
         "the reattach reached the successor by durable id: {requests:?}"
     );
-    // The saved-transcript close never fired: the pane recovered.
     assert!(
         !all.contains("The Prime Agent daemon shut down while this window was attached"),
         "the expiry row must not appear when the daemon came back:\n{all}"

@@ -1,24 +1,18 @@
-//! The queue concern: browsing, reordering, and editing the parked
-//! steering/follow-up messages (TS `queueSelection`'s browse/move/apply).
-//! The browse walks every parked item (the full queue stays inspectable),
-//! but the reorder/apply gates are user-origin only (operator directive
-//! 2026-09-28: internal prompts render read-only — the system owns
-//! them); see [`crate::queued::QueueSelectionItem::internal`].
+//! Browsing, reordering, and editing the parked steering/follow-up messages. The browse walks every
+//! parked item (the full queue stays inspectable), but the reorder/apply gates are user-origin only
+//! (operator directive 2026-09-28: internal prompts render read-only — the system owns them); see
+//! [`crate::queued::QueueSelectionItem::internal`].
 use super::{
     anyhow, AgentView, DaemonCommand, Duration, Map, QueueBrowseDirection, QueueLane, Result,
     SessionUi, Value, UI_REQUEST_TIMEOUT_MS,
 };
 
 impl SessionUi {
-    /// Project the browse selection to the view: the dim header row above
-    /// the editor (TS `getQueueSelectionHeader` reads the live selection).
     pub(crate) fn sync_queue_selection(&mut self, view: &mut AgentView) {
         view.queue_selected = self.queue_selection.selected().cloned();
     }
 
-    /// Report a queue-edit adoption event (`tui queue edited`): the seam
-    /// is spawned like the queued-input one, so key handling never waits
-    /// on the telemetry client.
+    /// Report a queue-edit adoption event (`tui queue edited`), fire-and-forget.
     fn emit_queue_edit(&self, action: &'static str) {
         if let Some(telemetry) = self.telemetry.clone() {
             tokio::spawn(async move {
@@ -27,9 +21,8 @@ impl SessionUi {
         }
     }
 
-    /// TS `browseQueueSelection`: move the selection one parked message
-    /// older/newer and show it in the editor. Entering the browse stashes
-    /// the editor draft; reaching the draft again restores it.
+    /// Move the selection one parked message older/newer and show it in the editor. Entering the
+    /// browse stashes the editor draft; reaching the draft again restores it.
     pub(crate) fn browse_queue_selection(
         &mut self,
         direction: QueueBrowseDirection,
@@ -50,9 +43,8 @@ impl SessionUi {
         self.sync_queue_selection(view);
     }
 
-    /// Send one `mutate_queued_message` and return its status string (TS
-    /// answers every outcome `success` with `{ status }`; only a malformed
-    /// request fails the command, which surfaces as the error here).
+    /// Send one `mutate_queued_message` and return its status string (every outcome answers
+    /// `success` with `{ status }`; only a malformed request fails the command).
     async fn queue_mutation(
         &self,
         lane: QueueLane,
@@ -81,11 +73,8 @@ impl SessionUi {
             .map(str::to_string))
     }
 
-    /// TS `moveQueueSelection`: reorder the selected message one slot
-    /// earlier/later in its lane. The move is mirrored locally - the
-    /// `session_action_update` event may land after the response, and the
-    /// strip and selection must not wait for it (TS mirrors for the same
-    /// reason).
+    /// Reorder the selected message one slot earlier/later in its lane; the move is mirrored
+    /// locally — the `session_action_update` event may land after the response.
     pub(crate) async fn move_queue_selection(
         &mut self,
         direction: i64,
@@ -94,12 +83,8 @@ impl SessionUi {
         let Some(selected) = self.queue_selection.selected().cloned() else {
             return Ok(());
         };
-        // The edit surface is user-origin only (operator directive
-        // 2026-09-28: the system owns the harness prompts — a human
-        // reorder of a child-exit notice or a continuation could
-        // mis-steer the agent): an internal item never reorders, the
-        // note says why, and the selection stays for the read-only
-        // browse.
+        // An internal item never reorders (a human reorder of a child-exit notice
+        // could mis-steer the agent); the selection stays for the read-only browse.
         if selected.internal {
             self.note("Internal prompts are read-only; reorder not applied", view);
             return Ok(());
@@ -142,10 +127,8 @@ impl SessionUi {
         Ok(())
     }
 
-    /// TS `applyQueueSelection`: apply the edited editor text to the
-    /// selected parked message. Empty text deletes it; otherwise the edit
-    /// replaces it and moves it to `target_lane` - Enter steers, the
-    /// follow-up key parks it for idle delivery.
+    /// Apply the edited editor text to the selected parked message: empty text deletes it;
+    /// otherwise the edit replaces it and moves it to `target_lane` (Enter steers).
     pub(crate) async fn apply_queue_selection(
         &mut self,
         text: &str,
@@ -155,13 +138,9 @@ impl SessionUi {
         let Some(selected) = self.queue_selection.selected().cloned() else {
             return Ok(());
         };
-        // The edit surface is user-origin only (operator directive
-        // 2026-09-28: humans edit the human sent and queued messages;
-        // an internal prompt — a child-exit notice, a heartbeat, a
-        // continuation — is never steered, re-queued, or deleted
-        // through the browse). The refusal follows the failed-edit
-        // contract: the typed text stays in the editor, the note says
-        // why, the selection stays.
+        // An internal prompt is never steered, re-queued, or deleted through the browse (see the
+        // module doc). The refusal follows the failed-edit contract: the typed text stays in the
+        // editor, the note says why, the selection stays.
         if selected.internal {
             view.editor.set_text(text);
             self.note(
@@ -210,9 +189,8 @@ impl SessionUi {
     }
 }
 
-/// TS status notes: the mutation status vocabulary (`applied`, `rejected`,
-/// `invalid`, `unsupported`) maps to the TS status rows; `is_edit` picks the
-/// edit phrasing over the reorder phrasing.
+/// The mutation status vocabulary (`applied`, `rejected`, `invalid`,
+/// `unsupported`) maps to the status rows; `is_edit` picks the edit phrasing.
 fn queue_mutation_status_note(status: &str, is_edit: bool) -> String {
     match status {
         "invalid" => {

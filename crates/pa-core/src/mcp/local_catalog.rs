@@ -1,17 +1,7 @@
-//! Local user-authored MCP service sources (`mcp-services.json`, ENG-6108):
-//! a bounded read of one local JSON file of service entries validated
-//! against the same contract as the catalog. Port of
-//! `packages/ai/src/mcp/local-catalog.ts`.
-//!
-//! The loader is deliberately narrow: a bounded read of a regular file +
-//! JSON parse + structural validation — no execution, no network, no
-//! credential access. A local file can never masquerade as trusted:
-//! provenance may only claim the `user` source, `legacyBuiltin` and
-//! `metadata-reviewed` review status cannot be self-asserted, audit-derived
-//! `setup.readiness` cannot be self-asserted, and ids colliding with the
-//! compiled built-ins are refused (no silent override/rebind of reserved
-//! ids). Errors are visible and bounded: they name the file and entry index
-//! and never echo raw input values.
+//! Local user-authored MCP service sources (`mcp-services.json`, ENG-6108): the loader is
+//! deliberately narrow (no execution, no network, no credential access) and a local file can never
+//! masquerade as trusted: provenance may only claim the `user` source, review status and
+//! `setup.readiness` cannot be self-asserted, and reserved-id collisions are refused.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -41,14 +31,11 @@ struct LocalCatalogFile {
     entries: Vec<McpServiceEntry>,
 }
 
-/// Load and validate one local service source file. A missing file is not an
-/// error and yields zero entries; every problem with an existing file is a
-/// returned error naming the path (and entry index where applicable).
+/// Load and validate one local service source file. A missing file is not an error and yields zero
+/// entries.
 ///
-/// `reserved` maps every id this installation already owns (compiled
-/// built-ins plus the remote/bundled catalog) to its label; a local entry
-/// colliding with any of them is refused — local sources cannot shadow or
-/// rebind reserved ids.
+/// `reserved` maps every id this installation already owns to its label; a local entry
+/// colliding with any of them is refused.
 pub fn load_local_service_catalog(
     path: &Path,
     reserved: &HashMap<String, String>,
@@ -149,9 +136,8 @@ pub fn load_local_service_catalog(
     })
 }
 
-/// Bounded read: chunked until the running total exceeds `max_bytes`, so at
-/// most `max_bytes` + one chunk is ever read before an oversized file is
-/// refused from the read itself.
+/// Bounded read: chunked until the running total exceeds `max_bytes`, so at most
+/// `max_bytes` + one chunk is ever read before an oversized file is refused.
 fn read_bounded(path: &Path, max_bytes: u64) -> Result<Vec<u8>, String> {
     use std::io::Read;
     let file = std::fs::File::open(path)

@@ -1,13 +1,7 @@
-//! The cron scheduler: wake-timer loop, claim-due dispatch, per-session
-//! dispatch lanes. Port of the `AgentCronScheduler` half of core/cron-jobs.ts.
+//! The cron scheduler: wake-timer loop, claim-due dispatch, per-session dispatch lanes.
 //!
-//! Deviation from TS, documented: a failing job backs off. TS re-fires a job
-//! at its full cadence no matter how many consecutive fires fail (a dead
-//! model route re-fires every tick until the job is cancelled); this port
-//! stretches the next run past the schedule on consecutive failures (see
-//! [`FAILURE_BACKOFF_BASE_MS`]) and resets the stretch after a good run. A
-//! skipped fire (busy session, deferral) neither extends nor resets the
-//! streak.
+//! Deliberate TS divergence (`cron-jobs.ts` re-fires a failing job at full
+//! cadence forever): consecutive failures back off (see [`FAILURE_BACKOFF_BASE_MS`]).
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -20,24 +14,18 @@ use super::store::{AgentCronDispatch, AgentCronJobStore, DispatchResultOptions};
 
 const MAX_TIMEOUT_MS: u64 = 2_147_483_647;
 
-/// The first consecutive-failure pause: 2 minutes.
 const FAILURE_BACKOFF_BASE_MS: u64 = 120_000;
 
 /// The backoff ceiling: a failing job still gets one fire per hour, so a
-/// recovered route (or a fixed session) is picked back up without a
-/// manual wake.
+/// recovered route is picked back up without a manual wake.
 const FAILURE_BACKOFF_CAP_MS: u64 = 3_600_000;
 
-/// The pause after `consecutive_failures` failed fires: `base * 2^(n-1)`
-/// capped at [`FAILURE_BACKOFF_CAP_MS`]. The first failure pauses 2m, the
-/// second 4m, then 8m, 16m, 32m, 1h.
 pub(crate) fn failure_backoff_ms(consecutive_failures: u32) -> u64 {
     FAILURE_BACKOFF_BASE_MS
         .saturating_mul(2u64.saturating_pow(consecutive_failures.saturating_sub(1)))
         .min(FAILURE_BACKOFF_CAP_MS)
 }
 
-/// A claimed dispatch paired with its optional settle callback.
 type PendingDispatch = (AgentCronDispatch, Option<Box<dyn FnOnce() + Send>>);
 
 /// Scheduler hooks: how claimed jobs actually run.
@@ -74,8 +62,7 @@ pub struct SchedulerCore<H: AgentCronSchedulerHooks> {
     stopped: AtomicBool,
     has_started: AtomicBool,
     dispatch_lanes: Mutex<HashMap<String, Arc<Mutex<()>>>>,
-    /// Consecutive failed fires per job id (the backoff streaks). A good
-    /// run clears its entry; a daemon restart starts every streak fresh.
+    /// Consecutive failed fires per job id (in-memory; a daemon restart starts fresh).
     failure_streaks: std::sync::Mutex<HashMap<String, u32>>,
     wake: Notify,
 }
@@ -107,7 +94,6 @@ impl<H: AgentCronSchedulerHooks + 'static> AgentCronScheduler<H> {
         self.schedule_next().await;
     }
 
-    /// Stop the timer loop.
     pub async fn stop(&self) {
         self.core.stopped.store(true, Ordering::SeqCst);
         if let Some(handle) = self.timer.lock().await.take() {
@@ -115,7 +101,6 @@ impl<H: AgentCronSchedulerHooks + 'static> AgentCronScheduler<H> {
         }
     }
 
-    /// Re-evaluate the next wake time immediately.
     pub async fn wake(&self) {
         if self.core.stopped.load(Ordering::SeqCst) {
             return;
@@ -128,8 +113,7 @@ impl<H: AgentCronSchedulerHooks + 'static> AgentCronScheduler<H> {
     ///
     /// # Errors
     ///
-    /// The underlying pass never fails in the current implementation, so this
-    /// always returns `Ok` with the number of dispatches that ran.
+    /// The underlying pass never fails in the current implementation.
     pub async fn run_due(&self) -> anyhow::Result<usize> {
         self.core.run_due_at(self.core.hooks.now()).await
     }
@@ -146,18 +130,14 @@ impl Drop for RunningGuard<'_> {
 }
 
 impl<H: AgentCronSchedulerHooks + 'static> SchedulerCore<H> {
-    /// Run one dispatch pass for jobs due at or before `now`, returning how
-    /// many dispatches ran. Returns `Ok(0)` without dispatching when the
-    /// scheduler is stopped or another pass is already running.
+    /// Run one dispatch pass for jobs due at or before `now` dispatching when the scheduler is
+    /// stopped or another pass is already running.
     ///
     /// # Errors
     ///
-    /// The current implementation never returns `Err`; every pass reports its
-    /// dispatch count in `Ok`.
+    /// The current implementation never returns `Err`.
     pub async fn run_due_at(&self, now: u64) -> anyhow::Result<usize> {
-        // The pass claim is atomic: exactly one pass runs at a time (a
-        // concurrent caller returns before touching another pass's
-        // dispatches).
+        // The pass claim is atomic: exactly one pass runs at a time.
         if (self.stopped.load(Ordering::SeqCst) && self.has_started.load(Ordering::SeqCst))
             || self
                 .running
@@ -166,16 +146,10 @@ impl<H: AgentCronSchedulerHooks + 'static> SchedulerCore<H> {
         {
             return Ok(0);
         }
-        // Panic safety: a claim/dispatch that unwinds must not wedge the
-        // re-entrancy flag at `true` — that would silence every later
-        // pass while the timer keeps spinning. The guard resets it on
-        // the way out however the pass ends.
+        // Panic safety: an unwinding pass must not wedge the re-entrancy flag at `true`.
         let _running = RunningGuard(&self.running);
-        // Recover interrupted dispatches before claiming: a claimed
-        // dispatch left on record by an unwound pass is released here,
-        // so its job's next occurrence claims and fires. The atomic
-        // claim above serializes passes, so this never touches another
-        // live pass's dispatch.
+        // Recover interrupted dispatches before claiming: a claim left
+        // by an unwound pass is released here.
         self.store.recover_interrupted_dispatches(now);
         let claimed = self.store.claim_due(now, self.hooks.now());
         let dispatches: Vec<PendingDispatch> = claimed
@@ -214,8 +188,7 @@ impl<H: AgentCronSchedulerHooks + 'static> SchedulerCore<H> {
                 .or_insert_with(|| Arc::new(Mutex::new(())))
                 .clone()
         };
-        // Serialize per-session dispatches: the lane lock queues this run
-        // behind any in-flight work for the same session.
+        // Serialize per-session dispatches behind in-flight work for the same session.
         let _guard = lane.lock().await;
         let result = self.run_dispatch(dispatch, end_dispatch).await;
         let mut lanes = self.dispatch_lanes.lock().await;
@@ -268,9 +241,6 @@ impl<H: AgentCronSchedulerHooks + 'static> SchedulerCore<H> {
                     },
                 )
                 .ok();
-            // Backoff bookkeeping: a failed fire (recorded above as a run
-            // with an error) stretches the job's next run past its
-            // schedule; a good run clears the streak.
             if failed {
                 let now = self.hooks.now();
                 let streak = self.note_run_failure(&dispatch.job.id);
@@ -289,7 +259,6 @@ impl<H: AgentCronSchedulerHooks + 'static> SchedulerCore<H> {
         outcome
     }
 
-    /// Count one more failed fire; returns the streak length.
     fn note_run_failure(&self, job_id: &str) -> u32 {
         let mut streaks = self
             .failure_streaks
@@ -300,8 +269,6 @@ impl<H: AgentCronSchedulerHooks + 'static> SchedulerCore<H> {
         *count
     }
 
-    /// A fire ran without error: the job's next run goes back to its
-    /// schedule.
     fn clear_run_failure(&self, job_id: &str) {
         let mut streaks = self
             .failure_streaks
@@ -314,18 +281,12 @@ impl<H: AgentCronSchedulerHooks + 'static> SchedulerCore<H> {
 impl<H: AgentCronSchedulerHooks + 'static> AgentCronScheduler<H> {
     /// (Re)start the wake timer to the next active run.
     ///
-    /// The timer task parks on the wake notify while the store has no
-    /// active runs instead of exiting, so a catalog mutation's wake can
-    /// always re-arm it (the TS `recomputeScheduledSessionWake` shape:
-    /// every recompute arms a fresh timer). An exited task would leave
-    /// the notify with no waiter, and later wakes would reach nobody.
+    /// The task parks on the notify while no runs are active, so a mutation's wake can always
+    /// re-arm it (TS `recomputeScheduledSessionWake`).
     async fn schedule_next(&self) {
         let mut timer = self.timer.lock().await;
-        // A live task is never aborted: the parked loop re-evaluates at
-        // its head on the notify, so a wake landing mid-pass needs no
-        // respawn. Only a dead task spawns a replacement; the explicit
-        // `stop` abort stays (the next `start` recovers the interrupted
-        // dispatches).
+        // A live task is never aborted: the parked loop re-evaluates on the notify, so a mid-pass
+        // wake needs no respawn.
         if let Some(previous) = timer.as_ref() {
             if !previous.is_finished() {
                 self.core.wake.notify_waiters();
@@ -336,17 +297,13 @@ impl<H: AgentCronSchedulerHooks + 'static> AgentCronScheduler<H> {
         let core = self.core.clone();
         let handle = tokio::spawn(async move {
             loop {
-                // The wake is registered before the store read (the
-                // enabled future holds the waiter slot), so a notify
-                // landing between the read and the wait is captured —
-                // by the park or by the delay select, whichever the read
-                // selects.
+                // The wake is registered before the store read, so a notify landing between the
+                // read and the wait is captured.
                 let notified = core.wake.notified();
                 tokio::pin!(notified);
                 notified.as_mut().enable();
                 let Some(next) = core.store.next_active_run_at() else {
-                    // Nothing to fire: park until a mutation re-arms
-                    // (an explicit stop is the only exit).
+                    // Nothing to fire: park until a mutation re-arms.
                     if core.stopped.load(Ordering::SeqCst) {
                         return;
                     }
@@ -364,7 +321,6 @@ impl<H: AgentCronSchedulerHooks + 'static> AgentCronScheduler<H> {
                 if core.stopped.load(Ordering::SeqCst) {
                     return;
                 }
-                // Fire the due batch and reschedule for the following run.
                 core.run_due_at(core.hooks.now()).await.ok();
             }
         });
@@ -408,11 +364,8 @@ mod tests {
         }
     }
 
-    /// The re-arm regression behind the dogfood P0 (a heartbeat created
-    /// after the bind-time arm never fires): starting on an empty store
-    /// arms no timer (`schedule_next` returns without one), so the
-    /// mutation's wake — TS `cronScheduler.wake()` — must re-arm and fire
-    /// the job created afterwards.
+    /// Dogfood P0 regression: a heartbeat created after the bind-time arm
+    /// never fires unless the mutation's wake re-arms.
     #[tokio::test]
     async fn wake_rearms_a_timer_for_a_job_created_after_start() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -424,15 +377,12 @@ mod tests {
             outcomes: Mutex::new(vec!["ran"]),
         });
         let scheduler = AgentCronScheduler::new(store.clone(), hooks);
-        // Empty store: the bind-time arm leaves no timer running.
         scheduler.start().await;
-        // A later mutation's job (created already-due on the fixed test
-        // clock, like the sibling tests' "in 1m" inputs, so the re-armed
-        // timer fires within milliseconds).
+        // Created already-due on the fixed test clock, so the re-armed
+        // timer fires within milliseconds.
         store
             .create(&input("tick", "in 1m", now - 61_000))
             .expect("create job");
-        // The mutation's wake re-arms; the timer fires within milliseconds.
         scheduler.wake().await;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while runs.load(Ordering::SeqCst) == 0 && std::time::Instant::now() < deadline {
@@ -445,12 +395,8 @@ mod tests {
         scheduler.stop().await;
     }
 
-    /// The frozen-heartbeat re-adoption incident's structural guard: a
-    /// dispatch that panics must not wedge the run-pass re-entrancy flag
-    /// at `true` — that silently no-ops every later pass while the timer
-    /// keeps firing (a job rows as active with a stale `nextRunAt` and
-    /// `runCount` 0 forever, exactly the governance session's frozen
-    /// `*/2` heartbeat after its supervisor restart re-adoption).
+    /// The frozen-heartbeat incident: a panicking dispatch must not wedge
+    /// the run-pass flag at `true` (later passes silently no-op forever).
     #[tokio::test]
     async fn a_panicking_dispatch_does_not_wedge_the_run_pass() {
         struct PanickingHooks {
@@ -477,8 +423,8 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let store = Arc::new(AgentCronJobStore::new(dir.path().join("jobs.json")));
         let now = 1_700_000_000_000;
-        // Created 10m ago on the fixed test clock: due immediately (a
-        // job created at `now` would sit 10m out and never dispatch).
+        // Created 10m ago on the fixed test clock: due immediately (at
+        // `now` it would sit 10m out).
         store
             .create(&input("tick", "every 10m", now - 600_000))
             .unwrap();
@@ -486,13 +432,9 @@ mod tests {
             runs: Arc::new(AtomicUsize::new(0)),
             panic_first: AtomicBool::new(true),
         });
-        // No start(): the passes below drive `run_due` directly (a
-        // started timer would race the manual passes for the same due
-        // job — the timer task would claim the first dispatch, and the
-        // manual pass would find nothing due).
+        // No start(): the manual passes below drive `run_due` directly;
+        // a started timer would race them for the same due job.
         let scheduler = Arc::new(AgentCronScheduler::new(store.clone(), hooks.clone()));
-        // The first pass panics inside its spawned task (the flag must
-        // not stay wedged).
         let first = tokio::time::timeout(
             std::time::Duration::from_secs(5),
             tokio::spawn({
@@ -501,12 +443,9 @@ mod tests {
             }),
         )
         .await
-        // The timeout layer unwraps; the panic surfaces as the join
-        // error underneath it.
+        // The timeout layer unwraps; the panic surfaces as the join error.
         .expect("first pass settles");
         assert!(first.is_err(), "the panicking pass surfaced: {first:?}");
-        // A second job becomes due; the pass must still claim and run it
-        // (a wedged flag would silently skip forever).
         store
             .create(&input("tock", "every 10m", now - 600_000))
             .expect("second job");
@@ -525,15 +464,8 @@ mod tests {
         scheduler.stop().await;
     }
 
-    /// THE LIVE INCIDENT'S EXACT SHAPE: a catalog mutation whose wake
-    /// lands while a fire pass is in-flight must not strand or wedge
-    /// the schedule. The pre-fix abort canceled the future at its await
-    /// without running the pass's tail, so the claimed dispatch stayed
-    /// interrupted and every later pass marked the job skipped instead
-    /// of retrying (the governance session's beats froze exactly here:
-    /// the job was re-created from inside a running beat). The live
-    /// task now consumes the wake at its loop head, and a pass-head
-    /// recovery un-sticks any interrupted claim.
+    /// The live incident: a wake landing while a fire pass is in-flight must
+    /// not strand the claimed dispatch.
     #[tokio::test]
     async fn a_mutation_wake_during_an_in_flight_pass_does_not_wedge_the_flag() {
         struct BlockingHooks {
@@ -544,9 +476,8 @@ mod tests {
             async fn run_job(&self, _job: &AgentCronJob) -> anyhow::Result<Option<&'static str>> {
                 self.runs.fetch_add(1, Ordering::SeqCst);
                 if self.block_first.swap(false, Ordering::SeqCst) {
-                    // The delivery holds (the fire's settle wait is
-                    // bounded in the real hooks): the pass is still
-                    // in-flight when the mutation's wake lands.
+                    // Hold the first delivery in-flight so the
+                    // mutation's wake lands mid-pass.
                     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                 }
                 Ok(Some("ran"))
@@ -563,8 +494,6 @@ mod tests {
             block_first: AtomicBool::new(true),
         });
         let scheduler = AgentCronScheduler::new(store.clone(), hooks.clone());
-        // The job is created already-due: the timer fires immediately on
-        // start. The pass parks inside its first delivery.
         store
             .create(&input("tick", "in 1m", now - 61_000))
             .expect("first job");
@@ -578,14 +507,10 @@ mod tests {
             1,
             "the first fire started"
         );
-        // A catalog mutation from inside the running beat: its wake
-        // aborts the timer task MID-PASS.
         store
             .create(&input("tock", "in 1m", now - 61_000))
             .expect("second job");
         scheduler.wake().await;
-        // The aborted pass's flag must not wedge: a fresh wake re-arms
-        // the timer and the second job's due pass must claim and run.
         scheduler.wake().await;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while hooks.runs.load(Ordering::SeqCst) < 2 && std::time::Instant::now() < deadline {
@@ -599,11 +524,8 @@ mod tests {
         scheduler.stop().await;
     }
 
-    /// The timer task parks on an empty store instead of dying: the store
-    /// emptying mid-life (every job cancelled or completed) must leave a
-    /// parked timer a later mutation wake re-arms — the mid-life death
-    /// behind a re-adopted worker whose session never receives a due
-    /// fire again.
+    /// The store emptying mid-life must leave a parked timer a later
+    /// wake re-arms (the mid-life death behind a re-adopted worker).
     #[tokio::test]
     async fn the_timer_parks_on_an_empty_store_and_re_arms_on_wake() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -616,13 +538,10 @@ mod tests {
         });
         let scheduler = AgentCronScheduler::new(store.clone(), hooks);
         scheduler.start().await;
-        // The store empties mid-life: the only job is cancelled.
         let job = store
             .create(&input("tick", "every 10m", now))
             .expect("first job");
         store.cancel(&job.id, now).expect("cancel the only job");
-        // The parked timer survives the empty era; a later mutation's
-        // job + wake must fire.
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
         while std::time::Instant::now() < deadline {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -655,11 +574,9 @@ mod tests {
         });
         let scheduler = AgentCronScheduler::new(store.clone(), hooks);
         scheduler.start().await;
-        // Not due yet: nothing runs.
         let ran = scheduler.run_due().await.unwrap();
         assert_eq!(ran, 0);
         assert_eq!(runs.load(Ordering::SeqCst), 0);
-        // Due later (hooks.now() is fixed; the job fires every 10m).
         store
             .create(&input("tick2", "in 1m", now - 61_000))
             .unwrap();
@@ -731,11 +648,8 @@ mod tests {
         assert_eq!(failure_backoff_ms(60), 3_600_000);
     }
 
-    /// The failure backoff: consecutive failed fires stretch the job's
-    /// next run past its schedule (2m, 4m, ... capped at 1h) and record
-    /// the error; one good run resets the stretch. Without it, a dead
-    /// model route re-fires at the job's full cadence forever (the
-    /// dogfood incident: ~120 fires of a failing every-2m heartbeat).
+    /// Dogfood incident: a dead route re-fired an every-2m heartbeat
+    /// ~120 times.
     #[tokio::test]
     async fn consecutive_failures_back_off_the_next_run() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -751,11 +665,8 @@ mod tests {
             now: std::sync::Mutex::new(t1),
         });
         let scheduler = AgentCronScheduler::new(store.clone(), hooks.clone());
-        // No `start()`: the timer task would race the explicit `run_due`
-        // calls below (both re-read the mutable clock), so this test
-        // drives the claim-dispatch-record loop directly.
-        // Failure 1: the schedule rolls next to t1 + 60s, the backoff
-        // raises it to t1 + 120s and the error lands on the job.
+        // No `start()`: the timer would race the explicit `run_due` calls below.
+        // Failure 1: the schedule rolls to t1 + 60s, the backoff raises it to t1 + 120s.
         assert_eq!(scheduler.run_due().await.unwrap(), 1);
         let job = store
             .list()
@@ -768,8 +679,7 @@ mod tests {
             crate::cron::parse_iso_millis(job.next_run_at.as_deref().unwrap()),
             Some(t1 + failure_backoff_ms(1))
         );
-        // Failure 2 (clock advanced past the deferred run): the pause
-        // doubles.
+        // Failure 2 (clock advanced past the deferred run): the pause doubles.
         let t2 = t1 + failure_backoff_ms(1) + 1;
         *hooks.now.lock().unwrap() = t2;
         assert_eq!(scheduler.run_due().await.unwrap(), 1);
@@ -782,8 +692,7 @@ mod tests {
             crate::cron::parse_iso_millis(job.next_run_at.as_deref().unwrap()),
             Some(t2 + failure_backoff_ms(2))
         );
-        // A good run clears the streak: the next run goes back to the
-        // bare schedule...
+        // A good run clears the streak: the next run goes back to the bare schedule.
         let t3 = t2 + failure_backoff_ms(2) + 1;
         *hooks.now.lock().unwrap() = t3;
         *hooks.error.lock().unwrap() = None;
@@ -798,7 +707,7 @@ mod tests {
             crate::cron::parse_iso_millis(job.next_run_at.as_deref().unwrap()),
             Some(t3 + 60_000)
         );
-        // ...so the failure after it restarts at the base pause.
+        // The failure after it restarts at the base pause.
         let t4 = t3 + 60_000 + 1;
         *hooks.now.lock().unwrap() = t4;
         *hooks.error.lock().unwrap() = Some("model route gone".to_string());

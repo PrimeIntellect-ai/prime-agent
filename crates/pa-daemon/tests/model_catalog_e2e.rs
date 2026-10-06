@@ -1,9 +1,7 @@
-//! End-to-end verifier for the `/model` picker's live catalog surface: the
-//! daemon's `get_model_catalog` command must serve the registry snapshot
-//! (full catalog plus the providers with configured auth), and an offline
-//! daemon (no network, no live catalog) must fall back to the bundled
-//! catalog with the disk cache untouched — the offline fallback the picker
-//! renders when the refresh cannot land.
+//! `/model` picker catalog e2e: `get_model_catalog` must serve the registry
+//! snapshot (full catalog plus the providers with configured auth), and an
+//! offline daemon (no network, no live catalog) falls back to the bundled
+//! catalog with the disk cache untouched.
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -40,8 +38,8 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path) -> Supervisor {
         .stderr(Stdio::null())
         .env_remove("PRIME_API_KEY")
         .env_remove("PRIME_AGENT_CODING_AGENT_DIR")
-        // Offline mode: the catalog refresh must stay on the bundled
-        // fallback and never write the disk cache (TS `PI_OFFLINE`).
+        // Offline mode: the refresh stays on the bundled fallback and never writes the disk cache
+        // (TS `PI_OFFLINE`).
         .env("PI_OFFLINE", "1")
         .spawn()
         .expect("spawn pa-daemon supervisor");
@@ -162,8 +160,7 @@ fn offline_daemon_serves_the_bundled_catalog_fallback() {
     std::fs::create_dir_all(&dir).expect("temp dir");
     let agent_dir = dir.join("agent");
     let socket = dir.join("daemon.sock");
-    // No auth beyond the models.json key: no provider credentials, no
-    // private-model entitlements.
+    // No auth beyond the models.json key: no provider credentials, no private-model entitlements.
     write_models_json(&agent_dir, "http://127.0.0.1:9/v1");
     let supervisor = spawn_supervisor(&socket, &agent_dir);
     let mut client = Client::connect(&socket);
@@ -187,7 +184,6 @@ fn offline_daemon_serves_the_bundled_catalog_fallback() {
         .expect("session id")
         .to_string();
 
-    // get_model_catalog: the full catalog with the configured providers.
     let response = client.request(
         "catalog-1",
         &json!({ "type": "get_model_catalog", "activeSessionId": session_id }),
@@ -200,12 +196,9 @@ fn offline_daemon_serves_the_bundled_catalog_fallback() {
         "the bundled catalog must serve as the offline fallback (got {} models)",
         models.len()
     );
-    // The models.json custom model is part of the catalog.
     assert!(models
         .iter()
         .any(|model| model["id"] == "mock-1" && model["provider"] == "prime-inference"));
-    // A bundled public prime-inference model is present with its catalog
-    // fields (name, cost, context window).
     let fable = models
         .iter()
         .find(|model| {
@@ -215,8 +208,8 @@ fn offline_daemon_serves_the_bundled_catalog_fallback() {
     assert_eq!(fable["name"], "Claude Fable 5");
     assert_eq!(fable["cost"]["input"], 10);
     assert_eq!(fable["contextWindow"], 1_000_000);
-    // The configured providers: prime-inference (the models.json key) and
-    // nothing else — no ambient credentials authorize other providers.
+    // The configured providers: prime-inference (the models.json key) and nothing
+    // else — no ambient credentials authorize other providers.
     let providers: Vec<&str> = data["configuredProviders"]
         .as_array()
         .expect("configuredProviders array")
@@ -224,13 +217,11 @@ fn offline_daemon_serves_the_bundled_catalog_fallback() {
         .filter_map(Value::as_str)
         .collect();
     assert_eq!(providers, vec!["prime-inference"]);
-    // Private Prime Inference models stay out without authorization.
     assert!(models.iter().all(|model| !model["id"]
         .as_str()
         .unwrap_or_default()
         .starts_with("internal/")));
 
-    // The offline refresh never wrote the live-catalog cache.
     assert!(
         !agent_dir.join("prime-inference-models-cache.json").exists(),
         "offline mode must not write the catalog cache"

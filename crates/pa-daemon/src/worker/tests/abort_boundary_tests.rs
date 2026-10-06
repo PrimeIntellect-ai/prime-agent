@@ -1,10 +1,6 @@
-//! Post-abort/post-compact queued-input suspension e2e tests (moved with their concerns).
+//! Post-abort/post-compact queued-input suspension e2e tests.
 use super::*;
 
-/// `abort` (TS `requestAbort`) suspends queued-input admission: a plain
-/// prompt is rejected with the TS admission error until a resume site
-/// fires (a `steer` carries `resumeIfIdle: true`), after which a plain
-/// prompt is admitted again.
 #[tokio::test]
 async fn abort_suspends_plain_prompts_until_steer_resumes() {
     let worker = created_dispatch_worker().await;
@@ -29,8 +25,7 @@ async fn abort_suspends_plain_prompts_until_steer_resumes() {
         rejected_prompt.error.as_deref(),
         Some(QUEUED_INPUT_SUSPENDED)
     );
-    // A prompt carrying streamingBehavior is a resume site (TS
-    // `resumeIfIdle: command.streamingBehavior !== undefined`).
+    // A prompt carrying streamingBehavior is a resume site.
     let admitted_with_behavior = worker
         .dispatch(
             "prompt_and_wait",
@@ -54,13 +49,6 @@ async fn abort_suspends_plain_prompts_until_steer_resumes() {
     assert!(plain.success, "still suspended after steer: {plain:?}");
 }
 
-/// A manual `compact` aborts first (TS `compact()`), so the
-/// suspension is set whatever the compaction outcome (the scripted
-/// engine always compacts; TS skips only "Session is too short" and
-/// the skip path leaves the suspension set too);
-/// `resume_queue` clears it before answering the empty queue (TS
-/// `resumeQueuedWork()` runs `_resumeSessionInputAdmission()`
-/// unconditionally).
 #[tokio::test]
 async fn compact_suspends_and_resume_queue_clears() {
     let worker = created_dispatch_worker().await;
@@ -96,12 +84,7 @@ async fn compact_suspends_and_resume_queue_clears() {
     );
 }
 
-/// `abort_and_send_queued` (TS `abortAndSendQueued`, schema 29): with
-/// visible steering parked at a running turn's boundary, the interrupt
-/// aborts the run AND delivers the parked queue right after the aborted
-/// turn settles (TS `requestAbort()` + `resumeQueuedWork()`); the
-/// follow-up lane drains too, once the session goes idle. The aborted
-/// turn's row surfaces with the aborted shape.
+/// The interrupt aborts the run AND delivers the parked queue right after the turn settles.
 #[tokio::test]
 // the faux registry is process-global: the guard must span the async flow
 #[allow(clippy::await_holding_lock)]
@@ -173,7 +156,6 @@ async fn abort_and_send_queued_delivers_the_parked_queue_at_the_boundary() {
         .dispatch("follow_up", &json!({ "message": "follow-up now" }))
         .await;
     assert!(follow.success, "follow_up failed: {follow:?}");
-    // The interrupt: abort the run and send the parked queue.
     let aborted = worker.dispatch("abort_and_send_queued", &json!({})).await;
     assert!(aborted.success, "abort_and_send_queued failed: {aborted:?}");
     assert_eq!(aborted.command, "abort_and_send_queued");
@@ -184,9 +166,7 @@ async fn abort_and_send_queued_delivers_the_parked_queue_at_the_boundary() {
     .await;
     assert!(idle.is_ok(), "the session never went idle after the abort");
     assert!(idle.unwrap().success, "wait_for_idle failed");
-    // The held turn aborted (its row carries the aborted shape) and
-    // the parked queue delivered: steering one, steering two, then the
-    // follow-up, each answered by its scripted reply.
+
     let messages = worker.dispatch("get_messages", &json!({})).await;
     assert!(messages.success, "get_messages failed: {messages:?}");
     let wire_messages = messages
@@ -211,14 +191,9 @@ async fn abort_and_send_queued_delivers_the_parked_queue_at_the_boundary() {
         ],
         "the parked queue never delivered in order: {texts:?}"
     );
-    // The one-batched-turn granularity (the steer-family lane's
-    // supersede of this test's original reply-granularity
-    // expectations): the two parked steers deliver as ONE co-delivered
-    // turn — a single `agent_start` for both rows and ONE assistant
-    // reply for the whole batch — exactly TS `abortAndSendQueued`'s
-    // armed batch (`_forcedAllSteeringActionIds` +
-    // `_startPreparedTurnActions`); the follow-up stays a turn of its
-    // own behind it.
+    // The two parked steers deliver as ONE co-delivered turn — a single
+    // `agent_start` and ONE assistant reply for the batch; the follow-up
+    // stays a turn of its own.
     let events = session_events_since(&mut subscription);
     let agent_starts = events
         .iter()
@@ -246,9 +221,7 @@ async fn abort_and_send_queued_delivers_the_parked_queue_at_the_boundary() {
                 .map(str::to_string)
         })
         .collect();
-    // The batch's one reply is the next scripted response; the
-    // follow-up's turn takes the one after it - the steers never
-    // consume one reply each.
+
     assert_eq!(
         replies,
         [
@@ -279,10 +252,6 @@ async fn abort_and_send_queued_delivers_the_parked_queue_at_the_boundary() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The abort-only arm: `abort_and_send_queued` with no visible steering
-/// parked is a plain abort (TS `queuedSteering.length === 0` ->
-/// `requestAbort()` + `return false`) - the queued-input suspension
-/// stays set, so a plain prompt is rejected until a resume site fires.
 #[tokio::test]
 async fn abort_and_send_queued_with_an_empty_queue_is_a_plain_abort() {
     let worker = created_dispatch_worker().await;
@@ -302,12 +271,7 @@ async fn abort_and_send_queued_with_an_empty_queue_is_a_plain_abort() {
     assert_eq!(rejected.error.as_deref(), Some(QUEUED_INPUT_SUSPENDED));
 }
 
-/// A follow-up-only queue keeps flowing after the abort (the
-/// sanctioned divergence): the abort ends the running turn cleanly
-/// and the OLDEST queued follow-up starts the next turn right after
-/// the aborted turn settles; later follow-ups stay queued and drain
-/// one per completed turn, each row delivered exactly once, in
-/// enqueue order.
+/// The sanctioned divergence: the OLDEST queued follow-up starts the next turn after the settle.
 #[tokio::test]
 #[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
 async fn abort_and_send_queued_with_only_follow_ups_starts_the_oldest() {
@@ -365,18 +329,15 @@ async fn abort_and_send_queued_with_only_follow_ups_starts_the_oldest() {
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    // Two follow-ups park behind the running turn and the steering
-    // lane stays empty — the interrupt keeps nothing armable, the
-    // exact shape of the follow-up-only abort.
+    // Two follow-ups park behind the running turn; the steering
+    // lane stays empty — nothing armable.
     for message in ["follow-up one", "follow-up two"] {
         let follow = worker
             .dispatch("follow_up", &json!({ "message": message }))
             .await;
         assert!(follow.success, "follow_up failed: {follow:?}");
     }
-    // The interrupt: the abort ends the held turn and the queue
-    // keeps flowing — the follow-up lane never parks behind the
-    // abort's suspension.
+
     let aborted = worker.dispatch("abort_and_send_queued", &json!({})).await;
     assert!(aborted.success, "abort_and_send_queued failed: {aborted:?}");
     assert_eq!(aborted.command, "abort_and_send_queued");
@@ -384,10 +345,7 @@ async fn abort_and_send_queued_with_only_follow_ups_starts_the_oldest() {
         !worker.core.lock().unwrap().queued_input_suspended,
         "the abort must resume a follow-up-only queue"
     );
-    // The OLDEST follow-up starts the next turn right after the
-    // aborted turn settles (its paced reply holds the turn open):
-    // while it runs, the second follow-up stays queued — the lane
-    // drains one turn per completed turn, never as one batch.
+    // While the oldest runs, the second follow-up stays queued.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         let (busy, queued) = {
@@ -420,8 +378,7 @@ async fn abort_and_send_queued_with_only_follow_ups_starts_the_oldest() {
         "the follow-up-only queue never drained after the abort"
     );
     assert!(idle.unwrap().success, "wait_for_idle failed");
-    // Both follow-ups delivered in enqueue order, each row exactly
-    // once, each in its own turn behind the aborted run.
+
     let messages = worker.dispatch("get_messages", &json!({})).await;
     assert!(messages.success, "get_messages failed: {messages:?}");
     let wire_messages = messages
@@ -509,9 +466,6 @@ async fn abort_and_send_queued_with_only_follow_ups_starts_the_oldest() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// `abort_and_clear_queue` suspends like the bare `abort` (TS
-/// `requestAbort` in that arm): a plain prompt is rejected afterwards
-/// and a `follow_up` (a resume site) is admitted.
 #[tokio::test]
 async fn abort_and_clear_queue_suspends_plain_prompts() {
     let worker = created_dispatch_worker().await;

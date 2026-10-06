@@ -1,21 +1,12 @@
 //! # pa-telemetry
 //!
-//! Modular telemetry for Prime Agent: a small client surface
-//! ([`TelemetryClient::track`], [`TelemetryClient::flush`],
-//! [`TelemetryClient::shutdown`]), a primitive-only property schema, batched
-//! delivery to pluggable [`TelemetrySink`]s, and the pseudonymous
-//! installation identity.
-//!
-//! Privacy contract: properties are JSON primitives only; no prompt, session,
-//! or tool content is ever emitted. Telemetry is best-effort and must never
-//! block or fail the agent.
+//! Modular telemetry over a primitive-only property schema: non-blocking
+//! [`TelemetryClient::track`], batched [`TelemetrySink`] delivery, and the
+//! pseudonymous installation identity.
 
-// Pedantic-gate exceptions (every other pedantic warning in this crate is
-// fixed in place; each exception carries its one-line justification):
-// - the casts: wire-format and duration arithmetic narrows validated or
-//   structurally bounded values (millisecond durations, clamped property
-//   bounds, non-negative-guarded JSON numbers); guarded conversions would
-//   add panic paths the bounds guarantee away.
+// Casts narrow values that are validated or structurally bounded (millisecond
+// durations, clamped property bounds, non-negative JSON numbers); guarded
+// conversions would add panic paths the bounds guarantee away.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,

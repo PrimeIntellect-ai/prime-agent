@@ -1,31 +1,6 @@
-//! The print run's goal continuation loop — the #252 residue: the print
-//! driver runs the same in-run continuation the TS session hosts inside one
-//! `promptAndWait`.
-//!
-//! TS ruling (probed against the installed binary, `prime-agent --mode json
-//! --goal <objective> [--goal-token-budget <n>] -p <prompt>` over the shared
-//! faux-provider harness): the seeded goal's context row rides the first
-//! turn; every settled turn's usage publishes a `goal_update`; the agent
-//! loop's continuation hook (`getContinuationMessages`) mints one
-//! goal-context turn per natural turn end INSIDE the same agent run, so the
-//! continuation turns surface as `turn_end -> goal_update -> turn_start`
-//! segments with no `agent_start`/`agent_end` between them; the turn that
-//! crosses the token budget queues a `[goal: budget-limit]` wrap-up steer as
-//! session input (`goal_update` with `budget_limited`, then a
-//! `session_action_update` with the queued steering preview), the loop ends,
-//! and the queue drains the steer as its own run (preparing/committing/
-//! running phase frames); a failed terminal assistant message fails the
-//! goal after the run's compaction arms (`goal_update` with `error`).
-//!
-//! The Rust mapping: the pa-core engine owns the goal arms
-//! ([`SessionEngine`]'s boundary methods); this surface owns the print
-//! stream — the usage-accounting subscription (message-end recording plus
-//! the `goal_update` frames), the in-loop continuation hook installed on the
-//! agent (the natural mint, with the threshold/requested-compaction stops
-//! deferring to the turn boundary like TS `_shouldStopForThresholdCompaction`),
-//! and the driver's queue arms (the budget steer and the threshold-held
-//! continuation run as the print invocation's follow-up turns with the
-//! TS action-phase frames). Text mode runs the same loop silently.
+//! The print run's goal continuation loop: the usage-accounting publication, the
+//! in-loop continuation hook, and the driver's queue arms (the in-run shape
+//! probed against the TS binary; budget/threshold stops).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -40,12 +15,11 @@ use pa_types::session::CustomMessage;
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
-/// Where the boundary's json events go: stdout in the product, a captured
-/// buffer in tests (the same sink contract `print_boundary` uses).
+/// Where the boundary's json events go: stdout in the product, a captured buffer in tests (the same
+/// sink contract `print_boundary` uses).
 pub(crate) type EventSink = std::sync::Arc<dyn Fn(&Value) + Send + Sync>;
 
-/// TS `compactRlmText(text, 160)`: collapse whitespace, cap at 160 chars
-/// with a trailing `...` (the session-action label form).
+/// Collapse whitespace, cap at 160 chars with a trailing `...` (the session-action label form).
 fn compact_rlm_text(text: &str, max_length: usize) -> String {
     let compact: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if compact.len() <= max_length {
@@ -59,30 +33,26 @@ fn compact_rlm_text(text: &str, max_length: usize) -> String {
     format!("{head}...")
 }
 
-/// The queue lane a minted goal turn was queued through (the TS session
-/// action's schedule): the preview array it rides in the queue snapshot.
+/// The queue lane a minted goal turn was queued through: which preview array it rides in the queue
+/// snapshot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum QueueLane {
-    /// The budget-limit wrap-up steer (`_queuePreparedPrompt("steer", ...)`).
     Steering,
-    /// The threshold-compaction continuation (`_createPreparedTurnAction(
-    /// "followUp", ...)`, TS `_queueGoalContinuationForThresholdCompaction`).
     FollowUp,
 }
 
 /// The goal arm's consult outcome for the composed natural-turn-end hook.
 pub(crate) enum NaturalContinuation {
-    /// Queued session input owns the boundary (the armed budget steer): no
-    /// turn mints, the run ends so the queue drains.
+    /// Queued session input owns the boundary (the armed budget steer): no turn mints, the run ends
+    /// so the queue drains.
     QueuedInput,
-    /// A pending requested compaction consumes the stop: no mint, the
-    /// boundary consumes the request.
+    /// A pending requested compaction consumes the stop: no mint, the boundary consumes the
+    /// request.
     RequestedCompaction,
-    /// A threshold compaction is due: the loop stops (any owed mint is held
-    /// for the post-compaction admission), the boundary compacts.
+    /// A threshold compaction is due: the loop stops (any owed mint is held for the post-compaction
+    /// admission), the boundary compacts.
     ThresholdDue,
-    /// The goal minted its next continuation row (the hook runs it inside
-    /// the same agent run).
+    /// The goal minted its next continuation row.
     GoalRow(Box<pa_agent::types::AgentMessage>),
     /// No goal work owns the boundary: the autonomous arm may consult.
     FallThrough,
@@ -95,15 +65,13 @@ struct QueuedGoalTurn {
 }
 
 impl QueuedGoalTurn {
-    /// The full message text (the queued preview: TS `queuedAgentMessagePreview`
-    /// returns the whole normalized text for a custom goal row).
+    /// The full message text (the queued preview returns the whole normalized text).
     fn preview_text(&self) -> String {
         custom_message_text(&self.message)
     }
 }
 
-/// The text of one custom row's content (the TS `normalizeMessageContent`
-/// text form: the plain text, or the text blocks joined).
+/// The text of one custom row's content: the plain text, or the text blocks joined.
 fn custom_message_text(message: &CustomMessage) -> String {
     match &message.content {
         pa_types::ai::UserContent::Text(text) => text.clone(),
@@ -118,28 +86,21 @@ fn custom_message_text(message: &CustomMessage) -> String {
     }
 }
 
-/// The print run's goal surface: the usage-accounting publication, the
-/// armed budget steer, the threshold-held continuation, and the queue-phase
-/// frames the drained turns stream.
+/// The print run's goal surface: the usage accounting, the armed budget
+/// steer, the threshold-held continuation, and the queue-phase frames.
 pub(crate) struct PrintGoalSurface {
     json_mode: bool,
     sink: EventSink,
-    /// Whether the latest settled turn's usage crossed the goal budget (the
-    /// wrap-up steer's arming; the driver consumes it).
+    /// Whether the latest settled turn's usage crossed the goal budget (the driver consumes it).
     budget_crossed: AtomicBool,
-    /// The armed budget steer (queued at the crossing turn's message end,
-    /// TS `_shouldStopAfterTurn`'s budget arm).
+    /// The queued goal turn (the armed budget steer or the held continuation).
     queued: Mutex<Option<QueuedGoalTurn>>,
-    /// The label of the action the driver is admitting (the `running` frame
-    /// the agent's `agent_start` completes; `None` when nothing is active).
+    /// The label of the action the driver is admitting (`None` when nothing is active).
     active_label: Mutex<Option<String>>,
-    /// The next queued-turn drain completes its `running` frame at the
-    /// loop's `turn_start` instead of `agent_start` (the TS order the
-    /// session-command continuation drain shows, probed against the TS
-    /// binary; the steer drain keeps the `agent_start` position).
+    /// The next queued-turn drain completes its `running` frame at `turn_start`
+    /// (the steer drain keeps `agent_start`).
     running_frame_at_turn_start: AtomicBool,
-    /// The last `session_action_update` snapshot emitted (TS `_emitQueueUpdate`
-    /// stays silent on an unchanged projection).
+    /// The last `session_action_update` snapshot emitted (unchanged projections stay silent).
     last_action_snapshot: Mutex<Value>,
     /// The last goal state published as a `goal_update` (the publish dedupe).
     last_published_goal: Mutex<pa_types::goal::GoalState>,
@@ -159,8 +120,7 @@ impl PrintGoalSurface {
         }
     }
 
-    /// A surface with an explicit event sink (json-mode verifiers; the
-    /// product path always uses [`PrintGoalSurface::new`]).
+    /// A surface with an explicit event sink (json-mode verifiers).
     #[cfg(test)]
     pub(crate) fn with_sink(json_mode: bool, sink: EventSink) -> Self {
         Self {
@@ -181,25 +141,18 @@ impl PrintGoalSurface {
         }
     }
 
-    /// Seed the publish dedupe's baseline from the current state: the state
-    /// that exists when the stream attaches (the seeded `--goal`, or a
-    /// resumed session's persisted goal) never announces itself — TS's
-    /// construction-time mutations land before the print client subscribes,
-    /// so the first `goal_update` on the stream is the first change the
-    /// run observes.
+    /// Seed the publish dedupe's baseline: the state at attach time never announces itself.
     pub(crate) async fn seed_publish_baseline(&self, engine: &SessionEngine) {
         *self.last_published_goal.lock().await = engine.goal_state().await;
     }
 
-    /// Publish the current goal state as a `goal_update` when it changed
-    /// (TS `_setGoalState` -> `_emitGoalUpdate` at every mutation site).
+    /// Publish the current goal state as a `goal_update` when it changed.
     pub(crate) async fn publish_goal_update(&self, engine: &SessionEngine) {
         let goal = engine.goal_state().await;
         let changed = {
             let mut last = self.last_published_goal.lock().await;
-            // The dedupe is age-invariant: the creation-based timer's age
-            // ticks with the wall clock (a second boundary between reads
-            // must not re-emit an unchanged goal).
+            // The dedupe is age-invariant: the timer's age ticks with the wall
+            // clock (a boundary between reads must not re-emit an unchanged goal).
             if pa_core::goals::goal_update_dedupe_projection(&last)
                 == pa_core::goals::goal_update_dedupe_projection(&goal)
             {
@@ -217,8 +170,7 @@ impl PrintGoalSurface {
         }
     }
 
-    /// The queue snapshot frame (TS `getSessionActionSnapshot` ->
-    /// `_emitQueueUpdate`): an unchanged projection stays silent.
+    /// The queue snapshot frame: an unchanged projection stays silent.
     async fn emit_action_snapshot(&self, snapshot: Value) {
         let mut last = self.last_action_snapshot.lock().await;
         if *last == snapshot {
@@ -229,8 +181,8 @@ impl PrintGoalSurface {
         self.emit(&json!({ "type": "session_action_update", "actions": snapshot }));
     }
 
-    /// The snapshot of a queue holding one minted goal turn (the queued
-    /// preview is the full row text, TS `queuedAgentMessagePreview`).
+    /// The snapshot of a queue holding one minted goal turn (the queued preview is the full row
+    /// text).
     fn queued_snapshot(turn: &QueuedGoalTurn) -> Value {
         let preview = turn.preview_text();
         match turn.lane {
@@ -247,8 +199,7 @@ impl PrintGoalSurface {
         }
     }
 
-    /// Queue one minted goal turn (TS `_queuePreparedPrompt` at the mint
-    /// site): the queue snapshot publishes at the moment of the mint.
+    /// Queue one minted goal turn: the queue snapshot publishes at the moment of the mint.
     async fn queue_turn(&self, turn: QueuedGoalTurn) {
         let snapshot = Self::queued_snapshot(&turn);
         *self.queued.lock().await = Some(turn);
@@ -256,8 +207,7 @@ impl PrintGoalSurface {
     }
 
     /// Arm the budget-limit wrap-up steer: the crossing turn's message end
-    /// queues it (the `budget_crossed` flag the driver's settle consult
-    /// reads, TS `_steeringStopPending` owning the boundary).
+    /// queues it (the `budget_crossed` flag the driver's settle consult reads).
     async fn arm_budget_steer(&self, message: CustomMessage) {
         self.budget_crossed.store(true, Ordering::SeqCst);
         self.queue_turn(QueuedGoalTurn {
@@ -267,9 +217,8 @@ impl PrintGoalSurface {
         .await;
     }
 
-    /// Hold the threshold-compaction continuation (TS
-    /// `_queueGoalContinuationForThresholdCompaction`: the mint precedes the
-    /// compaction; the held turn runs as the post-compaction turn).
+    /// Hold the threshold-compaction continuation: the mint precedes the compaction; the held turn
+    /// runs as the post-compaction turn.
     async fn hold_threshold_continuation(&self, message: CustomMessage) {
         self.queue_turn(QueuedGoalTurn {
             message,
@@ -278,9 +227,8 @@ impl PrintGoalSurface {
         .await;
     }
 
-    /// The settle consult's budget-steer read: the crossing's queued turn,
-    /// consumed once. The armed crossing is the steer's own flag, so a
-    /// different lane's hold can never be mistaken for it.
+    /// The budget-steer read: the crossing's queued turn, consumed once (no
+    /// other lane can be mistaken for the armed crossing).
     pub(crate) async fn take_budget_steer(&self) -> Option<CustomMessage> {
         if !self.budget_crossed.swap(false, Ordering::SeqCst) {
             return None;
@@ -292,8 +240,8 @@ impl PrintGoalSurface {
         }
     }
 
-    /// The driver's threshold-hold read: the continuation the in-loop hook
-    /// minted ahead of the boundary's compaction, consumed once.
+    /// The driver's threshold-hold read: the continuation the in-loop hook minted ahead of the
+    /// boundary's compaction, consumed once.
     pub(crate) async fn take_threshold_continuation(&self) -> Option<CustomMessage> {
         let mut queued = self.queued.lock().await;
         match queued.as_ref().map(|turn| turn.lane) {
@@ -302,13 +250,10 @@ impl PrintGoalSurface {
         }
     }
 
-    /// The `preparing` phase frame (TS action lifecycle: `selected` projects
-    /// as `preparing`).
     async fn emit_action_preparing(&self, label: &str) {
         self.emit_action_phase("preparing", label).await;
     }
 
-    /// The `committing` phase frame.
     async fn emit_action_committing(&self, label: &str) {
         self.emit_action_phase("committing", label).await;
     }
@@ -324,9 +269,7 @@ impl PrintGoalSurface {
         .await;
     }
 
-    /// The `running` phase frame: the agent's `agent_start` of the turn the
-    /// driver admitted (the subscription completes the phase transition
-    /// after the loop's own `agent_start` line, the TS order).
+    /// The `running` phase frame: the agent's `agent_start` of the turn the driver admitted.
     async fn emit_action_running_if_armed(&self) {
         let mut active = self.active_label.lock().await;
         let Some(label) = active.take() else {
@@ -341,9 +284,8 @@ impl PrintGoalSurface {
         .await;
     }
 
-    /// The `session_command` action's phase frame (TS
-    /// `_executeSelectedSessionCommand`'s `preparing`/`running`
-    /// transitions: the snapshot's `active` entry, kind `session_command`).
+    /// The `session_command` action's phase frame (the snapshot's `active` entry, kind
+    /// `session_command`).
     pub(crate) async fn emit_command_phase(&self, phase: &str, label: &str) {
         self.emit_action_snapshot(json!({
             "queuedCount": 0,
@@ -354,10 +296,8 @@ impl PrintGoalSurface {
         .await;
     }
 
-    /// The queue frame of a session command that scheduled a goal
-    /// continuation: the queued preview rides while the command action is
-    /// still the active one (TS `_runOrQueueGoalContext` ->
-    /// `_emitQueueUpdate`).
+    /// The queue frame of a session command that scheduled a goal continuation:
+    /// the queued preview rides while the command action is still active.
     pub(crate) async fn emit_command_queue_hold(
         &self,
         command_label: &str,
@@ -377,9 +317,7 @@ impl PrintGoalSurface {
         .await;
     }
 
-    /// The settled command's queue frame: the action completed, the queued
-    /// continuation stays (TS `_emitQueueUpdate` after the command action
-    /// settles, ahead of the queued turn's admission).
+    /// The settled command's queue frame: the action completed, the queued continuation stays.
     pub(crate) async fn emit_command_queue_drain(&self, continuation: &CustomMessage) {
         let preview = custom_message_text(continuation);
         self.emit_action_snapshot(json!({
@@ -390,8 +328,7 @@ impl PrintGoalSurface {
         .await;
     }
 
-    /// The empty-projection idle frame (a settled command that scheduled
-    /// nothing; TS `_emitQueueUpdate` with the empty queue).
+    /// The empty-projection idle frame (a settled command that scheduled nothing).
     pub(crate) async fn emit_queue_idle(&self) {
         self.emit_action_snapshot(json!({
             "queuedCount": 0,
@@ -401,9 +338,7 @@ impl PrintGoalSurface {
         .await;
     }
 
-    /// One durable row's `message_start`/`message_end` pair on the stream
-    /// (rows appended outside the agent loop — the session-command echo,
-    /// result, and status rows).
+    /// One durable row's `message_start`/`message_end` pair (rows appended outside the agent loop).
     pub(crate) fn emit_row_pair(&self, row: &CustomMessage) {
         let value = crate::headless_autonomous::custom_row_wire_value(row);
         for event_type in ["message_start", "message_end"] {
@@ -411,16 +346,14 @@ impl PrintGoalSurface {
         }
     }
 
-    /// One raw stream event (the session-command events:
-    /// `compaction_start`, `compaction_end`, `refine_complete`,
-    /// `refine_failed`).
+    /// One raw stream event (the session-command events: `compaction_start`, `compaction_end`,
+    /// `refine_complete`, `refine_failed`).
     pub(crate) fn emit_stream_event(&self, event: &Value) {
         self.emit(event);
     }
 
-    /// The unconditional goal-state publish (TS `_emitGoalUpdate` in the
-    /// goal command arms): the dedupe baseline follows the published state
-    /// so later settled-turn publishes stay quiet until it changes again.
+    /// The unconditional goal-state publish: the dedupe baseline follows the published state until
+    /// it changes again.
     pub(crate) async fn publish_goal_update_forced(&self, engine: &SessionEngine) {
         let goal = engine.goal_state().await;
         *self.last_published_goal.lock().await = goal.clone();
@@ -430,15 +363,12 @@ impl PrintGoalSurface {
         }));
     }
 
-    /// Arm the `running`-frame-at-`turn_start` position for the next
-    /// queued-turn drain (the session-command continuation's TS order).
+    /// Arm the `running`-frame-at-`turn_start` position for the next queued-turn drain.
     pub(crate) fn arm_running_frame_at_turn_start(&self) {
         self.running_frame_at_turn_start
             .store(true, Ordering::SeqCst);
     }
 
-    /// The drained-queue frame (the admitted action completed; TS
-    /// `_emitQueueUpdate` with the empty projection).
     async fn emit_action_drained(&self) {
         *self.active_label.lock().await = None;
         self.emit_action_snapshot(json!({
@@ -449,12 +379,9 @@ impl PrintGoalSurface {
         .await;
     }
 
-    /// Wire the goal usage accounting (and the phase/`goal_update`
-    /// publications) onto the engine's event feed: settled non-error,
-    /// non-aborted assistant turns spend the goal budget; the crossing arms
-    /// the wrap-up steer; every state change (usage, budget, or a kernel-side
-    /// complete) publishes `goal_update`; an armed action's `agent_start`
-    /// completes its phase frame.
+    /// Wire the goal usage accounting onto the engine's event feed: settled
+    /// non-error turns spend the budget, the crossing arms the steer, every
+    /// state change publishes `goal_update`.
     pub(crate) async fn wire_accounting(
         self: &Arc<Self>,
         engine: &Arc<SessionEngine>,
@@ -474,23 +401,17 @@ impl PrintGoalSurface {
                         if let Some(wire) =
                             json_round_trip::<_, pa_types::ai::AssistantMessage>(assistant)
                         {
-                            // TS `_accountGoalUsageForAssistantMessage`: only
-                            // turns that were neither errors nor aborted spend
-                            // the budget, and only while the goal is active;
-                            // the crossing flips the goal to `budget_limited`
-                            // (the state change publishes before the steer
-                            // queues) and arms the wrap-up steer.
+                            // Only turns that were neither errors nor aborted spend the budget; the
+                            // crossing flips the goal to `budget_limited` and arms the steer.
                             if !matches!(
                                 wire.stop_reason,
                                 pa_types::ai::StopReason::Error | pa_types::ai::StopReason::Aborted
                             ) {
-                                // The message identity for the double-counting
-                                // guard: the loop does not assign message ids
-                                // in-process.
+                                // The message identity for the double-counting guard: the loop does
+                                // not assign message ids in-process.
                                 let message_id = format!("a-{}", wire.timestamp);
-                                // TS `_shouldStopAfterTurn`'s catch: goal
-                                // accounting must not interrupt the loop;
-                                // a failed persist only warns.
+                                // Goal accounting must not interrupt the loop; a failed persist
+                                // only warns.
                                 let outcome =
                                     engine.record_goal_usage(&message_id, &wire.usage).await;
                                 surface.publish_goal_update(&engine).await;
@@ -523,10 +444,8 @@ impl PrintGoalSurface {
                     {
                         surface.emit_action_running_if_armed().await;
                     }
-                    // A goal state change from any other source (a kernel-side
-                    // `goal.complete`/`goal.create` mid-turn) publishes at the
-                    // moment it happened; the dedupe keeps settled turns from
-                    // re-announcing.
+                    // A kernel-side `goal.complete`/`goal.create` mid-turn publishes at the moment
+                    // it happened.
                     surface.publish_goal_update(&engine).await;
                     Ok(())
                 })
@@ -534,39 +453,25 @@ impl PrintGoalSurface {
             .await
     }
 
-    /// The goal arm of the natural-turn-end consult (TS
-    /// `_getContinuationMessages`'s goal arm plus its boundary gates): at
-    /// each natural turn end, queued input (the armed steer) and a
-    /// compaction due (requested or threshold, TS
-    /// `_shouldStopForThresholdCompaction` stopping the loop) gate the mint
-    /// — the threshold arm mints the goal's continuation ahead of the
-    /// compaction and holds it for the driver (TS
-    /// `_queueGoalContinuationForThresholdCompaction`) — and an active goal
-    /// mints its next continuation turn, which the composed hook runs
-    /// inside the same agent run. [`NaturalContinuation::FallThrough`]
-    /// hands the boundary to the autonomous arm.
+    /// The goal arm of the natural-turn-end consult: queued input (the armed
+    /// steer) and a compaction due gate the mint — the threshold arm mints
+    /// ahead of the compaction and holds it — and an active goal mints its
+    /// next continuation turn inside the same agent run.
     pub(crate) async fn natural_continuation(
         &self,
         engine: &Arc<SessionEngine>,
         model: &pa_types::ai::Model,
     ) -> NaturalContinuation {
-        // TS `_getContinuationMessages`: queued session input owns
-        // the boundary before any goal work — the armed budget steer
-        // ends the run so the queue drains it.
+        // Queued session input owns the boundary before any goal work — the armed budget steer ends
+        // the run so the queue drains it.
         if self.queued.lock().await.is_some() {
             return NaturalContinuation::QueuedInput;
         }
-        // A pending requested compaction consumes the stop (TS
-        // `_shouldStopForThresholdCompaction`'s first arm): no mint,
-        // the boundary consumes the request.
         if engine.turn_boundary.compaction_scheduled().await {
             return NaturalContinuation::RequestedCompaction;
         }
-        // The threshold arm: the crossing turn mints BEFORE the loop
-        // stops (the mint's `goal_update` and queue frame land between
-        // `turn_end` and `agent_end`, the TS event order); the boundary
-        // compacts, and the driver runs the held turn as the
-        // post-compaction turn.
+        // The threshold arm: the crossing turn mints BEFORE the loop stops; the
+        // boundary compacts, and the driver runs the held turn post-compaction.
         if engine.session.auto_compaction_due(model).await {
             if let Some(message) = engine.mint_goal_continuation().await {
                 self.publish_goal_update(engine).await;
@@ -574,11 +479,8 @@ impl PrintGoalSurface {
             }
             return NaturalContinuation::ThresholdDue;
         }
-        // The natural continuation mint: the goal's context turn runs
-        // as the next turn of the same run (TS pendingMessages). The
-        // handoff to the run loop is the admission: the driver's pending
-        // guard releases here — a row that cannot convert drops the mint
-        // with the guard (the next boundary re-mints).
+        // The natural continuation mint: the goal's context turn runs as the next
+        // turn of the same run; a row that cannot convert drops the mint.
         if let Some(message) = engine.mint_goal_continuation().await {
             self.publish_goal_update(engine).await;
             engine.clear_pending_goal_continuation().await;
@@ -590,16 +492,10 @@ impl PrintGoalSurface {
         NaturalContinuation::FallThrough
     }
 
-    /// The settled boundary's goal drain (the print driver's queue loop):
-    /// the threshold-held continuation and the armed budget steer run as
-    /// this invocation's follow-up turns, each crossing the same boundary
-    /// pair; a turn that still ends in a terminal error fails an active
-    /// goal once the arms could not save it (TS
-    /// `_finishGoalForTerminalAssistantMessage` at `agent_end`, after
-    /// `_checkCompaction`). Returns whether an active goal still owns the
-    /// boundary (TS `_getContinuationMessages`: the goal arm takes
-    /// exclusive priority — the autonomous arm is never consulted while a
-    /// goal is active).
+    /// The settled boundary's goal drain: the held continuation and the armed
+    /// budget steer run as this invocation's follow-up turns; a turn that
+    /// still ends in a terminal error fails an active goal. Returns whether
+    /// an active goal still owns the boundary.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn drive_boundary(
         &self,
@@ -611,9 +507,7 @@ impl PrintGoalSurface {
     ) -> Result<bool, String> {
         loop {
             if let Some(message) = self.take_threshold_continuation().await {
-                // A goal that went inactive mid-turn (a kernel-side
-                // complete) drops its queued continuation (TS
-                // `_clearQueuedGoalContexts`).
+                // A goal that went inactive mid-turn drops its queued continuation.
                 if engine.goal_state().await.status == pa_types::goal::GoalStatus::Active {
                     self.run_queued_turn(
                         engine,
@@ -651,15 +545,8 @@ impl PrintGoalSurface {
         }
     }
 
-    /// Admit a session command's scheduled continuation (a `/goal` start or
-    /// resume) as the print invocation's next run — the TS
-    /// `promptAndWait` drain, with the command surface's frame order: the
-    /// action's `preparing`/`committing` frames ahead of the turn, the
-    /// `running` frame at the turn's `turn_start` (the probed TS order for
-    /// the command-continuation admission), the settled boundary's arms
-    /// (`_checkCompaction` at `agent_end`), then the terminal-error goal
-    /// fail's `goal_update`, then the drained-queue frame (the pump
-    /// completing the action after the run settled).
+    /// Admit a session command's scheduled continuation (a `/goal` start or resume)
+    /// as the print invocation's next run, with the command surface's frame order.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn run_session_command_continuation(
         &self,
@@ -699,14 +586,8 @@ impl PrintGoalSurface {
         Ok(())
     }
 
-    /// Admit one queued goal turn as the print invocation's next run (the
-    /// queue drain: TS `resumeQueuedWork` -> `_createPreparedTurnAction`
-    /// admission). The action's phase frames bookend the turn — `preparing`
-    /// and `committing` ahead of it, the `running` frame on the loop's
-    /// `agent_start`, the drained-queue frame right after the run settles —
-    /// and the turn crosses the same boundary pair every print turn crosses
-    /// (TS `_prepareForCommit` -> `_runPreTurnCompaction` before, the
-    /// `agent_end` checks after).
+    /// Admit one queued goal turn as the print invocation's next run (the queue
+    /// drain): the phase frames bookend the turn.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn run_queued_turn(
         &self,
@@ -717,10 +598,8 @@ impl PrintGoalSurface {
         global_harness_dir: std::path::PathBuf,
         message: &CustomMessage,
     ) -> Result<(), String> {
-        // The queued goal turn's run completes its admission: the held
-        // threshold continuation leaves the hold, so the driver's pending
-        // guard releases before the boundary's next consult (the budget
-        // steer consumed no slot — releasing is a no-op for it).
+        // The queued goal turn's run completes its admission: the held continuation
+        // leaves the hold, so the pending guard releases before the next consult.
         engine.clear_pending_goal_continuation().await;
         let label = compact_rlm_text(&custom_message_text(message), 160);
         self.emit_action_preparing(&label).await;
@@ -743,9 +622,7 @@ impl PrintGoalSurface {
 }
 
 #[cfg(test)]
-// The faux provider registry is process-global and shared across the
-// print-runtime tests: one std lock serializes every test that drives it
-// (the same contract print_boundary's tests hold).
+// The faux provider registry is process-global: one std lock serializes every test that drives it.
 mod tests {
     use super::*;
     use pa_core::session_engine::provider_adapter::json_round_trip;
@@ -768,8 +645,7 @@ mod tests {
         (frames, sink)
     }
 
-    /// The goal frame kinds, in order (`goal_update` statuses and the
-    /// session-action phases).
+    /// The goal frame kinds, in order (`goal_update` statuses and the session-action phases).
     fn frame_kinds(frames: &Frames) -> Vec<String> {
         frames
             .lock()
@@ -836,8 +712,7 @@ mod tests {
             .collect()
     }
 
-    /// Count the agent runs (`agent_end` events) a live subscription
-    /// observes: the counter handle reads after the driver settles.
+    /// Count the agent runs (`agent_end` events) a live subscription observes.
     async fn agent_run_counter(
         engine: &Arc<SessionEngine>,
     ) -> (
@@ -861,12 +736,8 @@ mod tests {
         (counter, subscription)
     }
 
-    /// The faux engine bed: the engine, its tempdir (kept alive), the
-    /// model, the wired surface (accounting + hook), and the captured
-    /// frames. Compaction settings come from the caller's settings value.
-    /// The optional `--goal` seed runs BEFORE the surface wires, exactly
-    /// like the print runtime (the construction-time state is the publish
-    /// baseline and never announces itself).
+    /// The faux engine bed: engine, tempdir, model, wired surface (accounting +
+    /// hook), and captured frames. The `--goal` seed runs BEFORE the surface wires.
     async fn goal_bed(
         script: Value,
         settings: Value,
@@ -974,17 +845,15 @@ mod tests {
         frames: Frames,
         harness_dir: std::path::PathBuf,
         _accounting: pa_agent::agent::Subscription,
-        /// Keeps the composed hook's autonomous arm alive for the bed's
-        /// lifetime (the hook holds it weakly).
+        /// Keeps the composed hook's autonomous arm alive for the bed's lifetime (the hook holds it
+        /// weakly).
         _autonomous_run: Arc<crate::headless_autonomous::HeadlessAutonomous>,
         _dir: tempfile::TempDir,
     }
 
     impl GoalBed {
-        /// Admit one prompt through the same driver path the print runtime
-        /// uses: the pre-turn arms, the prompt (the in-loop hook runs the
-        /// natural continuations inside the one run), the settled arms,
-        /// and the goal boundary drain.
+        /// Admit one prompt through the same driver path the print runtime uses
+        /// (the in-loop hook runs the natural continuations inside the one run).
         async fn prompt(&self, text: &str) -> bool {
             let mut boundary = crate::print_boundary::TurnBoundary::new(false);
             boundary
@@ -1029,10 +898,8 @@ mod tests {
         json!({ "compaction": { "enabled": false } })
     }
 
-    /// The `--goal` seed rides the first turn: the goal context row lands
-    /// ahead of the user row (its slot still zero), and the seed itself
-    /// never announces (the baseline swallows the construction state; the
-    /// first `goal_update` is the first turn's own accounting).
+    /// The context row lands ahead of the user row (its slot still zero), and the
+    /// seed never announces.
     #[tokio::test]
     async fn seed_rides_the_first_turn_and_stays_silent() {
         let _guard = FAUX_TEST_LOCK.lock().await;
@@ -1046,9 +913,8 @@ mod tests {
         let owns = bed.prompt("work").await;
         subscription.unsubscribe().await;
         let runs = counter.load(Ordering::SeqCst);
-        // The active goal mints past the one scripted reply; the second
-        // turn overruns the faux queue and fails the goal (the
-        // terminal-error arm), ending the run.
+        // The active goal mints past the one scripted reply; the second turn
+        // overruns the faux queue and fails the goal (the terminal-error arm).
         assert_eq!(runs, 1, "the continuation turn shares the one run");
         assert!(!owns, "the failed goal no longer owns the boundary");
         let goal = bed.engine.goal_state().await;
@@ -1062,8 +928,6 @@ mod tests {
             2,
             "the seeded row plus the first turn's minted context"
         );
-        // The FIRST context row is the seed's: its slot is still zero and
-        // it lands ahead of the user row in the transcript.
         let entries = bed.engine.session.entries().await;
         let mut kinds: Vec<String> = Vec::new();
         for entry in &entries {
@@ -1105,8 +969,6 @@ mod tests {
         );
         let texts = assistant_texts(&bed.engine).await;
         assert_eq!(texts, vec!["first reply".to_string()]);
-        // The seed never announced: the first frame is the first turn's
-        // usage accounting, then the mint's bump, then the terminal error.
         assert_eq!(
             frame_kinds(&bed.frames),
             vec![
@@ -1117,8 +979,7 @@ mod tests {
         );
     }
 
-    /// An unseeded branch reports no seed; a branched (already-seeded)
-    /// session does not reseed.
+    /// An unseeded branch reports no seed; a branched (already-seeded) session does not reseed.
     #[tokio::test]
     async fn seeding_respects_the_branch() {
         let _guard = FAUX_TEST_LOCK.lock().await;
@@ -1143,10 +1004,8 @@ mod tests {
         );
     }
 
-    /// The natural continuation loop: an unbounded-budget goal mints one
-    /// continuation context per settled turn INSIDE the one agent run (no
-    /// `agent_start/agent_end` between continuation turns), each mint
-    /// publishing its continuationsUsed bump before the turn starts.
+    /// An unbounded-budget goal mints one continuation context per settled turn INSIDE
+    /// the one agent run.
     #[tokio::test]
     async fn natural_loop_mints_continuations_inside_one_run() {
         let _guard = FAUX_TEST_LOCK.lock().await;
@@ -1157,8 +1016,7 @@ mod tests {
         )
         .await;
         let (counter, subscription) = agent_run_counter(&bed.engine).await;
-        // The third turn overruns the faux queue: its error ends the run
-        // and fails the goal (the terminal-error arm below).
+        // The third turn overruns the faux queue: its error ends the run and fails the goal.
         let owns = bed.prompt("work").await;
         subscription.unsubscribe().await;
         let runs = counter.load(Ordering::SeqCst);
@@ -1182,9 +1040,8 @@ mod tests {
         let goal = bed.engine.goal_state().await;
         assert_eq!(goal.status, pa_types::goal::GoalStatus::Error);
         assert_eq!(goal.continuations_used, 2);
-        // The stream: each turn's usage bump, each mint's bump, and the
-        // terminal error — in that order, with no queue frames (the
-        // natural mints never queue).
+        // The stream: each turn's usage bump, each mint's bump, and the terminal
+        // error — no queue frames (the natural mints never queue).
         assert_eq!(
             frame_kinds(&bed.frames),
             vec![
@@ -1197,11 +1054,8 @@ mod tests {
         );
     }
 
-    /// The budget-limit wrap-up steer: the crossing turn's usage flips the
-    /// goal to `budget_limited` (a `goal_update` plus the queued steering
-    /// preview between its `message_end` and `turn_end`), the run ends, and
-    /// the steer drains as its own run (preparing/committing/running phase
-    /// frames) before the queue empties.
+    /// The crossing turn's usage flips the goal to `budget_limited`, the run ends, and the
+    /// steer drains as its own run.
     #[tokio::test]
     async fn budget_steer_drains_as_its_own_run() {
         let _guard = FAUX_TEST_LOCK.lock().await;
@@ -1237,9 +1091,6 @@ mod tests {
             })
             .count();
         assert_eq!(budget_rows, 1, "the wrap-up steer's context row ran");
-        // The stream order: the crossing's budget_limited goal_update, the
-        // queued steering preview, the steer's three phase frames, and the
-        // drained queue.
         assert_eq!(
             frame_kinds(&bed.frames),
             vec![
@@ -1253,17 +1104,14 @@ mod tests {
         );
     }
 
-    /// The threshold arm's held continuation (a resumed session with an
-    /// active goal — the print `-c` shape): the in-loop hook mints BEFORE
-    /// the run stops (the slot bump entry precedes the compaction entry),
-    /// the boundary compacts the resumed history, and the held turn runs as
-    /// the post-compaction turn with its queue frames.
+    /// The threshold arm's held continuation (the print `-c` shape): the hook mints BEFORE the
+    /// run stops, the boundary compacts, and the held turn runs as the post-compaction turn.
     #[tokio::test]
     async fn threshold_hold_mints_before_the_compaction_and_runs_after() {
         let _guard = FAUX_TEST_LOCK.lock().await;
-        // A small output budget keeps the 20k window's combined
-        // input+output ceiling satisfiable (threshold 13_904: window
-        // minus the 2_000 budget and the 4_096 estimate-error floor).
+        // A small output budget keeps the 20k window's combined input+output
+        // ceiling satisfiable (threshold 13_904 = window - 2_000 budget - 4_096
+        // estimate floor).
         let mut model_script = script(
             &json!([
                 "crossing reply",
@@ -1289,9 +1137,8 @@ mod tests {
         let owns = bed.prompt("crossing turn").await;
         subscription.unsubscribe().await;
         let runs = counter.load(Ordering::SeqCst);
-        // The crossing turn and the held continuation: two runs (the held
-        // turn's own natural mint stays inside its run; its faux-queue
-        // exhaustion ends it and fails the goal).
+        // The crossing turn and the held continuation: two runs (the held turn's
+        // own natural mint stays inside its run; faux-queue exhaustion fails the goal).
         assert_eq!(runs, 2, "the crossing run and the held-turn run");
         assert!(!owns, "the failed goal no longer owns the boundary");
         let texts = assistant_texts(&bed.engine).await;
@@ -1304,16 +1151,12 @@ mod tests {
             ],
             "the held continuation ran as the post-compaction turn"
         );
-        // The mint's slot bump (the LAST goal-state entry before the
-        // compaction) precedes the compaction; the held context row follows
-        // the compaction as the post-compaction turn's leading row.
         let entries = bed.engine.session.entries().await;
         let mut marks: Vec<(String, u64)> = Vec::new();
         for entry in &entries {
             match entry {
-                // The goal-state rows are `Custom` entries (their `data` is
-                // the serialized state); the context rows are
-                // `CustomMessage` entries (their `details` carries the slot).
+                // The goal-state rows are `Custom` entries (`data` carries the state);
+                // the context rows are `CustomMessage` entries (`details` carries the slot).
                 pa_types::session::FileEntry::Custom { payload, .. }
                     if payload.custom_type == pa_core::goals::GOAL_STATE_CUSTOM_TYPE =>
                 {
@@ -1360,10 +1203,6 @@ mod tests {
                 .all(|(kind, _)| kind != "compaction_outcome"),
             "no repeat compaction outcome follows the live summary boundary"
         );
-        // The stream: the crossing turn's usage bump, the mint's bump, the
-        // held follow-up queue frame, the drain's phase frames (the held
-        // turn's own accounting and natural mint land inside its run,
-        // before its drain frame), and the terminal error that ends it.
         assert_eq!(
             frame_kinds(&bed.frames),
             vec![
@@ -1387,10 +1226,8 @@ mod tests {
         );
     }
 
-    /// The threshold bed's engine shape: a RESUMED session carrying one
-    /// history turn and an active goal (the persisted goal state the
-    /// driver loads at construction — the print `-c` shape). The history
-    /// turn gives the threshold compaction something to summarize.
+    /// The threshold bed: a RESUMED session carrying one history turn and an
+    /// active goal (the persisted goal state the driver loads at construction).
     async fn goal_bed_with_resumed_goal(script: Value, settings: Value) -> GoalBed {
         let dir = tempfile::TempDir::new().unwrap();
         let agent_dir = dir.path().join("agent");
@@ -1409,8 +1246,8 @@ mod tests {
             pa_core::session_engine::provider_adapter::real_stream_fn(None, model.clone());
         let agent_model: pa_agent::types::Model =
             json_round_trip(&model).expect("the faux model crosses the loop boundary");
-        // The resumed session: one history turn (a user row and a settled
-        // assistant reply), then the active goal state.
+        // The resumed session: one history turn (a user row and a settled assistant reply), then
+        // the active goal state.
         let mut session_manager = pa_core::session::manager::SessionManager::persisted(
             dir.path(),
             &dir.path().join("sessions"),
@@ -1420,11 +1257,8 @@ mod tests {
             .append_message(pa_types::session::AgentMessage::User(
                 pa_types::ai::UserMessage {
                     content: pa_types::ai::UserContent::Text(
-                        // A large history turn: it crosses the reserve headroom
-                        // on the crossing turn's request estimate (the resumed
-                        // context rides every request), and the threshold
-                        // compaction summarizes it away — the post-compaction
-                        // context sits back under the headroom.
+                        // A large history turn: it crosses the reserve headroom on the crossing
+                        // turn's request estimate, and the compaction summarizes it away.
                         String::from("a resumed history turn ") + &"x".repeat(60000),
                     ),
                     timestamp: 1,

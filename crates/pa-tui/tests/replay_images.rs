@@ -1,30 +1,21 @@
 //! Replay-path image rendering: a session file with image blocks renders
-//! the same rows the live path shows (the TS replay adds an Image
-//! component per result image block, and an image-only user prompt shows
-//! the `[image]` placeholder). Drives the same fold the `pa-tui-replay`
+//! the same rows the live path shows (an image-only user prompt shows the
+//! `[image]` placeholder); drives the same fold the `pa-tui-replay`
 //! `--frame` path uses.
-// Pedantic-gate exceptions (every other pedantic warning in this crate is
-// fixed in place; each exception carries its one-line justification):
-// - the casts: terminal-layout arithmetic narrows structurally bounded
-//   values (screen coordinates, byte counts, timestamps); guarded
-//   conversions would add panic paths the bounds guarantee away.
+// Casts: structurally bounded terminal-layout arithmetic; guarded conversions add panic paths.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// - the render routes are flat tables (one arm per route); splitting them
-//   would add indirection without changing the flow.
+// Render routes are flat tables (one arm per route); splitting adds indirection.
 #![allow(clippy::too_many_lines)]
-// - widget state structs carry independent flag bits; a nested struct
-//   would add indirection without changing the shape.
+// Widget state structs carry independent flag bits.
 #![allow(clippy::struct_excessive_bools, clippy::fn_params_excessive_bools)]
-// - the futures are bounded by the surface's lifetime; boxing them would
-//   add an allocation to the steady-state loop.
+// Futures are bounded by the surface's lifetime; boxing adds a steady-state allocation.
 #![allow(clippy::large_futures)]
-// - the wrappers preserve a uniform Result-returning API surface; unwrap
-//   removals would ripple through the callers without changing behavior.
+// The wrappers preserve a uniform Result-returning API surface.
 #![allow(clippy::unnecessary_wraps)]
 
 use pa_tui::session::{parse_jsonl, JsonlSessionStream, SessionStream};
@@ -88,11 +79,8 @@ fn replayed_images_hidden_setting_swaps_the_placeholder_form() {
     let session = session_with_image(&png, /* with_text_prompt */ true);
     let rows = frame_text(&session, 100, 30, /* show_images */ false);
     let flat = rows.join("\n");
-    // Hidden images contribute the `[Image: ...]` text through the
-    // output preview, not the metadata row. TS renders the hidden text
-    // WITHOUT dimensions (includeImageDimensions: false at both
-    // interactive mount sites; the export renderer is the
-    // dims-including consumer).
+    // Hidden images contribute the `[Image: ...]` text through the output preview, not the metadata
+    // row; TS renders it WITHOUT dimensions (includeImageDimensions: false at both mount sites).
     assert!(flat.contains("[Image: [image/png]]"), "got: {flat}");
     assert!(!flat.contains("\u{2570}\u{2500} [image/png"), "got: {flat}");
 }

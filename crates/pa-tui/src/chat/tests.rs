@@ -56,9 +56,7 @@ fn retry_loader_renders_countdown() {
     );
 }
 
-/// TS `retryLoader` wraps the same `Loader` with muted spinner and
-/// message color fns: the muted pen colors the spinner, and the gap
-/// to the label resets to default fg.
+/// The muted pen colors the spinner, and the gap to the label resets to default fg.
 #[test]
 fn retry_loader_spans_carry_the_ts_sgr_boundaries() {
     let retry = RetryState {
@@ -105,9 +103,9 @@ fn detail_cycle_visits_all_three_levels() {
 
 #[test]
 fn detail_wire_names_round_trip_with_the_startup_fallback() {
-    // TS #2709: the Ctrl+O level persists as the `chatDetail` wire
-    // string and reads back; anything unknown is the startup level
-    // (the collapse mode, operator directive 2026-09-28).
+    // The Ctrl+O level persists as the `chatDetail` wire string and
+    // reads back; anything unknown is the startup level (operator
+    // directive 2026-09-28).
     for detail in [Detail::Overview, Detail::Details, Detail::All] {
         assert_eq!(Detail::from_wire_name(detail.wire_name()), detail);
     }
@@ -162,9 +160,6 @@ fn row_runs(row: &Line) -> Vec<(String, Style)> {
 
 #[test]
 fn user_block_keeps_the_link_affordance() {
-    // A markdown link in the user block: the label underlines over the
-    // user-message color, the URL bracket keeps the dim link slot, and
-    // the OSC 8 wrap rides the label — all on the block background.
     crate::hyperlinks::set_hyperlinks_override(Some(true));
     let (bg, body, _, _, _) = user_block_styles();
     let link_url = bg.patch(theme().fg_style(ThemeColor::MdLinkUrl));
@@ -192,8 +187,8 @@ fn user_block_keeps_the_link_affordance() {
 
 #[test]
 fn user_block_highlights_argument_tokens() {
-    // TS `PromptTokenMask`: the argument tokens render in their own
-    // colors inside the `userMessageText` body.
+    // The argument tokens render in their own colors inside the
+    // `userMessageText` body.
     let (bg, body, _, success, md_link) = user_block_styles();
     let rows = render_user_block("fix @Cargo.toml --quiet now", &theme(), "  ", 60);
     assert_eq!(rows.len(), 3);
@@ -213,9 +208,9 @@ fn user_block_highlights_argument_tokens() {
 
 #[test]
 fn user_block_accents_a_recognized_leading_command() {
-    // TS `UserMessageComponent`: a leading `/name` naming a recognized
-    // command masks in accent over the whole command segment; an
-    // unrecognized one renders like any other text.
+    // A leading `/name` naming a recognized command masks in accent
+    // over the whole command segment; an unrecognized one renders like
+    // any other text.
     let (bg, body, accent, _, _) = user_block_styles();
     let rows = render_user_block("/hotkeys", &theme(), "  ", 40);
     assert_eq!(
@@ -228,7 +223,6 @@ fn user_block_accents_a_recognized_leading_command() {
     );
     let rows = render_user_block("/definitely-not-builtin now", &theme(), "  ", 40);
     let styled = row_runs(&rows[1]);
-    // The unrecognized row stays uniform `userMessageText`.
     assert_eq!(
         styled
             .iter()
@@ -268,9 +262,8 @@ fn user_block_mask_shields_tokens_from_markdown() {
 
 #[test]
 fn user_block_plain_sources_stay_plain() {
-    // A source holding literal mask-range characters (TS
-    // `MASK_LITERAL_PATTERN`) masks nothing at all: the token colors
-    // would alias the literals, so the row renders whole.
+    // A source holding literal mask-range characters masks nothing:
+    // the token colors would alias the literals.
     let (bg, body, _, _, _) = user_block_styles();
     let rows = render_user_block("look \u{E000} at @file", &theme(), "  ", 60);
     let styled: Vec<(String, Style)> = rows[1]
@@ -284,10 +277,8 @@ fn user_block_plain_sources_stay_plain() {
             .all(|(_, s)| s == &body),
         "a literal-mask source renders whole: {styled:?}"
     );
-    // More masked graphemes than the placeholder alphabet holds (TS
-    // MASK_CAPACITY = 0xF8FF - 0xE000 + 1 = 6400) mask nothing. (The
-    // block's OSC zone-marker spans on the first and last rows are
-    // exempt.)
+    // More masked graphemes than the placeholder alphabet holds (6400)
+    // mask nothing.
     let long = format!("fix {} now", "@x".repeat(3300));
     let rows = render_user_block(&long, &theme(), "  ", 60);
     let offending: Vec<(String, Style)> = rows
@@ -307,7 +298,7 @@ fn user_block_plain_sources_stay_plain() {
 fn user_block_carries_zone_markers() {
     let rows = render_user_block("Run a quick check.", &theme(), "  ", 60);
     // The zone-start sequence leads the first block row; the end and
-    // final sequences lead the last block row (TS prepends both).
+    // final sequences lead the last block row.
     assert!(crate::osc133::row_markers(&rows[0]).start);
     assert!(crate::osc133::row_markers(&rows[2]).end);
     let first: String = rows[0].iter().map(|s| s.content.as_str()).collect();
@@ -360,8 +351,7 @@ fn assistant_markers_skip_tool_call_messages() {
 
 #[test]
 fn code_block_indent_rides_the_render_calls() {
-    // `markdown.codeBlockIndent` (TS getCodeBlockIndent ->
-    // getMarkdownThemeWithSettings): the settings string flows through
+    // `markdown.codeBlockIndent`: the settings string flows through
     // render_assistant / render_user_block into every fenced block.
     let message = AssistantMessage {
         blocks: vec![MessageBlock::Text(
@@ -473,7 +463,6 @@ fn assistant_error_row_and_spacers() {
         flat.iter().any(|row| row.contains("Error: request failed")),
         "got: {flat:?}"
     );
-    // A tool-carrying message keeps its trailing spacer.
     let message = AssistantMessage {
         blocks: vec![MessageBlock::Text("body".into())],
         has_tool_calls: true,
@@ -491,7 +480,6 @@ fn assistant_error_row_and_spacers() {
         &mut crate::markdown::MarkdownBlockCache::default(),
     );
     assert_eq!(rows.last().unwrap().len(), 0, "trailing spacer");
-    // A tool-only message after tool activity renders no spacers.
     let message = AssistantMessage {
         blocks: Vec::new(),
         has_tool_calls: true,
@@ -511,12 +499,8 @@ fn assistant_error_row_and_spacers() {
     assert!(rows.is_empty(), "got: {rows:?}");
 }
 
-/// TS `createErrorComponent` + `formatInlineLoginRecoveryMessage`: an
-/// error whose text ends with the login-recovery suffix renders as ONE
-/// merged inline line (`{base} · Run /login to update credentials.`),
-/// error-colored and one-space indented like every other error row, and
-/// identical across detail modes (a plain row, never the collapsible
-/// component).
+/// An error whose text ends with the login-recovery suffix renders as ONE merged inline
+/// line, error-colored and identical across detail modes (never the collapsible component).
 #[test]
 fn login_recovery_error_renders_one_merged_inline_line() {
     let theme = theme();
@@ -556,10 +540,8 @@ fn login_recovery_error_renders_one_merged_inline_line() {
     }
 }
 
-/// The exact daemon authentication-failure wording merges: one inline
-/// logical line at full width, and the same single line flows across
-/// wrapped rows when narrow (the suffix never renders as its own
-/// blank-line block).
+/// The exact daemon authentication-failure wording merges: one inline logical line, and
+/// the same single line flows across wrapped rows when narrow.
 #[test]
 fn login_recovery_merges_the_exact_daemon_error_wording() {
     let theme = theme();
@@ -630,8 +612,7 @@ fn login_recovery_merges_the_exact_daemon_error_wording() {
     );
 }
 
-/// Only an end-of-text suffix with a non-empty, single-line base merges;
-/// every other error shape keeps the normal (collapsible) rows.
+/// Only an end-of-text suffix with a non-empty, single-line base merges.
 #[test]
 fn login_recovery_fallthroughs_keep_the_normal_error_rows() {
     let theme = theme();
@@ -653,7 +634,6 @@ fn login_recovery_fallthroughs_keep_the_normal_error_rows() {
             &mut crate::markdown::MarkdownBlockCache::default(),
         )
     };
-    // No suffix: the raw single-line error row is unchanged (fence).
     assert_eq!(
         render("Auth failed.", Detail::Overview)[1],
         vec![
@@ -663,9 +643,7 @@ fn login_recovery_fallthroughs_keep_the_normal_error_rows() {
             Span::raw(" ".repeat(47)),
         ]
     );
-    // Multi-line base: the collapsible path applies to the full error —
-    // the summary row while collapsed, the suffix as its own block while
-    // expanded.
+    // Multi-line base: the collapsible path applies to the full error.
     let multi = "Auth failed\nfor provider.\n\nRun /login to update credentials.";
     assert_eq!(
         render(multi, Detail::Overview)[1],
@@ -692,15 +670,12 @@ fn login_recovery_fallthroughs_keep_the_normal_error_rows() {
             String::new(),
             format!(" Auth failed{}", " ".repeat(48)),
             format!(" for provider.{}", " ".repeat(46)),
-            // The error's empty line pads to a full-width spaces row
-            // (TS `collapsible-error.ts` renderText: `rawLine || " "`
-            // then pad to width); `render_collapsible_error` matches
-            // that — never a truly blank row inside the error body.
+            // The error's empty line pads to a full-width spaces row —
+            // never a truly blank row inside the error body.
             " ".repeat(60),
             format!(" Run /login to update credentials.{}", " ".repeat(26)),
         ]
     );
-    // Suffix not at the end: no merge, the collapsed summary stands.
     let trailing = "Auth failed.\n\nRun /login to update credentials.\nProvider degraded.";
     assert_eq!(
         render(trailing, Detail::Overview)[1],
@@ -713,11 +688,8 @@ fn login_recovery_fallthroughs_keep_the_normal_error_rows() {
     );
 }
 
-/// TS `AssistantMessageComponent.rebuild`'s aborted arm: the aborted
-/// message renders its "Operation aborted" row inside the component,
-/// in the theme's error color with no "Error: " prefix, behind a
-/// spacer; a non-generic errorMessage renders itself; the abort also
-/// keeps the tool-call trailing spacer (TS `hasTrailingSpace`).
+/// The aborted message renders its "Operation aborted" row inside the component, in the
+/// error color with no "Error: " prefix, behind a spacer.
 #[test]
 fn aborted_assistant_message_renders_the_red_abort_row() {
     let theme = theme();
@@ -744,10 +716,8 @@ fn aborted_assistant_message_renders_the_red_abort_row() {
                 .any(|span| span.content.contains("Operation aborted"))
         })
         .expect("the aborted row never rendered");
-    // The row before is the spacer TS `rebuild` adds, the row is
-    // error-colored with the plain text (no "Error: " prefix), and
-    // the trailing tool spacer follows (hasTrailingSpace's aborted
-    // arm, even after tool activity).
+    // The row before is the spacer, and the trailing tool spacer
+    // follows even after tool activity.
     assert_eq!(
         rows[abort_row_index - 1].len(),
         0,
@@ -770,7 +740,7 @@ fn aborted_assistant_message_renders_the_red_abort_row() {
     );
     assert_eq!(rows.last().unwrap().len(), 0, "trailing spacer");
     // A provider-supplied abort reason renders instead of the generic
-    // text (TS: every errorMessage but "Request was aborted" wins).
+    // text.
     let message = AssistantMessage {
         blocks: Vec::new(),
         has_tool_calls: false,
@@ -814,10 +784,7 @@ fn loader_line_shape() {
     assert!(text.contains("\u{283c} Writing \u{00b7} 1s \u{00b7} \u{2193} 72 tokens"));
 }
 
-/// TS `Loader`: `${spinnerColorFn(frame)} ${messageColorFn(msg)}` —
-/// the gap between the spinner and the label sits between chalk's two
-/// colored runs, so the emitted row resets to default fg there instead
-/// of carrying the label color over the gap.
+/// The gap resets to default fg instead of carrying the label color over the gap.
 #[test]
 fn loader_gap_between_spinner_and_label_is_unstyled() {
     let working = WorkingState {
@@ -842,9 +809,7 @@ fn loader_gap_between_spinner_and_label_is_unstyled() {
     );
 }
 
-/// While a tool owns the working message (python-kernel bootstrap), the
-/// loader shows "<message> <elapsed>" and drops the activity label and
-/// the token count (TS `getWorkingLoaderMessage`).
+/// The loader shows "<message> <elapsed>" and drops the activity label and token count.
 #[test]
 fn loader_working_message_replaces_the_activity_label() {
     let working = WorkingState {
@@ -867,8 +832,7 @@ fn loader_working_message_replaces_the_activity_label() {
     assert!(!text.contains("72 tokens"));
 }
 
-/// TS `formatWorkingElapsed`: "3s" below a minute, then "1m 05s",
-/// "1h 02m 03s", "1d 02h 03m 04s".
+/// "3s" below a minute, then "1m 05s", "1h 02m 03s", "1d 02h 03m 04s".
 #[test]
 fn elapsed_label_formats_like_ts() {
     assert_eq!(format_working_elapsed(3), "3s");
@@ -877,9 +841,8 @@ fn elapsed_label_formats_like_ts() {
     assert_eq!(format_working_elapsed(93784), "1d 02h 03m 04s");
 }
 
-/// TS `message_end`'s aborted arm: the live abort row carries the
-/// client's own retry count and working-elapsed suffix (the wire row
-/// never does; the rebuild keeps the plain stored text).
+/// The live abort row carries the client's retry count and elapsed suffix (the wire row
+/// never does).
 #[test]
 fn live_abort_text_matches_ts() {
     assert_eq!(live_abort_text(0, None), "Operation aborted");

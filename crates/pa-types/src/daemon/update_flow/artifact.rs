@@ -1,6 +1,5 @@
-//! The update flow's on-disk artifact vocabulary (spec §7): the coordinator
-//! identity, the intent lock, the status file, and the artifact path layout
-//! under `<agent-dir>/update-restarts/`.
+//! The update flow's on-disk artifact vocabulary (spec §7): the coordinator identity, the intent
+//! lock, the status file, and the artifact path layout under `<agent-dir>/update-restarts/`.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -11,13 +10,8 @@ use crate::JsonMap;
 
 use super::state::UpdateState;
 
-// ---------------------------------------------------------------------------
-// Update identity
-// ---------------------------------------------------------------------------
-
-/// Opaque update identifier (a `UUIDv7` in practice). Typed so status records,
-/// artifact paths, and prepare transactions cannot mix it up with session or
-/// request ids. Idempotency keys (prepare retry, join) compare whole ids.
+/// Opaque update identifier (a `UUIDv7` in practice), typed so status records, artifact paths, and
+/// prepare transactions cannot mix it up with session ids.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct UpdateId(pub String);
@@ -40,11 +34,9 @@ impl AsRef<str> for UpdateId {
     }
 }
 
-/// A process identity as recorded in update artifacts: `{pid,
-/// process_start_id}` (the TS `getProcessStartId` contract, so a recycled pid
-/// can never impersonate a live process), plus the supervisor-scoped fields
-/// the TS status file carries. Used by the status file's coordinator,
-/// predecessor, and successor identities.
+/// A process identity as recorded in update artifacts: `{pid, process_start_id}` (a recycled pid
+/// can never impersonate a live process), plus the supervisor-scoped fields the TS status file
+/// carries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateProcessIdentity {
@@ -59,15 +51,8 @@ pub struct UpdateProcessIdentity {
     pub rest: JsonMap,
 }
 
-// ---------------------------------------------------------------------------
-// intent.json — the coordinator lock
-// ---------------------------------------------------------------------------
-
-/// `intent.json`: the per-socket coordinator lock (spec §4 `Acquire`). A live
-/// holder means a new coordinator `Join`s instead of stealing; a recorded
-/// identity that is no longer alive (pid + start-id check) is the only legal
-/// steal. The coordinator heartbeats `heartbeat_at` every 5 s while it holds
-/// the lock.
+/// `intent.json`: the per-socket coordinator lock (spec §4 `Acquire`): a live holder is `Join`ed, a
+/// recorded identity no longer alive is the only legal steal; heartbeats every 5 s.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpdateIntent {
     pub update_id: UpdateId,
@@ -79,15 +64,9 @@ pub struct UpdateIntent {
     pub rest: JsonMap,
 }
 
-/// `PRIME_AGENT_UPDATE_ROSTER`: the path of the roster snapshot the
-/// coordinator passes to the successor supervisor in its spawn environment
-/// (spec §6: the one update-related input any boot reads - the successor
-/// never discovers a roster file on disk).
+/// `PRIME_AGENT_UPDATE_ROSTER`: the roster snapshot path the coordinator passes to the successor
+/// supervisor's spawn environment (spec §6: the one update-related input any boot reads).
 pub const UPDATE_ROSTER_ENV: &str = "PRIME_AGENT_UPDATE_ROSTER";
-
-// ---------------------------------------------------------------------------
-// status.json — the TS status-file schema
-// ---------------------------------------------------------------------------
 
 pub const UPDATE_STATUS_FORMAT_VERSION: u64 = 1;
 
@@ -101,10 +80,8 @@ pub struct UpdateStatusCounts {
     pub failed: u64,
 }
 
-/// One per-session restore failure recorded in the terminal report (TS
-/// `DaemonUpdateRestartFailure`). Restore failures never fail the boot
-/// (spec §9): they are recorded, and the session stays on disk for manual
-/// resume.
+/// One per-session restore failure (TS `DaemonUpdateRestartFailure`). Restore failures never fail
+/// the boot (spec §9): recorded, the session stays on disk for manual resume.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateStatusFailure {
@@ -112,10 +89,9 @@ pub struct UpdateStatusFailure {
     pub message: String,
 }
 
-/// The successor supervisor's hello resume contract (spec §10.3): tells a
-/// reconnecting client whether the restore pass behind this supervisor has
-/// finished. `update_id` is `None` on a normal boot. Rust-only extension
-/// (the TS close frame carries no resume contract).
+/// The successor supervisor's hello resume contract (spec §10.3): whether
+/// the restore pass has finished. `update_id` is `None` on a normal boot.
+/// Rust-only extension (the TS close frame carries no resume contract).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DaemonUpdateResume {
@@ -124,11 +100,9 @@ pub struct DaemonUpdateResume {
     pub complete: bool,
 }
 
-/// `status.json`: the TS coordinator status-file schema (`DaemonUpdateRestartStatus`
-/// parity, camelCase), with the spec's additions — `updateId` (spec; the TS
-/// file's `requestId`) and the monotonic `epoch` owned by the coordinator
-/// process so late writes from a dying predecessor cannot regress state
-/// (spec §4). `state` carries the new FSM vocabulary, not the TS phase names.
+/// `status.json`: the TS coordinator status-file schema (camelCase), with the spec's additions -
+/// `updateId` (the TS file's `requestId`) and the monotonic `epoch` so late writes from a dying
+/// predecessor cannot regress state (spec §4); `state` carries the new FSM vocabulary.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateStatus {
@@ -157,23 +131,18 @@ pub struct UpdateStatus {
     pub rest: JsonMap,
 }
 
-// ---------------------------------------------------------------------------
-// Artifact path layout (spec §7)
-// ---------------------------------------------------------------------------
-
-/// The update-flow scratch root: `<agent-dir>/update-restarts/`. Everything
-/// under it is swept unconditionally at supervisor boot, before the first
-/// client command is served (spec §6, invariant I2).
+/// The update-flow scratch root: `<agent-dir>/update-restarts/`, swept unconditionally at
+/// supervisor
+/// boot, before the first client command (spec §6, invariant I2).
 #[must_use]
 pub fn update_restarts_dir(agent_dir: &Path) -> PathBuf {
     agent_dir.join("update-restarts")
 }
 
-/// The per-socket scratch directory `<agent-dir>/update-restarts/<socket_hash>/`.
-/// `socket_hash` is the sha256 hex of the normalized socket path (TS
-/// `socketKey` parity); its derivation stays with the caller's platform layer
-/// so this crate stays crypto-free — coordinator and supervisor must derive
-/// it the same way.
+/// The per-socket scratch dir `<agent-dir>/update-restarts/<socket_hash>/`; `socket_hash` is the
+/// sha256 hex of the normalized socket path (TS `socketKey`), derived by the caller's platform
+/// layer
+/// (this crate stays crypto-free) - both sides must derive it the same way.
 #[must_use]
 pub fn socket_update_dir(agent_dir: &Path, socket_hash: &str) -> PathBuf {
     update_restarts_dir(agent_dir).join(socket_hash)
@@ -191,9 +160,8 @@ pub fn update_status_path(socket_dir: &Path) -> PathBuf {
     socket_dir.join("status.json")
 }
 
-/// `prepared/<update-id>/` — the old supervisor's durable prepare artifact.
-/// Written at `Snapshotted` (roster + marker, fsync before the ack), deleted
-/// by the supervisor's self-expiry or by the coordinator after `Restoring`.
+/// `prepared/<update-id>/` — the old supervisor's durable prepare artifact:
+/// written at `Snapshotted`, deleted by self-expiry or after `Restoring`.
 #[must_use]
 pub fn update_prepared_dir(socket_dir: &Path, update_id: &UpdateId) -> PathBuf {
     socket_dir.join("prepared").join(update_id.as_ref())
@@ -257,8 +225,7 @@ mod tests {
 
     #[test]
     fn status_defaults_accept_ts_minimal_file() {
-        // A TS-era status file (no epoch, no failures) parses and keeps its
-        // unknown fields.
+        // A TS-era status file (no epoch, no failures) parses and keeps unknown fields.
         let parsed: UpdateStatus = serde_json::from_str(
             r#"{"version":1,"updateId":"r1","socketPath":"/s","state":"complete","counts":{"total":0,"restored":0,"resumed":0,"failed":0},"startedAt":"a","updatedAt":"b","requestId":"r1"}"#,
         )
