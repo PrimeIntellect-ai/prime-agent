@@ -138,7 +138,23 @@ function Save-Release {
             try {
                 $file = [System.IO.File]::Create($OutFile)
                 $buffer = New-Object byte[] (256 * 1024)
-                while (($read = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                # THE STALL WATCHDOG (the reviewer's finding): the
+                # HttpClient timeout above bounds only the wait for the
+                # headers under ResponseHeadersRead - a server that answers
+                # them and then parks the body would leave the synchronous
+                # read below waiting forever, and the three attempts would
+                # never run. Each chunk read is a bounded task: a body
+                # silent for the whole window throws and takes the retry
+                # path; a slow body never trips it (a read returns as data
+                # arrives, the window restarts per chunk).
+                $readTimeout = [TimeSpan]::FromSeconds(60)
+                while ($true) {
+                    $readTask = $stream.ReadAsync($buffer, 0, $buffer.Length)
+                    if (-not $readTask.Wait($readTimeout)) {
+                        throw "the body of $Name stalled (no data for $([int]$readTimeout.TotalSeconds) seconds)"
+                    }
+                    $read = $readTask.Result
+                    if ($read -le 0) { break }
                     $file.Write($buffer, 0, $read)
                     $done += $read
                     if ($total) {
@@ -652,6 +668,7 @@ if (-not $uv) {
         if ((Test-Path $uvInstallerPath -PathType Leaf) -and ((Get-Item -LiteralPath $uvInstallerPath).Length -gt 0)) {
             $callerUvInstallDir = $env:UV_INSTALL_DIR
             $callerUvUnmanaged = $env:UV_UNMANAGED_INSTALL
+            $callerUvInstaller = $env:PRIME_AGENT_UV_INSTALLER
             try {
                 $env:UV_INSTALL_DIR = $uvInstallDir
                 $env:UV_UNMANAGED_INSTALL = $null
@@ -665,10 +682,21 @@ if (-not $uv) {
                 # silenced progress; the parent reads the child's exit as
                 # DATA, and the uv.exe FILE decides.
                 $childShell = if (Get-Command pwsh -ErrorAction SilentlyContinue) { (Get-Command pwsh).Source } else { 'powershell' }
+                # THE PATH RIDES AS DATA (the reviewers' finding): the
+                # download dir sits under the caller's TEMP, and a profile
+                # path with an apostrophe in it would break the single-
+                # quoted literal in the child script - the child parsed
+                # dead, the install skipped, the pre-warm left undone. So
+                # the path never rides the command line OR the script text:
+                # it rides the environment (the same handoff this block
+                # already runs UV_INSTALL_DIR through), and the child reads
+                # the variable - environment inheritance is OS semantics,
+                # no PowerShell parsing of the path happens at any version.
+                $env:PRIME_AGENT_UV_INSTALLER = $uvInstallerPath
                 $childScript = @"
 `$ProgressPreference = 'SilentlyContinue'
 `$VerbosePreference = 'SilentlyContinue'
-& '$uvInstallerPath'
+& `$env:PRIME_AGENT_UV_INSTALLER
 "@
                 $childEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childScript))
                 & $childShell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $childEncoded *> $null
@@ -676,6 +704,7 @@ if (-not $uv) {
             } finally {
                 $env:UV_INSTALL_DIR = $callerUvInstallDir
                 $env:UV_UNMANAGED_INSTALL = $callerUvUnmanaged
+                $env:PRIME_AGENT_UV_INSTALLER = $callerUvInstaller
             }
             if (-not (Test-Path $uvExe -PathType Leaf)) {
                 Step-Fail 'installing uv' "the uv installer exited $uvRunExit; uv.exe is missing"
@@ -701,8 +730,16 @@ if (-not $uv) {
 }
 # THE PRE-WARM'S PATH FIX (install-rust.sh's own): the product's ensure_uv
 # searches PATH and ~/.local/bin/uv(.exe), and the pre-warm's child inherits
-# this PATH — the freshly installed uv rides it.
-if (-not (Test-PathEntry $env:PATH $uvInstallDir)) {
+# this PATH — the freshly installed uv rides it. THE GUARD (the reviewer's
+# finding): the prepend serves the uv THIS RUN installed; an unconditional
+# prepend would also run when a working system uv already answered
+# Get-Command and a stale ~/.local/bin/uv.exe sits unwired on disk - and
+# then the stale local file would shadow the working system one for the
+# pre-warm and the immediate bootstrap. So the prepend runs only when this
+# run owns the local uv: none found on PATH and the local file present. (A
+# local uv that predates the install still serves the pre-warm: ensure_uv
+# checks ~/.local/bin/uv.exe by itself.)
+if (-not $uv -and (Test-Path $uvExe -PathType Leaf) -and -not (Test-PathEntry $env:PATH $uvInstallDir)) {
     $env:PATH = "$uvInstallDir;$env:PATH"
 }
 if ($uv -or (Test-Path $uvExe -PathType Leaf)) {

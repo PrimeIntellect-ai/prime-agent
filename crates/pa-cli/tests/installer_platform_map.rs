@@ -607,3 +607,281 @@ fn windows_install_e2e_builds_the_shipped_link_mode() {
         "the e2e must snapshot and restore the User PATH its installs dirty"
     );
 }
+
+/// Save-Release's body copy must survive a stalled body (the macroscope
+/// finding): `HttpClient.Timeout` under `ResponseHeadersRead` bounds only the
+/// wait for the headers, so a server that answers the headers and then
+/// parks the tarball body would hang the synchronous `$stream.Read` loop
+/// forever - the three-attempt retry the helper promises never gets its
+/// chance. Each chunk read is a bounded task: a body that delivers nothing
+/// within the stall window throws and takes the retry path, while a
+/// slow-but-flowing body never trips it (a read returns as soon as data
+/// arrives, the window restarts per chunk).
+#[test]
+fn install_ps1_download_survives_a_stalled_body() {
+    let text = std::fs::read_to_string(repo_root().join("install.ps1")).expect("read install.ps1");
+    let helper_start = text
+        .find("function Save-Release")
+        .expect("the streaming download helper must exist");
+    let helper = &text[helper_start..];
+    let helper = &helper[..helper.find("\n}\n").map_or(helper.len(), |at| at + 3)];
+    let markers: [(&str, &str); 4] = [
+        (
+            "the per-chunk stall window",
+            "$readTimeout = [TimeSpan]::FromSeconds(60)",
+        ),
+        (
+            "the bounded chunk read",
+            "$readTask = $stream.ReadAsync($buffer, 0, $buffer.Length)",
+        ),
+        (
+            "the wait against the window",
+            "if (-not $readTask.Wait($readTimeout)) {",
+        ),
+        ("the honest stall message", "the body of $Name stalled"),
+    ];
+    let mut positions: Vec<usize> = Vec::new();
+    for (what, marker) in markers {
+        positions.push(
+            helper.find(marker).unwrap_or_else(|| {
+                panic!("the download helper must carry its {what} line: {marker}")
+            }),
+        );
+    }
+    for pair in positions.windows(2) {
+        assert!(
+            pair[0] < pair[1],
+            "the stall discipline is ordered window -> read -> wait -> throw: {markers:?}"
+        );
+    }
+}
+
+/// The pre-warm's PATH fix must not shadow a working uv (the macroscope
+/// finding): the prepend exists so a FRESHLY INSTALLED uv rides the
+/// pre-warm child's PATH, but an unconditional prepend also runs when a
+/// working system uv already answered `Get-Command` and a stale
+/// `~/.local/bin/uv.exe` sits unwired on disk - and then the stale local
+/// file shadows the working system one for the pre-warm and the immediate
+/// bootstrap. The prepend runs only when this run owns the local uv: none
+/// found on PATH and the local executable present. (The product's own
+/// `ensure_uv` falls back to `~/.local/bin/uv.exe` by itself, so a local
+/// file that predates the install still serves the pre-warm without the
+/// prepend.)
+#[test]
+fn install_ps1_does_not_shadow_a_working_uv() {
+    let text = std::fs::read_to_string(repo_root().join("install.ps1")).expect("read install.ps1");
+    let section_start = text
+        .find("# --- the kernel pre-warm")
+        .expect("the pre-warm section exists");
+    let section_end = text
+        .find("# --- the PATH add")
+        .expect("the PATH-add section follows");
+    let section = &text[section_start..section_end];
+    let guard =
+        "if (-not $uv -and (Test-Path $uvExe -PathType Leaf) -and -not (Test-PathEntry $env:PATH $uvInstallDir)) {";
+    let guard_at = section
+        .find(guard)
+        .expect("the PATH fix must be guarded: it prepends only when this run owns the local uv");
+    let prepend_at = section
+        .find("$env:PATH = \"$uvInstallDir;$env:PATH\"")
+        .expect("the PATH fix's prepend line must survive the guard");
+    assert!(
+        guard_at < prepend_at,
+        "the guard decides before the prepend runs"
+    );
+}
+
+/// The fetched uv installer's path rides the child invocation as DATA (the
+/// macroscope finding): `$download` lives under the caller's TEMP, and a
+/// user profile whose path carries an apostrophe (an O'Brien-style Windows
+/// account) breaks the single-quoted literal the child script embedded -
+/// the child exits with a parse error, the install is skipped, and the
+/// kernel pre-warm is left undone on a machine that has everything but
+/// the apostrophe. The path never rides the command line (host parsing of
+/// extra arguments after `-EncodedCommand` is version-dependent) nor the
+/// script text: the parent hands it over through the environment (the
+/// same handoff the block runs `UV_INSTALL_DIR` through, with the caller's
+/// value saved and restored) and the child reads the variable - no
+/// PowerShell parsing of the path happens at any version.
+#[test]
+fn install_ps1_passes_the_uv_installer_path_as_process_data() {
+    let text = std::fs::read_to_string(repo_root().join("install.ps1")).expect("read install.ps1");
+    let section_start = text
+        .find("# --- the kernel pre-warm")
+        .expect("the pre-warm section exists");
+    let section_end = text
+        .find("# --- the PATH add")
+        .expect("the PATH-add section follows");
+    let section = &text[section_start..section_end];
+    assert!(
+        section.contains("& `$env:PRIME_AGENT_UV_INSTALLER"),
+        "the child script must invoke the fetched installer through the handoff variable, never an embedded literal"
+    );
+    assert!(
+        section.contains("$env:PRIME_AGENT_UV_INSTALLER = $uvInstallerPath"),
+        "the parent must hand the installer path to the child through the environment"
+    );
+    assert!(
+        section.contains("$callerUvInstaller = $env:PRIME_AGENT_UV_INSTALLER")
+            && section.contains("$env:PRIME_AGENT_UV_INSTALLER = $callerUvInstaller"),
+        "the handoff must save and restore the caller's value like UV_INSTALL_DIR beside it"
+    );
+    assert!(
+        section.contains("-EncodedCommand $childEncoded *> $null"),
+        "the encoded child invocation carries no trailing argument (host parsing of extra args after -EncodedCommand is version-dependent)"
+    );
+    assert!(
+        !section.contains("& '$uvInstallerPath'"),
+        "the child script must not embed the path in a single-quoted literal (an apostrophe in the path parses the child dead)"
+    );
+}
+
+/// The Windows e2e harnesses must not destroy a pre-existing user uv (the
+/// macroscope and cursor findings): both `finally` blocks unconditionally
+/// deleted `~/.local/bin/uv.exe` and `uvx.exe`, so a dev machine carrying
+/// its own uv install lost both binaries to the test run. Each harness
+/// snapshots both binaries (byte backups in its own scratch dir) BEFORE
+/// the installer runs and restores them in cleanup: the test deletes only
+/// the files it itself created.
+#[test]
+fn windows_e2e_harnesses_restore_the_users_uv_binaries() {
+    for harness_name in [
+        "test_windows_install.ps1",
+        "test_windows_channel_fallback.ps1",
+    ] {
+        let harness = std::fs::read_to_string(
+            repo_root()
+                .join("scripts")
+                .join("release")
+                .join(harness_name),
+        )
+        .unwrap_or_else(|_| panic!("read {harness_name}"));
+        let snapshot_markers: [(&str, &str); 3] = [
+            ("the snapshot dir", "$uvSnapshotDir = Join-Path $scratch 'uv-snapshot'"),
+            (
+                "the prior-state record",
+                "$uvBefore[$uvName] = Test-Path (Join-Path $uvBinDir $uvName) -PathType Leaf",
+            ),
+            (
+                "the byte backup",
+                "Copy-Item -LiteralPath (Join-Path $uvBinDir $uvName) -Destination (Join-Path $uvSnapshotDir $uvName) -Force",
+            ),
+        ];
+        for (what, marker) in snapshot_markers {
+            assert!(
+                harness.contains(marker),
+                "{harness_name} must carry its {what} line: {marker}"
+            );
+        }
+        assert!(
+            harness.contains("if ($uvBefore[$uvName] -and (Test-Path (Join-Path $uvSnapshotDir $uvName))) {"),
+            "{harness_name}'s cleanup must restore a recorded binary only when its byte backup exists"
+        );
+        assert!(
+            harness.contains("Copy-Item -LiteralPath (Join-Path $uvSnapshotDir $uvName) -Destination $uvPath -Force"),
+            "{harness_name}'s cleanup must restore a pre-existing uv binary from its byte backup"
+        );
+        assert!(
+            harness.contains("elseif (-not $uvBefore[$uvName] -and $uvSnapshotDone) {"),
+            "{harness_name}'s cleanup must delete only a file the snapshot itself recorded absent (a recorded pre-existing binary is never deleted, even if its backup went missing)"
+        );
+        assert!(
+            harness.contains("$uvRestoreFailed += $uvName")
+                && harness.contains("if ($uvRestoreFailed.Count -gt 0) {")
+                && harness.contains("could not verify the pre-existing uv binary"),
+            "{harness_name}'s cleanup must report a restore it could not perform LOUDLY (a recorded binary whose backup went missing must fail the run, never end green over silent loss)"
+        );
+        assert!(
+            harness
+                .contains("Remove-Item -LiteralPath $uvPath -Force -ErrorAction SilentlyContinue"),
+            "{harness_name}'s cleanup must still delete the uv binaries the test itself installed"
+        );
+        assert!(
+            !harness.contains("Remove-Item -Force (Join-Path $HOME '.local\\bin\\uv.exe')"),
+            "{harness_name}'s cleanup must not unconditionally delete the user's own uv.exe"
+        );
+    }
+}
+
+/// The uv parity gate runs against the fresh-runner contract it asserts
+/// (the cursor finding): install.ps1 skips its uv branch when the machine
+/// already answers `uv` - by design - so demanding the install on a box
+/// that had uv before the test ran fails the gate without the installer
+/// being wrong. The harness records the pre-state first, and the gate
+/// throws only for a box that had no uv in either place install.ps1
+/// looks.
+#[test]
+fn windows_install_e2e_gates_the_uv_install_on_a_fresh_runner() {
+    let harness = std::fs::read_to_string(
+        repo_root()
+            .join("scripts")
+            .join("release")
+            .join("test_windows_install.ps1"),
+    )
+    .expect("read test_windows_install.ps1");
+    assert!(
+        harness.contains(
+            "$uvWasOnPath = [bool](Get-Command uv -ErrorAction SilentlyContinue) -or (Test-Path (Join-Path $HOME '.local\\bin\\uv.exe'))"
+        ),
+        "the harness must record the uv pre-state before the install runs (both places install.ps1 looks)"
+    );
+    assert!(
+        harness.contains("if (-not $uvWasOnPath) {"),
+        "the uv parity gate must run only against the fresh-runner contract"
+    );
+}
+
+/// The harnesses keep the kernel pre-warm's writes out of the real user
+/// profile (the cursor finding): the bootstrap venv, uv's cache, and uv's
+/// downloaded pythons all default into the profile, and the pre-warm runs
+/// as part of the install the harness drives. Each harness steers all
+/// three into its scratch dir through the product's own override knobs
+/// and clears them again in cleanup, so the e2e touches the real profile
+/// only through the User PATH registry value and the uv binaries (both
+/// snapshotted and restored).
+#[test]
+fn windows_e2e_harnesses_keep_the_kernel_prewarm_writes_in_scratch() {
+    for harness_name in [
+        "test_windows_install.ps1",
+        "test_windows_channel_fallback.ps1",
+    ] {
+        let harness = std::fs::read_to_string(
+            repo_root()
+                .join("scripts")
+                .join("release")
+                .join(harness_name),
+        )
+        .unwrap_or_else(|_| panic!("read {harness_name}"));
+        for (what, marker) in [
+            (
+                "the venv redirect",
+                "$env:PRIME_AGENT_KERNEL_VENV = Join-Path $scratch 'kernel-venv'",
+            ),
+            (
+                "the uv cache redirect",
+                "$env:UV_CACHE_DIR = Join-Path $scratch 'uv-cache'",
+            ),
+            (
+                "the uv python redirect",
+                "$env:UV_PYTHON_INSTALL_DIR = Join-Path $scratch 'uv-python'",
+            ),
+            (
+                "the caller's venv value saved",
+                "$callerKernelVenv = $env:PRIME_AGENT_KERNEL_VENV",
+            ),
+            (
+                "the caller's venv value restored",
+                "$env:PRIME_AGENT_KERNEL_VENV = $callerKernelVenv",
+            ),
+        ] {
+            assert!(
+                harness.contains(marker),
+                "{harness_name} must carry its {what} line: {marker}"
+            );
+        }
+        assert!(
+            !harness.contains("Remove-Item 'Env:PRIME_AGENT_KERNEL_VENV'"),
+            "{harness_name}'s cleanup must RESTORE the caller's override values, never delete the knobs (a caller with its own redirect loses it on an in-process run)"
+        );
+    }
+}
