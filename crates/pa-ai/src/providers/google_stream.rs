@@ -1,9 +1,6 @@
-//! Shared Google stream-chunk processing.
-//!
-//! The chunk handler in the TS reference is duplicated across `google.ts` and
-//! `google-vertex.ts`; this module is the single Rust implementation used by
-//! both providers: text/thinking part transitions with thought-signature
-//! retention, function-call tool calls, finish-reason mapping, and usage
+//! Shared Google stream-chunk processing: the single Rust implementation of the chunk handler the
+//! TS duplicates across `google.ts` and `google-vertex.ts` — text/thinking part transitions with
+//! thought-signature retention, function-call tool calls, finish-reason mapping, and usage
 //! accounting.
 
 use serde_json::{Map, Value};
@@ -65,7 +62,7 @@ impl GoogleStreamState {
     }
 
     /// Process one streamed `GenerateContentResponse` chunk.
-    // Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+    // Long by design: mirrors the provider's stream shape.
     #[allow(clippy::too_many_lines)]
     pub fn handle_chunk(
         &mut self,

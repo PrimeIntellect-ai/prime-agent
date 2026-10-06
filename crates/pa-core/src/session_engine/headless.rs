@@ -1,7 +1,6 @@
-//! Headless completion and print-mode terminal selection. Port of
-//! modes/headless-completion.ts (selection half) and the text-output half of
-//! modes/print-mode.ts: pick the terminal result from a headless run and turn
-//! it into stdout/stderr/exit-code.
+//! Headless completion and print-mode terminal selection: pick the
+//! terminal result from a headless run and turn it into
+//! stdout/stderr/exit-code.
 
 use pa_types::session::{AgentMessage, FileEntry};
 
@@ -100,9 +99,8 @@ pub struct HeadlessTerminalResult {
     pub compaction_outcomes: Vec<CompactionOutcome>,
 }
 
-/// Pick the terminal result from the message suffix: compaction outcomes are
-/// collected, internal custom notices are skipped, and the first substantive
-/// message (assistant or slash-command result) is the primary.
+/// Pick the terminal result from the message suffix: compaction outcomes
+/// are collected, notices skipped, the first substantive message primary.
 pub fn select_headless_terminal_result(messages: &[AgentMessage]) -> HeadlessTerminalResult {
     let mut index: i64 = messages.len() as i64 - 1;
     let mut compaction_outcomes: Vec<CompactionOutcome> = Vec::new();

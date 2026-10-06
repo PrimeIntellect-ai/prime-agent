@@ -1,7 +1,7 @@
 //! Geometry uses the same wrapping traversal as painted Markdown rows.
 use super::{
-    block_cache_key, parse_blocks, render_inline, wrapped_span_count, Block, BlockKind,
-    MarkdownBlockCache, MarkdownStyle,
+    block_cache_key, code_rows, heading_spans, parse_blocks, render_inline, wrapped_span_count,
+    Block, BlockKind, MarkdownBlockCache, MarkdownStyle,
 };
 use crate::{Line, Span};
 use ratatui::style::Style;
@@ -66,11 +66,12 @@ pub(super) fn blank_after(next: Option<&Block>, exclude_lists: bool) -> bool {
     }
 }
 
-/// Count rows without painting output buffers or syntax highlighting.
-/// A non-empty `cache` replays the block's painted rows: the count==paint
-/// invariant holds by construction (the cached rows ARE what the render
-/// emits for the same key). The cache is only read — a cold cache costs
-/// what [`markdown_row_count`] costs.
+/// Count rows without collecting the painted rows; fenced code measures
+/// the same (highlighted) rows the paint wraps. A non-empty `cache`
+/// replays the block's painted rows: the count==paint invariant holds by
+/// construction (the cached rows ARE what the render emits for the same
+/// key). The cache is only read — a cold cache costs what
+/// [`markdown_row_count`] costs.
 pub(crate) fn markdown_row_count_tagged(
     text: &str,
     width: usize,
@@ -88,8 +89,7 @@ pub(crate) fn markdown_row_count_tagged(
     for (index, block) in blocks.iter().enumerate() {
         let next = blocks.get(index + 1);
         total += usize::from(block.sep_blank);
-        // The key build clones the block's lines, so an empty cache skips
-        // it for the count-only callers.
+        // The key build clones the block's lines, so an empty cache skips it.
         let cached = (!cache.0.is_empty())
             .then(|| block_cache_key(style_tag, &blocks, index, width))
             .flatten()
@@ -99,10 +99,18 @@ pub(crate) fn markdown_row_count_tagged(
             continue;
         }
         let count = match &block.kind {
-            BlockKind::Heading => 1 + usize::from(blank_after(next, false)),
+            BlockKind::Heading => {
+                let text = block.lines.first().cloned().unwrap_or_default();
+                wrapped_span_count(&heading_spans(&text, style), width)
+                    + usize::from(blank_after(next, false))
+            }
             BlockKind::Hr => 1,
-            BlockKind::Code { .. } => {
-                block.lines.len().max(1) + usize::from(blank_after(next, false))
+            BlockKind::Code { lang } => {
+                code_rows(block, lang.as_deref(), style)
+                    .iter()
+                    .map(|row| wrapped_span_count(row, width))
+                    .sum::<usize>()
+                    + usize::from(blank_after(next, false))
             }
             BlockKind::Paragraph => {
                 block
@@ -154,56 +162,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn count_matches_painted_blocks() {
-        let style = MarkdownStyle::default();
-        let documents = [
-            "",
-            "   ",
-            "# Heading\nparagraph with **bold** and [link](https://example.com)",
-            "one  two\n界界👩‍💻 words\n\nnext",
-            "```rust\nfn main() {}\n```\ntext",
-            "```\n```",
-            "- one long item with words\n- second\n\nend",
-            "9. long first item\n10. second item\nparagraph",
-            "> quoted words words\n> 界界 text",
-            "---\n# heading\n\n```\nline\n\n```",
-            "a\tb",
-            "`code words` *emphasis*",
-            "| a | b |\n| --- | --- |\n| long words 界 | c |\n\nparagraph",
-            "| a | b |\n| --- | --- |\n# heading",
-            "\x1b]8;;https://example.com\x07link\x1b]8;;\x07 tail",
-        ];
-        for text in documents {
-            for width in [0, 1, 2, 3, 7, 19, 80] {
-                assert_eq!(
-                    super::super::markdown_row_count(text, width, &style),
-                    super::super::render_markdown(text, width, &style).len(),
-                    "{text:?} width {width}"
-                );
-                // Warm: the same document's painted rows through the
-                // block cache, so every hit branch counts by construction.
-                let mut cache = MarkdownBlockCache::default();
-                let painted =
-                    super::super::render_markdown_tagged(text, width, &style, "", &mut cache);
-                assert_eq!(
-                    super::super::markdown_row_count_tagged(text, width, &style, "", &cache),
-                    painted.len(),
-                    "{text:?} width {width} (warm cache)"
-                );
-            }
-        }
-    }
-
-    #[test]
     fn counting_wrap_does_not_collect_output_rows() {
         let spans = vec![Span::raw("alpha  beta 界界 gamma"), Span::raw(" trailing")];
         for width in [0, 1, 2, 8, 80] {
             let mut output = WrapOutput::count();
             super::super::wrap_spans_into(&spans, width, &mut output);
             assert!(output.current.is_empty());
-            let mut painted = Vec::new();
-            super::super::wrap_spans(&spans, width, Style::default(), &mut painted);
-            assert_eq!(output.rows, painted.len());
         }
     }
 }

@@ -1,11 +1,10 @@
-//! Deep-merge and migration (settings-manager.ts).
+//! Deep-merge and migration.
 
 use serde_json::Value;
 
 use super::types::Settings;
 
-/// Deep merge: overrides win; nested objects merge recursively; arrays and
-/// scalars replace. Mirrors `deepMergeSettings`.
+/// Deep merge: overrides win; nested objects merge recursively; arrays and scalars replace.
 pub fn deep_merge(base: &Settings, overrides: &Settings) -> Settings {
     let mut base_value = serde_json::to_value(base).unwrap_or_default();
     let overrides_value = serde_json::to_value(overrides).unwrap_or_default();
@@ -41,14 +40,11 @@ fn merge_values(base: &mut Value, overrides: &Value) {
 }
 
 /// Migrate legacy settings shapes (queueMode, websockets, skills object,
-/// retry.maxDelayMs, telemetry bool, bad markdown) - port of
-/// `migrateSettings`.
+/// retry.maxDelayMs, telemetry bool, bad markdown).
 pub fn migrate(document: &mut serde_json::Map<String, Value>) {
-    // queueMode -> steeringMode
     if let Some(queue_mode) = document.remove("queueMode") {
         document.entry("steeringMode").or_insert(queue_mode);
     }
-    // websockets bool -> transport
     if !document.contains_key("transport") {
         if let Some(websockets) = document.remove("websockets") {
             if websockets.is_boolean() {
@@ -61,7 +57,6 @@ pub fn migrate(document: &mut serde_json::Map<String, Value>) {
             }
         }
     }
-    // skills object -> enableSkillCommands + customDirectories
     if let Some(skills) = document.remove("skills") {
         if let Value::Object(mut skills_obj) = skills {
             if let Some(flag) = skills_obj.remove("enableSkillCommands") {
@@ -76,11 +71,9 @@ pub fn migrate(document: &mut serde_json::Map<String, Value>) {
                 _ => {}
             }
         } else {
-            // Already a directory list: put it back untouched.
             document.insert("skills".into(), skills);
         }
     }
-    // retry.maxDelayMs -> retry.provider.maxRetryDelayMs
     if let Some(Value::Object(retry)) = document.get_mut("retry") {
         let max_delay = retry.remove("maxDelayMs");
         if let Some(Value::Number(delay)) = max_delay {
@@ -94,20 +87,17 @@ pub fn migrate(document: &mut serde_json::Map<String, Value>) {
             }
         }
     }
-    // telemetry bool -> { enabled }
     match document.get_mut("telemetry") {
         Some(Value::Bool(enabled)) => {
             let mut map = serde_json::Map::new();
             map.insert("enabled".into(), Value::Bool(*enabled));
             document.insert("telemetry".into(), Value::Object(map));
         }
-        // Non-object telemetry (arrays included) is dropped.
         Some(other) if !other.is_object() => {
             document.remove("telemetry");
         }
         _ => {}
     }
-    // Non-object markdown is dropped.
     if let Some(markdown) = document.get("markdown") {
         if !markdown.is_object() {
             document.remove("markdown");

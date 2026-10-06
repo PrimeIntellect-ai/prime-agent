@@ -1,15 +1,6 @@
-//! Assistant message event stream.
-//!
-//! Ported from `packages/ai/src/utils/event-stream.ts`. The stream carries the
-//! provider event protocol: `start` first, then partial updates, terminating
-//! with exactly one of `done` (success) or `error` (failure/abort). Producers
-//! push events through [`AssistantMessageEventWriter`]; consumers iterate the
-//! [`AssistantMessageEventStream`] and can await
-//! [`AssistantMessageEventStream::result`].
-//!
-//! The event type itself is the shared [`AssistantMessageEvent`] from
-//! `pa-types` (the wire shape); the helpers below are an extension trait
-//! because the type is owned by `pa-types`.
+//! Assistant message event stream: `start` first, then partial updates, terminating with exactly
+//! one of `done` (success) or `error` (failure/abort). The event type is owned by `pa-types`, so
+//! the helpers below are an extension trait.
 
 use std::collections::VecDeque;
 use std::pin::Pin;
@@ -23,17 +14,12 @@ pub use crate::types::{AssistantContent, AssistantMessage, AssistantMessageEvent
 
 /// Provider-side helpers over the shared [`AssistantMessageEvent`] wire enum.
 pub trait AssistantMessageEventExt {
-    /// Stable event-type name, matching the TS wire `type` tag.
+    /// Stable event-type name matching the TS wire `type` tag.
     fn event_type(&self) -> &'static str;
-    /// True for the two terminal event kinds.
     fn is_terminal(&self) -> bool;
-    /// The final message carried by a terminal event, if any.
     fn terminal_message(&self) -> Option<AssistantMessage>;
-    /// The partial assistant message the event refers to.
     fn partial(&self) -> &AssistantMessage;
-    /// Content index carried by content-block events (start/delta/end).
     fn content_index(&self) -> Option<u64>;
-    /// Text delta for `*_delta` events.
     fn delta(&self) -> Option<&str>;
 }
 
@@ -114,8 +100,6 @@ impl AssistantMessageEventExt for AssistantMessageEvent {
     }
 }
 
-// -- Shared state ------------------------------------------------------------
-
 #[derive(Default)]
 struct SharedState {
     done: bool,
@@ -174,22 +158,18 @@ impl Shared {
     }
 }
 
-// -- Writer ------------------------------------------------------------------
-
-/// Producer handle for an assistant message event stream.
 #[derive(Clone)]
 pub struct AssistantMessageEventWriter {
     shared: Arc<Shared>,
 }
 
 impl AssistantMessageEventWriter {
-    /// Queue an event. Events pushed after the stream terminated are dropped,
-    /// matching the TS reference.
+    /// Queue an event; events pushed after the stream terminated are
+    /// dropped.
     pub fn push(&self, event: AssistantMessageEvent) {
         self.shared.push(event);
     }
 
-    /// Terminate the stream. `result` becomes the final result when provided.
     pub fn end(&self, result: Option<AssistantMessage>) {
         self.shared.end(result);
     }
@@ -199,9 +179,8 @@ impl AssistantMessageEventWriter {
     }
 }
 
-// -- Reader ------------------------------------------------------------------
-
-/// Async iterable stream of [`AssistantMessageEvent`] with a final-result future.
+/// Async iterable stream of [`AssistantMessageEvent`] with a
+/// final-result future.
 pub struct AssistantMessageEventStream {
     shared: Arc<Shared>,
 }
@@ -221,7 +200,6 @@ impl AssistantMessageEventStream {
         )
     }
 
-    /// Collect all remaining events (draining, for tests and tooling).
     pub async fn collect(mut self) -> Vec<AssistantMessageEvent> {
         let mut events = Vec::new();
         while let Some(event) = self.next_event().await {
@@ -235,14 +213,11 @@ impl AssistantMessageEventStream {
         futures::future::poll_fn(|cx| self.poll_next_event(cx)).await
     }
 
-    /// Poll for the next queued event: `Ready` with one when queued, `None`
-    /// once the stream terminated, or `Pending` (after registering the waker)
-    /// until an event arrives.
+    /// Poll for the next queued event, or `None` once the stream terminated.
     ///
     /// # Panics
     ///
-    /// Panics if the shared-state `Mutex` is poisoned (a thread panicked
-    /// while holding the lock).
+    /// Panics if the shared-state `Mutex` is poisoned.
     pub fn poll_next_event(
         &mut self,
         cx: &mut TaskContext<'_>,
@@ -262,11 +237,10 @@ impl AssistantMessageEventStream {
     ///
     /// # Panics
     ///
-    /// Panics if the shared-state `Mutex` is poisoned (a thread panicked
-    /// while holding the lock).
+    /// Panics if the shared-state `Mutex` is poisoned.
     ///
-    /// A stream terminated without a resolved message (for example
-    /// `end(None)`) never resolves: this future hangs instead of panicking.
+    /// A stream terminated without a resolved message (`end(None)`) never resolves: this future
+    /// hangs.
     pub async fn result(self) -> AssistantMessage {
         if let Some(message) = self.try_result() {
             return message;
@@ -308,13 +282,11 @@ impl Stream for AssistantMessageEventStream {
     }
 }
 
-/// Convenience constructor matching the TS `createAssistantMessageEventStream()`.
 pub fn create_assistant_message_event_stream(
 ) -> (AssistantMessageEventWriter, AssistantMessageEventStream) {
     AssistantMessageEventStream::new()
 }
 
-/// Initial assistant message shape shared by every provider.
 /// Initial assistant message shape shared by every provider.
 #[allow(dead_code)] // provider constructors use this once each port lands
 pub fn initial_assistant_message(api: &str, provider: &str, model_id: &str) -> AssistantMessage {
@@ -340,7 +312,6 @@ pub fn initial_assistant_message(api: &str, provider: &str, model_id: &str) -> A
     }
 }
 
-/// Empty assistant content helper for stream constructors.
 #[allow(dead_code)] // provider constructors use this once each port lands
 pub fn empty_content() -> Vec<AssistantContent> {
     Vec::new()

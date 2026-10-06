@@ -2,7 +2,7 @@
 //! `role: "custom"` wire messages (TS `agent-message.ts`,
 //! `injected-prompt-message.ts`, `compaction-outcome-message.ts`,
 //! `refinement-outcome-message.ts`, `shell-completion.ts`, and the generic
-//! `custom-message.ts` box) plus the user-message skill-invocation card
+//! `custom-message.ts` panel) plus the user-message skill-invocation card
 //! (TS `skill-invocation-message.ts`, parsed out of a user message's
 //! `<skill>` block). Decode maps every custom type to the component
 //! the TS dispatch (`createDisplayedCustomMessageComponent` /
@@ -17,9 +17,18 @@
 //! (`createDisplayedCustomMessageComponent`): non-display rows render
 //! nothing, every displayed type without a dedicated component (engine
 //! bookkeeping like `harness_digest`, unknown types) renders the generic
-//! `[<customType>]` box. (The TS replay path `buildConversationComponents`
+//! `[<customType>]` panel. (The TS replay path `buildConversationComponents`
 //! drops unknown types instead; the live interactive path is the TUI ground
 //! truth, and the Rust engine persists those types with `display: false`.)
+//!
+//! Divergence (the operator's 2026-10-01 directive: "the factory child
+//! status notices should be like subagent messages not user messages"): the
+//! RLM child status notices (`rlm_child_terminal_notice` /
+//! `rlm_child_failure`) render in the `agent_message` component's class —
+//! child-originated mail, attributed to the exited subagent — where the TS
+//! dispatch classes them as injected-prompt rows (turn prompts). The
+//! notices still drive their turn (the daemon's `followUp` notice action is
+//! unchanged); only the transcript row's class moves.
 
 pub(crate) mod geometry;
 pub(crate) use geometry::agent_message_body_count;
@@ -31,14 +40,14 @@ pub mod skill_invocation;
 pub use skill_invocation::{skill_invocation_entries, SkillInvocationRow};
 
 use injected_prompt::injected_prompt_row;
-pub use injected_prompt::{InjectedPromptKind, InjectedPromptRow, RlmChildOutcome};
+pub use injected_prompt::{InjectedPromptKind, InjectedPromptRow};
 
 use crate::chat::{ChatEntry, StatusKind};
 use crate::theme::ThemeColor;
 use serde_json::Value;
 
-/// Custom types with a dedicated component (TS constants; pa-core owns the
-/// engine-side vocabulary, the render dispatch owns these).
+/// Custom types with a dedicated component (pa-core owns the engine-side
+/// vocabulary, the render dispatch owns these).
 pub const AGENT_MESSAGE_CUSTOM_TYPE: &str = "agent_message";
 pub const HEARTBEAT_PROMPT_CUSTOM_TYPE: &str = "heartbeat_prompt";
 pub const GOAL_CONTEXT_CUSTOM_TYPE: &str = "goal_context";
@@ -49,23 +58,14 @@ pub const RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE: &str = "rlm_child_terminal_noti
 pub const ASYNC_BASH_COMPLETION_CUSTOM_TYPE: &str = "async_bash_completion";
 pub const COMPACTION_OUTCOME_CUSTOM_TYPE: &str = "compaction_outcome";
 pub const REFINEMENT_OUTCOME_CUSTOM_TYPE: &str = "refinement_outcome";
-/// The durable single-line outcome of one provider-retry episode (SANCTIONED
-/// DIVERGENCE, operator ruling 2026-09-23: one resolved/terminal row per
-/// episode instead of the per-attempt error rows TS keeps). Wire twin of
-/// `pa_core::session_engine::messages::PROVIDER_RETRY_OUTCOME_CUSTOM_TYPE`.
+/// The durable single-line outcome of one provider-retry episode (SANCTIONED DIVERGENCE,
+/// operator ruling 2026-09-23: one terminal row per episode instead of TS's per-attempt error
+/// rows). Wire twin of `pa_core::session_engine::messages::PROVIDER_RETRY_OUTCOME_CUSTOM_TYPE`.
 pub const PROVIDER_RETRY_OUTCOME_CUSTOM_TYPE: &str = "provider_retry_outcome";
 
-// ---------------------------------------------------------------------------
-// Row payloads (carried by ChatEntry variants)
-// ---------------------------------------------------------------------------
-
-/// Which agent-message side a row renders: the received notice of the
-/// transcript custom-message rows (TS `AgentMessageComponent`), or the
-/// sent/queued receipts of the ipython cell output (TS
-/// `renderSentAgentMessages`). The variants carry no label of their own:
-/// the operator's 2026-09-25 arrow directive folds the direction word into
-/// the viewer-relative arrow (received `↓`, sent/queued `↑`) that renders
-/// next to the shared `AGENT_MESSAGE_LABEL`.
+/// Which agent-message side a row renders: the received transcript rows, or the
+/// sent/queued ipython cell receipts. The direction word folds into the
+/// viewer-relative arrow (`↓` received, `↑` sent/queued), so the variants carry no label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentMessageDirection {
     /// The transcript custom-message rows (this chat received the mail).
@@ -76,39 +76,29 @@ pub enum AgentMessageDirection {
     Queued,
 }
 
-/// The summary-line label (the operator's 2026-09-25 arrow directive: the
-/// `received`/`sent`/`queued` word folds into the viewer-relative arrow,
-/// so every direction carries the same label).
+/// The shared summary-line label: the direction word folds into the
+/// viewer-relative arrow, so every direction carries the same label.
 pub(crate) const AGENT_MESSAGE_LABEL: &str = "Agent message";
 
-/// One agent-message summary row:
-/// `✉ Agent message · <arrow> <counterpart>` plus the guttered body when
-/// expanded (TS `AgentMessageComponent` for received rows; the sent/queued
-/// directions feed the ipython cell receipt rows). The `✉` mail envelope
-/// is the row's icon — a sanctioned divergence (Kevin directive 2026-09-24)
-/// from the TS `◆` diamond; the TS side is expected to adopt the same
-/// glyph. The collapsed row carries no body preview (the operator's
-/// 2026-09-25 directive: display only `Agent message`, the viewer-relative
-/// arrow, and the counterpart agent's name).
+/// One agent-message summary row: `✉ Agent message · <arrow> <counterpart>` plus
+/// the guttered body when expanded. The `✉` mail envelope is a sanctioned
+/// divergence (Kevin directive 2026-09-24) from the TS `◆` diamond; the
+/// collapsed row carries no preview.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentMessageRow {
     /// Which side renders: it drives the viewer-relative arrow (`↑`
     /// sent/queued, `↓` received).
     pub direction: AgentMessageDirection,
     /// The counterpart agent's display name (session name, then the id
-    /// fallbacks, then `unknown`): the other end of the mail the row
-    /// summarizes. The `to`/`from` word and the relationship word fold
-    /// into the arrow and never render (the operator's 2026-09-25
-    /// directive).
+    /// fallbacks, then `unknown`); the relationship words never render.
     pub counterpart: String,
     /// `details.message` (the body shown expanded; never a collapsed
     /// preview).
     pub message: String,
 }
 
-/// One background-shell completion row (TS `ShellCompletionComponent`,
-/// standalone form: the completion attaches to a tool card only in the TS
-/// live path, which the Rust engine does not emit).
+/// One background-shell completion row, standalone form (the TS live path attaches
+/// the completion to a tool card, which the Rust engine never emits).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ShellCompletionRow {
     pub pid: Option<i64>,
@@ -154,24 +144,20 @@ pub struct EditField {
     pub change: Option<(Vec<String>, Vec<String>)>,
 }
 
-/// One generic custom row (TS `CustomMessageComponent`): the
-/// `[<customType>]` label box on `customMessageBg` with the markdown body in
-/// `customMessageText`. Every display-true custom type without a dedicated
-/// component renders this way (e.g. `autonomous_status`).
+/// One generic custom row: the bold `[<customType>]` label header with
+/// the guttered markdown body in `customMessageText` — every display-true
+/// custom type without a dedicated component renders this way.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CustomPanelRow {
     pub custom_type: String,
     pub content: String,
 }
 
-// ---------------------------------------------------------------------------
-// Decode
-// ---------------------------------------------------------------------------
-
 /// The transcript entries for one `custom`-role message, mirroring the TS
 /// dispatch order: slash rows, compaction and refinement outcomes, agent
-/// messages, shell completions, injected prompts, then the generic box.
-/// Non-display rows render nothing.
+/// messages (the received agent-message rows and the RLM child status
+/// notices, the same class), shell completions, injected prompts, then the
+/// generic panel. Non-display rows render nothing.
 pub fn custom_message_entries(message: &Value) -> Vec<ChatEntry> {
     use pa_types::slash_commands::{
         SESSION_SLASH_COMMAND_CUSTOM_TYPE, SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE,
@@ -195,9 +181,8 @@ pub fn custom_message_entries(message: &Value) -> Vec<ChatEntry> {
         }
         COMPACTION_OUTCOME_CUSTOM_TYPE => vec![compaction_outcome_entry(message, details)],
         PROVIDER_RETRY_OUTCOME_CUSTOM_TYPE => {
-            // The ONE line a retry episode leaves in the chat: the row text
-            // the daemon carried (the live rows use the same text), the
-            // tone from the structured verdict.
+            // The ONE line a retry episode leaves in the chat: the row
+            // text the daemon carried, the tone from the verdict.
             vec![ChatEntry::Status {
                 text: content,
                 kind: if details.get("success").and_then(Value::as_bool) == Some(true) {
@@ -218,24 +203,36 @@ pub fn custom_message_entries(message: &Value) -> Vec<ChatEntry> {
         HEARTBEAT_PROMPT_CUSTOM_TYPE
         | GOAL_CONTEXT_CUSTOM_TYPE
         | IPYTHON_STATE_RESTORED_CUSTOM_TYPE
-        | PYTHON_SKILLS_UNAVAILABLE_CUSTOM_TYPE
-        | RLM_CHILD_FAILURE_CUSTOM_TYPE
-        | RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE => {
+        | PYTHON_SKILLS_UNAVAILABLE_CUSTOM_TYPE => {
             vec![ChatEntry::InjectedPrompt(Box::new(injected_prompt_row(
                 custom_type,
                 message,
                 details,
             )))]
         }
+        // The RLM child status notices are child-originated mail — the
+        // spawned subagent's exit status (a factory's children included) —
+        // so they render in the same quiet, counterpart-attributed
+        // `Agent message` class the children's own `agent_message` rows
+        // use (the operator's 2026-10-01 directive: "the factory child
+        // status notices should be like subagent messages not user
+        // messages"), not as turn-prompt rows. The notice text rides as
+        // the row body, so nothing is lost.
+        RLM_CHILD_FAILURE_CUSTOM_TYPE | RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE => {
+            vec![ChatEntry::AgentMessage(Box::new(rlm_child_status_row(
+                message, details,
+            )))]
+        }
         // Everything else - engine bookkeeping (`harness_digest`,
         // `refinement_notice`, worker recovery) and unknown types - renders
-        // the generic box, exactly like the TS live dispatch fallthrough
+        // the generic panel, exactly like the TS live dispatch fallthrough
         // (those types persist with `display: false` and render nothing).
         _ => vec![generic_panel_entry(custom_type, message)],
     }
 }
 
-/// TS `CustomMessageComponent` fallthrough: the `[<customType>]` box row.
+/// TS `CustomMessageComponent` fallthrough: the `[<customType>]` guttered
+/// panel row.
 fn generic_panel_entry(custom_type: &str, message: &Value) -> ChatEntry {
     ChatEntry::CustomPanel(Box::new(CustomPanelRow {
         custom_type: custom_type.to_string(),
@@ -243,9 +240,8 @@ fn generic_panel_entry(custom_type: &str, message: &Value) -> ChatEntry {
     }))
 }
 
-/// The session-command echo/result rows: the echo decodes to the
-/// user-block slash row (the typed command IS user input); the result
-/// row decodes to the status-row class with the severity's tone.
+/// The session-command echo/result rows: the echo decodes to the user-block slash
+/// row (the typed command IS user input); the result row to the status-row class.
 fn slash_row_entries(
     message: &Value,
     custom_type: &str,
@@ -280,11 +276,8 @@ fn slash_row_entries(
             text: content.to_string(),
         }]
     } else {
-        // The outcome row is system output, never user text (the
-        // operator's 2026-09-25 bug report: the user-message box read as
-        // the "no active goal" reply being a user prompt): it renders in
-        // the status-row class, the severity driving the tone like the
-        // compaction and retry outcome rows.
+        // The outcome row is system output, never user text (operator ruling
+        // 2026-09-25): it renders in the status-row class, the severity driving the tone.
         let kind = match details.get("severity").and_then(Value::as_str) {
             Some("error") => StatusKind::Error,
             Some("warning") => StatusKind::Warning,
@@ -329,9 +322,8 @@ fn compaction_outcome_entry(message: &Value, details: &Value) -> ChatEntry {
     }
 }
 
-/// TS `isAgentSessionMessage`: string `details.id` + string
-/// `details.message` (no emptiness check); anything else is not an
-/// agent-message row and the dispatch falls through to the generic box.
+/// String `details.id` + string `details.message` (no emptiness check);
+/// anything else falls through to the generic box.
 fn agent_message_entry(details: &Value) -> Option<ChatEntry> {
     details.get("id").and_then(Value::as_str)?;
     let message = details.get("message").and_then(Value::as_str)?;
@@ -352,13 +344,43 @@ fn agent_message_entry(details: &Value) -> Option<ChatEntry> {
     })))
 }
 
+/// One RLM child status notice (`rlm_child_terminal_notice` /
+/// `rlm_child_failure`) as the subagent-mail row: the child that exited is
+/// the mail's counterpart, the notice text is the body (the full content,
+/// header included, so the outcome wording rides intact).
+fn rlm_child_status_row(message: &Value, details: &Value) -> AgentMessageRow {
+    let content = custom_content_text(message);
+    AgentMessageRow {
+        direction: AgentMessageDirection::Received,
+        counterpart: rlm_child_session_name(details, &content),
+        message: content,
+    }
+}
+
+/// The child's session name: the `sessionName` details key, falling back to
+/// the `child:<name>]` token of the content header (the pre-details wire
+/// rows), then the agent-message row's `unknown`.
+fn rlm_child_session_name(details: &Value, content: &str) -> String {
+    details
+        .get("sessionName")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            content
+                .split_once("child:")
+                .and_then(|(_, rest)| rest.split(']').next())
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
 /// TS `readShellCompletion` + `ShellCompletionComponent.render`: a valid
 /// completion needs an object details block with a positive-integer `pid`,
 /// a string `command`, and an integer `exitCode`; anything else renders the
-/// default finished row. The expanded raw text follows the same validity:
-/// `shellCompletionText` for a valid completion (content string or text
-/// blocks joined with newlines, images as `[image]`), the content string or
-/// its JSON form otherwise.
+/// default finished row (the expanded raw text follows the same validity).
 fn shell_completion_row(message: &Value, details: &Value) -> ShellCompletionRow {
     let pid = details.get("pid").and_then(Value::as_i64);
     let command = details.get("command").and_then(Value::as_str);
@@ -413,6 +435,7 @@ pub(crate) fn custom_content_text(message: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Line, Span};
     use serde_json::json;
 
     fn decoded(message: &serde_json::Value) -> Vec<ChatEntry> {
@@ -442,10 +465,8 @@ mod tests {
 
     #[test]
     fn bookkeeping_types_render_the_generic_box_when_displayed() {
-        // The TS live dispatch has no dedicated component for engine
-        // bookkeeping, so a stray display=true row falls through to the
-        // generic `CustomMessageComponent` box (in practice these persist
-        // with display=false and render nothing).
+        // A stray display=true bookkeeping row falls through to the
+        // generic box (in practice these persist with display=false).
         for custom_type in [
             "harness_digest",
             "refinement_notice",
@@ -499,10 +520,8 @@ mod tests {
 
     #[test]
     fn agent_message_counterpart_falls_back_to_ids() {
-        // TS `formatAgentMessageParticipant`'s name leg: session name,
-        // then active session id, client id, session id, then "unknown".
-        // The relationship word never reaches the row (the arrow carries
-        // the direction, the operator's 2026-09-25 directive).
+        // The name leg: session name, then active session id, client id, session
+        // id, then "unknown" (the relationship word never reaches the row).
         let base = |from: serde_json::Value| {
             decoded(&json!({
                 "role": "custom",
@@ -591,52 +610,6 @@ mod tests {
             [ChatEntry::InjectedPrompt(boxed)]
                 if matches!(boxed.kind, InjectedPromptKind::KernelRestored { restored: false })
         ));
-        // The RLM child rows decode the outcome and the session name (the
-        // render shapes live with the kind, in `injected_prompt`).
-        let failed = decoded(&json!({
-            "role": "custom",
-            "customType": RLM_CHILD_FAILURE_CUSTOM_TYPE,
-            "content": "[child-failed child:lane]\n\nboom",
-            "display": true,
-            "details": { "childId": "sub-1", "sessionName": "lane", "error": "boom" },
-        }));
-        assert!(matches!(
-            failed.as_slice(),
-            [ChatEntry::InjectedPrompt(boxed)]
-                if matches!(
-                    &boxed.kind,
-                    InjectedPromptKind::RlmChildStatus {
-                        outcome: RlmChildOutcome::Failed,
-                        session_name,
-                    } if session_name == "lane"
-                ) && boxed.body.as_deref() == Some("boom")
-        ));
-        for (kind, outcome) in [
-            ("completed_without_reply", RlmChildOutcome::Finished),
-            ("cancelled", RlmChildOutcome::Cancelled),
-        ] {
-            let row = decoded(&json!({
-                "role": "custom",
-                "customType": RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
-                "content": "[child-exited: no-reply child:lane]",
-                "display": true,
-                "details": { "childId": "sub-2", "sessionName": "lane", "kind": kind },
-            }));
-            // Neither fixture carries a reason, so both stay
-            // header-only.
-            assert!(
-                matches!(
-                    row.as_slice(),
-                    [ChatEntry::InjectedPrompt(boxed)]
-                        if matches!(
-                            &boxed.kind,
-                            InjectedPromptKind::RlmChildStatus { outcome: decoded_outcome, .. }
-                                if decoded_outcome == &outcome
-                        ) && boxed.body.is_none()
-                ),
-                "outcome {outcome:?} of kind {kind:?} did not decode"
-            );
-        }
         // The kernel-state row carries no expandable body.
         let restored = decoded(&json!({
             "role": "custom",
@@ -649,8 +622,80 @@ mod tests {
             restored.as_slice(),
             [ChatEntry::InjectedPrompt(boxed)] if boxed.body.is_none()
         ));
-        // The unavailable-skills row decodes the failed names and keeps
-        // the full report as its expandable body.
+    }
+
+    /// The RLM child status notices decode to the subagent-mail class
+    /// (the operator's 2026-10-01 directive: "the factory child status
+    /// notices should be like subagent messages not user messages"): the
+    /// row carries the child as its counterpart and the notice text as
+    /// the body, and it never renders as a turn-prompt (injected) or
+    /// user row — the class assertion is the mutation pin (routing the
+    /// types back through the injected-prompt arm fails it).
+    #[test]
+    fn rlm_child_notice_rows_decode_to_the_agent_message_class() {
+        let notices = [
+            (
+                RLM_CHILD_FAILURE_CUSTOM_TYPE,
+                "[child-failed child:lane]\n\nboom",
+                json!({ "childId": "sub-1", "sessionName": "lane", "error": "boom" }),
+            ),
+            (
+                RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
+                "[child-exited: no-reply child:lane]\n\nLast assistant text: done",
+                json!({ "childId": "sub-2", "sessionName": "lane", "kind": "completed_without_reply" }),
+            ),
+            (
+                RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
+                "[child-exited: cancelled child:cancel-worker]\n\nDeleted by parent",
+                json!({ "childId": "sub-3", "sessionName": "cancel-worker", "kind": "cancelled", "reason": "Deleted by parent" }),
+            ),
+        ];
+        for (custom_type, content, details) in notices {
+            let entries = decoded(&json!({
+                "role": "custom",
+                "customType": custom_type,
+                "content": content,
+                "display": true,
+                "details": details,
+            }));
+            let row = match entries.as_slice() {
+                [ChatEntry::AgentMessage(row)] => row,
+                other => panic!("{custom_type} must decode to the agent-message class: {other:?}"),
+            };
+            assert_eq!(row.direction, AgentMessageDirection::Received);
+            assert_eq!(row.counterpart, details["sessionName"]);
+            // The content rides intact as the body (outcome wording and
+            // the child's last text included).
+            assert_eq!(row.message, content);
+            assert!(
+                !matches!(
+                    entries.as_slice(),
+                    [ChatEntry::InjectedPrompt(_) | ChatEntry::User { .. }]
+                ),
+                "{custom_type} must not render as a turn-prompt/user row"
+            );
+        }
+        // The pre-details wire rows keep their identity: the name comes
+        // from the `child:<name>]` content token.
+        let entries = decoded(&json!({
+            "role": "custom",
+            "customType": RLM_CHILD_FAILURE_CUSTOM_TYPE,
+            "content": "[child-failed child:legacy-worker]\n\nspawn failed",
+            "display": true,
+            "details": serde_json::Value::Null,
+        }));
+        assert!(matches!(
+            entries.as_slice(),
+            [ChatEntry::AgentMessage(row)]
+                if row.counterpart == "legacy-worker"
+                    && row.message == "[child-failed child:legacy-worker]\n\nspawn failed"
+        ));
+    }
+
+    /// The unavailable-skills row decodes the failed names and keeps the
+    /// full report as its expandable body.
+    #[test]
+    fn python_skills_unavailable_row_decodes() {
         let unavailable = decoded(&json!({
             "role": "custom",
             "customType": PYTHON_SKILLS_UNAVAILABLE_CUSTOM_TYPE,
@@ -682,9 +727,8 @@ mod tests {
             [ChatEntry::ShellCompletion(row)]
                 if row.pid == Some(4371) && row.exit_code == Some(0)
         ));
-        // An invalid details block (TS `readShellCompletion` requires a
-        // positive pid, a string command, and an integer exit code) keeps
-        // the default finished row and the JSON content fallback.
+        // An invalid details block keeps the default finished row and the JSON
+        // content fallback.
         let entries = decoded(&json!({
             "role": "custom",
             "customType": ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
@@ -701,9 +745,8 @@ mod tests {
 
     #[test]
     fn agent_message_accepts_empty_string_details() {
-        // TS `isAgentSessionMessage` checks only `typeof id === "string"`
-        // and `typeof message === "string"`; empty strings still decode as
-        // agent-message rows.
+        // TS `isAgentSessionMessage` checks only `typeof id === "string"` and
+        // `typeof message === "string"`; empty strings still decode as agent-message rows.
         let entries = decoded(&json!({
             "role": "custom",
             "customType": AGENT_MESSAGE_CUSTOM_TYPE,
@@ -775,5 +818,114 @@ mod tests {
                 if row.custom_type == "autonomous_status"
                     && row.content == "[autonomous-status: on]"
         ));
+    }
+
+    /// Flattened rows with the trailing padding trimmed (whole-vector
+    /// equality against the painted transcript text).
+    fn plain_rows(rows: &[Line]) -> Vec<String> {
+        rows.iter()
+            .map(|row| {
+                row.iter()
+                    .map(|span| span.content.as_str())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// One gutter for every expandable chat body: the dim gutter row sits right
+    /// below the header, the rest on the four-column indent, and the collapsed rows stay bare.
+    #[test]
+    fn expandable_bodies_hang_on_one_gutter() {
+        use crate::chat::Detail;
+        use crate::compaction_row::render_compaction_summary;
+        let theme = crate::theme::Theme::builtin("prime", crate::theme::ColorMode::TrueColor);
+        let gutter = Span::styled(
+            crate::branch::BRANCH_GUTTER.to_string(),
+            theme.fg_style(ThemeColor::Dim),
+        );
+        // 57 columns wrap at the branch content width 56: one full row
+        // plus one.
+        let body = "w".repeat(57);
+        let head = format!(" {}{}", crate::branch::BRANCH_GUTTER, "w".repeat(56));
+        let tail = format!("{}w", crate::branch::BRANCH_INDENT);
+        let skill = SkillInvocationRow {
+            name: "review".to_string(),
+            content: body.clone(),
+        };
+        let goal = InjectedPromptRow {
+            kind: InjectedPromptKind::Goal {
+                kind: Some("continuation".to_string()),
+                objective: Some("Ship.".to_string()),
+            },
+            body: Some(body.clone()),
+        };
+        let shell = ShellCompletionRow {
+            pid: None,
+            exit_code: Some(0),
+            content: body.clone(),
+        };
+        let panel = CustomPanelRow {
+            custom_type: "notice".to_string(),
+            content: body.clone(),
+        };
+        let compacted = format!(" {body}");
+        // (collapsed rows + their expected text, expanded rows, expanded
+        // header text)
+        let cases = vec![
+            (
+                Some((
+                    skill_invocation::render_skill_invocation(
+                        &skill,
+                        Detail::Overview,
+                        &theme,
+                        60,
+                        false,
+                    ),
+                    vec![" [skill] review"],
+                )),
+                skill_invocation::render_skill_invocation(&skill, Detail::All, &theme, 60, false),
+                vec![" [skill] review"],
+            ),
+            (
+                Some((
+                    injected_prompt::render_injected_prompt(&goal, Detail::Overview, &theme, 60),
+                    vec!["", " Goal continuation \u{b7} Ship."],
+                )),
+                injected_prompt::render_injected_prompt(&goal, Detail::All, &theme, 60),
+                vec!["", " Goal continuation \u{b7} Ship."],
+            ),
+            (
+                Some((
+                    render::render_shell_completion(&shell, Detail::Overview, &theme, 60, false),
+                    vec![" \u{2713} Background shell command finished"],
+                )),
+                render::render_shell_completion(&shell, Detail::All, &theme, 60, false),
+                vec![" \u{2713} Background shell command finished"],
+            ),
+            (
+                None,
+                render::render_custom_panel(&panel, &theme, 60),
+                vec!["", " [notice]"],
+            ),
+            (
+                Some((
+                    render_compaction_summary(&body, 480, None, false, &theme, 60),
+                    vec![" \u{25c6} Context compacted", compacted.as_str()],
+                )),
+                render_compaction_summary(&body, 480, None, true, &theme, 60),
+                vec![" \u{25c6} Context compacted \u{b7} Compacted from 480 tokens"],
+            ),
+        ];
+        for (collapsed, expanded, header) in cases {
+            if let Some((rows, text)) = collapsed {
+                assert_eq!(plain_rows(&rows), text, "{rows:?}");
+            }
+            let mut text = header.clone();
+            text.extend([head.as_str(), tail.as_str()]);
+            assert_eq!(plain_rows(&expanded), text, "{expanded:?}");
+            assert_eq!(expanded[header.len()][1], gutter, "{expanded:?}");
+        }
     }
 }

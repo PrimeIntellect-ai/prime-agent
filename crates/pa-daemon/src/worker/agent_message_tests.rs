@@ -1,4 +1,4 @@
-//! Agent-message command tests (moved with the commands concern).
+//! Agent-message command tests.
 use super::*;
 
 pub(super) fn test_worker() -> Arc<Worker> {
@@ -47,9 +47,8 @@ pub(super) fn queue_texts(core: &Mutex<SessionCore>, lane: Lane) -> Vec<String> 
     .collect()
 }
 
-/// Receipt shape (`createAgentSessionMessageReceipt`): id, source,
-/// target endpoint, sender echo, delivered status and timestamp while
-/// the session is idle, and the rendered prompt on the steering lane.
+/// Receipt shape: id, source, target, sender echo, delivered status + timestamp,
+/// and the rendered prompt on the steering lane.
 #[tokio::test]
 async fn deliver_message_answers_the_ts_receipt_shape() {
     let worker = created_worker().await;
@@ -106,11 +105,8 @@ async fn deliver_message_answers_the_ts_receipt_shape() {
     assert!(queue_texts(&worker.core, Lane::FollowUp).is_empty());
 }
 
-/// The queued delivery carries the `agent_message` custom row (TS
-/// `acceptAgentSessionMessage` rides `acceptAgentMessagePrompt`'s
-/// `customMessage`): the row's content is the rendered prompt, the
-/// details carry the identity the collapsed card reads, and the
-/// agent-message marker still targets `agent_messages_clear`/`pause`.
+/// The row's content is the rendered prompt; the details carry the identity the
+/// collapsed card reads, and the marker still targets `agent_messages_clear`/`pause`.
 #[tokio::test]
 async fn deliver_message_carries_the_agent_message_custom_row() {
     let worker = created_worker().await;
@@ -173,8 +169,7 @@ async fn deliver_message_carries_the_agent_message_custom_row() {
     assert_eq!(agent_message.as_deref(), Some("the research is done"));
 }
 
-/// An explicit `follow_up` delivery mode queues behind current work
-/// instead of steering, and a subagent sender renders the relationship.
+/// An explicit `follow_up` delivery queues behind current work instead of steering.
 #[tokio::test]
 async fn deliver_message_follow_up_lane_and_subagent_sender() {
     let worker = created_worker().await;
@@ -272,11 +267,8 @@ async fn deliver_message_respects_the_pending_capacity() {
     );
 }
 
-/// The attach response's wire shape is the TS `createAttachResult`
-/// key order (`serde_json` keeps insertion order), for slim and plain
-/// clients: the slim response carries the messages exactly once
-/// (inside the snapshot) and the non-slim duplicate is byte-identical
-/// to the snapshot's copy.
+/// TS `createAttachResult` key order: the slim response carries the messages
+/// exactly once; the non-slim duplicate is byte-identical to the copy.
 #[tokio::test]
 async fn attach_response_wire_bytes_keep_the_ts_key_order() {
     let worker = created_worker().await;

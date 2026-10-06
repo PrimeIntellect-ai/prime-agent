@@ -1,26 +1,8 @@
 //! The telemetry client: non-blocking `track`, background queue + batch flush.
-//!
-//! Contract: `track()` never blocks, never panics, and never fails the
-//! agent. Events flow over an unbounded FIFO channel to a single background
-//! task that owns the delivery state and flushes when a batch fills, on the
-//! flush interval, or on explicit `flush()`/`shutdown()`.
-//!
-//! The #2117 delivery contract: each sink is an independent delivery
-//! channel with its own in-memory queue (cap [`DEFAULT_QUEUE_CAPACITY`],
-//! drop-oldest on overflow); batches cap at
-//! [`DEFAULT_BATCH_SIZE`] events and [`DEFAULT_MAX_BATCH_BYTES`] bytes;
-//! a dropped batch requeues with bounded attempts
-//! ([`RetryPolicy::max_attempts`]) and a capped backoff
-//! (`min(max_backoff, flush_interval * 2^attempts)`, never longer than
-//! [`RetryPolicy::max_backoff`]); entries expire after
-//! [`MAX_AGE`] or the attempt cap and count as dropped. Per-channel
-//! queues mean a retried batch never re-delivers to a sink that already
-//! accepted it (no mirror duplicates), and `shutdown()` never waits on a
-//! backoff: it drains once, best-effort, and stops.
-//!
-//! Before any sink sees a batch, every event is normalized through
-//! [`crate::catalog::sanitize`] (the platform adjust layer: unknown keys
-//! drop, out-of-vocabulary enums fall back, numbers clamp).
+//! `track()` never blocks, never panics, and never fails the agent: events
+//! flow over an unbounded FIFO channel to a single background task that
+//! flushes when a batch fills, on the interval, or on `flush()`/`shutdown()`.
+//! Every event is normalized through [`crate::catalog::sanitize`] before any sink sees it.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -34,23 +16,19 @@ use crate::event::TelemetryEvent;
 use crate::properties::Properties;
 use crate::sink::{SinkOutcome, TelemetrySink};
 
-/// TS/#2117 parity defaults: batches cap at 20 events, flush every 10s,
-/// queue cap 256 per sink.
 pub const DEFAULT_BATCH_SIZE: usize = 20;
 pub const DEFAULT_FLUSH_INTERVAL: Duration = Duration::from_secs(10);
 pub const DEFAULT_QUEUE_CAPACITY: usize = 256;
-/// The #2117 batch byte cap (the wire body estimate).
+/// The batch byte cap (wire-body estimate).
 pub const DEFAULT_MAX_BATCH_BYTES: usize = 30_000;
-/// The #2117 retention: entries older than 24h expire on the next flush.
+/// Retention: older entries expire on the next flush.
 pub const MAX_AGE: Duration = Duration::from_hours(24);
 
-/// The bounded delivery retry policy (#2117: five attempts, backoff capped
-/// at 60 seconds).
+/// The bounded delivery retry policy.
 #[derive(Debug, Clone, Copy)]
 pub struct RetryPolicy {
     /// Total send attempts per entry before it expires (1 = no retry).
     pub max_attempts: u32,
-    /// The backoff cap: `min(max_backoff, flush_interval * 2^attempts)`.
     pub max_backoff: Duration,
 }
 
@@ -69,7 +47,8 @@ struct QueueEntry {
     attempts: u32,
 }
 
-/// One sink's delivery channel: its own bounded queue and backoff state.
+/// One sink's delivery channel: its own bounded queue and backoff state, so
+/// a retried batch never re-delivers to a sink that already accepted it.
 struct Channel {
     sink: Arc<dyn TelemetrySink>,
     queue: VecDeque<QueueEntry>,
@@ -80,15 +59,13 @@ struct Channel {
 /// Client configuration.
 #[derive(Clone)]
 pub struct TelemetryClientConfig {
-    /// Pseudonymous installation id (sink-side identity, e.g. `PostHog`
-    /// `distinct_id`). Load via [`crate::install_id`].
+    /// Pseudonymous installation id (the analytics body's
+    /// `installation_id`). Load via [`crate::install_id`].
     pub install_id: String,
     /// Base properties merged under every event's own properties
     /// (version, os, execution mode...).
     pub base_properties: Properties,
-    /// Flush when this many events are queued.
     pub batch_size: usize,
-    /// Flush at least this often.
     pub flush_interval: Duration,
     /// In-memory queue cap per sink; oldest events drop on overflow.
     pub queue_capacity: usize,
@@ -98,6 +75,11 @@ pub struct TelemetryClientConfig {
     pub retry: RetryPolicy,
     /// Fan-out sinks: every sink receives every event.
     pub sinks: Vec<Arc<dyn TelemetrySink>>,
+    /// The live on/off switch, asked for every tracked event and before
+    /// every delivery pass: while it answers false, new and queued events
+    /// are dropped unsent (a mid-session opt-out applies without a
+    /// restart). `None` is always on.
+    pub enabled: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
 impl TelemetryClientConfig {
@@ -111,10 +93,13 @@ impl TelemetryClientConfig {
             max_batch_bytes: DEFAULT_MAX_BATCH_BYTES,
             retry: RetryPolicy::default(),
             sinks: Vec::new(),
+            enabled: None,
         }
     }
 }
 
+// Sinks and RetryPolicy have no Debug surface; the config rows above are the debug surface.
+#[allow(clippy::missing_fields_in_debug)]
 impl std::fmt::Debug for TelemetryClientConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TelemetryClientConfig")
@@ -133,8 +118,7 @@ impl std::fmt::Debug for TelemetryClientConfig {
 #[derive(Clone)]
 pub struct TelemetryClient {
     tx: mpsc::UnboundedSender<Cmd>,
-    /// Events dropped because a channel queue overflowed, a worker was
-    /// gone, or an entry expired (attempt cap / age).
+    /// Events dropped (queue overflow, worker gone, entry expired).
     dropped: Arc<AtomicU64>,
     /// Copy of the config base properties so `track` merges lock-free.
     base_properties: Properties,
@@ -150,7 +134,7 @@ enum Cmd {
 impl TelemetryClient {
     /// A client that counts every track as dropped. Fallback for
     /// environments without a tokio runtime (telemetry must never fail the
-    /// caller, and must never silently pretend events were sent).
+    /// caller or pretend events were sent).
     #[must_use]
     pub fn inert() -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
@@ -167,8 +151,7 @@ impl TelemetryClient {
     ///
     /// # Errors
     ///
-    /// Returns an error only when there is no tokio runtime on the current
-    /// thread (the caller falls back to the inert client).
+    /// Returns an error only when there is no tokio runtime on the current thread.
     pub fn spawn(mut config: TelemetryClientConfig) -> anyhow::Result<Self> {
         let (tx, rx) = mpsc::unbounded_channel();
         let dropped = Arc::new(AtomicU64::new(0));
@@ -204,8 +187,7 @@ impl TelemetryClient {
     /// Enqueue an event. The config base properties are merged under the
     /// event properties. Never blocks; if the worker is gone the event is
     /// dropped and counted.
-    // Workspace API consumed across crates (pa-cli, pa-core); the by-value
-    // `Properties` signature is fleet-wide, out of this lane's scope.
+    // Workspace API consumed across crates (pa-cli, pa-core); the by-value signature is fleet-wide.
     #[allow(clippy::needless_pass_by_value)]
     pub fn track(&self, name: impl Into<String>, properties: Properties) {
         let mut merged = self.base_properties.clone();
@@ -221,8 +203,7 @@ impl TelemetryClient {
     ///
     /// # Errors
     ///
-    /// Returns an error when the worker stopped before the flush finished
-    /// (a dropped client handle mid-shutdown).
+    /// Returns an error when the worker stopped before the flush finished.
     pub async fn flush(&self) -> anyhow::Result<()> {
         let (tx, rx) = oneshot::channel();
         if self.tx.send(Cmd::Flush(tx)).is_err() {
@@ -237,8 +218,7 @@ impl TelemetryClient {
     ///
     /// # Errors
     ///
-    /// Returns an error when the worker stopped before the shutdown
-    /// handshake completed.
+    /// Returns an error when the worker stopped before the shutdown handshake completed.
     pub async fn shutdown(&self) -> anyhow::Result<()> {
         let (tx, rx) = oneshot::channel();
         if self.tx.send(Cmd::Shutdown(tx)).is_err() {
@@ -277,15 +257,21 @@ impl Worker {
             tokio::select! {
                 cmd = self.rx.recv() => {
                     let Some(cmd) = cmd else {
-                        // Every client handle is gone: one final best-effort
-                        // drain so a one-shot client's events are never
-                        // lost to the drop (no missed fires).
+                        // Every client handle is gone: one final best-effort drain so a one-shot
+                        // client's events are not lost.
                         self.flush_final().await;
                         break;
                     };
                     match cmd {
                         Cmd::Track(event) => {
-                            self.enqueue(event);
+                            // An event recorded while the switch is off is
+                            // dropped now, so turning telemetry back on
+                            // never sends what happened while it was off.
+                            if self.drop_while_disabled() {
+                                self.queue_dropped.fetch_add(1, Ordering::Relaxed);
+                                continue;
+                            }
+                            self.enqueue(&event);
                             if self.channels.iter().any(|channel| {
                                 channel.queue.len() >= self.config.batch_size
                                     && channel.ready_for_send(tokio::time::Instant::now())
@@ -316,9 +302,8 @@ impl Worker {
         }
     }
 
-    /// The next flush deadline: the base interval, stretched by the
-    /// largest pending retry backoff (`min(max_backoff, interval *
-    /// 2^attempts)`), so a failing channel never request-storms.
+    /// The next flush deadline: the base interval, stretched by the largest
+    /// pending retry backoff, so a failing channel never request-storms.
     fn next_deadline(&self) -> tokio::time::Instant {
         let now = tokio::time::Instant::now();
         let max_attempts = self
@@ -338,7 +323,22 @@ impl Worker {
         now + delay
     }
 
-    fn enqueue(&mut self, event: TelemetryEvent) {
+    /// Ask the live switch; when it is off, drop every queued event
+    /// (counted) and report true so the pass sends nothing.
+    fn drop_while_disabled(&mut self) -> bool {
+        if self.config.enabled.as_ref().is_none_or(|enabled| enabled()) {
+            return false;
+        }
+        for channel in &mut self.channels {
+            self.queue_dropped
+                .fetch_add(channel.queue.len() as u64, Ordering::Relaxed);
+            channel.queue.clear();
+            channel.next_retry_at = None;
+        }
+        true
+    }
+
+    fn enqueue(&mut self, event: &TelemetryEvent) {
         for channel in &mut self.channels {
             if channel.queue.len() >= self.config.queue_capacity {
                 channel.queue.pop_front();
@@ -353,6 +353,9 @@ impl Worker {
 
     /// One delivery pass over every channel: expire, batch, send, retry.
     async fn flush_pass(&mut self) {
+        if self.drop_while_disabled() {
+            return;
+        }
         let now = std::time::SystemTime::now();
         let now_epoch_ms = now
             .duration_since(std::time::UNIX_EPOCH)
@@ -369,9 +372,8 @@ impl Worker {
             channel.next_retry_at = None;
             let mut retry_after: Option<u32> = None;
             while !channel.queue.is_empty() {
-                // The batch take: up to `batch_size` events within the byte
-                // budget (a single over-budget event still ships - there is
-                // nothing to split).
+                // Up to `batch_size` events within the byte budget (a
+                // single over-budget event still ships).
                 let mut take = 0usize;
                 let mut bytes = 0usize;
                 for entry in channel.queue.iter().take(self.config.batch_size) {
@@ -426,14 +428,15 @@ impl Worker {
     }
 
     /// The shutdown drain: every channel, one pass, no retry bookkeeping
-    /// (bounded shutdown; a hard exit may lose reports, like the TS
-    /// contract).
+    /// (bounded shutdown; a hard exit may lose reports).
     async fn flush_final(&mut self) {
+        if self.drop_while_disabled() {
+            return;
+        }
         for channel in &mut self.channels {
             while !channel.queue.is_empty() {
                 // The final drain honors the same batch byte cap as the
-                // interval path: a shutdown batch never exceeds what the
-                // delivery contract allows.
+                // interval path.
                 let mut take = 0usize;
                 let mut bytes = 0usize;
                 for entry in channel.queue.iter().take(self.config.batch_size) {
@@ -695,8 +698,6 @@ mod tests {
         }
     }
 
-    /// A dropped batch requeues and delivers after the backoff - exactly
-    /// once, never duplicated (the offline/retry edge case).
     #[tokio::test]
     async fn failed_batch_retries_after_backoff_and_delivers_once() {
         let delivered = Arc::new(MockSink::new());
@@ -716,8 +717,6 @@ mod tests {
         client.shutdown().await.unwrap();
     }
 
-    /// A permanently failing channel expires at the attempt cap; a healthy
-    /// sibling channel never sees a duplicate (per-channel queues).
     #[tokio::test]
     async fn permanently_failing_channel_expires_without_duplicating_sibling() {
         let failing = Arc::new(MockSink::failing());
@@ -731,8 +730,8 @@ mod tests {
         ];
         let client = TelemetryClient::spawn(config).unwrap();
         client.track("survives", Properties::new());
-        // The failure/retry/expiry cycle completes well inside this
-        // window at the 10ms interval (backoffs 20+40+80+160ms).
+        // The failure/retry/expiry cycle completes well inside this window (backoffs
+        // 20+40+80+160ms).
         tokio::time::sleep(Duration::from_millis(700)).await;
         assert_eq!(
             healthy.event_names(),
@@ -746,8 +745,6 @@ mod tests {
         client.shutdown().await.unwrap();
     }
 
-    /// The batch byte cap splits oversized batches (a single over-budget
-    /// event still ships).
     #[tokio::test]
     async fn batch_byte_cap_splits_batches() {
         let mock = Arc::new(MockSink::new());
@@ -769,7 +766,6 @@ mod tests {
         client.shutdown().await.unwrap();
     }
 
-    /// Entries older than the retention expire on the next flush.
     #[tokio::test]
     async fn aged_entries_expire() {
         let mut channel = Channel {
@@ -778,11 +774,13 @@ mod tests {
             next_retry_at: None,
         };
         let fresh = TelemetryEvent {
+            id: "fresh-id".into(),
             name: "fresh".into(),
             timestamp_ms: now_epoch_ms_for_tests(),
             properties: Properties::new(),
         };
         let stale = TelemetryEvent {
+            id: "stale-id".into(),
             name: "stale".into(),
             timestamp_ms: now_epoch_ms_for_tests().saturating_sub(MAX_AGE.as_millis() as u64 + 1),
             properties: Properties::new(),
@@ -802,7 +800,6 @@ mod tests {
         assert_eq!(channel.queue[0].event.name, "fresh");
     }
 
-    /// Entries at the attempt cap expire even when fresh.
     #[tokio::test]
     async fn capped_attempts_expire() {
         let mut channel = Channel {
@@ -827,8 +824,6 @@ mod tests {
             .unwrap_or_default()
     }
 
-    /// Every event a batch carries is catalog-sanitized (the adjust layer
-    /// drops unknown properties before any sink sees them).
     #[tokio::test]
     async fn flush_sanitizes_events_against_the_catalog() {
         let mock = Arc::new(MockSink::new());
@@ -840,7 +835,7 @@ mod tests {
         );
         properties.set("trigger", serde_json::Value::from("spontaneous"));
         properties.set("secret_path", serde_json::Value::from("/home/user/project"));
-        client.track("agent run started", properties);
+        client.track("agent run completed", properties);
         client.flush().await.unwrap();
         let events = mock.events();
         assert_eq!(events.len(), 1);

@@ -5,7 +5,6 @@ use super::{
     SessionCore, Value, VecDeque, WorkerRecoveryJournal, AUTONOMOUS_QUEUE_KEY,
 };
 
-/// Queue delivery lanes (port of the session action store's two deliveries).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lane {
     Steering,
@@ -21,26 +20,15 @@ impl Lane {
     }
 }
 
-/// The TS `_assertSessionActionAdmissionAvailable` rejection while the
-/// queued-input pump is suspended (agent-session.ts).
 /// How long the close paths (`shutdown`, `kill`) wait for aborted side
-/// question runs to queue their terminal cancelled events before the
-/// process exits. The runs observe the abort within their 20ms pump tick
-/// and the stream teardown, so this is generous headroom, not a gate.
+/// question runs to queue their terminal cancelled events: headroom, not a gate.
 pub(crate) const SIDE_QUESTION_SETTLE_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub(crate) const QUEUED_INPUT_SUSPENDED: &str =
     "Cannot admit a session action while queued session input is suspended.";
 
-/// The item's turn-execution class (TS `TurnExecutionPolicy`, the
-/// `_pumpSessionInputs` batch-gathering's `turnExecutionPoliciesEqual`
-/// gate): items co-deliver as one batched turn only within the same
-/// class. Client-queued rows (the `steer`/`follow_up` commands and
-/// prompt admissions behind work, TS `"queued"`) batch together;
-/// injected rows (heartbeat fires, agent-message deliveries, goal and
-/// autonomous continuations, TS `"injected"`) batch among themselves;
-/// the idle session's direct-prompt hand-off (TS `"directPrompt"`)
-/// never joins a queue batch.
+/// The item's turn-execution class: items co-deliver as one batched turn only
+/// within the same class; the direct-prompt hand-off never joins a batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TurnPolicy {
     Queued,
@@ -60,39 +48,21 @@ impl TurnPolicy {
     }
 }
 
-/// The turn-execution class restored from a wire `restore_actions`
-/// payload (TS `restoreSessionActions` restores the full
-/// `executionPolicy`): `nextTurnContextTiming` "commit" is the
-/// client-queued policy; "preparation" with a preserved empty
-/// extension prompt is injected; "preparation" without it is the
-/// direct-prompt hand-off. An absent or unknown policy restores as the
-/// dominant queued class.
+/// The turn-execution class restored from a wire `restore_actions` payload;
+/// an absent or unknown policy restores as the queued class.
 pub(crate) fn restored_turn_policy(payload: &Value) -> TurnPolicy {
     let timing = payload
         .get("executionPolicy")
         .and_then(|policy| policy.get("nextTurnContextTiming"))
         .and_then(Value::as_str);
     match timing {
-        Some("preparation") => {
-            let preserved = payload
-                .get("executionPolicy")
-                .and_then(|policy| policy.get("preserveEmptyExtensionPrompt"))
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            if preserved {
-                TurnPolicy::Injected
-            } else {
-                TurnPolicy::Direct
-            }
-        }
+        Some("preparation") => TurnPolicy::Direct,
         _ => TurnPolicy::Queued,
     }
 }
 
-/// The wire text of an aborted turn's settle (the `turn_end` error frame
-/// and the waiting prompt's failure): the turn was aborted before an
-/// assistant message was produced (a user abort, a queued-input
-/// suspension).
+/// The wire text of an aborted turn's settle (the `turn_end` error frame and
+/// the waiting prompt's failure): aborted before an assistant message.
 pub(crate) const ABORTED_TURN_SETTLE_ERROR: &str = "No response produced.";
 
 /// The wire text of a prompt cancelled before delivery (the
@@ -103,18 +73,13 @@ pub(crate) const PROMPT_ABORTED_BEFORE_DELIVERY: &str = "Prompt aborted before d
 /// `QueuedMessageError` verbatim).
 pub(crate) const QUEUED_PROMPT_DELETED: &str = "Queued prompt was deleted before delivery.";
 
-/// The typed settle of one queued prompt, as the waiting caller's `done`
-/// channel carries it. The variants classify the settle without reading
-/// the (provider-controllable) error text: an aborted turn is not a
-/// provider failure, and a withdrawn prompt never ran.
+/// The typed settle of one queued prompt: the variants classify the
+/// settle without reading the (provider-controllable) error text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TurnSettle {
-    /// The turn ran to its settle.
     Completed,
-    /// The turn was aborted before an assistant message was produced.
     Aborted,
-    /// The queued prompt was withdrawn before delivery (the abort
-    /// cancel, a queue edit deleting the row); the text is the
+    /// The prompt was withdrawn before delivery; the text is the
     /// wire-facing reason.
     Withdrawn(String),
     /// The turn settled with an error; the text surfaces to the waiting
@@ -155,9 +120,8 @@ impl QueuePriority {
     }
 }
 
-/// TS `ActionStore` priority insertion: walk back only across a lower-priority
-/// suffix. Never re-sort a lane: explicit moves and restored order can cross
-/// priority boundaries, and equal-priority arrivals remain FIFO.
+/// Priority insertion: walk back only across a lower-priority suffix. Never
+/// re-sort a lane (moves and restored order can cross; equal priorities stay FIFO).
 pub(crate) fn enqueue_priority(lane: &mut VecDeque<QueuedItem>, item: QueuedItem) {
     let mut index = lane.len();
     while index > 0 && lane[index - 1].priority.rank() < item.priority.rank() {
@@ -170,55 +134,38 @@ pub(crate) fn enqueue_priority(lane: &mut VecDeque<QueuedItem>, item: QueuedItem
 pub(crate) struct QueuedItem {
     pub(crate) message: String,
     pub(crate) priority: QueuePriority,
-    /// The labeled queue-strip row (TS `payload.preview`): the queue
-    /// snapshot serves it instead of `message` when the delivery carries
-    /// one, and the active-action label reads it too (TS #2063
-    /// `queuedAgentMessagePreview` returns `payload.preview ??
-    /// payload.text`); the turn's prompt text stays `message`.
+    /// The labeled queue-strip row (the snapshot and the active-action
+    /// label read it); the turn's prompt text stays `message`.
     pub(crate) preview: Option<String>,
     /// An injected custom row that replaces this turn's user message (the
     /// RLM child terminal notices ride the follow-up lane this way).
     pub(crate) custom_message: Option<Value>,
     /// The original agent-message text when this item came from an
-    /// `agent_message` delivery (the marker `agent_messages_clear` /
-    /// `agent_messages_pause` remove queued items by); `None` for items a
-    /// client queued directly (`steer/follow_up`).
+    /// `agent_message` delivery (the markers remove queued items by).
     pub(crate) agent_message: Option<String>,
-    /// The scheduler's queue key (TS `followUpQueueKey`): a heartbeat's
-    /// queued fire carries `heartbeat:<id>`, and a later fire replaces the
-    /// queued item with the same key instead of stacking.
+    /// The scheduler's queue key: a later fire replaces the queued
+    /// item with the same key instead of stacking.
     pub(crate) queue_key: Option<String>,
-    /// The prompt-admission id this admitted prompt registered (the
-    /// `cancel_prompt_admission` bookkeeping); `None` for prompts that
-    /// carried no admission id.
+    /// The prompt-admission id (the `cancel_prompt_admission`
+    /// bookkeeping); `None` when it carried none.
     pub(crate) admission_id: Option<String>,
-    /// Images attached to the prompt (wire `images`: base64 payload plus
-    /// mime type), admitted with the message as multimodal content.
+    /// Images attached to the prompt (wire `images`: base64 plus mime
+    /// type).
     pub(crate) images: Vec<pa_agent::types::ImageContent>,
     pub(crate) done: Option<oneshot::Sender<TurnSettle>>,
-    /// TS `payload.queueVisible`: the item shows in the queue projection
-    /// and its delivery projects the active-action phase transitions
-    /// (steer/follow-up lanes, agent-message deliveries, prompt-behind-work,
-    /// heartbeat fires, restored rows). Injected continuations (goal,
-    /// autonomous, post-compaction) and an idle session's direct prompt
-    /// admission stay invisible: the TS wire shows no queue rows or
-    /// active phases for them.
+    /// The item shows in the queue projection and projects the active-action
+    /// phases; injected continuations and a direct prompt admission stay invisible.
     pub(crate) queue_visible: bool,
     /// The item's turn-execution class (see [`TurnPolicy`]): the batch
     /// gathering's compatibility gate.
     pub(crate) policy: TurnPolicy,
-    /// Membership of the one-shot forced steering batch (TS
-    /// `_forcedAllSteeringActionIds`, armed by `abortAndSendQueued`):
-    /// armed items co-deliver as one batched turn even under queue mode
-    /// "one-at-a-time". Transient worker state — never journaled; a
-    /// restart between the abort and the delivery loses the forced batch
-    /// (the TS armed set is equally in-memory).
+    /// Membership of the one-shot forced steering batch: armed items co-deliver as
+    /// one batched turn even under "one-at-a-time". Never journaled.
     pub(crate) forced_batch: bool,
 }
 
-/// Parse the wire `images` array of a prompt-family command (each entry
-/// `{type: "image", data, mimeType}`). Entries that do not carry payload
-/// data or a mime type are dropped, not failed: the text still admits.
+/// Parse the wire `images` array: entries without payload data or a
+/// mime type are dropped, not failed — the text still admits.
 pub(crate) fn parse_prompt_images(payload: &Value) -> Vec<pa_agent::types::ImageContent> {
     let Some(images) = payload.get("images").and_then(Value::as_array) else {
         return Vec::new();
@@ -239,20 +186,16 @@ pub(crate) fn parse_prompt_images(payload: &Value) -> Vec<pa_agent::types::Image
         .collect()
 }
 
-/// The pending queue lanes of a session (journal persistence payload):
-/// the full parked rows — message text, labeled preview, injected custom
-/// row, queue key, and visibility — so crash/respawn recovery restores a
-/// queued heartbeat as the heartbeat component, not a plain prompt.
+/// The pending queue lanes of a session (journal persistence payload): the
+/// full parked rows, so recovery restores a queued heartbeat's component.
 pub(crate) struct QueueLanes {
     pub(crate) steering: Vec<crate::journal::WorkerQueueItemRecord>,
     pub(crate) follow_up: Vec<crate::journal::WorkerQueueItemRecord>,
 }
 
-/// Read the pending lanes off a locked core.
-/// The wire `customMessage` of a prompt/follow-up command: an injected
-/// custom row (`role: "custom"` with a non-empty `customType`) that
-/// replaces the turn's user row. `Err` rejects the command loudly — a
-/// malformed notice must not silently degrade into a plain prompt.
+/// The wire `customMessage` of a prompt/follow-up command: an injected custom
+/// row that replaces the turn's user row. `Err` rejects loudly — a malformed
+/// notice must not degrade into a plain prompt.
 pub(crate) fn parse_custom_message(value: Option<&Value>) -> Result<Option<Value>, String> {
     let Some(value) = value else {
         return Ok(None);
@@ -277,31 +220,19 @@ pub(crate) fn parse_custom_message(value: Option<&Value>) -> Result<Option<Value
     Ok(Some(value.clone()))
 }
 
-/// One queue-lane recovery checkpoint. The verdict and the persisted
-/// lane snapshot come from one locked read, so a concurrent
-/// enqueue/clear cannot be overwritten by a stale verdict and a stale
-/// snapshot cannot resurrect cleared lanes.
+/// One queue-lane recovery checkpoint: the verdict and the persisted
+/// snapshot come from one locked read (no stale verdict).
 #[derive(Clone, Copy)]
 pub(crate) enum QueueCheckpoint {
-    /// The lanes hold admitted live work: `busy = true` (TS
-    /// `prompt_accepted` / `steer_queued` / `follow_up_queued` /
-    /// `actions_restored`).
+    /// The lanes hold admitted live work: `busy = true`.
     Admitted { operation: &'static str },
-    /// The verdict follows the lanes: `busy = whether lanes remain
-    /// queued` (TS `turn_end` computes the same verdict over live
-    /// work). Also used by queue mutations with no TS record (a clear,
-    /// an edit, an agent-message drain) so the journal never keeps a
-    /// stale verdict over a changed queue.
+    /// The verdict follows the lanes (`busy = lanes remain queued`); mutations
+    /// with no TS record use it too, so the journal keeps no stale verdict.
     Settle { operation: &'static str },
 }
 
-/// Write one queue-lane recovery checkpoint: under the recovery lock
-/// (then the core lock, the documented order) the lanes are snapshotted
-/// into the journal and the busy verdict is recorded from the same
-/// read. Shared by the worker (`prompt` admission,
-/// `steer`/`follow_up`/agent-message delivery, `restore_actions`, queue
-/// clears/edits) and the turn runner (`turn_end` settle), which own the
-/// same fields.
+/// Write one queue-lane recovery checkpoint: under the recovery lock (then
+/// the core lock) the lanes and the busy verdict record from the same read.
 pub(crate) fn checkpoint_queue_recovery(
     recovery: &std::sync::Mutex<Option<WorkerRecoveryJournal>>,
     core_lock: &std::sync::Mutex<SessionCore>,
@@ -358,13 +289,9 @@ pub(crate) fn record_queue_checkpoint_locked(
     };
     let (busy, operation) = match checkpoint {
         QueueCheckpoint::Admitted { operation } => (true, operation),
-        // TS computes a settled verdict from live session work
-        // (`hasLiveSessionWork` — an active session counts — plus retries
-        // and accepted prompts), never from the lanes alone: a withdrawal
-        // landing mid-turn (queue purge, clear, drop) must not flip the
-        // journal to idle while the turn still streams, or a crash in
-        // that window parks live work. The turn's own settle reads the
-        // idle flip first, so `turn_in_flight` is false at `turn_end`.
+        // A settled verdict never comes from the lanes alone: a withdrawal landing
+        // mid-turn must not flip the journal to idle while the turn still streams,
+        // or a crash in that window parks live work.
         QueueCheckpoint::Settle { operation } => (
             turn_in_flight || !lanes.steering.is_empty() || !lanes.follow_up.is_empty(),
             operation,
@@ -411,19 +338,9 @@ pub(crate) fn queue_lanes(core: &SessionCore) -> QueueLanes {
     }
 }
 
-/// TS `_pumpSessionInputs`'s batch gathering: the lane's front item
-/// anchors the delivery; under queue mode "all" — or the forced steering
-/// batch armed by `abort_and_send_queued` (TS `abortAndSendQueued`'s
-/// `_forcedAllSteeringActionIds`) — the same-class prefix behind it joins
-/// as co-delivered rows of ONE turn (TS `turnExecutionPoliciesEqual` +
-/// the mode/armed-set gates).
-///
-/// Joining gates: the same turn-execution class; a plain user row (an
-/// injected custom row always delivers solo — it replaces its turn's
-/// user row); not a queued session command (TS batches only `turn`-kind
-/// actions); and membership of the armed set while the forced batch
-/// governs this delivery. The front item anchors regardless — a
-/// non-batchable front delivers solo, exactly like TS's `first`.
+/// The lane's front item anchors the delivery; under queue mode "all" — or
+/// the forced steering batch — the same-class prefix behind it joins as
+/// co-delivered rows of ONE turn. A non-batchable front delivers solo.
 pub(crate) fn gather_delivery_batch(core: &mut SessionCore, lane: Lane) -> Vec<QueuedItem> {
     let (items, mode) = match lane {
         Lane::Steering => (&mut core.steering, core.steering_mode.as_str()),
@@ -432,12 +349,8 @@ pub(crate) fn gather_delivery_batch(core: &mut SessionCore, lane: Lane) -> Vec<Q
     let Some(first) = items.front() else {
         return Vec::new();
     };
-    // TS `_forcedAllSteeringBatch(first)`: the armed set forces "all" only
-    // when the front item is armed; an un-armed front disarms the batch
-    // once no armed item remains queued (a delivered item leaves the lane
-    // with its flag, so the armed prefix exhausts itself). The read runs
-    // before the front's delivery class — every pickup disarms an
-    // exhausted arm, whatever it delivers.
+    // The armed set forces "all" only when the front item is armed; an un-armed
+    // front disarms the batch once no armed item remains queued.
     let forced = lane == Lane::Steering && core.forced_all_steering && first.forced_batch;
     let mut batch = Vec::new();
     if lane == Lane::Steering
@@ -447,11 +360,6 @@ pub(crate) fn gather_delivery_batch(core: &mut SessionCore, lane: Lane) -> Vec<Q
     {
         core.forced_all_steering = false;
     }
-    // The front's own delivery class decides the turn's shape before any
-    // gathering (TS: the direct prompt hand-off never queues, an injected
-    // custom row replaces its turn's user row, and a queued session
-    // command runs as the command — none of those turns carry co-delivered
-    // rows, so the front delivers solo).
     if first.custom_message.is_some()
         || first.policy == TurnPolicy::Direct
         || crate::session_commands::parse_prompt_session_command(&first.message).is_some()
@@ -483,14 +391,8 @@ pub(crate) fn restore_queue_snapshot(
     active_session_id: &str,
 ) -> (VecDeque<QueuedItem>, VecDeque<QueuedItem>) {
     fn pending(lanes: Vec<crate::journal::WorkerQueueItemRecord>) -> VecDeque<QueuedItem> {
-        // Images on a queued prompt do not survive the worker restart:
-        // the recovery journal stores the delivery rows without the
-        // process-local attachments (the TS command-recovery journal
-        // keeps the same text-only shape for its lanes). Everything the
-        // turn needs to deliver identically — the labeled preview, the
-        // injected custom row, the queue key, the visibility flag —
-        // rides the item record, so a restored queued heartbeat still
-        // runs and persists as the `heartbeat_prompt` component.
+        // Images on a queued prompt do not survive the restart; the
+        // delivery rows ride the item record without them.
         lanes
             .into_iter()
             .map(|record| {
@@ -530,18 +432,8 @@ pub(crate) fn restore_queue_snapshot(
     (steering, follow_up)
 }
 
-/// Admit one engine-minted goal follow-up (TS `_queuePreparedPrompt`'s
-/// steer arm and the queued `followUp` admission behind
-/// `_getGoalContinuationMessages` / `_maybeResumeGoalContinuationAfterRlmWork`):
-/// the mint's `goal_update` surfaces at the moment the state changed
-/// (durable `thread_goal_state` entry first, then the broadcast), the
-/// minted turn queues into its lane (the steering lane for the
-/// budget-limit wrap-up steer, the follow-up lane for the continuation),
-/// and the runner wakes (`resumeIfIdle`).
-/// Admit one held autonomous continuation through the follow-up lane (TS
-/// `_queueAutonomousContinuationForThresholdCompaction`'s queued `followUp`
-/// admission): the runner wakes, the item runs as its own queue item after
-/// the current run settles.
+/// Admit one held autonomous continuation through the follow-up lane:
+/// the item runs as its own queue item after the current run settles.
 pub(crate) fn admit_autonomous_follow_up(
     recovery: &std::sync::Mutex<Option<WorkerRecoveryJournal>>,
     core: &Arc<Mutex<SessionCore>>,
@@ -565,12 +457,8 @@ pub(crate) fn admit_autonomous_follow_up(
             forced_batch: false,
         });
     }
-    // The admission checkpoint (busy=true): an injected continuation
-    // admitted while idle (after the previous settle) is undelivered
-    // live work the journal must prove — the runner records nothing at
-    // pickup, so a kill between this admission and the turn's settle
-    // would otherwise read as idle and park the continuation on a
-    // plain boot.
+    // The admission checkpoint: a continuation admitted while idle is undelivered
+    // live work the journal must prove (a kill before the settle would park it).
     checkpoint_queue_recovery(
         recovery,
         core,
@@ -629,10 +517,8 @@ pub(crate) fn admit_goal_follow_up(
             Lane::FollowUp => enqueue_priority(&mut core.follow_up, item),
         }
     }
-    // The admission checkpoint (busy=true, TS's queue strings by lane):
-    // a minted follow-up admitted while idle is undelivered live work
-    // the journal must prove until its turn settles (same gap as the
-    // autonomous continuation above).
+    // The admission checkpoint: same idle-admission gap as the
+    // autonomous continuation above.
     checkpoint_queue_recovery(
         recovery,
         core,
@@ -644,20 +530,14 @@ pub(crate) fn admit_goal_follow_up(
         },
         None,
     );
-    // `resumeIfIdle`: the runner re-checks the queue at its loop head, so
-    // the minted turn runs as the next admitted turn.
+    // The runner re-checks the queue at its loop head, so the minted
+    // turn runs as the next admitted turn.
     work_notify.notify_one();
 }
 
-/// Admit one detached kernel bash completion notice (TS
-/// `bash.completed` -> `_promptInjectedMessage(message, {
-/// streamingBehavior: "steer", queueIfBusy: true, resumeIfIdle: true })`):
-/// the `[bash-done pid:N exit:M]` row queues on the steering lane — a
-/// busy session keeps a visible steer row, an idle session wakes into
-/// the turn that runs on the row. The admission carries the recovery
-/// busy-evidence checkpoint, so a crash between the notice and its
-/// delivery revives the worker with the row replaying (the wake
-/// survives worker re-adoption and revival).
+/// Admit one detached kernel bash completion notice: the row queues on the
+/// steering lane (busy sessions keep a visible steer row, idle sessions wake
+/// into it); a crash before the delivery revives with the row replaying.
 pub(crate) fn admit_bash_completion_notice(
     recovery: &std::sync::Mutex<Option<WorkerRecoveryJournal>>,
     core: &Arc<Mutex<SessionCore>>,
@@ -675,16 +555,11 @@ pub(crate) fn admit_bash_completion_notice(
         pa_types::ai::UserContent::Text(text) => text.clone(),
         pa_types::ai::UserContent::Blocks(_) => String::new(),
     };
-    // TS `queueVisible: visibleQueued` + the schedule's execution policy:
-    // busy sessions queue a visible row, idle sessions wake on an
-    // invisible injected turn. The busy sample and the push share ONE
-    // critical section: a turn starting between a separate sample and
-    // the push would queue an invisible row for a busy session.
+    // The busy sample and the push share ONE critical section: a turn starting
+    // between them would queue an invisible row for a busy session.
     let mut core_guard = core.lock().unwrap();
-    // The close paths mark the session and then clear the lanes in their
-    // own core section: a notice that raced past the sink's first check
-    // is refused here (the marker is visible by now), or the close's
-    // clear wipes it — never a completion turn for a closed session.
+    // A notice that raced past the sink's first check is refused here or wiped
+    // by the close's clear — never a completion turn for a closed session.
     if session_is_closed() {
         return;
     }
@@ -696,10 +571,7 @@ pub(crate) fn admit_bash_completion_notice(
     {
         core_guard.steering.push_back(QueuedItem {
             priority: QueuePriority::Background,
-            // TS `previewLabel` (`injectedMessagePreviewLabel` ->
-            // `ASYNC_BASH_COMPLETION_PREVIEW_LABEL`): the queue strip
-            // reads `Background command finished: <content>` (the TUI's
-            // labeled-preview prefix).
+            // The queue strip's labeled preview (TS `previewLabel`).
             preview: Some(format!(
                 "{}: {content}",
                 pa_core::session_engine::messages::ASYNC_BASH_COMPLETION_PREVIEW_LABEL
@@ -719,9 +591,8 @@ pub(crate) fn admit_bash_completion_notice(
     // The checkpoint re-locks the core (documented order: recovery lock
     // first), so the admission's guard must release first.
     drop(core_guard);
-    // The fire checkpoint (busy=true, TS's steering queue string): the
-    // notice is undelivered live work until its turn settles — the same
-    // evidence the goal/autonomous continuations record.
+    // The busy-evidence checkpoint: the notice is undelivered live
+    // work until its turn settles.
     checkpoint_queue_recovery(
         recovery,
         core,
@@ -730,15 +601,11 @@ pub(crate) fn admit_bash_completion_notice(
         },
         None,
     );
-    // `resumeIfIdle`: the runner re-checks the queue at its loop head.
     work_notify.notify_one();
 }
 
-/// Withdraw one queued bash completion notice (TS `bash.consumed` ->
-/// `_withdrawAsyncBashCompletionNotice`): the kernel read the finished
-/// command's result before the notice delivered, so the undelivered row
-/// cancels — one read withdraws one notice, and pids are reused across
-/// handles, so the command disambiguates (`_isAsyncBashCompletionActionFor`).
+/// Withdraw one queued bash completion notice: the kernel read the result
+/// before the notice delivered (pids are reused, so the command disambiguates).
 pub(crate) fn withdraw_bash_completion_notice(
     recovery: &std::sync::Mutex<Option<WorkerRecoveryJournal>>,
     core: &Arc<Mutex<SessionCore>>,
@@ -747,10 +614,8 @@ pub(crate) fn withdraw_bash_completion_notice(
     let removed = {
         let mut core_guard = core.lock().unwrap();
         let before = core_guard.steering.len() + core_guard.follow_up.len();
-        // TS withdraws ONE row per read ("pid reuse can queue an
-        // identical key twice, and the read belongs to the older
-        // handle, which is the earlier notice"): the front-most match
-        // across the two lanes, never the whole set.
+        // The front-most match across the two lanes, never the
+        // whole set.
         let mut withdrawn = false;
         let mut withdraw_one = |item: &QueuedItem| {
             if !withdrawn && is_bash_completion_notice_for(item, notice) {
@@ -765,10 +630,8 @@ pub(crate) fn withdraw_bash_completion_notice(
         before != core_guard.steering.len() + core_guard.follow_up.len()
     };
     if removed {
-        // The withdrawal refreshes the verdict (and the snapshot) so a
-        // consumed notice cannot keep busy=true promising a revive the
-        // withdrawn row would replay (a mid-turn withdrawal stays busy
-        // through the in-flight turn).
+        // The withdrawal refreshes the verdict so a consumed notice cannot keep
+        // busy=true promising a revive the withdrawn row would replay.
         checkpoint_queue_recovery(
             recovery,
             core,
@@ -780,9 +643,8 @@ pub(crate) fn withdraw_bash_completion_notice(
     }
 }
 
-/// Whether one queued item is the async-bash-completion notice for this
-/// pid+command (TS `_isAsyncBashCompletionActionFor`: the custom row's
-/// details carry both — pids alone are reused).
+/// Whether one queued item is the completion notice for this pid+command
+/// (the details carry both — pids alone are reused).
 fn is_bash_completion_notice_for(
     item: &QueuedItem,
     notice: &crate::engine::BashConsumedNotice,

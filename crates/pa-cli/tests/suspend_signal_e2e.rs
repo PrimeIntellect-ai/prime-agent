@@ -1,13 +1,6 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
-// by design on hot paths (boxing 130 fns is allocation-churn with zero
-// correctness gain); the fn-length threshold is a style gate, not
-// correctness (the harness fns are intentionally linear); 64-bit targets -
-// the narrowing sits at OS/protocol boundaries where the values are
-// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
-// guarded parses), and checked conversions would add panic paths where
-// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
-// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
-// dossier for the conductor).
+// large_futures: stack-resident futures on hot paths by design.
+// too_many_lines: style gate, not correctness. Casts: 64-bit targets;
+// narrowing sits at bounded OS/protocol boundaries.
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -18,26 +11,9 @@
 )]
 
 //! Real-signal e2e for the `app.suspend` cycle (TS `handleCtrlZ`): the
-//! product's terminal renderer runs on a pty in a child process group,
-//! and the harness drives the signal path a shell exercises.
-//!
-//! The TS shield window (SIGINT ignored while suspended) is covered by
-//! the pa-types unit test on the disposition pair; it cannot be e2e'd
-//! here: a SIGINT sent to a *stopped* process queues until SIGCONT and is
-//! delivered while the app already restored the default disposition
-//! mid-resume, which destabilizes the terminal reader in this harness —
-//! and a real shell cannot produce that sequence anyway (Ctrl+C goes to
-//! the shell, the foreground process; the suspended app is background).
-//!
-//! Two harness details keep the child deterministic (found the hard way):
-//! the child is in its own
-//! process group inside this runner's session (its terminal is the
-//! harness pty alone), and the SIGINT-while-stopped
-//! test is separate — a SIGINT sent to a *stopped* process queues until
-//! SIGCONT and is delivered when the app already restored the default
-//! disposition mid-resume, which destabilizes the terminal reader; a
-//! real shell cannot produce that (Ctrl+C goes to the shell, the
-//! foreground process), so the byte-level assertions run without it.
+//! renderer runs on a pty in a child process group, driven like a shell.
+//! The TS SIGINT shield window lives in the pa-types disposition-pair
+//! unit test: a SIGINT to a stopped process queues until SIGCONT.
 
 #![cfg(unix)]
 
@@ -59,41 +35,43 @@ use pa_tui::interactive::{
     run_interactive, InteractiveOptions, ModelSelection, SessionSelection, UiMode,
 };
 
-/// The SGR tracking sequences the seam writes (the exact byte order of
-/// `mouse_tracking`: enable is `?1002h` then `?1006h`, disable the
-/// reverse).
-const MOUSE_ENABLE: &str = "\x1b[?1002h\x1b[?1006h";
-const MOUSE_DISABLE: &str = "\x1b[?1006l\x1b[?1002l";
+/// Enable is `?1002h`, `?1003h` (the hover affordance), then `?1006h`; disable reverses.
+const MOUSE_ENABLE: &str = "\x1b[?1002h\x1b[?1003h\x1b[?1006h";
+const MOUSE_DISABLE: &str = "\x1b[?1006l\x1b[?1003l\x1b[?1002l";
 
-/// The kitty capability query crossterm's support check writes (`\x1b[?u`
-/// then the primary-device-attributes query in one write). The port runs
-/// it once per process (the first mount); a resume that writes it again
-/// re-arms the 2s support check — crossterm's filtered poll holds the
-/// process-global event-reader lock for its whole budget, and the app
-/// reader's input goes blind until it expires (the strace-proven
-/// ~2s-after-every-resume blackout).
+/// The kitty capability query. It runs once per process: a resume that
+/// writes it again re-arms the 2s support check, blinding input.
 const KITTY_QUERY: &str = "\x1b[?u\x1b[c";
 
-/// The child-mode socket: set (with the socket path) only when this very
-/// binary is re-executed as the product-under-test.
+/// Set (with the socket path) only when this very binary is re-executed as the product-under-test.
 const CHILD_SOCKET_ENV: &str = "PA_SUSPEND_CHILD_SOCKET";
 
-/// The child half of the e2e: runs the real interactive loop in terminal
-/// mode against the parent's mock supervisor. A plain `cargo test` run
-/// (no `CHILD_SOCKET_ENV`) passes trivially — only the parent test
-/// drives the real path.
+/// The mock's wire traffic in arrival order, for the timeout diagnostics.
+static WIRE_LOG: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+fn log_wire(frame: &str) {
+    WIRE_LOG
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(frame.to_string());
+}
+
+fn wire_log_dump() -> String {
+    WIRE_LOG
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .join("\n")
+}
+
+/// The child half: the real interactive loop against the parent's mock supervisor.
 #[test]
 fn suspend_child_mode() {
     let Ok(socket) = std::env::var(CHILD_SOCKET_ENV) else {
         return;
     };
     let options = child_options(PathBuf::from(socket));
-    // A current-thread runtime keeps the child at two threads (the loop
-    // plus the terminal reader): a multithreaded runtime's parked workers
-    // can lose their futex wakeups across a group stop/continue, which
-    // starves the resume mid-path (observed as the resumed child never
-    // writing its re-apply bytes; the product behavior itself is
-    // correct — verified under strace).
+    // A current-thread runtime keeps the child at two threads: parked workers of a
+    // multithreaded runtime can lose their futex wakeups across a group stop.
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -101,63 +79,57 @@ fn suspend_child_mode() {
     let _ = runtime.block_on(run_interactive(options, UiMode::Terminal));
 }
 
-/// The two pty harnesses serialize: each drives process-group signals and
-/// a raw pty; running them concurrently made the byte-level waits flake
-/// on the shared 4-CPU sandbox.
+/// The two pty harnesses serialize: concurrent runs flaked on the shared sandbox.
 static HARNESS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Whether this runner is attached to a controlling-terminal session.
-/// The real-signal stop/continue cycle runs in that class; without one
-/// the test skips with a loud note instead of running.
+/// Whether this runner is attached to a controlling-terminal session (the test skips otherwise).
 fn sigtstp_session_runner() -> bool {
-    // tcgetpgrp on fd 0 answers "does this runner's stdin sit on a
-    // session's controlling terminal": a pipe or /dev/null stdin and a
-    // tty without a foreground process group both read as errors.
+    // tcgetpgrp(0) errors for a pipe or /dev/null stdin and a tty with no fg group.
     // SAFETY: tcgetpgrp only queries the fd's foreground process group.
     let foreground = unsafe { libc::tcgetpgrp(0) };
     if foreground < 0 {
         eprintln!(
             "no controlling-terminal session on the runner (tcgetpgrp(fd 0) \
-             failed); skipping the suspend signal e2e — it needs a \
-             controlling-terminal session to drive the stop/continue cycle"
+             failed); skipping the tests that need one to drive the \
+             stop/continue signal cycle"
         );
         return false;
     }
     true
 }
 
+/// Whether the runner had a controlling-terminal session, sampled before the single `setsid`.
+fn lead_fresh_session() -> bool {
+    static HAD_CTTY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *HAD_CTTY.get_or_init(|| {
+        let had = sigtstp_session_runner();
+        if let Err(error) = nix::unistd::setsid() {
+            panic!("the harness could not start a fresh session: {error}");
+        }
+        had
+    })
+}
+
 #[test]
 fn ctrl_z_releases_tracking_stops_and_sigcont_re_applies() {
-    if !sigtstp_session_runner() {
+    if !lead_fresh_session() {
         return;
     }
-    // The runner leads a fresh session with no controlling terminal (a
-    // new session gets none until TIOCSCTTY), and spawn_child then
-    // moves the child into its own process group inside it. Both are
-    // the harness contract: the stop/continue cycle needs the child's
-    // group parented inside its session, and the renderer needs the
-    // child's terminal to be the harness pty alone.
-    match nix::unistd::setsid() {
-        Ok(_) => {}
-        Err(error) => panic!("the harness could not start a fresh session: {error}"),
-    }
+    // The runner leads a fresh session; `spawn_child` owns the process-group contract.
     let _lock = match HARNESS_LOCK.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
-    let mut harness = SuspendHarness::start();
+    let mut harness = SuspendHarness::start(/*editor*/ None);
 
-    // The startup contract: the fullscreen surface enables SGR mouse
-    // tracking (the seam bytes) before any input is handled.
     harness.wait_from_start(MOUSE_ENABLE, "startup mouse enable");
 
-    // The first mount runs the kitty capability query once (the
-    // once-per-process contract's positive side: the probe exists).
     harness.wait_from_start(KITTY_QUERY, "the first mount's kitty query");
+    // The prompt row is derived from the caret park, never hard-coded.
+    harness.wait_from_start(" >  ", "the first frame's prompt row rendered");
+    let prompt_row = harness.wait_caret_row_from(0, 5, "the first frame's empty editor rendered");
 
-    // Ctrl+Z: the app.suspend binding. The renderer releases tracking
-    // before the process group stops, so the disable bytes arrive while
-    // the process is still running.
+    // Ctrl+Z: the renderer releases tracking BEFORE the group stops.
     let mark_suspend = harness.mark();
     harness.write(&[0x1a]);
     harness.wait_from(mark_suspend, MOUSE_DISABLE, "suspend mouse release");
@@ -168,56 +140,30 @@ fn ctrl_z_releases_tracking_stops_and_sigcont_re_applies() {
         "the app.suspend cycle stopped the group",
     );
 
-    // SIGCONT (`fg`): the resume re-applies the terminal modes — raw
-    // mode, the alternate screen, SGR mouse tracking — and repaints; the
-    // mouse-tracking seam bytes come back on the pty.
-    // Drain the suspend's scrollback flush to silence first (see
-    // `drain_until_quiet`): the resume's writes must find room in the pty
-    // buffer instead of being dropped by a full one.
+    // Drain the scrollback flush to silence first (see `drain_until_quiet`): the
+    // resume's writes must find room in the pty buffer.
     harness.drain_until_quiet(8);
     let mark_resume = harness.mark();
     kill(Pid::from_raw(harness.child_id() as i32), Signal::SIGCONT).expect("SIGCONT");
-    // The post-continue repaint (the resume's `term.clear` plus the fresh
-    // frame) is the deterministic marker on this harness: the resumed
-    // child writes the alt-screen-enter and mouse-tracking sequences first
-    // (verified under strace, and the seam's release/re-apply order is
-    // unit-locked in pa-tui), but this sandbox's pty drops the first
-    // post-continue writes nondeterministically, so the harness pins the
-    // assertion on the repaint that always arrives.
+    // The post-continue repaint is the deterministic marker (the pty drops the first writes).
     harness.wait_from(
         mark_resume,
         "\x1b[1;33Hsuspend",
         "the SIGCONT resume repaints the terminal",
     );
 
-    // The resumed app still runs: typing renders in the editor line.
-    // Ratatui's diff renderer repaints only the changed cells, so the
-    // typed text never appears as a contiguous "> hi" byte string: the
-    // editor draws the typed cells at their positions and parks the
-    // cursor right after them — row 22 (the prompt dock line of the
-    // fixed 24-row frame), column 7 ("hi" after the "> " prompt).
-    //
-    // The wait is bounded tight: a resume that re-queried kitty leaves
-    // the app reader starved behind crossterm's support check for the
-    // check's whole 2s budget, and the typed bytes only render when it
-    // expires — the fixed resume leaves the reader free and renders in
-    // well under a second even on a loaded VM (the pre-fix run took
-    // 2.0s here, 10/10, strace-verified).
+    // Ratatui's diff renderer repaints only changed cells: the typed text shows as the
+    // caret's park right after it. The bound is tight: a re-queried kitty starves 2s.
     let mark_typed = harness.mark();
     harness.write(b"hi");
     harness.wait_from_bounded(
         mark_typed,
-        "\x1b[22;7H",
+        &format!("\x1b[{prompt_row};7H"),
         "the resumed editor renders the typed text",
         Duration::from_millis(1500),
     );
 
-    // The regression lock: the resume never re-queries kitty. Drain the
-    // tail so the assertion sees everything the child wrote since the
-    // SIGCONT — the once-per-process probe's query bytes must be absent
-    // from the whole resume (a re-armed probe re-blindes the reader for
-    // its 2s support check; the byte-level evidence of the fix is that
-    // the query appears exactly once, on the first mount).
+    // The regression lock: the once-per-process query must be absent from the whole resume.
     harness.drain_until_quiet(4);
     let resume_region = harness.region_since(mark_resume);
     assert!(
@@ -229,17 +175,77 @@ fn ctrl_z_releases_tracking_stops_and_sigcont_re_applies() {
     harness.finish();
 }
 
+/// Real-tty e2e for `app.editor.external` (TS `openExternalEditor`): ctrl+g hands the
+/// terminal to `$VISUAL`; the resumed surface strips one trailing newline.
+#[test]
+fn ctrl_g_hands_the_terminal_to_the_external_editor() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // The child's raw-mode enable must land on the harness pty alone.
+    lead_fresh_session();
+    let _lock = match HARNESS_LOCK.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    // The editor stand-in first SIGINTs its own process group, proving the TUI's SIGINT shield.
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let editor = dir.path().join("editor.sh");
+    std::fs::write(
+        &editor,
+        "#!/bin/sh\ntrap '' INT\nkill -INT 0\nprintf 'edited externally\n' > \"$1\"\n",
+    )
+    .expect("write editor script");
+    std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod editor script");
+    let mut harness = SuspendHarness::start(Some(&editor));
+
+    harness.wait_from_start(MOUSE_ENABLE, "startup mouse enable");
+
+    // The first content frame is the readiness marker (earlier keystrokes race the kitty probe).
+    harness.wait_from_start(" >  ", "the first frame's prompt row rendered");
+    let prompt_row = harness.wait_caret_row_from(0, 5, "the first frame's empty editor rendered");
+
+    // Each typed key paints its own cell: the draft's arrival is the caret's park.
+    let mark_draft = harness.mark();
+    harness.write(b"draft");
+    harness.wait_from(
+        mark_draft,
+        &format!("\x1b[{prompt_row};10H"),
+        "the draft rendered in the editor",
+    );
+
+    let mark_edit = harness.mark();
+    harness.write(&[0x07]);
+    harness.wait_from(
+        mark_edit,
+        "edited externally",
+        "the editor child's text replaced the draft",
+    );
+
+    // The strip proof: one newline removed, so the caret parks at the end of the
+    // edited line (a leftover would park it on the wrapped second line).
+    let mark_typed = harness.mark();
+    harness.write(b"x");
+    harness.wait_from_bounded(
+        mark_typed,
+        &format!("\x1b[{prompt_row};22H"),
+        "the editor parked the caret after the single-line edit",
+        Duration::from_secs(10),
+    );
+
+    harness.finish();
+}
+
 /// One pty-backed product child plus the mock supervisor it attaches to.
 struct SuspendHarness {
     child: Child,
-    /// The mock-supervisor server thread's join handle (it exits with the
-    /// child's connection).
+    /// The mock-supervisor server thread's join handle (it exits with the child's connection).
     _server: std::thread::JoinHandle<()>,
     master: PtyReader,
 }
 
 impl SuspendHarness {
-    fn start() -> SuspendHarness {
+    fn start(editor: Option<&std::path::Path>) -> SuspendHarness {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let socket = dir.path().join("tui.sock");
         let supervisor = MockSupervisor::bind(&socket);
@@ -256,10 +262,8 @@ impl SuspendHarness {
         )
         .expect("open pty");
 
-        let child = spawn_child(&socket, &pty.slave);
-        // Leak the temp dir's socket path on purpose: the child needs the
-        // socket for the lifetime of the test, and the whole tree dies
-        // with the child at teardown.
+        let child = spawn_child(&socket, &pty.slave, editor);
+        // Leak the socket dir on purpose: the child needs it for the test's lifetime.
         std::mem::forget(dir);
         SuspendHarness {
             child,
@@ -292,6 +296,11 @@ impl SuspendHarness {
         self.master.wait_from_bounded(mark, needle, what, bound);
     }
 
+    /// Wait until a caret parks at `column` and return its row (DERIVED, not assumed).
+    fn wait_caret_row_from(&mut self, mark: usize, column: u16, what: &str) -> String {
+        self.master.wait_caret_row_from(mark, column, what)
+    }
+
     fn region_since(&self, mark: usize) -> Vec<u8> {
         self.master.region_since(mark)
     }
@@ -302,13 +311,11 @@ impl SuspendHarness {
 
     fn finish(mut self) {
         let _ = self.child.kill();
-        // Reap the child so no zombie is left behind.
         let _ = self.child.wait();
     }
 }
 
-/// Non-blocking reader over the pty master, collecting the raw byte
-/// stream the child writes.
+/// Non-blocking reader over the pty master, collecting the raw byte stream the child writes.
 struct PtyReader {
     file: std::fs::File,
     output: Vec<u8>,
@@ -328,8 +335,7 @@ impl PtyReader {
         self.output.len()
     }
 
-    /// The bytes collected since the given mark (the region the
-    /// no-re-query assertion inspects).
+    /// The bytes collected since the given mark.
     fn region_since(&self, mark: usize) -> Vec<u8> {
         self.output[mark..].to_vec()
     }
@@ -338,12 +344,8 @@ impl PtyReader {
         self.file.write_all(payload).expect("write to the pty");
     }
 
-    /// Read until the master goes quiet for `quiet_polls` consecutive
-    /// polls: the suspend's scrollback flush fills the pty's kernel-side
-    /// buffer, and a resume write that finds it full is silently dropped
-    /// by the pty driver — draining to silence first keeps every resume
-    /// byte (this is the whole difference between the flaky and the
-    /// deterministic harness).
+    /// Read until quiet for `quiet_polls` polls: a write into a full kernel buffer is
+    /// dropped, so drain to silence before every resume write.
     fn drain_until_quiet(&mut self, quiet_polls: usize) {
         let mut quiet = 0;
         while quiet < quiet_polls {
@@ -359,9 +361,7 @@ impl PtyReader {
         }
     }
 
-    /// Drain the master until the needle appears in the output collected
-    /// since the given mark, bounded by a generous harness deadline
-    /// (attach + first renders).
+    /// Drain until the needle appears since the mark (bounded by a generous deadline).
     fn wait_from(&mut self, mark: usize, needle: &str, what: &str) {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
@@ -377,17 +377,15 @@ impl PtyReader {
             if Instant::now() > deadline {
                 let text = String::from_utf8_lossy(&self.output[mark..]);
                 panic!(
-                    "timeout waiting for {what} (needle {needle:?}); pty tail since mark:\n{text}"
+                    "timeout waiting for {what} (needle {needle:?}); wire log:\n{}\npty tail since mark:\n{text}",
+                    wire_log_dump()
                 );
             }
             std::thread::sleep(Duration::from_millis(20));
         }
     }
 
-    /// `wait_from` with a caller-chosen bound: the paths this pins (the
-    /// resume's input freedom) must answer well inside the bound, while
-    /// the regression they lock out (the re-armed kitty support check's
-    /// 2s event-reader starvation) exceeds it.
+    /// `wait_from` with a caller-chosen bound (the regression's 2s starvation exceeds it).
     fn wait_from_bounded(&mut self, mark: usize, needle: &str, what: &str, bound: Duration) {
         let deadline = Instant::now() + bound;
         loop {
@@ -410,6 +408,30 @@ impl PtyReader {
             std::thread::sleep(Duration::from_millis(10));
         }
     }
+
+    /// Wait (the plain wait's 30s bound) until a caret paints at `column` and return its row.
+    fn wait_caret_row_from(&mut self, mark: usize, column: u16, what: &str) -> String {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Some(row) = caret_row_at_column(&self.output[mark..], column) {
+                return row;
+            }
+            let mut buffer = [0u8; 8192];
+            let result = self.file.read(&mut buffer);
+            match result {
+                Ok(0) | Err(_) => {}
+                Ok(n) => self.output.extend_from_slice(&buffer[..n]),
+            }
+            if Instant::now() > deadline {
+                let text = String::from_utf8_lossy(&self.output[mark..]);
+                panic!(
+                    "timeout waiting for {what} (a caret at column {column}); \
+                     pty tail since mark:\n{text}"
+                );
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
 }
 
 fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -418,18 +440,36 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
-/// A child process group of this very binary, re-executed in child mode
-/// with the pty slave as its terminal and no tmux (the tmux keyboard
-/// check must stay out of the way). The child lives in its own process
-/// group inside the runner's session: kill(0, SIGTSTP) stops the child
-/// and not this runner, and the stop holds — the child's parent, the
-/// session leader, sits in a different process group of the same
-/// session. The child's terminal is the harness pty, never a
-/// controlling terminal, so no background-group arbitration
-/// (SIGTTIN/SIGTTOU) applies to its I/O across the stop/continue cycle.
-fn spawn_child(socket: &std::path::Path, slave: &OwnedFd) -> Child {
-    // Runs between fork and exec in the child: setpgid moves it into its
-    // own process group, inside the runner's session.
+/// The row of the LAST caret parked at `column` (startup paints transient carets).
+fn caret_row_at_column(stream: &[u8], column: u16) -> Option<String> {
+    let suffix = format!(";{column}H").into_bytes();
+    let mut from = 0;
+    let mut row = None;
+    while let Some(at) = find_subsequence(&stream[from..], &suffix) {
+        let head = &stream[from..from + at];
+        let digits_start = head
+            .iter()
+            .rposition(|byte| !byte.is_ascii_digit())
+            .map_or(0, |last_non_digit| last_non_digit + 1);
+        let digits = &head[digits_start..];
+        let esc = head[..digits_start].ends_with(b"\x1b[");
+        if esc && !digits.is_empty() {
+            row = Some(String::from_utf8_lossy(digits).into_owned());
+        }
+        from += at + suffix.len();
+    }
+    row
+}
+
+/// A child process group of this very binary, re-executed with the pty slave as
+/// its terminal (no tmux, no controlling terminal: no SIGTTIN/SIGTTOU). kill(0,
+/// SIGTSTP) stops the child, not this runner, and the stop holds.
+fn spawn_child(
+    socket: &std::path::Path,
+    slave: &OwnedFd,
+    editor: Option<&std::path::Path>,
+) -> Child {
+    // Runs between fork and exec in the child: setpgid into its own group.
     fn make_process_group() -> std::io::Result<()> {
         nix::unistd::setpgid(Pid::from_raw(0), Pid::from_raw(0))?;
         Ok(())
@@ -439,7 +479,11 @@ fn spawn_child(socket: &std::path::Path, slave: &OwnedFd) -> Child {
         .arg("--exact")
         .arg("suspend_child_mode")
         .env(CHILD_SOCKET_ENV, socket)
-        .env_remove("TMUX")
+        .env_remove("TMUX");
+    if let Some(editor) = editor {
+        command.env("VISUAL", editor);
+    }
+    command
         .stdin(slave_as_stdio(slave))
         .stdout(slave_as_stdio(slave))
         .stderr(slave_as_stdio(slave));
@@ -456,6 +500,7 @@ fn slave_as_stdio(slave: &OwnedFd) -> Stdio {
 
 fn child_options(socket: PathBuf) -> InteractiveOptions {
     InteractiveOptions {
+        models: None,
         socket_path: socket,
         cwd: PathBuf::from("/tmp"),
         session_dir: None,
@@ -507,8 +552,7 @@ fn wait_for_stopped(pid: u32, what: &str) {
     }
 }
 
-/// One attached session behind a mock supervisor socket (the same frame
-/// contract the headless e2e harness serves).
+/// One attached session behind a mock supervisor socket (the family's frame contract).
 struct MockSupervisor {
     listener: std::os::unix::net::UnixListener,
 }
@@ -524,6 +568,7 @@ impl MockSupervisor {
         let Ok((stream, _)) = self.listener.accept() else {
             return;
         };
+        log_wire("[accept] the child connected");
         let write_stream = stream.try_clone().expect("clone mock socket");
         let mut writer = write_stream;
         let mut reader = std::io::BufReader::new(stream);
@@ -543,6 +588,7 @@ impl MockSupervisor {
                 Ok(0) | Err(_) => break,
                 Ok(_) => {}
             }
+            log_wire(&format!("[req] {line}"));
             let Ok(envelope) = serde_json::from_str::<Value>(line.trim()) else {
                 continue;
             };
@@ -593,6 +639,7 @@ impl MockSupervisor {
 
 fn write_json(writer: &mut std::os::unix::net::UnixStream, value: &Value) {
     let mut line = serde_json::to_string(value).expect("serialize mock frame");
+    log_wire(&format!("[res] {line}"));
     line.push('\n');
     writer.write_all(line.as_bytes()).expect("write mock frame");
     writer.flush().expect("flush mock frame");

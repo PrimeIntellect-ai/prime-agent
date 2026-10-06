@@ -1,10 +1,7 @@
-//! The `@` fuzzy file search (TS `getFuzzyFileSuggestions` +
-//! `walkDirectoryWithFd`): fd's own `ignore`-crate walk — `--type f
-//! --type d --follow --hidden --exclude .git` with fd's default
-//! gitignore rules — run on one background thread, because a no-match
-//! walk of a large tree takes seconds. Dropping the [`FileSearch`]
-//! handle cancels the walk (TS kills fd on abort); the result lands on
-//! the receiver.
+//! The `@` fuzzy file search: fd's own `ignore`-crate walk — files and directories, links
+//! followed, hidden entries included, `.git` pruned, fd's default gitignore rules — run
+//! on one background thread, because a no-match walk of a large tree takes seconds; the
+//! result lands on the receiver.
 
 use std::cmp::Reverse;
 use std::path::{Path, PathBuf};
@@ -21,15 +18,13 @@ use super::{
     Suggestions,
 };
 
-/// fd's `--max-results` (TS `walkDirectoryWithFd`): the walk stops once
-/// this many entries match.
+/// fd's `--max-results`: the walk stops once this many entries match.
 const MAX_WALK_RESULTS: usize = 100;
-/// The menu's row cap (TS `topEntries.slice(0, 20)`).
+/// The menu's row cap.
 const MAX_SUGGESTIONS: usize = 20;
 
-/// An in-flight `@` file search: the walk thread sends its result over
-/// `results` (`None` when there is nothing to suggest). Dropping the
-/// handle cancels the walk, so a stale search costs nothing.
+/// An in-flight `@` file search: the walk thread sends its result over `results` (`None`
+/// when there is nothing to suggest). Dropping the handle cancels the walk.
 #[derive(Debug)]
 pub struct FileSearch {
     pub(crate) results: Receiver<Option<Suggestions>>,
@@ -62,9 +57,8 @@ struct WalkedEntry {
     is_directory: bool,
 }
 
-/// The `@dir/partial` scope (TS `resolveScopedFuzzyQuery`): the walk
-/// runs inside `base_dir` for `query`, and `display_base` rebuilds the
-/// typed scope in the item paths.
+/// The `@dir/partial` scope: the walk runs inside `base_dir` for `query`, and
+/// `display_base` rebuilds the typed scope in the item paths.
 struct ScopedQuery {
     base_dir: PathBuf,
     query: String,
@@ -95,11 +89,8 @@ fn resolve_scoped_query(base: &Path, raw_query: &str) -> Option<ScopedQuery> {
     })
 }
 
-/// Walk with fd's semantics (TS `walkDirectoryWithFd`): the parallel
-/// `ignore` walker with hidden entries included, links followed, and
-/// `.git` pruned, the base itself skipped, the walk cut at
-/// [`MAX_WALK_RESULTS`] or on cancel. Results come back in fd's printed
-/// form — relative to the base, directories carrying their trailing `/`.
+/// Walk with fd's semantics: the parallel `ignore` walker, the base itself skipped, the
+/// walk cut at [`MAX_WALK_RESULTS`] or on cancel; results come back in fd's printed form.
 fn walk_directory(
     walk_base: &Path,
     regex: Option<&regex::Regex>,
@@ -120,9 +111,8 @@ fn walk_directory(
                 let Ok(entry) = entry else {
                     return WalkState::Continue;
                 };
-                // fd never prints the base directory itself, and only
-                // files and directories reach the results (broken links
-                // and loops arrive as errors and skip).
+                // Only files and directories reach the results (broken
+                // links and loops arrive as errors and skip).
                 if entry.depth() == 0 {
                     return WalkState::Continue;
                 }
@@ -157,9 +147,8 @@ fn walk_directory(
     found.into_inner().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The walk thread body (TS `getFuzzyFileSuggestions`): resolve the
-/// typed scope, walk with fd's semantics, score, and build the items.
-/// `None` means no menu: fd matched nothing, the query was an invalid
+/// The walk thread body: resolve the typed scope, walk with fd's semantics, score, and
+/// build the items. `None` means no menu: fd matched nothing, the query was an invalid
 /// regex (fd exits non-zero), or every entry scored zero.
 fn search(base: &Path, at_prefix: &str, cancel: &AtomicBool) -> Option<Suggestions> {
     let (raw_query, _is_at_prefix, is_quoted_prefix) = parse_path_prefix(at_prefix);
@@ -168,10 +157,8 @@ fn search(base: &Path, at_prefix: &str, cancel: &AtomicBool) -> Option<Suggestio
         Some(scoped) => (scoped.base_dir.clone(), scoped.query.clone()),
         None => (base.to_path_buf(), raw_query),
     };
-    // The fd pattern is the raw query as a regex (smart case), matched
-    // against the file name — or the whole path, which fd holds
-    // absolute because the base is absolute, when the query contains a
-    // `/`. An empty query matches everything.
+    // The fd pattern is the raw query as a regex (smart case), matched against the file
+    // name — or the whole path when the query contains a `/`. An empty query matches everything.
     let pattern = build_fd_path_query(&query);
     let full_path_mode = to_display_path(&query).contains('/');
     let regex = if pattern.is_empty() {
@@ -237,9 +224,8 @@ fn search(base: &Path, at_prefix: &str, cancel: &AtomicBool) -> Option<Suggestio
     })
 }
 
-/// TS `scoreEntry`: exact name 100, name prefix 80, name contains 50,
-/// path contains 30, +10 for directories (when positive), all
-/// case-insensitive against the fd-printed path.
+/// Exact name 100, name prefix 80, name contains 50, path contains 30,
+/// +10 for directories (when positive), all case-insensitive.
 fn score_entry(file_path: &str, query: &str, is_directory: bool) -> i32 {
     let file_name = file_path
         .trim_end_matches('/')
@@ -265,9 +251,8 @@ fn score_entry(file_path: &str, query: &str, is_directory: bool) -> i32 {
     score
 }
 
-/// The fd path query (TS `buildFdPathQuery`): the raw query when it
-/// holds no `/`; otherwise the segments regex-escaped and joined with
-/// `[\\/]`, a trailing separator included.
+/// The raw query when it holds no `/`; otherwise the segments
+/// regex-escaped and joined with `[\\/]`, a trailing separator included.
 fn build_fd_path_query(query: &str) -> String {
     let normalized = to_display_path(query);
     if !normalized.contains('/') {
@@ -291,13 +276,13 @@ fn build_fd_path_query(query: &str) -> String {
     pattern
 }
 
-/// Normalize backslashes to `/` on every platform (TS `toDisplayPath`).
+/// Normalize backslashes to `/` on every platform.
 fn to_display_path(value: &str) -> String {
     value.replace('\\', "/")
 }
 
-/// Rebuild the scoped display path (TS `scopedPathForDisplay`): the
-/// typed base plus the walk-relative path.
+/// Rebuild the scoped display path: the typed base plus the
+/// walk-relative path.
 fn scoped_path_for_display(display_base: &str, relative_path: &str) -> String {
     let normalized = to_display_path(relative_path);
     if display_base == "/" {

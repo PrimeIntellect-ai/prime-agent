@@ -1,16 +1,8 @@
-//! The session input-pause surface (protocol breadth wave b8): the
-//! worker arms for `acquire_session_input_pause` and
-//! `release_session_input_pause` (TS daemon-mode `case
-//! "acquire_session_input_pause"` / `case "release_session_input_pause"`)
-//! plus the pause itself - the input-admission gate the turn runner
-//! consults before it admits queued work (TS `acquireSessionInputPause`'s
-//! `_sessionInputAdmissionPauses` token set).
-//!
-//! While any pause is held, the session's queued input (prompts, steering,
-//! follow-ups) stays queued; releasing wakes the runner. A pause is leased
-//! to one owner identity: reacquiring the same session with the same lease
-//! key answers the existing pause id, and releasing a pause another client
-//! holds answers the TS ownership error.
+//! The session input-pause surface: the worker arms plus the input-admission
+//! gate the turn runner consults before it admits queued work. While any pause
+//! is held, queued input stays queued; a pause is leased to one owner identity:
+//! reacquiring with the same lease key answers the existing id, and a foreign
+//! release answers the TS ownership error.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -207,6 +199,7 @@ impl Worker {
         let pause_id = self
             .input_pauses
             .acquire(&active_session_id, &owner_client_id, lease_key);
+        self.idle_notify.notify_waiters();
         response_success(
             None,
             "acquire_session_input_pause",
@@ -214,10 +207,8 @@ impl Worker {
         )
     }
 
-    /// `release_session_input_pause`: the TS outcome ladder - an unknown
-    /// pause id answers the plain success, a foreign owner answers the
-    /// ownership error, a correct release lifts the admission gate and
-    /// wakes the turn runner.
+    /// `release_session_input_pause`: the TS outcome ladder — an unknown id
+    /// answers the plain success, a foreign owner the ownership error.
     pub(crate) fn handle_release_session_input_pause(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("release_session_input_pause") {
             return response;
@@ -241,10 +232,8 @@ impl Worker {
             .release(pause_id, &owner_client_id, &active_session_id)
         {
             ReleaseOutcome::Released => {
-                // The gate lifted: queued input admits again, and the
-                // release is a TS `_maybeResumeGoalContinuationAfterRlmWork`
-                // site (the deferral held while the pause owned admission
-                // re-evaluates).
+                // The gate lifted: queued input admits again, and the held
+                // goal-continuation deferral re-evaluates.
                 self.work_notify.notify_one();
                 if let Some(engine) = self.agent_engine.as_ref() {
                     engine.retry_owed_goal_continuation();
@@ -301,6 +290,51 @@ mod tests {
         worker
     }
 
+    #[tokio::test]
+    async fn a_pause_wakes_idle_wait_holding_queued_input() {
+        let worker = created_worker().await;
+        {
+            let mut core = worker.core.lock().unwrap();
+            core.queued_input_suspended = true;
+            core.follow_up.push_back(crate::worker::QueuedItem {
+                priority: crate::worker::QueuePriority::Human,
+                preview: None,
+                message: "held follow-up".to_string(),
+                custom_message: None,
+                agent_message: None,
+                queue_key: None,
+                admission_id: None,
+                images: Vec::new(),
+                done: None,
+                queue_visible: true,
+                policy: crate::worker::TurnPolicy::Queued,
+                forced_batch: false,
+            });
+        }
+        // Clear a create-time permit so acquisition must wake this waiter.
+        worker.idle_notify.notify_one();
+        worker.idle_notify.notified().await;
+        let waiting = tokio::spawn({
+            let worker = Arc::clone(&worker);
+            async move { worker.wait_until_idle().await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished(), "queued input holds the idle wait");
+        let pause = worker
+            .dispatch(
+                "acquire_session_input_pause",
+                &json!({
+                    "activeSessionId": "pause-session", "leaseKey": "idle-wake", "clientId": "test"
+                }),
+            )
+            .await;
+        assert!(pause.success, "pause failed: {pause:?}");
+        tokio::time::timeout(std::time::Duration::from_secs(2), waiting)
+            .await
+            .expect("pause acquisition did not wake the idle waiter")
+            .expect("idle waiter panicked");
+    }
+
     /// Wire shape: acquire answers `{ pauseId }`, the same lease
     /// deduplicates to the same id, a different lease mints a new one.
     #[tokio::test]
@@ -345,9 +379,6 @@ mod tests {
         assert_ne!(other.data.unwrap()["pauseId"], pause_id);
     }
 
-    /// Wire shape: release answers the plain TS success for an unknown
-    /// id, the ownership error for a foreign client, and lifts the gate
-    /// for the owner.
     #[tokio::test]
     async fn release_answers_the_ts_outcome_ladder() {
         let worker = created_worker().await;
@@ -397,8 +428,6 @@ mod tests {
         assert!(!worker.input_pauses.paused());
     }
 
-    /// The admission gate: held pauses keep queued input queued, a release
-    /// admits it again.
     #[tokio::test]
     async fn the_gate_holds_queued_input_until_released() {
         let worker = created_worker().await;

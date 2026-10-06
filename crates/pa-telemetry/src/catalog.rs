@@ -1,14 +1,13 @@
 //! The versioned event catalog: every product event's name and typed property
 //! rules, the successor of the deleted `docs/telemetry-events.md`.
 //!
-//! Schema version 2 adds the tracking vocabulary of the (never-merged) TS
-//! PR #2117: `agent run started`, `agent error`, `agent timing`,
-//! `agent tool summary`, `onboarding stage`, `agent feature outcome`,
-//! `agent startup stage`, `agent input stage`, and
-//! `agent installation stage`, each a catalog entry with typed property
-//! rules, plus enrichment on the legacy session events. The v1 adoption
-//! events stay catalogued (schema rules: additive changes do not bump the
-//! schema version; the new-event vocabulary does).
+//! The catalog is the low-frequency set: per-run facts ride the one
+//! `agent run completed` per run (TS parity), per-session facts ride
+//! `agent session ended`, the interactive client's adoption counters ride
+//! its one `tui exit`; the remaining events are lifecycle moments
+//! (startup, onboarding, installation, update, daemon incidents). Schema
+//! version 2 is the #2117 vocabulary (the v2 enrichment on the legacy
+//! events and the onboarding/startup/installation stages).
 //!
 //! [`sanitize`] is the platform adjust layer: before a batch reaches any
 //! sink, every catalogued event's properties are normalized against its
@@ -22,28 +21,18 @@ use serde_json::Value;
 
 use crate::properties::Properties;
 
-/// The current schema version stamped on every event. Bumped to 2 when the
-/// #2117 tracking vocabulary landed; additive property changes do not bump
-/// it.
+/// The current schema version stamped on every event; additive property
+/// changes do not bump it.
 pub const SCHEMA_VERSION: u64 = 2;
-
-/// The property-rule revision of the error-message policy (the reviewed
-/// fixed-string set). #2117 `error_message_policy_revision`.
-pub const ERROR_MESSAGE_POLICY_REVISION: u64 = 1;
-
-/// The error-classifier revision (`classifier_revision` on `agent error`).
-pub const ERROR_CLASSIFIER_REVISION: u64 = 1;
 
 // ---------------------------------------------------------------------------
 // Rule kinds
-// ---------------------------------------------------------------------------
 
-/// One property's validation rule (the #2117 `TelemetryPropertyRule`).
+/// One property's validation rule.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PropKind {
     /// Fixed vocabulary; an out-of-vocabulary value falls back to the
-    /// fallback, a null stays null when `nullable` (e.g. `error_category`
-    /// is null when the run did not error).
+    /// fallback, a null stays null when `nullable`.
     Enum {
         values: &'static [&'static str],
         fallback: &'static str,
@@ -163,8 +152,8 @@ impl PropKind {
 pub struct PropertyRule {
     /// The value rule.
     pub kind: PropKind,
-    /// True when the event is malformed without this property (the
-    /// builder-level contract; sanitize never invents required values).
+    /// True when the event is malformed without this property; sanitize
+    /// never invents required values.
     pub required: bool,
 }
 
@@ -179,11 +168,8 @@ pub struct EventRule {
     pub since: u64,
 }
 
-// ---------------------------------------------------------------------------
-// Shared vocabularies (#2117 enums + the v1 doc's fixed value sets)
-// ---------------------------------------------------------------------------
+// Shared vocabularies
 
-/// The legacy error categories (v1 `error_category`).
 pub const ERROR_CATEGORIES: &[&str] = &[
     "authentication",
     "rate_limit",
@@ -194,7 +180,6 @@ pub const ERROR_CATEGORIES: &[&str] = &[
     "other",
 ];
 
-/// The #2117 error subtypes.
 pub const ERROR_SUBTYPES: &[&str] = &[
     "credential_missing",
     "credential_invalid",
@@ -210,6 +195,7 @@ pub const ERROR_SUBTYPES: &[&str] = &[
     "provider_unavailable",
     "refusal",
     "malformed_response",
+    "stream_drop",
     "context_limit",
     "configuration_error",
     "filesystem_error",
@@ -218,191 +204,11 @@ pub const ERROR_SUBTYPES: &[&str] = &[
     "unknown",
 ];
 
-/// The #2117 error codes (provider codes, OS error codes, daemon codes).
-pub const ERROR_CODES: &[&str] = &[
-    "invalid_api_key",
-    "invalid_token",
-    "invalid_grant",
-    "token_expired",
-    "expired_token",
-    "missing_api_key",
-    "authentication_error",
-    "unauthorized",
-    "permission_error",
-    "permission_denied",
-    "access_denied",
-    "forbidden",
-    "model_not_found",
-    "model_access_denied",
-    "usage_not_included",
-    "insufficient_funds",
-    "insufficient_balance",
-    "insufficient_quota",
-    "quota_exceeded",
-    "resource_exhausted",
-    "rate_limit_error",
-    "rate_limit_exceeded",
-    "too_many_requests",
-    "overloaded_error",
-    "server_error",
-    "api_error",
-    "service_unavailable",
-    "refusal",
-    "content_filter",
-    "safety",
-    "malformed_response",
-    "context_length_exceeded",
-    "context_window_exceeded",
-    "ENOENT",
-    "EACCES",
-    "EPERM",
-    "ENOSPC",
-    "EMFILE",
-    "ENFILE",
-    "EROFS",
-    "ELOCKED",
-    "EEXIST",
-    "ENOTEMPTY",
-    "EBUSY",
-    "ENOTDIR",
-    "EISDIR",
-    "EIO",
-    "EADDRINUSE",
-    "EADDRNOTAVAIL",
-    "ECONNRESET",
-    "ECONNREFUSED",
-    "ECONNABORTED",
-    "EHOSTUNREACH",
-    "ENETUNREACH",
-    "ENOTFOUND",
-    "EAI_AGAIN",
-    "EPIPE",
-    "ETIMEDOUT",
-    "UND_ERR_CONNECT_TIMEOUT",
-    "UND_ERR_HEADERS_TIMEOUT",
-    "UND_ERR_BODY_TIMEOUT",
-    "UND_ERR_SOCKET",
-    "missing_session_cwd",
-    "session_import_file_not_found",
-    "session_already_active",
-    "session_recovering",
-    "daemon_supervisor_already_running",
-    "supervisor_generation_stale",
-    "daemon_shutdown_in_progress",
-    "supervisor_recovery_cancelled",
-    "command_result_uncertain",
-    "unknown",
-];
-
-/// The #2117 error components.
-pub const ERROR_COMPONENTS: &[&str] = &[
-    "startup",
-    "configuration",
-    "authentication",
-    "provider",
-    "tools",
-    "mcp",
-    "extensions",
-    "daemon",
-    "rpc",
-    "acp",
-    "session",
-    "compaction",
-    "background",
-    "unknown",
-];
-
-/// The #2117 error operations.
-pub const ERROR_OPERATIONS: &[&str] = &[
-    "startup",
-    "load",
-    "save",
-    "refresh",
-    "validate",
-    "login",
-    "logout",
-    "discover",
-    "request",
-    "stream",
-    "execute",
-    "connect",
-    "attach",
-    "parse",
-    "compact",
-    "retry",
-    "shutdown",
-    "uncaught_exception",
-    "unhandled_rejection",
-    "unknown",
-];
-
-/// The #2117 error stages.
-pub const ERROR_STAGES: &[&str] = &[
-    "startup",
-    "configuration",
-    "authentication",
-    "model_discovery",
-    "model_request",
-    "model_stream",
-    "tool_execution",
-    "session_persistence",
-    "compaction",
-    "background",
-    "shutdown",
-    "unknown",
-];
-
-/// The #2117 recovery actions.
-pub const RECOVERY_ACTIONS: &[&str] = &[
-    "automatic_retry",
-    "manual_retry",
-    "credentials_updated",
-    "provider_changed",
-    "model_changed",
-    "cancelled",
-    "none",
-    "unknown",
-];
-
-/// The #2117 recovery outcomes.
-pub const RECOVERY_OUTCOMES: &[&str] = &[
-    "pending",
-    "success",
-    "failed",
-    "cancelled",
-    "not_observed",
-    "unknown",
-];
-
-/// The #2117 classification sources.
-pub const CLASSIFICATION_SOURCES: &[&str] = &[
-    "structured_reason",
-    "http_status",
-    "typed_error",
-    "reviewed_message",
-    "unknown",
-];
-
-/// The error-message sources (#2117 `error_message_source`).
-pub const ERROR_MESSAGE_SOURCES: &[&str] = &["reviewed_literal", "system_template"];
-
 /// The #2117 tool categories.
 pub const TOOL_CATEGORIES: &[&str] = &[
-    "read",
-    "write",
-    "edit",
-    "bash",
-    "grep",
-    "find",
-    "ls",
-    "ipython",
-    "mcp",
-    "extension",
-    "custom",
-    "unknown",
+    "read", "write", "edit", "bash", "grep", "find", "ls", "ipython", "mcp", "custom", "unknown",
 ];
 
-/// The #2117 terminal outcomes.
 pub const TERMINAL_OUTCOMES: &[&str] = &[
     "success",
     "error",
@@ -411,47 +217,13 @@ pub const TERMINAL_OUTCOMES: &[&str] = &[
     "unknown",
 ];
 
-/// The #2117 timing origins.
-pub const TIMING_ORIGINS: &[&str] = &[
-    "worker_input",
-    "worker_action",
-    "worker_run",
-    "ui_input",
-    "ui_cancellation",
-    "ui",
-    "unknown",
-];
-
-/// The #2117 timing stages.
-pub const TIMING_STAGES: &[&str] = &[
-    "first_status",
-    "first_model_event",
-    "first_reasoning",
-    "first_text",
-    "tool",
-    "retry_wait",
-    "compaction",
-    "stream_gap",
-    "terminal",
-    "queue_wait",
-    "local_preparation",
-    "input_to_run",
-    "provider_dispatch",
-    "time_to_error",
-    "cancellation_to_idle",
-    "unknown",
-];
-
 /// The #2117 run triggers.
 pub const RUN_TRIGGERS: &[&str] = &["prompt", "continuation", "unknown"];
 
-/// The legacy run outcomes.
 pub const RUN_OUTCOMES: &[&str] = &["success", "error", "aborted"];
 
-/// The #2117 stop reasons.
 pub const STOP_REASONS: &[&str] = &["stop", "length", "toolUse", "error", "aborted", "unknown"];
 
-/// The provider categories (v1 `telemetryProviderCategory`).
 pub const PROVIDER_CATEGORIES: &[&str] = &[
     "anthropic",
     "openai",
@@ -467,13 +239,11 @@ pub const PROVIDER_CATEGORIES: &[&str] = &[
     "unknown",
 ];
 
-/// The model categories (v1 `modelCategory`).
 pub const MODEL_CATEGORIES: &[&str] = &[
     "claude", "gpt", "o1", "o3", "o4", "gemini", "glm", "kimi", "qwen", "deepseek", "llama",
     "mistral", "custom", "unknown",
 ];
 
-/// The auth categories (v1 `telemetryAuthCategory`).
 pub const AUTH_CATEGORIES: &[&str] = &[
     "oauth",
     "api_key",
@@ -489,25 +259,17 @@ pub const AUTH_CATEGORIES: &[&str] = &[
     "unknown",
 ];
 
-/// The #2117 feature names.
 pub const FEATURE_NAMES: &[&str] = &[
     "model", "login", "logout", "effort", "goal", "new", "resume", "fork", "clone", "tree",
     "feedback",
 ];
 
-/// The #2117 feature outcomes.
 pub const FEATURE_OUTCOMES: &[&str] = &[
     "initiated",
     "completed",
     "failed",
     "canceled",
     "unavailable",
-];
-
-/// The #2117 configuration choices (effort levels, goal actions).
-pub const CONFIGURATION_CHOICES: &[&str] = &[
-    "off", "minimal", "low", "medium", "high", "xhigh", "max", "create", "status", "pause",
-    "resume", "clear", "unknown",
 ];
 
 /// The #2117 onboarding stages.
@@ -521,7 +283,6 @@ pub const ONBOARDING_STAGES: &[&str] = &[
     "exit",
 ];
 
-/// The #2117 onboarding outcomes.
 pub const ONBOARDING_OUTCOMES: &[&str] = &[
     "initiated",
     "completed",
@@ -533,7 +294,6 @@ pub const ONBOARDING_OUTCOMES: &[&str] = &[
     "provider_switched",
 ];
 
-/// The #2117 onboarding entry reasons.
 pub const ONBOARDING_ENTRY_REASONS: &[&str] = &[
     "first_setup",
     "existing_configuration",
@@ -541,7 +301,6 @@ pub const ONBOARDING_ENTRY_REASONS: &[&str] = &[
     "reentered",
 ];
 
-/// The #2117 acquisition methods.
 pub const ACQUISITION_METHODS: &[&str] = &[
     "existing_configuration",
     "prime_browser",
@@ -552,7 +311,6 @@ pub const ACQUISITION_METHODS: &[&str] = &[
     "unknown",
 ];
 
-/// The #2117 validation scopes.
 pub const VALIDATION_SCOPES: &[&str] = &[
     "configuration",
     "identity_scope",
@@ -561,10 +319,8 @@ pub const VALIDATION_SCOPES: &[&str] = &[
     "unchecked",
 ];
 
-/// The #2117 timing scopes.
 pub const TIMING_SCOPES: &[&str] = &["system_work", "elapsed_including_user_wait"];
 
-/// The #2117 installation stages.
 pub const INSTALLATION_STAGES: &[&str] = &[
     "started",
     "requirements",
@@ -579,7 +335,6 @@ pub const INSTALLATION_STAGES: &[&str] = &[
     "completed",
 ];
 
-/// The #2117 installation outcomes.
 pub const INSTALLATION_OUTCOMES: &[&str] = &[
     "started",
     "success",
@@ -589,7 +344,6 @@ pub const INSTALLATION_OUTCOMES: &[&str] = &[
     "unavailable",
 ];
 
-/// The #2117 installation reasons.
 pub const INSTALLATION_REASONS: &[&str] = &[
     "up_to_date",
     "unsupported_install",
@@ -607,16 +361,12 @@ pub const INSTALLATION_REASONS: &[&str] = &[
     "unknown",
 ];
 
-/// The #2117 installation actions.
 pub const INSTALLATION_ACTIONS: &[&str] = &["install", "update"];
 
-/// The #2117 installation sources.
 pub const INSTALLATION_SOURCES: &[&str] = &["shell_installer", "cli", "interactive"];
 
-/// The #2117 ready kinds.
 pub const READY_KINDS: &[&str] = &["interactive", "headless"];
 
-/// The #2117 input stages.
 pub const INPUT_STAGES: &[&str] = &[
     "received",
     "queued",
@@ -630,21 +380,6 @@ pub const INPUT_STAGES: &[&str] = &[
     "cancellation_to_idle",
 ];
 
-/// The #2117 input outcomes.
-pub const INPUT_OUTCOMES: &[&str] = &[
-    "started",
-    "success",
-    "error",
-    "cancelled",
-    "no_run",
-    "unknown",
-    "initiated",
-    "completed",
-    "failed",
-    "canceled",
-    "unavailable",
-];
-
 /// The #2117 startup stages.
 pub const STARTUP_STAGES: &[&str] = &[
     "ui_ready",
@@ -654,21 +389,15 @@ pub const STARTUP_STAGES: &[&str] = &[
     "session_ui_rebind",
 ];
 
-/// The #2117 startup outcomes.
 pub const STARTUP_OUTCOMES: &[&str] = &["completed", "failed"];
 
-/// The #2117 startup kinds.
 pub const STARTUP_KINDS: &[&str] = &["cold", "warm_attach", "resumed", "unknown"];
 
-/// The #2117 build channels.
 pub const BUILD_CHANNELS: &[&str] = &["release", "prerelease", "development", "unknown"];
 
-/// The #2117 workload origins.
 pub const WORKLOAD_ORIGINS: &[&str] = &["interactive", "automated", "internal", "test", "unknown"];
 
-// ---------------------------------------------------------------------------
 // Rule constructors
-// ---------------------------------------------------------------------------
 
 const fn enum_rule(values: &'static [&'static str], fallback: &'static str) -> PropKind {
     PropKind::Enum {
@@ -708,9 +437,8 @@ const fn count() -> PropKind {
     }
 }
 
-/// The base properties merged under every event (the platform module
-/// stamps them): sanitize validates them against these rules instead of
-/// dropping them as uncatalogued.
+/// The base properties merged under every event (the platform module stamps them): sanitize
+/// validates them against these rules instead of dropping them as uncatalogued.
 pub const BASE_PROPERTIES: &[(&str, PropertyRule)] = &[
     ("version", optional(PropKind::Version)),
     (
@@ -779,14 +507,6 @@ const fn duration() -> PropKind {
     }
 }
 
-const fn http_status() -> PropKind {
-    PropKind::Number {
-        max: 599,
-        integer: true,
-        nullable: true,
-    }
-}
-
 const fn uuid() -> PropKind {
     PropKind::Uuid
 }
@@ -797,14 +517,6 @@ const fn version() -> PropKind {
 
 const fn boolean() -> PropKind {
     PropKind::Boolean { nullable: false }
-}
-
-const fn nullable_boolean() -> PropKind {
-    PropKind::Boolean { nullable: true }
-}
-
-const fn error_message() -> PropKind {
-    PropKind::BoundedString { max: 4096 }
 }
 
 const fn cost() -> PropKind {
@@ -818,13 +530,10 @@ const fn free_string(max: usize) -> PropKind {
     PropKind::BoundedString { max }
 }
 
-// ---------------------------------------------------------------------------
-// The catalog (schema v2): the #2117 events plus the v1 adoption events.
-// Every event the product emits has exactly one row here; the seams are the
-// complete emission set (privacy contract).
-// ---------------------------------------------------------------------------
+// The catalog: every event the product emits has exactly one row here; the
+// seams are the complete emission set (privacy contract).
 
-/// `agent started` (v1, enriched in v2): session creation, depth-0 only.
+/// Session creation, depth-0 only.
 const AGENT_STARTED: EventRule = EventRule {
     name: "agent started",
     since: 1,
@@ -832,19 +541,6 @@ const AGENT_STARTED: EventRule = EventRule {
         ("session_id", required(uuid())),
         ("skill_count", optional(count())),
         ("python_skill_count", optional(count())),
-    ],
-};
-
-/// `agent run started` (v2): fires at the run's `AgentStart`, pairing every
-/// admitted run with its id and trigger before any model call.
-const AGENT_RUN_STARTED: EventRule = EventRule {
-    name: "agent run started",
-    since: 2,
-    properties: &[
-        ("session_id", required(uuid())),
-        ("run_id", required(uuid())),
-        ("run_index", required(count())),
-        ("trigger", required(enum_rule(RUN_TRIGGERS, "unknown"))),
     ],
 };
 
@@ -884,7 +580,6 @@ const AGENT_RUN_COMPLETED: EventRule = EventRule {
             "error_category",
             optional(nullable_enum_rule(ERROR_CATEGORIES, "other")),
         ),
-        // v2 enrichment:
         ("run_id", optional(uuid())),
         ("run_index", optional(count())),
         ("trigger", optional(enum_rule(RUN_TRIGGERS, "unknown"))),
@@ -906,10 +601,60 @@ const AGENT_RUN_COMPLETED: EventRule = EventRule {
         ("retry_wait_ms", optional(duration())),
         ("compaction_duration_ms", optional(duration())),
         ("max_stream_gap_ms", optional(duration())),
+        // The folded per-run aggregates (one event per run):
+        ("model_latency_p50_ms", optional(duration())),
+        ("model_error_count", optional(count())),
+        ("error_authentication_count", optional(count())),
+        ("error_rate_limit_count", optional(count())),
+        ("error_timeout_count", optional(count())),
+        ("error_context_limit_count", optional(count())),
+        ("error_network_count", optional(count())),
+        ("error_provider_unavailable_count", optional(count())),
+        ("error_other_count", optional(count())),
+        ("tool_read_call_count", optional(count())),
+        ("tool_read_error_count", optional(count())),
+        ("tool_read_duration_ms", optional(duration())),
+        ("tool_read_max_duration_ms", optional(duration())),
+        ("tool_write_call_count", optional(count())),
+        ("tool_write_error_count", optional(count())),
+        ("tool_write_duration_ms", optional(duration())),
+        ("tool_write_max_duration_ms", optional(duration())),
+        ("tool_edit_call_count", optional(count())),
+        ("tool_edit_error_count", optional(count())),
+        ("tool_edit_duration_ms", optional(duration())),
+        ("tool_edit_max_duration_ms", optional(duration())),
+        ("tool_bash_call_count", optional(count())),
+        ("tool_bash_error_count", optional(count())),
+        ("tool_bash_duration_ms", optional(duration())),
+        ("tool_bash_max_duration_ms", optional(duration())),
+        ("tool_grep_call_count", optional(count())),
+        ("tool_grep_error_count", optional(count())),
+        ("tool_grep_duration_ms", optional(duration())),
+        ("tool_grep_max_duration_ms", optional(duration())),
+        ("tool_find_call_count", optional(count())),
+        ("tool_find_error_count", optional(count())),
+        ("tool_find_duration_ms", optional(duration())),
+        ("tool_find_max_duration_ms", optional(duration())),
+        ("tool_ls_call_count", optional(count())),
+        ("tool_ls_error_count", optional(count())),
+        ("tool_ls_duration_ms", optional(duration())),
+        ("tool_ls_max_duration_ms", optional(duration())),
+        ("tool_ipython_call_count", optional(count())),
+        ("tool_ipython_error_count", optional(count())),
+        ("tool_ipython_duration_ms", optional(duration())),
+        ("tool_ipython_max_duration_ms", optional(duration())),
+        ("mcp_tool_call_count", optional(count())),
+        ("mcp_tool_error_count", optional(count())),
+        ("mcp_tool_duration_ms", optional(duration())),
+        ("mcp_tool_max_duration_ms", optional(duration())),
+        ("custom_tool_call_count", optional(count())),
+        ("custom_tool_error_count", optional(count())),
+        ("custom_tool_duration_ms", optional(duration())),
+        ("custom_tool_max_duration_ms", optional(duration())),
     ],
 };
 
-/// `agent session ended` (v1, enriched in v2): session dispose.
+/// Session dispose.
 const AGENT_SESSION_ENDED: EventRule = EventRule {
     name: "agent session ended",
     since: 1,
@@ -929,145 +674,94 @@ const AGENT_SESSION_ENDED: EventRule = EventRule {
         ("cache_read_tokens", optional(tokens())),
         ("cache_write_tokens", optional(tokens())),
         ("total_tokens", optional(tokens())),
-        // v2 enrichment:
         (
             "terminal_outcome",
             optional(enum_rule(TERMINAL_OUTCOMES, "unknown")),
         ),
+        // The folded per-session counters:
+        ("retry_count", optional(count())),
+        ("failover_count", optional(count())),
+        ("model_error_count", optional(count())),
+        ("skill_use_count", optional(count())),
+        ("mcp_connector_use_count", optional(count())),
+        ("kernel_bootstrap_count", optional(count())),
+        ("kernel_bootstrap_cold_count", optional(count())),
+        ("kernel_bootstrap_failed_count", optional(count())),
+        ("kernel_bootstrap_max_ms", optional(duration())),
+        ("rlm_child_usage_count", optional(count())),
+        ("rlm_child_input_tokens", optional(tokens())),
+        ("rlm_child_output_tokens", optional(tokens())),
+        ("rlm_child_cache_read_tokens", optional(tokens())),
+        ("rlm_child_cache_write_tokens", optional(tokens())),
+        ("rlm_child_cost", optional(cost())),
+        ("feature_model_initiated_count", optional(count())),
+        ("feature_model_completed_count", optional(count())),
+        ("feature_model_failed_count", optional(count())),
+        ("feature_model_canceled_count", optional(count())),
+        ("feature_model_unavailable_count", optional(count())),
+        ("feature_login_initiated_count", optional(count())),
+        ("feature_login_completed_count", optional(count())),
+        ("feature_login_failed_count", optional(count())),
+        ("feature_login_canceled_count", optional(count())),
+        ("feature_login_unavailable_count", optional(count())),
+        ("feature_logout_initiated_count", optional(count())),
+        ("feature_logout_completed_count", optional(count())),
+        ("feature_logout_failed_count", optional(count())),
+        ("feature_logout_canceled_count", optional(count())),
+        ("feature_logout_unavailable_count", optional(count())),
+        ("feature_effort_initiated_count", optional(count())),
+        ("feature_effort_completed_count", optional(count())),
+        ("feature_effort_failed_count", optional(count())),
+        ("feature_effort_canceled_count", optional(count())),
+        ("feature_effort_unavailable_count", optional(count())),
+        ("feature_goal_initiated_count", optional(count())),
+        ("feature_goal_completed_count", optional(count())),
+        ("feature_goal_failed_count", optional(count())),
+        ("feature_goal_canceled_count", optional(count())),
+        ("feature_goal_unavailable_count", optional(count())),
+        ("feature_new_initiated_count", optional(count())),
+        ("feature_new_completed_count", optional(count())),
+        ("feature_new_failed_count", optional(count())),
+        ("feature_new_canceled_count", optional(count())),
+        ("feature_new_unavailable_count", optional(count())),
+        ("feature_resume_initiated_count", optional(count())),
+        ("feature_resume_completed_count", optional(count())),
+        ("feature_resume_failed_count", optional(count())),
+        ("feature_resume_canceled_count", optional(count())),
+        ("feature_resume_unavailable_count", optional(count())),
+        ("feature_fork_initiated_count", optional(count())),
+        ("feature_fork_completed_count", optional(count())),
+        ("feature_fork_failed_count", optional(count())),
+        ("feature_fork_canceled_count", optional(count())),
+        ("feature_fork_unavailable_count", optional(count())),
+        ("feature_clone_initiated_count", optional(count())),
+        ("feature_clone_completed_count", optional(count())),
+        ("feature_clone_failed_count", optional(count())),
+        ("feature_clone_canceled_count", optional(count())),
+        ("feature_clone_unavailable_count", optional(count())),
+        ("feature_tree_initiated_count", optional(count())),
+        ("feature_tree_completed_count", optional(count())),
+        ("feature_tree_failed_count", optional(count())),
+        ("feature_tree_canceled_count", optional(count())),
+        ("feature_tree_unavailable_count", optional(count())),
+        ("feature_feedback_initiated_count", optional(count())),
+        ("feature_feedback_completed_count", optional(count())),
+        ("feature_feedback_failed_count", optional(count())),
+        ("feature_feedback_canceled_count", optional(count())),
+        ("feature_feedback_unavailable_count", optional(count())),
     ],
 };
 
 /// `agent command used` (v1): builtin command names only, never arguments.
+/// The TUI client sends it with the base properties and the command name
+/// alone (TS `captureAgentCommandUsed`), so it carries no session id.
 const AGENT_COMMAND_USED: EventRule = EventRule {
     name: "agent command used",
     since: 1,
-    properties: &[
-        ("session_id", required(uuid())),
-        ("command_name", required(free_string(64))),
-    ],
+    properties: &[("command_name", required(free_string(64)))],
 };
 
-/// `agent error` (v2): a provider/runtime failure occurrence or a later
-/// recovery update. The message policy keeps raw provider text out: only
-/// reviewed fixed strings ride `error_message`, everything else reports
-/// the fixed `diagnostic_message`.
-const AGENT_ERROR: EventRule = EventRule {
-    name: "agent error",
-    since: 2,
-    properties: &[
-        ("error_id", required(uuid())),
-        (
-            "error_event_kind",
-            required(enum_rule(&["occurrence", "recovery_update"], "occurrence")),
-        ),
-        (
-            "error_subtype",
-            required(enum_rule(ERROR_SUBTYPES, "unknown")),
-        ),
-        (
-            "error_category",
-            optional(enum_rule(ERROR_CATEGORIES, "other")),
-        ),
-        ("error_code", optional(enum_rule(ERROR_CODES, "unknown"))),
-        ("http_status", optional(http_status())),
-        (
-            "classification_source",
-            optional(enum_rule(CLASSIFICATION_SOURCES, "unknown")),
-        ),
-        (
-            "classifier_revision",
-            optional(PropKind::Number {
-                max: 10_000,
-                integer: true,
-                nullable: false,
-            }),
-        ),
-        ("diagnostic_message", optional(free_string(256))),
-        (
-            "component",
-            optional(enum_rule(ERROR_COMPONENTS, "unknown")),
-        ),
-        (
-            "operation",
-            optional(enum_rule(ERROR_OPERATIONS, "unknown")),
-        ),
-        ("stage", optional(enum_rule(ERROR_STAGES, "unknown"))),
-        ("retryable", optional(nullable_boolean())),
-        ("retry_attempt", optional(count())),
-        ("retry_backoff_ms", optional(duration())),
-        ("consecutive_failure_count", optional(count())),
-        (
-            "recovery_action",
-            optional(enum_rule(RECOVERY_ACTIONS, "unknown")),
-        ),
-        (
-            "recovery_outcome",
-            optional(enum_rule(RECOVERY_OUTCOMES, "unknown")),
-        ),
-        ("error_message", optional(error_message())),
-        ("error_message_id", optional(free_string(64))),
-        (
-            "error_message_source",
-            optional(enum_rule(ERROR_MESSAGE_SOURCES, "system_template")),
-        ),
-        ("error_message_length", optional(count())),
-        ("error_message_length_lower_bound", optional(boolean())),
-        ("error_message_truncated", optional(boolean())),
-        ("error_message_redacted", optional(boolean())),
-    ],
-};
-
-/// `agent timing` (v2): one measurement per stage boundary.
-const AGENT_TIMING: EventRule = EventRule {
-    name: "agent timing",
-    since: 2,
-    properties: &[
-        ("stage", required(enum_rule(TIMING_STAGES, "unknown"))),
-        ("duration_ms", required(duration())),
-        (
-            "outcome",
-            optional(enum_rule(
-                &[
-                    "success",
-                    "error",
-                    "cancelled",
-                    "shutdown_interrupted",
-                    "unavailable",
-                    "unknown",
-                ],
-                "unknown",
-            )),
-        ),
-        (
-            "tool_category",
-            optional(enum_rule(TOOL_CATEGORIES, "custom")),
-        ),
-        (
-            "timing_origin",
-            optional(enum_rule(TIMING_ORIGINS, "unknown")),
-        ),
-    ],
-};
-
-/// `agent tool summary` (v2): per-run, per-tool-category aggregates.
-const AGENT_TOOL_SUMMARY: EventRule = EventRule {
-    name: "agent tool summary",
-    since: 2,
-    properties: &[
-        ("session_id", required(uuid())),
-        ("run_id", required(uuid())),
-        (
-            "tool_category",
-            required(enum_rule(TOOL_CATEGORIES, "custom")),
-        ),
-        ("call_count", required(count())),
-        ("failure_count", required(count())),
-        ("duration_ms", optional(duration())),
-        ("recovered_count", optional(count())),
-    ],
-};
-
-/// `onboarding stage` (v2): the onboarding journey's real stages only.
+/// The onboarding journey's real stages only.
 const ONBOARDING_STAGE: EventRule = EventRule {
     name: "onboarding stage",
     since: 2,
@@ -1102,7 +796,7 @@ const ONBOARDING_STAGE: EventRule = EventRule {
     ],
 };
 
-/// `onboarding completed` (v1): the onboarding flow's terminal outcome.
+/// The onboarding flow's terminal outcome.
 const ONBOARDING_COMPLETED: EventRule = EventRule {
     name: "onboarding completed",
     since: 1,
@@ -1117,27 +811,7 @@ const ONBOARDING_COMPLETED: EventRule = EventRule {
             "provider_category",
             optional(enum_rule(PROVIDER_CATEGORIES, "unknown")),
         ),
-        // v2 enrichment:
         ("onboarding_id", optional(uuid())),
-    ],
-};
-
-/// `agent feature outcome` (v2): user-facing feature attempts and results.
-const AGENT_FEATURE_OUTCOME: EventRule = EventRule {
-    name: "agent feature outcome",
-    since: 2,
-    properties: &[
-        ("feature_id", required(uuid())),
-        (
-            "feature_name",
-            required(enum_rule(FEATURE_NAMES, "unknown")),
-        ),
-        ("outcome", required(enum_rule(FEATURE_OUTCOMES, "unknown"))),
-        ("duration_ms", optional(duration())),
-        (
-            "configuration_choice",
-            optional(enum_rule(CONFIGURATION_CHOICES, "unknown")),
-        ),
     ],
 };
 
@@ -1156,22 +830,6 @@ const AGENT_STARTUP_STAGE: EventRule = EventRule {
         (
             "timing_scope",
             optional(enum_rule(TIMING_SCOPES, "system_work")),
-        ),
-    ],
-};
-
-/// `agent input stage` (v2): one input's lifecycle observations.
-const AGENT_INPUT_STAGE: EventRule = EventRule {
-    name: "agent input stage",
-    since: 2,
-    properties: &[
-        ("input_id", required(uuid())),
-        ("stage", required(enum_rule(INPUT_STAGES, "unknown"))),
-        ("outcome", required(enum_rule(INPUT_OUTCOMES, "unknown"))),
-        ("duration_ms", optional(duration())),
-        (
-            "timing_origin",
-            optional(enum_rule(TIMING_ORIGINS, "unknown")),
         ),
     ],
 };
@@ -1221,24 +879,6 @@ const AGENT_INSTALLATION_STAGE: EventRule = EventRule {
     ],
 };
 
-/// `skill used` (v1): skill invocation, never skill content.
-const SKILL_USED: EventRule = EventRule {
-    name: "skill used",
-    since: 1,
-    properties: &[
-        ("session_id", required(uuid())),
-        ("skill_name", required(free_string(128))),
-        (
-            "skill_kind",
-            required(enum_rule(&["markdown", "python"], "markdown")),
-        ),
-        (
-            "source",
-            required(enum_rule(&["prompt", "steer", "follow_up"], "prompt")),
-        ),
-    ],
-};
-
 /// `startup` (v1): process entry to ready interactive session environment.
 const STARTUP: EventRule = EventRule {
     name: "startup",
@@ -1250,7 +890,7 @@ const STARTUP: EventRule = EventRule {
     ],
 };
 
-/// `daemon event` (v1): supervision lifecycle, counts only.
+/// Supervision lifecycle, counts only.
 const DAEMON_EVENT: EventRule = EventRule {
     name: "daemon event",
     since: 1,
@@ -1268,10 +908,25 @@ const DAEMON_EVENT: EventRule = EventRule {
         ("skipped_idle", optional(count())),
         ("stopped", optional(count())),
         ("failed", optional(count())),
+        // The `summary` kind: the frequent supervision events, counted
+        // over a window of at most an hour.
+        ("window_ms", optional(duration())),
+        ("worker_exited_normal_count", optional(count())),
+        ("worker_exited_crash_count", optional(count())),
+        ("worker_restarted_count", optional(count())),
+        ("worker_overloaded_count", optional(count())),
+        ("attach_count", optional(count())),
+        ("reattach_count", optional(count())),
+        ("detach_count", optional(count())),
+        ("registration_refused_count", optional(count())),
+        ("session_rebound_count", optional(count())),
+        ("root_identity_persist_failed_count", optional(count())),
+        ("saved_sessions_list_count", optional(count())),
+        ("saved_sessions_usage_rows_max", optional(count())),
     ],
 };
 
-/// `model refused` (v1): the settings allowlist guardrail.
+/// The settings allowlist guardrail.
 const MODEL_REFUSED: EventRule = EventRule {
     name: "model refused",
     since: 1,
@@ -1300,66 +955,6 @@ const MODEL_REFUSED: EventRule = EventRule {
     ],
 };
 
-/// `mcp connector used` (v1): server name only.
-const MCP_CONNECTOR_USED: EventRule = EventRule {
-    name: "mcp connector used",
-    since: 1,
-    properties: &[
-        (
-            "action",
-            required(enum_rule(&["config", "refresh", "paste-install"], "config")),
-        ),
-        ("server_name", optional(free_string(128))),
-    ],
-};
-
-/// `rlm child usage attributed` (v1): a durable usage attribution row.
-const RLM_CHILD_USAGE: EventRule = EventRule {
-    name: "rlm child usage attributed",
-    since: 1,
-    properties: &[
-        ("session_id", required(uuid())),
-        (
-            "origin",
-            required(enum_rule(
-                &["spawn_task", "agent_message", "direct_user"],
-                "direct_user",
-            )),
-        ),
-        ("input_tokens", optional(tokens())),
-        ("output_tokens", optional(tokens())),
-        ("cache_read_tokens", optional(tokens())),
-        ("cache_write_tokens", optional(tokens())),
-        ("cost", optional(cost())),
-    ],
-};
-
-/// `tool executed` (v1): per tool execution, name + duration + outcome.
-const TOOL_EXECUTED: EventRule = EventRule {
-    name: "tool executed",
-    since: 1,
-    properties: &[
-        ("session_id", required(uuid())),
-        ("tool_name", required(free_string(128))),
-        ("duration_ms", required(duration())),
-        ("is_error", required(boolean())),
-    ],
-};
-
-/// `kernel bootstrap` (v1): one per actual kernel boot.
-const KERNEL_BOOTSTRAP: EventRule = EventRule {
-    name: "kernel bootstrap",
-    since: 1,
-    properties: &[
-        ("duration_ms", required(duration())),
-        ("cold", required(boolean())),
-        (
-            "outcome",
-            required(enum_rule(&["success", "error"], "error")),
-        ),
-    ],
-};
-
 /// `session archived` (v1): the daemon `kill` path.
 const SESSION_ARCHIVED: EventRule = EventRule {
     name: "session archived",
@@ -1370,195 +965,136 @@ const SESSION_ARCHIVED: EventRule = EventRule {
     ],
 };
 
-/// The `tui *` adoption events (v1).
-const TUI_EVENTS: &[EventRule] = &[
-    EventRule {
-        name: "tui scroll used",
-        since: 1,
-        properties: &[
-            (
-                "action",
-                required(enum_rule(
-                    &["page_up", "page_down", "top", "follow"],
-                    "page_up",
-                )),
-            ),
-            ("resumed_following", required(boolean())),
-        ],
-    },
-    EventRule {
-        name: "tui selection used",
-        since: 1,
-        properties: &[("lines", required(count()))],
-    },
-    EventRule {
-        name: "tui click used",
-        since: 1,
-        properties: &[(
-            "surface",
-            required(enum_rule(&["transcript", "editor", "picker"], "picker")),
-        )],
-    },
-    EventRule {
-        name: "tui enhanced keys",
-        since: 1,
-        properties: &[
-            ("kitty", required(boolean())),
-            ("modify_other_keys", required(boolean())),
-        ],
-    },
-    EventRule {
-        name: "tui hyperlinks",
-        since: 1,
-        properties: &[("enabled", required(boolean()))],
-    },
-    EventRule {
-        name: "tui image pasted",
-        since: 1,
-        properties: &[(
-            "mime_type",
-            required(enum_rule(
-                &["image/png", "image/jpeg", "image/gif", "image/webp"],
-                "image/png",
-            )),
-        )],
-    },
-    EventRule {
-        name: "tui exit",
-        since: 1,
-        properties: &[
-            (
-                "exit_reason",
-                required(enum_rule(
-                    &["ctrl_c_twice", "ctrl_d", "session_request", "daemon_closed"],
-                    "daemon_closed",
-                )),
-            ),
-            ("turn_active", required(boolean())),
-        ],
-    },
-    EventRule {
-        name: "tui input queued",
-        since: 1,
-        properties: &[
-            (
-                "lane",
-                required(enum_rule(&["steering", "follow_up"], "steering")),
-            ),
-            (
-                "steering_mode",
-                required(enum_rule(&["all", "one-at-a-time"], "all")),
-            ),
-        ],
-    },
-    EventRule {
-        name: "tui queue edited",
-        since: 1,
-        properties: &[(
-            "action",
-            required(enum_rule(
-                &["select", "edit", "delete", "reorder"],
-                "select",
-            )),
-        )],
-    },
-    EventRule {
-        name: "tui suspend used",
-        since: 1,
-        properties: &[(
-            "outcome",
-            required(enum_rule(&["resumed", "failed"], "failed")),
-        )],
-    },
-    EventRule {
-        name: "tui subagents open",
-        since: 1,
-        properties: &[("children_total", required(count()))],
-    },
-    EventRule {
-        name: "tui activity opened",
-        since: 1,
-        properties: &[(
-            "kind",
-            required(enum_rule(&["subagents", "heartbeats", "bash"], "subagents")),
-        )],
-    },
-    EventRule {
-        name: "tui menu opened",
-        since: 1,
-        properties: &[
-            (
-                "menu",
-                required(enum_rule(
-                    &[
-                        "model",
-                        "mcp",
-                        "settings",
-                        "context",
-                        "session",
-                        "system-prompt",
-                        "logs",
-                        "changelog",
-                        "hotkeys",
-                        "traces",
-                        "list",
-                    ],
-                    "list",
-                )),
-            ),
-            (
-                "source",
-                required(enum_rule(&["command", "tab"], "command")),
-            ),
-        ],
-    },
-    EventRule {
-        name: "tui prompt stash",
-        since: 1,
-        properties: &[
-            (
-                "action",
-                required(enum_rule(
-                    &["agents_view", "session_switch", "restored"],
-                    "session_switch",
-                )),
-            ),
-            ("had_images", required(boolean())),
-        ],
-    },
-    EventRule {
-        name: "tui bash shortcut used",
-        since: 1,
-        properties: &[
-            ("excluded", required(boolean())),
-            ("side_conversation", required(boolean())),
-        ],
-    },
-    EventRule {
-        name: "tui bash bang executed",
-        since: 1,
-        properties: &[
-            (
-                "duration_bucket",
-                required(enum_rule(
-                    &["lt_5s", "5_to_30s", "30s_plus", "unknown"],
-                    "unknown",
-                )),
-            ),
-            (
-                "exit_class",
-                required(enum_rule(
-                    &["zero", "nonzero", "cancelled", "failed", "unknown"],
-                    "unknown",
-                )),
-            ),
-        ],
-    },
-];
+/// A settled ipython cell that rendered as bash (v2): its executed
+/// `bash()` line share and command count, never command text. One of the
+/// two standalone TUI events (with `agent command used`), tracked per
+/// render by the upstream #3307 addition and kept intact.
+const TUI_IPYTHON_BASH_RENDERED: EventRule = EventRule {
+    name: "tui ipython bash rendered",
+    since: 2,
+    properties: &[
+        ("bash_lines", required(count())),
+        ("cell_lines", required(count())),
+        ("count", required(count())),
+    ],
+};
 
-/// The update-flow events (v1): `update completed` plus the per-phase
-/// events (one per status transition, the same names the `phase` property
-/// carries).
+/// `tui exit` (v1, enriched): one per interactive session run (each agents
+/// view handoff ends one), carrying that run's adoption counters (the TUI
+/// interactions, the client-side feature outcomes, the input-stage counts
+/// and maxima) instead of one event per interaction.
+const TUI_EXIT: EventRule = EventRule {
+    name: "tui exit",
+    since: 1,
+    properties: &[
+        (
+            "exit_reason",
+            required(enum_rule(
+                &["ctrl_c_twice", "ctrl_d", "session_request", "daemon_closed"],
+                "daemon_closed",
+            )),
+        ),
+        ("turn_active", required(boolean())),
+        ("tui_scroll_count", optional(count())),
+        ("tui_selection_count", optional(count())),
+        ("tui_click_count", optional(count())),
+        ("tui_menu_open_count", optional(count())),
+        ("tui_activity_open_count", optional(count())),
+        ("tui_subagents_open_count", optional(count())),
+        ("tui_scoped_agent_count", optional(count())),
+        ("tui_image_paste_count", optional(count())),
+        ("tui_input_queued_count", optional(count())),
+        ("tui_queue_edit_count", optional(count())),
+        ("tui_prompt_stash_count", optional(count())),
+        ("tui_bash_shortcut_count", optional(count())),
+        ("tui_bash_bang_count", optional(count())),
+        ("tui_external_editor_count", optional(count())),
+        ("tui_scoped_models_count", optional(count())),
+        ("tui_suspend_count", optional(count())),
+        ("tui_agents_action_count", optional(count())),
+        ("tui_enhanced_keys_kitty", optional(boolean())),
+        ("tui_enhanced_keys_modify_other_keys", optional(boolean())),
+        ("tui_hyperlinks_enabled", optional(boolean())),
+        ("feature_model_initiated_count", optional(count())),
+        ("feature_model_completed_count", optional(count())),
+        ("feature_model_failed_count", optional(count())),
+        ("feature_model_canceled_count", optional(count())),
+        ("feature_model_unavailable_count", optional(count())),
+        ("feature_login_initiated_count", optional(count())),
+        ("feature_login_completed_count", optional(count())),
+        ("feature_login_failed_count", optional(count())),
+        ("feature_login_canceled_count", optional(count())),
+        ("feature_login_unavailable_count", optional(count())),
+        ("feature_logout_initiated_count", optional(count())),
+        ("feature_logout_completed_count", optional(count())),
+        ("feature_logout_failed_count", optional(count())),
+        ("feature_logout_canceled_count", optional(count())),
+        ("feature_logout_unavailable_count", optional(count())),
+        ("feature_effort_initiated_count", optional(count())),
+        ("feature_effort_completed_count", optional(count())),
+        ("feature_effort_failed_count", optional(count())),
+        ("feature_effort_canceled_count", optional(count())),
+        ("feature_effort_unavailable_count", optional(count())),
+        ("feature_goal_initiated_count", optional(count())),
+        ("feature_goal_completed_count", optional(count())),
+        ("feature_goal_failed_count", optional(count())),
+        ("feature_goal_canceled_count", optional(count())),
+        ("feature_goal_unavailable_count", optional(count())),
+        ("feature_new_initiated_count", optional(count())),
+        ("feature_new_completed_count", optional(count())),
+        ("feature_new_failed_count", optional(count())),
+        ("feature_new_canceled_count", optional(count())),
+        ("feature_new_unavailable_count", optional(count())),
+        ("feature_resume_initiated_count", optional(count())),
+        ("feature_resume_completed_count", optional(count())),
+        ("feature_resume_failed_count", optional(count())),
+        ("feature_resume_canceled_count", optional(count())),
+        ("feature_resume_unavailable_count", optional(count())),
+        ("feature_fork_initiated_count", optional(count())),
+        ("feature_fork_completed_count", optional(count())),
+        ("feature_fork_failed_count", optional(count())),
+        ("feature_fork_canceled_count", optional(count())),
+        ("feature_fork_unavailable_count", optional(count())),
+        ("feature_clone_initiated_count", optional(count())),
+        ("feature_clone_completed_count", optional(count())),
+        ("feature_clone_failed_count", optional(count())),
+        ("feature_clone_canceled_count", optional(count())),
+        ("feature_clone_unavailable_count", optional(count())),
+        ("feature_tree_initiated_count", optional(count())),
+        ("feature_tree_completed_count", optional(count())),
+        ("feature_tree_failed_count", optional(count())),
+        ("feature_tree_canceled_count", optional(count())),
+        ("feature_tree_unavailable_count", optional(count())),
+        ("feature_feedback_initiated_count", optional(count())),
+        ("feature_feedback_completed_count", optional(count())),
+        ("feature_feedback_failed_count", optional(count())),
+        ("feature_feedback_canceled_count", optional(count())),
+        ("feature_feedback_unavailable_count", optional(count())),
+        ("input_received_count", optional(count())),
+        ("input_queued_count", optional(count())),
+        ("input_preparation_count", optional(count())),
+        ("input_dispatch_count", optional(count())),
+        ("input_admitted_count", optional(count())),
+        ("input_terminal_count", optional(count())),
+        ("input_submitted_count", optional(count())),
+        ("input_rejected_count", optional(count())),
+        ("input_first_visible_status_count", optional(count())),
+        ("input_cancellation_to_idle_count", optional(count())),
+        ("input_received_max_ms", optional(duration())),
+        ("input_queued_max_ms", optional(duration())),
+        ("input_preparation_max_ms", optional(duration())),
+        ("input_dispatch_max_ms", optional(duration())),
+        ("input_admitted_max_ms", optional(duration())),
+        ("input_terminal_max_ms", optional(duration())),
+        ("input_submitted_max_ms", optional(duration())),
+        ("input_rejected_max_ms", optional(duration())),
+        ("input_first_visible_status_max_ms", optional(duration())),
+        ("input_cancellation_to_idle_max_ms", optional(duration())),
+    ],
+};
+
+/// `update completed` plus the per-phase events (one per status
+/// transition, the same names the `phase` property carries).
 const UPDATE_EVENTS: &[EventRule] = &[
     EventRule {
         name: "update completed",
@@ -1675,40 +1211,48 @@ const UPDATE_EVENTS: &[EventRule] = &[
     },
 ];
 
-/// Every catalogued event, flattened. `AGENT_ERROR` et al. are the #2117 v2
-/// events; the v1 adoption events follow.
+/// Every catalogued event, flattened.
+#[must_use]
 pub fn catalog() -> Vec<&'static EventRule> {
     let mut all: Vec<&'static EventRule> = vec![
         &AGENT_STARTED,
-        &AGENT_RUN_STARTED,
         &AGENT_RUN_COMPLETED,
         &AGENT_SESSION_ENDED,
         &AGENT_COMMAND_USED,
-        &AGENT_ERROR,
-        &AGENT_TIMING,
-        &AGENT_TOOL_SUMMARY,
         &ONBOARDING_STAGE,
         &ONBOARDING_COMPLETED,
-        &AGENT_FEATURE_OUTCOME,
         &AGENT_STARTUP_STAGE,
-        &AGENT_INPUT_STAGE,
         &AGENT_INSTALLATION_STAGE,
-        &SKILL_USED,
         &STARTUP,
         &DAEMON_EVENT,
         &MODEL_REFUSED,
-        &MCP_CONNECTOR_USED,
-        &RLM_CHILD_USAGE,
-        &TOOL_EXECUTED,
-        &KERNEL_BOOTSTRAP,
         &SESSION_ARCHIVED,
+        &TUI_EXIT,
+        &TUI_IPYTHON_BASH_RENDERED,
     ];
-    all.extend(TUI_EVENTS.iter());
     all.extend(UPDATE_EVENTS.iter());
     all
 }
 
+/// The `feature_<name>_<outcome>_count` counter key for a feature outcome
+/// in the fixed vocabulary (`None` outside it).
+#[must_use]
+pub fn feature_outcome_key(feature_name: &str, outcome: &str) -> Option<String> {
+    (FEATURE_NAMES.contains(&feature_name) && FEATURE_OUTCOMES.contains(&outcome))
+        .then(|| format!("feature_{feature_name}_{outcome}_count"))
+}
+
+/// The `input_<stage>_*` key prefix for an input stage in the fixed
+/// vocabulary (`None` outside it).
+#[must_use]
+pub fn input_stage_key(stage: &str) -> Option<String> {
+    INPUT_STAGES
+        .contains(&stage)
+        .then(|| format!("input_{stage}"))
+}
+
 /// Look up one event's rule.
+#[must_use]
 pub fn lookup(name: &str) -> Option<&'static EventRule> {
     catalog().into_iter().find(|rule| rule.name == name)
 }
@@ -1716,21 +1260,17 @@ pub fn lookup(name: &str) -> Option<&'static EventRule> {
 /// Normalize one event's properties against its catalog rule: unknown
 /// keys are dropped, out-of-vocabulary enums fall back, numbers clamp to
 /// their caps, strings cap at their byte budget. Events outside the
-/// catalog pass through unchanged (forward compatibility).
+/// catalog pass through unchanged.
 ///
-/// Returns the number of properties adjusted or dropped (tests + the
-/// worker's debug log).
+/// Returns the number of properties adjusted or dropped.
 pub fn sanitize(name: &str, properties: &mut Properties) -> usize {
     let Some(rule) = lookup(name) else {
-        // Not catalogued: an existing or future vocabulary entry; the
-        // primitive-only boundary still applies.
+        // Not catalogued: the primitive-only boundary still applies.
         return 0;
     };
     let mut adjusted = 0usize;
     let mut normalized = Properties::new();
     for (key, value) in properties.iter() {
-        // The base properties ride every event; they validate against
-        // their own rules, never the event's table.
         if let Some((_, base_rule)) = BASE_PROPERTIES.iter().find(|(known, _)| known == key) {
             if let Some(value) = base_rule.kind.normalize(value.clone()) {
                 normalized.insert_validated(key, value);
@@ -1774,8 +1314,7 @@ fn value_ref<'a>(properties: &'a Properties, key: &str) -> &'a Value {
     properties.get(key).unwrap_or(&Value::Null)
 }
 
-/// True for a hex uuid in the canonical dashed shape (the install-id
-/// validation vocabulary).
+/// True for a hex uuid in the canonical dashed shape.
 pub(crate) fn is_uuid(value: &str) -> bool {
     let bytes = value.as_bytes();
     if bytes.len() != 36 {
@@ -1806,92 +1345,101 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn schema_version_bumped_for_the_2117_vocabulary() {
-        // The #2117 event vocabulary landed at schema version 2; the v1
-        // adoption events stay catalogued at their entry version.
+    fn the_catalog_is_the_low_frequency_set() {
         assert_eq!(SCHEMA_VERSION, 2);
-        let catalog = catalog();
-        for name in [
-            "agent run started",
-            "agent error",
-            "agent timing",
-            "agent tool summary",
-            "onboarding stage",
-            "agent feature outcome",
-            "agent startup stage",
-            "agent input stage",
-            "agent installation stage",
-        ] {
-            let rule = catalog
-                .iter()
-                .find(|rule| rule.name == name)
-                .unwrap_or_else(|| panic!("{name} must be catalogued"));
-            assert_eq!(rule.since, 2, "{name} entered the catalog at v2");
-        }
+        let names: Vec<&str> = catalog().iter().map(|rule| rule.name).collect();
         for name in [
             "agent started",
             "agent run completed",
             "agent session ended",
             "agent command used",
             "onboarding completed",
-            "tool executed",
-            "skill used",
+            "onboarding stage",
+            "agent startup stage",
+            "agent installation stage",
             "session archived",
             "startup",
             "daemon event",
+            "model refused",
             "update completed",
             "tui exit",
         ] {
+            assert!(names.contains(&name), "{name} stays catalogued");
+        }
+        // The per-occurrence events folded into run/session/client counters.
+        for name in [
+            "agent run started",
+            "agent error",
+            "agent timing",
+            "agent tool summary",
+            "agent feature outcome",
+            "agent input stage",
+            "tool executed",
+            "skill used",
+            "mcp connector used",
+            "rlm child usage attributed",
+            "kernel bootstrap",
+            "tui scroll used",
+        ] {
+            assert!(!names.contains(&name), "{name} is folded, not an event");
+        }
+    }
+
+    /// Every property key matches the platform backend's key pattern
+    /// (`^[a-zA-Z][a-zA-Z0-9_]*$`, at most 64 chars; a bad key drops the
+    /// whole event there) and every event stays under its 128-key cap.
+    #[test]
+    fn every_key_passes_the_backend_pattern() {
+        for rule in catalog() {
             assert!(
-                catalog.iter().any(|rule| rule.name == name),
-                "{name} stays catalogued"
+                rule.properties.len() + BASE_PROPERTIES.len() <= 128,
+                "{} exceeds the backend's 128 keys",
+                rule.name
+            );
+            for (key, _) in rule.properties.iter().chain(BASE_PROPERTIES.iter()) {
+                let mut chars = key.chars();
+                assert!(
+                    key.len() <= 64
+                        && chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+                        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_'),
+                    "{}: {key}",
+                    rule.name
+                );
+            }
+            assert!(
+                rule.name
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c == ' ' || c == '_'),
+                "{}",
+                rule.name
             );
         }
     }
 
     #[test]
-    fn every_v2_event_carries_its_required_properties() {
-        let run_started = lookup("agent run started").expect("catalogued");
-        for key in ["session_id", "run_id", "run_index", "trigger"] {
-            assert!(
-                run_started
-                    .properties
-                    .iter()
-                    .any(|(name, rule)| name == &key && rule.required),
-                "agent run started requires {key}"
-            );
+    fn counter_keys_cover_the_fixed_vocabularies() {
+        assert_eq!(
+            feature_outcome_key("goal", "completed").as_deref(),
+            Some("feature_goal_completed_count")
+        );
+        assert_eq!(feature_outcome_key("goal", "exploded"), None);
+        assert_eq!(input_stage_key("queued").as_deref(), Some("input_queued"));
+        assert_eq!(input_stage_key("nope"), None);
+        let ended = lookup("agent session ended").unwrap();
+        let exit = lookup("tui exit").unwrap();
+        for name in FEATURE_NAMES {
+            for outcome in FEATURE_OUTCOMES {
+                let key = feature_outcome_key(name, outcome).unwrap();
+                assert!(ended.properties.iter().any(|(known, _)| *known == key));
+                assert!(exit.properties.iter().any(|(known, _)| *known == key));
+            }
         }
-        let tool_summary = lookup("agent tool summary").expect("catalogued");
-        for key in [
-            "session_id",
-            "run_id",
-            "tool_category",
-            "call_count",
-            "failure_count",
-        ] {
-            assert!(
-                tool_summary
-                    .properties
-                    .iter()
-                    .any(|(name, rule)| name == &key && rule.required),
-                "agent tool summary requires {key}"
-            );
-        }
-        let installation = lookup("agent installation stage").expect("catalogued");
-        for key in [
-            "installation_attempt_id",
-            "installation_action",
-            "installation_source",
-            "stage",
-            "outcome",
-        ] {
-            assert!(
-                installation
-                    .properties
-                    .iter()
-                    .any(|(name, rule)| name == &key && rule.required),
-                "agent installation stage requires {key}"
-            );
+        for stage in INPUT_STAGES {
+            let prefix = input_stage_key(stage).unwrap();
+            for suffix in ["count", "max_ms"] {
+                let key = format!("{prefix}_{suffix}");
+                assert!(exit.properties.iter().any(|(known, _)| *known == key));
+            }
         }
     }
 
@@ -1899,16 +1447,15 @@ mod tests {
     fn sanitize_drops_unknown_keys_and_falls_back_enums() {
         let mut properties = Properties::new();
         properties.set("session_id", json!("0197d0a0-8f5c-7f2a-b0e3-2d7e0d2b3b1a"));
+        properties.set("outcome", json!("success"));
+        properties.set("duration_ms", json!(5));
         properties.set("trigger", json!("spontaneous")); // out of vocabulary
-        properties.set("run_index", json!(7u64));
-        properties.set("prompt_text", json!("private prompt")); // not a catalogued property
-        let adjusted = sanitize("agent run started", &mut properties);
+        properties.set("tool_bash_call_count", json!(3u64));
+        properties.set("tool_name", json!("private_tool")); // not a catalogued property
+        let adjusted = sanitize("agent run completed", &mut properties);
         assert_eq!(properties.get("trigger"), Some(&json!("unknown")));
-        assert_eq!(properties.get("run_index"), Some(&json!(7u64)));
-        assert!(
-            properties.get("prompt_text").is_none(),
-            "unknown key dropped"
-        );
+        assert_eq!(properties.get("tool_bash_call_count"), Some(&json!(3u64)));
+        assert!(properties.get("tool_name").is_none(), "unknown key dropped");
         assert_eq!(adjusted, 2, "one fallback + one dropped key");
     }
 
@@ -1916,18 +1463,13 @@ mod tests {
     fn sanitize_clamps_numbers_and_caps_strings() {
         let mut properties = Properties::new();
         properties.set("session_id", json!("0197d0a0-8f5c-7f2a-b0e3-2d7e0d2b3b1a"));
-        properties.set("run_id", json!("0197d0a0-8f5c-7f2a-b0e3-2d7e0d2b3b1b"));
-        properties.set("run_index", json!(u64::MAX)); // over the count cap
-        properties.set("trigger", json!("prompt"));
-        let _ = sanitize("agent run started", &mut properties);
-        assert_eq!(properties.get("run_index"), Some(&json!(1_000_000u64)));
-        let mut summary = Properties::new();
-        summary.set("session_id", json!("0197d0a0-8f5c-7f2a-b0e3-2d7e0d2b3b1a"));
-        summary.set("run_id", json!("0197d0a0-8f5c-7f2a-b0e3-2d7e0d2b3b1b"));
-        summary.set("tool_category", json!("custom"));
-        summary.set("call_count", json!(3.5)); // fractional where integer
-        let _ = sanitize("agent tool summary", &mut summary);
-        assert!(summary.get("call_count").is_none(), "fraction dropped");
+        properties.set("outcome", json!("success"));
+        properties.set("duration_ms", json!(5));
+        properties.set("turn_count", json!(u64::MAX)); // over the count cap
+        properties.set("retry_count", json!(3.5)); // fractional where integer
+        let _ = sanitize("agent run completed", &mut properties);
+        assert_eq!(properties.get("turn_count"), Some(&json!(1_000_000u64)));
+        assert!(properties.get("retry_count").is_none(), "fraction dropped");
     }
 
     #[test]

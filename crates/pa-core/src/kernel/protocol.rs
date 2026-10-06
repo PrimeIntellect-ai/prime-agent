@@ -1,8 +1,8 @@
 //! Wire types of the REPL runtime protocol (version 3).
 //!
-//! Requests are newline-delimited JSON objects written to the kernel's stdin;
-//! events arrive as newline-delimited JSON objects on the runtime's private
-//! protocol dup of fd 1. See `prime-agent-runtime/src/rlm/repl.md`.
+//! Requests are newline-delimited JSON objects written to the kernel's stdin; events
+//! arrive as newline-delimited JSON objects on the runtime's private protocol dup of
+//! fd 1. See `prime-agent-runtime/src/rlm/repl.md`.
 
 use serde_json::{json, Value};
 
@@ -32,10 +32,8 @@ pub enum Request {
     },
     Restore {
         path: String,
-        /// The snapshot's own byte caps bound the restore's record reads:
-        /// a corrupt or sparse snapshot file cannot force a huge allocation
-        /// (the writer enforced these when it framed the payload; the
-        /// reader enforces the same limits before every blob read).
+        /// The snapshot's own byte caps bound the restore's record reads: a corrupt or sparse
+        /// snapshot file cannot force a huge allocation.
         max_bytes: u64,
         max_variable_bytes: u64,
     },
@@ -162,22 +160,19 @@ impl Event {
 
 /// Parse one protocol line into an event, or explain why the frame is invalid.
 ///
-/// `done` and `host_request` route strictly by non-empty string id (the
-/// runtime mints uuid hex ids and echoes the host's uuids); silently dropping
-/// an id-less one would leave the awaiting request unsettled forever.
+/// `done` and `host_request` route strictly by non-empty string id: silently
+/// dropping an id-less one would leave the awaiting request unsettled forever.
 ///
 /// # Errors
 ///
-/// Returns a human-readable error string when the line is not valid JSON,
-/// is not a JSON object, names an unknown protocol event, or frames an
-/// id-less `done`, `result`, or `host_request`.
+/// Returns a human-readable error string when the line is not valid JSON, not a
+/// JSON object, names an unknown event, or frames an id-less frame.
 pub fn parse_event(line: &str) -> Result<Event, String> {
     let mut value: Value = serde_json::from_str(line)
         .map_err(|_| format!("unparseable protocol line: {}", clip(line)))?;
-    // `display` and `host_request` carry bulk `data` payloads (attachments,
-    // agent messages); move the field out of the parsed map instead of
-    // deep-cloning it out of `value` below. Other kinds and non-object lines
-    // keep `Null`, and a missing field parses exactly as before.
+    // `display` and `host_request` carry bulk `data` payloads (attachments, agent messages); move
+    // the field out of the parsed map instead of deep-cloning it out of `value` below. Other kinds
+    // and non-object lines keep `Null`.
     let data = match value.as_object_mut() {
         Some(map)
             if matches!(
@@ -551,11 +546,8 @@ mod tests {
         );
     }
 
-    /// TS wire parity (`packages/coding-agent/src/core/kernel/repl-manager.ts`,
-    /// `invalidProtocolFrameReason`): `done` and `host_request` are the only
-    /// kinds the TS manager rejects for id shape, and both products reject the
-    /// same corpus of id-less frames below. Rust keeps its pre-existing
-    /// stricter rule for `result` ids (the runtime always sends one).
+    /// TS wire parity (`invalidProtocolFrameReason`): `done` and `host_request` are the only kinds
+    /// the TS manager rejects for id shape. Rust keeps its stricter rule for `result` ids.
     #[test]
     fn id_requirements_match_the_ts_manager() {
         // Rejected by both: done/host_request without a string id.
@@ -569,9 +561,8 @@ mod tests {
         assert!(parse_event(r#"{"event":"error","evalue":"x"}"#).is_ok());
     }
 
-    /// Timed fixture for the bulk `data` payloads of `display`/`host_request`
-    /// frames at 1 KiB / 1 MiB / 10 MiB. Run with
-    /// `cargo test -p pa-core --release -- kernel::protocol --ignored --nocapture`.
+    /// Timed fixture for the bulk `data` payloads of `display`/`host_request` frames at 1 KiB / 1
+    /// MiB / 10 MiB.
     #[test]
     #[ignore = "timing fixture; run with --release --ignored --nocapture"]
     fn parse_event_data_frame_timing() {

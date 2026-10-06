@@ -1,6 +1,4 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28) - this target's own
-// crate root: the same bounded-boundary disposition as src/lib.rs
-// (large_futures/too_many_lines/the cast family; details there).
+// Pedantic-gate dispositions as src/lib.rs (large_futures/too_many_lines/casts).
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -10,9 +8,8 @@
     clippy::cast_precision_loss
 )]
 
-//! Git context parity tests: fixture git repos drive `capture_git_context`
-//! (TS `captureGitContext`, utils/git.ts) and the session git-state lifecycle
-//! (TS `SessionManager.recordGitStateIfChanged`, session-manager.ts).
+//! Git context parity tests: fixture git repos drive `capture_git_context` (TS `captureGitContext`)
+//! and the session git-state lifecycle (TS `SessionManager.recordGitStateIfChanged`).
 
 use std::path::Path;
 
@@ -163,12 +160,10 @@ fn dirty_tree_does_not_change_capture() {
     );
 }
 
-/// Byte-parity pin: a session header captured by the installed TS binary
-/// (0.9.5) in a fixture repo parses into the same Rust git context, wire
-/// shape included. The line below is the verbatim first line of
-/// `~/.prime/sessions/<id>.jsonl` produced by
-/// `prime-agent -p --session-dir ... "say hi"` in that repo (the turn itself
-/// failed on billing; the header is written before any model call).
+/// Byte-parity pin: a session header captured by the installed TS binary (0.9.5) in a fixture repo
+/// parses into the same Rust git context, wire shape included. The line below is the verbatim first
+/// line of `~/.prime/sessions/<id>.jsonl` produced by `prime-agent -p --session-dir ... "say hi"`
+/// in that repo (the header is written before any model call).
 #[test]
 fn ts_binary_session_header_round_trips() {
     let ts_header = concat!(
@@ -201,9 +196,7 @@ fn ts_binary_session_header_round_trips() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Session git-state lifecycle (TS session-manager-git-state.test.ts)
-// ---------------------------------------------------------------------------
+// Session git-state lifecycle
 
 #[test]
 fn session_header_captures_git_context() {
@@ -240,7 +233,10 @@ fn no_git_state_entry_when_nothing_changed() {
     commit(repo.path(), "init");
 
     let mut manager = SessionManager::persisted(repo.path(), sessions.path());
-    assert_eq!(manager.record_git_state_if_changed(), None);
+    assert_eq!(
+        manager.record_git_state_if_changed(capture_git_context(repo.path()).unwrap()),
+        None
+    );
     assert!(!manager
         .get_entries()
         .iter()
@@ -254,10 +250,11 @@ fn records_git_state_when_commit_changes() {
     init_repo(repo.path());
     commit(repo.path(), "init");
 
-    // The header captures the first commit; the run lands on the second.
     let mut manager = SessionManager::persisted(repo.path(), sessions.path());
     let second_sha = commit(repo.path(), "second");
-    assert!(manager.record_git_state_if_changed().is_some());
+    assert!(manager
+        .record_git_state_if_changed(capture_git_context(repo.path()).unwrap())
+        .is_some());
     let entries = manager.get_entries();
     let git_states: Vec<_> = entries
         .iter()
@@ -271,7 +268,10 @@ fn records_git_state_when_commit_changes() {
         other => panic!("expected git_state, got {other:?}"),
     }
     // Unchanged context dedupes away.
-    assert_eq!(manager.record_git_state_if_changed(), None);
+    assert_eq!(
+        manager.record_git_state_if_changed(capture_git_context(repo.path()).unwrap()),
+        None
+    );
 }
 
 #[test]
@@ -284,13 +284,16 @@ fn re_records_git_state_on_branch_without_it_on_active_path() {
     let mut manager = SessionManager::persisted(repo.path(), sessions.path());
     let msg_id = manager.append_message(user("hi")).unwrap();
     commit(repo.path(), "second");
-    assert!(manager.record_git_state_if_changed().is_some());
+    assert!(manager
+        .record_git_state_if_changed(capture_git_context(repo.path()).unwrap())
+        .is_some());
 
-    // Move the leaf before the git_state entry: the nearest git context on
-    // this path is the header again, so a new entry must be appended rather
-    // than deduped against the sibling's.
+    // Move the leaf before the git_state entry: the nearest git context on this path is the header
+    // again, so a new entry must be appended rather than deduped against the sibling's.
     manager.branch(&msg_id);
-    assert!(manager.record_git_state_if_changed().is_some());
+    assert!(manager
+        .record_git_state_if_changed(capture_git_context(repo.path()).unwrap())
+        .is_some());
 }
 
 #[test]
@@ -302,7 +305,7 @@ fn git_state_entries_stay_out_of_llm_context() {
 
     let mut manager = SessionManager::persisted(repo.path(), sessions.path());
     commit(repo.path(), "second");
-    manager.record_git_state_if_changed();
+    manager.record_git_state_if_changed(capture_git_context(repo.path()).unwrap());
     let context = pa_core::session::build_session_context(
         &manager.get_entries(),
         manager.get_leaf_id().map(str::to_string).as_deref(),

@@ -1,0 +1,1 @@
+- On macOS the daemon no longer spawns a `ps` process for every client connection and every process-liveness check; start times and zombie states are read in-process from the kernel's process record, cutting idle battery drain.

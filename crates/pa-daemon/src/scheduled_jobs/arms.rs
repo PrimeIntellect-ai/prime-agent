@@ -2,7 +2,11 @@
 //! `heartbeat_manage`, `cron_add`, `cron_cancel`, `heartbeat_get`,
 //! `heartbeat_set`, `heartbeat_update`): payload validation and the store
 //! calls behind each `scheduled`-surface command.
-use super::*;
+use super::{
+    is_heartbeat_cron_job, json, normalize_heartbeat_delivery_mode, normalize_heartbeat_schedule,
+    response_failure, response_success, CreateAgentCronJobInput, DaemonResponse,
+    HeartbeatManagementAction, JobStatus, Value, Worker,
+};
 
 impl Worker {
     /// `cron_list` (TS daemon-mode case): the store's jobs filtered by the
@@ -86,9 +90,8 @@ impl Worker {
         )
     }
 
-    /// `heartbeat_manage` (TS daemon-mode case over `manageHeartbeat`):
-    /// pause/resume/stop a heartbeat by job id; an unknown id answers the
-    /// TS error.
+    /// `heartbeat_manage` (TS daemon-mode case over `manageHeartbeat`): pause/resume/stop
+    /// a heartbeat by job id; an unknown id answers the TS error.
     pub(crate) async fn handle_heartbeat_manage(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("heartbeat_manage") {
             return response;
@@ -266,8 +269,8 @@ impl Worker {
         )
     }
 
-    /// `heartbeat_set` (TS daemon-mode case over `createHeartbeatForState`):
-    /// replace the session's heartbeat.
+    /// `heartbeat_set` (TS daemon-mode case over `createHeartbeatForState`): replace the
+    /// session's heartbeat.
     pub(crate) async fn handle_heartbeat_set(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("heartbeat_set") {
             return response;
@@ -343,9 +346,8 @@ impl Worker {
         }
     }
 
-    /// `heartbeat_update` (TS daemon-mode case over
-    /// `updateHeartbeatForState`): pause/resume/clear the session's
-    /// heartbeat.
+    /// `heartbeat_update` (TS daemon-mode case over `updateHeartbeatForState`):
+    /// pause/resume/clear the session's heartbeat.
     pub(crate) async fn handle_heartbeat_update(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("heartbeat_update") {
             return response;
@@ -373,8 +375,8 @@ impl Worker {
                 .scheduled
                 .store()
                 .resume_heartbeat(&active_session_id, now),
-            // TS `updateHeartbeatForState`: anything but pause/resume
-            // clears the heartbeat.
+            // TS `updateHeartbeatForState`: anything but pause/resume clears the
+            // heartbeat.
             _ => Ok(self
                 .scheduled
                 .store()

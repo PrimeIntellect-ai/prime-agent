@@ -1,32 +1,7 @@
-//! The scheduling surface (protocol breadth wave b10): the worker arms for
-//! the cron/heartbeat catalog (`cron_list`, `heartbeats_list`,
-//! `heartbeat_manage`, `cron_add`, `cron_cancel`, `heartbeat_get`,
-//! `heartbeat_set`, `heartbeat_update` — TS daemon-mode cases over
-//! `AgentCronJobStore`), the per-session artifact store they read, and the
-//! scheduler that fires due jobs into the session queue (TS
-//! `AgentCronScheduler` + `runCronJob`).
-//!
-//! Store: one `AgentCronJobStore::for_session_artifacts()` per worker
-//! process, like TS daemon-mode (`options.worker ?
-//! AgentCronJobStore.forSessionArtifacts() : ...`); sessions register
-//! their artifact partition when they bind (create and every
-//! replacement flow - `new_session` / `switch_session` / `import_jsonl` /
-//! fork) and jobs rebind with them.
-//!
-//! Delivery: a due job is claimed by the store and fired through the
-//! session's queue lanes — heartbeats on their delivery-mode lane (steer
-//! -> steering, follow-up -> follow-up) with the TS queue key
-//! `heartbeat:<id>` (a later fire replaces the queued one) as the
-//! injected `heartbeat_prompt` custom row (TS `promptHeartbeat` /
-//! `createHeartbeatPromptMessage`), plain cron jobs on the follow-up
-//! lane as a regular prompt (TS queues a busy session's scheduled prompt
-//! as a follow-up). The fire settles when its turn settles, so the
-//! store's run bookkeeping (`lastRunAt`/`runCount`) matches the TS
-//! record-after-run timing.
-//!
-//! Deviation (deferred fires): TS `promptHeartbeat` steers a running
-//! turn mid-stream; this port's lanes deliver at the next turn boundary
-//! (the same queue semantics the `steer` command uses).
+//! The scheduling surface: the worker arms for the cron/heartbeat catalog,
+//! the per-session artifact store, and the scheduler that fires due jobs
+//! into the session queue. Deviation: TS `promptHeartbeat` steers a running
+//! turn mid-stream; this port's lanes deliver at the next turn boundary.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -48,13 +23,11 @@ use pa_core::cron::{
 use crate::protocol::{response_failure, response_success, DaemonResponse};
 use crate::worker::{QueuedItem, SessionCore, Worker};
 
-/// How long a scheduler fire waits for its turn to settle before answering
-/// the scheduler with a skip (a stuck turn must not pin the dispatch lane
-/// forever).
+/// How long a fire waits for its turn to settle before answering the scheduler with a skip (a stuck
+/// turn must not pin the dispatch lane forever).
 const FIRE_SETTLE_TIMEOUT_MS: u64 = 15 * 60 * 1000;
 
-/// The session-artifact directory for one session file (TS
-/// `getSessionArtifactPathForFile`): `<sessions>/../session-artifacts/<id>`.
+/// The session-artifact directory for one session file: `<sessions>/../session-artifacts/<id>`.
 pub(crate) fn session_artifact_dir(session_file: &Path, session_id: &str) -> Option<PathBuf> {
     session_file
         .parent()?
@@ -73,8 +46,7 @@ pub(crate) struct QueueHooks {
 }
 
 impl QueueHooks {
-    /// The session's activity snapshot (TS `shouldDeferHeartbeatCronJob`
-    /// inputs): busy flags off the core plus the bash slot.
+    /// The session's activity snapshot: busy flags off the core plus the bash slot.
     fn activity(&self) -> HeartbeatSessionActivity {
         let core = self
             .core
@@ -83,8 +55,8 @@ impl QueueHooks {
         HeartbeatSessionActivity {
             is_streaming: core.busy,
             is_compacting: core.compacting,
-            // The abort flag the retry lane reads: the closest live
-            // signal this port keeps for an in-flight retry.
+            // The abort flag the retry lane reads: the closest live signal
+            // for an in-flight retry.
             is_retrying: core.retry_abort_requested,
             is_bash_running: self.user_bash.is_running(),
             has_pending_session_work: !core.pending_next_turn.is_empty(),
@@ -94,11 +66,8 @@ impl QueueHooks {
 }
 
 impl QueueHooks {
-    /// TS `isPersistedCronJobRunnable` (the persisted-job half): a
-    /// persisted job may only fire at a session that still exists — the
-    /// session file present, still the job's session, still carrying the
-    /// `active` state. A killed (`archived`) or deleted session fails the
-    /// check.
+    /// A persisted job may only fire at a session that still exists — file
+    /// present, still the job's session, still `active`.
     fn persisted_target_gone(job: &AgentCronJob) -> bool {
         if job.session_file.is_empty() {
             return true;
@@ -109,9 +78,8 @@ impl QueueHooks {
         }
     }
 
-    /// The failed-runnable cancel (TS
-    /// `cancelScheduledJobsForSessionFile`): the store cancels the dead
-    /// session's whole job set by file, so the artifact never re-fires.
+    /// The failed-runnable cancel: the store cancels the dead session's whole
+    /// job set by file, so the artifact never re-fires.
     fn cancel_jobs_for_dead_target(&self, job: &AgentCronJob) {
         self.store.cancel_jobs_for_session(
             &CancelJobsFilter {
@@ -126,11 +94,8 @@ impl QueueHooks {
 
 impl AgentCronSchedulerHooks for QueueHooks {
     async fn run_job(&self, job: &AgentCronJob) -> anyhow::Result<Option<&'static str>> {
-        // TS `runCronJob` -> `getOrCreateCronJobSession` ->
-        // `isPersistedCronJobRunnable`: a persisted job whose target is no
-        // longer live (killed — state `archived` — or deleted) cancels the
-        // session's jobs and skips, so a fire can never revive a stopped
-        // session (the zombie fix's delivery-side gate).
+        // A persisted job whose target is no longer live (killed — `archived` — or deleted)
+        // cancels the session's jobs and skips: a fire can never revive a stopped session.
         if Self::persisted_target_gone(job) {
             self.cancel_jobs_for_dead_target(job);
             return Ok(Some("skipped"));
@@ -142,9 +107,7 @@ impl AgentCronSchedulerHooks for QueueHooks {
         let (done_tx, done_rx) = oneshot::channel();
         let heartbeat = is_heartbeat_cron_job(job);
         let queue_key = heartbeat.then(|| format!("heartbeat:{}", job.id));
-        // A heartbeat rides its delivery-mode lane; a plain cron job
-        // queues on the follow-up lane (the fire checkpoint after the
-        // admission reads the same lane decision).
+        // A heartbeat rides its delivery-mode lane; a plain cron job queues on the follow-up lane.
         let rides_steering =
             heartbeat && !matches!(job.delivery_mode, Some(DeliveryMode::FollowUp));
         {
@@ -155,13 +118,11 @@ impl AgentCronSchedulerHooks for QueueHooks {
             if !core.created || core.shutdown_requested || job.status != JobStatus::Active {
                 return Ok(Some("skipped"));
             }
-            // TS cron fires resume the suspension before admission
-            // (`promptHeartbeat`/`promptUntilAccepted` carry
-            // `resumeIfIdle: true`): a fire on a post-abort/post-compact
-            // session is a resume site.
+            // TS cron fires resume the suspension before admission (`resumeIfIdle: true`): a
+            // fire on a post-abort/post-compact session is a resume site.
             core.queued_input_suspended = false;
-            // The TS `heartbeat:<id>` queue key: a later fire replaces the
-            // queued one instead of stacking.
+            // The TS `heartbeat:<id>` queue key: a later fire replaces the queued one instead of
+            // stacking.
             if let Some(key) = &queue_key {
                 core.steering
                     .retain(|item| item.queue_key.as_deref() != Some(key.as_str()));
@@ -173,24 +134,16 @@ impl AgentCronSchedulerHooks for QueueHooks {
             } else {
                 &mut core.follow_up
             };
-            // TS `runCronJob`: a heartbeat fire delivers through
-            // `promptHeartbeat`, so the turn IS the injected
-            // `heartbeat_prompt` custom row (TS
-            // `createHeartbeatPromptMessage`) — the transcript renders the
-            // heartbeat prompt component while the model turn runs on the
-            // row's content. A plain cron job stays a regular prompt (TS
-            // `promptUntilAccepted`).
+            // A heartbeat fire delivers through `promptHeartbeat`: the turn IS
+            // the injected `heartbeat_prompt` custom row, a plain cron job a regular prompt.
             let (message, preview, custom_message) = if heartbeat {
                 let row = pa_core::session_engine::messages::create_heartbeat_prompt_message(
                     job,
                     crate::util::now_ms(),
                 );
                 let content = row.content.text();
-                // TS `_createPreparedTurnAction` over
-                // `injectedMessagePreviewLabel`: the parked row reads
-                // `Heartbeat prompt: <content>` (the TUI renders it with its
-                // own label, no lane label), while the active-action label
-                // keeps the raw content (TS `compactRlmText(payload.text)`).
+                // The parked row reads `Heartbeat prompt: <content>`, while the
+                // active-action label keeps the raw content.
                 let preview = format!(
                     "{}: {content}",
                     pa_core::session_engine::messages::HEARTBEAT_PROMPT_PREVIEW_LABEL
@@ -221,10 +174,8 @@ impl AgentCronSchedulerHooks for QueueHooks {
                 },
             );
         }
-        // The fire checkpoint (busy=true): a scheduled prompt is admitted
-        // live work, and heartbeats/cron jobs run unattended — no client
-        // reopens a parked session, so a crash mid-fire must revive the
-        // worker to run it. The operation is the lane's TS queue string.
+        // The fire checkpoint (busy=true): a scheduled prompt runs unattended —
+        // a crash mid-fire must revive the worker.
         crate::worker::checkpoint_queue_recovery(
             &self.recovery,
             &self.core,
@@ -244,21 +195,10 @@ impl AgentCronSchedulerHooks for QueueHooks {
         )
         .await
         {
-            // The typed settle classifies the fire (never the
-            // provider-controllable error text):
-            // - a settled turn is a run; a failed turn still counts as
-            //   a run (the store bumps runCount and records lastError,
-            //   the TS recordRunResult-with-error shape) but the error
-            //   propagates to the scheduler so its failure backoff
-            //   stretches the next fire (documented deviation: TS
-            //   re-fires per schedule regardless of failures);
-            // - an aborted turn is a clean run (TS `promptHeartbeat`
-            //   resolves normally when the turn aborts): no lastError,
-            //   no backoff;
-            // - a fire withdrawn before delivery (abort cancel, a queue
-            //   edit deleting the row) skips, the TS
-            //   unrunnable-at-admission verdict: no runCount bump, no
-            //   backoff.
+            // The typed settle classifies the fire (never the error text): a
+            // settled or failed turn counts as a run (the failure backoff
+            // stretches the next fire; deviation: TS re-fires per schedule);
+            // an aborted turn is a clean run; a withdrawn fire skips, no backoff.
             Ok(Ok(settle)) => match settle {
                 crate::worker::TurnSettle::Completed | crate::worker::TurnSettle::Aborted => {
                     Ok(None)
@@ -266,10 +206,8 @@ impl AgentCronSchedulerHooks for QueueHooks {
                 crate::worker::TurnSettle::Withdrawn(_) => Ok(Some("skipped")),
                 crate::worker::TurnSettle::Failed(error) => Err(anyhow::anyhow!(error)),
             },
-            // The queued item was consumed without a settle handshake
-            // (its waiter dropped — a runner that died mid-turn, or the
-            // harness's direct pop): the fire ran as far as the queue
-            // could deliver it.
+            // The queued item was consumed without a settle handshake (its waiter dropped):
+            // the fire ran as far as the queue could deliver it.
             Ok(Err(_)) => Ok(None),
             // The settle window expired: the fire did not run.
             Err(_) => Ok(Some("skipped")),
@@ -277,8 +215,8 @@ impl AgentCronSchedulerHooks for QueueHooks {
     }
 }
 
-/// The worker's schedule catalog: the shared artifact store plus the
-/// scheduler (started when the first session binds).
+/// The worker's schedule catalog: the shared artifact store plus the scheduler (started when the
+/// first session binds).
 pub(crate) struct ScheduledJobs {
     store: Arc<AgentCronJobStore>,
     hooks: Arc<QueueHooks>,
@@ -294,11 +232,8 @@ impl ScheduledJobs {
         recovery: Arc<Mutex<Option<crate::journal::WorkerRecoveryJournal>>>,
     ) -> Self {
         let mut store = AgentCronJobStore::for_session_artifacts();
-        // TS daemon-mode's `cronStore.onHeartbeatChange` →
-        // `broadcastGlobal({ type: "heartbeats_changed" })`: any heartbeat
-        // catalog change (user set/manage, agent `rlm_heartbeat` CRUD, a
-        // fire's bookkeeping) broadcasts to the clients and the supervisor
-        // re-broadcasts daemon-wide.
+        // `cronStore.onHeartbeatChange` broadcasts `{ type: "heartbeats_changed" }`
+        // to the clients; the supervisor re-broadcasts daemon-wide.
         store.on_heartbeat_change(Box::new(move || {
             events.send(crate::worker::OutboundFrame::heartbeats_changed());
         }));
@@ -320,9 +255,8 @@ impl ScheduledJobs {
         &self.store
     }
 
-    /// Bind the live session (TS `rebindCronJobsToState`): register the
-    /// session's artifact partition, move its stored jobs onto the live
-    /// ids, and start (or wake) the scheduler.
+    /// Bind the live session (TS `rebindCronJobsToState`): register the session's artifact
+    /// partition, move its stored jobs onto the live ids, and start (or wake) the scheduler.
     pub(crate) async fn bind_session(
         &self,
         binding: SessionBinding,
@@ -357,14 +291,8 @@ impl ScheduledJobs {
         }
     }
 
-    /// The kernel rlm heartbeat mutation hook (TS daemon-mode's
-    /// controller post-mutation work: `removeQueuedHeartbeatFollowUp`
-    /// where the mutation withdraws the queued fire, then
-    /// `cronScheduler.wake()`): installed by the worker onto the session
-    /// engine's kernel cron wiring, invoked by the `rlm_heartbeat.*` host
-    /// handlers after every create/update/delete. Without the wake the
-    /// bind-time arm — taken over an empty store — leaves no timer, and a
-    /// heartbeat created afterwards never fires.
+    /// The kernel rlm heartbeat mutation hook (after every create/update/delete):
+    /// without the wake, a heartbeat created after the bind never fires.
     pub(crate) fn mutation_hook(
         self: &std::sync::Arc<Self>,
     ) -> pa_core::session_engine::host_requests::RlmHeartbeatMutationHook {
@@ -380,8 +308,7 @@ impl ScheduledJobs {
         })
     }
 
-    /// `removeQueuedHeartbeatFollowUp` (TS daemon-mode): drop the queued
-    /// fire of a heartbeat job from the session's queue.
+    /// Drop the queued fire of a heartbeat job from the session's queue.
     pub(crate) fn remove_queued_heartbeat_follow_up(&self, job: &AgentCronJob) {
         if !is_heartbeat_cron_job(job) {
             return;
@@ -398,10 +325,8 @@ impl ScheduledJobs {
             core.follow_up
                 .retain(|item| item.queue_key.as_deref() != Some(key.as_str()));
         }
-        // Same settle as the other withdrawals: the mutation withdrew a
-        // queued fire, so the verdict and the snapshot must not keep the
-        // fire's admission busy=true (a revive would replay the deleted
-        // heartbeat's prompt from the stale snapshot).
+        // Same settle as the other withdrawals: the verdict and snapshot must not keep the
+        // withdrawn fire's busy=true (a revive would replay the deleted heartbeat's prompt).
         crate::worker::checkpoint_queue_recovery(
             &self.hooks.recovery,
             &self.hooks.core,
@@ -413,8 +338,8 @@ impl ScheduledJobs {
     }
 }
 
-/// The bind inputs of one live session (TS `SessionBinding` plus the
-/// session's artifact partition): `None` for in-memory sessions.
+/// The bind inputs of one live session plus the session's artifact partition:
+/// `None` for in-memory sessions.
 pub(crate) fn live_binding(core: &SessionCore) -> Option<(SessionBinding, Option<PathBuf>)> {
     let store = core.store.as_ref()?;
     if store.path.as_os_str().is_empty() {
@@ -432,8 +357,8 @@ pub(crate) fn live_binding(core: &SessionCore) -> Option<(SessionBinding, Option
 }
 
 impl Worker {
-    /// Register the live session's artifact partition on the store
-    /// (idempotent) so catalog reads see this session's jobs.
+    /// Register the live session's artifact partition on the store (idempotent) so catalog reads
+    /// see this session's jobs.
     fn bind_store_artifact(&self, core: &SessionCore) {
         let Some(store) = core.store.as_ref() else {
             return;
@@ -448,12 +373,8 @@ impl Worker {
         }
     }
 
-    /// TS `cancelScheduledJobsForSession(state)` (the killed close's
-    /// schedule cancel): the session's whole job set cancels (matched by
-    /// any of the session's three identities, exactly the TS filter), each
-    /// cancelled heartbeat's queued follow-up withdraws
-    /// (`removeQueuedHeartbeatFollowUp`), and the scheduler re-arms. The
-    /// cancel is durable, so the stopped session's own heartbeats can
+    /// The killed close's cancel: the session's whole job set cancels by any of
+    /// its three identities — durably, so the session's own heartbeats can
     /// never revive it.
     pub(crate) async fn cancel_session_scheduled_jobs(&self) {
         let (active_session_id, session_id, session_file) = {
@@ -487,10 +408,8 @@ impl Worker {
         }
     }
 
-    /// TS `cancelSubagentRlmHeartbeats(state)` (the replaced close of a
-    /// subagent): only the subagent's RLM heartbeat jobs cancel; the plain
-    /// cron jobs survive the replacement. A top-level session cancels
-    /// nothing here (the TS `kind !== "subagent"` gate).
+    /// Only a subagent's RLM heartbeat jobs cancel here (the plain cron jobs
+    /// survive the replacement); a top-level session cancels nothing.
     pub(crate) async fn cancel_session_rlm_heartbeats(&self) {
         let (is_subagent, active_session_id) = {
             let core = self
@@ -518,15 +437,9 @@ impl Worker {
         }
     }
 
-    /// TS `cancelScheduledJobsForSessionFile` (the saved-session delete's
-    /// `afterFileRemoved` hook): register the deleted file's artifact
-    /// partition (only when its store file exists) and cancel its whole
-    /// job set by file, so the jobs die with the delete even if the
-    /// partition removal fails. The hook runs once the file is gone, so
-    /// the partition derives from the file's stem (the session file IS
-    /// `<session id>.jsonl`), not from a session-info read. Best-effort:
-    /// the deletion never fails on a store error (the TS hook's failures
-    /// are logged, not thrown).
+    /// The saved-session delete's cancel: cancel the deleted file's whole job
+    /// set by file (its partition derives from the file's stem); best-effort —
+    /// the deletion never fails on a store error.
     pub(crate) fn cancel_deleted_session_jobs(&self, session_file: &std::path::Path) {
         let Some(session_id) = session_file
             .file_stem()
@@ -558,14 +471,10 @@ impl Worker {
     }
 }
 
-// The nine scheduling protocol arms (cron_list, heartbeats_list, heartbeat_manage,
-// cron_add, cron_cancel, heartbeat_get, heartbeat_set, heartbeat_update) live in
-// the child module (scheduled_jobs::arms) as the same inherent impl Worker block -
-// every arm keeps its pub(crate) level, so the command dispatcher and the tests
-// resolve them through the type, ZERO path churn.
+// The scheduling protocol arms live in scheduled_jobs::arms as the same
+// inherent impl Worker block.
 mod arms;
 
-// The inline unit battery lives in the child module (scheduled_jobs::tests);
-// its use-super glob resolves through this facade's bindings.
+// The inline unit battery lives in scheduled_jobs::tests.
 #[cfg(test)]
 mod tests;

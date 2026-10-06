@@ -16,10 +16,6 @@ use serde_json::Value;
 
 use crate::{JsNumber, JsonMap};
 
-// ---------------------------------------------------------------------------
-// APIs and providers
-// ---------------------------------------------------------------------------
-
 /// APIs with first-class support in the TS provider registry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -38,8 +34,7 @@ pub enum KnownApi {
 /// TS `Api = KnownApi | (string & {})`. The wire value is an arbitrary string.
 pub type Api = String;
 
-/// The Prime Inference provider id (the bundled/live catalog's provider
-/// key; a wire identifier shared by every crate that names it).
+/// The Prime Inference provider id (the catalog's provider key).
 pub const PRIME_INFERENCE_PROVIDER_ID: &str = "prime-inference";
 
 /// Providers with well-known identifiers in the TS model registry.
@@ -99,10 +94,6 @@ pub enum KnownProvider {
 /// TS `Provider = KnownProvider | string`.
 pub type Provider = String;
 
-// ---------------------------------------------------------------------------
-// Thinking levels
-// ---------------------------------------------------------------------------
-
 /// Reasoning effort levels accepted by the model-facing surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -129,9 +120,8 @@ pub enum ModelThinkingLevel {
 }
 
 impl ModelThinkingLevel {
-    /// The wire name shared by the `thinkingLevelMap` keys, the CLI
-    /// `--thinking` values, and the daemon `create` config (`"off"`,
-    /// `"minimal"`, ...).
+    /// The wire name shared by the `thinkingLevelMap` keys, the CLI `--thinking` values, and the
+    /// daemon `create` config.
     #[must_use]
     pub fn wire_name(self) -> &'static str {
         match self {
@@ -146,12 +136,8 @@ impl ModelThinkingLevel {
     }
 }
 
-/// Maps Prime Agent thinking levels to provider/model-specific values.
-/// `None` values mark a level as unsupported.
-///
-/// Ordered (`BTreeMap`): the map serializes into wire JSON (the model
-/// catalog) and unordered iteration would leak random key order into the
-/// bytes.
+/// Maps thinking levels to provider/model-specific values; `None` marks a level as unsupported.
+/// Ordered (`BTreeMap`): serializes into wire JSON; unordered iteration would leak key order.
 pub type ThinkingLevelMap = std::collections::BTreeMap<ModelThinkingLevel, Option<String>>;
 
 /// Token budgets for each thinking level (token-based providers only).
@@ -167,10 +153,6 @@ pub struct ThinkingBudgets {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub high: Option<u64>,
 }
-
-// ---------------------------------------------------------------------------
-// Provider options
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -206,26 +188,18 @@ pub enum ServiceTier {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderResponse {
     pub status: u16,
-    /// Ordered (`BTreeMap`): response metadata can serialize into failure
-    /// diagnostics on the wire; unordered iteration would leak random key
-    /// order into the bytes.
+    /// Ordered (`BTreeMap`): can serialize into failure diagnostics on the wire.
     pub headers: std::collections::BTreeMap<String, String>,
 }
-
-// ---------------------------------------------------------------------------
-// Content blocks
-// ---------------------------------------------------------------------------
 
 /// Text content block (`type: "text"`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TextContent {
     pub text: String,
-    /// `OpenAI` Responses message metadata: a legacy id string or a
-    /// [`TextSignatureV1`] JSON payload (TS wire key `textSignature`; the
-    /// camelCase rename keeps the provider signature attached to the block
-    /// across the pa-ai <-> pa-agent wire-shape round trips, which have no
-    /// catch-all field to carry a dropped key through).
+    /// `OpenAI` Responses metadata: a legacy id string or a [`TextSignatureV1`] JSON payload (TS
+    /// wire key `textSignature`; the camelCase rename keeps it attached across the pa-ai <->
+    /// pa-agent round trips, which have no catch-all).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_signature: Option<String>,
     #[serde(flatten)]
@@ -254,13 +228,9 @@ pub enum TextSignaturePhase {
 #[serde(rename_all = "camelCase")]
 pub struct ThinkingContent {
     pub thinking: String,
-    /// Provider reasoning item id (e.g. `OpenAI` Responses), or the encoded
-    /// reasoning-details payload for redacted blocks. TS wire key
-    /// `thinkingSignature`; the camelCase rename keeps the provider
-    /// signature attached to the block across the pa-ai <-> pa-agent
-    /// wire-shape round trips (pa-agent has no catch-all field, so a
-    /// `snake_case` key was silently dropped there) and matches the TS
-    /// product's session files and event frames.
+    /// Provider reasoning item id, or the encoded reasoning-details payload for redacted blocks (TS
+    /// wire key `thinkingSignature`; the camelCase rename keeps it attached across the pa-ai <->
+    /// pa-agent round trips, where a `snake_case` key was silently dropped).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_signature: Option<String>,
     /// True when the thinking content was redacted by safety filters.
@@ -288,30 +258,22 @@ pub struct ToolCall {
     pub name: String,
     pub arguments: JsonMap,
     /// Google-specific opaque signature for reusing thought context (TS
-    /// wire key `thoughtSignature`; see [`ThinkingContent`] for why the
-    /// camelCase rename must match pa-agent's).
+    /// wire key `thoughtSignature`; see [`ThinkingContent`] for the rename).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thought_signature: Option<String>,
     #[serde(flatten)]
     pub rest: JsonMap,
 }
 
-/// Content blocks allowed in user and tool-result messages.
-///
-/// The tagged forms (`type: "text"` / `type: "image"`) are the TS wire
-/// contract, but live session files also carry text blocks written without a
-/// `type` tag (earlier daemon builds persisted `{"text": ...}` directly), and
-/// newer builds may write block kinds this version does not model. Any block
-/// that is not a well-formed known variant is preserved verbatim as
-/// [`UserContentBlock::Raw`] so a session load never fails on an unknown
-/// shape and every entry round-trips losslessly - the same catch-all
-/// contract [`crate::session::FileEntry`] applies to whole entries.
+/// Content blocks allowed in user and tool-result messages. Live session files also carry untagged
+/// text blocks and unknown block kinds; those are preserved verbatim as [`UserContentBlock::Raw`]
+/// so
+/// a load never fails - the same catch-all contract [`crate::session::FileEntry`] applies.
 #[derive(Debug, Clone, PartialEq)]
 pub enum UserContentBlock {
     Text(TextContent),
     Image(ImageContent),
-    /// Un-modeled block: a missing or unknown `type` tag, or any other JSON
-    /// shape that is not a known variant. Serialized verbatim.
+    /// Un-modeled block (missing/unknown `type` tag or other JSON shape); serialized verbatim.
     Raw(Value),
 }
 
@@ -326,7 +288,7 @@ impl Serialize for UserContentBlock {
 }
 
 /// Serialize a known block as its flat wire object: the content fields plus
-/// the `type` tag (same output as the derived `#[serde(tag = "type")]` form).
+/// the `type` tag (same output as the derived tagged form).
 fn serialize_tagged_block<T: Serialize, S: serde::Serializer>(
     tag: &str,
     content: &T,
@@ -363,8 +325,7 @@ impl<'de> Deserialize<'de> for UserContentBlock {
 }
 
 /// Copy of the block without its `type` tag, so the tag is not captured
-/// into the content catch-all map (the derived tagged form consumed it the
-/// same way and never exposed it in `rest`).
+/// into the content catch-all map.
 fn strip_block_tag(value: &Value) -> Value {
     let mut payload = value.clone();
     if let Some(map) = payload.as_object_mut() {
@@ -374,12 +335,10 @@ fn strip_block_tag(value: &Value) -> Value {
 }
 
 impl UserContentBlock {
-    /// Text carried by this block for provider payload conversion: the modeled
-    /// text, or the `text` string of an un-modeled block (live session files
-    /// carry bare `{"text": ...}` blocks with no `type` tag, and a provider
-    /// prompt must not silently lose them). Image blocks and raw blocks
-    /// without a `text` field return `None`. TS display paths stay
-    /// tag-strict ([`UserContent::text`] does not use this helper).
+    /// Text for provider payload conversion: modeled text, or the `text` string of an un-modeled
+    /// bare `{"text": ...}` block (a provider prompt must not silently lose them); image blocks and
+    /// raw blocks without `text` return `None`. TS display stays tag-strict ([`UserContent::text`]
+    /// does not use this helper).
     pub fn text(&self) -> Option<&str> {
         match self {
             Self::Text(content) => Some(content.text.as_str()),
@@ -388,9 +347,8 @@ impl UserContentBlock {
         }
     }
 
-    /// Base64 image data and mime type carried by this block for provider
-    /// payload conversion: the modeled image, or the `data`/`mimeType`
-    /// fields of an un-modeled block.
+    /// Base64 data and mime type for provider payload conversion: the
+    /// modeled image, or the `data`/`mimeType` fields of an un-modeled block.
     pub fn image(&self) -> Option<(&str, &str)> {
         match self {
             Self::Image(content) => Some((content.data.as_str(), content.mime_type.as_str())),
@@ -422,11 +380,9 @@ pub enum UserContent {
 }
 
 impl UserContent {
-    /// Concatenated text of all text blocks (string content is returned as-is).
-    ///
-    /// Tag-strict like the TS text extraction (`block.type === "text"`):
-    /// un-modeled [`UserContentBlock::Raw`] blocks contribute nothing here
-    /// even when they carry a bare `text` field.
+    /// Concatenated text of all text blocks (string content returned as-is).
+    /// Tag-strict like TS (`block.type === "text"`): Raw blocks contribute
+    /// nothing even when they carry a bare `text` field.
     #[must_use]
     pub fn text(&self) -> String {
         match self {
@@ -442,10 +398,6 @@ impl UserContent {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Usage and stop reasons
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -478,10 +430,9 @@ pub struct Usage {
 pub enum StopReason {
     Stop,
     Length,
-    /// Terminal reason of a turn that ended in tool calls. Deserialization
-    /// also accepts the raw `OpenAI` wire value `tool_calls` (TS's loader
-    /// keeps any `stopReason` string, so a session file written by the TS
-    /// product or a foreign tool never loses its assistant rows).
+    /// Terminal reason of a turn that ended in tool calls; also accepts the
+    /// raw `OpenAI` wire value `tool_calls` (TS keeps any `stopReason`
+    /// string, so foreign session files never lose assistant rows).
     #[serde(alias = "tool_calls")]
     ToolUse,
     Error,
@@ -504,10 +455,6 @@ pub enum ErrorStopReason {
     Aborted,
     Error,
 }
-
-// ---------------------------------------------------------------------------
-// Messages
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "camelCase")]
@@ -596,11 +543,9 @@ pub struct AssistantMessage {
 #[serde(rename_all = "camelCase")]
 pub struct ToolResultMessage {
     pub tool_call_id: String,
-    /// The tool's name. The product always writes it, but a session file
-    /// from a foreign tool or an older build may omit it — the TS loader
-    /// keeps such rows (an undefined name renders empty), so the field
-    /// defaults instead of degrading the whole entry. An empty name is not
-    /// re-serialized, keeping the round trip lossless against the source.
+    /// The tool's name. A session file from a foreign tool or older build
+    /// may omit it (the TS loader keeps such rows), so the field defaults;
+    /// an empty name is not re-serialized, keeping it lossless.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub tool_name: String,
     pub content: Vec<UserContentBlock>,
@@ -614,10 +559,6 @@ pub struct ToolResultMessage {
     #[serde(flatten)]
     pub rest: JsonMap,
 }
-
-// ---------------------------------------------------------------------------
-// Tools and context
-// ---------------------------------------------------------------------------
 
 /// Tool definition sent to providers. `parameters` is a TypeBox/JSON schema.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -639,14 +580,8 @@ pub struct Context {
     pub tools: Option<Vec<Tool>>,
 }
 
-// ---------------------------------------------------------------------------
-// Stream events
-// ---------------------------------------------------------------------------
-
-/// Event protocol for assistant message streams.
-///
-/// Streams emit `start` before partial updates, then terminate with either
-/// `done` (success) or `error` (`stopReason` `"error"`/`"aborted"`).
+/// Event protocol for assistant message streams: `start` before partial
+/// updates, then `done` (success) or `error` (`stopReason` `"error"`/`"aborted"`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "type",
@@ -709,10 +644,6 @@ pub enum AssistantMessageEvent {
     },
 }
 
-// ---------------------------------------------------------------------------
-// Models
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelCost {
@@ -731,266 +662,23 @@ pub enum ModelInput {
     Text,
     Image,
 }
+mod compat;
+pub use compat::{
+    AnthropicMessagesCompat, CacheControlFormat, CompatKind, MaxTokensField, ModelCompat,
+    OpenAiCompletionsCompat, OpenAiResponsesCompat, ThinkingFormat,
+};
 
-/// Compatibility settings for OpenAI-compatible completions APIs.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OpenAiCompletionsCompat {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supports_store: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supports_developer_role: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supports_reasoning_effort: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supports_usage_in_streaming: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_tokens_field: Option<MaxTokensField>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub requires_tool_result_name: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub requires_assistant_after_tool_result: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub requires_thinking_as_text: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub requires_reasoning_content_on_assistant_messages: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thinking_format: Option<ThinkingFormat>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub open_router_routing: Option<OpenRouterRouting>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub vercel_gateway_routing: Option<VercelGatewayRouting>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub zai_tool_stream: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supports_strict_mode: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_control_format: Option<CacheControlFormat>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub send_session_affinity_headers: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supports_long_cache_retention: Option<bool>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MaxTokensField {
-    MaxCompletionTokens,
-    MaxTokens,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ThinkingFormat {
-    Openai,
-    Openrouter,
-    Deepseek,
-    Zai,
-    Qwen,
-    #[serde(rename = "qwen-chat-template")]
-    QwenChatTemplate,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CacheControlFormat {
-    Anthropic,
-}
-
-/// Compatibility settings for `OpenAI` Responses APIs.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OpenAiResponsesCompat {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub send_session_id_header: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supports_long_cache_retention: Option<bool>,
-}
-
-/// Compatibility settings for Anthropic Messages-compatible APIs.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AnthropicMessagesCompat {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supports_eager_tool_input_streaming: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supports_long_cache_retention: Option<bool>,
-}
-
-/// TS models `Model.compat` as an API-dependent conditional type. On the wire
-/// it is one of the three compat objects, all with optional fields, so the
-/// variant cannot be tagged. serde's `flatten` also cannot carry nested
-/// untagged enums, so this wrapper keeps the raw object and offers typed
-/// views: [`ModelCompat::kind`] sniffs distinctive keys and decodes into the
-/// matching typed struct, and [`ModelCompat::from_kind`] encodes one back.
-/// Keeping the raw object makes wire round-trips exactly lossless.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct ModelCompat {
-    pub raw: JsonMap,
-}
-
-const ANTHROPIC_COMPAT_KEYS: &[&str] = &["supportsEagerToolInputStreaming"];
-const RESPONSES_COMPAT_KEYS: &[&str] = &["sendSessionIdHeader"];
-/// Which compat object a `Model.compat` wire value carries.
-#[derive(Debug, Clone, PartialEq)]
-pub enum CompatKind {
-    AnthropicMessages(AnthropicMessagesCompat),
-    OpenAiResponses(OpenAiResponsesCompat),
-    OpenAiCompletions(Box<OpenAiCompletionsCompat>),
-}
-
-impl ModelCompat {
-    /// Build a [`ModelCompat`] from a typed compat value.
-    ///
-    /// # Panics
-    ///
-    /// Panics if serializing `kind` to a JSON value fails or if that value
-    /// is not a JSON object. Both are unreachable for the current compat
-    /// structs, which serialize to plain JSON objects.
-    // Workspace API consumed across crates (pa-ai, pa-models, pa-core); the
-    // by-value `CompatKind` signature is fleet-wide, out of this lane's scope.
-    #[allow(clippy::needless_pass_by_value)]
-    #[must_use]
-    pub fn from_kind(kind: CompatKind) -> Self {
-        let value = match &kind {
-            CompatKind::AnthropicMessages(c) => serde_json::to_value(c),
-            CompatKind::OpenAiResponses(c) => serde_json::to_value(c),
-            CompatKind::OpenAiCompletions(c) => serde_json::to_value(c.as_ref()),
-        }
-        .expect("compat structs serialize to JSON");
-        let Value::Object(map) = value else {
-            unreachable!("compat structs serialize to JSON objects");
-        };
-        ModelCompat { raw: map }
-    }
-
-    /// Decode the raw object into the typed compat struct its keys select.
-    /// When only shared keys (e.g. `supportsLongCacheRetention`) are present,
-    /// every shape encodes them identically; the completions shape is the
-    /// fallback because it is the common case for OpenAI-compatible providers.
-    ///
-    /// # Errors
-    ///
-    /// Returns the `serde_json` error when the raw object does not
-    /// deserialize into the compat struct its keys selected.
-    pub fn kind(&self) -> Result<CompatKind, serde_json::Error> {
-        let has_key = |keys: &[&str]| keys.iter().any(|k| self.raw.contains_key(*k));
-        let value = Value::Object(self.raw.clone());
-        if has_key(ANTHROPIC_COMPAT_KEYS) {
-            Ok(CompatKind::AnthropicMessages(serde_json::from_value(
-                value,
-            )?))
-        } else if has_key(RESPONSES_COMPAT_KEYS) {
-            Ok(CompatKind::OpenAiResponses(serde_json::from_value(value)?))
-        } else {
-            Ok(CompatKind::OpenAiCompletions(Box::new(
-                serde_json::from_value(value)?,
-            )))
-        }
-    }
-}
-
-/// `OpenRouter` provider routing preferences (`provider` request field).
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OpenRouterRouting {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub allow_fallbacks: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub require_parameters: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub data_collection: Option<DataCollection>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub zdr: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub enforce_distillable_text: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub order: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub only: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ignore: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub quantizations: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sort: Option<OpenRouterSort>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_price: Option<OpenRouterMaxPrice>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub preferred_min_throughput: Option<OpenRouterThreshold>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub preferred_max_latency: Option<OpenRouterThreshold>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DataCollection {
-    Deny,
-    Allow,
-}
-
-/// `OpenRouter` sort strategy: a string metric or a partitioned object.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum OpenRouterSort {
-    Metric(String),
-    Detailed {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        by: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        partition: Option<String>,
-    },
-}
-
-/// `OpenRouter` price cap, with string-or-number fields as in the upstream API.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OpenRouterMaxPrice {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt: Option<NumOrString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub completion: Option<NumOrString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub image: Option<NumOrString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub audio: Option<NumOrString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub request: Option<NumOrString>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum NumOrString {
-    Num(JsNumber),
-    Str(String),
-}
-
-/// `OpenRouter` percentile threshold: a scalar or a percentile map.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum OpenRouterThreshold {
-    Scalar(JsNumber),
-    Percentiles {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        p50: Option<JsNumber>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        p75: Option<JsNumber>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        p90: Option<JsNumber>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        p99: Option<JsNumber>,
-    },
-}
-
-/// Vercel AI Gateway routing preferences.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct VercelGatewayRouting {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub only: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub order: Option<Vec<String>>,
+mod routing;
+pub use routing::{
+    DataCollection, NumOrString, OpenRouterMaxPrice, OpenRouterRouting, OpenRouterSort,
+    OpenRouterThreshold, VercelGatewayRouting,
+};
+/// `skip_serializing_if` predicate for [`Model::max_tokens_explicit`]: the
+/// wire/catalog JSON stays byte-identical for catalog models (the flag
+/// serializes only when set).
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde's skip predicate ABI takes the field by reference
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// Unified model descriptor for the model registry.
@@ -1012,12 +700,16 @@ pub struct Model {
     pub context_window: u64,
     #[serde(rename = "maxTokens")]
     pub max_tokens: u64,
+    /// Set when `maxTokens` came from explicit configuration rather than the
+    /// model catalog (a models.json entry, a per-model override). An explicit
+    /// value bypasses the 32 000 default output ceiling so a configured cap
+    /// reaches the provider unchanged; catalog values stay capped.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub max_tokens_explicit: bool,
     /// Flagship model surfaced above non-featured models of the same provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub featured: Option<bool>,
-    /// Extra request headers. Ordered (`BTreeMap`): the model serializes
-    /// into wire JSON (the model catalog) and unordered iteration would
-    /// leak random key order into the bytes.
+    /// Extra request headers. Ordered (`BTreeMap`): serializes into wire JSON (the model catalog).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub headers: Option<std::collections::BTreeMap<String, String>>,
     /// Compatibility overrides; auto-detected from `baseUrl` when absent.
@@ -1025,11 +717,8 @@ pub struct Model {
     pub compat: Option<ModelCompat>,
 }
 
-/// TS `supportsServiceTier` over the eligibility fields: whether a
-/// provider accepts (and honors) a requested service tier. The
-/// Model-typed [`supports_service_tier`] delegates here so the surfaces
-/// that only hold the connection-state model metadata (provider, api, id)
-/// share one predicate.
+/// TS `supportsServiceTier` over the eligibility fields; the Model-typed [`supports_service_tier`]
+/// delegates here, so connection-state surfaces share one predicate.
 #[must_use]
 pub fn supports_service_tier_fields(
     provider: &str,
@@ -1040,10 +729,8 @@ pub fn supports_service_tier_fields(
     if tier == ServiceTier::Default {
         return true;
     }
-    // OpenRouter accepts top-level service_tier (flex|priority) for every
-    // model, routes to matching tier endpoints where they exist, and bills
-    // by the tier that actually served the request:
-    // https://openrouter.ai/docs/guides/features/service-tiers
+    // OpenRouter accepts top-level service_tier (flex|priority) for every model and bills by the
+    // tier that served the request: https://openrouter.ai/docs/guides/features/service-tiers
     if provider == "openrouter" && api == "openai-completions" {
         return matches!(tier, ServiceTier::Flex | ServiceTier::Priority);
     }
@@ -1052,9 +739,7 @@ pub fn supports_service_tier_fields(
     if !openai_responses && !codex_responses {
         return false;
     }
-    // "auto" defers the tier choice to OpenAI and is valid for every model
-    // there; "scale" is entitlement-gated, so pass it through for callers
-    // that have it.
+    // "auto" defers the tier choice to OpenAI; "scale" is entitlement-gated, so pass it through.
     if matches!(tier, ServiceTier::Auto | ServiceTier::Scale) {
         return true;
     }
@@ -1066,24 +751,19 @@ pub fn supports_service_tier_fields(
     if tier == ServiceTier::Priority {
         return eligible_id;
     }
-    // Flex processing is an API-key feature; the ChatGPT (Codex OAuth)
-    // backend has no flex tier.
+    // Flex is an API-key feature; the ChatGPT (Codex OAuth) backend has no flex tier.
     tier == ServiceTier::Flex && eligible_id && openai_responses
 }
 
-/// TS `supportsServiceTier`: whether a model's provider accepts (and
-/// honors) a requested service tier. The single eligibility predicate
-/// behind the `/tier` command, the settings row, and the `/fast` toggle
-/// (the TS product keeps the same function in the shared AI package).
+/// TS `supportsServiceTier`: whether a provider accepts a requested service tier; the single
+/// predicate behind the `/tier` command, the settings row, and the `/fast` toggle.
 #[must_use]
 pub fn supports_service_tier(model: &Model, tier: ServiceTier) -> bool {
     supports_service_tier_fields(&model.provider, &model.api, &model.id, tier)
 }
 
-/// TS `clampServiceTier`: clamp a requested tier to `default` when the
-/// model does not support it. An absent model (a session with no resolved
-/// model) clamps every non-default tier, exactly like the TS
-/// `model == null` arm; an unset (`null`) preference passes through.
+/// Clamp a requested tier to `default` when the model does not support it; an absent model clamps
+/// every non-default tier (TS `model == null`), an unset preference passes through.
 #[must_use]
 pub fn clamp_service_tier(model: Option<&Model>, tier: Option<ServiceTier>) -> Option<ServiceTier> {
     match tier {
@@ -1095,211 +775,12 @@ pub fn clamp_service_tier(model: Option<&Model>, tier: Option<ServiceTier>) -> O
     }
 }
 
-/// TS `supportsFastMode` (now `supportsServiceTier(model, "priority")`):
-/// the fast-mode (priority) tier exists on the eligible ids served over
-/// the `OpenAI` Responses APIs. Shared by the surfaces that gate the
-/// `/fast` command on model eligibility.
+/// TS `supportsFastMode` (now `supportsServiceTier(model, "priority")`): the
+/// fast-mode tier on the eligible ids over the `OpenAI` Responses APIs.
 #[must_use]
 pub fn supports_fast_mode(model: &Model) -> bool {
     supports_service_tier(model, ServiceTier::Priority)
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A minimal model for the tier-eligibility predicate (TS #2144's
-    /// gating tests run the same provider/api/id combinations).
-    fn tier_model(provider: &str, api: &str, id: &str) -> Model {
-        let zero_cost = || ModelCost {
-            input: JsNumber(0.0),
-            output: JsNumber(0.0),
-            cache_read: JsNumber(0.0),
-            cache_write: JsNumber(0.0),
-        };
-        Model {
-            id: id.to_string(),
-            name: id.to_string(),
-            api: api.to_string(),
-            provider: provider.to_string(),
-            base_url: "https://example.invalid/v1".to_string(),
-            reasoning: false,
-            thinking_level_map: None,
-            input: Vec::new(),
-            cost: zero_cost(),
-            context_window: 0,
-            max_tokens: 0,
-            featured: None,
-            headers: None,
-            compat: None,
-        }
-    }
-
-    #[test]
-    fn service_tier_eligibility_matches_ts() {
-        use ServiceTier::*;
-        // `default` is always accepted (it means no tier request at all).
-        for (provider, api, id) in [
-            ("anthropic", "anthropic-messages", "claude-fable-5"),
-            ("openrouter", "openai-completions", "openai/gpt-5.5"),
-            ("openai", "openai-responses", "gpt-5.5"),
-        ] {
-            let model = tier_model(provider, api, id);
-            assert!(supports_service_tier(&model, Default));
-        }
-        // OpenRouter accepts flex/priority for every completions model and
-        // nothing else.
-        let openrouter = tier_model("openrouter", "openai-completions", "openai/qwen-4.9");
-        assert!(supports_service_tier(&openrouter, Flex));
-        assert!(supports_service_tier(&openrouter, Priority));
-        assert!(!supports_service_tier(&openrouter, Auto));
-        assert!(!supports_service_tier(&openrouter, Scale));
-        // The Responses APIs take auto/scale everywhere, priority on the
-        // eligible ids (gpt-6-astra joined the list with #2144), and flex
-        // only on the API-key (openai) backend's eligible ids.
-        let codex = tier_model("openai-codex", "openai-codex-responses", "gpt-5.5");
-        assert!(supports_service_tier(&codex, Auto));
-        assert!(supports_service_tier(&codex, Scale));
-        assert!(supports_service_tier(&codex, Priority));
-        assert!(!supports_service_tier(&codex, Flex));
-        let codex_astra = tier_model("openai-codex", "openai-codex-responses", "gpt-6-astra");
-        assert!(supports_service_tier(&codex_astra, Priority));
-        let openai = tier_model("openai", "openai-responses", "gpt-5.4");
-        assert!(supports_service_tier(&openai, Flex));
-        let codex_ineligible = tier_model("openai-codex", "openai-codex-responses", "gpt-5.1");
-        assert!(!supports_service_tier(&codex_ineligible, Priority));
-        // Completions models outside OpenRouter never take a tier.
-        let direct = tier_model("openai", "openai-completions", "gpt-5.5");
-        assert!(!supports_service_tier(&direct, Priority));
-        // supportsFastMode is the priority question — and #2144 makes the
-        // OpenRouter completions models fast-mode-eligible too (their
-        // priority tier is accepted).
-        assert!(supports_fast_mode(&codex));
-        assert!(supports_fast_mode(&openrouter));
-        assert!(!supports_fast_mode(&codex_ineligible));
-    }
-
-    #[test]
-    fn clamp_service_tier_degrades_unsupported_requests() {
-        use ServiceTier::*;
-        let openai = tier_model("openai", "openai-responses", "gpt-5.5");
-        let other = tier_model("anthropic", "anthropic-messages", "claude-fable-5");
-        assert_eq!(clamp_service_tier(Some(&openai), Some(Flex)), Some(Flex));
-        assert_eq!(clamp_service_tier(Some(&other), Some(Flex)), Some(Default));
-        assert_eq!(
-            clamp_service_tier(Some(&other), Some(Priority)),
-            Some(Default)
-        );
-        // An absent model clamps every non-default tier (TS `model == null`).
-        assert_eq!(clamp_service_tier(None, Some(Priority)), Some(Default));
-        // Default and an unset preference pass through untouched.
-        assert_eq!(clamp_service_tier(None, Some(Default)), Some(Default));
-        assert_eq!(clamp_service_tier(None, None), None);
-    }
-
-    fn rt<T: serde::Serialize + for<'de> Deserialize<'de>>(json: &str) -> String {
-        let parsed: T = serde_json::from_str(json).expect("deserialize");
-        serde_json::to_string(&parsed).expect("serialize")
-    }
-
-    fn assert_roundtrip<T: serde::Serialize + for<'de> Deserialize<'de>>(json: &str) {
-        let original: Value = serde_json::from_str(json).unwrap();
-        let out = rt::<T>(json);
-        let reparsed: Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(original, reparsed, "round trip changed the value: {out}");
-    }
-
-    #[test]
-    fn user_message_content_string_or_blocks() {
-        assert_roundtrip::<Message>(r#"{"role":"user","content":"hello","timestamp":1}"#);
-        assert_roundtrip::<Message>(
-            r#"{"role":"user","content":[{"type":"text","text":"a"},{"type":"image","data":"QQ==","mimeType":"image/png"}],"timestamp":2}"#,
-        );
-    }
-
-    #[test]
-    fn assistant_message_roundtrip_and_unknown_fields() {
-        assert_roundtrip::<Message>(
-            r#"{"role":"assistant","content":[{"type":"thinking","thinking":"t","thinkingSignature":"r","redacted":false},{"type":"toolCall","id":"1","name":"bash","arguments":{"code":"ls"},"thoughtSignature":"g"},{"type":"text","text":"done","textSignature":"{\"v\":1,\"id\":\"x\"}"}],"api":"openai-completions","provider":"p","model":"m","responseModel":"m2","responseId":"rid","usage":{"input":1,"output":2,"cacheRead":3,"cacheWrite":4,"totalTokens":10,"cost":{"input":0.5,"output":0.25,"cacheRead":0,"cacheWrite":0,"total":0.75}},"stopReason":"toolUse","stopReasonRaw":"stop_sequence","timestamp":9,"future":"kept"}"#,
-        );
-    }
-
-    #[test]
-    fn stream_event_roundtrip() {
-        let msg = r#"{"role":"assistant","content":[],"api":"a","provider":"p","model":"m","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":1}"#;
-        assert_roundtrip::<AssistantMessageEvent>(&format!(
-            r#"{{"type":"text_delta","contentIndex":3,"delta":"abc","partial":{msg}}}"#
-        ));
-        assert_roundtrip::<AssistantMessageEvent>(&format!(
-            r#"{{"type":"done","reason":"toolUse","message":{msg}}}"#
-        ));
-        assert_roundtrip::<AssistantMessageEvent>(&format!(
-            r#"{{"type":"error","reason":"aborted","error":{msg}}}"#
-        ));
-    }
-
-    #[test]
-    fn tool_result_message_roundtrip() {
-        assert_roundtrip::<Message>(
-            r#"{"role":"toolResult","toolCallId":"c1","toolName":"ipython","content":[{"type":"text","text":"out"}],"details":{"durationMs":3},"isError":false,"timestamp":4}"#,
-        );
-    }
-
-    #[test]
-    fn model_with_compat_roundtrip() {
-        // Anthropic-flavored compat is recognized by its distinctive key.
-        assert_roundtrip::<Model>(
-            r#"{"id":"m","name":"M","api":"anthropic-messages","provider":"anthropic","baseUrl":"https://x","reasoning":true,"input":["text","image"],"cost":{"input":3,"output":15,"cacheRead":0.3,"cacheWrite":3.75},"contextWindow":200000,"maxTokens":8192,"thinkingLevelMap":{"minimal":null,"low":"low"},"compat":{"supportsEagerToolInputStreaming":false},"headers":{"x":"y"},"featured":true}"#,
-        );
-        // OpenAI-completions-flavored compat.
-        assert_roundtrip::<Model>(
-            r#"{"id":"m2","name":"M2","api":"openai-completions","provider":"p","baseUrl":"https://y","reasoning":false,"input":["text"],"cost":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0},"contextWindow":1000,"maxTokens":100,"compat":{"thinkingFormat":"openrouter","openRouterRouting":{"only":["a"],"sort":{"by":"price","partition":"model"},"max_price":{"prompt":"0.5","completion":2}}}}"#,
-        );
-    }
-
-    #[test]
-    fn user_content_untagged_text_block_roundtrips_losslessly() {
-        // Live session files carry user text blocks without a `type` tag
-        // (persisted by earlier daemon builds, e.g. session
-        // 01a0abe1-ab24-73c0-b363-0cc4e4d6cc5f.jsonl line 4). The block must
-        // deserialize and re-serialize verbatim, without injecting a tag.
-        assert_roundtrip::<Message>(r#"{"role":"user","content":[{"text":"hi"}],"timestamp":3}"#);
-    }
-
-    #[test]
-    fn user_content_unknown_block_kind_is_preserved() {
-        // A block kind this version does not model (written by a newer
-        // build) must never fail the load; it round-trips verbatim.
-        assert_roundtrip::<Message>(
-            r#"{"role":"user","content":[{"type":"video","url":"x","meta":{"a":1}}],"timestamp":4}"#,
-        );
-    }
-
-    #[test]
-    fn bare_block_payload_views() {
-        let content: UserContent = serde_json::from_str(
-            r#"[{"text":"hi"},{"type":"image","data":"QQ==","mimeType":"image/png"},{"type":"file","id":"f"}]"#,
-        )
-        .unwrap();
-        // Tag-strict display text ignores un-modeled blocks, matching the TS
-        // text extraction (`block.type === "text"`).
-        assert_eq!(content.text(), "");
-        let UserContent::Blocks(blocks) = content else {
-            panic!("expected blocks");
-        };
-        // Provider payload views recover the bare text/image structurally.
-        assert_eq!(blocks[0].text(), Some("hi"));
-        assert_eq!(blocks[1].image(), Some(("QQ==", "image/png")));
-        assert_eq!(blocks[2].text(), None);
-        assert_eq!(blocks[2].image(), None);
-    }
-
-    #[test]
-    fn user_content_text_helper() {
-        let content: UserContent = serde_json::from_str(
-            r#"[{"type":"text","text":"a b"},{"type":"image","data":"x","mimeType":"i"},{"type":"text","text":"c"}]"#,
-        )
-        .unwrap();
-        assert_eq!(content.text(), "a b c");
-    }
-}
+mod tests;

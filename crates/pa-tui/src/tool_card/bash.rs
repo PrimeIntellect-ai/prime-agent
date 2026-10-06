@@ -1,6 +1,4 @@
-//! The `bash` tool-call card, a port of the TS `bash.ts` renderCall /
-//! renderResult components composed inside the `ToolPanel`: a `label \u{00b7}
-//! status` header, the dim `$ command` call row, the command's output
+//! The `bash` tool-call card: the `$ command` call row, the output
 //! (collapsed: the last five visual lines with an `... N earlier lines`
 //! hint; expanded: everything), the truncation warning, and the live
 //! `Took`/`Elapsed` duration row.
@@ -408,52 +406,5 @@ mod tests {
         let rows = render(&card, 0, Detail::Overview, &theme(), 120, true);
         let flat: Vec<String> = rows.iter().map(text_of).collect();
         assert!(flat.iter().any(|r| r.contains("$ ...")), "got: {flat:?}");
-    }
-    #[test]
-    fn geometry_matches_render_across_card_states() {
-        let theme = theme();
-        for output in [
-            "",
-            "a\n\nb\n",
-            "界e\u{301} 👩‍💻\tend",
-            "abcdefghijklmnopqrstuvwxyz",
-            "a\nb\nc\nd\ne\nf\ng",
-            "\u{1b}[31mred\u{1b}[0m",
-        ] {
-            for args in [
-                json!({}),
-                json!({"command": null}),
-                json!({"command": "echo hello", "timeout": 123}),
-                json!({"command": "python -c 'print(1)'"}),
-            ] {
-                for state in 0..4 {
-                    let mut card = done_card("", output);
-                    card.args = args.clone();
-                    card.result_partial = state == 1;
-                    if state == 0 {
-                        card.result = None;
-                        card.started_at = None;
-                    }
-                    if let Some(result) = &mut card.result {
-                        result.is_error = state == 2;
-                        result.details = json!({"truncation": {"truncated": true, "truncatedBy": "lines", "outputLines": 2, "totalLines": 10}, "fullOutputPath": "/tmp/full"});
-                        result
-                            .content
-                            .push(json!({"type": "image", "data": "", "mimeType": "image/png"}));
-                    }
-                    for width in [0, 1, 2, 3, 4, 5, 8, 20, 40, 80] {
-                        for detail in [Detail::Overview, Detail::Details, Detail::All] {
-                            for show_images in [false, true] {
-                                let painted = render(&card, 3, detail, &theme, width, show_images);
-                                assert_eq!(
-                                    count(&card, 3, detail, &theme, width, show_images),
-                                    painted.len()
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
     }
 }

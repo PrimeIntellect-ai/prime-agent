@@ -256,6 +256,7 @@ impl CloudAgentMessageReceipt {
     ///
     /// Returns the TS problem string when the receipt is not canonical JSON
     /// or exceeds the bound.
+    #[must_use]
     pub fn canonical_problem(&self) -> Option<String> {
         let value = serde_json::to_value(self).ok()?;
         match canonical_json(&value) {
