@@ -317,7 +317,6 @@ impl TurnRunner {
         let Some((first, batched)) = items.split_first() else {
             return;
         };
-        engine.clear_progress_note();
         self.emit_turn_event(json!({ "type": "agent_start" }));
         self.emit_turn_event(json!({ "type": "turn_start" }));
         // The pane reporter's run boundary (TS `agent_start`): working.
@@ -443,13 +442,8 @@ impl TurnRunner {
                 if matches!(event, EngineEvent::TurnEnd { .. }) {
                     engine_turn_ended = true;
                 }
-                if matches!(event, EngineEvent::AgentStart) {
-                    engine.clear_progress_note();
-                }
                 if matches!(event, EngineEvent::AgentEnd { .. }) {
                     engine_agent_end_seen.store(true, std::sync::atomic::Ordering::SeqCst);
-                    // Clear before the frame: its roster flush must not publish the stale note.
-                    engine.clear_progress_note();
                 }
                 let aborted_row = matches!(
                     &event,
@@ -483,6 +477,19 @@ impl TurnRunner {
                         | EngineEvent::DoneAborted
                 );
                 let mut core = core.lock().unwrap();
+                // The run's TRUE end — an `agent_end` with no queued work
+                // taking the next turn — keys both the note clear here and
+                // the pane's idle debounce below. An internal boundary that
+                // hands the next turn to queued work (the async bash
+                // completion that cut this run) keeps the note for the work
+                // continuing in the next delivery. Clear before the frame:
+                // its roster flush must not publish the stale note.
+                let agent_end = matches!(event, EngineEvent::AgentEnd { .. });
+                let more_queued =
+                    agent_end && (!core.steering.is_empty() || !core.follow_up.is_empty());
+                if agent_end && !more_queued {
+                    engine.clear_progress_note();
+                }
                 if core.abort_requested {
                     // The sighting arms the fallback's silence only when
                     // load-bearing: a sighting on a run that completed on its own
@@ -516,7 +523,6 @@ impl TurnRunner {
                         herdr_run_end_seen.store(false, std::sync::atomic::Ordering::SeqCst);
                     }
                     EngineEvent::AgentEnd { messages } => {
-                        let more_queued = !core.steering.is_empty() || !core.follow_up.is_empty();
                         herdr
                             .lock()
                             .unwrap()
@@ -1034,8 +1040,18 @@ impl TurnRunner {
         // re-read would race `handle_abort` and silence a completed
         // session-command or pre-model-failure run).
         let engine_reported_run_end = engine_agent_end.load(std::sync::atomic::Ordering::SeqCst);
+        // One read of the queued-work state keys both the fallback note
+        // clear and the pane's `run_ended` below.
+        let more_queued = {
+            let core = self.core.lock().unwrap();
+            !core.steering.is_empty() || !core.follow_up.is_empty()
+        };
         if !engine_reported_run_end && !abort_gate_armed.load(std::sync::atomic::Ordering::SeqCst) {
-            settle_engine.clear_progress_note();
+            // The same true-end key as the engine `agent_end` above: the
+            // fallback clear leaves the note for queued continuing work.
+            if !more_queued {
+                settle_engine.clear_progress_note();
+            }
             self.emit_turn_event(json!({ "type": "agent_end" }));
         }
         {
@@ -1054,13 +1070,7 @@ impl TurnRunner {
             // `core.busy` flipped to false above; queued lanes still
             // holding items keep the settle debounced so the next pickup
             // cancels the idle flip.
-            let (error_hold, more_queued) = {
-                let core = self.core.lock().unwrap();
-                (
-                    herdr_settle_error.lock().unwrap().take(),
-                    !core.steering.is_empty() || !core.follow_up.is_empty(),
-                )
-            };
+            let error_hold = herdr_settle_error.lock().unwrap().take();
             if !herdr_run_end.load(std::sync::atomic::Ordering::SeqCst) {
                 self.herdr
                     .lock()
