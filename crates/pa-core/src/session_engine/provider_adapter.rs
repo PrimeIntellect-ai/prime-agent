@@ -50,6 +50,7 @@ pub(crate) fn agent_model_to_ai_model(model: &AgentModel) -> Model {
         },
         context_window: model.context_window,
         max_tokens: model.max_tokens,
+        max_tokens_explicit: model.max_tokens_explicit,
         featured: None,
         headers: None,
         compat: None,
@@ -453,7 +454,7 @@ mod tests {
             "id": "session-model", "name": "Session Model", "api": "faux",
             "provider": "testprov", "base_url": "http://localhost:9", "reasoning": true,
             "cost": { "input": 1.5, "output": 2.5, "cacheRead": 0.25, "cacheWrite": 0.75 },
-            "contextWindow": 128_000, "maxTokens": 4096
+            "contextWindow": 128_000, "maxTokens": 4096, "maxTokensExplicit": true
         }))
         .unwrap();
         let model = agent_model_to_ai_model(&agent_model);
@@ -469,6 +470,10 @@ mod tests {
         assert_eq!(model.cost.cache_write.as_f64(), 0.75);
         assert_eq!(model.context_window, 128_000);
         assert_eq!(model.max_tokens, 4096);
+        // The explicitly configured cap survives the crossing (#3362):
+        // the ai side needs the flag to keep the cap above the default
+        // output ceiling.
+        assert!(model.max_tokens_explicit);
         // The lossy defaults: the descriptor carries none of these.
         assert_eq!(model.input, Vec::new());
         assert_eq!(model.thinking_level_map, None);

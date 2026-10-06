@@ -392,6 +392,57 @@ while True:
     );
 }
 
+/// A request into a full stdin pipe must hit its documented per-request
+/// timeout, not park the write forever (cursor: request write ignores
+/// per-request timeout). The adapter answers `init`, then stops reading
+/// stdin; a request larger than the pipe capacity blocks mid-write, and the
+/// per-request deadline - now riding the write, not just the reply wait -
+/// cuts it with the timeout error instead of the segment deadline's
+/// teardown being the first thing that unblocks it.
+#[tokio::test]
+async fn a_request_into_a_full_stdin_pipe_hits_the_request_timeout() {
+    let (_dir, command) = adapter(
+        r#"
+import json
+import sys
+import time
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    request = json.loads(line)
+    if request.get("type") == "init":
+        print(json.dumps({"id": request.get("id"), "ok": True}), flush=True)
+        break
+# The adapter stops reading stdin: the next request has nowhere to go.
+while True:
+    time.sleep(0.1)
+"#,
+    );
+    let env = StdioRouterEnvironment::new(command, None, 250, None);
+    env.init().await.unwrap();
+    let params = std::collections::BTreeMap::from([("blob".to_string(), "A".repeat(256 * 1024))]);
+    let started = std::time::Instant::now();
+    let error = tokio::time::timeout(Duration::from_secs(5), env.execute("big", &params))
+        .await
+        .expect("the request returned instead of hanging on the full stdin pipe")
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "environment adapter execute timed out after 250ms"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the per-request timeout fired while the write was stalled"
+    );
+    // The stalled adapter still meets the budgeted teardown.
+    env.close(RouterCloseOptions {
+        budget_ms: Some(500),
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn closing_an_unstarted_adapter_is_a_no_op() {
     let env = StdioRouterEnvironment::new(vec!["python3".to_string()], None, 1_000, None);

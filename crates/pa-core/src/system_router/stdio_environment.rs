@@ -24,7 +24,11 @@
 //! where the TS reference's buffered `stdin.end` cannot block: a full
 //! stdin pipe (a large unread request, a hung adapter that stopped
 //! reading) must not stall teardown before the budgeted wait and the group
-//! kill (cursor: close write can hang forever). The reader completes the
+//! kill (cursor: close write can hang forever). The same guard bounds the
+//! request writes: every request's stdin write rides the same per-request
+//! deadline its reply wait draws from, so a full pipe cannot park a request
+//! past its documented timeout (cursor: request write ignores per-request
+//! timeout). The reader completes the
 //! buffered tail as a final line at end of stream, where the TS data
 //! handler can drop a reply the adapter wrote without its trailing
 //! newline (cursor: EOF drops last adapter reply). A line-level
@@ -229,6 +233,14 @@ impl StdioRouterEnvironment {
         {
             return Err(anyhow!("{failure}"));
         }
+        // The documented per-request budget bounds the whole request: the
+        // stdin write below rides the same deadline the reply wait draws
+        // from, so a full stdin pipe (a hung adapter that stopped reading,
+        // the hazard the close write guard records) cannot park the request
+        // past its timeout (cursor: request write ignores per-request
+        // timeout). The TS reference never meets it: its writes are
+        // buffered and never block.
+        let deadline = Instant::now() + Duration::from_millis(self.request_timeout_ms);
         let (id, receiver) = {
             let mut inner = self.inner.lock().await;
             self.ensure_child(&mut inner)?;
@@ -249,10 +261,17 @@ impl StdioRouterEnvironment {
             })?;
             line.push(b'\n');
             let write_result = match &mut inner.stdin {
-                Some(stdin) => stdin
-                    .write_all(&line)
-                    .await
-                    .map_err(|error| anyhow!("failed writing to the environment adapter: {error}")),
+                Some(stdin) => {
+                    match tokio::time::timeout_at(deadline, stdin.write_all(&line)).await {
+                        Ok(result) => result.map_err(|error| {
+                            anyhow!("failed writing to the environment adapter: {error}")
+                        }),
+                        Err(_) => Err(anyhow!(
+                            "environment adapter {request_type} timed out after {}ms",
+                            self.request_timeout_ms
+                        )),
+                    }
+                }
                 None => Err(anyhow!("environment adapter stdin is not a pipe")),
             };
             if let Err(error) = write_result {
@@ -263,7 +282,7 @@ impl StdioRouterEnvironment {
             }
             (id, receiver)
         };
-        match tokio::time::timeout(Duration::from_millis(self.request_timeout_ms), receiver).await {
+        match tokio::time::timeout_at(deadline, receiver).await {
             Ok(Ok(Ok(reply))) => Ok(reply),
             Ok(Ok(Err(error))) => Err(error),
             Ok(Err(_)) => Err(anyhow!("environment adapter closed")),
