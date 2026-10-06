@@ -438,6 +438,25 @@ async fn finish_failure(
         return Ok(());
     }
     writer.lock().await.set_state(UpdateState::Booting)?;
+    // The rollback boot must not race the dying predecessor either: wait
+    // the prepare-time fence out exactly like the main flow's stopped
+    // state. The fence is a deadman record (a dead pin self-clears here;
+    // TS `waitForDaemonStartupFence`), so this only blocks while the
+    // pinned predecessor is a genuine survivor - and a surviving owner of
+    // the socket must surface as an explicit rollback failure, never as a
+    // silent boot refusal inside the spawned child.
+    if let Err(error) = pa_daemon::supervisor_ownership::wait_for_startup_fence(
+        &options.socket_path,
+        UPDATE_RESTART_PREDECESSOR_FENCE_TIMEOUT_MS,
+    )
+    .await
+    {
+        fail_hard(format!(
+            "The rollback could not wait out the predecessor fence ({error}); the update failed ({reason}). Sessions persist on disk - prime-agent attach recovers them."
+        ))
+        .await;
+        return Ok(());
+    }
     let spawn_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
     // The rollback spawn is pinned exactly like the main flow's: the
     // adopted hello must come from the rollback child this coordinator
