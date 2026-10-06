@@ -381,6 +381,7 @@ impl Supervisor {
                     self.options.socket_path.display()
                 )
             })?;
+        socket::bind_capture_gap().await;
         // Capture the bound file's identity before anything can replace
         // it (TS daemon-supervisor.ts:879, between `listen` and
         // `restrictDaemonSocketPath`): the exit cleanup below compares
@@ -496,11 +497,15 @@ impl Supervisor {
             });
         }
 
-        accept_loop::serve(&self, &*listener).await?;
-        socket::cleanup_socket_path(
-            &self.options.socket_path,
-            self.bound_socket_identity.lock().unwrap().clone(),
-        );
+        accept_loop::serve(&self, listener).await?;
+        // The accept loop OWNED the listener, so its return already
+        // closed it (TS daemon-supervisor.ts:7436-7491 awaits the
+        // "daemon server" close step before the "daemon socket" cleanup
+        // step): the cleanup below probes the path with the owner's
+        // listener provably closed, so a successor's live socket at the
+        // path survives even a poisoned bind-time capture.
+        let expected_identity = self.bound_socket_identity.lock().unwrap().clone();
+        socket::cleanup_socket_path_after_close(&self.options.socket_path, expected_identity);
         self.flush_telemetry_on_exit().await;
         Ok(())
     }
