@@ -108,18 +108,18 @@ mod rename_noreplace {
     }
 }
 
-/// Atomically move a directory to `to` without ever replacing an existing
-/// entry there: a live lock at the destination fails with
+/// Atomically move a filesystem entry to `to` without ever replacing an
+/// existing entry there: a live lock at the destination fails with
 /// [`io::ErrorKind::AlreadyExists`] instead of being clobbered. Linux
 /// only - this is `renameat2(RENAME_NOREPLACE)`, which no other unix
-/// provides; there is no portable no-replace rename for directories.
+/// provides; there is no portable no-replace rename.
 ///
 /// # Errors
 ///
 /// Returns [`io::ErrorKind::AlreadyExists`] when `to` is occupied (the
 /// caller keeps `from`), and any underlying I/O error as-is.
 #[cfg(target_os = "linux")]
-pub fn move_dir_without_replacing(from: &Path, to: &Path) -> io::Result<()> {
+pub fn move_without_replacing(from: &Path, to: &Path) -> io::Result<()> {
     rename_noreplace::rename(from, to)
 }
 
@@ -414,12 +414,16 @@ impl LockDir {
     }
 
     /// True when a no-replace rename failed because the kernel or
-    /// filesystem does not implement it (EINVAL: the flag is unsupported
-    /// here; ENOSYS: no renameat2 at all) - the mkdir protocol is the
-    /// compatible fallback.
+    /// filesystem does not implement it (EINVAL: the flag is unknown
+    /// here; ENOSYS: no renameat2 at all; EOPNOTSUPP: the filesystem
+    /// rejects the flag - NFS, FUSE and similar mounts) - the mkdir
+    /// protocol is the compatible fallback.
     #[cfg(target_os = "linux")]
     fn rename_noreplace_unsupported(error: &io::Error) -> bool {
-        matches!(error.raw_os_error(), Some(libc::EINVAL | libc::ENOSYS))
+        matches!(
+            error.raw_os_error(),
+            Some(libc::EINVAL | libc::ENOSYS | libc::EOPNOTSUPP)
+        )
     }
 
     /// The mkdir is the acquisition signal: EEXIST is the only collision.
@@ -692,6 +696,10 @@ mod tests {
         ));
         assert!(LockDir::rename_noreplace_unsupported(
             &io::Error::from_raw_os_error(libc::ENOSYS)
+        ));
+        // NFS/FUSE mounts reject the flag with EOPNOTSUPP: same fallback.
+        assert!(LockDir::rename_noreplace_unsupported(
+            &io::Error::from_raw_os_error(libc::EOPNOTSUPP)
         ));
         // Contention and real I/O failures must keep their own errors.
         assert!(!LockDir::rename_noreplace_unsupported(

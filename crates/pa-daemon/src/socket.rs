@@ -184,14 +184,36 @@ impl SocketLease {
     }
 
     /// Best-effort unlink of only the bound socket owned by this holder.
-    /// On compromise, leave the successor's socket untouched.
+    /// On compromise, leave the successor's socket untouched. The socket
+    /// file is claimed under a private name with one atomic rename before
+    /// the removal, so the checked inode is the inode removed: a successor
+    /// that replaced the path between the identity check and the unlink is
+    /// renamed back untouched instead of being removed.
     pub fn cleanup_socket_path(&self, path: &Path, expected: Option<SocketIdentity>) {
         if self.assert_path_held(path).is_err() {
             return;
         }
         let Some(expected) = expected else { return };
-        if socket_identity(path) == Some(expected) && self.assert_path_held(path).is_ok() {
-            let _ = std::fs::remove_file(path);
+        if socket_identity(path) != Some(expected.clone()) {
+            return;
+        }
+        if self.assert_path_held(path).is_err() {
+            return;
+        }
+        let claim = pa_core::platform::private_sibling_for(path, "unlinked");
+        if std::fs::rename(path, &claim).is_err() {
+            // Nothing at the path is ours to unlink.
+            return;
+        }
+        if socket_identity(&claim) == Some(expected) && self.assert_path_held(path).is_ok() {
+            // The private name is ours alone: unlinking it cannot touch a
+            // successor's socket.
+            let _ = std::fs::remove_file(&claim);
+        } else if pa_core::platform::move_without_replacing(&claim, path).is_err() {
+            // A successor holds the vacated path: the claimed file cannot
+            // go back - remove the orphan instead of leaking it. Its owner
+            // fences on the displaced inode.
+            let _ = std::fs::remove_file(&claim);
         }
     }
 }
@@ -255,7 +277,7 @@ impl SocketLease {
 fn restore_claim(claim: &Path, path: &Path) -> bool {
     #[cfg(target_os = "linux")]
     {
-        pa_core::platform::move_dir_without_replacing(claim, path).is_ok()
+        pa_core::platform::move_without_replacing(claim, path).is_ok()
     }
     #[cfg(all(unix, not(target_os = "linux")))]
     {
@@ -596,6 +618,27 @@ mod tests {
             lock_path.is_dir(),
             "a compromised lease must not release the successor's lock"
         );
+    }
+
+    #[tokio::test]
+    async fn socket_cleanup_claims_and_restores_a_replaced_socket() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let socket = dir.path().join("daemon.sock");
+        let lease = SocketLease::acquire(&socket).await.unwrap();
+        let lock_path = pa_core::platform::LockDir::path_for(&socket);
+        let listener = bind_transport(&socket).await.unwrap();
+        let bound = socket_identity(&socket);
+        lease.cleanup_socket_path(&socket, bound.clone());
+        assert!(!socket.exists(), "the claimed socket was unlinked");
+        // A successor binds a replacement at the vacated path; the lease's
+        // cleanup must restore it, never remove it.
+        let successor = bind_transport(&socket).await.unwrap();
+        lease.cleanup_socket_path(&socket, bound);
+        assert!(socket.exists(), "the successor's socket survives");
+        drop(listener);
+        drop(successor);
+        drop(lease);
+        assert!(!lock_path.exists());
     }
 
     #[tokio::test]
