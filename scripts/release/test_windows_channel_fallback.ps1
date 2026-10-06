@@ -79,8 +79,9 @@ function Invoke-Installer {
 $serverLog = Join-Path $scratch 'channel-server.log'
 $server = Start-Process -FilePath $py -ArgumentList '-u','-m','http.server','0','--bind','127.0.0.1','--directory',$channel -PassThru -WindowStyle Hidden -RedirectStandardOutput $serverLog
 # install.ps1 writes the User PATH (the PATH-parity flow) and installs uv
-# when the machine has none (the astral route); the harness restores the
-# registry value it dirtied. THE UV BINARIES ARE THE USER'S OWN STATE (the
+# when the machine has none (the astral route); the harness strips exactly
+# its own scratch-prefixed PATH entries in the cleanup below. THE UV
+# BINARIES ARE THE USER'S OWN STATE (the
 # reviewers' finding): an unconditional cleanup delete destroyed a
 # pre-existing ~/.local/bin install, so both binaries are snapshotted
 # (byte backups) before the installer runs and restored in the cleanup
@@ -89,7 +90,6 @@ $server = Start-Process -FilePath $py -ArgumentList '-u','-m','http.server','0',
 # (the server stops, the scratch goes); a half-done snapshot neither
 # restores a backup that does not exist nor deletes a file it never
 # recorded (the $uvSnapshotDone guard below).
-$userPathBefore = [Environment]::GetEnvironmentVariable('Path', 'User')
 $uvBinDir = Join-Path $HOME '.local\bin'
 $uvSnapshotDir = Join-Path $scratch 'uv-snapshot'
 $uvBinaries = @('uv.exe', 'uvx.exe')
@@ -179,25 +179,59 @@ try {
     Write-Host "WIN_CHANNEL_FALLBACK default->beta=$betaVersion notice+marker verified; explicit-stable refused with the beta route"
 } finally {
     Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
-    # The registry value first (the machine state the harness dirtied most
-    # invasively must come back even if a later restore step throws).
-    [Environment]::SetEnvironmentVariable('Path', $userPathBefore, 'User')
+    # The User PATH: strip ONLY the entries this test added - the ones
+    # under its own scratch dir - from the CURRENT registry value, never
+    # a stale snapshot restore (a whole-value overwrite would clobber any
+    # external PATH change made while the test ran) and never through
+    # [Environment]::SetEnvironmentVariable (it flattens a REG_EXPAND_SZ
+    # Path to plain REG_SZ with this run's expansion frozen in). The raw
+    # value rides out with its registry kind intact; a Path this test
+    # created from nothing is deleted again; a Path it never touched is
+    # not rewritten at all. A cleanup failure is recorded and the
+    # remaining steps still run (the loud tail below reports it).
+    $pathCleanFailed = $false
+    $envKey = $null
+    try {
+        $envKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+        $rawUserPath = $envKey.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        $rawUserKind = [Microsoft.Win32.RegistryValueKind]::ExpandString
+        if ($envKey.GetValueNames() -contains 'Path') {
+            $rawUserKind = $envKey.GetValueKind('Path')
+        }
+        $allEntries = @($rawUserPath -split ';')
+        $keptEntries = @($allEntries | Where-Object { -not $_.Trim().StartsWith($scratch, [System.StringComparison]::OrdinalIgnoreCase) })
+        if ($keptEntries.Count -lt $allEntries.Count) {
+            if ($keptEntries.Count -gt 0) {
+                $envKey.SetValue('Path', ($keptEntries -join ';'), $rawUserKind)
+            } else {
+                $envKey.DeleteValue('Path', $false)
+            }
+        }
+    } catch {
+        $pathCleanFailed = $true
+    } finally {
+        if ($envKey) { $envKey.Close() }
+    }
     # The uv binaries: a recorded pre-existing install is restored
-    # byte-for-byte from its backup; a file the snapshot recorded ABSENT is
-    # the test's own and leaves with it. Everything else - a snapshot that
-    # never completed, or a recorded binary whose backup went missing -
-    # touches NOTHING: the delete below runs only for files the snapshot
-    # itself recorded absent, so the user's own uv can never be deleted.
-    # A recorded binary whose backup went missing CANNOT be verified as the
-    # user's own copy anymore: the current file stays in place, the
-    # remaining cleanup steps run, and the loss is then reported LOUDLY
-    # (never swallowed - a test that ends green with the user's uv
-    # replaced is a silent restore failure).
+    # byte-for-byte from its backup - a restore that FAILS (a locked
+    # binary) is recorded and the remaining cleanup steps still run; a
+    # file the snapshot recorded ABSENT is the test's own and leaves with
+    # it; anything else - a snapshot that never completed, or a recorded
+    # binary whose backup went missing - touches NOTHING: the delete below
+    # runs only for files the snapshot itself recorded absent, so the
+    # user's own uv can never be deleted. The loud tail below reports
+    # every failure together, after the cleanup has finished (never
+    # swallowed - a test that ends green with the user's uv replaced is a
+    # silent restore failure).
     $uvRestoreFailed = @()
     foreach ($uvName in $uvBinaries) {
         $uvPath = Join-Path $uvBinDir $uvName
         if ($uvBefore[$uvName] -and (Test-Path (Join-Path $uvSnapshotDir $uvName))) {
-            Copy-Item -LiteralPath (Join-Path $uvSnapshotDir $uvName) -Destination $uvPath -Force
+            try {
+                Copy-Item -LiteralPath (Join-Path $uvSnapshotDir $uvName) -Destination $uvPath -Force
+            } catch {
+                $uvRestoreFailed += $uvName
+            }
         } elseif (-not $uvBefore[$uvName] -and $uvSnapshotDone) {
             Remove-Item -LiteralPath $uvPath -Force -ErrorAction SilentlyContinue
         } elseif ($uvBefore[$uvName] -and $uvSnapshotDone) {
@@ -208,7 +242,14 @@ try {
     $env:UV_CACHE_DIR = $callerUvCacheDir
     $env:UV_PYTHON_INSTALL_DIR = $callerUvPythonDir
     Remove-Item -Recurse -Force $scratch -ErrorAction SilentlyContinue
-    if ($uvRestoreFailed.Count -gt 0) {
-        throw "could not verify the pre-existing uv binary ($($uvRestoreFailed -join ', ')): its byte backup went missing, so the file on disk may be the test's own; reinstall uv with: irm https://astral.sh/uv/install.ps1 | iex"
+    if ($pathCleanFailed -or $uvRestoreFailed.Count -gt 0) {
+        $cleanupFailures = @()
+        if ($pathCleanFailed) {
+            $cleanupFailures += 'could not clean the user PATH entries this test added'
+        }
+        if ($uvRestoreFailed.Count -gt 0) {
+            $cleanupFailures += "could not restore the pre-existing uv binary ($($uvRestoreFailed -join ', ')): the restore failed or its byte backup went missing, so the file on disk may be the test's own; reinstall uv with: irm https://astral.sh/uv/install.ps1 | iex"
+        }
+        throw ($cleanupFailures -join '; ')
     }
 }

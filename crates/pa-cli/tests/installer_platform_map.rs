@@ -371,19 +371,31 @@ fn install_ps1_adds_bin_to_the_user_path_and_the_session_path() {
         .find("# --- verify: the launcher must answer --version")
         .expect("the smoke test section exists");
     let section = &text[section_start..section_end];
-    let markers: [(&str, &str); 6] = [
+    let markers: [(&str, &str); 9] = [
         ("the session PATH add", "$env:PATH = \"$env:PATH;$bin\""),
         (
-            "the user PATH read",
-            "[Environment]::GetEnvironmentVariable('Path', 'User')",
+            "the registry key open (writable: the append needs it anyway)",
+            "[Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)",
         ),
         (
-            "the idempotent absent check (a whole-entry compare, never a substring: a sibling entry like C:\\Tools\\bin-old must not mask C:\\Tools\\bin)",
-            "if (-not (Test-PathEntry $userPath $bin))",
+            "the RAW user PATH read (never [Environment]::GetEnvironmentVariable: it returns the EXPANDED value, and the flattened write-back would freeze %VAR%-style entries at this run's expansion)",
+            "[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames",
         ),
         (
-            "the durable user PATH write",
-            "[Environment]::SetEnvironmentVariable('Path', $newUserPath, 'User')",
+            "the kind read (a REG_EXPAND_SZ Path must stay REG_EXPAND_SZ: SetEnvironmentVariable flattens it to plain REG_SZ, dotnet/runtime#1442)",
+            "$envKey.GetValueKind('Path')",
+        ),
+        (
+            "the expanded copy for membership (a %USERPROFILE%\\..local\\bin-style RAW entry spells the same directory as the expanded $bin - the dedup must see it, or the idempotent add appends the directory twice)",
+            "[Environment]::ExpandEnvironmentVariables($rawUserPath)",
+        ),
+        (
+            "the idempotent absent check (a whole-entry compare on BOTH spellings, never a substring: a sibling entry like C:\\Tools\\bin-old must not mask C:\\Tools\\bin)",
+            "if (-not (Test-PathEntry $rawUserPath $bin) -and -not (Test-PathEntry $expandedUserPath $bin)) {",
+        ),
+        (
+            "the kind-preserving user PATH write",
+            "$envKey.SetValue('Path', $newUserPath, $rawUserKind)",
         ),
         ("the change broadcast", "SendMessageTimeout([IntPtr]0xffff"),
         ("the new-terminal hint", "picks it up automatically"),
@@ -407,6 +419,14 @@ fn install_ps1_adds_bin_to_the_user_path_and_the_session_path() {
     assert!(
         !section.contains("add it for the prime-agent command"),
         "the PATH note must not tell the user to edit their own PATH by hand"
+    );
+    // The flattened write route is gone: SetEnvironmentVariable turns a
+    // REG_EXPAND_SZ Path into plain REG_SZ with this run's expansion frozen
+    // in (the macroscope finding: %JAVA_HOME%-style entries stop following
+    // their variables).
+    assert!(
+        !section.contains("[Environment]::SetEnvironmentVariable('Path'"),
+        "the user PATH write must preserve the registry value's kind (never the flattening SetEnvironmentVariable route)"
     );
 }
 
@@ -603,9 +623,61 @@ fn windows_install_e2e_builds_the_shipped_link_mode() {
         "the e2e must gate on the uv executable the ps1 route promises to install"
     );
     assert!(
-        harness.contains("[Environment]::SetEnvironmentVariable('Path', $userPathBefore, 'User')"),
-        "the e2e must snapshot and restore the User PATH its installs dirty"
+        harness.contains(".Trim().StartsWith($scratch, [System.StringComparison]::OrdinalIgnoreCase)"),
+        "the e2e must strip exactly its own scratch-prefixed PATH entries from the CURRENT user PATH (never a stale snapshot restore)"
     );
+}
+
+/// The harnesses' User PATH cleanup strips ONLY the entries the test itself
+/// added (the macroscope finding): restoring a whole stale snapshot would
+/// clobber any PATH change made outside the test while it ran, and the
+/// flatten-on-write [Environment] route would destroy the registry value's
+/// `REG_EXPAND_SZ` kind. Each harness reads the RAW value with its kind,
+/// drops only the entries under its own scratch dir, and writes back with
+/// the kind preserved - a Path the test created from nothing is deleted
+/// again; a Path untouched by the test is not rewritten at all.
+#[test]
+fn windows_e2e_harnesses_strip_only_their_own_path_entries() {
+    for harness_name in [
+        "test_windows_install.ps1",
+        "test_windows_channel_fallback.ps1",
+    ] {
+        let harness = std::fs::read_to_string(
+            repo_root()
+                .join("scripts")
+                .join("release")
+                .join(harness_name),
+        )
+        .unwrap_or_else(|_| panic!("read {harness_name}"));
+        for (what, marker) in [
+            (
+                "the raw read",
+                "[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames",
+            ),
+            ("the kind read", "$envKey.GetValueKind('Path')"),
+            (
+                "the own-entries filter",
+                ".Trim().StartsWith($scratch, [System.StringComparison]::OrdinalIgnoreCase)",
+            ),
+            (
+                "the kind-preserving write",
+                "$envKey.SetValue('Path', ($keptEntries -join ';'), $rawUserKind)",
+            ),
+            (
+                "the absent-Path edge (the test created the value from nothing)",
+                "$envKey.DeleteValue('Path', $false)",
+            ),
+        ] {
+            assert!(
+                harness.contains(marker),
+                "{harness_name} must carry its {what} line: {marker}"
+            );
+        }
+        assert!(
+            !harness.contains("[Environment]::SetEnvironmentVariable('Path', $userPathBefore, 'User')"),
+            "{harness_name}'s cleanup must not restore a stale whole-value snapshot (it clobbers external changes and flattens the kind)"
+        );
+    }
 }
 
 /// Save-Release's body copy must survive a stalled body (the macroscope
@@ -786,10 +858,14 @@ fn windows_e2e_harnesses_restore_the_users_uv_binaries() {
             "{harness_name}'s cleanup must delete only a file the snapshot itself recorded absent (a recorded pre-existing binary is never deleted, even if its backup went missing)"
         );
         assert!(
-            harness.contains("$uvRestoreFailed += $uvName")
-                && harness.contains("if ($uvRestoreFailed.Count -gt 0) {")
-                && harness.contains("could not verify the pre-existing uv binary"),
-            "{harness_name}'s cleanup must report a restore it could not perform LOUDLY (a recorded binary whose backup went missing must fail the run, never end green over silent loss)"
+            harness.contains("} catch {")
+                && harness.contains("$uvRestoreFailed += $uvName"),
+            "{harness_name}'s cleanup must survive a failing restore Copy-Item (a locked binary): record the failure and keep cleaning, never abort the finally"
+        );
+        assert!(
+            harness.contains("if ($uvRestoreFailed.Count -gt 0) {")
+                && harness.contains("could not restore the pre-existing uv binary"),
+            "{harness_name}'s cleanup must report a restore it could not perform LOUDLY after the other cleanup steps (a restore failure must fail the run, never end green over silent loss)"
         );
         assert!(
             harness

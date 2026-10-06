@@ -772,10 +772,38 @@ if (-not (Test-PathEntry $env:PATH $bin)) {
     $env:PATH = "$env:PATH;$bin"
     Write-Host "PATH: added $bin to this session - prime-agent works in this console now"
 }
-$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-if (-not (Test-PathEntry $userPath $bin)) {
-    $newUserPath = if ($userPath) { $userPath.TrimEnd(';') + ";$bin" } else { $bin }
-    [Environment]::SetEnvironmentVariable('Path', $newUserPath, 'User')
+# THE REGISTRY-KIND DISCIPLINE (the reviewer's finding): the user Path is
+# often REG_EXPAND_SZ (the %VAR%-carrying kind Windows template profiles
+# write), and [Environment]::GetEnvironmentVariable returns it EXPANDED
+# while SetEnvironmentVariable writes back plain REG_SZ
+# (dotnet/runtime#1442) - %JAVA_HOME%-style entries would freeze at THIS
+# run's expansion and stop following their variables. The add reads the
+# RAW value with its kind through the registry API and writes the append
+# back with the SAME kind: the %VAR% spellings survive verbatim.
+$pathAdded = $false
+$envKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+try {
+    $rawUserPath = $envKey.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    $rawUserKind = [Microsoft.Win32.RegistryValueKind]::ExpandString
+    if ($envKey.GetValueNames() -contains 'Path') {
+        $rawUserKind = $envKey.GetValueKind('Path')
+    }
+    # THE DUAL-SPELLING DEDUP (the reviewer's finding): a raw entry like
+    # %USERPROFILE%\.local\bin spells the SAME directory as the expanded
+    # $bin, and a raw-text compare alone would miss it - the add would
+    # append the directory a second time in its expanded spelling. So the
+    # membership check runs against BOTH spellings while the append and
+    # the kind-preserving write-back keep the raw text untouched.
+    $expandedUserPath = [Environment]::ExpandEnvironmentVariables($rawUserPath)
+    if (-not (Test-PathEntry $rawUserPath $bin) -and -not (Test-PathEntry $expandedUserPath $bin)) {
+        $newUserPath = if ($rawUserPath) { $rawUserPath.TrimEnd(';') + ";$bin" } else { $bin }
+        $envKey.SetValue('Path', $newUserPath, $rawUserKind)
+        $pathAdded = $true
+    }
+} finally {
+    if ($envKey) { $envKey.Close() }
+}
+if ($pathAdded) {
     try {
         if (-not ('prime_agent_install.Win32SendMessage' -as [type])) {
             Add-Type -Namespace 'prime_agent_install' -Name 'Win32SendMessage' -MemberDefinition @'
