@@ -158,7 +158,42 @@ impl RlmSubagentHost for SupervisorChildSessions {
             // starts after the parent's continuation request is in flight.
             let watcher_this = Arc::clone(&this);
             let watcher_record = Arc::clone(&record);
-            let prompt = request.prompt.clone();
+            // TS `spawnMessage`: the kickoff rides prompt admission as
+            // the parent's `agent_message` row, so the child renders a
+            // parent message and the model reads the
+            // "[task from parent]" label.
+            let prompt = request.prompt.as_str();
+            let kickoff_content = format!("[task from parent]\n\n{prompt}");
+            let kickoff_row_id = format!("spawn:{child_id}");
+            let mut parent_endpoint = json!({
+                "activeSessionId": this.parent_active_session_id,
+            });
+            if let Some(session_id) = &identity.session_id {
+                parent_endpoint["sessionId"] = json!(session_id);
+            }
+            if let Some(name) = this
+                .parent_session_name
+                .lock()
+                .expect("parent session name lock")
+                .clone()
+            {
+                parent_endpoint["sessionName"] = json!(name);
+            }
+            let kickoff_row =
+                pa_core::session_engine::agent_messaging::create_agent_session_message_row(
+                    &pa_core::session_engine::agent_messaging::AgentSessionMessageRowPayload {
+                        id: &kickoff_row_id,
+                        prompt: &kickoff_content,
+                        message: prompt,
+                        from: &parent_endpoint,
+                        from_relationship: Some(
+                            pa_core::session_engine::agent_messaging::AgentFamilyRelationship::Parent,
+                        ),
+                        // TS `spawnMessage` carries no `target`.
+                        target: None,
+                        timestamp: now_ms(),
+                    },
+                );
             let child_active_session_id = created.active_session_id.clone();
             let child_session_file = created.session_file.clone();
             let child_log_id = child_id.clone();
@@ -176,20 +211,30 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 }
                 watcher_record.lock().await.prompt_admitted = true;
                 if let Err(error) = watcher_this
-                    .prompt_child(&child_active_session_id, &prompt)
+                    .prompt_child(
+                        &child_active_session_id,
+                        &kickoff_content,
+                        Some(&kickoff_row),
+                    )
                     .await
                 {
                     // The route can fail ambiguously around a worker
                     // replacement. The durable session file arbitrates: a
-                    // prompt in the file landed (re-sending would duplicate
-                    // the first turn); one retry is safe.
-                    let landed =
-                        session_file_carries_prompt(child_session_file.as_deref(), &prompt);
+                    // kickoff row in the file landed (re-sending would
+                    // duplicate the first turn); one retry is safe.
+                    let landed = session_file_carries_spawn_kickoff(
+                        child_session_file.as_deref(),
+                        &kickoff_row_id,
+                    );
                     let retried = if landed {
                         Ok(())
                     } else {
                         watcher_this
-                            .prompt_child(&child_active_session_id, &prompt)
+                            .prompt_child(
+                                &child_active_session_id,
+                                &kickoff_content,
+                                Some(&kickoff_row),
+                            )
                             .await
                     };
                     if let Err(retry_error) = retried {
@@ -597,9 +642,14 @@ impl RlmSubagentHost for SupervisorChildSessions {
     }
 }
 
-/// Whether the child's durable session file already carries the task
-/// prompt (the record a worker replacement replays from arbitrates).
-fn session_file_carries_prompt(session_file: Option<&str>, prompt: &str) -> bool {
+/// Whether the child's durable session file already carries the spawn
+/// kickoff row (`agent_message` custom row with `details.id` =
+/// `spawn:<child id>`). The session file is the record a worker
+/// replacement replays from, so it arbitrates an ambiguous prompt-route
+/// failure: a row in the file was durably processed by the dead worker (a
+/// re-send would duplicate the first turn), a missing row provably never
+/// landed.
+fn session_file_carries_spawn_kickoff(session_file: Option<&str>, spawn_row_id: &str) -> bool {
     let Some(path) = session_file.filter(|path| !path.is_empty()) else {
         return false;
     };
@@ -609,18 +659,10 @@ fn session_file_carries_prompt(session_file: Option<&str>, prompt: &str) -> bool
     content
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter(|entry| {
-            entry.get("type").and_then(Value::as_str) == Some("message")
-                && entry.pointer("/message/role").and_then(Value::as_str) == Some("user")
-        })
-        .any(|entry| match entry.pointer("/message/content") {
-            Some(Value::String(text)) => text.contains(prompt),
-            Some(Value::Array(blocks)) => blocks.iter().any(|block| {
-                block
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .is_some_and(|text| text.contains(prompt))
-            }),
-            _ => false,
+        .any(|entry| {
+            entry.get("type").and_then(Value::as_str) == Some("custom_message")
+                && entry.get("customType").and_then(Value::as_str)
+                    == Some(pa_core::session_engine::agent_messaging::AGENT_MESSAGE_CUSTOM_TYPE)
+                && entry.pointer("/details/id").and_then(Value::as_str) == Some(spawn_row_id)
         })
 }

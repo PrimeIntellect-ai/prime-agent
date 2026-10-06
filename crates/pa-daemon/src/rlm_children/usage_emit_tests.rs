@@ -78,8 +78,8 @@ fn child_file(dir: &Path) -> PathBuf {
         &path,
         concat!(
             r#"{"type":"session","id":"child-1","timestamp":"2026-09-23T00:00:00.000Z","cwd":"/tmp","version":3}"#, "\n",
-            r#"{"type":"message","id":"u1","parentId":null,"timestamp":"2026-09-23T00:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"the task"}],"timestamp":0}}"#, "\n",
-            r#"{"type":"message","id":"a1","parentId":"u1","timestamp":"2026-09-23T00:00:02.000Z","message":{"role":"assistant","content":[],"stopReason":"toolUse","usage":{"input":50208,"output":2929,"cacheRead":0,"cacheWrite":0,"totalTokens":53137,"cost":{"input":0.0075312,"output":0.0014645,"cacheRead":0,"cacheWrite":0,"total":0.0089957}}}}"#, "\n",
+            r#"{"type":"custom_message","id":"c0","parentId":null,"timestamp":"2026-09-23T00:00:01.000Z","customType":"agent_message","content":"[task from parent]\n\nthe task","display":true,"details":{"id":"spawn:child-1","message":"the task"}}"#, "\n",
+            r#"{"type":"message","id":"a1","parentId":"c0","timestamp":"2026-09-23T00:00:02.000Z","message":{"role":"assistant","content":[],"stopReason":"toolUse","usage":{"input":50208,"output":2929,"cacheRead":0,"cacheWrite":0,"totalTokens":53137,"cost":{"input":0.0075312,"output":0.0014645,"cacheRead":0,"cacheWrite":0,"total":0.0089957}}}}"#, "\n",
         ),
     )
     .unwrap();
