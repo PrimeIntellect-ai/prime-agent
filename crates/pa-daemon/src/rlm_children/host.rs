@@ -607,10 +607,23 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     // tail's notice claim keeps watching a re-cleared
                     // verdict), so the record is consistent at every
                     // interleave: claimed verdicts keep their status,
-                    // unclaimed misreads re-clear.
+                    // unclaimed misreads re-clear. The same hold re-reads
+                    // the return history: the grace window — its sleep
+                    // plus the busy check — is wide enough for a second
+                    // collect to return this very verdict in between, and
+                    // a result a reader already bound keeps itself (the
+                    // entry gate's contract, TS completed children stay
+                    // readable until deleted). The busy child is the
+                    // follow-up turn of a result a caller already holds,
+                    // not the admission-window misread the grace exists
+                    // to un-settle, and stripping its status would flip
+                    // a bound answer back to `running` behind the
+                    // reader's back.
                     let recleared = {
                         let mut record = record.lock().await;
-                        let may = busy_again && collect_grace_may_reclear(&record);
+                        let may = busy_again
+                            && !record.result_returned
+                            && collect_grace_may_reclear(&record);
                         if may {
                             record.settled_status = None;
                         }

@@ -1502,6 +1502,116 @@ async fn a_claim_owned_settle_answers_a_zero_budget_collect_without_the_grace() 
     );
 }
 
+/// The "Collect re-clear ignores returned results" pin: the grace's entry
+/// gate reads the return history, but the window it guards — its sleep
+/// plus the busy check — is wide enough for a SECOND collect to return
+/// the very verdict the first collect is still gracing. The re-clear
+/// commit re-reads `result_returned` at its one hold of the record lock:
+/// a result a reader already bound keeps itself (TS completed children
+/// stay readable until deleted), so a busy-again child after the window
+/// is the follow-up turn of a result the caller already holds, not the
+/// admission-window misread the grace exists to un-settle. Without the
+/// re-read the parked collect flipped the record back to `running`
+/// behind the second caller's back: the returned answer was bound once,
+/// and every later reader (the factory executor's re-read, the roster)
+/// saw `running` with the marker latched — a verdict no grace could
+/// ever re-settle, because the entry gate reads the marker first.
+#[tokio::test]
+async fn a_re_clear_keeps_a_result_another_collect_returned_in_the_grace_window() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let child_subagents = Arc::new(FakeChildSubagents::default());
+    let (sessions, _kill_rx) = sessions_with_fake_child_subagents(
+        follow_up_tx,
+        0,
+        FakeKill::Success,
+        FakeChild::ParksGraceCheck,
+        Arc::clone(&child_subagents),
+    )
+    .await;
+    sessions
+        .push_test_child(RlmChildIdentity {
+            rlm_child_id: "sub-raced-return".to_string(),
+            active_session_id: "child-live".to_string(),
+            session_id: Some("child-file".to_string()),
+            session_name: "raced-return".to_string(),
+        })
+        .await;
+    // An unclaimed settle with its answer captured (the admission-window
+    // misread): both collects pass the grace's entry gate on it.
+    {
+        let record = Arc::clone(&sessions.inner.children.lock().await[0]);
+        let mut record = record.lock().await;
+        record.settled_status = Some("done");
+        record.answer_preview = Some("the child final answer".to_string());
+        record.answer_captured = true;
+    }
+    // The first collect enters its grace and parks in the busy-check (the
+    // third state read of the pinned flow).
+    let collect_sessions = sessions.clone();
+    let parked_collect = tokio::spawn(async move {
+        collect_sessions
+            .collect(vec!["sub-raced-return".to_string()], 0)
+            .await
+            .expect("collect the raced child")
+    });
+    child_subagents.grace_parked.notified().await;
+    // The second collect runs its own grace with the child idle (the busy
+    // re-check reads idle, so it never re-clears) and RETURNS the settled
+    // snapshot inside the first collect's window: its result block marks
+    // `result_returned` while the first still sits parked.
+    let returned = tokio::time::timeout(
+        Duration::from_secs(10),
+        sessions.collect(vec!["sub-raced-return".to_string()], 0),
+    )
+    .await
+    .expect("the second collect returns inside the first's grace window")
+    .expect("collect the raced child again");
+    assert_eq!(returned.len(), 1);
+    assert_eq!(returned[0].status, "done");
+    assert_eq!(
+        returned[0].answer_preview.as_deref(),
+        Some("the child final answer")
+    );
+    // A follow-up prompt makes the child busy again before the parked
+    // busy-check answers: the re-clear path holds everything the old
+    // commit gate read as re-clearable — busy, unclaimed, unlatched.
+    child_subagents.running.store(true, Ordering::SeqCst);
+    child_subagents.grace_release.notify_one();
+
+    let raced = tokio::time::timeout(Duration::from_secs(10), parked_collect)
+        .await
+        .expect("the parked collect returns after the grace")
+        .expect("the collect task joins");
+    assert_eq!(
+        raced[0].status, "done",
+        "a result another collect already returned keeps itself for the in-flight grace"
+    );
+    assert!(
+        raced[0].settled,
+        "the returned verdict stays settled behind the follow-up turn"
+    );
+    assert_eq!(
+        raced[0].answer_preview.as_deref(),
+        Some("the child final answer"),
+        "the busy follow-up never strips a result a reader already bound"
+    );
+    // The record stays readable as completed (TS completed children stay
+    // readable until deleted): a later collect and the roster agree.
+    let later = sessions
+        .collect(vec!["sub-raced-return".to_string()], 0)
+        .await
+        .expect("collect the raced child a third time");
+    assert_eq!(
+        later[0].status, "done",
+        "the returned verdict never flips back to running"
+    );
+    let roster = sessions.list_subagents().await.expect("child roster");
+    assert_eq!(
+        roster[0].status, "completed",
+        "the record reads completed everywhere, not a bound-then-running orphan"
+    );
+}
+
 /// The "Grace reclear races the funnel latch" pin: the collect's grace
 /// gate and its re-clear commit at ONE hold of the record lock, and the
 /// settle tail's notice claim — the funnel's commit — aborts on a
