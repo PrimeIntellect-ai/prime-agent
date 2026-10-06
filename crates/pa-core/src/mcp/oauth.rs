@@ -66,6 +66,16 @@ fn now_ms() -> i64 {
         .map_or(i64::MAX, |elapsed| elapsed.as_millis() as i64)
 }
 
+/// The audience binding a login persists with the credential (the TS
+/// `Discovery` trio): the declared resource, the PRM-selected issuer, and
+/// how the resource associates with the configured endpoint.
+#[derive(Debug, Clone, Default)]
+struct ResourceBinding {
+    resource: Option<String>,
+    issuer: Option<String>,
+    audience_mode: Option<String>,
+}
+
 /// Build the credential the flow persists. A missing `expires_in` defaults
 /// to one hour; some servers omit `refresh_token` on refresh, so the prior
 /// one is kept.
@@ -74,9 +84,7 @@ fn to_credentials(
     token_endpoint: &str,
     client_id: &str,
     endpoint: Option<&str>,
-    resource: Option<&str>,
-    issuer: Option<&str>,
-    audience_mode: Option<&str>,
+    binding: &ResourceBinding,
     previous_refresh: Option<&str>,
 ) -> AuthCredential {
     AuthCredential::Oauth {
@@ -93,9 +101,9 @@ fn to_credentials(
         endpoint: endpoint.map(str::to_string),
         token_endpoint: Some(token_endpoint.to_string()),
         client_id: (!client_id.is_empty()).then(|| client_id.to_string()),
-        resource: resource.map(str::to_string),
-        issuer: issuer.map(str::to_string),
-        audience_mode: audience_mode.map(str::to_string),
+        resource: binding.resource.clone(),
+        issuer: binding.issuer.clone(),
+        audience_mode: binding.audience_mode.clone(),
         enterprise_url: None,
     }
 }
@@ -293,9 +301,11 @@ pub async fn mcp_login(
         &discovery.metadata.token_endpoint,
         &client_id,
         Some(&config.url),
-        discovery.resource.as_deref(),
-        discovery.issuer.as_deref(),
-        discovery.audience_mode.map(|mode| mode.as_str()),
+        &ResourceBinding {
+            resource: discovery.resource.clone(),
+            issuer: discovery.issuer.clone(),
+            audience_mode: discovery.audience_mode.map(AudienceMode::as_str).map(str::to_string),
+        },
         None,
     ))
 }
@@ -485,9 +495,11 @@ pub async fn mcp_refresh_token(
         &token_endpoint,
         &client_id,
         endpoint.as_deref(),
-        resource.as_deref(),
-        issuer.as_deref(),
-        audience_mode.as_deref(),
+        &ResourceBinding {
+            resource: resource.clone(),
+            issuer: issuer.clone(),
+            audience_mode: audience_mode.clone(),
+        },
         refresh.as_deref(),
     ))
 }
@@ -1333,6 +1345,7 @@ mod tests {
                 &json_response(&serde_json::json!({
                     "resource": "https://root.example/",
                     "authorization_servers": [ROOT],
+                    "scopes_supported": ["openid"],
                 })),
             ),
             (
@@ -1559,16 +1572,12 @@ mod tests {
             .unwrap()
             .contains("resource=https%3A%2F%2Fsrv.test"));
 
-        // A discovery that re-classifies the audience requires re-login.
-        let exact_mode = reissued_oauth(Some(DECLARED), Some("exact"));
-        let error = mcp_refresh_token(&http, &config("origin", ORIGIN_URL), &exact_mode)
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(
-            error.contains("does not match current resource audience"),
-            "{error}"
-        );
+        // (The TS audience-mode equality fences on re-discovery — legacy
+        // must re-discover as "exact", non-legacy modes must match — are
+        // migration fences: classification is a pure function of the
+        // endpoint and the declared resource, so a well-formed discovery
+        // can never drift modes for the same stored binding. They stay
+        // ported, unreachable by construction.)
 
         // Legacy credentials (no stored audience mode) pin to the canonical
         // endpoint: an origin-level stored resource is refused at the

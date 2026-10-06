@@ -719,7 +719,10 @@ mod tests {
         let endpoint = Url::parse("https://mcp.example/mcp").unwrap();
         // A cross-origin declared resource fails closed.
         let error = resource_metadata(
-            &serde_json::json!({ "resource": "https://other/mcp" }),
+            &serde_json::json!({
+                "resource": "https://other/mcp",
+                "authorization_servers": ["https://issuer.example"],
+            }),
             &endpoint,
         )
         .unwrap_err()
@@ -730,7 +733,10 @@ mod tests {
         );
         // A same-origin resource with a different path fails closed too.
         let error = resource_metadata(
-            &serde_json::json!({ "resource": "https://mcp.example/other" }),
+            &serde_json::json!({
+                "resource": "https://mcp.example/other",
+                "authorization_servers": ["https://issuer.example"],
+            }),
             &endpoint,
         )
         .unwrap_err()
