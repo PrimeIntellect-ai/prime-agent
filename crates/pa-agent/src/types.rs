@@ -430,6 +430,22 @@ pub struct Model {
     pub context_window: u64,
     #[serde(rename = "maxTokens", default)]
     pub max_tokens: u64,
+    /// Set when `maxTokens` came from explicit configuration: rides the
+    /// wire-shape round-trips with the pa-ai model so the flag survives
+    /// the crate boundary and the persisted session state.
+    #[serde(
+        rename = "maxTokensExplicit",
+        default,
+        skip_serializing_if = "is_false"
+    )]
+    pub max_tokens_explicit: bool,
+}
+
+/// `skip_serializing_if` predicate for [`Model::max_tokens_explicit`]: the
+/// persisted/proxied JSON stays byte-identical when the flag is unset.
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde's skip predicate ABI takes the field by reference
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl Model {
@@ -445,6 +461,7 @@ impl Model {
             cost: UsageCost::default(),
             context_window: 0,
             max_tokens: 0,
+            max_tokens_explicit: false,
         }
     }
 }
