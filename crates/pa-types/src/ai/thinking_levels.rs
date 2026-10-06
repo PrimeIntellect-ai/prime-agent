@@ -155,6 +155,7 @@ mod tests {
             },
             context_window: 128_000,
             max_tokens: 8_192,
+            max_tokens_explicit: false,
             featured: None,
             headers: None,
             compat: None,
