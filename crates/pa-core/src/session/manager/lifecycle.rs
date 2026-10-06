@@ -360,11 +360,11 @@ impl SessionManager {
         let mut session_id = options.id.clone().unwrap_or_else(create_session_id);
         let mut session_file: Option<PathBuf> = None;
         if self.persist {
-            if options.id.is_some() {
-                let candidate = get_session_file_path(&self.session_dir, &session_id);
+            if let Some(id) = &options.id {
+                let candidate = get_session_file_path(&self.session_dir, id);
                 assert!(
                     !candidate.exists(),
-                    "Session file already exists for id \"{session_id}\": {}",
+                    "Session file already exists for id \"{id}\": {}",
                     candidate.display()
                 );
                 session_file = Some(candidate);
