@@ -868,7 +868,12 @@ jobs:
           (cd release-out && sha256sum --check SHA256SUMS)
 
           RELEASE_PREFIX="releases/${RELEASE_VERSION}"
+          # The R2 channel serves the installers: the platform tarballs
+          # the channel manifests reference. The homebrew-core source
+          # tarball rides the GitHub release only (packagers pin it
+          # there; the R2 pointers never name it).
           for artifact in release-out/prime-agent-*.tar.gz; do
+            case "$artifact" in *-src.tar.gz) continue ;; esac
             aws s3 cp "$artifact" "s3://${R2_BUCKET}/${RELEASE_PREFIX}/$(basename "$artifact")" \
               --endpoint-url "$R2_ENDPOINT_URL" \
               --content-type application/gzip \
