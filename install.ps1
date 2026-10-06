@@ -90,6 +90,86 @@ try {
     Fail "could not enable TLS 1.2: $($_.Exception.Message)"
 }
 
+# --- the install ledger (install-rust.sh's step_ok / step_fail lines, in
+# --- the ASCII the console's default codepage renders cleanly) --------------
+function Step-Ok([string]$Text, [string]$Detail = '') {
+    if ($Detail) { Write-Host "ok: $Text ($Detail)" } else { Write-Host "ok: $Text" }
+}
+function Step-Fail([string]$Text, [string]$Detail = '') {
+    if ($Detail) { Write-Warning "fail: $Text ($Detail)" } else { Write-Warning "fail: $Text" }
+}
+
+# --- the whole-entry PATH compare -------------------------------------------------
+# A substring check against the joined PATH string ("$bin*") lets a sibling
+# entry like C:\Tools\bin-old mask C:\Tools\bin: the add is skipped and
+# the command stays unavailable. Membership compares WHOLE `;`-delimited
+# entries, case-insensitively (Windows paths are case-insensitive).
+function Test-PathEntry([string]$PathValue, [string]$Entry) {
+    foreach ($candidate in ($PathValue -split ';')) {
+        if ($candidate -and ($candidate.Trim() -ieq $Entry)) { return $true }
+    }
+    return $false
+}
+
+# --- the streaming download (install-rust.sh's fetch() discipline: three
+# --- attempts, and the installer's own progress, never the web cmdlet's
+# --- transfer records - a HttpClient copy loop repaints one short line in
+# --- place with the file's name, the landed bytes, and the percent) ---------
+if (-not ('System.Net.Http.HttpClient' -as [type])) {
+    Add-Type -AssemblyName System.Net.Http
+}
+function Save-Release {
+    param([string]$Uri, [string]$OutFile, [string]$Name)
+    $attempts = 0
+    while ($true) {
+        $attempts += 1
+        $client = [System.Net.Http.HttpClient]::new()
+        $response = $null
+        try {
+            $client.Timeout = [TimeSpan]::FromMinutes(30)
+            $response = $client.GetAsync($Uri, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+            if (-not $response.IsSuccessStatusCode) {
+                throw "HTTP $([int]$response.StatusCode) for $Uri"
+            }
+            $total = $response.Content.Headers.ContentLength
+            $stream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+            $file = $null
+            $done = 0L
+            try {
+                $file = [System.IO.File]::Create($OutFile)
+                $buffer = New-Object byte[] (256 * 1024)
+                while (($read = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                    $file.Write($buffer, 0, $read)
+                    $done += $read
+                    if ($total) {
+                        $pct = [Math]::Floor($done * 100 / $total)
+                        Write-Host ("`r {0}: {1:N1} of {2:N1} MB ({3}%)" -f $Name, ($done / 1MB), ($total / 1MB), $pct) -NoNewline
+                    } else {
+                        Write-Host ("`r {0}: {1:N1} MB" -f $Name, ($done / 1MB)) -NoNewline
+                    }
+                }
+                $file.Flush()
+            } finally {
+                if ($file) { $file.Dispose() }
+                $stream.Dispose()
+            }
+            Write-Host ''
+            return
+        } catch {
+            Write-Host ''
+            Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
+            if ($attempts -ge 3) {
+                throw "could not download $Uri (3 attempts): $($_.Exception.Message)"
+            }
+            Write-Host "retrying $Name (attempt $($attempts + 1) of 3): $($_.Exception.Message)"
+            Start-Sleep -Seconds 1
+        } finally {
+            if ($response) { $response.Dispose() }
+            $client.Dispose()
+        }
+    }
+}
+
 # --- the knobs ----------------------------------------------------------------
 $baseUrl = if ($env:PRIME_AGENT_DOWNLOAD_BASE_URL) { $env:PRIME_AGENT_DOWNLOAD_BASE_URL } else { $DownloadBaseUrlDefault }
 $channelRequested = $env:PRIME_AGENT_RELEASE_CHANNEL
@@ -158,22 +238,36 @@ function Read-ChannelPair($channelName) {
     $pairPointer = $channelName
     $pairManifestName = if ($channelName -eq 'beta') { 'beta.json' } else { 'latest.json' }
     $attempt = 0
-    while ($true) {
-        # The pointer is published bare ("1.2.3") but a `v`-prefixed
-        # spelling is a valid historical form - normalize it (the manifest's
-        # version is bare; the release prefix and the artifact names carry
-        # no extra `v` - the bots' finding).
-        $pairVersion = (Invoke-RestMethod -Uri "$baseUrl/$pairPointer").ToString().Trim().TrimStart('v')
-        if (-not $pairVersion) { Fail "could not resolve the latest $channelName version from $baseUrl/$pairPointer" }
-        $pairManifest = Invoke-RestMethod -Uri "$baseUrl/$pairManifestName"
-        $pairManifestVersion = ($pairManifest.version).ToString().TrimStart('v')
-        if ($pairManifestVersion -eq $pairVersion) { break }
-        $attempt += 1
-        if ($attempt -gt 2) {
-            Fail "the $channelName manifest's version $pairManifestVersion does not match the channel pointer $pairVersion (re-read twice; the channel looks inconsistent)"
+    # The same quiet discipline as the download block: these reads are web
+    # cmdlets too (their progress records flash the console); pinned here,
+    # restored on every exit - the quiet zone is the read, never the
+    # session. -UseBasicParsing keeps a stock PowerShell 5.1 (Internet
+    # Explorer never initialized) off the parsing COM path.
+    $callerProgressPreference = $ProgressPreference
+    $callerVerbosePreference = $VerbosePreference
+    $ProgressPreference = 'SilentlyContinue'
+    $VerbosePreference = 'SilentlyContinue'
+    try {
+        while ($true) {
+            # The pointer is published bare ("1.2.3") but a `v`-prefixed
+            # spelling is a valid historical form - normalize it (the manifest's
+            # version is bare; the release prefix and the artifact names carry
+            # no extra `v` - the bots' finding).
+            $pairVersion = (Invoke-RestMethod -Uri "$baseUrl/$pairPointer" -UseBasicParsing).ToString().Trim().TrimStart('v')
+            if (-not $pairVersion) { Fail "could not resolve the latest $channelName version from $baseUrl/$pairPointer" }
+            $pairManifest = Invoke-RestMethod -Uri "$baseUrl/$pairManifestName" -UseBasicParsing
+            $pairManifestVersion = ($pairManifest.version).ToString().TrimStart('v')
+            if ($pairManifestVersion -eq $pairVersion) { break }
+            $attempt += 1
+            if ($attempt -gt 2) {
+                Fail "the $channelName manifest's version $pairManifestVersion does not match the channel pointer $pairVersion (re-read twice; the channel looks inconsistent)"
+            }
+            Write-Host "the $channelName pointer and manifest disagree (a publish's consistency window); re-reading the pair..."
+            Start-Sleep -Seconds 1
         }
-        Write-Host "the $channelName pointer and manifest disagree (a publish's consistency window); re-reading the pair..."
-        Start-Sleep -Seconds 1
+    } finally {
+        $ProgressPreference = $callerProgressPreference
+        $VerbosePreference = $callerVerbosePreference
     }
     return [pscustomobject]@{ Version = $pairVersion; Manifest = $pairManifest }
 }
@@ -249,11 +343,31 @@ $script:primeAgentInstallScratch = $download
 # bots' finding: accumulated release tarballs in the temp folder).
 $tarball = Join-Path $download $expectedFile
 $sumsPath = Join-Path $download 'SHA256SUMS'
+# THE QUIET DOWNLOAD (the operator's real-machine report, 2026-10-06):
+# PowerShell's web cmdlets under the default preferences leak the .NET
+# stack's transfer records onto the caller's console - the progress bar
+# and the "Writing web request / Writing request stream..." verbose
+# chatter - and under `irm | iex` this script shares the caller's
+# session, so the caller's preferences ride along. The installer pins
+# both to SilentlyContinue for its web work only and restores the
+# caller's values after (the quiet zone is the download, never the
+# session); the payload streams through Save-Release (its own in-place
+# progress line, no transfer records at all), and the checksums file's
+# small fetch stays silent under the pin.
+$callerProgressPreference = $ProgressPreference
+$callerVerbosePreference = $VerbosePreference
+$ProgressPreference = 'SilentlyContinue'
+$VerbosePreference = 'SilentlyContinue'
+Write-Host "downloading $expectedFile"
 try {
-    Invoke-WebRequest -Uri "$baseUrl/$releasePrefix/$expectedFile" -OutFile $tarball
-    Invoke-WebRequest -Uri "$baseUrl/$releasePrefix/SHA256SUMS" -OutFile $sumsPath
+    Save-Release -Uri "$baseUrl/$releasePrefix/$expectedFile" -OutFile $tarball -Name $expectedFile
+    Invoke-WebRequest -Uri "$baseUrl/$releasePrefix/SHA256SUMS" -OutFile $sumsPath -UseBasicParsing
+    Write-Host "downloaded: $expectedFile ($([Math]::Round((Get-Item -LiteralPath $tarball).Length / 1MB, 1)) MB)"
 } catch {
     Fail "could not download $expectedFile from $baseUrl/$releasePrefix/: $($_.Exception.Message)"
+} finally {
+    $ProgressPreference = $callerProgressPreference
+    $VerbosePreference = $callerVerbosePreference
 }
 
 # --- verify the checksum (the release prefix's sums, cross-checked with the
@@ -264,7 +378,7 @@ $sumsSha = ($sumsLine -split '\s+')[0]
 if (-not $versionPin -and $sumsSha -ne $row.sha256) { Fail "checksum mismatch between the channel manifest and SHA256SUMS for ${expectedFile}: the channel is inconsistent" }
 $actualSha = (Get-FileHash -LiteralPath $tarball -Algorithm SHA256).Hash.ToLower()
 if ($actualSha -ne $sumsSha) { Fail "checksum mismatch for ${expectedFile}: the download is corrupt" }
-Write-Host "checksum verified: $expectedFile ($version, the $channel channel)"
+Step-Ok 'checksum verified' "$expectedFile ($version, the $channel channel)"
 
 # --- extract to a staging dir inside the prefix (same volume: the final swap
 # --- is a rename, not a copy) -----------------------------------------------------
@@ -282,6 +396,7 @@ $script:primeAgentInstallStage = $stage
 if ($LASTEXITCODE -ne 0) { Fail "could not extract $expectedFile (tar exited $LASTEXITCODE)" }
 $payloadExe = Join-Path $stage 'prime-agent.exe'
 if (-not (Test-Path $payloadExe -PathType Leaf)) { Fail "the tarball did not contain a prime-agent.exe payload" }
+Step-Ok 'extracted' $expectedFile
 
 # The ownership marker (install-rust.sh's exact write shape — the update
 # funnel's channel-stickiness read keys on it).
@@ -389,6 +504,7 @@ try {
     # tree is valid; the restored launchers point at ../share/prime-agent/
     # prime-agent.exe - the new payload - and keep working).
     $published = $true
+    Step-Ok 'published' "prime-agent $version to $prefix"
 
     # --- the launcher pair: the cmd shim (cmd.exe + PowerShell) and the sh
     # --- launcher (Git Bash) - the same payload, both shells, the same
@@ -508,38 +624,156 @@ exec "$(dirname "$0")/../share/prime-agent/prime-agent.exe" "$@"
     $script:primeAgentInstallLock = $null
 }
 
-# --- the kernel pre-warm: uv + the Python venv (best-effort, install-rust.sh
-# --- parity — an offline machine still installs; the first session retries
-# --- the bootstrap online).
+# --- the kernel pre-warm: uv + the Python venv (install-rust.sh
+# --- parity — the sh installer INSTALLS uv when it is missing and then
+# --- pre-warms the kernel; the ps1 mirrors the whole flow). THE SEPARATE
+# --- CHECKS (install-rust.sh's own discipline): the fetch and the script
+# --- run are verified one after the other, so a dead network cannot
+# --- masquerade as success — the astral script's own verdict is never
+# --- trusted, the uv.exe FILE decides. The destination rides the env
+# --- EXPLICITLY (UV_INSTALL_DIR, install-rust.sh's UV_INSTALL_DIR=
+# --- "$uv_bin_dir"): the computed target wins over any inherited value,
+# --- and the caller's values come back. Offline the step degrades to the
+# --- honest note plus the exact manual command (install-rust.sh's
+# --- note/todo shape); the install itself still succeeds.
+$uvInstallDir = Join-Path $HOME '.local\bin'
+$uvExe = Join-Path $uvInstallDir 'uv.exe'
 $uv = Get-Command uv -ErrorAction SilentlyContinue
-if (-not $uv -and (Test-Path (Join-Path $HOME '.local\bin\uv.exe'))) { $uv = $true }
-if ($uv) {
+if (-not $uv -and (Test-Path $uvExe -PathType Leaf)) { $uv = $true }
+if (-not $uv) {
+    Write-Host "installing uv (the kernel venv's package manager)"
+    $uvInstallerPath = Join-Path $download 'uv-install.ps1'
+    $callerProgressPreference = $ProgressPreference
+    $callerVerbosePreference = $VerbosePreference
+    $ProgressPreference = 'SilentlyContinue'
+    $VerbosePreference = 'SilentlyContinue'
+    try {
+        Invoke-WebRequest -Uri 'https://astral.sh/uv/install.ps1' -OutFile $uvInstallerPath -UseBasicParsing -TimeoutSec 60
+        if ((Test-Path $uvInstallerPath -PathType Leaf) -and ((Get-Item -LiteralPath $uvInstallerPath).Length -gt 0)) {
+            $callerUvInstallDir = $env:UV_INSTALL_DIR
+            $callerUvUnmanaged = $env:UV_UNMANAGED_INSTALL
+            try {
+                $env:UV_INSTALL_DIR = $uvInstallDir
+                $env:UV_UNMANAGED_INSTALL = $null
+                # THE CHILD PROCESS (the reviewer's finding): the astral
+                # script exits 1 on its own failures (a Restricted execution
+                # policy among them - a stock Windows PowerShell 5.1 setting),
+                # and under Invoke-Expression that exit would leave THIS
+                # installer's control flow before the catch could degrade it
+                # to the honest note. The fetched script runs in its own
+                # shell with a process-scoped execution policy and its own
+                # silenced progress; the parent reads the child's exit as
+                # DATA, and the uv.exe FILE decides.
+                $childShell = if (Get-Command pwsh -ErrorAction SilentlyContinue) { (Get-Command pwsh).Source } else { 'powershell' }
+                $childScript = @"
+`$ProgressPreference = 'SilentlyContinue'
+`$VerbosePreference = 'SilentlyContinue'
+& '$uvInstallerPath'
+"@
+                $childEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childScript))
+                & $childShell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $childEncoded *> $null
+                $uvRunExit = $LASTEXITCODE
+            } finally {
+                $env:UV_INSTALL_DIR = $callerUvInstallDir
+                $env:UV_UNMANAGED_INSTALL = $callerUvUnmanaged
+            }
+            if (-not (Test-Path $uvExe -PathType Leaf)) {
+                Step-Fail 'installing uv' "the uv installer exited $uvRunExit; uv.exe is missing"
+            } elseif ($uvRunExit -ne 0) {
+                Step-Fail 'installing uv' "the uv installer exited $uvRunExit (uv.exe landed; keeping it)"
+            } else {
+                Step-Ok 'uv installed' $uvInstallDir
+            }
+        } else {
+            Step-Fail 'installing uv' 'the fetched uv installer is empty'
+        }
+    } catch {
+        Step-Fail 'installing uv' $_.Exception.Message
+    } finally {
+        $ProgressPreference = $callerProgressPreference
+        $VerbosePreference = $callerVerbosePreference
+        Remove-Item -LiteralPath $uvInstallerPath -Force -ErrorAction SilentlyContinue
+    }
+    if (-not (Test-Path $uvExe -PathType Leaf)) {
+        Write-Host 'note: could not install uv; the kernel pre-warm was skipped. The first session needs uv. Install it with:'
+        Write-Host '  irm https://astral.sh/uv/install.ps1 | iex'
+    }
+}
+# THE PRE-WARM'S PATH FIX (install-rust.sh's own): the product's ensure_uv
+# searches PATH and ~/.local/bin/uv(.exe), and the pre-warm's child inherits
+# this PATH — the freshly installed uv rides it.
+if (-not (Test-PathEntry $env:PATH $uvInstallDir)) {
+    $env:PATH = "$uvInstallDir;$env:PATH"
+}
+if ($uv -or (Test-Path $uvExe -PathType Leaf)) {
     Write-Host 'kernel pre-warm: provisioning the Python kernel runtime'
     & $launcher --prime-agent-bootstrap
     if ($LASTEXITCODE -ne 0) {
-        Write-Warning 'the kernel pre-warm failed (the install stands; the first session will retry it online)'
+        Step-Fail 'preparing the Python kernel' 'the first session retries it online'
+    } else {
+        Step-Ok 'kernel ready'
     }
 } else {
     Write-Host 'note: uv was not found; the first session bootstraps the kernel itself and needs the network once'
 }
 
-# --- the PATH note (warn, not fail — install-rust.sh parity) ---------------------
+# --- the PATH add (the operator's smoothness ask, 2026-10-06; the
+# --- windows-native shape of the sh installer's profile note) --------------------
+# Linux boxes usually carry ~/.local/bin on PATH already, so install-rust.sh
+# only PRINTS a profile note (it never edits a shell profile); a Windows
+# box has no %USERPROFILE%\.local\bin, and a printed-only note leaves the
+# fresh install unusable until the user edits their environment by hand.
+# Windows has a canonical user-PATH setting (the registry's User scope —
+# no admin needed), so the installer ADDS the launcher's bin dir there
+# itself: idempotent (appended only when the entry is absent, never
+# duplicated), mirrored into the CURRENT session so prime-agent works in
+# this console immediately, and a new terminal picks it up (the
+# WM_SETTINGCHANGE broadcast tells the running shells the environment
+# changed, the same way setx does — best-effort; the registry write is
+# what lasts).
+if (-not (Test-PathEntry $env:PATH $bin)) {
+    $env:PATH = "$env:PATH;$bin"
+    Write-Host "PATH: added $bin to this session - prime-agent works in this console now"
+}
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-if ($userPath -notlike "*$bin*") {
-    Write-Host "note: $bin is not on your PATH; add it for the prime-agent command:"
-    Write-Host "  [Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path','User') + ';$bin', 'User')"
+if (-not (Test-PathEntry $userPath $bin)) {
+    $newUserPath = if ($userPath) { $userPath.TrimEnd(';') + ";$bin" } else { $bin }
+    [Environment]::SetEnvironmentVariable('Path', $newUserPath, 'User')
+    try {
+        if (-not ('prime_agent_install.Win32SendMessage' -as [type])) {
+            Add-Type -Namespace 'prime_agent_install' -Name 'Win32SendMessage' -MemberDefinition @'
+[DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
+'@
+        }
+        [prime_agent_install.Win32SendMessage]::SendMessageTimeout([IntPtr]0xffff, 0x001A, [UIntPtr]::Zero, 'Environment', 2, 5000, [ref]([UIntPtr]::Zero))
+    } catch {
+        # The registry write stands; the broadcast is a courtesy (a re-login
+        # reloads the environment too).
+    }
+    Write-Host "PATH: added $bin to the user PATH (a new terminal picks it up automatically)"
 }
 
 # --- verify: the launcher must answer --version -----------------------------------
 try {
     $versionOut = (& $launcher --version) 2>$null | Select-Object -First 1
     if ($LASTEXITCODE -ne 0) {
-        Write-Warning "the installed launcher failed --version (exit code $LASTEXITCODE; the first run bootstraps the kernel venv — re-run it)"
+        if ($LASTEXITCODE -eq -1073741515) {
+            # 0xC0000135, STATUS_DLL_NOT_FOUND: the launcher's process never
+            # started - a runtime DLL the binary links is missing. The shipped
+            # build links the STATIC VC runtime, so this class should not
+            # occur; the honest message replaces the venv-bootstrap claim (a
+            # DLL failure has nothing to do with the kernel venv, and
+            # re-running cannot fix it).
+            Write-Warning "the installed launcher failed --version with exit code -1073741515 (0xC0000135: the launcher could not start - a runtime DLL it needs is missing; the shipped build links the static runtime and should not need one - please report this install)"
+        } else {
+            Write-Warning "the installed launcher failed --version (exit code $LASTEXITCODE; the first run bootstraps the kernel venv - re-run it)"
+        }
     } else {
         Write-Host "installed: $versionOut"
     }
 } catch {
-    Write-Warning "the first --version run failed (the first run bootstraps the kernel venv — re-run it): $($_.Exception.Message)"
+    Write-Warning "the first --version run failed (the first run bootstraps the kernel venv - re-run it): $($_.Exception.Message)"
 }
 Write-Host "launcher:  $launcher"
 Write-Host "payload:   $share"

@@ -78,6 +78,11 @@ function Invoke-Installer {
 # test reads it back from the log.
 $serverLog = Join-Path $scratch 'channel-server.log'
 $server = Start-Process -FilePath $py -ArgumentList '-u','-m','http.server','0','--bind','127.0.0.1','--directory',$channel -PassThru -WindowStyle Hidden -RedirectStandardOutput $serverLog
+# install.ps1 writes the User PATH (the PATH-parity flow) and installs uv
+# when the machine has none (the astral route); the harness restores the
+# registry value it dirtied and removes the test-installed uv (isolation
+# for the harness steps that follow).
+$userPathBefore = [Environment]::GetEnvironmentVariable('Path', 'User')
 try {
     # The port the server itself announced, then readiness is it answering
     # a request for this test's own channel (beta.json): bounded deadlines,
@@ -145,4 +150,7 @@ try {
 } finally {
     Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
     Remove-Item -Recurse -Force $scratch -ErrorAction SilentlyContinue
+    [Environment]::SetEnvironmentVariable('Path', $userPathBefore, 'User')
+    Remove-Item -Force (Join-Path $HOME '.local\bin\uv.exe') -ErrorAction SilentlyContinue
+    Remove-Item -Force (Join-Path $HOME '.local\bin\uvx.exe') -ErrorAction SilentlyContinue
 }

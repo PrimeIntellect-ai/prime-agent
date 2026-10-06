@@ -357,7 +357,19 @@ jobs:
         shell: bash
         run: echo "PY=$(command -v python3 || command -v python)" >> "$GITHUB_ENV"
       # Only the shipped binary links here (the build-gnu/build-darwin rule).
+      # THE STATIC VC RUNTIME (the operator's real-machine report,
+      # 2026-10-06: the dynamically linked launcher died at process start -
+      # 0xC0000135, STATUS_DLL_NOT_FOUND, exit -1073741515 - on a stock
+      # Windows box, which carries no vcruntime140.dll; the windows-2022
+      # runner image has it, so the livecheck never sees the gap): the
+      # step-scoped RUSTFLAGS below links the shipped binary against the
+      # static CRT. The pin rides THIS STEP alone and never Cargo.toml,
+      # whose dev builds stay dynamic; cargo's unit fingerprints carry
+      # RUSTFLAGS, so a cache restored from the dynamic-link era rebuilds
+      # instead of reusing a dynamically linked tree.
       - name: Build (release, locked)
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
         run: cargo build --release --locked --target ${{ matrix.target }} -j 4 -p pa-cli --bin prime-agent
       - name: "Livecheck gate: --version prints the tag version"
         shell: bash
