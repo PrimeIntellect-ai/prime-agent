@@ -612,6 +612,7 @@ async fn a_parent_rename_after_a_revival_and_second_passivation_reaches_the_chil
             name: Some("parked-kid".to_string()),
             model: None,
             thinking: None,
+            target: RlmSpawnTarget::Local,
             cell_source_code: None,
             spawned_by_request_id: None,
         })
