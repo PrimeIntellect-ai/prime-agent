@@ -227,6 +227,7 @@ fn children(socket: &Path, agent_dir: &Path, script: &Path, depth: u32) -> Super
         thinking: None,
         child_script: Some(script.to_string_lossy().to_string()),
     });
+    sessions.set_parent_session_name(Some("parent-name".to_string()));
     sessions
 }
 
@@ -393,14 +394,9 @@ async fn rlm_children_spawn_roster_collect_delete_end_to_end() {
             "from": {
                 "activeSessionId": "parent-active-id",
                 "sessionId": "parent-session-uuid",
+                "sessionName": "parent-name",
             },
             "fromRelationship": "parent",
-            "target": {
-                "activeSessionId": roster_summary["activeSessionId"],
-                "sessionId": roster_summary["sessionId"],
-                "runtimeKind": "subagent",
-                "sessionName": "worker-a",
-            },
         }),
     );
     // The kickoff is the child's only prompt: no user row exists.

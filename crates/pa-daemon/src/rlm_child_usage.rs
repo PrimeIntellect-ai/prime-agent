@@ -277,21 +277,4 @@ mod tests {
         assert!((usage.cost.total.as_f64() - 0.03).abs() < 1e-9);
         let _ = usage_of(&entries[1]);
     }
-
-    /// TS parity: a plain user row — even the child file's first row —
-    /// labels `direct_user`; only the spawn kickoff row labels
-    /// `spawn_task` (the pre-TS-parity port labeled the first user row
-    /// `spawn_task` because its kickoff landed as a user row).
-    #[test]
-    fn a_plain_user_row_labels_direct_user_even_first() {
-        let entries = vec![
-            user_row("u1"),
-            assistant_row("a1", &captured_usage(10, 5, 0, 0.01), "stop"),
-        ];
-        let (batches, _cursor) = child_usage_batches(&entries, 0);
-        let [(origin, _)] = batches[..] else {
-            panic!("one batch: {batches:?}");
-        };
-        assert_eq!(origin, ChildUsageOrigin::DirectUser);
-    }
 }

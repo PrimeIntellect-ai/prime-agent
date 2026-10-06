@@ -280,11 +280,9 @@ impl SupervisorChildSessionsInner {
         None
     }
 
-    /// Prompt one child over the supervisor link (the plain prompt path,
-    /// TS `promptAndWait`): `prompt` is the model-facing text; the spawn
-    /// kickoff passes its `agent_message` custom row alongside (TS
-    /// `customMessage`), so the turn persists the row instead of a user
-    /// row, while `rlm.create_session` prompts plain (no row).
+    /// Prompt one child over the supervisor link (TS `promptAndWait`):
+    /// `custom_message` replaces the persisted user row (TS
+    /// `customMessage`).
     pub(super) async fn prompt_child(
         &self,
         active_session_id: &str,

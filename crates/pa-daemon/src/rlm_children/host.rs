@@ -175,15 +175,10 @@ impl RlmSubagentHost for SupervisorChildSessions {
             // the prompt is admitted (it idles on a pre-prompt child).
             let watcher_this = Arc::clone(&this);
             let watcher_record = Arc::clone(&record);
-            // The TS spawn kickoff (agent-session.ts `spawnMessage`): the
-            // task prompt rides the plain prompt admission carrying the
-            // `agent_message` custom row — content "[task from parent]
-            // \n\n<prompt>" (the label the child system prompt promises),
-            // `details.id "spawn:<child id>"`, `details.message` the raw
-            // prompt, the parent endpoint with
-            // `fromRelationship: "parent"` — so the child's transcript
-            // renders the parent-attributed card (never a user row)
-            // while the model context stays the plain prompt text.
+            // TS `spawnMessage`: the kickoff rides prompt admission as
+            // the parent's `agent_message` row, so the child renders a
+            // parent message and the model reads the
+            // "[task from parent]" label.
             let prompt = request.prompt.as_str();
             let kickoff_content = format!("[task from parent]\n\n{prompt}");
             let kickoff_row_id = format!("spawn:{child_id}");
@@ -201,16 +196,6 @@ impl RlmSubagentHost for SupervisorChildSessions {
             {
                 parent_endpoint["sessionName"] = json!(name);
             }
-            let mut child_endpoint = json!({
-                "activeSessionId": created.active_session_id,
-                "runtimeKind": "subagent",
-            });
-            if let Some(session_id) = &created.session_id {
-                child_endpoint["sessionId"] = json!(session_id);
-            }
-            if let Some(name) = &created.session_name {
-                child_endpoint["sessionName"] = json!(name);
-            }
             let kickoff_row =
                 pa_core::session_engine::agent_messaging::create_agent_session_message_row(
                     &pa_core::session_engine::agent_messaging::AgentSessionMessageRowPayload {
@@ -221,7 +206,8 @@ impl RlmSubagentHost for SupervisorChildSessions {
                         from_relationship: Some(
                             pa_core::session_engine::agent_messaging::AgentFamilyRelationship::Parent,
                         ),
-                        target: &child_endpoint,
+                        // TS `spawnMessage` carries no `target`.
+                        target: None,
                         timestamp: now_ms(),
                     },
                 );

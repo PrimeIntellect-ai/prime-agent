@@ -366,9 +366,7 @@ impl SessionEngine for AgentSessionEngine {
     /// The worker's live session summary (the TS
     /// `createAgentSessionMessageSender` source): rendered into the
     /// sender identity block of direct worker-to-worker deliveries, and
-    /// seeded into the children registry as the parent-name half of the
-    /// spawn kickoff's `from` endpoint (the summary follows the live
-    /// name, renames included).
+    /// seeds the children registry's parent name for spawn rows.
     fn set_session_summary(&self, summary: Value) {
         *self
             .own_summary
