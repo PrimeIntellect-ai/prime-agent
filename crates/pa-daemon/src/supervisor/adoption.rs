@@ -200,11 +200,31 @@ impl Supervisor {
         // checks the recorded pid before connecting a stopped worker.
         // Ordinary descriptors retain the existing socket-based revival
         // decision, which also handles descriptors without a start id.
-        let recorded_process_alive = recorded_process_alive(
-            crate::lease::is_process_alive(descriptor.pid as u32).ok(),
-            descriptor.process_start_id.as_deref(),
-            crate::lease::get_process_start_id(descriptor.pid as u32).as_deref(),
-        );
+        // The identity probes are the tombstone's alone: an ordinary
+        // descriptor's stop term is `stop_requested_at.is_none()` and the
+        // OR never reads the probes, so running them for every descriptor
+        // pays a process spawn (`ps` on Unix platforms without /proc or
+        // sysctl) inside the async adoption task - blocking an executor
+        // worker at boot. The tombstoned path runs the probes off the
+        // runtime through `spawn_blocking`; a join failure conservatively
+        // treats the recorded process as alive (the graceful IPC leg
+        // below degrades to the same finalize a dead verdict runs).
+        let tombstoned = descriptor.stop_requested_at.is_some();
+        let recorded_process_alive = if tombstoned {
+            let pid = descriptor.pid as u32;
+            let expected = descriptor.process_start_id.clone();
+            tokio::task::spawn_blocking(move || {
+                recorded_process_alive(
+                    crate::lease::is_process_alive(pid).ok(),
+                    expected.as_deref(),
+                    crate::lease::get_process_start_id(pid).as_deref(),
+                )
+            })
+            .await
+            .unwrap_or(true)
+        } else {
+            true
+        };
         let alive = (descriptor.stop_requested_at.is_none() || recorded_process_alive)
             && socket::can_connect(&socket_path, Duration::from_millis(500)).await;
         let pid = descriptor.pid;
