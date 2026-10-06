@@ -746,6 +746,29 @@ mod tests {
         );
     }
 
+    /// A long-basename socket stays claim-probeable: the claim is a
+    /// basename-independent dotname in the socket's own directory, so
+    /// the claim path is short no matter how long the bound name was -
+    /// this pins the address-budget fix for names whose sibling-claim
+    /// form exceeded the `AF_UNIX` limit.
+    #[cfg(all(unix, target_os = "linux"))]
+    #[tokio::test]
+    async fn socket_cleanup_claims_a_dead_socket_with_a_long_basename() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let socket = dir.path().join("x".repeat(82));
+        let lease = SocketLease::acquire(&socket).await.unwrap();
+        let listener = bind_transport(&socket).await.unwrap();
+        let bound = socket_identity(&socket);
+        drop(listener);
+        lease.cleanup_socket_path(&socket, bound);
+        assert!(
+            !socket.exists(),
+            "the long-named dead socket is claimed and unlinked"
+        );
+        drop(lease);
+        assert!(!pa_core::platform::LockDir::path_for(&socket).exists());
+    }
+
     #[tokio::test]
     async fn socket_cleanup_spares_a_live_successor_and_claims_dead_files() {
         let dir = tempfile::TempDir::new().unwrap();
