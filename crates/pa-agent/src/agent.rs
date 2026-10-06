@@ -762,10 +762,12 @@ impl AgentInner {
     /// the executor, settle failures, then the finish critical section —
     /// clear the slot and, under the same lock, reflect "leftover queued
     /// batches" into the idle-queued wake, so a batch that missed the
-    /// loop's final steering poll (or a stop hook/abort that skipped the
+    /// loop's final steering poll (or a stop hook that skipped the
     /// polls) cannot strand between the final poll and the idle
-    /// transition. The wake is re-armed on every finish with a non-empty
-    /// queue, so a subscribed pump converges without spinning.
+    /// transition. The wake is re-armed on every non-aborted finish with
+    /// a non-empty queue, so a subscribed pump converges without
+    /// spinning; an aborted finish keeps it clear so the queued rows
+    /// park (TS runLoop skips the polls on abort).
     async fn execute_claimed_run<F, Fut>(
         self: &Arc<Self>,
         claim: RunClaim,
@@ -803,8 +805,14 @@ impl AgentInner {
         {
             let mut run = self.run.lock().unwrap();
             if let Some(active) = run.take() {
-                let has_queued = self.steering_queue.lock().unwrap().has_items()
-                    || self.follow_up_queue.lock().unwrap().has_items();
+                // An aborted run parks its queued rows (TS runLoop skips
+                // the steering/follow-up polls when abort settles the
+                // turn): they fold into the next admitted run's polls,
+                // never the idle pump, so an aborted finish keeps the
+                // wake clear even with rows queued.
+                let has_queued = !run_signal.is_aborted()
+                    && (self.steering_queue.lock().unwrap().has_items()
+                        || self.follow_up_queue.lock().unwrap().has_items());
                 self.idle_queued_tx.send_modify(|armed| *armed = has_queued);
                 let _ = active.idle_tx.send(true);
             }

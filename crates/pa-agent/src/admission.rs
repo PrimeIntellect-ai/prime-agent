@@ -230,12 +230,13 @@ impl Agent {
 
     /// The stateful idle-queued wake: `true` while a finished run left
     /// unconsumed steering/follow-up batches (the loop's final steering
-    /// poll missed them, or a stop hook/abort skipped the polls). The
+    /// poll missed them, or a stop hook that skipped the polls — an
+    /// aborted finish never arms it, so aborted-run rows park). The
     /// value is stored in the channel, so an arming before the
     /// subscription is still visible (`borrow_and_update`) and no wake
     /// is lost; the run-finish critical section re-arms it on every
-    /// finish with a non-empty queue. pa-agent never acts on this signal
-    /// — a host-owned pump drives the drain through
+    /// non-aborted finish with a non-empty queue. pa-agent never acts on
+    /// this signal — a host-owned pump drives the drain through
     /// [`Agent::admit_queued_turn`].
     #[must_use]
     pub fn idle_queued_wake(&self) -> tokio::sync::watch::Receiver<bool> {
@@ -682,6 +683,64 @@ mod tests {
             Some(&("assistant", String::new())),
             "the post-abort admission completed its turn"
         );
+    }
+
+    #[tokio::test]
+    async fn aborted_run_parks_queued_batches_instead_of_pumping() {
+        let (called_tx, _called_rx) = tokio::sync::watch::channel(0u32);
+        let (gate_tx, _gate_rx) = tokio::sync::watch::channel(false);
+        let called = Arc::new(called_tx);
+        let gate = Arc::new(gate_tx);
+        let contexts = Arc::new(StdMutex::new(Vec::<LlmContext>::new()));
+        let agent = agent_with_stream(gated_stream_fn(
+            vec![Ok("one"), Ok("two"), Ok("three")],
+            Arc::clone(&called),
+            Arc::clone(&gate),
+            Arc::clone(&contexts),
+        ));
+
+        assert_eq!(
+            agent.admit_or_enqueue(AgentMessage::user("a")),
+            AdmitStatus::Admitted
+        );
+        // The gated stream holds the first run open, so the second batch
+        // queues as steering under the busy run.
+        assert_eq!(
+            agent.admit_or_enqueue(AgentMessage::user("parked")),
+            AdmitStatus::Busy
+        );
+        agent.abort();
+        agent.wait_for_idle().await;
+
+        let state = agent.state().await;
+        assert!(!state.is_streaming, "the aborted run settled");
+        assert_eq!(
+            agent.steering_previews(),
+            vec!["parked".to_string()],
+            "the abort parked the queued batch"
+        );
+        assert!(
+            !*agent.idle_queued_wake().borrow_and_update(),
+            "an aborted finish never arms the idle-queued wake"
+        );
+
+        // The parked batch folds into the next admitted run's initial
+        // steering poll, not the pump.
+        gate.send_replace(true);
+        assert_eq!(
+            agent.admit_or_enqueue(AgentMessage::user("b")),
+            AdmitStatus::Admitted
+        );
+        agent.wait_for_idle().await;
+
+        let state = agent.state().await;
+        let rows = transcript(&state);
+        assert!(
+            rows.contains(&("user", "parked".to_string())),
+            "the parked batch folded into the admitted run"
+        );
+        assert!(rows.contains(&("user", "b".to_string())));
+        assert!(!agent.has_queued_messages(), "the fold drained the queue");
     }
 
     #[tokio::test]
