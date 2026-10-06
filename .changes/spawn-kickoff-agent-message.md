@@ -1,0 +1,1 @@
+- A spawned subagent's kickoff task now renders as an agent message from the parent (labeled `[task from parent]`), matching the TypeScript version, instead of an unlabeled user message.

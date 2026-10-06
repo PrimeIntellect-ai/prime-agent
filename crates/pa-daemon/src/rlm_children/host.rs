@@ -175,7 +175,56 @@ impl RlmSubagentHost for SupervisorChildSessions {
             // the prompt is admitted (it idles on a pre-prompt child).
             let watcher_this = Arc::clone(&this);
             let watcher_record = Arc::clone(&record);
-            let prompt = request.prompt.clone();
+            // The TS spawn kickoff (agent-session.ts `spawnMessage`): the
+            // task prompt rides the plain prompt admission carrying the
+            // `agent_message` custom row — content "[task from parent]
+            // \n\n<prompt>" (the label the child system prompt promises),
+            // `details.id "spawn:<child id>"`, `details.message` the raw
+            // prompt, the parent endpoint with
+            // `fromRelationship: "parent"` — so the child's transcript
+            // renders the parent-attributed card (never a user row)
+            // while the model context stays the plain prompt text.
+            let prompt = request.prompt.as_str();
+            let kickoff_content = format!("[task from parent]\n\n{prompt}");
+            let kickoff_row_id = format!("spawn:{child_id}");
+            let mut parent_endpoint = json!({
+                "activeSessionId": this.parent_active_session_id,
+            });
+            if let Some(session_id) = &identity.session_id {
+                parent_endpoint["sessionId"] = json!(session_id);
+            }
+            if let Some(name) = this
+                .parent_session_name
+                .lock()
+                .expect("parent session name lock")
+                .clone()
+            {
+                parent_endpoint["sessionName"] = json!(name);
+            }
+            let mut child_endpoint = json!({
+                "activeSessionId": created.active_session_id,
+                "runtimeKind": "subagent",
+            });
+            if let Some(session_id) = &created.session_id {
+                child_endpoint["sessionId"] = json!(session_id);
+            }
+            if let Some(name) = &created.session_name {
+                child_endpoint["sessionName"] = json!(name);
+            }
+            let kickoff_row =
+                pa_core::session_engine::agent_messaging::create_agent_session_message_row(
+                    &pa_core::session_engine::agent_messaging::AgentSessionMessageRowPayload {
+                        id: &kickoff_row_id,
+                        prompt: &kickoff_content,
+                        message: prompt,
+                        from: &parent_endpoint,
+                        from_relationship: Some(
+                            pa_core::session_engine::agent_messaging::AgentFamilyRelationship::Parent,
+                        ),
+                        target: &child_endpoint,
+                        timestamp: now_ms(),
+                    },
+                );
             let child_active_session_id = created.active_session_id.clone();
             let child_session_file = created.session_file.clone();
             // Capture the current turn boundary before detaching: spawn
@@ -195,24 +244,34 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 }
                 watcher_record.lock().await.prompt_admitted = true;
                 if let Err(error) = watcher_this
-                    .prompt_child(&child_active_session_id, &prompt)
+                    .prompt_child(
+                        &child_active_session_id,
+                        &kickoff_content,
+                        Some(&kickoff_row),
+                    )
                     .await
                 {
                     // The route can fail ambiguously around a worker
                     // replacement: the frame reached a dying connection and
                     // no reply came back. The child's durable session file
                     // is the record the replacement replays from, so it
-                    // arbitrates the ambiguity - a prompt already in the
-                    // file landed (re-sending would duplicate the first
-                    // turn), a missing prompt provably never landed and one
+                    // arbitrates the ambiguity - a kickoff row already in
+                    // the file landed (re-sending would duplicate the first
+                    // turn), a missing row provably never landed and one
                     // retry against the replaced worker is safe.
-                    let landed =
-                        session_file_carries_prompt(child_session_file.as_deref(), &prompt);
+                    let landed = session_file_carries_spawn_kickoff(
+                        child_session_file.as_deref(),
+                        &kickoff_row_id,
+                    );
                     let retried = if landed {
                         Ok(())
                     } else {
                         watcher_this
-                            .prompt_child(&child_active_session_id, &prompt)
+                            .prompt_child(
+                                &child_active_session_id,
+                                &kickoff_content,
+                                Some(&kickoff_row),
+                            )
                             .await
                     };
                     if let Err(retry_error) = retried {
@@ -645,12 +704,14 @@ impl RlmSubagentHost for SupervisorChildSessions {
     }
 }
 
-/// Whether the child's durable session file already carries the task prompt
-/// as a user message. The session file is the record a worker replacement
-/// replays from, so it arbitrates an ambiguous prompt-route failure: a
-/// prompt in the file was durably processed by the dead worker (a re-send
-/// would duplicate the first turn), a missing prompt provably never landed.
-fn session_file_carries_prompt(session_file: Option<&str>, prompt: &str) -> bool {
+/// Whether the child's durable session file already carries the spawn
+/// kickoff row (`agent_message` custom row with `details.id` =
+/// `spawn:<child id>`). The session file is the record a worker
+/// replacement replays from, so it arbitrates an ambiguous prompt-route
+/// failure: a row in the file was durably processed by the dead worker (a
+/// re-send would duplicate the first turn), a missing row provably never
+/// landed.
+fn session_file_carries_spawn_kickoff(session_file: Option<&str>, spawn_row_id: &str) -> bool {
     let Some(path) = session_file.filter(|path| !path.is_empty()) else {
         return false;
     };
@@ -660,18 +721,10 @@ fn session_file_carries_prompt(session_file: Option<&str>, prompt: &str) -> bool
     content
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter(|entry| {
-            entry.get("type").and_then(Value::as_str) == Some("message")
-                && entry.pointer("/message/role").and_then(Value::as_str) == Some("user")
-        })
-        .any(|entry| match entry.pointer("/message/content") {
-            Some(Value::String(text)) => text.contains(prompt),
-            Some(Value::Array(blocks)) => blocks.iter().any(|block| {
-                block
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .is_some_and(|text| text.contains(prompt))
-            }),
-            _ => false,
+        .any(|entry| {
+            entry.get("type").and_then(Value::as_str) == Some("custom_message")
+                && entry.get("customType").and_then(Value::as_str)
+                    == Some(pa_core::session_engine::agent_messaging::AGENT_MESSAGE_CUSTOM_TYPE)
+                && entry.pointer("/details/id").and_then(Value::as_str) == Some(spawn_row_id)
         })
 }

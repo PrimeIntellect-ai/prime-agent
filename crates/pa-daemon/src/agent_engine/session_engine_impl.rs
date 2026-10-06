@@ -365,12 +365,24 @@ impl SessionEngine for AgentSessionEngine {
 
     /// The worker's live session summary (the TS
     /// `createAgentSessionMessageSender` source): rendered into the
-    /// sender identity block of direct worker-to-worker deliveries.
+    /// sender identity block of direct worker-to-worker deliveries, and
+    /// seeded into the children registry as the parent-name half of the
+    /// spawn kickoff's `from` endpoint (the summary follows the live
+    /// name, renames included).
     fn set_session_summary(&self, summary: Value) {
         *self
             .own_summary
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(summary);
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(summary.clone());
+        if let Some(children) = &self.children {
+            children.set_parent_session_name(
+                summary
+                    .get("sessionName")
+                    .and_then(Value::as_str)
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_string),
+            );
+        }
     }
 
     fn configure_service_tier(&self, tier: Option<pa_types::ai::ServiceTier>) {

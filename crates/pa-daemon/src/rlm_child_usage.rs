@@ -12,13 +12,11 @@
 //! Origin labels: TS reads the child's live message list
 //! and walks back to the nearest preceding user or agent-session custom
 //! message — the spawn prompt is a custom row with `details.id
-//! "spawn:<id>"`, so its completions label `spawn_task`. The Rust daemon
-//! prompts children through the plain prompt path, so the task prompt
-//! lands as the child file's first user row; that row labels
-//! `spawn_task`, later user rows `direct_user`. Agent-message deliveries
-//! persist as `custom_message` rows (`customType "agent_message"`), so
-//! they label `agent_message` exactly like TS. Completions with stop
-//! reason `error` or `aborted` fold nowhere (TS
+//! "spawn:<id>"`, so its completions label `spawn_task`; every plain
+//! user row (and any other row the walk stops at) labels
+//! `direct_user`. The Rust daemon lands the kickoff as the same
+//! `agent_message` custom row, so one rule covers both. Completions with
+//! stop reason `error` or `aborted` fold nowhere (TS
 //! `agent-session.ts`'s `message_end` filter).
 
 use pa_types::ai::Usage;
@@ -37,28 +35,15 @@ fn message_role(entry: &SessionEntry, role: &str) -> bool {
             == Some(role)
 }
 
-/// The index of the child file's first user row (the task prompt).
-fn first_user_row(entries: &[SessionEntry]) -> Option<usize> {
-    entries.iter().position(|entry| message_role(entry, "user"))
-}
-
 /// TS `rlmChildUsageOrigin`: the nearest preceding user or
 /// agent-session message row labels a completion's origin. Non-agent
-/// custom rows and plain user rows (after the task prompt) label
-/// `direct_user`, exactly like the TS walk's fallback arm.
-fn child_usage_origin(
-    entries: &[SessionEntry],
-    task_prompt_row: Option<usize>,
-    assistant_index: usize,
-) -> ChildUsageOrigin {
+/// custom rows and plain user rows label `direct_user`, exactly like the
+/// TS walk's fallback arm.
+fn child_usage_origin(entries: &[SessionEntry], assistant_index: usize) -> ChildUsageOrigin {
     for index in (0..assistant_index).rev() {
         let entry = &entries[index];
         if message_role(entry, "user") {
-            return if Some(index) == task_prompt_row {
-                ChildUsageOrigin::SpawnTask
-            } else {
-                ChildUsageOrigin::DirectUser
-            };
+            return ChildUsageOrigin::DirectUser;
         }
         if entry.type_ != "custom_message" {
             continue;
@@ -119,13 +104,12 @@ pub(crate) fn child_usage_batches(
     entries: &[SessionEntry],
     from: usize,
 ) -> (Vec<(ChildUsageOrigin, Usage)>, usize) {
-    let task_prompt_row = first_user_row(entries);
     let mut batches: Vec<(ChildUsageOrigin, Usage)> = Vec::new();
     for (index, entry) in entries.iter().enumerate().skip(from) {
         let Some(usage) = assistant_usage(entry) else {
             continue;
         };
-        let origin = child_usage_origin(entries, task_prompt_row, index);
+        let origin = child_usage_origin(entries, index);
         match batches.iter_mut().find(|(origin_, _)| *origin_ == origin) {
             Some((_, total)) => {
                 pa_core::session_engine::rlm_usage::add_assistant_usage(total, &usage);
@@ -178,6 +162,16 @@ mod tests {
         )
     }
 
+    /// The spawn kickoff row (TS `spawnMessage`: the `agent_message` custom
+    /// row with `details.id "spawn:<id>"`).
+    fn spawn_kickoff_row(id: &str, message: &str) -> SessionEntry {
+        custom_message_row(
+            id,
+            "agent_message",
+            &json!({"id": "spawn:sub-1", "message": message}),
+        )
+    }
+
     fn captured_usage(input: u64, output: u64, total_tokens: u64, cost_total: f64) -> Value {
         json!({
             "input": input, "output": output, "cacheRead": 0, "cacheWrite": 0,
@@ -190,17 +184,17 @@ mod tests {
         serde_json::from_value(entry.fields["message"]["usage"].clone()).unwrap()
     }
 
-    /// The origin walk over a real child-file shape: the first user row is
-    /// the task prompt (TS labels the spawn message `spawn_task`), an
-    /// agent-message custom row relabels the origin, a later user row is
-    /// a direct user prompt, and an aborted completion folds nowhere (TS
+    /// The origin walk over a real child-file shape: the kickoff custom
+    /// row labels `spawn_task` (TS `spawnMessage`), an agent-message
+    /// custom row relabels the origin, a user row is a direct user
+    /// prompt, and an aborted completion folds nowhere (TS
     /// `agent-session.ts` skips `error`/`aborted` completions). The
     /// captured numbers verify the `spawn_task` batch: 50,208 input +
     /// 2,929 output, $0.0089957.
     #[test]
     fn origin_walk_and_cursor_over_a_child_file() {
         let entries = vec![
-            user_row("u1"),
+            spawn_kickoff_row("c0", "ship the lane"),
             assistant_row(
                 "a1",
                 &captured_usage(50_208, 2_929, 53_137, 0.008_995_7),
@@ -268,7 +262,7 @@ mod tests {
     #[test]
     fn batches_sum_across_completions_of_one_origin() {
         let entries = vec![
-            user_row("u1"),
+            spawn_kickoff_row("c0", "ship the lane"),
             assistant_row("a1", &captured_usage(10, 5, 0, 0.01), "toolUse"),
             assistant_row("a2", &captured_usage(20, 8, 0, 0.02), "stop"),
         ];
@@ -282,5 +276,22 @@ mod tests {
         assert_eq!(usage.output, 13);
         assert!((usage.cost.total.as_f64() - 0.03).abs() < 1e-9);
         let _ = usage_of(&entries[1]);
+    }
+
+    /// TS parity: a plain user row — even the child file's first row —
+    /// labels `direct_user`; only the spawn kickoff row labels
+    /// `spawn_task` (the pre-TS-parity port labeled the first user row
+    /// `spawn_task` because its kickoff landed as a user row).
+    #[test]
+    fn a_plain_user_row_labels_direct_user_even_first() {
+        let entries = vec![
+            user_row("u1"),
+            assistant_row("a1", &captured_usage(10, 5, 0, 0.01), "stop"),
+        ];
+        let (batches, _cursor) = child_usage_batches(&entries, 0);
+        let [(origin, _)] = batches[..] else {
+            panic!("one batch: {batches:?}");
+        };
+        assert_eq!(origin, ChildUsageOrigin::DirectUser);
     }
 }

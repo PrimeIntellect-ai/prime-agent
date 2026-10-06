@@ -367,6 +367,50 @@ async fn rlm_children_spawn_roster_collect_delete_end_to_end() {
     assert_eq!(entry.label.as_deref(), Some("ship the lane"));
     assert!(entry.session_dir.ends_with(&handle.rlm_child_id));
 
+    // The kickoff row (TS `spawnMessage`): the task prompt lands as the
+    // parent-attributed `agent_message` custom row — never a user row —
+    // carrying the promised `[task from parent]` label, the raw prompt as
+    // `details.message`, `details.id "spawn:<child id>"`, and the
+    // delivery's parent/child endpoints.
+    let rows: Vec<Value> = std::fs::read_to_string(child_files[0].path())
+        .expect("read child session file")
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .collect();
+    let Some(kickoff) = rows
+        .iter()
+        .find(|row| row.get("type").and_then(Value::as_str) == Some("custom_message"))
+    else {
+        panic!("no custom_message row in the child file: {rows:?}");
+    };
+    assert_eq!(kickoff["customType"], "agent_message");
+    assert_eq!(kickoff["content"], "[task from parent]\n\nship the lane");
+    assert_eq!(
+        kickoff["details"],
+        json!({
+            "id": format!("spawn:{}", handle.rlm_child_id),
+            "message": "ship the lane",
+            "from": {
+                "activeSessionId": "parent-active-id",
+                "sessionId": "parent-session-uuid",
+            },
+            "fromRelationship": "parent",
+            "target": {
+                "activeSessionId": roster_summary["activeSessionId"],
+                "sessionId": roster_summary["sessionId"],
+                "runtimeKind": "subagent",
+                "sessionName": "worker-a",
+            },
+        }),
+    );
+    // The kickoff is the child's only prompt: no user row exists.
+    assert!(
+        rows.iter()
+            .filter(|row| row.get("type").and_then(Value::as_str) == Some("message"))
+            .all(|row| row.pointer("/message/role").and_then(Value::as_str) != Some("user")),
+        "the kickoff left a user row: {rows:?}"
+    );
+
     // Collect: settled snapshot of the child, and the selector errors.
     let results = children
         .collect(vec![handle.rlm_child_id.clone()], 5_000)

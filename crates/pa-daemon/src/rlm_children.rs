@@ -358,6 +358,10 @@ struct SupervisorChildSessionsInner {
     link: Arc<SupervisorLink>,
     agent_dir: PathBuf,
     parent_active_session_id: String,
+    /// The parent session's live name (the worker's summary, the TS
+    /// `sessionName` of every spawn row's `from` endpoint): `None` until
+    /// the worker publishes a summary, and refreshed by every rename.
+    parent_session_name: std::sync::Mutex<Option<String>>,
     // The identity lock is only ever a data swap (never held across an
     // await), so a std mutex keeps the setter callable from sync engine
     // paths (the create command) without a runtime `block_on`.
@@ -445,6 +449,7 @@ impl SupervisorChildSessions {
                 link,
                 agent_dir,
                 parent_active_session_id,
+                parent_session_name: std::sync::Mutex::new(None),
                 identity: std::sync::Mutex::new(ParentIdentity::with_default_depth()),
                 children: Mutex::new(Vec::new()),
                 pending_spawn_names: std::sync::Mutex::new(std::collections::HashSet::new()),
@@ -610,6 +615,22 @@ impl SupervisorChildSessions {
     /// while holding the lock).
     pub fn set_identity(&self, identity: ParentIdentity) {
         *self.inner.identity.lock().expect("identity lock") = identity;
+    }
+
+    /// Replace the parent session's live name (the worker's summary — the
+    /// `sessionName` of the spawn kickoff's `from` endpoint); `None` when
+    /// the summary carries none.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the name mutex is poisoned (a holder panicked while
+    /// holding the lock).
+    pub fn set_parent_session_name(&self, name: Option<String>) {
+        *self
+            .inner
+            .parent_session_name
+            .lock()
+            .expect("parent session name lock") = name;
     }
 
     /// Rebuild the children registry from the spawn ledger (a restarted

@@ -182,7 +182,10 @@ impl SupervisorChildSessionsInner {
             .await?;
         // A failed prompt tears the just-created session down (TS kills the
         // created session in the create-path catch block).
-        if let Err(error) = self.prompt_child(&created.active_session_id, prompt).await {
+        if let Err(error) = self
+            .prompt_child(&created.active_session_id, prompt, None)
+            .await
+        {
             let _ = self
                 .kill_child(&created.active_session_id, ChildCloseReason::Killed)
                 .await;
@@ -277,7 +280,17 @@ impl SupervisorChildSessionsInner {
         None
     }
 
-    pub(super) async fn prompt_child(&self, active_session_id: &str, prompt: &str) -> Result<()> {
+    /// Prompt one child over the supervisor link (the plain prompt path,
+    /// TS `promptAndWait`): `prompt` is the model-facing text; the spawn
+    /// kickoff passes its `agent_message` custom row alongside (TS
+    /// `customMessage`), so the turn persists the row instead of a user
+    /// row, while `rlm.create_session` prompts plain (no row).
+    pub(super) async fn prompt_child(
+        &self,
+        active_session_id: &str,
+        prompt: &str,
+        custom_message: Option<&Value>,
+    ) -> Result<()> {
         let make_command = |selector: &str| DaemonCommand::Prompt {
             id: None,
             active_session_id: selector.to_string(),
@@ -290,7 +303,7 @@ impl SupervisorChildSessionsInner {
                 expand_prompt_templates: None,
                 source: Some(json!("rpc")),
                 agent_message_id: None,
-                custom_message: None,
+                custom_message: custom_message.cloned(),
                 queue_key: None,
                 prefix_messages: None,
                 admission_id: None,
