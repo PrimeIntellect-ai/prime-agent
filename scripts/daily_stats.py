@@ -117,9 +117,18 @@ def change(current, previous, *, percentage_points=False):
 
 def render_report(points, day):
     yesterday, last_week, last_month = (day - timedelta(days=n) for n in (1, 7, 30))
-    lines = [f"*Prime Agent daily stats — {day.isoformat()} (UTC)*"]
-    for name, display_name in (("DAU", "DAU"), ("Tokens", "Token usage"),
-                               ("Runs", "Completed runs")):
+    title_date = f"{day:%b} {day.day}, {day.year}"
+    lines = [f"*Prime Agent Daily Stats ({title_date})*", "",
+             " · ".join(f"*{name}: {points[name][day]:,.0f}*" for name in ("DAU", "WAU", "MAU"))]
+    values = points["DAU"]
+    lines.append(f"DAU: {change(values[day], values[yesterday])} vs yesterday · "
+                 f"{change(values[day], values[last_week])} vs last week")
+    for name, previous, period in (("WAU", last_week, "previous 7 days"),
+                                    ("MAU", last_month, "previous 30 days")):
+        values = points[name]
+        lines.append(f"{name}: {change(values[day], values[previous])} vs {period}")
+    lines.append("")
+    for name, display_name in (("Tokens", "Token usage"), ("Runs", "Completed runs")):
         values = points[name]
         value = f"{values[day]:,.0f}"
         if name == "Tokens":
@@ -127,17 +136,12 @@ def render_report(points, day):
                 if values[day] >= divisor:
                     value = f"{values[day] / divisor:.2f}{suffix}"
                     break
-        lines.append(f"• *{display_name}: {value}* — {change(values[day], values[yesterday])}"
+        lines.append(f"• *{display_name}: {value}* · {change(values[day], values[yesterday])}"
                      f" vs yesterday · {change(values[day], values[last_week])} vs last week")
-    for name, previous, period in (("WAU", last_week, "previous 7 days"),
-                                    ("MAU", last_month, "previous 30 days")):
-        values = points[name]
-        lines.append(f"• *{name}: {values[day]:,.0f}* — "
-                     f"{change(values[day], values[previous])} vs {period}")
     rates = {d: points["Successful runs"][d] / points["Runs"][d] * 100
              if points["Runs"][d] else None for d in (day, yesterday, last_week)}
     rate = f"{rates[day]:.1f}%" if rates[day] is not None else "n/a (no completed runs)"
-    lines.append(f"• *Run success rate: {rate}* — "
+    lines.append(f"• *Run success rate: {rate}* · "
                  f"{change(rates[day], rates[yesterday], percentage_points=True)} vs yesterday · "
                  f"{change(rates[day], rates[last_week], percentage_points=True)} vs last week")
     lines.extend([f"<{DASHBOARD_URL}|Open dashboard>",

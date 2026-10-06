@@ -76,6 +76,10 @@ class ReportTests(unittest.TestCase):
 
     def test_report_compares_complete_rolling_windows_and_success_rate(self):
         report = stats.render_report(stats.parse_results(fixture(), DAY), DAY)
+        self.assertTrue(report.startswith("*Prime Agent Daily Stats (Oct 5, 2026)*\n"))
+        self.assertIn("*DAU: 100* · *WAU: 300* · *MAU: 700*", report)
+        self.assertNotIn("—", report)
+        self.assertNotIn("(UTC)", report)
         for expected in ("DAU: 100", "↑ 25.0% vs yesterday", "↑ 100.0% vs last week",
                          "WAU: 300", "↑ 50.0% vs previous 7 days", "MAU: 700",
                          "↑ 40.0% vs previous 30 days", "Token usage: 4.00K",
