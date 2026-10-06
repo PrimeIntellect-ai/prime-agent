@@ -374,6 +374,7 @@ impl Supervisor {
             })?;
         #[cfg(unix)]
         socket_lease.assert_held()?;
+        socket::bind_capture_gap().await;
         // Capture the bound file's identity before anything can replace
         // it (TS daemon-supervisor.ts:879, between `listen` and
         // `restrictDaemonSocketPath`): the exit cleanup below compares
@@ -556,9 +557,35 @@ impl Supervisor {
             }
             return Err(error);
         }
+        // Session-archive sweep (roadmap: the sessions directory must not
+        // grow forever): boot sweep, then the periodic re-sweep at the TS
+        // idle-eviction cadence. Housekeeping only — it never gates serving.
+        {
+            let supervisor = Arc::clone(&self);
+            tokio::spawn(async move {
+                crate::session_archive::archive_sweep_loop(&supervisor).await;
+            });
+        }
+
+        // Update-prepare watchdog: aborts deadline- or self-expiry-breached
+        // prepare transactions even when no command arrives to re-check.
+        {
+            let supervisor = Arc::clone(&self);
+            tokio::spawn(async move {
+                supervisor.update_prepare_watchdog().await;
+            });
+        }
+
+        // The accept loop OWNS the listener, so whichever arm ends serving
+        // the listener is closed before the cleanup below probes the path:
+        // a successor's live socket at the path survives even a poisoned
+        // bind-time capture. On unix the lease-gated cleanup claims the
+        // bound socket atomically (asserting the lease still holds), and a
+        // compromised lease leaves the successor's socket untouched; the
+        // lease-monitor select's compromise arm mirrors the boot fence.
         #[cfg(unix)]
         let serving = tokio::select! {
-            result = accept_loop::serve(&self, &*listener) => result,
+            result = accept_loop::serve(&self, listener) => result,
             () = socket_lease.wait_compromised() => {
                 // The boot's ownership passes die with the lease: none may
                 // adopt or restore against a successor that holds the
@@ -574,18 +601,12 @@ impl Supervisor {
             }
         };
         #[cfg(not(unix))]
-        let serving = accept_loop::serve(&self, &*listener).await;
-        drop(listener);
+        let serving = accept_loop::serve(&self, listener).await;
+        let expected_identity = self.bound_socket_identity.lock().unwrap().clone();
         #[cfg(unix)]
-        socket_lease.cleanup_socket_path(
-            &self.options.socket_path,
-            self.bound_socket_identity.lock().unwrap().clone(),
-        );
+        socket_lease.cleanup_socket_path(&self.options.socket_path, expected_identity);
         #[cfg(not(unix))]
-        socket::cleanup_socket_path(
-            &self.options.socket_path,
-            self.bound_socket_identity.lock().unwrap().clone(),
-        );
+        socket::cleanup_socket_path_after_close(&self.options.socket_path, expected_identity);
         self.flush_telemetry_on_exit().await;
         serving
     }

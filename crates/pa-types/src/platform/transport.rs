@@ -161,6 +161,47 @@ pub async fn connect_transport(path: &Path) -> Result<Box<dyn TransportStream>> 
     Ok(Box::new(stream))
 }
 
+/// Definitive nonblocking Unix listener refusal, used by the exit cleanup.
+/// A saturated backlog can yield `EAGAIN` on Linux rather than a completed
+/// connect. Only `ConnectionRefused` permits unlink; all unknown outcomes fail
+/// closed. Reuse the transport's long-path re-anchor so deep socket paths
+/// retain their stale-cleanup behavior.
+///
+/// The refused verdict is definitive on Linux only: on macOS and the BSDs a
+/// saturated listen queue ALSO refuses the connect, so a live successor that
+/// filled its backlog is indistinguishable from a dead path by this probe.
+/// There the function never claims closure (the exit cleanup preserves the
+/// path; the next bind's stale-socket prepare cleans a file nothing serves).
+#[cfg(unix)]
+#[must_use]
+pub fn unix_listener_definitely_closed(path: &Path) -> bool {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = path;
+        return false;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(effective) = UnixSocketAddress::new(path) else {
+            return false;
+        };
+        let Ok(address) = socket2::SockAddr::unix(effective.effective()) else {
+            return false;
+        };
+        let Ok(socket) = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)
+        else {
+            return false;
+        };
+        if socket.set_nonblocking(true).is_err() {
+            return false;
+        }
+        matches!(
+            socket.connect(&address),
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused
+        )
+    }
+}
+
 #[cfg(windows)]
 impl TransportListener for super::windows_pipe::NamedPipeListener {
     fn accept(&self) -> AcceptFuture<'_> {
