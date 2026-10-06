@@ -162,7 +162,8 @@ impl ResponseChunks {
                 ))),
             },
             Self::Queued(chunks) => Ok(chunks.pop_front()),
-        }    }
+        }
+    }
 }
 
 /// The sandbox HTTP transport. Implementations execute one request and
