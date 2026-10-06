@@ -11,14 +11,12 @@ pub const SESSION_DIR_ENV: &str = "PRIME_AGENT_SESSION_DIR";
 pub const CONFIG_DIR_NAME: &str = ".prime/agent";
 
 /// The home directory for state layout. Unresolvable home is an explicit
-/// error, not a degraded `/tmp` default: the daemon owns durable state and
-/// must refuse to start rather than write it outside the user profile
-/// (TS `getAgentDir` throws when `os.homedir()` fails).
+/// error, not a degraded `/tmp` default: the daemon must refuse to start
+/// rather than write durable state outside the user profile.
 ///
 /// # Errors
 ///
-/// Returns an error when the home directory cannot be resolved from the
-/// supported environment variables.
+/// Returns an error when the home directory cannot be resolved.
 pub fn home_dir() -> Result<PathBuf> {
     pa_types::platform::home_dir()
         .ok_or_else(|| anyhow!("home directory not found: set HOME (or USERPROFILE on Windows)"))
@@ -29,8 +27,7 @@ pub fn home_dir() -> Result<PathBuf> {
 /// # Errors
 ///
 /// Returns an error when expanding `~`/`~/` needs the home directory and
-/// [`home_dir`] cannot resolve it; every other path passes through
-/// unchanged.
+/// [`home_dir`] cannot resolve it.
 pub fn expand_tilde(path: &str) -> Result<PathBuf> {
     if let Some(rest) = path.strip_prefix("~/") {
         Ok(home_dir()?.join(rest))
@@ -41,9 +38,8 @@ pub fn expand_tilde(path: &str) -> Result<PathBuf> {
     }
 }
 
-/// The agent state root: the `PRIME_AGENT_CODING_AGENT_DIR` override
-/// when set (tilde expanded), else `.prime/agent` under the home
-/// directory.
+/// The agent state root: the `PRIME_AGENT_CODING_AGENT_DIR` override when
+/// set (tilde expanded), else `.prime/agent` under the home directory.
 ///
 /// # Errors
 ///
@@ -80,7 +76,7 @@ pub fn logs_dir(agent_dir: &Path) -> PathBuf {
 /// # Errors
 ///
 /// Returns an error when directory creation fails; the permission
-/// restriction is best effort and never fails the call.
+/// restriction is best effort.
 pub fn ensure_dir(path: &Path) -> Result<()> {
     std::fs::create_dir_all(path)?;
     let _ = pa_core::platform::perms::restrict_dir(path);
@@ -99,8 +95,8 @@ pub fn hash_key(input: &str, chars: usize) -> String {
         .to_string()
 }
 
-/// Log path for a daemon socket (port of `getDaemonLogPath`): readable basename
-/// plus an 8-char hash of the normalized socket path.
+/// Log path for a daemon socket: readable basename plus an 8-char hash of
+/// the normalized socket path (TS `getDaemonLogPath`).
 #[must_use]
 pub fn daemon_log_path(socket_path: &Path, agent_dir: &Path) -> PathBuf {
     let normalized = socket_path.to_string_lossy().to_string();
@@ -111,8 +107,8 @@ pub fn daemon_log_path(socket_path: &Path, agent_dir: &Path) -> PathBuf {
     logs_dir(agent_dir).join(format!("{base}.{}.log", hash_key(&normalized, 8)))
 }
 
-/// Rotating log appender: keep the file bounded with one generation rotation
-/// (port of `appendRotatingLog`).
+/// Rotating log appender: keep the file bounded with one generation
+/// rotation (TS `appendRotatingLog`).
 pub struct RotatingLog {
     path: PathBuf,
     max_bytes: u64,

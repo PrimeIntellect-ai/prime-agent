@@ -1,17 +1,7 @@
 //! Cross-process directory locks, byte-compatible with the TS product's
-//! `proper-lockfile` 4.1.2 convention.
-//!
-//! The TS product (auth.json, settings.json, cron state, session-lease
-//! guards) locks a file by creating an EMPTY DIRECTORY at `{file}.lock`,
-//! bumping its mtime, and removing the directory on release. Staleness is
-//! judged from that mtime alone - there is no pid or owner file. A regular
-//! file at the lock path is not a valid lock in this protocol; it is removed
-//! on acquisition (older Rust builds left flock files there, which broke TS
-//! startup with ENOTDIR).
-//!
-//! Held locks are expected to be short (read-modify-write of one small JSON
-//! document); long holds rely on the caller re-checking, as in the TS
-//! product, whose sync lock keeps its mtime fresh via an unref'd timer.
+//! `proper-lockfile` 4.1.2 convention: a lock is an EMPTY DIRECTORY at
+//! `{file}.lock`, staleness is judged from its bumped mtime alone (no pid
+//! or owner file), and a regular file at the lock path is removed on acquisition.
 
 use std::fs;
 use std::io;
@@ -33,8 +23,8 @@ fn probe_mtime() -> (i64, i64) {
     (seconds, 5_000_000)
 }
 
-// The `libc::timespec` field names are the syscall's own vocabulary -
-// the struct-literal shorthand below is the point of the params.
+// The `libc::timespec` field names are the syscall's own vocabulary; the struct-literal shorthand
+// below is the point.
 #[allow(clippy::similar_names)]
 #[cfg(unix)]
 fn set_mtime(path: &Path, tv_sec: i64, tv_nsec: i64) -> io::Result<()> {
@@ -55,12 +45,11 @@ fn set_mtime(path: &Path, tv_sec: i64, tv_nsec: i64) -> io::Result<()> {
     Ok(())
 }
 
-/// Windows: the directory's last-write time via `CreateFileW` (the only
-/// way to open a directory is `FILE_FLAG_BACKUP_SEMANTICS`) +
-/// `SetFileTime` - the mtime probe proper-lockfile performs with
-/// `utimensat` on Unix.
-// The `libc::timespec` field names are the syscall's own vocabulary -
-// the struct-literal shorthand below is the point of the params.
+/// Windows: set the directory's last-write time via `CreateFileW` (with
+/// `FILE_FLAG_BACKUP_SEMANTICS`, the only way to open a directory) +
+/// `SetFileTime` - the mtime probe `utimensat` performs on Unix.
+// The `libc::timespec` field names are the syscall's own vocabulary; the struct-literal shorthand
+// below is the point.
 #[allow(clippy::similar_names)]
 #[cfg(windows)]
 fn set_mtime(path: &Path, tv_sec: i64, tv_nsec: i64) -> io::Result<()> {
@@ -89,8 +78,8 @@ mod win32 {
     const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
     /// `winbase.h`: write access to the file's times.
     const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
-    /// `winnt.h` `FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE`:
-    /// a concurrent stat of the lock dir must not be blocked.
+    /// `winnt.h` `FILE_SHARE_READ | WRITE | DELETE`: a concurrent stat of the lock dir must not be
+    /// blocked.
     const FILE_SHARE_ALL: u32 = 0x0000_0007;
     /// `winbase.h` `OPEN_EXISTING`.
     const OPEN_EXISTING: u32 = 3;
@@ -129,6 +118,9 @@ mod win32 {
     /// `(tv_sec, tv_nsec)` -> FILETIME. The Windows epoch trails the Unix
     /// epoch by 11644473600 seconds; the sub-second part is nanoseconds
     /// against FILETIME's 100ns ticks.
+    // `tv_sec`/`tv_nsec` are the POSIX timespec spellings the callers
+    // pass through; the pair is the domain's own vocabulary.
+    #[allow(clippy::similar_names)]
     fn unix_to_filetime(tv_sec: i64, tv_nsec: i64) -> FileTime {
         const EPOCH_DELTA_TICKS: i64 = 11_644_473_600 * 10_000_000;
         let ticks = tv_sec * 10_000_000 + EPOCH_DELTA_TICKS + tv_nsec / 100;
@@ -138,7 +130,9 @@ mod win32 {
         }
     }
 
-    /// Set the directory's last-write time.
+    /// Set the directory's last-write time. The `tv_sec`/`tv_nsec` pair
+    /// is the POSIX timespec vocabulary, same as `unix_to_filetime`.
+    #[allow(clippy::similar_names)]
     pub(crate) fn set_last_write_time(path: &Path, tv_sec: i64, tv_nsec: i64) -> io::Result<()> {
         let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
         let handle = unsafe {
@@ -156,7 +150,14 @@ mod win32 {
             return Err(io::Error::last_os_error());
         }
         let last_write = unix_to_filetime(tv_sec, tv_nsec);
-        let ok = unsafe { SetFileTime(handle, std::ptr::null(), std::ptr::null(), &last_write) };
+        let ok = unsafe {
+            SetFileTime(
+                handle,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::from_ref(&last_write),
+            )
+        };
         unsafe { CloseHandle(handle) };
         if ok == 0 {
             return Err(io::Error::last_os_error());
@@ -182,24 +183,20 @@ impl LockDir {
     }
 
     /// Acquire exclusively: create `{file}.lock` as an empty directory and
-    /// bump its mtime. A fresh lock held by another process surfaces as
-    /// [`io::ErrorKind::WouldBlock`] (the TS protocol's ELOCKED); callers
-    /// own retry policy. A lock older than `stale_after` is removed and
-    /// retried once, so a crashed holder cannot wedge the file.
+    /// bump its mtime. A fresh foreign lock surfaces as
+    /// [`io::ErrorKind::WouldBlock`] (the TS protocol's ELOCKED); a lock
+    /// older than `stale_after` is removed and retried once.
     ///
     /// # Errors
     ///
-    /// Returns [`io::ErrorKind::WouldBlock`] when a fresh lock is held by
-    /// another process, and any underlying I/O error (missing parent,
-    /// permissions, stale-reclaim failures) as-is.
+    /// [`io::ErrorKind::WouldBlock`] for a fresh foreign lock; other I/O errors as-is.
     pub fn acquire(file: &Path, stale_after: Duration) -> io::Result<Self> {
         let path = Self::path_for(file);
         let stale_after = stale_after.max(MIN_STALE);
         match Self::create(&path) {
             Ok(()) => Ok(LockDir { path }),
-            // Only an existing path is a lock collision; any other failure
-            // (missing parent, permissions) is a real error, like the TS
-            // protocol's non-EEXIST path - never masked as contention.
+            // Only an existing path is a lock collision; other failures
+            // (missing parent, permissions) are real errors, never contention.
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                 Self::judge_and_reclaim(&path, stale_after)?;
                 // The judge path removed (or raced away) the incumbent: one
@@ -232,9 +229,8 @@ impl LockDir {
         Ok(())
     }
 
-    /// The mkdir is the acquisition signal; the mtime probe makes the
-    /// staleness judgment meaningful on NTFS too (directory mtimes would
-    /// otherwise sit on the second, and stale takeovers would misjudge).
+    /// The mkdir is the acquisition signal; the mtime probe keeps staleness
+    /// meaningful on NTFS (directory mtimes otherwise sit on the second).
     #[cfg(windows)]
     fn create(path: &Path) -> io::Result<()> {
         fs::create_dir(path)?;
@@ -267,8 +263,7 @@ impl LockDir {
         if metadata.is_file() {
             // A regular file is not a lock in this protocol (a pre-compat
             // Rust build or foreign artifact): remove it and retry - but
-            // only when no live flock holder guards it, so a concurrently
-            // running pre-compat binary is not clobbered mid-write.
+            // only when no live flock holder guards it.
             #[cfg(unix)]
             {
                 if Self::legacy_flock_held(path) {
@@ -321,9 +316,8 @@ impl LockDir {
     }
 
     /// Release: remove the lock directory. A missing directory means someone
-    /// else already reclaimed it (e.g. a stale takeover) - matching the TS
-    /// release, which tolerates ENOENT. Other failures are surfaced to the
-    /// trace log; `Drop` cannot propagate.
+    /// else already reclaimed it (the TS release tolerates ENOENT); other
+    /// failures go to the trace log (`Drop` cannot propagate).
     pub fn release(&self) {
         if let Err(error) = fs::remove_dir(&self.path) {
             if error.kind() != io::ErrorKind::NotFound {
@@ -374,8 +368,7 @@ mod tests {
             .unwrap()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap();
-        // Ceil to the next second plus 5ms, so millisecond-precision
-        // filesystems never record a time "on the second".
+
         assert_eq!(modified.as_millis() % 1000, 5);
         assert!(
             modified.as_millis()
@@ -414,9 +407,8 @@ mod tests {
 
     #[test]
     fn legacy_lock_file_is_removed_not_choked_on() {
-        // A pre-compat Rust build left flock FILES at the lock path; the TS
-        // product rmdir()s them and dies with ENOTDIR. Acquision must heal
-        // the artifact instead of failing.
+        // A pre-compat Rust build left flock FILES at the lock path (the TS
+        // product rmdir()s them and dies with ENOTDIR): acquisition must heal.
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("auth.json");
         std::fs::write(&file, "{}").unwrap();

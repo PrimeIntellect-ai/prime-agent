@@ -1,0 +1,1 @@
+- A `maxTokens` configured in models.json (or a per-model override) now reaches the provider unchanged instead of being silently clamped to the 32000 default output ceiling; catalog models keep the default ceiling ([#755](https://github.com/PrimeIntellect-ai/prime-agent/issues/755)).

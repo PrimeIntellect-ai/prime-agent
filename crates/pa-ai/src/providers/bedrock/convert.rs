@@ -1,7 +1,5 @@
-//! Bedrock Converse request conversion: messages, system prompt, tool config,
-//! and model-capability classification.
-//! Port of the conversion section of
-//! `packages/ai/src/providers/amazon-bedrock.ts`.
+//! Bedrock Converse request conversion: messages, system prompt, tool config, and model-capability
+//! classification.
 
 use base64::Engine as _;
 use serde_json::{json, Map, Value};
@@ -14,7 +12,6 @@ use crate::types::{
 };
 use crate::utils_inner::sanitize_unicode::sanitize_surrogates;
 
-/// Port of `getModelMatchCandidates`.
 fn get_model_match_candidates(model_id: &str, model_name: Option<&str>) -> Vec<String> {
     let mut values = vec![model_id.to_string()];
     if let Some(name) = model_name {
@@ -33,7 +30,7 @@ fn get_model_match_candidates(model_id: &str, model_name: Option<&str>) -> Vec<S
         .collect()
 }
 
-/// Port of `supportsAdaptiveThinking` (Opus 4.6+, Sonnet 4.6).
+/// Adaptive thinking support (Opus 4.6+, Sonnet 4.6).
 pub fn supports_adaptive_thinking(model_id: &str, model_name: Option<&str>) -> bool {
     get_model_match_candidates(model_id, model_name)
         .iter()
@@ -50,8 +47,8 @@ pub fn supports_adaptive_thinking(model_id: &str, model_name: Option<&str>) -> b
         })
 }
 
-/// Port of `supportsAlwaysOnAdaptiveThinking`: Fable/Mythos models — and
-/// Claude Opus 5.5 — think every turn and reject sampling params with a 400.
+/// Fable/Mythos models — and Claude Opus 5.5 — think every turn and reject sampling params with a
+/// 400.
 pub fn supports_always_on_adaptive_thinking(model_id: &str, model_name: Option<&str>) -> bool {
     get_model_match_candidates(model_id, model_name)
         .iter()
@@ -64,7 +61,6 @@ pub fn supports_always_on_adaptive_thinking(model_id: &str, model_name: Option<&
         })
 }
 
-/// Port of `isAnthropicClaudeModel`.
 pub fn is_anthropic_claude_model(model: &Model) -> bool {
     let id = model.id.to_lowercase();
     let name = model.name.to_lowercase();
@@ -75,13 +71,12 @@ pub fn is_anthropic_claude_model(model: &Model) -> bool {
         || name.contains("claude")
 }
 
-/// Port of `supportsPromptCaching`.
 pub fn supports_prompt_caching(model: &Model) -> bool {
     let candidates = get_model_match_candidates(&model.id, Some(&model.name));
     let has_claude_ref = candidates.iter().any(|s| s.contains("claude"));
     if !has_claude_ref {
-        // Application inference profiles don't contain the model name in the
-        // ARN. Allow users to force cache points via environment variable.
+        // Application inference profiles don't contain the model name in the ARN. Allow users to
+        // force cache points via environment variable.
         return std::env::var("AWS_BEDROCK_FORCE_CACHE").as_deref() == Ok("1");
     }
     candidates.iter().any(|s| {
@@ -89,12 +84,11 @@ pub fn supports_prompt_caching(model: &Model) -> bool {
     })
 }
 
-/// Port of `supportsThinkingSignature`.
 pub fn supports_thinking_signature(model: &Model) -> bool {
     is_anthropic_claude_model(model)
 }
 
-/// Port of `normalizeToolCallId`: Bedrock tool-use IDs are `[a-zA-Z0-9_-]{1,64}`.
+/// Bedrock tool-use IDs are `[a-zA-Z0-9_-]{1,64}`.
 pub fn normalize_tool_call_id(id: &str) -> String {
     let sanitized: String = id
         .chars()
@@ -113,8 +107,8 @@ pub fn normalize_tool_call_id(id: &str) -> String {
     }
 }
 
-/// Port of `createImageBlock`: validates the mime type and passes the base64
-/// bytes straight through (the AWS JSON protocol transmits blobs as base64).
+/// Validates the mime type and passes the base64 bytes straight through (the AWS JSON protocol
+/// transmits blobs as base64).
 fn create_image_block(mime_type: &str, data: &str) -> Value {
     let format = match mime_type {
         "image/jpeg" | "image/jpg" => "jpeg",
@@ -136,7 +130,6 @@ fn create_image_block(mime_type: &str, data: &str) -> Value {
     })
 }
 
-/// Port of `buildSystemPrompt`.
 pub fn build_system_prompt(
     system_prompt: Option<&str>,
     model: &Model,
@@ -157,8 +150,7 @@ pub fn build_system_prompt(
     Some(blocks)
 }
 
-/// Port of `convertMessages`.
-// Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+// Long by design: mirrors the provider's stream shape.
 #[allow(clippy::too_many_lines)]
 pub fn convert_messages(
     context: &Context,
@@ -224,16 +216,14 @@ pub fn convert_messages(
                             if thinking.thinking.trim().is_empty() {
                                 continue;
                             }
-                            // Only Anthropic models support the signature field
-                            // in reasoningText. For other models we omit it to
-                            // avoid: "This model doesn't support the
+                            // Only Anthropic models support the signature field in reasoningText.
+                            // For other models we omit it to avoid: "This model doesn't support the
                             // reasoningContent.reasoningText.signature field".
                             if supports_thinking_signature(model) {
-                                // Signatures arrive after thinking deltas. If a
-                                // partial or externally persisted message lacks
-                                // a signature, Bedrock rejects the replayed
-                                // reasoning block. Fall back to plain text,
-                                // matching Anthropic.
+                                // Signatures arrive after thinking deltas. If a partial or
+                                // externally persisted message lacks a signature, Bedrock rejects
+                                // the replayed reasoning block. Fall back to plain text, matching
+                                // Anthropic.
                                 let signature = thinking
                                     .thinking_signature
                                     .as_deref()
@@ -271,8 +261,8 @@ pub fn convert_messages(
                 i += 1;
             }
             Message::ToolResult(_) => {
-                // Collect all consecutive toolResult messages into a single
-                // user message: Bedrock requires all tool results in one message.
+                // Collect all consecutive toolResult messages into a single user message: Bedrock
+                // requires all tool results in one message.
                 let mut tool_results: Vec<Value> = Vec::new();
                 let mut j = i;
                 while j < transformed.len() {
@@ -304,8 +294,8 @@ pub fn convert_messages(
         }
     }
 
-    // Add a cache point to the last user message for supported Claude models
-    // when caching is enabled.
+    // Add a cache point to the last user message for supported Claude models when caching is
+    // enabled.
     if cache_retention != CacheRetention::None
         && supports_prompt_caching(model)
         && !result.is_empty()
@@ -327,7 +317,6 @@ pub fn convert_messages(
     result
 }
 
-/// Port of `convertToolConfig`.
 pub fn convert_tool_config(
     tools: Option<&[Tool]>,
     tool_choice: Option<&BedrockToolChoice>,
@@ -368,7 +357,7 @@ pub fn convert_tool_config(
     Some(Value::Object(config))
 }
 
-/// Tool selection (`toolChoice` in the TS reference).
+/// Tool selection.
 #[allow(dead_code)] // full TS option surface; variants set by callers
 #[derive(Clone, Debug, PartialEq)]
 pub enum BedrockToolChoice {
@@ -378,10 +367,9 @@ pub enum BedrockToolChoice {
     Tool { name: String },
 }
 
-/// Port of `mapThinkingLevelToEffort`.
 pub fn map_thinking_level_to_effort(model: &Model, level: ModelThinkingLevel) -> &'static str {
-    // Clamp to what the model actually supports so callers that bypass
-    // clampThinkingLevel can't send an effort the model lacks.
+    // Clamp to what the model actually supports so callers that bypass clampThinkingLevel can't
+    // send an effort the model lacks.
     let effective = clamp_thinking_level(model, level);
     let mapped = model
         .thinking_level_map
@@ -405,7 +393,6 @@ pub fn map_thinking_level_to_effort(model: &Model, level: ModelThinkingLevel) ->
     }
 }
 
-/// Port of `mapStopReason`.
 pub fn map_stop_reason(reason: Option<&str>) -> crate::types::StopReason {
     use crate::types::StopReason;
     match reason {

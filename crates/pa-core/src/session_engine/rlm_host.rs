@@ -1,7 +1,8 @@
 //! The `rlm.*` kernel host-request bridge: wire validation, the child-session
 //! host seam, and handler registration for `rlm.spawn` (`rlm.run`),
 //! `rlm.create_session`, `rlm.find_models`, `rlm.list_subagents`,
-//! `rlm.collect`, `rlm.progress.note`, and `rlm.delete_subagent`.
+//! `rlm.collect`, `rlm.progress.note`, `rlm.delete_subagent`, and
+//! `rlm.rename`.
 //!
 //! Wire contract: the Python side (`rlm/__init__.py`) sends typed requests and
 //! parses strict `snake_case` replies. Pure normalization lives in
@@ -31,9 +32,7 @@ pub const RLM_PROGRESS_NOTE_MAX_LENGTH: usize = 512;
 pub const RLM_PROGRESS_NOTE_MIN_INTERVAL_MS: u64 = 10_000;
 const RLM_COLLECT_MAX_TIMEOUT_MS: u64 = 2_147_483_647;
 
-// ---------------------------------------------------------------------------
 // Wire shapes (strict snake_case, parsed by the Python rlm module)
-// ---------------------------------------------------------------------------
 
 /// `rlm.spawn` handle returned once the child task is admitted.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -125,9 +124,7 @@ pub struct RlmChildResult {
     pub replied_since_task: Option<bool>,
 }
 
-// ---------------------------------------------------------------------------
 // Requests into the host
-// ---------------------------------------------------------------------------
 
 /// Validated `rlm.spawn` request handed to the child-session host.
 #[derive(Debug, Clone)]
@@ -139,6 +136,9 @@ pub struct RlmSpawnRequest {
     pub model: Option<String>,
     /// Validated thinking level; the host checks model support.
     pub thinking: Option<String>,
+    /// The parent's in-flight turn request the spawn anchors to (TS
+    /// `spawnedByRequestId`): `None` for a spawn outside an active run.
+    pub spawned_by_request_id: Option<String>,
     pub cell_source_code: Option<String>,
 }
 
@@ -152,33 +152,44 @@ pub struct RlmCreateSessionRequest {
     pub cwd: Option<String>,
 }
 
-/// One pending host call. Boxed (not RPITIT) because the host crosses the
-/// pa-core/pa-daemon boundary as a dyn object: the daemon supplies the
-/// implementation and pa-core only owns the contract.
+/// One pending host call. Boxed (not RPITIT): the host crosses the pa-core/pa-daemon boundary
+/// as a dyn object — the daemon supplies the implementation, pa-core owns the contract.
 pub type RlmHostFuture<T> = std::pin::Pin<Box<dyn Future<Output = anyhow::Result<T>> + Send>>;
 
-/// The child-session machinery the daemon supplies. Sessions without a host
-/// (headless print mode today) answer with the no-children behavior:
-/// rosters are empty, spawns fail explicitly, and selectors cannot match.
+/// The child-session machinery the daemon supplies. Sessions without a
+/// host answer with the no-children behavior: empty rosters, explicit
+/// spawn failures, no selector matches.
 pub trait RlmSubagentHost: Send + Sync {
-    /// Spawn a recursive child session and return once its task is admitted.
     fn spawn(&self, request: RlmSpawnRequest) -> RlmHostFuture<RlmSpawnHandle>;
-    /// Create and prompt a resident depth-0 daemon session.
     fn create_session(
         &self,
         request: RlmCreateSessionRequest,
     ) -> RlmHostFuture<RlmCreateSessionHandle>;
-    /// Roster of direct children retained by this parent session.
     fn list_subagents(&self) -> RlmHostFuture<Vec<RlmSubagentEntry>>;
-    /// Delete one running or retained direct child.
     fn delete_subagent(&self, target: String) -> RlmHostFuture<RlmDeleteSubagentResult>;
-    /// Typed fan-in of child results; a timeout returns snapshots, never errors.
+    /// A timeout returns snapshots, never errors.
     fn collect(&self, targets: Vec<String>, timeout_ms: u64) -> RlmHostFuture<Vec<RlmChildResult>>;
+    /// Rename the current session (`session_id` absent) or one direct
+    /// child (TS `rlm.rename`); answers the applied name.
+    fn rename(&self, name: String, session_id: Option<String>) -> RlmHostFuture<String>;
 }
 
 /// Host behavior for sessions with no child runtime: truthful empties and the
 /// TS selector errors, so the kernel surface never silently invents children.
-pub struct NoRlmChildren;
+/// A self-rename still lands locally (TS `setSessionName`): the session's own
+/// `session_info` name row.
+pub struct NoRlmChildren {
+    /// The session whose name a self-rename appends.
+    session: Arc<tokio::sync::Mutex<crate::session::manager::SessionManager>>,
+}
+
+impl NoRlmChildren {
+    /// The no-children host over one session's persistence.
+    #[must_use]
+    pub fn new(session: Arc<tokio::sync::Mutex<crate::session::manager::SessionManager>>) -> Self {
+        Self { session }
+    }
+}
 
 impl RlmSubagentHost for NoRlmChildren {
     fn spawn(&self, _request: RlmSpawnRequest) -> RlmHostFuture<RlmSpawnHandle> {
@@ -213,6 +224,21 @@ impl RlmSubagentHost for NoRlmChildren {
     ) -> RlmHostFuture<Vec<RlmChildResult>> {
         Box::pin(async move { no_children_collect(&targets) })
     }
+    fn rename(&self, name: String, session_id: Option<String>) -> RlmHostFuture<String> {
+        // The alias boxes a `'static` future, so the session handle moves
+        // in by value — nothing here borrows `self`.
+        let session = Arc::clone(&self.session);
+        Box::pin(async move {
+            if session_id.is_some() {
+                anyhow::bail!("rlm.rename with session_id requires a daemon-backed session");
+            }
+            let mut session = session.lock().await;
+            session
+                .append_session_info(&name)
+                .map_err(anyhow::Error::from)?;
+            Ok(name)
+        })
+    }
 }
 
 /// `collect` against an empty roster: every target is a miss.
@@ -228,9 +254,7 @@ pub fn no_children_collect(targets: &[String]) -> anyhow::Result<Vec<RlmChildRes
     Ok(Vec::new())
 }
 
-// ---------------------------------------------------------------------------
 // Progress notes
-// ---------------------------------------------------------------------------
 
 /// Outcome of one `rlm.progress.note`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -285,9 +309,16 @@ pub fn utf16_length(message: &str) -> usize {
     message.chars().map(char::len_utf16).sum()
 }
 
-// ---------------------------------------------------------------------------
 // Handler registration
-// ---------------------------------------------------------------------------
+
+/// The parent-side spawn anchor (TS `_startRlmChildRun`'s
+/// `spawnedByRequestId` snapshot): the in-flight turn's request id a
+/// mid-turn `rlm.spawn` names. The bridge is built before the session's
+/// agent exists, so the engine sets this once the agent is built.
+pub(crate) struct SemanticSpawnAnchor {
+    pub(crate) agent: std::sync::Weak<pa_agent::agent::Agent>,
+    pub(crate) recorder: Arc<super::semantic_edges::SemanticEdgeRecorder>,
+}
 
 /// Session-scoped RLM state the handlers share.
 pub struct RlmHostBridge {
@@ -297,20 +328,26 @@ pub struct RlmHostBridge {
     /// The child-usage attribution producer `rlm.spawn` registers into
     /// and the daemon's child observation drives.
     pub usage: Arc<super::rlm_usage::RlmChildUsageAttributions>,
+    /// The spawn anchor [`register_run`] reads the in-flight turn from
+    /// (`None` until the engine built the session's agent).
+    pub(crate) semantic_spawn: std::sync::OnceLock<SemanticSpawnAnchor>,
 }
 
 impl RlmHostBridge {
-    /// Build the bridge: an explicit host, or the no-children behavior.
+    /// Build the bridge over one child-session host: the daemon supplies
+    /// [`SupervisorChildSessions`]; session embeddings without one pass
+    /// [`NoRlmChildren`] (built against the session's own persistence).
     pub fn new(
         registry: Arc<ModelRegistry>,
-        host: Option<Arc<dyn RlmSubagentHost>>,
+        host: Arc<dyn RlmSubagentHost>,
         usage: Arc<super::rlm_usage::RlmChildUsageAttributions>,
     ) -> Self {
         Self {
             registry,
             notes: Arc::new(RlmProgressNotes::default()),
-            host: host.unwrap_or_else(|| Arc::new(NoRlmChildren)),
+            host,
             usage,
+            semantic_spawn: std::sync::OnceLock::new(),
         }
     }
 }
@@ -324,6 +361,7 @@ pub fn register_rlm_host_handlers(handlers: &mut HostRequestHandlers, bridge: &A
     register_list_subagents(handlers, bridge);
     register_delete_subagent(handlers, bridge);
     register_collect(handlers, bridge);
+    register_rename(handlers, bridge);
 }
 
 fn register_find_models(handlers: &mut HostRequestHandlers, bridge: &Arc<RlmHostBridge>) {
@@ -405,13 +443,11 @@ fn register_progress_note(handlers: &mut HostRequestHandlers, bridge: &Arc<RlmHo
 }
 
 fn register_run(handlers: &mut HostRequestHandlers, bridge: &Arc<RlmHostBridge>) {
-    let host = Arc::clone(&bridge.host);
-    let usage = Arc::clone(&bridge.usage);
+    let bridge = Arc::clone(bridge);
     handlers.register(
         "rlm.run",
         host_handler(move |payload| {
-            let host = Arc::clone(&host);
-            let usage = Arc::clone(&usage);
+            let bridge = Arc::clone(&bridge);
             Box::pin(async move {
                 let data = &payload.data;
                 let Some(prompt) = data.get("prompt").and_then(Value::as_str) else {
@@ -419,21 +455,37 @@ fn register_run(handlers: &mut HostRequestHandlers, bridge: &Arc<RlmHostBridge>)
                 };
                 let mut request = spawn_request_from_payload(prompt, data)?;
                 request.cell_source_code = payload.cell_source_code.clone();
-                let handle = host.spawn(request).await?;
+                // TS `_startRlmChildRun`: the spawning request is the turn
+                // whose tool call is executing now (the anchor is computed
+                // before the spawn admission's first await); a spawn
+                // outside an active run has no such turn, and an absent
+                // edge beats a wrong one.
+                request.spawned_by_request_id = match bridge.semantic_spawn.get() {
+                    Some(anchor) => {
+                        let agent = anchor.agent.upgrade();
+                        match agent {
+                            Some(agent) if agent.state().await.is_streaming => {
+                                anchor.recorder.last_turn_request_id()
+                            }
+                            _ => None,
+                        }
+                    }
+                    None => None,
+                };
+                let handle = bridge.host.spawn(request).await?;
                 // TS `_findLastAssistantMessage` at spawn: the spawning
                 // assistant row (persisted at `message_end` before tool
                 // execution) is the target every child-usage attribution
                 // folds into.
-                usage.register_spawn(&handle.rlm_child_id).await;
+                bridge.usage.register_spawn(&handle.rlm_child_id).await;
                 serde_json::to_value(&handle).map_err(anyhow::Error::new)
             })
         }),
     );
 }
 
-/// Shared kwargs validation for `rlm.run`: unsupported keys are rejected with
-/// the sorted key list, and name/model/thinking normalize through the pure
-/// helpers.
+/// Shared kwargs validation for `rlm.run`: unsupported keys are rejected
+/// with the sorted key list.
 fn spawn_request_from_payload(prompt: &str, data: &Value) -> anyhow::Result<RlmSpawnRequest> {
     const OPERATION: &str = "rlm.spawn";
     let kwargs = kwargs_from_payload(data);
@@ -453,6 +505,7 @@ fn spawn_request_from_payload(prompt: &str, data: &Value) -> anyhow::Result<RlmS
         name,
         model,
         thinking,
+        spawned_by_request_id: None,
         cell_source_code: None,
     })
 }
@@ -597,6 +650,45 @@ fn register_collect(handlers: &mut HostRequestHandlers, bridge: &Arc<RlmHostBrid
     );
 }
 
+fn register_rename(handlers: &mut HostRequestHandlers, bridge: &Arc<RlmHostBridge>) {
+    let host = Arc::clone(&bridge.host);
+    handlers.register(
+        "rlm.rename",
+        host_handler(move |payload| {
+            let host = Arc::clone(&host);
+            Box::pin(async move {
+                const OPERATION: &str = "rlm.rename";
+                let data = &payload.data;
+                // The name follows the spawn rules exactly (TS
+                // `createRlmRenameHostHandler` reuses the spawn
+                // normalizer); absent or non-string names read as the
+                // TS "must be a string" error.
+                let Some(name) = normalize_requested_rlm_subagent_session_name(
+                    data.get("name").and_then(Value::as_str),
+                    OPERATION,
+                )?
+                else {
+                    anyhow::bail!("rlm.rename name must be a string");
+                };
+                assert_direct_agent_message_target(&name)?;
+                let session_id = match data.get("session_id") {
+                    None | Some(Value::Null) => None,
+                    Some(Value::String(raw)) => {
+                        let trimmed = raw.trim();
+                        if trimmed.is_empty() {
+                            anyhow::bail!("rlm.rename session_id must be a non-empty string");
+                        }
+                        Some(trimmed.to_string())
+                    }
+                    Some(_) => anyhow::bail!("rlm.rename session_id must be a non-empty string"),
+                };
+                let name = host.rename(name, session_id).await?;
+                Ok(json!({ "name": name }))
+            })
+        }),
+    );
+}
+
 /// Present-but-non-string kwargs fail like the TS normalizers do.
 fn optional_string_kwarg<'a>(
     kwargs: &'a Map<String, Value>,
@@ -637,12 +729,15 @@ mod tests {
     /// A host recording every call, answering with fixed handles.
     /// One recorded collect call: its targets and timeout.
     type CollectCall = (Vec<String>, u64);
+    /// One recorded rename: the normalized name and the optional child id.
+    type RecordedRename = (String, Option<String>);
 
     struct RecordingHost {
         spawn_requests: Arc<Mutex<Vec<RlmSpawnRequest>>>,
         create_requests: Arc<Mutex<Vec<RlmCreateSessionRequest>>>,
         targets: Arc<Mutex<Vec<String>>>,
         collects: Arc<Mutex<Vec<CollectCall>>>,
+        renames: Arc<Mutex<Vec<RecordedRename>>>,
     }
 
     impl RecordingHost {
@@ -652,6 +747,7 @@ mod tests {
                 create_requests: Arc::new(Mutex::new(Vec::new())),
                 targets: Arc::new(Mutex::new(Vec::new())),
                 collects: Arc::new(Mutex::new(Vec::new())),
+                renames: Arc::new(Mutex::new(Vec::new())),
             })
         }
     }
@@ -755,6 +851,13 @@ mod tests {
                     tool_use_count: Some(3),
                     replied_since_task: Some(true),
                 }])
+            })
+        }
+        fn rename(&self, name: String, session_id: Option<String>) -> RlmHostFuture<String> {
+            let renames = Arc::clone(&self.renames);
+            Box::pin(async move {
+                renames.lock().await.push((name.clone(), session_id));
+                Ok(name)
             })
         }
     }
@@ -863,7 +966,6 @@ mod tests {
         .await
         .unwrap();
         let models = response["models"].as_array().unwrap();
-        // Exact selector first; the turbo sibling matches by substring.
         assert_eq!(models.len(), 2);
         assert_eq!(
             models[0],
@@ -875,7 +977,6 @@ mod tests {
             })
         );
         assert_eq!(models[1]["selector"], "test-provider/glm-5.3-turbo");
-        // A shared id fragment ranks the exact selector match first.
         let response = call(
             &wiring,
             "rlm.find_models",
@@ -947,7 +1048,6 @@ mod tests {
         assert_eq!(accepted, json!({ "accepted": true }));
         let (latest, _) = wiring.rlm.notes.latest_note().await.unwrap();
         assert_eq!(latest, "making progress");
-        // An immediate second note is throttled with a retry hint.
         let throttled = call(
             &wiring,
             "rlm.progress.note",
@@ -1238,6 +1338,108 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "rlm.delete_subagent target must be a non-empty string"
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_round_trip_and_validation() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let host = RecordingHost::new();
+        let renames = Arc::clone(&host.renames);
+        let wiring = wired(dir.path(), Some(host));
+
+        // A child rename forwards the normalized name and the trimmed
+        // session id (the Python side already resolved handles to child
+        // ids).
+        let reply = call(
+            &wiring,
+            "rlm.rename",
+            json!({ "name": "  bench-runner ", "session_id": "  sub-1  " }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(reply, json!({ "name": "bench-runner" }));
+        assert_eq!(
+            *renames.lock().await,
+            vec![("bench-runner".to_string(), Some("sub-1".to_string()))]
+        );
+
+        // A self rename carries no session id.
+        call(&wiring, "rlm.rename", json!({ "name": "solo" }))
+            .await
+            .unwrap();
+        assert_eq!(
+            renames.lock().await.last(),
+            Some(&("solo".to_string(), None))
+        );
+
+        // Validation: the shared spawn normalizer (the length rule) plus
+        // the rename-local broadcast guard, then the session id shape.
+        let error = call(&wiring, "rlm.rename", json!({})).await.unwrap_err();
+        assert_eq!(error.to_string(), "rlm.rename name must be a string");
+        let error = call(&wiring, "rlm.rename", json!({ "name": "x".repeat(65) }))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "rlm.rename name must be at most 64 characters"
+        );
+        let error = call(&wiring, "rlm.rename", json!({ "name": "all" }))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Broadcast agent messaging is not supported"
+        );
+        let error = call(
+            &wiring,
+            "rlm.rename",
+            json!({ "name": "x", "session_id": "   " }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "rlm.rename session_id must be a non-empty string"
+        );
+        let error = call(
+            &wiring,
+            "rlm.rename",
+            json!({ "name": "x", "session_id": 7 }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "rlm.rename session_id must be a non-empty string"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_host_rename_appends_locally_and_rejects_child_targets() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let wiring = wired(dir.path(), None);
+        // A self rename appends the session's `session_info` name row
+        // (TS `setSessionName`).
+        let renamed = call(&wiring, "rlm.rename", json!({ "name": "solo-lane" }))
+            .await
+            .unwrap();
+        assert_eq!(renamed, json!({ "name": "solo-lane" }));
+        assert_eq!(
+            wiring.session.lock().await.get_session_name(),
+            Some("solo-lane".to_string())
+        );
+        // A child target requires the daemon-backed host.
+        let error = call(
+            &wiring,
+            "rlm.rename",
+            json!({ "name": "x", "session_id": "sub-1" }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "rlm.rename with session_id requires a daemon-backed session"
         );
     }
 

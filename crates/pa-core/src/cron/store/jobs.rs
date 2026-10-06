@@ -1,7 +1,6 @@
 //! Generic cron job operations: create/list/cancel, session binding and
 //! rebinding, run and skip result recording, and due-claim dispatch with
 //! result recording and interrupted-dispatch recovery.
-//! Section of the port of the `AgentCronJobStore` half of core/cron-jobs.ts.
 
 use uuid::Uuid;
 
@@ -31,8 +30,7 @@ impl AgentCronJobStore {
     ///
     /// # Errors
     ///
-    /// Returns an error when the prompt is empty or the schedule text cannot
-    /// be parsed.
+    /// Returns an error when the prompt is empty or the schedule text cannot be parsed.
     pub fn create(&self, input: &CreateAgentCronJobInput) -> anyhow::Result<AgentCronJob> {
         let prompt = input.prompt.trim();
         if prompt.is_empty() {
@@ -172,8 +170,7 @@ impl AgentCronJobStore {
     ///
     /// # Errors
     ///
-    /// The current implementation never returns `Err`; the updated job (or
-    /// `None` when the job is missing) is always wrapped in `Ok`.
+    /// The current implementation never returns `Err`.
     pub fn record_run_result(
         &self,
         id: &str,
@@ -255,16 +252,12 @@ impl AgentCronJobStore {
         updated
     }
 
-    /// Push a job's next run later, never earlier (the scheduler's
-    /// consecutive-failure backoff). `until_ms` is an epoch-ms deadline; an
-    /// already-later `nextRunAt` wins, and non-active jobs are untouched.
+    /// Push a job's next run later, never earlier (the scheduler's consecutive-failure backoff); an
+    /// already-later `nextRunAt` wins.
     ///
-    /// Runs under the store's state locks (the `mutate_states` path, like
-    /// `record_dispatch_result`): a cancel that lands between the failure
-    /// and this defer must stay cancelled, so the active-status check and
-    /// the write are one atomic state mutation — a read-modify-write over
-    /// the merged jobs would race a concurrent cancel and could write a
-    /// stale active copy back over it.
+    /// Runs under the store's state locks: a cancel landing between the failure and this
+    /// defer must stay cancelled, so the status check and the write are one atomic
+    /// state mutation.
     pub fn defer_next_run(&self, id: &str, until_ms: u64) -> Option<AgentCronJob> {
         let until_iso = iso_from_millis(until_ms);
         let mut updated = None;
@@ -322,14 +315,12 @@ impl AgentCronJobStore {
         None
     }
 
-    /// Record the outcome of a claimed dispatch: release the claim, roll the
-    /// job's next run, and complete one-shots. Returns the updated job, or
-    /// `None` when the dispatch is no longer pending.
+    /// Record the outcome of a claimed dispatch: release the claim, roll the job's next run, and
+    /// complete one-shots. Returns the updated job.
     ///
     /// # Errors
     ///
-    /// The current implementation never returns `Err`; the updated job (or
-    /// `None`) is always wrapped in `Ok`.
+    /// The current implementation never returns `Err`.
     pub fn record_dispatch_result(
         &self,
         dispatch_id: &str,
@@ -448,11 +439,9 @@ mod tests {
         assert_eq!(store.list().len(), 1);
         let due = store.due(now + 600_000);
         assert!(due.iter().any(|found| found.id == job.id));
-        // Cancel.
         let cancelled = store.cancel(&job.id, now + 1).unwrap();
         assert_eq!(cancelled.status, JobStatus::Cancelled);
         assert_eq!(store.list()[0].status, JobStatus::Cancelled);
-        // Empty prompt rejected.
         assert!(store.create(&input("  ", "every 10m", now)).is_err());
     }
 
@@ -462,9 +451,7 @@ mod tests {
         let store = AgentCronJobStore::new(dir.path().join("jobs.json"));
         let now = 1_700_000_000_000;
         let job = store.create(&input("tick", "every 10m", now)).unwrap();
-        // Not due yet.
         assert!(store.claim_due(now, now).is_empty());
-        // Due later: claim advances the schedule and records a dispatch.
         let dispatches = store.claim_due(now + 600_000, now + 600_000);
         assert_eq!(dispatches.len(), 1);
         assert_eq!(dispatches[0].job.id, job.id);
@@ -472,9 +459,7 @@ mod tests {
             dispatches[0].job.next_run_at.as_deref(),
             Some(iso_from_millis(now + 1_200_000).as_str())
         );
-        // The claimed job is retrievable.
         assert!(store.get_claimed_job(&job.id).is_some());
-        // Record a run result: clears the dispatch, bumps counters.
         let updated = store
             .record_dispatch_result(
                 &dispatches[0].id,
@@ -488,7 +473,6 @@ mod tests {
             .unwrap();
         assert_eq!(updated.run_count, 1);
         assert!(store.get_claimed_job(&job.id).is_none());
-        // Interrupted dispatches recover with an error stamp.
         let second = store.claim_due(now + 1_200_000, now + 1_200_000);
         assert_eq!(second.len(), 1);
         let recovered = store.recover_interrupted_dispatches(now + 1_300_000);
@@ -520,7 +504,6 @@ mod tests {
             updated.last_run_at.as_deref(),
             Some(iso_from_millis(now).as_str())
         );
-        // One-shot jobs complete after their single run.
         let mut once_input = input("one and done", "in 10m", now);
         once_input.session_id = "session-once".to_string();
         let once = store.create(&once_input).unwrap();
@@ -535,7 +518,6 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(once_done.status, JobStatus::Completed);
-        // Skip rolls nextRunAt and stamps lastSkippedAt.
         store.record_skip_result(&job.id, now + 60_000).unwrap();
         assert!(store.list().iter().any(|job| job.last_skipped_at.is_some()));
     }
@@ -547,30 +529,26 @@ mod tests {
         let now = 1_700_000_000_000;
         let job = store.create(&input("tick", "every 10m", now)).unwrap();
         let scheduled_next = now + 600_000;
-        // A deadline before the schedule does not pull the run earlier.
         assert!(store.defer_next_run(&job.id, now + 60_000).is_none());
         let current = store.list().pop().expect("job kept");
         assert_eq!(
             crate::cron::parse_iso_millis(current.next_run_at.as_deref().unwrap()),
             Some(scheduled_next)
         );
-        // A deadline after the schedule defers the run to it.
         let deferred = now + 900_000;
         let updated = store.defer_next_run(&job.id, deferred).expect("deferred");
         assert_eq!(
             crate::cron::parse_iso_millis(updated.next_run_at.as_deref().unwrap()),
             Some(deferred)
         );
-        // An already-later nextRunAt wins over an earlier deadline.
         assert!(store.defer_next_run(&job.id, now + 120_000).is_none());
         let current = store.list().pop().expect("job kept");
         assert_eq!(
             crate::cron::parse_iso_millis(current.next_run_at.as_deref().unwrap()),
             Some(deferred)
         );
-        // Cancelled jobs are never deferred. Cancel with a fresh clock:
-        // the jobs file merges on `updatedAt` freshness (last writer with
-        // the newer stamp wins), so a stale stamp would lose the cancel.
+        // Cancelled jobs are never deferred. Fresh clock: the jobs file merges on
+        // `updatedAt` freshness, so a stale stamp would lose the cancel.
         store.cancel(&job.id, now_millis()).unwrap();
         assert!(store.defer_next_run(&job.id, now + 2_000_000).is_none());
     }

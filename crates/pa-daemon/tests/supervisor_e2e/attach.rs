@@ -3,10 +3,8 @@
 
 use super::*;
 
-/// Telemetry attach guard (TS `assertTelemetryAttachAllowed` parity): a
-/// telemetry-disabled client may not attach to a worker running with
-/// telemetry enabled, with the TS error text; attaching to a
-/// telemetry-disabled worker stays allowed.
+/// A telemetry-disabled client may not attach to a telemetry-enabled
+/// worker (TS error text); attaching to a disabled worker stays allowed.
 #[test]
 fn telemetry_disabled_attach_guard_matches_ts_error() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -16,7 +14,6 @@ fn telemetry_disabled_attach_guard_matches_ts_error() {
     let _daemon = spawn_daemon(&socket, &agent_dir);
     let (mut client, _hello) = Client::connect(&socket);
 
-    // Session 1: telemetry-enabled (no `telemetryDisabled` on create).
     let script_path = dir.path().join("script.json");
     std::fs::write(
         &script_path,
@@ -40,7 +37,6 @@ fn telemetry_disabled_attach_guard_matches_ts_error() {
         .expect("session id in create response")
         .to_string();
 
-    // Disabled attach to an enabled worker: the exact TS error.
     client.send_command(
         "ta1",
         &serde_json::json!({
@@ -59,7 +55,6 @@ fn telemetry_disabled_attach_guard_matches_ts_error() {
         "Cannot attach to this active agent while telemetry is disabled for the current invocation. Stop the agent and retry so it can restart without telemetry."
     );
 
-    // Enabled attach to the same worker stays fine (guard does not over-block).
     client.send_command(
         "ta2",
         &serde_json::json!({ "type": "attach", "activeSessionId": session_id }),
@@ -67,8 +62,6 @@ fn telemetry_disabled_attach_guard_matches_ts_error() {
     let attached = client.read_response("ta2");
     assert_eq!(attached["success"], true, "attach failed: {attached}");
 
-    // Session 2: created with telemetry disabled — a disabled attach is
-    // allowed against its worker.
     client.send_command(
         "tc2",
         &serde_json::json!({
@@ -100,11 +93,8 @@ fn telemetry_disabled_attach_guard_matches_ts_error() {
 }
 
 /// Chunked snapshot streaming on the attach path (live TS goldens in
-/// `tests/goldens/chunked-attach-live-ts.json`): a `chunked_snapshot`
-/// client gets the attach response with the transcript stripped, followed
-/// by `session_snapshot_begin` / `session_snapshot_chunk` /
-/// `session_snapshot_end` records whose reassembly equals the full
-/// snapshot legacy clients receive.
+/// `tests/goldens/chunked-attach-live-ts.json`): begin/chunk/end records
+/// whose reassembly equals the full snapshot legacy clients receive.
 #[test]
 fn chunked_snapshot_attach_streams_begin_chunk_end() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -173,7 +163,6 @@ fn chunked_snapshot_attach_streams_begin_chunk_end() {
     // The turn_end event may precede the prompt reply (TS order).
     let _ = client.take_session_event(&mut turn_lines, "turn_end");
 
-    // Attach with the chunked_snapshot capability.
     let caps = serde_json::json!([
         "attach_snapshot",
         "event_sequence",
@@ -210,7 +199,6 @@ fn chunked_snapshot_attach_streams_begin_chunk_end() {
         .collect();
     sorted_golden.sort();
     assert_eq!(data_keys, sorted_golden, "attach result key set");
-    // The transcript is gone from the streamed result.
     assert_eq!(data["snapshot"]["messages"], serde_json::json!([]));
     assert!(
         data.get("messages").is_none(),
@@ -229,7 +217,6 @@ fn chunked_snapshot_attach_streams_begin_chunk_end() {
     );
     let snapshot_id = stream["id"].as_str().expect("snapshot id").to_string();
 
-    // begin / chunk / end records follow the response.
     let mut begin: Option<serde_json::Value> = None;
     let mut chunks: Vec<serde_json::Value> = Vec::new();
     let end = loop {
@@ -320,7 +307,6 @@ fn chunked_snapshot_attach_streams_begin_chunk_end() {
         );
     }
 
-    // End record closes the transfer with the counts and cursor.
     let golden_end_keys: Vec<String> = golden["end"]["keys"]
         .as_array()
         .expect("golden end keys")
@@ -341,8 +327,6 @@ fn chunked_snapshot_attach_streams_begin_chunk_end() {
     assert_eq!(end["lastEventSequence"], data["lastEventSequence"]);
     assert_eq!(end["lastEventCursor"], data["lastEventCursor"]);
 
-    // A legacy client still gets the full snapshot inside the response,
-    // and the reassembled chunk transcript equals it exactly.
     let (mut legacy, _hello) = Client::connect(&socket);
     legacy.send_command(
         "a2",

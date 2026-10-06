@@ -5,15 +5,9 @@ use super::{
     KernelState, MemoSlot, Signal, HOST_REQUEST_SHUTDOWN_TIMEOUT_MS, KERNEL_SHUTDOWN_TIMEOUT_MS,
 };
 
-// ---------------------------------------------------------------------------
-// Teardown
-// ---------------------------------------------------------------------------
-
 impl Inner {
-    /// Resolves `true` when this call performed the cleanup (false: a
-    /// concurrent teardown won; a joiner's options are ignored — the first
-    /// caller's policy wins). The memoization joins concurrent callers onto
-    /// one in-flight shutdown.
+    /// Resolves `true` when this call performed the cleanup (false: a concurrent teardown won; a
+    /// joiner's options are ignored).
     pub(crate) async fn shutdown_for_cleanup(
         self: &Arc<Self>,
         opts: KernelShutdownOptions,
@@ -98,31 +92,46 @@ impl Inner {
                 .insert(id.clone(), done_tx);
             request_id = Some(id.clone());
             let frame = json!({ "type": "shutdown", "id": id });
-            let send_result = self.write_line(&frame).await;
-            if let Err(error) = send_result {
-                self.append_diagnostic(&format!("failed to send shutdown request: {error:#}"));
-            }
-            let graceful_reply = async {
-                let _ = done_rx.await;
-            };
-            let deadline = tokio::time::sleep(Duration::from_millis(KERNEL_SHUTDOWN_TIMEOUT_MS));
-            let mut failed = false;
-            tokio::select! {
-                () = graceful_reply => {}
-                () = self.wait_for_kernel_exit() => {}
-                () = deadline => {
-                    failed = true;
-                    self.append_diagnostic(&format!(
-                        "graceful shutdown failed (killing instead): Kernel did not shut down within {KERNEL_SHUTDOWN_TIMEOUT_MS}ms"
-                    ));
+            let send_result = tokio::time::timeout(
+                Duration::from_millis(KERNEL_SHUTDOWN_TIMEOUT_MS),
+                self.write_line(&frame),
+            )
+            .await;
+            let sent = match send_result {
+                Ok(Ok(())) => true,
+                Ok(Err(error)) => {
+                    self.append_diagnostic(&format!("failed to send shutdown request: {error:#}"));
+                    false
                 }
-            }
-            if !failed {
+                Err(_) => {
+                    self.append_diagnostic("timed out sending shutdown request");
+                    false
+                }
+            };
+            if sent {
+                let graceful_reply = async {
+                    let _ = done_rx.await;
+                };
                 let deadline =
                     tokio::time::sleep(Duration::from_millis(KERNEL_SHUTDOWN_TIMEOUT_MS));
+                let mut failed = false;
                 tokio::select! {
+                    () = graceful_reply => {}
                     () = self.wait_for_kernel_exit() => {}
-                    () = deadline => {}
+                    () = deadline => {
+                        failed = true;
+                        self.append_diagnostic(&format!(
+                            "graceful shutdown failed (killing instead): Kernel did not shut down within {KERNEL_SHUTDOWN_TIMEOUT_MS}ms"
+                        ));
+                    }
+                }
+                if !failed {
+                    let deadline =
+                        tokio::time::sleep(Duration::from_millis(KERNEL_SHUTDOWN_TIMEOUT_MS));
+                    tokio::select! {
+                        () = self.wait_for_kernel_exit() => {}
+                        () = deadline => {}
+                    }
                 }
             }
         }
@@ -155,6 +164,8 @@ impl Inner {
             g.late_handlers.clear();
             g.pending_done_waiters.clear();
             g.bash_activity_waiters.clear();
+            g.factory_activity_waiters.clear();
+            g.mcp_status_waiters.clear();
             let had_background_work = !g.background_bash_handles.is_empty();
             g.background_bash_handles.clear();
             // Stale pre-teardown background output must not surface after a restart.

@@ -1,7 +1,5 @@
 //! Request assembly for the Codex Responses provider: URL resolution,
 //! headers (SSE and WebSocket), JWT account-id extraction, and request ids.
-//! Section of the port of
-//! `packages/ai/src/providers/openai-codex-responses.ts`.
 
 use base64::Engine as _;
 use serde_json::Value;
@@ -13,7 +11,6 @@ use crate::providers::openai_codex_responses::websocket::OPENAI_BETA_RESPONSES_W
 pub const DEFAULT_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api";
 pub const JWT_CLAIM_PATH: &str = "https://api.openai.com/auth";
 
-/// Port of `resolveCodexUrl`.
 pub fn resolve_codex_url(base_url: &str) -> String {
     let raw = if base_url.trim().is_empty() {
         DEFAULT_CODEX_BASE_URL
@@ -30,15 +27,13 @@ pub fn resolve_codex_url(base_url: &str) -> String {
     }
 }
 
-/// Port of `resolveCodexWebSocketUrl`.
 pub fn resolve_codex_websocket_url(base_url: &str) -> String {
     resolve_codex_url(base_url)
         .replacen("https://", "wss://", 1)
         .replacen("http://", "ws://", 1)
 }
 
-/// Port of `extractAccountId`: decode the JWT payload and read the
-/// `chatgpt_account_id` claim.
+/// Decode the JWT payload and read the `chatgpt_account_id` claim.
 pub fn extract_account_id(token: &str) -> Result<String, String> {
     let parts: Vec<&str> = token.split('.').collect();
     if parts.len() != 3 {
@@ -57,7 +52,6 @@ pub fn extract_account_id(token: &str) -> Result<String, String> {
     Ok(account_id.to_string())
 }
 
-/// Port of `createCodexRequestId`.
 pub fn create_codex_request_id() -> String {
     format!(
         "codex_{}_{}",
@@ -69,7 +63,6 @@ pub fn create_codex_request_id() -> String {
     )
 }
 
-/// Port of `buildBaseCodexHeaders` + `buildSSEHeaders`.
 pub fn build_sse_headers(
     model_headers: Option<&std::collections::BTreeMap<String, String>>,
     additional_headers: Option<&std::collections::HashMap<String, String>>,
@@ -98,7 +91,6 @@ pub fn build_sse_headers(
     headers
 }
 
-/// Port of `buildWebSocketHeaders`.
 pub fn build_websocket_headers(
     model_headers: Option<&std::collections::BTreeMap<String, String>>,
     additional_headers: Option<&std::collections::HashMap<String, String>>,
@@ -117,8 +109,8 @@ pub fn build_websocket_headers(
     set_header(&mut headers, "chatgpt-account-id", account_id);
     set_header(&mut headers, "originator", "pi");
     set_header(&mut headers, "User-Agent", &platform_user_agent());
-    // The WebSocket handshake drops the SSE beta header (matches the TS
-    // `delete wsHeaders["OpenAI-Beta"]`).
+    // The WebSocket handshake drops the SSE beta header (matches the TS `delete
+    // wsHeaders["OpenAI-Beta"]`).
     set_header(
         &mut headers,
         "OpenAI-Beta",
@@ -135,7 +127,7 @@ fn set_header(headers: &mut Vec<(String, String)>, name: &str, value: &str) {
     headers.push((name.to_string(), value.to_string()));
 }
 
-/// Port of the `User-Agent` builder: `pi (<platform> <release>; <arch>)`.
+/// The `User-Agent` builder: `pi (<platform> <release>; <arch>)`.
 fn platform_user_agent() -> String {
     let os = std::env::consts::OS;
     let arch = std::env::consts::ARCH;

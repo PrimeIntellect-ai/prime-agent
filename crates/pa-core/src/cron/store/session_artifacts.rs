@@ -2,7 +2,6 @@
 //! artifact files, recovery of a session's jobs from its artifact partition,
 //! and the partitioned merge-write that keeps each artifact file holding only
 //! its session's jobs and dispatches.
-//! Section of the port of the `AgentCronJobStore` half of core/cron-jobs.ts.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -35,7 +34,6 @@ impl AgentCronJobStore {
         true
     }
 
-    /// Every registered `(session id, artifact file)` pair.
     pub fn session_artifacts(&self) -> Vec<(String, PathBuf)> {
         let files = self
             .session_artifact_files
@@ -145,11 +143,8 @@ impl AgentCronJobStore {
     }
 }
 
-/// Read one scheduled-jobs artifact file's job rows: a locked, read-only
-/// scan shared by the update-flow roster projection (heartbeat rows are a
-/// projection of these files, never a separate write path) and the
-/// supervisor's boot
-/// re-arm. A missing or unparseable file reads as no jobs.
+/// Read one scheduled-jobs artifact file's job rows: a locked, read-only scan A missing or
+/// unparseable file reads as no jobs.
 #[must_use]
 pub fn read_scheduled_jobs_artifact(path: &Path) -> Vec<AgentCronJob> {
     with_state_locks(&[path.to_path_buf()], || read_jobs_state(path).jobs)
@@ -178,13 +173,11 @@ mod tests {
         store.create(&job_b).unwrap();
         let jobs = store.list();
         assert_eq!(jobs.len(), 2);
-        // Each artifact file holds only its session's jobs.
         let state_a = read_jobs_state(&artifacts_a.join(SESSION_SCHEDULED_JOBS_FILENAME));
         assert_eq!(state_a.jobs.len(), 1);
         assert_eq!(state_a.jobs[0].prompt, "job a");
         let state_b = read_jobs_state(&artifacts_b.join(SESSION_SCHEDULED_JOBS_FILENAME));
         assert_eq!(state_b.jobs.len(), 1);
-        // Rebind moves jobs to a new session binding.
         let rebound = store.rebind_session_jobs(&SessionBinding {
             active_session_id: "live-2".to_string(),
             session_id: "session-1".to_string(),
@@ -193,7 +186,6 @@ mod tests {
         });
         assert_eq!(rebound.len(), 2);
         assert!(rebound.iter().all(|job| job.active_session_id == "live-2"));
-        // Cancel by session file.
         let cancelled = store.cancel_jobs_for_session(
             &CancelJobsFilter {
                 session_file: Some("/w/session.jsonl".to_string()),

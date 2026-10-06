@@ -1,24 +1,17 @@
-//! The builtin slash-command vocabulary. Port of `core/slash-commands.ts`:
-//! the command table every surface shares (the interactive TUI, the session
-//! engine's command admission, and CLI suggestion help), plus the parse and
-//! suggestion helpers over it.
-//!
-//! Pure data and pure functions only. This is the shared-vocabulary crate:
-//! the TUI cannot import the session engine, and one table must serve both
-//! sides, so the data lives here (the TS product keeps the same single
-//! table in core and imports it from its TUI).
+//! The builtin slash-command vocabulary (TS `slash-commands.ts`): the one command table every
+//! surface shares (TUI, session-engine admission, CLI suggestion help), plus parse/suggestion
+//! helpers. Lives here because the TUI cannot import the session engine.
 
 use std::collections::HashMap;
 
 /// Session-executed commands (their behavior lives in the session engine).
 pub const SESSION_SLASH_COMMAND_NAMES: [&str; 4] = ["compact", "refine", "goal", "autonomous"];
 
-/// Durable row custom types (TS core/messages.ts): the command echo and its
-/// result, as persisted in sessions and rendered by every surface.
+/// Durable row custom types (TS `messages.ts`): the command echo and its
+/// result, persisted in sessions and rendered by every surface.
 pub const SESSION_SLASH_COMMAND_CUSTOM_TYPE: &str = "session_slash_command";
 pub const SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE: &str = "session_slash_command_result";
 
-/// True when `value` names a session-executed command.
 #[must_use]
 pub fn is_session_slash_command_name(value: &str) -> bool {
     SESSION_SLASH_COMMAND_NAMES.contains(&value)
@@ -33,10 +26,9 @@ pub enum SlashCommandExecution {
     Session,
 }
 
-/// One builtin slash command. Descriptions and argument hints are
-/// user-facing: keep them byte-identical to the TS table. `update` is the
-/// one sanctioned divergence (the 2026-09-27 operator directive): it is
-/// the TS->Rust migration path, not the TS update surface.
+/// One builtin slash command. Descriptions and argument hints are user-facing: byte-identical to
+/// the TS table. `update` is the one sanctioned divergence (2026-09-27 operator directive): it is
+/// the TS->Rust migration path.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BuiltinSlashCommand {
     pub name: &'static str,
@@ -63,6 +55,7 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: &[BuiltinSlashCommand] = &[
     BuiltinSlashCommand { name: "system-prompt", description: "Show the exact system prompt sent to the model", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
     BuiltinSlashCommand { name: "logs", description: "Show where daemon and client logs are saved", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
     BuiltinSlashCommand { name: "traces", description: "Preview, upload, or configure Prime Agent traces", execution: SlashCommandExecution::Client, argument_hint: Some("[status|on|off|preview|upload|upload-current|upload-all|login]"), aliases: &[], takes_argument: false },
+    BuiltinSlashCommand { name: "telemetry", description: "Show or change usage telemetry (pseudonymous metrics, never prompts or code)", execution: SlashCommandExecution::Client, argument_hint: Some("[status|on|off]"), aliases: &[], takes_argument: true },
     BuiltinSlashCommand { name: "context", description: "Show token, cost, and context usage for agent and sub-agents", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &["usage"], takes_argument: false },
     BuiltinSlashCommand { name: "changelog", description: "Show changelog entries", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
     BuiltinSlashCommand { name: "update", description: "Update to the latest Rust build (uninstalls the TypeScript version; sessions preserved)", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
@@ -83,8 +76,9 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: &[BuiltinSlashCommand] = &[
     BuiltinSlashCommand { name: "rlm-max-depth", description: "Set/view the per-chat persistent RLM max depth immediately; never interrupts or queues the running turn", execution: SlashCommandExecution::Client, argument_hint: Some("[<int> [--global]]"), aliases: &[], takes_argument: true },
     BuiltinSlashCommand { name: "heartbeat", description: "Set or view a persistent heartbeat; delivery defaults to steer, use --follow-up to queue; supports pause, resume, stop, and clear", execution: SlashCommandExecution::Client, argument_hint: Some("[status|pause|resume|stop|[every <duration>] [--steer|--follow-up] <instruction>]"), aliases: &[], takes_argument: true },
     BuiltinSlashCommand { name: "heartbeats", description: "View and manage all user and agent heartbeats", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
+    BuiltinSlashCommand { name: "factory", description: "Show or set the agent factory opt-in gate (off by default)", execution: SlashCommandExecution::Client, argument_hint: Some("[on|off|status]"), aliases: &[], takes_argument: true },
     BuiltinSlashCommand { name: "resume", description: "Open the agents view, or resume a session by id or path", execution: SlashCommandExecution::Client, argument_hint: Some("[id|path]"), aliases: &[], takes_argument: true },
-    BuiltinSlashCommand { name: "reload", description: "Reload keybindings, extensions, skills, prompts, and themes", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
+    BuiltinSlashCommand { name: "reload", description: "Reload keybindings, skills, prompts, and themes", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
     BuiltinSlashCommand { name: "speed", description: "Toggle footer readout of model output tok/sec (latest response and session average)", execution: SlashCommandExecution::Client, argument_hint: Some("[on|off]"), aliases: &[], takes_argument: true },
     BuiltinSlashCommand { name: "quit", description: "Quit Prime Agent", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
 ];
@@ -173,9 +167,8 @@ impl SlashCommandRegistry {
         })
     }
 
-    /// The suggestion candidates for a mistyped command: every canonical
-    /// name and alias, in registry order (`findSlashCommandSuggestion` in
-    /// core/slash-commands.ts searches this list).
+    /// The suggestion candidates: every canonical name and alias, in
+    /// registry order (TS `findSlashCommandSuggestion` searches this list).
     #[must_use]
     pub fn suggestion_candidates(&self) -> Vec<&'static str> {
         let mut candidates = Vec::new();
@@ -197,9 +190,8 @@ pub struct ResolvedSlashCommand {
     pub args: String,
 }
 
-/// Parse a `/name args` line. A leading `/` is required; the name is the
-/// token up to the first whitespace separator, the rest (trimmed) is the
-/// argument string.
+/// Parse a `/name args` line: leading `/` required, name up to the first
+/// whitespace, the trimmed rest is the argument string.
 pub fn parse_slash_command(text: &str) -> Option<(String, String)> {
     if !text.starts_with('/') {
         return None;
@@ -211,9 +203,7 @@ pub fn parse_slash_command(text: &str) -> Option<(String, String)> {
     }
 }
 
-/// Suggest the closest candidate command name, mirroring
-/// `findSlashCommandSuggestion` in core/slash-commands.ts.
-///
+/// Suggest the closest candidate command name, mirroring `findSlashCommandSuggestion`.
 /// # Panics
 ///
 /// Cannot panic: the `unwrap` below only runs when `closest` already holds

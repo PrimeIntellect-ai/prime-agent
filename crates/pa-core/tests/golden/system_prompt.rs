@@ -1,7 +1,6 @@
-//! Golden snapshot of the assembled layered system prompt. The prompt no
-//! longer pins the TS text (the layered redesign supersedes TS-prompt
-//! parity); the golden pins the Rust prompt itself so any layer edit is a
-//! visible, reviewed change. Regenerate with `PA_UPDATE_GOLDEN=1 cargo test`.
+//! Golden snapshot of the assembled layered system prompt. The prompt no longer pins the TS text
+//! (the layered redesign supersedes TS-prompt parity); the golden pins the Rust prompt itself so
+//! any layer edit is a visible, reviewed change. Regenerate with `PA_UPDATE_GOLDEN=1 cargo test`.
 
 use pa_core::prompts::system_prompt::{build_system_prompt, BuildSystemPromptOptions};
 use pa_core::skills::load_skills_from_dir;
@@ -54,8 +53,7 @@ fn fixture_prompt() -> (String, usize) {
     (normalized, count)
 }
 
-/// Replace `Current date: YYYY-MM-DD` with a placeholder (no chrono dep for
-/// one substitution).
+/// Replace `Current date: YYYY-MM-DD` with a placeholder (no chrono dep for one substitution).
 fn regex_lite_replace(text: &str) -> String {
     const MARKER: &str = "Current date: ";
     let mut out = String::with_capacity(text.len());

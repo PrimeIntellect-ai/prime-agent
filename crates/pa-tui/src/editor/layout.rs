@@ -5,7 +5,7 @@ use super::{word_wrap_line, Editor, LayoutLine};
 use crate::width::str_width;
 
 impl Editor {
-    /// Build layout lines for a given content width (port of layoutText).
+    /// Build layout lines for a given content width.
     #[must_use]
     pub fn layout_text(&self, content_width: usize) -> Vec<LayoutLine> {
         let mut layout_lines = Vec::new();

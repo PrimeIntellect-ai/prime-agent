@@ -1,7 +1,6 @@
-//! The divider logic: the TS `_checkCompaction` arms of the print
-//! runtime's turn boundary — the overflow compact-and-retry machine
-//! (Case 1) with its three state enums, and the requested/threshold
-//! compaction arms — the child cut of the `print_boundary` facade.
+//! The overflow compact-and-retry machine (Case 1) and the
+//! requested/threshold compaction arms of the print runtime's turn
+//! boundary.
 
 use super::{
     compaction_end_success_event, compaction_start_event, is_context_overflow_failure,
@@ -9,13 +8,12 @@ use super::{
     SessionAgentMessage, SessionEngine, TrailingAssistantFilter, TurnBoundary,
 };
 
-/// The TS failure text when one compact-and-retry attempt could not save
-/// the turn (`_checkCompaction`'s reported state).
+/// The failure text when one compact-and-retry attempt could not save
+/// the turn.
 pub(super) const OVERFLOW_RECOVERY_FAILED_MESSAGE: &str = "Context overflow recovery failed after one compact-and-retry attempt. Try reducing context or switching to a larger-context model.";
 
-/// One recovery attempt per overflow (TS `_overflowRecovery`): "attempted"
-/// marks a compact-and-retry in flight; "reported" dedups the failure
-/// notice when the retry overflows too.
+/// One recovery attempt per overflow: "attempted" marks a compact-and-retry
+/// in flight; "reported" dedups the notice when the retry overflows too.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(super) enum OverflowRecovery {
     #[default]
@@ -24,10 +22,8 @@ pub(super) enum OverflowRecovery {
     Reported,
 }
 
-/// Which boundary the arm runs at. The re-issue differs: a settled-turn
-/// overflow compaction re-issues the turn (TS `agent.continue()`); a
-/// pre-turn one leaves the loop to the admitted prompt, which continues
-/// on the compacted context (TS `_runPreTurnCompaction` never re-issues).
+/// Which boundary the arm runs at. The re-issue differs: a settled-turn overflow
+/// re-issues the turn; a pre-turn one leaves the loop to the admitted prompt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum OverflowBoundary {
     SettledTurn,
@@ -49,23 +45,16 @@ pub(super) enum OverflowOutcome {
 }
 
 impl TurnBoundary {
-    /// Reset the overflow recovery state (TS: a message that starts an
-    /// agent run — the admitted prompt — and every settled non-error
-    /// assistant turn reset `_overflowRecovery`).
+    /// Reset the overflow recovery state; the admitted prompt and every
+    /// settled non-error assistant turn reset it.
     pub(crate) fn reset(&mut self) {
         self.recovery = OverflowRecovery::Idle;
     }
 
-    /// The requested and threshold arms (TS `_checkCompaction` after Case
-    /// 1 stayed silent): a pending model-requested compaction consumes the
-    /// check — TS `_runAutoCompaction` emits the start event before the
-    /// summarizer runs, carrying the pending instructions — else the
-    /// threshold arm compacts when the live context crossed the reserve
-    /// headroom (Case 3: the settled turn's usage at `agent_end`, or the
-    /// resumed context before an admitted prompt). Both boundaries share
-    /// the body: the settled turn and the pre-turn check run the identical
-    /// arms (TS `_runPreTurnCompaction` is the same `_checkCompaction`
-    /// call; only the overflow arm's re-issue differs by boundary).
+    /// The requested and threshold arms: a pending model-requested compaction
+    /// consumes the check (the start event carries the pending instructions
+    /// before the summarizer runs), else the threshold arm compacts when the
+    /// live context crossed the reserve headroom. The boundaries share the body.
     pub(super) async fn requested_and_threshold_arms(
         &mut self,
         engine: &SessionEngine,
@@ -84,14 +73,13 @@ impl TurnBoundary {
             .await
         {
             Some(Ok(CompactOutcome::Ran(run))) => {
-                // Adoption telemetry (TS `compaction_end` handling counts
-                // every completed compaction into the active run).
+                // Adoption telemetry: every completed compaction counts
+                // into the active run.
                 if let Some(telemetry) = engine.telemetry.as_ref() {
                     telemetry.note_compaction(Some(run.duration_ms));
                 }
-                // TS `_scheduleAutoRefineAfterCompaction`: every successful
-                // compaction schedules the compact-trigger auto-refine for
-                // the next serialized checkpoint (or the disposal drain).
+                // Every successful compaction schedules the compact-trigger
+                // auto-refine for the next checkpoint (or the disposal drain).
                 self.compact_auto_refine_pending = true;
                 self.emit_ipython_state_row(&run);
                 self.emit_json(&compaction_end_success_event(
@@ -103,9 +91,8 @@ impl TurnBoundary {
                         .and_then(|pending| pending.instructions.as_deref()),
                 ));
             }
-            // A skip consumed the request: the durable warning row plus the
-            // `compaction_end` event (TS `Requested compaction skipped:
-            // ...`, warning severity).
+            // A skip consumed the request: the durable warning row plus
+            // the `compaction_end` event.
             Some(Ok(CompactOutcome::Skipped(message))) => {
                 self.end_unsuccessfully(
                     engine,
@@ -131,12 +118,8 @@ impl TurnBoundary {
                 .await;
             }
             None => {
-                // The threshold arm (TS `_checkCompaction` Case 3): the
-                // live context crossing the reserve headroom compacts
-                // before the next prompt. The `compaction_start` /
-                // `compaction_end` pair streams in json mode (the outcome
-                // persists in the session entries the headless terminal
-                // result reads in text mode).
+                // The threshold arm: the live context crossing the reserve headroom
+                // compacts before the next prompt; the pair streams in json mode.
                 if engine.session.auto_compaction_due(model).await {
                     self.emit_json(&compaction_start_event(
                         CompactionOutcomeReason::Threshold.wire(),
@@ -144,16 +127,9 @@ impl TurnBoundary {
                     ));
                     match engine.session.compact(None, model, api_key, None).await {
                         Ok(CompactOutcome::Ran(run)) => {
-                            // Adoption telemetry (TS `compaction_end`
-                            // handling counts every completed compaction
-                            // into the active run).
                             if let Some(telemetry) = engine.telemetry.as_ref() {
                                 telemetry.note_compaction(Some(run.duration_ms));
                             }
-                            // TS `_scheduleAutoRefineAfterCompaction`: every
-                            // successful compaction schedules the
-                            // compact-trigger auto-refine for the next
-                            // serialized checkpoint (or the disposal drain).
                             self.compact_auto_refine_pending = true;
                             self.emit_ipython_state_row(&run);
                             self.emit_json(&compaction_end_success_event(
@@ -190,15 +166,8 @@ impl TurnBoundary {
         Ok(())
     }
 
-    /// The shared Case-1 body (TS `_checkCompaction` Case 1). Guard order is
-    /// the TS one: a settled non-error turn resets the recovery state, the
-    /// message must come from the session's current model, may not predate
-    /// the latest compaction boundary, compaction must be enabled (or a
-    /// pending model request covers it — the run consumes it), and the
-    /// shared overflow classifier must recognize it. On a retry the
-    /// settled-turn arm re-issues the turn without a new user message (TS
-    /// `agent.continue()`); the pre-turn arm leaves the loop to the
-    /// admitted prompt (the boundary the caller passes decides).
+    /// The shared Case-1 body: the compact-and-retry for a settled overflow error. On
+    /// a retry the settled-turn arm re-issues the turn without a new user message.
     pub(super) async fn overflow_recovery_attempt(
         &mut self,
         engine: &SessionEngine,
@@ -211,21 +180,16 @@ impl TurnBoundary {
         else {
             return Ok(OverflowOutcome::NotApplicable);
         };
-        // A settled non-error turn resets the recovery state (TS resets at
-        // every non-error assistant message end).
+        // A settled non-error turn resets the recovery state.
         if wire.stop_reason != pa_types::ai::StopReason::Error {
             self.reset();
             return Ok(OverflowOutcome::NotApplicable);
         }
-        // Skip the overflow check when the message came from a different
-        // model (TS `sameModel`: a model switch must not compact for the
-        // old model's overflow).
+        // A model switch must not compact for the old model's overflow.
         if wire.provider != model.provider || wire.model != model.id {
             return Ok(OverflowOutcome::NotApplicable);
         }
-        // Skip the check when the message predates the latest compaction
-        // boundary (TS `assistantIsFromBeforeCompaction`): a stale
-        // pre-compaction overflow must not retrigger.
+        // A stale pre-compaction overflow must not retrigger.
         if engine
             .session
             .latest_compaction_timestamp()
@@ -234,26 +198,23 @@ impl TurnBoundary {
         {
             return Ok(OverflowOutcome::NotApplicable);
         }
-        // Enablement: the compaction settings gate, or a pending model
-        // request (the run below consumes it and honors its instructions).
+        // The compaction settings gate, or a pending model request (the
+        // run below consumes it).
         let pending_scheduled = engine.turn_boundary.compaction_scheduled().await;
         if !engine.session.auto_compaction_enabled() && !pending_scheduled {
             return Ok(OverflowOutcome::NotApplicable);
         }
-        // The shared overflow classifier (TS `isContextOverflow`).
         let Some(assistant) = json_round_trip::<_, pa_agent::types::AssistantMessage>(&wire) else {
             return Ok(OverflowOutcome::NotApplicable);
         };
         if !is_context_overflow_failure(&assistant, model.context_window) {
             return Ok(OverflowOutcome::NotApplicable);
         }
-        // One recovery attempt per overflow (TS `_overflowRecovery`).
         match self.recovery {
             OverflowRecovery::Attempted => {
                 self.recovery = OverflowRecovery::Reported;
                 // The retry still overflows: report once — the durable
-                // outcome row plus the `compaction_end` failure (no error
-                // severity on the wire — TS passes none for the auto arms).
+                // outcome row plus the failure, no error severity.
                 self.end_unsuccessfully(
                     engine,
                     CompactionOutcomeReason::Overflow,
@@ -267,14 +228,14 @@ impl TurnBoundary {
             OverflowRecovery::Reported => return Ok(OverflowOutcome::NotApplicable),
             OverflowRecovery::Idle => self.recovery = OverflowRecovery::Attempted,
         }
-        // Remove the error turn from the loop context first (TS: it stays
-        // in the session history, but the retry must not re-send it).
+        // Remove the error turn from the loop context first; it stays in
+        // the session history, but the retry must not re-send it.
         engine
             .session
             .drop_trailing_assistant(TrailingAssistantFilter::Any)
             .await;
-        // Any compaction consumes a pending model request and honors its
-        // instructions (overflow can fire first and take the request with it).
+        // Any compaction consumes a pending model request (overflow can
+        // fire first and take the request with it).
         let custom_instructions = engine
             .turn_boundary
             .take_compaction()
@@ -284,8 +245,8 @@ impl TurnBoundary {
             CompactionOutcomeReason::Overflow.wire(),
             custom_instructions.as_deref(),
         ));
-        // Headless compactions run unsignaled (TS print-mode compactions
-        // have no abort trigger), so no abort race wraps the run.
+        // Headless compactions run unsignaled, so no abort race wraps
+        // the run.
         let outcome = engine
             .session
             .compact(custom_instructions.as_deref(), model, api_key, None)
@@ -294,36 +255,28 @@ impl TurnBoundary {
             Ok(CompactOutcome::Ran(run)) => {
                 self.compact_auto_refine_pending = true;
                 self.emit_ipython_state_row(&run);
-                // Adoption telemetry (TS `compaction_end` handling counts
-                // every completed compaction into the active run).
                 if let Some(telemetry) = engine.telemetry.as_ref() {
                     telemetry.note_compaction(Some(run.duration_ms));
                 }
-                // The wire result is the TS `CompactionResult` shape; the
-                // end event carries `willRetry: true` (the turn re-issues).
+                // The end event carries `willRetry: true` (the turn
+                // re-issues).
                 self.emit_json(&compaction_end_success_event(
                     CompactionOutcomeReason::Overflow.wire(),
                     &run,
                     true,
                     custom_instructions.as_deref(),
                 ));
-                // The compaction rebuild re-adds the error turn from the
-                // kept tail: drop it again so the retried request is free
-                // of it (TS will-retry branch).
+                // The rebuild re-adds the error turn from the kept tail:
+                // drop it again so the retried request is free of it.
                 engine
                     .session
                     .drop_trailing_assistant(TrailingAssistantFilter::ErrorOnly)
                     .await;
                 if boundary == OverflowBoundary::PreTurn {
-                    // The admitted prompt continues the loop on the
-                    // compacted context (TS `_runPreTurnCompaction` never
-                    // re-issues; the prompt's own commit is the
-                    // continuation).
                     return Ok(OverflowOutcome::Finished);
                 }
-                // Re-issue the turn without a new user message (TS
-                // `agent.continue()`), then hand the newly settled turn
-                // back to the boundary checks.
+                // Re-issue the turn without a new user message, then hand
+                // the newly settled turn back to the boundary checks.
                 engine
                     .session
                     .agent()
@@ -333,8 +286,7 @@ impl TurnBoundary {
                 engine.session.agent().wait_for_idle().await;
                 Ok(OverflowOutcome::RetryTurn)
             }
-            // A skipped overflow recovery does not re-issue (TS excludes
-            // overflow from `resumeAfterFailure`).
+            // A skipped overflow recovery does not re-issue.
             Ok(CompactOutcome::Skipped(message)) => {
                 self.end_unsuccessfully(
                     engine,

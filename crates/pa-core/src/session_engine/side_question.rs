@@ -1,15 +1,7 @@
-//! Side questions: a temporary side thread cloned from the main conversation
-//! that answers a question without interrupting the main work.
-//!
-//! Each run clones the live main conversation into a fresh loop with the same
-//! system prompt, model, thinking level, and tool declarations, so the
-//! provider-side KV-cacheable prefix is preserved for the side call; earlier
-//! side turns are replayed after the cloned conversation so follow-ups see the
-//! newest main-thread context. Tool execution is blocked (`before_tool_call`)
-//! and a turn cap backstops a model that keeps calling deactivated tools.
-//!
-//! Side-question results never enter the session history; the caller streams
-//! them to its own sink and owns delivery.
+//! Side questions: a side thread cloned from the main conversation that answers without
+//! interrupting the main work. Each run clones the live main conversation into a fresh loop
+//! (KV-cacheable prefix preserved); earlier side turns replay after the clone, tools are
+//! blocked (`before_tool_call`), a turn cap is the backstop; results never enter history.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -60,18 +52,13 @@ pub struct SideQuestionTurn {
     pub answer: String,
 }
 
-/// How a side-question run ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SideQuestionStatus {
-    /// The run finished with a final answer.
     Complete,
-    /// The caller aborted the run.
     Cancelled,
-    /// The provider or engine failed.
     Error,
 }
 
-/// Result of one side-question run: the accumulated answer plus its outcome.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SideQuestionResult {
     pub status: SideQuestionStatus,
@@ -111,11 +98,15 @@ fn assistant_text(message: &AssistantMessage) -> String {
 
 /// Run one side question against a clone of the parent conversation.
 ///
-/// The run streams partial answers to `sink` (returning `false` aborts the
-/// run), honors `signal` for external aborts, and retries provider failures
-/// per `retry_policy`. It never mutates the parent agent or its history.
+/// The side calls run on `stream_fn` (TS `unwrapSemanticEdgeStreamFn`: the
+/// parent's pre-semantic fn, so a side call carries no request id and its
+/// ledger stays untouched). The run streams partial answers to `sink`
+/// (returning `false` aborts the run), honors `signal` for external
+/// aborts, and retries provider failures per `retry_policy`. It never
+/// mutates the parent agent or its history.
 pub async fn run_side_question(
     parent: &Arc<Agent>,
+    stream_fn: pa_agent::stream::StreamFn,
     question: &str,
     previous_turns: &[SideQuestionTurn],
     retry_policy: &ProviderRetryPolicy,
@@ -129,12 +120,6 @@ pub async fn run_side_question(
             "Select a model before asking a side question".to_string(),
         );
     }
-    let Some(stream_fn) = parent.stream_fn().cloned() else {
-        return SideQuestionResult::failed(
-            String::new(),
-            "Select a model before asking a side question".to_string(),
-        );
-    };
 
     // Each turn re-clones the live main conversation, so follow-ups always see
     // the newest main-thread context; earlier side turns replay after it.
@@ -253,9 +238,9 @@ pub async fn run_side_question(
     result
 }
 
-/// The retrying completion cycle: prompt (first attempt), then drop the
-/// failed assistant turn and continue, with the shared provider retry policy
-/// (standalone side runs bypass the session auto-retry loop, so retry here).
+/// The retrying completion cycle: prompt (first attempt), then drop the failed
+/// assistant turn and continue, with the shared provider retry policy (standalone side
+/// runs bypass the session auto-retry loop, so retry here).
 #[allow(clippy::too_many_arguments)]
 async fn run_attempts(
     side_agent: &Arc<Agent>,
@@ -570,8 +555,13 @@ mod tests {
         signal: &AbortSignal,
         sink: &SideQuestionSink,
     ) -> SideQuestionResult {
+        let stream_fn = parent
+            .stream_fn()
+            .cloned()
+            .expect("the parent agent has a stream fn");
         run_side_question(
             parent,
+            stream_fn,
             question,
             previous_turns,
             &fast_retry_policy(),
