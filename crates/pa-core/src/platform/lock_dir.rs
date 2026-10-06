@@ -476,20 +476,49 @@ impl LockDir {
                 }
                 Err(error) => return Err(error),
             };
-            // An open directory fd carries no write state (O_RDONLY), so the
-            // flock is only the witness; it closes with the handle.
-            let held = unsafe { libc::flock(fd.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-            if held != 0 {
-                let error = io::Error::last_os_error();
-                return Err(match error.kind() {
-                    io::ErrorKind::WouldBlock => io::Error::new(
-                        io::ErrorKind::WouldBlock,
-                        format!("Lock file is already being held: {}", path.display()),
-                    ),
-                    _ => error,
-                });
+            // The flock witness is Linux-only: `flock` is per-open-file-
+            // description there (a second open in the SAME process
+            // conflicts with the first holder's lock - the semantics the
+            // takeover gate and the guarded release rely on), while on
+            // macOS/BSD `flock` is PER-PROCESS (a probe by the holder's
+            // own process succeeds, and closing the probe fd releases
+            // the process's locks - the witness cannot be probed soundly
+            // there; `fcntl` record locks are also per-process and
+            // cannot be taken on a directory). Off-Linux the fd is only
+            // a pinned identity handle, and the takeover/release run the
+            // flock-free protocol (pre-judge, park, parked re-judge,
+            // mtime-ours, identity pair) - which is proper-lockfile's
+            // own protocol AND its own exposure on every platform: a
+            // live but stalled holder whose mtime aged past the
+            // threshold is stale-reclaimed exactly as the TS product
+            // stale-reclaims it (proper-lockfile has no live-holder
+            // protection at all; the displaced holder detects the
+            // foreign lock at its next mtime-ours check and aborts,
+            // fail-closed). The Linux flock gate is the port's hardening
+            // on top of that parity, not a contract the other platforms
+            // can carry.
+            #[cfg(not(target_os = "linux"))]
+            {
+                return Ok(Some(fd.into()));
             }
-            Ok(Some(fd.into()))
+            #[cfg(target_os = "linux")]
+            {
+                // An open directory fd carries no write state (O_RDONLY),
+                // so the flock is only the witness; it closes with the
+                // handle.
+                let held = unsafe { libc::flock(fd.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+                if held != 0 {
+                    let error = io::Error::last_os_error();
+                    return Err(match error.kind() {
+                        io::ErrorKind::WouldBlock => io::Error::new(
+                            io::ErrorKind::WouldBlock,
+                            format!("Lock file is already being held: {}", path.display()),
+                        ),
+                        _ => error,
+                    });
+                }
+                Ok(Some(fd.into()))
+            }
         }
     }
 
@@ -786,6 +815,18 @@ impl LockDir {
                 return match error.kind() {
                     // The park vanished (a concurrent cleanup): done.
                     io::ErrorKind::NotFound => Ok(()),
+                    // The path stayed re-taken through the whole window: the
+                    // park is ABANDONED (the callers retry only on
+                    // WouldBlock contention, never on this) - the displaced
+                    // holder's next mtime write fails and it aborts,
+                    // fail-closed.
+                    io::ErrorKind::AlreadyExists => {
+                        tracing::warn!(
+                            "abandoned a parked lock directory beside {} (the path stayed re-taken)",
+                            path.display()
+                        );
+                        Ok(())
+                    }
                     _ => Err(error),
                 };
             }
