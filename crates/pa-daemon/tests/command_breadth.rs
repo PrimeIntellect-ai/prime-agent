@@ -575,7 +575,7 @@ fn every_command_type_parses_and_routes() {
         assert_eq!(
             selector.is_some(),
             wire_has_selector,
-            "{type_name}: session selector mismatch (got {selector:?})"
+            "{type_name}: session selector mismatch"
         );
         assert_eq!(selector, wire_has_selector.then_some("sess"));
     }
