@@ -1,14 +1,7 @@
 //! The queue-lane command surface: `mutate_queued_message` and
-//! `resume_queue` (TS daemon-mode `case "mutate_queued_message"` /
-//! `case "resume_queue"`, over `AgentSession.mutateQueuedMessage` /
-//! `resumeQueuedWork`).
-//!
-//! Wire contract (the queue is the visible projection): `get_queue` and the
-//! `session_action_update` events expose each lane's message previews, and a
-//! mutation addresses one preview by `lane` + `index` + `expectedText`. The
-//! status vocabulary is TS-verbatim - `applied`, `rejected`, `invalid` -
-//! where `invalid` (a session-command payload that fails to parse) is
-//! unreachable on this build: the worker queues hold prompts only.
+//! `resume_queue`. Wire contract: `get_queue` and the
+//! `session_action_update` events expose each lane's message previews,
+//! and a mutation addresses one preview by `lane` + `index` + `expectedText`.
 
 use serde_json::Value;
 
@@ -16,7 +9,7 @@ use crate::protocol::{response_failure, response_success, DaemonResponse};
 use crate::worker::Lane;
 use crate::worker::{parse_prompt_images, TurnSettle, Worker};
 
-/// TS `QueuedMessageLane`: wire names `"steering"` and `"followUp"`.
+/// The wire lane names: `"steering"` and `"followUp"`.
 fn wire_lane(value: Option<&Value>) -> Option<Lane> {
     match value.and_then(Value::as_str) {
         Some("steering") => Some(Lane::Steering),
@@ -27,14 +20,11 @@ fn wire_lane(value: Option<&Value>) -> Option<Lane> {
 
 impl Worker {
     /// `mutate_queued_message { lane, index, expectedText, mutation }`:
-    /// apply one delete/move/replace against the queue preview. Rejections
-    /// are statuses, not errors (TS answers every outcome `success` with
-    /// `{ status }`); only a malformed request (bad lane/index/mutation
-    /// shape) fails the command.
+    /// apply one delete/move/replace against the queue preview.
+    /// Rejections are statuses, not errors; only a malformed request fails the command.
     pub(crate) fn handle_mutate_queued_message(&self, payload: &Value) -> DaemonResponse {
-        // The delete error the rejected waiter sees (TS
-        // `QueuedMessageError`); a prompt_and_wait caller surfaces it as
-        // the command failure.
+        // The delete error the rejected waiter sees; a prompt_and_wait
+        // caller surfaces it as the command failure.
         const DELETED: &str = crate::worker::QUEUED_PROMPT_DELETED;
         if let Err(response) = self.require_created("mutate_queued_message") {
             return response;
@@ -101,10 +91,9 @@ impl Worker {
                 ),
             };
             if status == "applied" {
-                // A replace onto another lane moves the item to the back of
-                // the target lane (TS `moveQueued(item, targetPolicy,
-                // ...length)`). The non-overlapping direction pairs only -
-                // `target != lane` holds for every reached arm.
+                // A replace onto another lane moves the item to the back
+                // of the target lane. The non-overlapping direction pairs
+                // only - `target != lane` holds for every reached arm.
                 if mutation_type == "replace" {
                     if let Some(target) =
                         wire_lane(mutation.get("lane")).filter(|target| *target != lane)
@@ -127,9 +116,8 @@ impl Worker {
                 (status, false)
             }
         };
-        // Every applied mutation resumes the suspension (TS
-        // `mutateQueuedMessage` ends with `resumeQueuedWork()`; the delete
-        // arm calls it directly).
+        // Every applied mutation resumes the suspension (TS's delete and
+        // replace arms call resumeQueuedWork).
         if status == "applied" {
             self.resume_queued_input();
         }
@@ -141,10 +129,8 @@ impl Worker {
         if !queue_changed {
             return response;
         }
-        // Same post-mutation flow as the admission paths: persist the lanes
-        // to the recovery journal, push the projection, and wake the turn
-        // runner (TS `resumeQueuedWork` after delete/replace; move only
-        // emits the queue update).
+        // Same post-mutation flow as the admission paths: persist the lanes,
+        // push the projection, and wake the turn runner.
         let core = self.core.lock().unwrap();
         let snapshot = Self::snapshot_locked(&core);
         drop(core);
@@ -161,15 +147,13 @@ impl Worker {
     }
 
     /// `resume_queue`: the queue's queued work resumes (the turn runner
-    /// drains the lanes when idle); the failure string is TS-verbatim for
-    /// the empty queue.
+    /// drains the lanes when idle); the failure string is TS-verbatim for the empty queue.
     pub(crate) fn handle_resume_queue(&self) -> DaemonResponse {
         if let Err(response) = self.require_created("resume_queue") {
             return response;
         }
-        // TS `resumeQueuedWork()` clears the queued-input suspension first
-        // and only then reports the empty queue, so `resume_queue` is a
-        // resume site even when it answers "No queued work to resume".
+        // The suspension clears first, so `resume_queue` is a resume
+        // site even when it answers "No queued work to resume".
         self.resume_queued_input();
         let has_queued_work = {
             let core = self.core.lock().unwrap();
@@ -183,8 +167,7 @@ impl Worker {
     }
 }
 
-/// Apply one mutation to a lane. The status vocabulary is the TS
-/// `QueuedMessageMutationStatus`; the caller owns the cross-lane move a
+/// Apply one mutation to a lane; the caller owns the cross-lane move a
 /// replace-with-lane-change implies.
 fn mutate_lane(
     lane: &mut std::collections::VecDeque<crate::worker::QueuedItem>,
@@ -197,9 +180,9 @@ fn mutate_lane(
     let Some(item) = lane.get_mut(index) else {
         return "rejected";
     };
-    // The visible preview (TS `queuedAgentMessagePreview`) is the row the
-    // client saw in `get_queue`/`session_action_update`: the labeled
-    // preview when the delivery carries one, else the message text.
+    // The visible preview is the row the client saw in
+    // `get_queue`/`session_action_update`: the labeled preview when
+    // present, else the message text.
     if item.preview.as_deref().unwrap_or(item.message.as_str()) != expected {
         return "rejected";
     }
@@ -223,14 +206,9 @@ fn mutate_lane(
             lane.swap(index, target as usize);
         }
         "replace" => {
-            // TS `mutateQueuedMessage` rejects the edit before its replace
-            // arms when the turn's primary delivery record is not a plain
-            // user message — an injected custom row (`payload.customMessage`,
-            // e.g. a parked heartbeat prompt) or an accepted agent message.
-            // Editing only `message` would leave the turn still delivering
-            // and persisting the old injected row, so the parked heartbeat
-            // (and every other injected component) answers `rejected`
-            // instead of reporting `applied` while delivering stale content.
+            // A replace is rejected when the turn's primary delivery record
+            // is not a plain user message: editing only `message` would
+            // leave the turn delivering the old injected row.
             if item.custom_message.is_some() || item.agent_message.is_some() {
                 return "rejected";
             }
@@ -238,12 +216,10 @@ fn mutate_lane(
                 return "rejected";
             };
             item.message = text.to_string();
-            // The edited row loses its labeled preview (TS clears
-            // `payload.preview` on edit): the client's own text becomes
-            // the preview.
+            // The edited row loses its labeled preview: the client's
+            // own text becomes the preview.
             item.preview = None;
-            // `images` present clears or replaces the attachments; absent
-            // keeps them (TS `images?.length ? images : undefined`).
+            // `images` present clears or replaces the attachments; absent keeps them.
             if mutation.get("images").is_some() {
                 item.images = parse_prompt_images(mutation);
             }
@@ -295,9 +271,6 @@ mod tests {
         .collect()
     }
 
-    /// A labeled row (TS `queuedAgentMessagePreview`): `get_queue` and the
-    /// mutation `expectedText` address the preview, not the message text,
-    /// and a replace clears the label (TS clears `payload.preview`).
     #[tokio::test]
     async fn a_labeled_preview_row_is_addressed_and_edited_by_its_preview() {
         let worker = created_worker().await;
@@ -328,9 +301,8 @@ mod tests {
             data["steering"][0],
             "Heartbeat prompt: [heartbeat: every 10m run#0]\n\nnudge the mission"
         );
-        // The preview text addresses the row; the edited text becomes the
-        // message and the label drops (the next get_queue row is the
-        // client's own text).
+        // The preview text addresses the row; the edited text becomes
+        // the message and the label drops.
         let mutate = worker
             .dispatch(
                 "mutate_queued_message",
@@ -350,13 +322,9 @@ mod tests {
         assert_eq!(data["steering"][0], "edited while parked");
     }
 
-    /// TS `mutateQueuedMessage` rejects the replace on an injected row
-    /// (the turn's primary delivery record is not a plain user message):
-    /// a parked heartbeat (labeled preview + injected custom row + queue
-    /// key) answers `rejected`, so an edit can never report `applied`
-    /// while the turn would still deliver and persist the old injected
-    /// content. Delete still applies (TS allows delete/move on every
-    /// queued row).
+    /// A parked heartbeat (injected custom row) answers `rejected` on
+    /// replace so an edit can never report `applied` while the turn
+    /// still delivers the old injected content; delete still applies.
     #[tokio::test]
     async fn an_injected_heartbeat_row_rejects_replace_but_deletes() {
         let worker = created_worker().await;
@@ -408,7 +376,6 @@ mod tests {
             assert!(item.custom_message.is_some());
             assert!(item.preview.is_some());
         }
-        // Delete applies: the injected row leaves the lane.
         let delete = worker
             .dispatch(
                 "mutate_queued_message",
@@ -425,8 +392,6 @@ mod tests {
         assert_eq!(lane_texts(&worker, Lane::Steering), Vec::<String>::new());
     }
 
-    /// Wire shape: every outcome answers `success` with `{ status }`; the
-    /// status vocabulary is TS-verbatim.
     #[tokio::test]
     async fn mutate_delete_moves_and_replaces_match_ts_status_wire() {
         let worker = created_worker().await;
@@ -443,7 +408,6 @@ mod tests {
             )
             .await;
 
-        // Mismatched preview rejects.
         let response = worker
             .dispatch(
                 "mutate_queued_message",
@@ -459,7 +423,6 @@ mod tests {
         assert!(response.success);
         assert_eq!(response.data, Some(json!({ "status": "rejected" })));
 
-        // Delete applies and empties the lane.
         let response = worker
             .dispatch(
                 "mutate_queued_message",
@@ -475,7 +438,6 @@ mod tests {
         assert_eq!(response.data, Some(json!({ "status": "applied" })));
         assert_eq!(lane_texts(&worker, Lane::Steering), vec!["two"]);
 
-        // Move swaps with the neighbor; a missing neighbor rejects.
         worker
             .dispatch(
                 "steer",
@@ -510,8 +472,6 @@ mod tests {
             .await;
         assert_eq!(response.data, Some(json!({ "status": "rejected" })));
 
-        // Replace edits the text; a lane change moves it to the back of
-        // the target lane.
         let response = worker
             .dispatch(
                 "mutate_queued_message",
@@ -528,7 +488,6 @@ mod tests {
         assert_eq!(lane_texts(&worker, Lane::Steering), vec!["two"]);
         assert_eq!(lane_texts(&worker, Lane::FollowUp), vec!["edited"]);
 
-        // An out-of-range index rejects.
         let response = worker
             .dispatch(
                 "mutate_queued_message",
@@ -543,7 +502,6 @@ mod tests {
             .await;
         assert_eq!(response.data, Some(json!({ "status": "rejected" })));
 
-        // A malformed lane or mutation shape fails the command.
         let response = worker
             .dispatch(
                 "mutate_queued_message",
@@ -560,8 +518,6 @@ mod tests {
         assert_eq!(response.command, "mutate_queued_message");
     }
 
-    /// `resume_queue` answers success for queued work and the TS-verbatim
-    /// failure for an empty queue.
     #[tokio::test]
     async fn resume_queue_matches_the_ts_wire_shapes() {
         let worker = created_worker().await;
@@ -582,8 +538,6 @@ mod tests {
         assert!(response.data.is_none());
     }
 
-    /// A deleted queued prompt rejects its waiting caller (the `prompt_and_wait`
-    /// `done` channel) with the TS delete error string.
     #[tokio::test]
     async fn delete_rejects_the_waiting_caller() {
         let worker = created_worker().await;
@@ -627,11 +581,8 @@ mod tests {
         );
     }
 
-    /// TS `mutateQueuedMessage` rejects a `replace` on an accepted
-    /// agent-message delivery (`payload.acceptedAgentMessage` guard): the
-    /// delivery rides the `agent_message` custom row, whose content must
-    /// stay byte-identical to the prompt the turn runs on. Move and delete
-    /// stay applicable.
+    /// A `replace` on an accepted agent-message delivery is rejected: its content must stay
+    /// byte-identical to the prompt the turn runs on. Move and delete stay applicable.
     #[tokio::test]
     async fn replace_rejects_a_queued_agent_message_delivery() {
         let worker = created_worker().await;
@@ -650,8 +601,8 @@ mod tests {
             )
             .await;
         assert!(delivered.success, "deliver failed: {delivered:?}");
-        // The queue strip addresses the delivery by its labeled preview
-        // (TS `queuedAgentMessagePreview`), not the rendered prompt.
+        // The queue strip addresses the delivery by its labeled preview,
+        // not the rendered prompt.
         let expected = "Agent message received: the research is done";
         // A second queued prompt gives the delivery a move neighbor.
         worker

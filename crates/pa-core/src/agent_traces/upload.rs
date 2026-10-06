@@ -1,7 +1,6 @@
-//! The upload concern (moved with its concern): the one-session upload
-//! options, the outcome-logged upload entry point, the gated perform arm
-//! with its cursor/header/context resolution, and the retriable
-//! `fetch_with_retry` loop (TS uploadAgentTraceFile).
+//! The upload concern: the one-session upload options, the outcome-logged
+//! upload entry point, the gated perform arm with its cursor/header/context
+//! resolution, and the retriable `fetch_with_retry` loop.
 
 use super::{
     active_git_context, delay, encode_uri_component, is_retriable_transport_error,
@@ -14,9 +13,8 @@ use super::{
     TRACE_UPLOAD_MAX_RETRIES, TRACE_UPLOAD_RATE_LIMIT_WINDOW_MS,
 };
 
-/// One upload arm's inputs (TS `AgentTraceUploadOptions`): the session
-/// file (None is TS's `no_session_file`), the daemon-shared directories
-/// for the settings, the outbox, and the trace log, and the transport.
+/// One upload arm's inputs: the session file (None is TS's
+/// `no_session_file`), the daemon-shared directories, and the transport.
 pub struct TraceUploadOptions<'a> {
     pub session_file: Option<&'a Path>,
     pub cwd: &'a Path,
@@ -33,7 +31,7 @@ pub struct TraceUploadOptions<'a> {
 }
 
 impl TraceUploadOptions<'_> {
-    /// TS `getAgentTracesEnabled`: the reload gate then the setting.
+    /// The reload gate then the setting.
     fn enabled(&self) -> bool {
         let mut settings = crate::settings::SettingsManager::create(self.cwd, self.agent_dir);
         if self.reload_config {
@@ -43,16 +41,15 @@ impl TraceUploadOptions<'_> {
     }
 }
 
-/// TS `uploadAgentTraceFile`: the upload with its outcome logged to the
-/// trace log.
+/// The upload with its outcome logged to the trace log.
 pub async fn upload_trace_file(options: &TraceUploadOptions<'_>) -> TraceUploadResult {
     let result = perform_agent_trace_upload(options, None).await;
     log_agent_trace_outcome(options.agent_dir, options.session_file, &result);
     result
 }
 
-/// TS `performAgentTraceUpload` (the gate variant is the upload-all
-/// call: perform with the shared request slot, then log).
+/// The gate variant is the upload-all call: perform with the shared
+/// request slot.
 pub(super) async fn perform_agent_trace_upload(
     options: &TraceUploadOptions<'_>,
     before_request: Option<&TraceRequestGate>,
@@ -194,9 +191,8 @@ pub(super) async fn perform_agent_trace_upload(
     }
 }
 
-/// TS `fetchWithRetry`: the gate runs before every attempt, the
-/// retriable statuses/network errors back off with jitter, and 503 honors
-/// `Retry-After`.
+/// The gate runs before every attempt, the retriable statuses/network
+/// errors back off with jitter, and 503 honors `Retry-After`.
 async fn fetch_with_retry(
     options: &TraceUploadOptions<'_>,
     url: &str,
@@ -207,8 +203,7 @@ async fn fetch_with_retry(
     let mut attempt: u32 = 0;
     loop {
         if let Some(gate) = before_request {
-            // A cancelled wait ends the upload (TS the signal aborts the
-            // queued gate slot).
+            // A cancelled wait ends the upload.
             gate.before_request(options.cancel, options.on_upload_delay.as_ref())
                 .await?;
         }

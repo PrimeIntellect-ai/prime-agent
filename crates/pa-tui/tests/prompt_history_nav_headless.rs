@@ -6,28 +6,20 @@
 //! own Down enters the dock in every session shape, and the Up that
 //! follows returns to the prompt before the next Up recalls.
 #![cfg(unix)]
-// Pedantic-gate exceptions (every other pedantic warning in this crate is
-// fixed in place; each exception carries its one-line justification):
-// - the casts: terminal-layout arithmetic narrows structurally bounded
-//   values (screen coordinates, byte counts, timestamps); guarded
-//   conversions would add panic paths the bounds guarantee away.
+// Casts: structurally bounded terminal-layout arithmetic; guarded conversions add panic paths.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// - the render routes are flat tables (one arm per route); splitting them
-//   would add indirection without changing the flow.
+// Render routes are flat tables (one arm per route); splitting adds indirection.
 #![allow(clippy::too_many_lines)]
-// - widget state structs carry independent flag bits; a nested struct
-//   would add indirection without changing the shape.
+// Widget state structs carry independent flag bits.
 #![allow(clippy::struct_excessive_bools, clippy::fn_params_excessive_bools)]
-// - the futures are bounded by the surface's lifetime; boxing them would
-//   add an allocation to the steady-state loop.
+// Futures are bounded by the surface's lifetime; boxing adds a steady-state allocation.
 #![allow(clippy::large_futures)]
-// - the wrappers preserve a uniform Result-returning API surface; unwrap
-//   removals would ripple through the callers without changing behavior.
+// The wrappers preserve a uniform Result-returning API surface.
 #![allow(clippy::unnecessary_wraps)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -52,12 +44,8 @@ impl MockSupervisor {
         }
     }
 
-    /// Serve one connection: attach an empty session, list one heartbeat
-    /// (the dock's heartbeats group is selectable while no subagents
-    /// exist — the session shape that must not steal the prompt's Down),
-    /// and answer every prompt with the ack plus the turn's bookend
-    /// events, so the transcript never echoes the prompts and the
-    /// recalled text renders only in the prompt box.
+    /// Serve one connection: attach an empty session, list one heartbeat (selectable while no
+    /// subagents exist — the session shape that must not steal the prompt's Down).
     fn serve(self) {
         let (stream, _) = self.listener.accept().expect("accept");
         let writer = stream.try_clone().expect("clone mock socket");
@@ -111,8 +99,8 @@ impl MockSupervisor {
                     write_json(&mut writer, &attach_data(id));
                 }
                 "heartbeats_list" => {
-                    // One in-scope heartbeat row: the dock renders its
-                    // heartbeats group, and that group is selectable.
+                    // One in-scope heartbeat row: the dock renders its heartbeats group, and that
+                    // group is selectable.
                     write_json(
                         &mut writer,
                         &json!({
@@ -142,15 +130,10 @@ impl MockSupervisor {
                     );
                 }
                 "prompt" => {
-                    // An admitted prompt: the ack, then the turn's bookend
-                    // events (`turn_start` + `turn_end`, no message rows —
-                    // the transcript keeps nothing of the prompt, so the
-                    // recalled text renders only in the prompt box). The
-                    // client optimistically marks the turn active on the
-                    // ack and only `turn_end` clears it; the headless
-                    // harness's idle gate requires the turn settled before
-                    // the run can finish, so a turn-less ack would hang
-                    // the plan's run forever.
+                    // An admitted prompt: the ack, then the turn's bookends (`turn_start` +
+                    // `turn_end`, no message rows — the transcript keeps nothing of the prompt).
+                    // The client marks the turn active on the ack and only `turn_end` clears it;
+                    // the harness's idle gate requires the turn settled.
                     write_json(
                         &mut writer,
                         &json!({
@@ -180,8 +163,8 @@ impl MockSupervisor {
     }
 }
 
-/// One daemon session event (the pushed frame the client's event stream
-/// reads): scoped to the mock session like the real supervisor's.
+/// One daemon session event (the pushed frame the client's event stream reads): scoped to the mock
+/// session like the real supervisor's.
 fn write_session_event(writer: &mut UnixStream, event: &Value) {
     write_json(
         writer,
@@ -272,8 +255,7 @@ fn options(socket: PathBuf) -> InteractiveOptions {
     }
 }
 
-/// Run a headless plan against a fresh mock supervisor; the captured
-/// frames show the editor surface (the prompt box) and the dock.
+/// Run a headless plan; the captured frames show the editor surface (the prompt box) and the dock.
 fn run_plan(steps: Vec<HeadlessStep>) -> Vec<String> {
     std::env::remove_var("TMUX");
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -297,8 +279,8 @@ fn run_plan(steps: Vec<HeadlessStep>) -> Vec<String> {
     outcome.frames
 }
 
-/// Every step's condition wait must have been satisfied: a barrier that
-/// timed out renders its note, and the note would name the broken step.
+/// Every step's condition wait must have been satisfied: a barrier that timed out renders its note
+/// naming the broken step.
 fn assert_no_barrier_timeouts(frames: &[String]) {
     let all = frames.join("\n");
     assert!(
@@ -307,9 +289,8 @@ fn assert_no_barrier_timeouts(frames: &[String]) {
     );
 }
 
-/// Submit one prompt through the typed path (the editor's own submit —
-/// `HeadlessStep::Submit` bypasses the editor and would leave the
-/// history empty), then hold until the prompt box renders empty again.
+/// Submit one prompt through the typed path (`HeadlessStep::Submit` bypasses the editor and would
+/// leave the history empty), then hold until the prompt box renders empty again.
 fn submit(prompt: &str) -> Vec<HeadlessStep> {
     vec![
         HeadlessStep::Type(prompt.to_string()),
@@ -342,8 +323,7 @@ fn escape() -> KeyEvent {
     KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
 }
 
-/// Right: the dock's group-traversal arrow (the focused row's
-/// `left`/`right` arms).
+/// Right: the dock's group-traversal arrow (the focused row's `left`/`right` arms).
 fn right() -> KeyEvent {
     KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)
 }
@@ -362,9 +342,6 @@ fn wait_gone(needle: &str) -> HeadlessStep {
     }
 }
 
-/// TS `navigateHistory`: Up recalls the newest prompt, a second Up walks
-/// one older, Down walks forward, and one Down past the newest returns to
-/// the empty draft.
 #[test]
 fn up_walks_backward_down_forward_and_the_draft_returns() {
     let mut steps = Vec::new();
@@ -423,32 +400,24 @@ fn the_drafts_down_enters_the_dock_and_up_returns_before_the_recall() {
     );
 }
 
-/// Coexistence: the dock's own shortcut still focuses the row (the
-/// operator's direct-navigation redesign), the right arrow walks to the
-/// heartbeats group (the 2026-09-26 dock-arrows directive — every
-/// rendered group is traversable, empty ones included), Enter opens the
-/// focused group's view, and Escape closes the panel onto the dock's own
-/// Heartbeates item (the 2026-09-26 panel-exit ruling — leaving a panel
-/// lands on its dock item, never the prompt bar): the cancel Escape
-/// hands the editor back, and the history recall works right after the
-/// round trip.
+/// Coexistence: the right arrow walks to the heartbeats group (the 2026-09-26 dock-arrows
+/// directive), and Escape closes the panel onto the dock's own item (the 2026-09-26 panel-exit
+/// ruling): the history recall works right after the round trip.
 #[test]
 fn alt_a_arrows_and_enter_still_open_the_dock_group_view_and_recall_survives_it() {
     let mut steps = Vec::new();
     steps.push(wait_render("heartbeat"));
     steps.extend(submit("first prompt"));
     steps.push(HeadlessStep::Key(alt_a()));
-    // The dock's row starts the focus on the subagents group; one right
-    // arrow steps to heartbeats (the rendered-group cycle).
+    // The dock's row starts the focus on the subagents group; one right arrow steps to heartbeats
+    // (the rendered-group cycle).
     steps.push(HeadlessStep::Key(right()));
     steps.push(HeadlessStep::Key(enter()));
     steps.push(wait_render("Heartbeats"));
     steps.push(HeadlessStep::Key(escape()));
     steps.push(wait_gone("Heartbeats"));
-    // The panel's exit hands the keyboard focus to the dock's own
-    // Heartbeates item (the panel-exit ruling), so the recall needs the
-    // dock's focus released first: the cancel Escape returns the editor,
-    // and only then the Up recalls the prompt.
+    // The panel's exit hands the keyboard focus to the dock's own Heartbeates item (the panel-exit
+    // ruling): the cancel Escape returns the editor, and only then the Up recalls the prompt.
     steps.push(HeadlessStep::Key(escape()));
     steps.push(HeadlessStep::Key(up()));
     steps.push(wait_render("first prompt"));

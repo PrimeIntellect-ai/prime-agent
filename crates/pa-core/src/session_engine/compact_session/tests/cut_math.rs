@@ -1,7 +1,6 @@
-//! Compact-session tests, the cut-math family (moved with their
-//! concerns): the cut-and-tokens computation, the entry-message
-//! extraction, the tokens-before anchoring, and the summary-request
-//! window estimate.
+//! Compact-session tests, the cut-math family: the cut-and-tokens
+//! computation, the entry-message extraction, the tokens-before
+//! anchoring, and the summary-request window estimate.
 use super::*;
 use pa_types::session::EntryBase;
 
@@ -10,7 +9,6 @@ fn cut_and_tokens_computed_from_entries() {
     let tmp = tempfile::tempdir().unwrap();
     let session = session_with_turns(tmp.path(), 3);
     let (cut, tokens) = compute_cut(&session, 10_000);
-    // A large keep budget keeps from the start.
     assert_eq!(cut.first_kept_entry_index, 1); // after the header
     assert_eq!(tokens, 120);
 }
@@ -58,16 +56,13 @@ fn message_extraction_skips_compaction_and_tool_results() {
     assert!(message_from_entry(&tool_result).is_none());
 }
 
-/// A usage-less error turn never anchors `tokensBefore`: the estimate
-/// uses the last settled (probe-measured) usage plus a chars/4
-/// estimate of everything that trails it — the exact TS overflow-row
-/// scenario (`getLastAssistantUsageInfo` skips error turns).
+/// A usage-less error turn never anchors `tokensBefore`: the estimate uses
+/// the last settled usage plus a chars/4 estimate of what trails it.
 #[test]
 fn tokens_before_anchors_on_last_valid_usage_plus_trailing() {
     let reply = |usage: pa_types::ai::Usage, error: bool| {
         // A failed request carries no content: the failure lives in
-        // `errorMessage` (the TS and Rust durable error turns both
-        // record an empty content list).
+        // `errorMessage`.
         let content = if error {
             Vec::new()
         } else {
@@ -121,8 +116,8 @@ fn tokens_before_anchors_on_last_valid_usage_plus_trailing() {
     session
         .append_message(probe(&("overflow probe ".to_string() + &"x".repeat(400))))
         .unwrap();
-    // The overflow error turn: stopReason "error" with zeroed usage
-    // (what the provider returns for a failed request).
+    // The overflow error turn: zeroed usage, what the provider
+    // returns for a failed request.
     session
         .append_message(reply(pa_types::ai::Usage::default(), true))
         .unwrap();
@@ -133,12 +128,8 @@ fn tokens_before_anchors_on_last_valid_usage_plus_trailing() {
     );
 }
 
-/// The window estimate covers the exact wire bodies the compaction
-/// will issue (TS #2411's `estimateSummaryRequestTokens`): a split
-/// turn estimates BOTH the history request and the turn-prefix
-/// request (each with the shared system prompt and its own
-/// completion budget), and the no-history split arm estimates only the
-/// prefix call.
+/// A split turn estimates BOTH the history request and the turn-prefix
+/// request; the no-history split arm estimates only the prefix call.
 #[test]
 fn summary_window_estimate_covers_both_split_requests() {
     let history = vec![user_message("some history to summarize")];
@@ -149,14 +140,11 @@ fn summary_window_estimate_covers_both_split_requests() {
         estimate_summary_request_tokens(&history, &[], false, None, None, None, 10_000);
     let prefix_only =
         estimate_summary_request_tokens(&[], &turn_prefix, true, None, None, None, 10_000);
-    // A split turn must fit every request it will issue: the estimate
-    // is the larger of the two arms' estimates (each with the shared
-    // system prompt and its own completion budget).
+    // The estimate is the larger of the two arms' estimates.
     assert_eq!(full, history_only.max(prefix_only));
     assert!(full > history_only);
-    // The previous summary, the recency anchor, and the custom
-    // instructions grow the history request, so they grow the
-    // estimate.
+    // The previous summary, the recency anchor, and the custom instructions
+    // grow the history request, so they grow the estimate.
     let with_anchors = estimate_summary_request_tokens(
         &history,
         &[],
@@ -167,9 +155,7 @@ fn summary_window_estimate_covers_both_split_requests() {
         10_000,
     );
     assert!(with_anchors > history_only);
-    // The recency anchor alone grows the estimate (TS follow-up
-    // 771611b14: the estimator mirrors the anchor block the wire
-    // request carries).
+    // The recency anchor alone grows the estimate.
     let with_anchor = estimate_summary_request_tokens(
         &history,
         &[],
@@ -180,8 +166,6 @@ fn summary_window_estimate_covers_both_split_requests() {
         10_000,
     );
     assert!(with_anchor > history_only);
-    // The completion budgets draw on the reserve: a larger reserve
-    // grows the estimate.
     let bigger_reserve =
         estimate_summary_request_tokens(&history, &[], false, None, None, None, 100_000);
     assert!(bigger_reserve > history_only);

@@ -1,13 +1,7 @@
 //! The process-shared live catalog chain: one [`ModelCatalog`] per models
-//! dir, shared by every registry the process constructs (the worker's
-//! create path, the model switcher, the RLM surface).
-//!
-//! TS parity: the TS daemon hosts its sessions in one process and each
-//! session's `ModelRegistry` privately owns a catalog layer per session;
-//! the Rust daemon runs one worker process per session, so the disk
-//! caches are the cross-process state and one chain instance per process
-//! serves every registry that process creates. The supervisor keeps the
-//! disk caches warm (the forced startup refresh plus the hourly loop).
+//! dir, shared by every registry the process constructs. TS parity: the TS
+//! daemon has a private catalog layer per session in one process; the Rust
+//! daemon runs one worker per session, so the disk caches carry the state.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -18,8 +12,8 @@ use pa_models::{ModelCatalog, PrimeCredentials};
 use crate::auth::types::PRIME_INFERENCE_PROVIDER_ID;
 use crate::auth::AuthStorage;
 
-/// The models cache dir for a `models.json` path: `<agent-dir>/models`
-/// (the TS cache dir — both catalog caches live beside `models.json`).
+/// The models cache dir for a `models.json` path: `<agent-dir>/models` — both catalog caches live
+/// beside `models.json`.
 fn models_dir(models_json_path: &Path) -> PathBuf {
     models_json_path
         .parent()
@@ -33,9 +27,7 @@ fn shared() -> &'static Mutex<HashMap<Option<PathBuf>, Arc<ModelCatalog>>> {
 }
 
 /// The process-shared catalog for `models_json_path` (`None` = an
-/// in-memory registry, no disk caches): one [`ModelCatalog`] per models
-/// dir, so every registry in the process sees the same snapshots and a
-/// refresh any of them triggers serves the rest.
+/// in-memory registry, no disk caches).
 ///
 /// # Panics
 ///
@@ -64,10 +56,9 @@ pub fn install_catalog(models_json_path: &Path, catalog: Arc<ModelCatalog>) {
 }
 
 /// The Prime Inference credentials from the auth stored under `agent_dir`.
-/// The supervisor's hourly loop re-reads auth from disk before each tick,
-/// so a login or logout between ticks is picked up by the next refresh
-/// (the scope-keyed caches discard the previous account's view on the
-/// credential change).
+/// Callers re-read auth from disk before each use, so a login or logout is
+/// picked up by the next refresh (the scope-keyed caches discard the
+/// previous account's view).
 #[must_use]
 pub fn prime_credentials_for_dir(agent_dir: &Path) -> Option<PrimeCredentials> {
     let mut auth = AuthStorage::create(agent_dir);
@@ -79,10 +70,9 @@ pub fn prime_credentials_for_dir(agent_dir: &Path) -> Option<PrimeCredentials> {
 }
 
 /// The daemon's warm-up: the shared catalog for `agent_dir` with a forced
-/// [`RefreshTrigger::Startup`] refresh fired (fire-and-forget: the disk
-/// caches fill in the background and every registry resolves the
-/// last-good chain immediately). TS parity: the supervisor process keeps
-/// the disk caches warm for the workers it spawns.
+/// [`RefreshTrigger::Startup`] refresh fired (fire-and-forget: every
+/// registry resolves the last-good chain immediately while the caches
+/// fill in the background).
 #[must_use]
 pub fn startup_refresh(agent_dir: &Path) -> Arc<ModelCatalog> {
     let catalog = catalog_for(Some(&agent_dir.join("models.json")));
@@ -95,9 +85,8 @@ pub fn startup_refresh(agent_dir: &Path) -> Arc<ModelCatalog> {
 
 /// The daemon's hourly refresh loop (one per process — the shared
 /// catalog's own guard coalesces repeated calls). The credentials closure
-/// re-reads auth from disk on every tick, so a CLI login or logout between
-/// ticks changes the next refresh's scope and the scope-keyed caches
-/// discard the previous account's view.
+/// re-reads auth from disk on every tick, so a login or logout between
+/// ticks changes the next refresh's scope.
 pub fn spawn_hourly_refresh(agent_dir: &Path) {
     let catalog = catalog_for(Some(&agent_dir.join("models.json")));
     let dir = agent_dir.to_path_buf();

@@ -1,12 +1,7 @@
-//! Session resource resolution (`resolve()`): precedence-ranked collection of
-//! skill/prompt/theme paths from configured packages (pi manifest,
-//! convention directories, filter patterns), settings top-level arrays, and
-//! auto-discovery (settings-base directories, `.agents/skills` ancestor
-//! scan, bundled skills).
-//!
-//! Name collisions resolve first-wins downstream: consumers receive entries
-//! ordered by [`resource_precedence_rank`] (project settings > project auto >
-//! user settings > user auto > package > builtin) and deduplicated by
+//! Session resource resolution (`resolve()`): precedence-ranked collection
+//! of skill/prompt/theme paths from configured packages, settings
+//! top-level arrays, and auto-discovery. Collisions resolve first-wins:
+//! entries are ordered by [`resource_precedence_rank`] and deduped by
 //! canonicalized path.
 
 pub(crate) mod auto;
@@ -66,7 +61,6 @@ impl MetadataSource {
     }
 }
 
-/// Provenance carried with every resolved path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathMetadata {
     pub source: MetadataSource,
@@ -92,7 +86,6 @@ pub struct ResolvedPaths {
     pub diagnostics: Vec<crate::skills::diagnostics::ResourceDiagnostic>,
 }
 
-/// Response to a missing configured package source during resolution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MissingSourceAction {
     Install,

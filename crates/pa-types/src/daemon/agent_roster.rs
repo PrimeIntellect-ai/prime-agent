@@ -1,15 +1,13 @@
-//! The agent-roster vocabulary shared by the supervisor's roster store and
-//! every viewing surface (the TUI agents view, agent observation). Port of
-//! `modes/daemon/agent-roster.ts`: the one status formula every surface
-//! shares, the roster agent-id formula, and the wire entry shape carried by
-//! `roster_subscribe` responses and `roster_update` pushes.
+//! The agent-roster vocabulary shared by the supervisor's roster store and every viewing surface
+//! (TS
+//! `agent-roster.ts`): the one status formula, the agent-id formula, and the wire entry shape.
 
 use crate::JsonMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// One status formula output (TS `AgentRosterStatus`). Surfaces adapt their
-/// inputs and never reimplement the classification.
+/// One status formula output. Surfaces adapt their inputs and never reimplement the
+/// classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentRosterStatus {
@@ -45,9 +43,8 @@ pub fn classify_agent_status(input: AgentStatusInput) -> AgentRosterStatus {
     }
 }
 
-/// Classify one session summary (TS `classifySessionRosterStatus`): a
-/// resident session is busy when its activity is `working` or the session
-/// reports an active turn.
+/// Classify one session summary (TS `classifySessionRosterStatus`): a resident session is busy when
+/// its activity is `working` or the session reports an active turn.
 #[must_use]
 pub fn classify_session_roster_status(
     resident: bool,
@@ -78,11 +75,9 @@ pub fn classify_summary_value(summary: &Value, queued_child: bool) -> AgentRoste
     classify_session_roster_status(resident, activity, session_active, queued_child)
 }
 
-/// The roster agent id (TS `rosterAgentIdForSummary`): child ids are only
-/// unique per parent, so the parent key (canonical session path, or the
-/// live parent id for no-session parents) qualifies them daemon-wide;
-/// top-level sessions key by session id. The caller passes the parent path
-/// already canonicalized.
+/// The roster agent id (TS `rosterAgentIdForSummary`): child ids are unique only per parent, so the
+/// parent key qualifies them daemon-wide; top-level sessions key by session id. The caller passes
+/// the parent path already canonicalized.
 #[must_use]
 pub fn roster_agent_id(
     session_id: &str,
@@ -92,8 +87,7 @@ pub fn roster_agent_id(
 ) -> String {
     if runtime_kind == "subagent" {
         if let Some(child_id) = rlm_child_id {
-            // No-session parents have no path (and no ledger edge); their
-            // live parent id still disambiguates.
+            // No-session parents have no path; their live parent id disambiguates.
             return match parent_key {
                 Some(key) if !key.is_empty() => format!("{key}#{child_id}"),
                 _ => child_id.to_string(),
@@ -127,36 +121,25 @@ pub fn roster_agent_id_for_summary(summary: &Value) -> String {
     roster_agent_id(session_id, runtime_kind, child_id, parent_key)
 }
 
-/// View-specific labels for the shared activity branch table below (TS
-/// `SessionActivityOptions`).
+/// View-specific labels for the shared activity branch table below (TS `SessionActivityOptions`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionActivityOptions {
-    /// Label for a row with an armed heartbeat (the agents view adds a
-    /// live countdown; a static table has no next-run timer).
+    /// Label for a row with an armed heartbeat (no next-run timer here).
     pub heartbeat_label: String,
-    /// Fallback when no branch fires (the agents view says "needs input";
-    /// the sessions table leaves the cell empty because its status column
-    /// already says idle).
+    /// Fallback when no branch fires (agents view: "needs input"; sessions
+    /// table: empty, its status column already says idle).
     pub idle_label: String,
 }
 
-/// The one activity branch table (TS `sessionActivityDetail`): what a
-/// session is doing right now, read from the wire summary's runtime flags.
-/// The agents view status label and the CLI sessions table activity column
-/// both derive from it, so a state added here serves every surface. The
-/// TS action branch (agents-view-only labels over `sessionActions`) rides
-/// with that view's port; the roster rows this table reads carry an empty
-/// action snapshot, so no branch is missing.
-///
-/// `statusLabel` and `lastHeardFromAt` stay with the caller: the agents
-/// view returns them before delegating, the sessions table gives them
-/// their own columns.
+/// The one activity branch table: what a session is doing right now, read from the wire summary's
+/// runtime flags. The agents view status label and the CLI sessions table activity column both
+/// derive from it. The TS action branch rides with the agents-view port (roster rows carry an empty
+/// action snapshot); `statusLabel` and `lastHeardFromAt` stay with the caller.
 pub fn session_activity_detail(summary: &Value, options: &SessionActivityOptions) -> String {
     let str_field = |name: &str| summary.get(name).and_then(Value::as_str);
     let active = |name: &str| summary.get(name).and_then(Value::as_bool) == Some(true);
-    // A non-ready worker cannot report fresh runtime flags; its state is
-    // the row's story. A row already carrying the ledger mark keeps that
-    // mark out of the activity (its surface shows it as the status).
+    // A non-ready worker cannot report fresh runtime flags; its state is the row's story. A
+    // ledger-marked row keeps the mark out of the activity (its surface shows it as the status).
     if let Some(worker_state) = str_field("workerState") {
         if str_field("statusLabel").is_none() && worker_state != "ready" {
             return worker_state.to_string();
@@ -219,22 +202,19 @@ pub fn session_activity_detail(summary: &Value, options: &SessionActivityOptions
     options.idle_label.clone()
 }
 
-/// One roster entry (TS `AgentRosterEntry`): the agent's slim session
-/// summary with the supervisor's classification. `statusLabel` and
-/// `lastHeardFromAt` are set only for exceptional states; viewers key label
-/// display on their presence.
+/// One roster entry: the slim session summary with the supervisor's classification;
+/// `statusLabel`/`lastHeardFromAt` only for exceptional states (viewers key on their
+/// presence).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentRosterEntry {
     pub agent_id: String,
-    /// `true` marks an admitted child run whose session has not
-    /// materialized yet.
+    /// `true` marks an admitted child run whose session has not materialized yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queued_child: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seeded_cwd: Option<bool>,
-    /// The slim session summary (the wire summary without
-    /// `streamingMessage`/`sessionActions`/`diagnostics`).
+    /// The slim session summary (without `streamingMessage`/ `sessionActions`/`diagnostics`).
     pub summary: Value,
     pub status: AgentRosterStatus,
     /// `queued` / `recovering` / `failed` (TS `statusLabel`).
@@ -248,9 +228,7 @@ pub struct AgentRosterEntry {
     pub rest: JsonMap,
 }
 
-/// The slim summary a worker reports for the roster (TS
-/// `workerRosterEntryFromSummary`): the full summary minus the
-/// streaming-message, session-actions, and diagnostics fields.
+/// The slim summary a worker reports for the roster (TS `workerRosterEntryFromSummary`).
 #[must_use]
 pub fn slim_roster_summary(summary: Value) -> Value {
     let mut summary = summary;
@@ -360,8 +338,7 @@ mod tests {
         assert_eq!(roster_agent_id_for_summary(&summary), "/x/sess.jsonl#7");
     }
 
-    /// The minimal wire summary the branch table reads; tests merge field
-    /// overrides into it.
+    /// The minimal wire summary the branch table reads; tests merge overrides into it.
     fn activity_summary(overrides: Value) -> Value {
         let mut summary = json!({
             "id": "s",
@@ -473,8 +450,7 @@ mod tests {
             ),
             ""
         );
-        // A row already carrying the ledger mark keeps the worker state
-        // out of the activity: its surface shows the mark as the status.
+        // A ledger-marked row keeps the worker state out of the activity.
         assert_eq!(
             session_activity_detail(
                 &activity_summary(

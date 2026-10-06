@@ -14,8 +14,7 @@ use super::report::UpdateReport;
 use super::status::UPDATE_TELEMETRY_STATE_NAMES;
 use super::status::{read_status, StatusWriter};
 
-/// The tail loop budgets (TS `launchDaemonUpdateRestartCoordinator`:
-/// 30 minutes of progress, 3 minutes of heartbeat liveness).
+/// The tail loop budgets: 30 minutes of progress, 3 minutes of heartbeat liveness.
 const TAIL_PROGRESS_TIMEOUT_MS: u64 = 30 * 60_000;
 const TAIL_LIVENESS_TIMEOUT_MS: u64 = 180_000;
 /// Grace for a status file deleted by the successor's boot sweep (spec §6):
@@ -30,12 +29,9 @@ pub struct UpdateCommandOptions {
     pub channel: Option<pa_core::update::version::UpdateChannel>,
     /// The manual/direct install: stage this local payload (a release
     /// archive or a payload directory) instead of resolving the channel.
-    /// The release version comes from the payload binary's `--version`
-    /// output and the install goes through the same staged, atomic
-    /// activation as a channel update — never an in-place copy.
     pub archive: Option<std::path::PathBuf>,
-    /// The `http(s)://` origin recorded as the release's install source
-    /// (required with `archive`; future updates resolve from it).
+    /// The `http(s)://` origin recorded as the release's install source (required with `archive`;
+    /// future updates resolve from it).
     pub source: Option<String>,
 }
 
@@ -43,12 +39,8 @@ pub struct UpdateCommandOptions {
 /// terminal status. Returns the process exit code.
 ///
 /// # Errors
-/// Returns an error when this binary is not owned by the installer (no
-/// managed install root), when the update lock cannot be acquired, handed
-/// over, or released, when a status-record write fails, when planning,
-/// downloading, staging, or candidate validation fails (a planning failure
-/// records `Aborted` first), or when the detached coordinator cannot be
-/// spawned.
+/// Returns an error when the binary is not installer-owned or a phase,
+/// the lock, a status write, or the coordinator spawn fails.
 pub async fn run_update_command(options: &UpdateCommandOptions) -> Result<i32> {
     let agent_dir = crate::config::get_agent_dir();
     let socket_path = pa_daemon::socket::default_daemon_socket_path();
@@ -67,9 +59,8 @@ pub async fn run_update_command(options: &UpdateCommandOptions) -> Result<i32> {
         &status_path,
     )? {
         AcquireOutcome::Join { status_path } => {
-            // Relay the running update's terminal status (TS
-            // `waitForActiveDaemonUpdateRestartCoordinator`). The running
-            // coordinator's invoker owns the telemetry emission.
+            // Relay the running update's terminal status; the running coordinator's invoker owns
+            // the telemetry emission.
             let status = tail_status(&status_path).await;
             print_terminal(&status);
             return Ok(i32::from(status.state != UpdateState::Complete));
@@ -102,11 +93,10 @@ pub async fn run_update_command(options: &UpdateCommandOptions) -> Result<i32> {
             archive_sha256,
             base_url,
         }) => {
-            // The release lookup resolved: the plan's target version rides
-            // the installation-stage events.
+            // The plan's target version rides the installation-stage events.
             phases.target_version = Some(version.clone());
-            // `Downloading`: stream + digest the archive (one wall-clock
-            // budget across all attempts, spec §9).
+            // `Downloading`: stream + digest the archive (one wall-clock budget across all
+            // attempts, spec §9).
             writer.set_state(UpdateState::Downloading)?;
             phases.phase(writer.current());
             let archive = agent_dir.join(format!("update-{update_id}.tar.gz"));
@@ -140,10 +130,8 @@ pub async fn run_update_command(options: &UpdateCommandOptions) -> Result<i32> {
             version,
             candidate_dir,
         }) => {
-            // `Staged` directly: the payload was staged by `plan_direct`
-            // (scratch + fsync + atomic rename); the probe below re-checks
-            // the binary's `--version` against the version the release
-            // name carries.
+            // `Staged` directly: `plan_direct` already staged the payload;
+            // the probe below re-checks the binary's `--version`.
             writer.set_state(UpdateState::Staged)?;
             phases.phase(writer.current());
             super::swap::validate_candidate(&candidate_dir.join("prime-agent"), &version).await?;
@@ -154,8 +142,8 @@ pub async fn run_update_command(options: &UpdateCommandOptions) -> Result<i32> {
             candidate_dir,
             ..
         }) => {
-            // A rollback stages nothing; the previous release is already
-            // validated on disk. The coordinator IS the previous binary.
+            // A rollback stages nothing; the previous release is already validated on disk. The
+            // coordinator IS the previous binary.
             writer.set_state(UpdateState::Staged)?;
             (coordinator_exe, candidate_dir)
         }
@@ -165,17 +153,16 @@ pub async fn run_update_command(options: &UpdateCommandOptions) -> Result<i32> {
             release(&agent_dir, &socket_path.to_string_lossy())?;
             track_update_completed(writer.current()).await;
             println!("{reason}");
-            // TS `setSelfUpdateNoChangeExitCode`: an interactive child
-            // reports no-change with the not-attempted code so the client
-            // keeps running instead of relaunching an unchanged binary.
+            // An interactive child reports no-change with the not-attempted
+            // code so the client keeps running (TS `setSelfUpdateNoChangeExitCode`).
             let interactive_child =
                 std::env::var(crate::public_command::SELF_UPDATE_INTERACTIVE_CHILD_ENV).as_deref()
                     == Ok("1");
             return Ok(if interactive_child { 75 } else { 0 });
         }
         Err(error) => {
-            // A planning failure aborts before any state that could wedge:
-            // the daemon never stopped (spec §4 `Aborted`).
+            // A planning failure aborts before any state that could wedge: the daemon never stopped
+            // (spec §4 `Aborted`).
             writer.set_state(UpdateState::Aborted)?;
             writer.set_message(Some(error.to_string()))?;
             release(&agent_dir, &socket_path.to_string_lossy())?;
@@ -185,8 +172,7 @@ pub async fn run_update_command(options: &UpdateCommandOptions) -> Result<i32> {
     };
 
     // Spawn the detached coordinator (the new - or previous - binary) and
-    // hand the lock over (spec §3: the user-facing process exits after
-    // spawning it; only the status file couples them).
+    // hand the lock over (spec §3: only the status file couples them).
     let mut command = std::process::Command::new(&coordinator_exe);
     command
         .args([
@@ -201,8 +187,8 @@ pub async fn run_update_command(options: &UpdateCommandOptions) -> Result<i32> {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        // The coordinator inherits this CLI's environment minus the worker
-        // role markers (the TS launcher deletes the same set).
+        // The coordinator inherits this CLI's environment minus the worker role markers (the TS
+        // launcher deletes the same set).
         .env_remove(pa_daemon::worker::WORKER_ROLE_ENV)
         .env_remove(pa_daemon::worker::WORKER_TOKEN_ENV)
         .env_remove(pa_daemon::worker::WORKER_ACTIVE_SESSION_ID_ENV)
@@ -244,15 +230,8 @@ pub async fn run_update_command(options: &UpdateCommandOptions) -> Result<i32> {
     Ok(i32::from(status.state != UpdateState::Complete))
 }
 
-/// The manual/direct install (`--archive <payload>`): no manifest and no
-/// channel decision — the operator names the payload, the version comes
-/// from the payload binary's `--version` probe, and the staging is
-/// copy-to-scratch + fsync + atomic rename (the in-place `cp` over a
-/// running binary that corrupted two installs is structurally impossible
-/// here). The current launcher must already name a valid release — the
-/// coordinator's rollback boot depends on it — so a broken launcher is
-/// refused with a repair hint before any binary is replaced (the flag
-/// parser validated `--source`; the staging boundary re-validates it).
+/// The manual/direct install (`--archive <payload>`): the version comes from the
+/// payload binary's `--version` probe, staged copy-to-scratch + fsync + atomic rename.
 async fn plan_direct(
     install_root: &std::path::Path,
     options: &UpdateCommandOptions,
@@ -267,8 +246,8 @@ async fn plan_direct(
     if !archive.exists() {
         anyhow::bail!("the release payload {} does not exist", archive.display());
     }
-    // The active launcher must name a valid release before anything is
-    // replaced: the coordinator records it as the rollback target.
+    // The active launcher must name a valid release before anything is replaced: the coordinator
+    // records it as the rollback target.
     if pa_core::update::install::read_installation(
         install_root,
         pa_core::update::install::CURRENT_LAUNCHER,
@@ -287,9 +266,8 @@ async fn plan_direct(
     })
 }
 
-/// Tail the coordinator's status file to a terminal state (TS
-/// `launchDaemonUpdateRestartCoordinator`'s wait loop): progress, liveness,
-/// and the holder's process lifetime all bound the wait.
+/// Tail the coordinator's status file to a terminal state: progress, liveness, and the holder's
+/// process lifetime all bound the wait.
 async fn tail_status(status_path: &std::path::Path) -> UpdateStatus {
     tail_status_with(status_path, &mut |_, _| {}).await
 }
@@ -304,11 +282,10 @@ async fn tail_status_with(
     let mut last_liveness = std::time::Instant::now();
     let mut last_epoch: Option<u64> = None;
     let mut last_state: Option<UpdateState> = None;
-    // The successor's boot sweep (spec §6 step 1) deletes the scratch dir —
-    // including this status file — while the coordinator is still driving
-    // the successor's `Restoring`/`Complete` writes. A file that was seen
-    // and then vanishes is the sweep, not a dead coordinator: grace it
-    // within the liveness budget instead of failing the tail mid-update.
+    // The successor's boot sweep (spec §6 step 1) deletes the scratch dir,
+    // this status file included, while the coordinator still drives the
+    // successor's `Restoring`/`Complete` writes: grace a seen-then-vanished
+    // file instead of failing the tail mid-update.
     let mut missing_since: Option<std::time::Instant> = None;
     loop {
         if let Some(status) = read_status(status_path) {
@@ -317,8 +294,8 @@ async fn tail_status_with(
                 last_liveness = std::time::Instant::now();
             }
             missing_since = None;
-            // One observation per NEW state (epoch churn inside a state -
-            // heartbeats - does not re-fire the observers).
+            // One observation per NEW state (epoch churn inside a state - heartbeats - does not
+            // re-fire the observers).
             if last_state != Some(status.state) {
                 let fresh = last_state.is_some();
                 last_state = Some(status.state);
@@ -375,8 +352,8 @@ fn print_terminal(status: &UpdateStatus) {
     }
 }
 
-/// The §11 CLI status line for one live state (the terminal states print
-/// the TS-parity report instead).
+/// The §11 CLI status line for one live state (the terminal states print the TS-parity report
+/// instead).
 fn phase_status_line(state: UpdateState) -> Option<&'static str> {
     match state {
         UpdateState::Preparing => Some("Preparing the daemon for the update…"),
@@ -385,11 +362,8 @@ fn phase_status_line(state: UpdateState) -> Option<&'static str> {
         UpdateState::Activating | UpdateState::Booting => Some("Activating → booting"),
         UpdateState::Restoring => Some("Restoring sessions…"),
         UpdateState::Rollback => Some("Rolling back"),
-        // `Acquire`/`Join` precede the coordinator's status file; `Stopped`
-        // is `Stopping`'s own tail (the successor's spawn follows); the
-        // terminal states print the TS-parity report instead.
-        // `Downloading`/`Staged` print their own lines in the invoking
-        // phase (before the coordinator spawns).
+        // `Acquire`/`Join` precede the status file; `Stopped` is `Stopping`'s own
+        // tail; `Downloading`/`Staged` print in the invoking phase.
         UpdateState::Acquire
         | UpdateState::Join
         | UpdateState::Downloading
@@ -403,23 +377,17 @@ fn phase_status_line(state: UpdateState) -> Option<&'static str> {
     }
 }
 
-/// One `update_<phase>` telemetry event per status-file transition (spec
-/// §11: every surface derives from the same transitions; the invoker owns
-/// the emission - coordinator mode never emits). Primitives only: phase
-/// name, observed duration, and the terminal counts. The privacy contract
-/// keeps paths, messages, and ids out.
+/// One `update_<phase>` telemetry event per status-file transition (spec §11: the
+/// invoker owns the emission). Primitives only.
 struct PhaseTelemetry {
     client: Option<pa_telemetry::TelemetryClient>,
     last_observed: Option<std::time::Instant>,
-    /// States already emitted this invocation: the invoking CLI emits its
-    /// own phases directly (Downloading/Staged) and the tail's first
-    /// observation must not duplicate them.
+    /// States already emitted: the CLI emits Downloading/Staged directly, so
+    /// the tail's first observation must not duplicate them.
     emitted: Vec<UpdateState>,
-    /// The installed version at update start (`from_version`; the running
-    /// binary's version).
+    /// The installed version at update start.
     from_version: Option<String>,
-    /// The plan's target release (`target_version`; set once the release
-    /// lookup resolved).
+    /// The plan's target release (set once the release lookup resolved).
     target_version: Option<String>,
 }
 
@@ -449,11 +417,8 @@ impl PhaseTelemetry {
         if self.emitted.contains(&status.state) {
             return;
         }
-        // Only states with a v1 phase event OR a v2 stage mapping own a
-        // duration window; unmapped states (`Planning`, `Acquire`,
-        // `Join`, `Stopped`) never consume the window - a `Stopped`
-        // observation between mapped stages would otherwise shorten the
-        // next stage's duration instead of being skipped.
+        // Only mapped states own a duration window; a `Stopped` observation
+        // between mapped stages would otherwise shorten the next stage's duration.
         let v2_stage = installation_stage(status.state);
         let v1_event = phase_event_name(status.state);
         if v2_stage.is_none() && v1_event.is_none() {
@@ -465,9 +430,8 @@ impl PhaseTelemetry {
             .last_observed
             .map_or(0, |last| now.duration_since(last).as_millis() as u64);
         self.last_observed = Some(now);
-        // The v2 installation stage fires for EVERY mapped transition -
-        // including the ones without their own v1 phase event (`Skipped`:
-        // the already-current path still reports `completed`/`skipped`).
+        // The v2 installation stage fires for EVERY mapped transition,
+        // including the ones without their own v1 phase event.
         self.installation_stage(status, duration_ms, v2_stage);
         let Some(event) = v1_event else {
             return;
@@ -492,11 +456,8 @@ impl PhaseTelemetry {
         client.track(event, properties);
     }
 
-    /// `agent installation stage` (v2, #2117): the same status-file
-    /// transitions mapped onto the installer-stage vocabulary, one event
-    /// per transition, carrying the attempt id, the version pair, and
-    /// the terminal restore counts. Primitives only: no paths, no
-    /// messages, no ids beyond the attempt id.
+    /// `agent installation stage` (v2): one event per status-file transition in
+    /// installer-stage vocabulary, with the attempt id and version pair.
     fn installation_stage(
         &self,
         status: &UpdateStatus,
@@ -536,9 +497,8 @@ impl PhaseTelemetry {
     }
 }
 
-/// The #2117 installation-stage mapping for one coordinator state: the
-/// FSM's transition onto the installer vocabulary (`stage`, `outcome`,
-/// optional `reason`).
+/// The installation-stage mapping for one coordinator state (`stage`, `outcome`, optional
+/// `reason`).
 fn installation_stage(
     state: UpdateState,
 ) -> Option<(&'static str, &'static str, Option<&'static str>)> {
@@ -563,9 +523,8 @@ fn installation_stage(
     }
 }
 
-/// The §11 telemetry event for one coordinator state (`None` for states
-/// without their own event: `Planning`, `Skipped`, and the phases the
-/// invoking CLI emits directly around its own work).
+/// The §11 telemetry event for one coordinator state (`None` for `Planning`,
+/// `Skipped`, and the phases the invoking CLI emits directly).
 fn phase_event_name(state: UpdateState) -> Option<&'static str> {
     match state {
         UpdateState::Downloading => Some("update_download_started"),
@@ -587,9 +546,8 @@ fn phase_event_name(state: UpdateState) -> Option<&'static str> {
     }
 }
 
-/// `update completed`: the update flow's adoption event, one per invocation
-/// at the terminal status (primitives only; the privacy contract keeps
-/// paths, messages, and ids out of telemetry).
+/// `update completed`: the adoption event, one per invocation at the terminal status (primitives
+/// only).
 async fn track_update_completed(status: &UpdateStatus) {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let agent_dir = crate::config::get_agent_dir();
@@ -624,20 +582,17 @@ async fn track_update_completed(status: &UpdateStatus) {
     let _ = client.shutdown().await;
 }
 
-/// The coordinator mode entry (`update --internal-update-restart-coordinator
-/// --daemon-socket <path> --internal-update-restart-status <path>`): the
+/// The coordinator mode entry (`--internal-update-restart-coordinator`): the
 /// detached process that adopts the staged status and drives the FSM to a
 /// terminal state. Returns the process exit code.
 ///
 /// # Errors
-/// Returns an error when the coordinator cannot adopt the staged status
-/// record or a status write fails. An invalid invocation (a status path
-/// outside the agent dir's `update-restarts/`) is reported on stderr and
-/// returns `Ok(1)` instead.
+/// Returns an error when adoption or a status write fails; an invalid
+/// invocation is reported on stderr and returns `Ok(1)`.
 pub async fn run_coordinator_mode(socket_path: PathBuf, status_path: PathBuf) -> Result<i32> {
     let agent_dir = crate::config::get_agent_dir();
-    // TS parity: the status file belongs under the agent dir's
-    // `update-restarts/` - the coordinator never writes status elsewhere.
+    // TS parity: the status file belongs under the agent dir's `update-restarts/` - the coordinator
+    // never writes status elsewhere.
     let restarts_dir = pa_types::daemon::update_flow::update_restarts_dir(&agent_dir);
     if !status_path.starts_with(&restarts_dir) {
         eprintln!("Invalid daemon update restart coordinator invocation.");

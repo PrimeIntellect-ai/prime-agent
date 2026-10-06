@@ -1,14 +1,8 @@
-//! The queue-admission family (moved with its concern): the suspension
-//! park, the steering/follow-up batching policies, the forced batch, the
-//! abort-and-send-queued flow, and the pump fixtures (`runner_events`,
-//! `queued_prompt`, `drain_pump`, `delivered_rows`).
+//! The queue-admission family: the suspension park, the
+//! steering/follow-up batching policies, the forced batch, the
+//! abort-and-send-queued flow, and the pump fixtures.
 use super::*;
 
-/// Run one scripted turn and return its session-event frames in wire
-/// order.
-/// The suspension parks the turn runner (TS `_scheduleSessionInputPump`
-/// refuses while `_sessionInputPumpSuspended`): a queued steering item
-/// survives undelivered until the flag clears, then runs.
 #[tokio::test]
 async fn suspended_runner_parks_a_queued_item_until_resumed() {
     let engine = ScriptedEngine::default();
@@ -35,8 +29,6 @@ async fn suspended_runner_parks_a_queued_item_until_resumed() {
     let parked = std::sync::Arc::clone(&runner.core);
     let work_notify = std::sync::Arc::clone(&runner.work_notify);
     let running = tokio::spawn(async move { runner.run().await });
-    // The runner idles through the suspension window without
-    // starting the queued turn.
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     {
         let core = parked.lock().unwrap();
@@ -47,8 +39,6 @@ async fn suspended_runner_parks_a_queued_item_until_resumed() {
             "the queued item was consumed while suspended"
         );
     }
-    // A resume site clears the flag and wakes the runner: the parked
-    // turn completes.
     {
         let mut core = parked.lock().unwrap();
         core.queued_input_suspended = false;
@@ -59,8 +49,7 @@ async fn suspended_runner_parks_a_queued_item_until_resumed() {
     running.abort();
 }
 
-/// The session-event frames off the runner's event pump (the same
-/// wire shape the outer tests' `session_events_since` collects).
+/// The session-event frames off the runner's event pump.
 fn runner_events(
     subscription: &mut tokio::sync::broadcast::Receiver<Arc<OutboundFrame>>,
 ) -> Vec<Value> {
@@ -115,8 +104,7 @@ async fn drain_pump(core: &Arc<Mutex<SessionCore>>, work_notify: &Arc<Notify>) {
 }
 
 /// The settled user/assistant rows of the session events, in wire
-/// order (the `message_end` frames; the scripted engine carries the
-/// text as a plain string content, the real engine as content parts).
+/// order (`message_end` frames; string content or content parts).
 fn delivered_rows(events: &[Value]) -> Vec<(String, String)> {
     events
         .iter()
@@ -155,11 +143,6 @@ fn delivered_rows(events: &[Value]) -> Vec<(String, String)> {
         .collect()
 }
 
-/// TS `_pumpSessionInputs` under queue mode "all"
-/// (`turnExecutionPoliciesEqual` + the mode gate): the same-lane
-/// same-class prefix co-delivers as ONE batched turn — one
-/// `agent_start`/`turn_start` pair, every user row in delivery order,
-/// one assistant reply for the whole batch.
 #[tokio::test]
 async fn steering_mode_all_batches_the_queued_prefix_into_one_turn() {
     let engine: Arc<dyn SessionEngine> = Arc::new(
@@ -207,9 +190,6 @@ async fn steering_mode_all_batches_the_queued_prefix_into_one_turn() {
     );
 }
 
-/// The product default: with no explicit mode set, the steering
-/// lane co-delivers the queued same-class prefix as ONE batched turn
-/// at the boundary.
 #[tokio::test]
 async fn the_default_mode_co_delivers_the_queued_steering_prefix() {
     let engine: Arc<dyn SessionEngine> = Arc::new(
@@ -255,15 +235,11 @@ async fn the_default_mode_co_delivers_the_queued_steering_prefix() {
     );
 }
 
-/// Queue mode "one-at-a-time" (selectable via the `steeringMode`
-/// setting; the product default is "all"): each queued steer is its
-/// own turn — one reply each, delivered in order.
 #[tokio::test]
 async fn one_at_a_time_delivers_each_queued_steer_as_its_own_turn() {
-    // The burst harness has no session store, so the scripted engine
-    // serves its first response for EVERY turn (prompt_index stays
-    // 0): the turns are discriminated by the agent_start count and
-    // the user-row order, not the reply text.
+    // The burst harness has no session store, so the scripted engine serves
+    // its first response for EVERY turn (prompt_index stays 0): the turns
+    // are discriminated by the agent_start count and the user-row order.
     let engine: Arc<dyn SessionEngine> = Arc::new(
         ScriptedEngine::from_value(&json!({ "responses": ["settled reply"] })).unwrap_or_default(),
     );
@@ -302,15 +278,9 @@ async fn one_at_a_time_delivers_each_queued_steer_as_its_own_turn() {
     );
 }
 
-/// The forced steering batch (TS `abortAndSendQueued`'s
-/// `_forcedAllSteeringActionIds`): the armed prefix co-delivers as ONE
-/// turn even under queue mode "one-at-a-time" (pinned explicitly —
-/// the product default is "all"); an item queued after the arm stays
-/// out of the batch and delivers next.
+/// An item queued after the arm stays out of the batch.
 #[tokio::test]
 async fn forced_batch_delivers_the_armed_prefix_as_one_turn() {
-    // (The burst harness serves the first scripted response for every
-    // turn — see one_at_a_time above.)
     let engine: Arc<dyn SessionEngine> = Arc::new(
         ScriptedEngine::from_value(&json!({ "responses": ["batch reply"] })).unwrap_or_default(),
     );
@@ -326,8 +296,6 @@ async fn forced_batch_delivers_the_armed_prefix_as_one_turn() {
         for item in &mut core.steering {
             item.forced_batch = true;
         }
-        // An un-armed steer queued behind the armed prefix (a steer
-        // that arrived after the abort): it never joins the batch.
         core.steering
             .push_back(queued_prompt("late steer", TurnPolicy::Queued));
     }
@@ -361,13 +329,8 @@ async fn forced_batch_delivers_the_armed_prefix_as_one_turn() {
     );
 }
 
-/// TS `turnExecutionPoliciesEqual`: mode "all" never batches across
-/// turn-execution classes — a client steer and an injected heartbeat
-/// row deliver as separate turns even under "all".
 #[tokio::test]
 async fn mode_all_never_batches_across_policy_classes() {
-    // (The burst harness serves the first scripted response for every
-    // turn — see one_at_a_time above.)
     let engine: Arc<dyn SessionEngine> = Arc::new(
         ScriptedEngine::from_value(&json!({ "responses": ["lane reply"] })).unwrap_or_default(),
     );
@@ -406,8 +369,6 @@ async fn mode_all_never_batches_across_policy_classes() {
     );
 }
 
-/// The follow-up lane batches under its own mode (TS `followUpMode`):
-/// two queued follow-ups co-deliver as one turn with "all".
 #[tokio::test]
 async fn follow_up_mode_all_batches_the_follow_up_lane() {
     let engine: Arc<dyn SessionEngine> = Arc::new(
@@ -448,15 +409,7 @@ async fn follow_up_mode_all_batches_the_follow_up_lane() {
     );
 }
 
-/// Kevin's acceptance case (the multi-steer abort flow, TS
-/// `abortAndSendQueued` + `interactive-mode.ts`'s Ctrl+C path): on the
-/// abort of a streaming turn, ALL visible queued plain-user steering
-/// messages send together as the next batched turn — the follow-up
-/// lane stays queued behind it (never discarded, never merged), then
-/// runs in order once the session goes idle; the arm co-delivers
-/// under any mode (the product default is "all"), and the queue
-/// parks only when the abort leaves nothing visible behind (the
-/// plain-abort shape).
+/// Kevin's acceptance case: ALL visible steers send together; the follow-up runs once idle.
 #[tokio::test]
 #[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
 async fn abort_and_send_queued_delivers_the_steering_batch_then_the_follow_ups() {
@@ -514,16 +467,10 @@ async fn abort_and_send_queued_delivers_the_steering_batch_then_the_follow_ups()
         );
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
-    // The TS acceptance case's positive-signal discipline (ENG-5991's
-    // `waitForToolStart`): the abort must land on the REGISTERED run —
-    // `core.busy` flips at the runner's pickup, before the engine's
-    // admission, so a busy-only sync races the first turn's session
-    // build and the abort lands in the admission prefix (the
-    // abort-and-send idle race: the consult aborts the turn before its
-    // provider call, the faux step the held turn never consumed leaks
-    // to the batch turn, and the batch inherits the 600s hold). The
-    // run slot is the registration signal: once it exists the abort
-    // lands on the run itself, the shape this family means to pin.
+    // The abort must land on the REGISTERED run (ENG-5991's `waitForToolStart`
+    // discipline): `core.busy` flips at the runner's pickup, before the
+    // engine's admission, so a busy-only sync races the session build. The
+    // run slot is the registration signal.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         let registered = worker
@@ -548,9 +495,7 @@ async fn abort_and_send_queued_delivers_the_steering_batch_then_the_follow_ups()
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-    // Two steering messages and one follow-up behind the streaming
-    // turn (the real wire admission path: queue-visible, policy-queued
-    // rows).
+    // Two steers and one follow-up behind the streaming turn.
     for message in ["steering one", "steering two"] {
         let steered = worker
             .dispatch("steer", &json!({ "message": message }))
@@ -564,10 +509,7 @@ async fn abort_and_send_queued_delivers_the_steering_batch_then_the_follow_ups()
         )
         .await;
     assert!(follow.success, "follow_up failed: {follow:?}");
-    // The funnel (the wire command's body — #2599's handler calls it):
-    // arm the visible plain-user steering, abort the run, resume the
-    // pump. The arm carries the batch under any mode; the default
-    // itself is asserted below (the product default "all").
+    // The funnel: arm the steering, abort the run, resume the pump.
     let sent = worker.abort_and_send_queued();
     assert!(sent, "the armed steering batch sent with the abort");
     let idle = tokio::time::timeout(
@@ -577,9 +519,6 @@ async fn abort_and_send_queued_delivers_the_steering_batch_then_the_follow_ups()
     .await;
     assert!(idle.is_ok(), "the session never went idle after the abort");
     assert!(idle.unwrap().success, "wait_for_idle failed");
-    // The aborted turn's row + the batched steers + the follow-up, in
-    // order: the two steers share ONE turn (one reply), the follow-up
-    // runs after it as its own turn.
     let messages = worker.dispatch("get_messages", &json!({})).await;
     assert!(messages.success, "get_messages failed: {messages:?}");
     let wire_messages = messages
@@ -604,9 +543,6 @@ async fn abort_and_send_queued_delivers_the_steering_batch_then_the_follow_ups()
         ],
         "the steering batch sent as one turn; the follow-up ran after it: {texts:?}"
     );
-    // The reply granularity: the aborted row, then ONE assistant
-    // reply for the whole steering batch, then the follow-up's own
-    // reply (never one per steer).
     let replies: Vec<String> = wire_messages
         .iter()
         .filter(|message| crate::types::message_role(message) == Some("assistant"))
@@ -622,8 +558,6 @@ async fn abort_and_send_queued_delivers_the_steering_batch_then_the_follow_ups()
         &["batch reply".to_string(), "follow-up reply".to_string()],
         "one reply for the batch, one for the follow-up: {replies:?}"
     );
-    // The wire frames: each batched user row broadcasts exactly once
-    // (the accepted-row emission — never the engine's loop re-emission).
     let events = runner_events(&mut subscription);
     let wire_user_starts: Vec<String> = events
         .iter()
@@ -667,13 +601,7 @@ async fn abort_and_send_queued_delivers_the_steering_batch_then_the_follow_ups()
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The abort's acknowledgment never waits for the queue's delivery:
-/// with the aborted turn AND the queued follow-up's reply both held,
-/// `abort_and_send_queued` answers immediately and the resumed pump
-/// starts the follow-up's own turn behind the ack. A second, bare
-/// `abort` (the API surface) then ends that turn cleanly, delivers
-/// no duplicate of the follow-up's row, and parks the emptied queue
-/// behind the suspension like the TS plain abort.
+/// Answers immediately while both the aborted turn and the follow-up's reply are held.
 #[tokio::test]
 #[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
 async fn abort_and_send_queued_acks_before_the_follow_up_delivery() {
@@ -733,9 +661,8 @@ async fn abort_and_send_queued_acks_before_the_follow_up_delivery() {
         .dispatch("follow_up", &json!({ "message": "ack follow-up" }))
         .await;
     assert!(follow.success, "follow_up failed: {follow:?}");
-    // The ack: the aborted turn's settle AND the follow-up's own
-    // reply are both held, so a funnel that awaited the settle or
-    // the delivery would never answer inside the bound.
+    // Both the aborted turn's settle and the follow-up's reply are held, so
+    // a funnel that awaited either would never answer inside the bound.
     let aborted = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         worker.dispatch("abort_and_send_queued", &json!({})),
@@ -748,8 +675,6 @@ async fn abort_and_send_queued_acks_before_the_follow_up_delivery() {
     let aborted = aborted.unwrap();
     assert!(aborted.success, "abort_and_send_queued failed: {aborted:?}");
     assert_eq!(aborted.command, "abort_and_send_queued");
-    // The follow-up starts promptly behind the ack: its turn runs
-    // (the paced reply holds it) and its row left the queue.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         let (busy, queued) = {
@@ -787,10 +712,9 @@ async fn abort_and_send_queued_acks_before_the_follow_up_delivery() {
         ],
         "the follow-up row must deliver exactly once: {texts:?}"
     );
-    // The API abort surface: a bare `abort` ends the follow-up's
-    // own turn cleanly and parks the emptied queue behind the
-    // suspension (the TS plain-abort park the Ctrl+C funnel
-    // deliberately does not take).
+    // A bare `abort` ends the follow-up's turn cleanly and parks the emptied
+    // queue behind the suspension (the TS plain-abort park the Ctrl+C
+    // funnel deliberately does not take).
     let aborted_again = worker.dispatch("abort", &json!({})).await;
     assert!(
         aborted_again.success,
@@ -815,8 +739,6 @@ async fn abort_and_send_queued_acks_before_the_follow_up_delivery() {
             "the bare abort parks the queue behind the suspension"
         );
     }
-    // The second abort ends the follow-up's turn — it never
-    // re-delivers or duplicates the follow-up's row.
     let messages = worker.dispatch("get_messages", &json!({})).await;
     assert!(messages.success, "get_messages failed: {messages:?}");
     let texts: Vec<String> = messages

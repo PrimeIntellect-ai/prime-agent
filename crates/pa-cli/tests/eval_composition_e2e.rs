@@ -1,13 +1,5 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
-// by design on hot paths (boxing 130 fns is allocation-churn with zero
-// correctness gain); the fn-length threshold is a style gate, not
-// correctness (the harness fns are intentionally linear); 64-bit targets -
-// the narrowing sits at OS/protocol boundaries where the values are
-// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
-// guarded parses), and checked conversions would add panic paths where
-// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
-// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
-// dossier for the conductor).
+// large_futures: stack futures on hot paths by design. too_many_lines: style gate
+// only. Casts: 64-bit targets; narrowing sits at bounded OS/protocol boundaries.
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -19,11 +11,10 @@
 
 //! End-to-end verifier for the eval/verifiers composition over the headless
 //! session: the CLI autonomous flags drive a print/json session with a
-//! verifier gate command through the #98 gate seams (no eval-specific core
-//! code — the composition is the `prime-agent` binary itself). A fixture
-//! verifier script decides completion; the gate outcome must surface as
-//! durable session rows and structured json events, and the process exit
-//! code must follow the TS print-mode contract (print-mode.ts).
+//! verifier gate command (the composition is the `prime-agent` binary
+//! itself). The gate outcome must surface as durable session rows and
+//! structured json events, and the exit code follows the TS print-mode
+//! contract.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -155,10 +146,9 @@ fn parse_events(stdout: &str) -> Vec<Value> {
 }
 
 /// The verifier-driven session completing: the first turn fails the fixture
-/// verifier, the gate-failure continuation drives a second turn IN-RUN (the
-/// TS shape: no run boundary between continuation turns), the second
-/// consult passes, and the run stops without a row (the TS shape, probed
-/// against the binary: the stop surfaces through the exit contract only).
+/// verifier, the gate-failure continuation drives a second turn IN-RUN (the TS
+/// shape: no run boundary between continuation turns), and the stop surfaces
+/// no row.
 #[test]
 fn verifier_gate_pass_stops_the_run_with_structured_events_in_run() {
     let home = isolated_home();
@@ -180,11 +170,9 @@ fn verifier_gate_pass_stops_the_run_with_structured_events_in_run() {
     assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
     let events = parse_events(&stdout);
 
-    // Header first.
     assert_eq!(events[0]["type"], "session");
     assert_eq!(events[0]["version"], 3);
 
-    // Both scripted turns ran, in order.
     let assistant_texts: Vec<String> = events
         .iter()
         .filter(|event| event["type"] == "message_end" && event["message"]["role"] == "assistant")
@@ -281,8 +269,7 @@ fn verifier_gate_pass_stops_the_run_with_structured_events_in_run() {
 }
 
 /// A verifier that never passes exhausts its retry window: the process exits
-/// one, the TS print-mode stderr line names the attempt and exit code, and
-/// the stop writes no row (the exit contract carries it).
+/// one with the TS print-mode stderr line; the stop writes no row.
 #[test]
 fn verifier_gate_failure_exhausts_retries_and_exits_one() {
     let home = isolated_home();
@@ -382,8 +369,8 @@ fn text_mode_verifier_pass_prints_the_final_answer() {
 }
 
 /// The autonomous contract without gates: a budget limit stops the run and
-/// the process exits one with the TS "stopped before terminal evidence"
-/// line; the stop writes no row.
+/// exits one with the TS "stopped before terminal evidence" line; the stop
+/// writes no row.
 #[test]
 fn autonomous_limit_without_gates_exits_one_without_a_row() {
     let home = isolated_home();

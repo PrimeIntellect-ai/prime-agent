@@ -1,31 +1,9 @@
-//! Force-quit guard for the double-Ctrl+C exit contract.
-//!
-//! The interactive loop is not always alive when the user wants out: a
-//! daemon request on the key-handling path can hold the loop for seconds
-//! (`UI_REQUEST_TIMEOUT_MS`), the exit path itself awaits several bounded
-//! requests, and a wedged runtime never runs those bounds at all. Issue
-//! #138's per-request caps bound the healthy path, but the second Ctrl+C
-//! still has to be *observed by the loop* before they apply, so the exit
-//! could lag indefinitely — the live report: the first press is accepted
-//! (abort sent), the second never terminates.
-//!
-//! The contract this module enforces: two Ctrl+C presses inside the exit
-//! window mean exit, and the process is gone within
-//! [`FORCE_QUIT_AFTER_MS`] of the second press — no matter what the loop,
-//! the daemon connection, or the async runtime is doing. The observation
-//! runs on the terminal reader thread (the one component that stays alive
-//! when the UI loop is wedged) and the enforcement runs on a plain
-//! `std::thread` watchdog that needs no runtime, so even a deadlocked
-//! runtime cannot stop it.
-//!
-//! Semantics stay TS-exact while the loop is healthy: the reader arms the
-//! watchdog for any in-window Ctrl+C *pair*, and the loop disarms it once
-//! it has handled every observed Ctrl+C press without exiting (first press
-//! closed an autocomplete or aborted the turn, TS `handleCtrlC`). Counted
-//! handoff is what makes both directions sound: a handled press can never
-//! clear the deadline of a press still queued behind it, so a pair that
-//! the wedged loop never reaches always fires, and a pair a healthy loop
-//! consumed always disarms.
+//! Force-quit guard for the double-Ctrl+C exit contract: two presses
+//! inside the exit window mean exit, and the process is gone within
+//! [`FORCE_QUIT_AFTER_MS`] of the second press — a wedged runtime never
+//! runs the per-request caps, so the second press must not wait for the
+//! loop to observe it (the reader thread observes, a plain-thread
+//! watchdog enforces).
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -33,54 +11,31 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-/// The double-press window (TS `EXIT_HINT_DURATION_MS`): a Ctrl+C pair is
-/// two presses at most this far apart.
+/// The double-press window (TS `EXIT_HINT_DURATION_MS`).
 pub(crate) const CTRL_C_WINDOW_MS: u64 = 2_000;
-/// Hard ceiling from the second Ctrl+C to process exit. The contract is
-/// "exited within 2 seconds of the second press"; the watchdog fires
-/// 500ms inside that so the exit (best-effort terminal restore plus
-/// `process::exit`) is *observed* within the 2s window once process
-/// teardown and terminal latency are included.
+/// Hard ceiling from the second Ctrl+C to process exit: the watchdog fires
+/// 500ms inside the 2s contract so the exit (best-effort restore plus
+/// `process::exit`) is observed within the window once teardown and
+/// terminal latency are included.
 pub(crate) const FORCE_QUIT_AFTER_MS: u64 = 1_500;
 /// How long the exit path may stay silent after a real observation of
-/// progress before the watchdog treats it as stalled. The exit flush
-/// hands the whole transcript to the terminal in bounded chunks
-/// (view/flush.rs `FlushSink`), and a slow terminal consumes those chunks at
-/// its own pace: the writer blocks inside `write` while the terminal
-/// drains, which looks exactly like a wedged shutdown to a pure wall
-/// clock. A completed chunk write is proof the exit is moving, so the
-/// watchdog holds fire while progress was observed within this window
-/// and force-quits only once it goes stale (a dead terminal, a wedged
-/// writer). TS has no watchdog at all — its exit simply waits for the
-/// writes — so holding on observed progress is the TS-healthy behavior;
-/// the hard 1500ms ceiling stays for the silent case (the wedged loop
-/// the guard was built for). With 32KiB chunks this holds for any drain
-/// faster than ~65KB/s; slower drains read as stalled and force-quit
-/// (deliberate: the 1500ms contract outranks an unbounded wait).
+/// progress before the watchdog treats it as stalled. A slow terminal
+/// blocks inside `write` while it drains, which looks like a wedged
+/// shutdown to a wall clock; a completed chunk write is proof of movement
+/// (TS has no watchdog — this is the TS-healthy behavior).
 const EXIT_PROGRESS_GRACE_MS: u64 = 500;
-/// Watchdog poll slice: the sleep-until-deadline loop wakes this often to
-/// re-read the deadline (so a disarm or cancel lands) and never
-/// overshoots the deadline by more than a few milliseconds.
+/// Watchdog poll slice: re-read the deadline this often so a disarm or cancel lands.
 const WATCHDOG_POLL_MS: u64 = 25;
 /// The name of the watchdog thread (visible in thread dumps).
 const WATCHDOG_THREAD_NAME: &str = "tui-exit-watchdog";
 
 /// When the exit path last proved it is making progress (`None` until the
-/// first proof). Process-global on purpose: the writers that owe the proof
-/// (the exit flush's chunked writes in view.rs, the release tail in
-/// `exit_restore.rs`, the resume hint in `pa-cli`) do not own the guard — the
-/// guard is shared across surfaces and the writers live in other layers —
-/// and a stamp beside the watchdog reads at every poll slice exactly the
-/// same state any guard's watchdog would. One TUI process, one exit.
+/// first proof). Process-global: the writers that owe the proof live in
+/// other layers; one TUI process, one exit.
 static LAST_EXIT_PROGRESS: Mutex<Option<Instant>> = Mutex::new(None);
 
-/// Report exit-path progress: the writer completed a real step toward the
-/// process exit (a flush chunk, a release-tail write, the resume hint).
-/// The watchdog holds its force-quit while progress lands within
-/// [`EXIT_PROGRESS_GRACE_MS`]; a shutdown that keeps moving is draining a
-/// slow terminal, not stalled, and TS semantics for it are to let the
-/// writes finish (TS has no forced exit at all). Feeding is one mutex
-/// store per bounded chunk: never on a frame path, only on the exit path.
+/// Report exit-path progress: the writer completed a real step. One
+/// mutex store per bounded chunk, exit path only.
 pub fn note_exit_progress() {
     if let Ok(mut last) = LAST_EXIT_PROGRESS.lock() {
         *last = Some(Instant::now());
@@ -88,12 +43,8 @@ pub fn note_exit_progress() {
 }
 
 /// Whether the watchdog may force-quit at `now`: the deadline has passed
-/// AND the exit path has been silent for the whole grace window. A fresh
-/// progress stamp means the exit is draining a slow terminal (a healthy
-/// flush), so the forced exit would kill a live writer mid-stream —
-/// truncating the scrollback contract the flush is frozen to, and
-/// queueing the restore's own bytes mid-flush. Silence for the grace
-/// window means nothing is moving: the original wedged-shutdown case.
+/// AND the exit path has been silent for the whole grace window (fresh
+/// progress is a live writer mid-stream).
 fn force_quit_due(now: Instant, deadline: Instant, last_progress: Option<Instant>) -> bool {
     now >= deadline
         && !last_progress.is_some_and(|last| {
@@ -134,18 +85,16 @@ struct GuardState {
     last_ctrl_c_ms: AtomicU64,
     /// Ctrl+C presses observed by the reader thread.
     observed_ctrl_c: AtomicU64,
-    /// Ctrl+C presses handled by the UI loop (every consumer surface
-    /// reports: session editor, model picker, onboarding).
+    /// Ctrl+C presses handled by the UI loop (every consumer surface reports).
     handled_ctrl_c: AtomicU64,
-    /// The run handed the terminal to a follow-on surface (the agents
-    /// view): the process may legitimately continue; no force quit.
+    /// The run handed the terminal to a follow-on surface: the process may legitimately continue;
+    /// no force quit.
     settled: AtomicBool,
     /// The watchdog thread is spawned once, on the first arming.
     watchdog_spawned: AtomicBool,
 }
 
-/// The double-Ctrl+C exit guard. Clones share one state; cheap to pass
-/// around (one `Arc`).
+/// The double-Ctrl+C exit guard; clones share one state.
 #[derive(Clone)]
 pub(crate) struct ExitGuard {
     state: Arc<GuardState>,
@@ -181,8 +130,8 @@ impl ExitGuard {
     }
 
     /// Observe one key from the terminal reader: a Ctrl+C press inside the
-    /// window of the previous press arms the force-quit deadline. Runs on
-    /// the reader thread, independent of the UI loop.
+    /// window of the previous press arms the force-quit deadline (runs on the
+    /// reader thread, independent of the UI loop).
     pub(crate) fn observe_key(&self, key: &KeyEvent) {
         let is_press = matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
             && key.code == KeyCode::Char('c')
@@ -198,12 +147,10 @@ impl ExitGuard {
         }
     }
 
-    /// The UI loop handled one Ctrl+C key (session editor, model picker, or
-    /// onboarding — every consumer reports). Once every observed press has
-    /// been handled and the loop did not exit, the pair was consumed with
-    /// TS semantics (abort, autocomplete cancel): the force-quit deadline
-    /// clears. A press still queued behind this one keeps its deadline, so
-    /// a wedged loop that never reaches the second press still fires.
+    /// The UI loop handled one Ctrl+C key (every consumer reports). Once
+    /// every observed press is handled and the loop did not exit, the pair
+    /// was consumed with TS semantics: the deadline clears. A queued press
+    /// keeps its deadline.
     pub(crate) fn note_ctrl_c_handled(&self) {
         let handled = self.state.handled_ctrl_c.fetch_add(1, Ordering::SeqCst) + 1;
         if handled >= self.state.observed_ctrl_c.load(Ordering::SeqCst) {
@@ -211,19 +158,17 @@ impl ExitGuard {
         }
     }
 
-    /// The run decided to leave (exit key, session request, or the daemon
-    /// connection closing): the process must be gone within
-    /// [`FORCE_QUIT_AFTER_MS`] even if the shutdown path wedges — the
-    /// bounded stats/detach/telemetry requests and the exit flush are all
-    /// best-effort now.
+    /// The run decided to leave: the process must be gone within
+    /// [`FORCE_QUIT_AFTER_MS`] even if the shutdown path wedges — the bounded
+    /// requests and the exit flush are best-effort now.
     pub(crate) fn arm_for_exit(&self) {
         let now_ms = self.ms(Instant::now());
         self.arm(now_ms + FORCE_QUIT_AFTER_MS);
     }
 
     /// Pull the force-quit deadline earlier (never push it later): the
-    /// reader's pair observation is the exact second-press timestamp, so
-    /// it wins over a later loop-side arming.
+    /// reader's pair observation is the exact second-press timestamp, so it
+    /// wins over a later loop-side arming.
     fn arm(&self, deadline_ms: u64) {
         let mut current = self.state.force_deadline_ms.load(Ordering::SeqCst);
         while deadline_ms < current {
@@ -250,10 +195,9 @@ impl ExitGuard {
             .store(u64::MAX, Ordering::SeqCst);
     }
 
-    /// The run finished and the process may continue (the agents-view
-    /// handoff): retire the watchdog. Every other completion is a process
-    /// exit, where the deadline simply dies with the process — or fires
-    /// when the exit wedged, which is the point.
+    /// The run handed the terminal to a follow-on surface: retire the
+    /// watchdog. Every other completion is a process exit — the deadline dies
+    /// with the process, or fires when the exit wedged, which is the point.
     pub(crate) fn cancel(&self) {
         self.state.settled.store(true, Ordering::SeqCst);
         self.disarm();
@@ -280,11 +224,9 @@ fn spawn_watchdog(state: &Arc<GuardState>) {
             let deadline = thread_state.base + Duration::from_millis(deadline_ms);
             let now = Instant::now();
             if now >= deadline {
-                // Drain-aware: the deadline passed, but a writer that
-                // completed a step recently is draining a slow terminal,
-                // not stalled. Hold the fire while progress keeps landing
-                // (checked every poll slice); the silent case still fires
-                // at the deadline, exactly as before.
+                // Drain-aware: the deadline passed, but a writer that completed a step
+                // recently is draining a slow terminal, not stalled. Hold the fire while
+                // progress keeps landing.
                 let last_progress = LAST_EXIT_PROGRESS.lock().ok().and_then(|last| *last);
                 if force_quit_due(now, deadline, last_progress) {
                     force_quit();
@@ -304,8 +246,7 @@ fn spawn_watchdog(state: &Arc<GuardState>) {
 }
 
 /// Force-quit right now: restore the terminal best-effort and exit the
-/// process with code 0 (the user asked to close the TUI; the exit is
-/// deliberate, not a crash).
+/// process with code 0 (the exit is deliberate, not a crash).
 fn force_quit() -> ! {
     crate::exit_restore::restore_terminal();
     eprintln!("Prime Agent: shutdown stalled; forced exit.");
@@ -317,8 +258,7 @@ mod tests {
     use super::*;
 
     /// Serializes the tests that touch the process-global progress stamp:
-    /// the stamp is shared by every test thread, so a reader must hold
-    /// this lock across its whole observation window.
+    /// a reader must hold it across its whole observation window.
     static PROGRESS_STATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn ctrl_c() -> KeyEvent {
@@ -329,20 +269,13 @@ mod tests {
     fn force_quit_holds_only_while_progress_is_fresh() {
         let now = Instant::now();
         let deadline = now + Duration::from_secs(1);
-        // Before the deadline the watchdog never fires, progress or not.
         assert!(!force_quit_due(now, deadline, None));
         assert!(!force_quit_due(now, deadline, Some(now)));
-        // Past the deadline with no progress ever observed: the wedged
-        // shutdown — fires at the deadline, unchanged.
         assert!(force_quit_due(deadline, deadline, None));
-        // Past the deadline with progress inside the grace window: the
-        // exit is draining a slow terminal — hold.
         let fresh = deadline
             .checked_sub(Duration::from_millis(EXIT_PROGRESS_GRACE_MS))
             .expect("the grace window precedes the deadline");
         assert!(!force_quit_due(deadline, deadline, Some(fresh)));
-        // Progress one millisecond older than the grace window: nothing
-        // has moved for the whole window — stalled, fire.
         let stale = deadline
             .checked_sub(Duration::from_millis(EXIT_PROGRESS_GRACE_MS + 1))
             .expect("the stale timestamp precedes the deadline");
@@ -371,15 +304,12 @@ mod tests {
 
     #[test]
     fn first_press_records_and_pairs_arm() {
-        // A lone press (no previous) records only.
         assert_eq!(classify_pair(0, 500), CtrlCDecision::Record);
-        // A second press inside the window arms the force quit.
         assert_eq!(classify_pair(500, 2_200), CtrlCDecision::ArmForceQuit);
         assert_eq!(
             classify_pair(500, 500 + CTRL_C_WINDOW_MS),
             CtrlCDecision::ArmForceQuit
         );
-        // One outside the window records instead.
         assert_eq!(
             classify_pair(500, 501 + CTRL_C_WINDOW_MS),
             CtrlCDecision::Record
@@ -412,8 +342,6 @@ mod tests {
         );
         guard.observe_key(&ctrl_c());
         let second = guard.state.last_ctrl_c_ms.load(Ordering::SeqCst);
-        // Two presses can land in the same millisecond; both must read as
-        // recorded (never 0), and the second at least the first.
         assert!(second >= first);
         let deadline = guard.state.force_deadline_ms.load(Ordering::SeqCst);
         assert!(
@@ -433,17 +361,13 @@ mod tests {
             guard.state.force_deadline_ms.load(Ordering::SeqCst),
             u64::MAX
         );
-        // The first handled press still has its pair partner queued: the
-        // deadline must survive (a wedged loop that never reaches the
-        // second press must still fire).
+        // The first handled press still has its partner queued: the deadline must survive.
         guard.note_ctrl_c_handled();
         assert_ne!(
             guard.state.force_deadline_ms.load(Ordering::SeqCst),
             u64::MAX,
             "a handled press never clears the deadline of a queued one"
         );
-        // The second handled press drained the pair without an exit
-        // (autocomplete cancel, turn abort): disarm.
         guard.note_ctrl_c_handled();
         assert_eq!(
             guard.state.force_deadline_ms.load(Ordering::SeqCst),
@@ -481,7 +405,6 @@ mod tests {
         guard.arm(10_000);
         guard.arm(5_000);
         assert_eq!(guard.state.force_deadline_ms.load(Ordering::SeqCst), 5_000);
-        // A later arming never pushes the deadline out.
         guard.arm(9_000);
         assert_eq!(guard.state.force_deadline_ms.load(Ordering::SeqCst), 5_000);
         guard.cancel();

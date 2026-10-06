@@ -1,4 +1,4 @@
-//! Worker tests (moved with their concerns).
+//! Worker tests.
 use super::*;
 
 async fn snapshot_after_create() -> (Arc<Worker>, DaemonResponse) {
@@ -31,9 +31,6 @@ async fn snapshot_after_create() -> (Arc<Worker>, DaemonResponse) {
     (worker, response)
 }
 
-/// TS `queuedAgentMessagePreview`: the queue action rows serve a
-/// delivery's labeled preview when it carries one, while the raw
-/// steering lane keeps the message text (TS `getSteeringMessages`).
 #[tokio::test]
 async fn queue_action_rows_serve_the_labeled_preview() {
     let (worker, _) = snapshot_after_create().await;
@@ -129,8 +126,7 @@ async fn update_snapshot_reflects_queued_work() {
         "the lane snapshot and the actions projection agree"
     );
 }
-/// The wire text of one RLM child terminal notice (the exact row
-/// `rlm_children::deliver_terminal_notice` rides): the follow-up
+/// The wire text of one RLM child terminal notice: the follow-up
 /// command's `message` plus the injected custom row.
 fn child_status_notice_wire(kind: &str) -> Value {
     let notice = if kind == "failure" {
@@ -167,13 +163,7 @@ fn queued_user_item(message: &str) -> QueuedItem {
     }
 }
 
-/// The queue-fold bug (operator 2026-09-25): parked RLM child status
-/// notices projected as user-like rows — one per exited child behind
-/// a busy turn. The snapshot now carries TYPED provenance: the lane
-/// strings stay the raw notice texts (the TS
-/// `queuedAgentMessagePreview` projection is unchanged), and the
-/// `rlmChildStatus` rider holds the indices of exactly the injected
-/// rows — a user-typed row with the same text never flags.
+/// The rider flags exactly the injected rows (operator 2026-09-25), never a same-text user row.
 #[tokio::test]
 async fn the_action_snapshot_flags_parked_child_status_notices() {
     let (worker, _) = snapshot_after_create().await;
@@ -225,15 +215,6 @@ async fn the_action_snapshot_flags_parked_child_status_notices() {
     assert_eq!(snapshot.queued_count, 5);
 }
 
-/// The real delivery route: the notice rides the follow-up command
-/// with the one-shot capability the daemon mints in this same worker
-/// process, and the parked row carries the typed provenance. The
-/// exact spoofs are answered loudly instead — the same command
-/// without a mint, and a replay of the consumed mint — while the
-/// same-text user row still parks as a plain row. That user row is
-/// human class while the minted notice is background, so admission
-/// priority parks the user row ahead of the notice; the rider names
-/// only the notice's lane slot, whichever position it holds.
 #[tokio::test]
 async fn a_follow_up_notice_parks_with_typed_provenance() {
     let (worker, _) = snapshot_after_create().await;
@@ -297,11 +278,7 @@ async fn a_follow_up_notice_parks_with_typed_provenance() {
     );
 }
 
-/// The spoof matrix (the operator's anti-spoof mandate): the exact
-/// reserved kinds are refused on every client admission surface —
-/// with no mint, with a guessed mint, and on `steer`/`prompt`
-/// regardless — while lookalike kinds (prefix, case, and fused
-/// variants) park as ordinary custom rows that never flag.
+/// The spoof matrix (the operator's anti-spoof mandate).
 #[tokio::test]
 async fn reserved_kind_spoofs_reject_and_lookalikes_park_unflagged() {
     let (worker, _) = snapshot_after_create().await;
@@ -392,9 +369,7 @@ async fn reserved_kind_spoofs_reject_and_lookalikes_park_unflagged() {
     );
 }
 
-/// The rider serializes only when a notice is parked: a notice-free
-/// projection keeps the TS wire shape byte-for-byte (the field is
-/// skipped), and a parked notice rides the camelCase indices.
+/// A notice-free projection keeps the TS wire shape (the field is skipped).
 #[test]
 fn the_rider_serializes_only_when_a_notice_is_parked() {
     let empty = SessionActionSnapshot::default();
@@ -444,14 +419,7 @@ fn the_rider_serializes_only_when_a_notice_is_parked() {
     );
 }
 
-/// The engine-minted continuations carry their own typed provenance
-/// (operator directive 2026-09-28 — internal prompts never render as
-/// individual queue rows): the injected, queue-invisible admissions
-/// (goal continuations, budget-limit steers, threshold-compaction
-/// continuations) mark the `injectedPrompts` rider by lane index, and
-/// every other shape never does — the same-text user row, the visible
-/// labeled injected row (the busy agent message folds by its TS label
-/// instead), and the child-status notice (it rides its own rider).
+/// Operator directive 2026-09-28: internal prompts never render as individual queue rows.
 #[tokio::test]
 async fn injected_continuations_mark_their_own_rider_only() {
     let (worker, _) = snapshot_after_create().await;
@@ -490,8 +458,7 @@ async fn injected_continuations_mark_their_own_rider_only() {
             forced_batch: false,
         });
         // A visible injected row (the busy agent message shape) folds
-        // by its TS label in the strip — the injected rider never flags
-        // it, so the label classification keeps owning it.
+        // by its TS label — the injected rider never flags it.
         core.follow_up.push_back(QueuedItem {
             priority: QueuePriority::Background,
             message: "from the research child".to_string(),
@@ -555,10 +522,7 @@ async fn injected_continuations_mark_their_own_rider_only() {
     );
 }
 
-/// A queue-invisible injected item still projects its lane text (the
-/// strip's preview projection is unchanged) — the rider is what folds
-/// it, never an omission from the projection: the browse affordance
-/// keeps the full queue inspectable.
+/// The rider folds the row, never an omission: the browse affordance keeps the queue inspectable.
 #[tokio::test]
 async fn injected_continuations_still_project_their_lane_text() {
     let (worker, _) = snapshot_after_create().await;
@@ -591,10 +555,7 @@ async fn injected_continuations_still_project_their_lane_text() {
     assert_eq!(snapshot.injected_prompts.steering, vec![0]);
 }
 
-/// The journal round-trip preserves the typed provenance: the restore
-/// re-derives the flag from the parked row's injected custom row (the
-/// record carries it), so a respawned worker's strip still folds the
-/// notice (operator safeguard: journal restore must preserve that).
+/// Operator safeguard: journal restore must preserve the typed provenance.
 #[tokio::test]
 async fn restored_lane_rows_keep_the_child_status_provenance() {
     let (worker, _) = snapshot_after_create().await;

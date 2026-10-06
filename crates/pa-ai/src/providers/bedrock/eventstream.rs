@@ -1,9 +1,8 @@
 //! AWS `vnd.amazon.eventstream` binary framing decoder.
 //!
-//! Bedrock `converse-stream` responses use the AWS event-stream wire format:
-//! a prelude (total length, headers length, CRC), a header section, a JSON
-//! payload, and a message CRC. Only the payload and the `:event-type` /
-//! `:exception-type` headers are needed by the provider.
+//! Bedrock `converse-stream` responses use the AWS event-stream wire format (prelude + headers +
+//! JSON payload + CRC); only the payload and the `:event-type` / `:exception-type` headers are
+//! needed.
 
 /// One decoded event-stream message.
 #[derive(Debug, Clone)]
@@ -55,9 +54,8 @@ fn read_u32(bytes: &[u8]) -> u32 {
     u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
 }
 
-/// Parse the header section: name (u8 len + bytes), value type u8, value.
-/// Value type 7 is a length-prefixed (u16) string; other types are skipped
-/// by their fixed or encoded widths.
+/// Parse the header section: name (u8 len + bytes), value type u8, value. Value type 7 is a
+/// length-prefixed (u16) string; other types are skipped by their fixed or encoded widths.
 fn parse_headers(bytes: &[u8]) -> Vec<(String, Option<String>)> {
     let mut headers = Vec::new();
     let mut offset = 0usize;

@@ -6,9 +6,6 @@ use super::{
 };
 
 impl AgentSession {
-    /// The latest compaction boundary in the live loop context, if any
-    /// (the TS `getLatestCompactionEntry` guard source): the timestamp of
-    /// the newest compaction summary in the agent state.
     pub async fn latest_compaction_timestamp(&self) -> Option<u64> {
         let state = self.agent.state().await;
         state
@@ -23,17 +20,13 @@ impl AgentSession {
             .max()
     }
 
-    /// Whether an automatic threshold compaction is due at a turn boundary
-    /// (the TS `_checkCompaction` threshold arm, fired at `agent_end` and
-    /// before the next admitted prompt): the live loop context over the
-    /// model's context window against the effective threshold
-    /// (`compaction::compaction_threshold`: the percentage ceiling or the
-    /// combined input+output ceiling, whichever comes first). Usage
-    /// from before the latest compaction never re-triggers.
+    /// Whether an automatic threshold compaction is due at a turn boundary:
+    /// the live loop context over the model's context window against the
+    /// effective threshold; usage before the latest compaction never re-triggers.
     pub async fn auto_compaction_due(&self, model: &pa_types::ai::Model) -> bool {
         let state = self.agent.state().await;
-        // The live loop context is the agent's message list (the same JSON
-        // round-trip `compact` uses for its rebuilt context).
+        // The live loop context is the agent's message list (the same
+        // JSON round-trip `compact` uses).
         let messages: Vec<SessionAgentMessage> = state
             .messages
             .iter()
@@ -53,15 +46,9 @@ impl AgentSession {
         )
     }
 
-    /// Remove the trailing assistant message from the loop context (TS retry:
-    /// `messages.slice(0, -1)`), so a re-issued request does not re-send the
-    /// failed turn's error message. The session history keeps it (it already
-    /// persisted through the message-end hook).
-    ///
-    /// [`TrailingAssistantFilter::ErrorOnly`] matches the TS
-    /// compact-and-retry will-retry branch: only an error assistant message
-    /// drops (a compaction rebuild may leave any other trailing assistant
-    /// in place).
+    /// Remove the trailing assistant message from the loop context, so a
+    /// re-issued request does not re-send the failed turn's error message;
+    /// [`TrailingAssistantFilter::ErrorOnly`] drops only an error assistant.
     pub async fn drop_trailing_assistant(&self, filter: TrailingAssistantFilter) {
         let state = self.agent.state().await;
         let mut messages = state.messages;
@@ -83,26 +70,18 @@ impl AgentSession {
         }
     }
 
-    /// Drop the failed continuation pair from the live loop context (the
-    /// 402 diagnosis's (c)): the trailing no-progress assistant row (a
-    /// terminal provider failure or an empty settle) together with the
-    /// `goal_context` continuation row that drove it, directly under it.
-    /// The failed cycle's rows stop riding the context into every next
-    /// request — a fresh mint queues a fresh continuation row instead, and
-    /// a manual prompt runs on a context free of the corpse pair. A failed
-    /// USER turn's corpse (no continuation row under it) stays, like every
-    /// other non-goal row; the durable transcript keeps everything (this
-    /// drops only the live loop, like [`Self::drop_trailing_assistant`]).
+    /// Drop the failed continuation pair from the live loop context: the
+    /// trailing no-progress assistant row and the `goal_context` continuation
+    /// row that drove it. A USER turn's corpse stays; only the live loop drops
+    /// (like [`Self::drop_trailing_assistant`]).
     pub async fn drop_failed_goal_continuation(&self) {
-        // The whole drop runs under ONE state lock (the atomic mutate):
-        // a concurrent append's rows cannot be dropped between a stale
-        // snapshot and the replace.
+        // The whole drop runs under ONE state lock (the atomic mutate): a
+        // concurrent append cannot drop rows between the snapshot and replace.
         self.agent
             .mutate_messages(|messages| {
-                // The failed assistant row: the LAST assistant, not the
-                // last row — a trailing `provider_retry_outcome`
-                // disclosure (a restored loop replays it after the
-                // corpse) must not hide the pair from the cleanup.
+                // The failed assistant row: the LAST assistant, not the last row —
+                // a trailing `provider_retry_outcome` disclosure must not hide
+                // the pair from the cleanup.
                 let Some(corpse_index) = messages
                     .iter()
                     .rposition(|message| standard_message(message).is_some())
@@ -119,12 +98,8 @@ impl AgentSession {
                 if !no_progress {
                     return;
                 }
-                // The driving continuation row sits under the corpse,
-                // possibly behind trailing display rows (the
-                // `provider_retry_outcome` disclosure): scan backward
-                // over Custom rows only — the first goal_context
-                // continuation row wins, and every display row it
-                // scanned past stays.
+                // The driving continuation row sits under the corpse: scan backward
+                // over Custom rows only — the first goal_context continuation row wins.
                 let goal_context_row_at = messages[..corpse_index]
                     .iter()
                     .enumerate()
@@ -152,19 +127,16 @@ impl AgentSession {
                 let Some(context_index) = goal_context_row_at else {
                     return;
                 };
-                // Remove the later index first so the earlier one keeps
-                // its position (a trailing disclosure row keeps the
-                // corpse above the removal pair).
+                // Remove the later index first so the earlier one keeps its
+                // position.
                 messages.remove(corpse_index);
                 messages.remove(context_index);
             })
             .await;
     }
 
-    /// The last assistant message in the live loop context (TS
-    /// `_findLastAssistantMessage`), in the session wire shape: trailing
-    /// non-assistant rows (a compaction outcome disclosure, a compaction
-    /// summary) are skipped, not matched.
+    /// The last assistant message in the live loop context, in the session
+    /// wire shape: trailing non-assistant rows are skipped.
     pub async fn last_assistant_message(&self) -> Option<SessionAgentMessage> {
         let state = self.agent.state().await;
         state.messages.iter().rev().find_map(|message| {
@@ -174,18 +146,13 @@ impl AgentSession {
         })
     }
 
-    /// Execute `/compact`: summarize the pre-cut prefix, persist the
-    /// compaction entry, and rebuild the loop context summary-first. A skip
-    /// (already compacted, or nothing to summarize) leaves the session
-    /// untouched, matching the TS `CompactionSkippedError` flow. `abort`
-    /// is the run's abort signal (TS `_performCompaction`'s `signal`):
-    /// an aborted run returns the abort error and never commits.
+    /// Execute `/compact`: summarize the pre-cut prefix, persist the entry,
+    /// and rebuild the loop context summary-first; a skip leaves the session
+    /// untouched, an aborted run never commits.
     ///
     /// # Errors
     ///
-    /// Returns the abort error when the run was aborted, or the compaction
-    /// failure when the summarizer call or the compaction entry's persist
-    /// fails. A skip is a normal `Ok` outcome carrying the skip message.
+    /// Returns the abort error, or the summarizer/persist failure; a skip is a normal `Ok` outcome.
     ///
     /// # Panics
     ///
@@ -197,9 +164,8 @@ impl AgentSession {
         api_key: Option<String>,
         abort: Option<&pa_agent::abort::AbortSignal>,
     ) -> anyhow::Result<CompactOutcome> {
-        // TS `_performCompaction` captures `this._harnessDigest()` at the
-        // commit: relevance terms from the live (pre-compaction) context,
-        // harness state read fresh from disk when the snapshot renders.
+        // The digest inputs come from the live (pre-compaction) context;
+        // harness state reads fresh from disk when the snapshot renders.
         compaction_trace::trace(
             "compact.enter",
             &serde_json::json!({
@@ -235,7 +201,6 @@ impl AgentSession {
             compaction_trace::trace("compact.skipped", &serde_json::Value::Null);
             return Ok(outcome);
         }
-        // Rebuild the loop context from the post-compaction session.
         let rebuilt = {
             let session = self.session.lock().await;
             crate::session_engine::compact_session::rebuilt_context_after_compaction(&session)
@@ -247,14 +212,9 @@ impl AgentSession {
             "compact.rebuilt_context",
             &serde_json::json!({ "messages": rebuilt_message_count }),
         );
-        // TS `_performCompaction` ends with
-        // `_syncKernelStateAfterCompaction()`: a kernel that survived the
-        // compaction gets its persistence notice — a durable
-        // `ipython_state` row that is also model context, and the row that
-        // keeps a back-to-back second `/compact` preparing (update mode)
-        // instead of skipping as already compacted. The row rides the run
-        // so each surface broadcasts it as a `message_start` /
-        // `message_end` pair.
+        // A kernel that survived the compaction gets its persistence notice —
+        // a durable `ipython_state` row that also keeps a back-to-back second
+        // `/compact` preparing (update mode) instead of skipping.
         let kernel_state = match self.kernel_state.as_ref() {
             Some(probe) => {
                 ipython_state::sync_after_compaction(probe.as_ref(), &self.session, &self.agent)
@@ -275,23 +235,14 @@ impl AgentSession {
         Ok(outcome)
     }
 
-    /// Record an unsuccessful compaction outcome (TS
-    /// `_persistCompactionOutcome`): append the durable `compaction_outcome`
-    /// row to the session entries and push it onto the live loop context,
-    /// returning it for the caller to broadcast as a `message_start` /
-    /// `message_end` pair. The row is a user-facing disclosure, never model
-    /// context: `convert_to_llm` drops it, so the KV-cacheable prefix is
-    /// unaffected (the TS contract — `agent-session-compaction.test.ts`
-    /// asserts the outcome "stays out of model context"). The append is
-    /// retained in the in-memory entry chain even when the disk write
-    /// fails, so every in-process context rebuild (compaction, tree
-    /// navigation) keeps the disclosure — the TS `_unpersistedOutcomes`
-    /// guarantee, held structurally.
+    /// Record an unsuccessful compaction outcome: append the durable
+    /// `compaction_outcome` row and push it onto the live loop context. The
+    /// row is a user-facing disclosure, never model context (`convert_to_llm` drops it).
     ///
     /// # Errors
     ///
-    /// Returns an error when the disclosure row cannot be appended or
-    /// surfaced to the live loop; the row is retained in memory either way.
+    /// Returns an error when the row cannot be appended or surfaced;
+    /// it is retained in memory either way.
     pub async fn record_compaction_outcome(
         &self,
         reason: crate::session_engine::messages::CompactionOutcomeReason,
@@ -313,9 +264,6 @@ impl AgentSession {
                 eprintln!("pa-core: compaction outcome row not persisted: {error}");
             }
         }
-        // TS pushes the row onto `agent.state.messages` after the append:
-        // the live context owns the disclosure; the loop's converter filters
-        // custom rows out of the provider request.
         if let Some(loop_message) =
             session_message_to_loop(&SessionAgentMessage::Custom(row.clone()))
         {
@@ -327,11 +275,8 @@ impl AgentSession {
         Ok(row)
     }
 
-    /// Rebuild the live loop context from a durable branch (TS
-    /// `navigateTree`'s context rebuild: `sessionManager.branch(newLeafId)`
-    /// then `agent.state.messages = buildSessionContext().messages`). The
-    /// session adopts the branch entries and the agent's message list is
-    /// rebuilt from the post-navigation session state.
+    /// Rebuild the live loop context from a durable branch: the session adopts
+    /// the branch entries, and the agent's message list rebuilds from the state.
     ///
     /// # Errors
     ///
@@ -352,8 +297,7 @@ impl AgentSession {
     }
 
     /// Execute `/refine`: plan, re-read, apply, and persist the continual
-    /// harness state for this session. The conversation snapshot comes from
-    /// the session entries (what the model would see on a rebuild).
+    /// harness state for this session.
     ///
     /// # Errors
     ///
@@ -387,10 +331,8 @@ impl AgentSession {
         refine_call: crate::refinement::executor::RefinerFn,
         global_harness_dir: std::path::PathBuf,
     ) -> anyhow::Result<crate::refinement::RefinementResult> {
-        // The transcript's consumed artifacts (the message rows plus the
-        // in-session refinement history) are extracted under this first
-        // lock straight from the retained rows: no owned copy of the full
-        // entry set, no second clone of the message rows (#3013).
+        // The transcript's consumed artifacts are extracted under this first
+        // lock straight from the retained rows: no second clone of the rows.
         let parts = self.session.lock().await.refine_transcript_parts();
         let crate::session::manager::RefineTranscriptParts {
             messages,
@@ -423,19 +365,10 @@ impl AgentSession {
             )
             .await?
         };
-        // TS `_appendDurableRefineMessage` pushes the outcome row (and the
-        // notice row when any edit applied) onto `agent.state.messages`
-        // after the durable append; TS never rebuilds the whole context
-        // after a refine — the rebuild is the compact/navigate arm, and a
-        // rebuild here would also resurrect a retried turn's dropped
-        // trailing assistant, which TS deliberately keeps out of the live
-        // context. The pushed rows are THIS run's, selected by the ids the
-        // run appended (so interleaved runs can never select each other's
-        // rows), and materialize from the appended durable entries, so they
-        // are byte-identical to a context rebuild's rows for them, while the
-        // live-context update stays O(refine rows) instead of O(session
-        // file) and lands under ONE agent-state lock (TS's synchronous
-        // `agent.state.messages.push`).
+        // The outcome rows (and the notice row when any edit applied) push
+        // onto the live context after the durable append, never a full rebuild
+        // — a rebuild would resurrect a retried turn's dropped trailing
+        // assistant. The pushed rows are THIS run's, under ONE agent-state lock.
         let rows = {
             let session = self.session.lock().await;
             refine::context_rows_by_ids(session.retained_entries(), &context_row_ids)

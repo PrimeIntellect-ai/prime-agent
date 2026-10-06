@@ -1,15 +1,7 @@
-//! The stranded-worker registration heal e2e: a session worker whose
-//! supervisor destroyed its durable identity (its descriptor is gone) is
-//! the live-box incident's leftover holder — alive, holding its runtime
-//! session lease, and invisible to every roster: its registration is
-//! refused with the TS unknown-worker error, nothing on the daemon can
-//! adopt or route to it, and the orphan-exit monitor never fires because
-//! the (new) supervisor socket answers. The refused-registration
-//! self-heal retires the worker — the graceful close a routed `shutdown`
-//! runs — so the lease releases and the session file resumes; the
-//! per-session stop retires the descriptor only after a confirmed
-//! process death (the same contract the shutdown pass enforces), so a
-//! stop that misses its worker escalates instead of stranding it.
+//! The stranded-worker registration heal e2e: a worker whose supervisor destroyed its
+//! descriptor is the live-box incident's leftover holder — alive, invisible, holding its
+//! runtime session lease. Its registration is refused (TS unknown-worker error); the self-heal
+//! retires it so the lease releases and the session file resumes.
 // The suite's liveness and child-discovery helpers read Linux procfs;
 // on other unixes they cannot observe processes, and the waits would
 // pass vacuously — skip the suite there instead of reporting a false
@@ -26,8 +18,7 @@ use serde_json::{json, Value};
 
 struct Daemon {
     child: Child,
-    // The socket path rides the struct for harness symmetry (the spawned
-    // daemon's address is part of the fixture); no case reads it here.
+    // The socket path rides the struct for harness symmetry; no case reads it here.
     #[allow(dead_code)]
     socket: PathBuf,
 }
@@ -229,8 +220,7 @@ fn the_one_worker_of(daemon_pid: u32) -> u32 {
     }
 }
 
-/// The active id a create response answered (the summary's `id`, the same
-/// field a pane attaches by).
+/// The active id a create response answered (the summary's `id`, what a pane attaches by).
 fn create_session(client: &mut Client, request_id: &str, config: &Value) -> (String, Value) {
     client.send_command(request_id, &json!({ "type": "create", "config": config }));
     let created = client.read_response(request_id);
@@ -257,9 +247,8 @@ fn session_file_of(client: &mut Client, id: &str, request_id: &str) -> String {
         .to_string()
 }
 
-/// Run one scripted turn to completion so the worker sits idle holding its
-/// session lease (the create reply alone is enough for the lease, but the
-/// completed turn makes the file a real transcript).
+/// Run one scripted turn to completion so the worker sits idle holding its session lease
+/// (the completed turn makes the file a real transcript).
 fn run_one_turn(client: &mut Client, id: &str, request_id: &str) {
     client.send_command(
         request_id,
@@ -273,13 +262,6 @@ fn run_one_turn(client: &mut Client, id: &str, request_id: &str) {
     assert_eq!(done["success"], true, "scripted turn failed: {done}");
 }
 
-/// A refused registration retires the worker: a supervisor that holds no
-/// descriptor for the identity answers `worker_register` with the
-/// unknown-worker error, and the worker — which before the self-heal
-/// retried forever, holding whatever it held with no daemon able to reach
-/// it — runs its graceful close and exits instead. The refusal is also
-/// observable: the daemon logs it (the box incident left it silent) and
-/// emits its `daemon event`.
 #[test]
 fn a_refused_registration_retires_the_worker() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -288,10 +270,9 @@ fn a_refused_registration_retires_the_worker() {
     std::fs::create_dir_all(agent_dir.join("sessions")).expect("sessions dir");
     let _daemon = spawn_daemon(&socket, &agent_dir);
 
-    // A bare worker with an identity no descriptor backs: the supervisor
-    // can only refuse it. The scripted engine keeps the worker's runtime
-    // self-contained (no model resolution, no kernel) so the retire path
-    // under test is the registration close alone.
+    // A bare worker with an identity no descriptor backs: the supervisor can only refuse it.
+    // The scripted engine keeps the runtime self-contained, so the retire path under test
+    // is the registration close alone.
     let script_path = write_script(dir.path(), &["unused"]);
     let mut worker = Command::new(env!("CARGO_BIN_EXE_pa-daemon"))
         .arg("worker")
@@ -332,9 +313,8 @@ fn a_refused_registration_retires_the_worker() {
         .expect("spawn worker");
     let worker_pid = worker.id();
 
-    // The refusal lands in the daemon's rotating log (the operator-facing
-    // trace the incident lacked) — and the worker exits instead of
-    // retrying forever.
+    // The refusal lands in the daemon's rotating log (the operator-facing trace the incident
+    // lacked) — and the worker exits instead of retrying forever.
     let log_path = pa_daemon::paths::daemon_log_path(&socket, &agent_dir);
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
@@ -355,8 +335,7 @@ fn a_refused_registration_retires_the_worker() {
     }
     let _ = worker.wait();
 
-    // The refusal leaves the worker's own socket behind it: a graceful
-    // exit owns its endpoint file.
+    // The refusal leaves the worker's own socket behind: a graceful exit owns its endpoint.
     assert!(
         !dir.path().join("orphan.sock").exists(),
         "the retired worker cleaned up its own socket"
@@ -364,14 +343,7 @@ fn a_refused_registration_retires_the_worker() {
     let _ = std::fs::remove_file(dir.path().join("orphan.sock"));
 }
 
-/// The box incident, end to end: a supervisor dies over a live worker,
-/// the worker's descriptor is destroyed (the pre-reap stop pass's exact
-/// on-disk state), and the next daemon cycle must not leave the worker
-/// as an invisible lease holder — it dies (the self-heal retires it
-/// wherever the boot reap cannot enumerate processes), the lease
-/// releases, and the session file resumes through a fresh registered
-/// worker: the create over the held file succeeds instead of answering
-/// the "session is currently open in another Rust build" refusal.
+/// The box incident, end to end.
 #[test]
 fn a_descriptorless_leftover_dies_and_its_session_resumes() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -394,10 +366,8 @@ fn a_descriptorless_leftover_dies_and_its_session_resumes() {
     let session_file = session_file_of(&mut client, &worker_id, "s1");
     let worker_process_id = the_one_worker_of(daemon_pid);
 
-    // The supervisor dies hard; the detached worker survives it, holding
-    // its session lease. Its descriptor is then destroyed — the stranded
-    // state the incident left on disk (and the state a raced terminal
-    // stop produced before the confirm-then-delete contract).
+    // The supervisor dies hard; the detached worker survives it, holding its session lease.
+    // Its descriptor is then destroyed — the stranded state the incident left on disk.
     drop(client);
     let _ = daemon.child.kill();
     let _ = daemon.child.wait();
@@ -423,11 +393,8 @@ fn a_descriptorless_leftover_dies_and_its_session_resumes() {
         .expect("the worker's descriptor is on disk");
     std::fs::remove_file(&descriptor).expect("destroy the descriptor");
 
-    // The next daemon cycle: the leftover worker's re-registration is
-    // refused (no descriptor), so it retires (or, where the boot reap can
-    // enumerate processes, the reap clears it — the end state is the
-    // same); the lease releases and the session file resumes through a
-    // fresh registered worker.
+    // The next daemon cycle: the re-registration is refused (no descriptor), so it retires (or
+    // the boot reap clears it); the lease releases, the session resumes through a fresh worker.
     let daemon2 = spawn_daemon(&socket, &agent_dir);
     if !wait_gone(worker_process_id, Instant::now() + Duration::from_secs(20)) {
         force_kill(worker_process_id);
@@ -455,8 +422,7 @@ fn a_descriptorless_leftover_dies_and_its_session_resumes() {
         .to_string();
     run_one_turn(&mut client, &resumed_id, "p2");
 
-    // Teardown: the resumed worker dies with the daemon, never leaking
-    // into later test binaries.
+    // Teardown: the resumed worker dies with the daemon, never leaking into later binaries.
     let _ = client.writer.shutdown(std::net::Shutdown::Both);
     for pid in child_pids_of(daemon2.child.id()) {
         let _ = Command::new("kill").arg("-9").arg(pid.to_string()).status();
@@ -464,11 +430,6 @@ fn a_descriptorless_leftover_dies_and_its_session_resumes() {
     drop(daemon2);
 }
 
-/// A stop whose worker misses the routed `shutdown` must not strand it:
-/// the per-session stop shares the terminal-stop contract — the
-/// descriptor dies only with a provably-gone process, and a live worker
-/// gets the SIGTERM -> SIGKILL escalation instead of an invisible
-/// lease-holder's life sentence.
 #[test]
 fn an_owned_stop_kills_a_worker_that_missed_the_shutdown() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -486,8 +447,7 @@ fn an_owned_stop_kills_a_worker_that_missed_the_shutdown() {
         "sessionDir": sessions_dir.to_string_lossy(),
         "script": script_path.to_string_lossy(),
     });
-    // A client-owned session: its owner's stop is the per-session stop
-    // that must escalate past a wedged worker.
+    // A client-owned session: its owner's stop must escalate past a wedged worker.
     client.send_command(
         "c1",
         &json!({
@@ -507,9 +467,8 @@ fn an_owned_stop_kills_a_worker_that_missed_the_shutdown() {
     let session_file = session_file_of(&mut client, &worker_id, "s1");
     let worker_process_id = the_one_worker_of(daemon_pid);
 
-    // The worker freezes mid-flight: it cannot process the routed
-    // shutdown (the route times out), it survives SIGTERM (the signal
-    // stays pending while it is stopped), and only SIGKILL ends it.
+    // The worker freezes mid-flight: it cannot process the routed shutdown (the route times
+    // out), survives SIGTERM, and only SIGKILL ends it.
     let stop = Command::new("kill")
         .arg("-STOP")
         .arg(worker_process_id.to_string())
@@ -517,19 +476,15 @@ fn an_owned_stop_kills_a_worker_that_missed_the_shutdown() {
         .expect("SIGSTOP the worker");
     assert!(stop.success(), "SIGSTOP the session worker");
 
-    // The owner stops its session: the stop must confirm the worker's
-    // process death (escalating to SIGKILL) before retiring its
-    // descriptor. The response waits out the whole stop.
+    // The owner stops its session: the stop must confirm the worker's process death
+    // (escalating to SIGKILL) before retiring its descriptor; the response waits it out.
     client.send_command(
         "k1",
         &json!({ "type": "complete_owned_session", "activeSessionId": worker_id }),
     );
-    // The stop's durable intent is observable on disk BEFORE the worker
-    // is told: the routed shutdown waits out its route budget against the
-    // frozen worker, and in that window the descriptor must already carry
-    // its stop tombstone — a supervisor that died mid-stop would adopt
-    // the tombstone (finishing the stop) instead of the worker (a later
-    // boot must never re-adopt a stopped worker as healthy).
+    // The stop's durable intent is observable on disk BEFORE the worker is told: the descriptor
+    // must already carry its stop tombstone while the routed shutdown waits — a supervisor that
+    // died mid-stop would adopt the tombstone, never re-adopt a stopped worker as healthy.
     let descriptor_path = pa_daemon::descriptor::descriptor_dir(&agent_dir, &socket)
         .join(format!("{worker_id}.json"));
     let deadline = Instant::now() + Duration::from_secs(10);

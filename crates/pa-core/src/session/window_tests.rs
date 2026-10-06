@@ -19,12 +19,7 @@ fn fixture() -> String {
     rows.into_iter().map(|row| row.to_string() + "\n").collect()
 }
 
-/// An attribution targeting a discarded-prefix (older-path) assistant:
-/// the older-path stats must carry the assistant's cumulative aggregate
-/// (TS `applyChildUsageAttributions` over the whole file), not its raw
-/// row — otherwise the child spend attributed to a pre-window assistant
-/// vanishes from the windowed `get_session_stats` while a full open
-/// counts it.
+/// The stats carry the cumulative aggregate, not the raw row.
 #[test]
 fn older_path_stats_fold_child_usage_attributions() {
     let dir = tempfile::tempdir().unwrap();
@@ -59,8 +54,8 @@ fn older_path_stats_fold_child_usage_attributions() {
         .collect();
     std::fs::write(&path, &body).unwrap();
     let store = WindowedSessionStore::open(&path).unwrap().unwrap();
-    // The discarded assistant reports the aggregate (150/15/5, $0.165),
-    // never the raw row (100/10/5, $0.11) and never raw-plus-child.
+    // The discarded assistant reports the aggregate (150/15/5, $0.165), never the raw row
+    // (100/10/5, $0.11).
     let stats = store.older_path_stats();
     assert_eq!(stats.assistant_messages, 1);
     assert_eq!(stats.user_messages, 210);
@@ -76,10 +71,7 @@ fn older_path_stats_fold_child_usage_attributions() {
     assert!((stats.cost - 0.165).abs() < 1e-9);
 }
 
-/// The walk keeps a target's LAST cumulative aggregate for the fold
-/// even when more attributions follow it in file order: the walk runs
-/// newest-first, so the FIRST aggregate seen per target is the last
-/// one written — the cumulative aggregate the TS fold ends with.
+/// Newest-first, the FIRST aggregate seen per target is the last one written.
 #[test]
 fn older_path_stats_keep_a_targets_last_aggregate() {
     let dir = tempfile::tempdir().unwrap();
@@ -113,15 +105,11 @@ fn older_path_stats_keep_a_targets_last_aggregate() {
     std::fs::write(&path, &body).unwrap();
     let store = WindowedSessionStore::open(&path).unwrap().unwrap();
     let stats = store.older_path_stats();
-    // The LAST aggregate (the walk keeps the newest-first first-seen)
-    // folds the row.
+    // The LAST aggregate folds the row (newest-first first-seen).
     assert!((stats.cost - 0.198).abs() < 1e-9);
 }
 
-/// A MALFORMED aggregate (null, a scalar) must not replace a valid row
-/// usage with zeros: the capture gate accepts objects only, so the raw
-/// row stays the counted bill — the same skip the session-store fold
-/// applies to a non-object aggregate.
+/// The capture gate accepts objects only, like the session-store fold.
 #[test]
 fn older_path_stats_skip_malformed_aggregates() {
     let dir = tempfile::tempdir().unwrap();
@@ -149,17 +137,12 @@ fn older_path_stats_skip_malformed_aggregates() {
     std::fs::write(&path, &body).unwrap();
     let store = WindowedSessionStore::open(&path).unwrap().unwrap();
     let stats = store.older_path_stats();
-    // The malformed aggregate never folds (the raw row's $0.125 stays
-    // the counted bill).
+    // The malformed aggregate never folds (the raw row's $0.125 stays the bill).
     assert!((stats.cost - 0.125).abs() < 1e-9);
 }
 
-/// The boundary model the per-model usage fold seeds its timeline with:
-/// the newest `model_change` in the discarded prefix — NOT the leaf's
-/// model. A post-compaction switch inside the retained window must not
-/// re-label the boundary's early summarizer spend (the Bugbot/Macroscope
-/// window-seed round: seeding with the leaf's model billed the boundary
-/// rows on the wrong side of the switch).
+/// A post-compaction switch inside the retained window must not re-label the boundary's early
+/// summarizer spend.
 #[test]
 fn boundary_model_is_the_prefixs_newest_model_change_not_the_leafs() {
     let dir = tempfile::tempdir().unwrap();
@@ -187,8 +170,7 @@ fn boundary_model_is_the_prefixs_newest_model_change_not_the_leafs() {
         Some(&("openai".to_string(), "gpt-a".to_string())),
         "the seed is the prefix's newest model_change, not the leaf's"
     );
-    // The leaf model stays what it is (the context's own semantics are
-    // unchanged): the latest model identity on the active path.
+    // The leaf model stays the latest model identity on the active path.
     assert_eq!(
         store.context().model,
         Some(("anthropic".to_string(), "gpt-b".to_string()))
@@ -627,8 +609,8 @@ fn reverse_reader_preserves_long_lines_and_unterminated_tail() {
 #[test]
 fn windowed_context_is_byte_identical_to_the_cold_parse() {
     // The resumed worker's first model request is built from this context:
-    // the windowed open (cold scan and sidecar-warm alike) must reproduce
-    // the full parse byte for byte.
+    // the windowed open (cold and sidecar-warm alike) must reproduce the
+    // full parse byte for byte.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("byte-parity.jsonl");
     let mut rows: Vec<serde_json::Value> = fixture()
@@ -667,9 +649,9 @@ fn windowed_context_is_byte_identical_to_the_cold_parse() {
 
 #[test]
 fn sequential_appends_keep_reopens_amortized() {
-    // N leased appends stay O(append): every reopen is still a cache hit
-    // whose file reads grow only by the appended suffix bytes — never a
-    // rescan of the (much larger) pre-window history.
+    // N leased appends stay O(append): every reopen stays a cache hit whose
+    // reads grow only by the appended suffix — never a rescan of the
+    // pre-window history.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("flat.jsonl");
     std::fs::write(&path, fixture()).unwrap();
@@ -700,11 +682,7 @@ fn sequential_appends_keep_reopens_amortized() {
     }
 }
 
-/// One-copy adoption oracle: after `adopt_window`, the manager's
-/// `active_context` must be byte-identical to an un-adopted window's
-/// `context()` over the same file (cold walk and sidecar-warm alike) —
-/// the detach changes WHO holds the retained rows, never WHAT the
-/// served context is.
+/// The detach changes WHO holds the retained rows, never WHAT is served.
 #[test]
 fn adopted_context_matches_unadopted_window_byte_for_byte() {
     let dir = tempfile::tempdir().unwrap();
@@ -718,9 +696,9 @@ fn adopted_context_matches_unadopted_window_byte_for_byte() {
     let body: String = rows.into_iter().map(|row| row.to_string() + "\n").collect();
     std::fs::write(&path, &body).unwrap();
     for phase in ["cold", "warm"] {
-        // The reference opens FIRST in the cold pass (the adopted open in
-        // the same pass warms the sidecar, which is fine — the parity is
-        // about WHO holds the rows, not which side hit the cache).
+        // The reference opens FIRST in the cold pass (the adopted open
+        // warms the sidecar; the parity is about WHO holds the rows, not
+        // which side hit the cache).
         let reference = WindowedSessionStore::open(&path).unwrap().unwrap();
         assert_eq!(
             reference.read_stats().cache_hit,
@@ -755,9 +733,9 @@ fn adopted_context_matches_unadopted_window_byte_for_byte() {
     }
 }
 
-/// The detached window keeps its snapshot/settings/metadata surfaces,
-/// and its transcript context moves to the owning manager — `context()`
-/// on a detached window is a programming error, caught loudly.
+/// The detached window keeps its snapshot/settings/metadata surfaces; its
+/// transcript context moves to the owning manager — `context()` on a
+/// detached window is a programming error, caught loudly.
 #[test]
 #[should_panic(expected = "detached window's transcript context")]
 fn detached_window_serves_lookups_but_not_its_own_context() {
@@ -783,11 +761,8 @@ fn detached_window_serves_lookups_but_not_its_own_context() {
     let _ = window.context();
 }
 
-/// Post-adoption mutations keep the served context equal to a full
-/// reader's: live appends (including a child-usage attribution whose
-/// target is a RETAINED assistant — the manager's own fold is the
-/// one-copy authority once the window's bodies are detached) must match
-/// what a cold reopen of the same file serves.
+/// Post-adoption live appends — including an attribution whose target is
+/// a RETAINED assistant — must match what a cold reopen serves.
 #[tokio::test]
 async fn adopted_manager_live_appends_match_full_reopen() {
     let dir = tempfile::tempdir().unwrap();
@@ -880,8 +855,7 @@ async fn adopted_manager_live_appends_match_full_reopen() {
     );
 }
 
-/// A no-compaction fixture: the walk retains every row, so the window
-/// covers the whole file (`retained_whole_file`).
+/// A no-compaction fixture: the walk retains every row (`retained_whole_file`).
 fn full_history_fixture() -> String {
     let mut rows = vec![
         json!({"type":"session","id":"s","version":3,"cwd":"/tmp","timestamp":"2026-01-01T00:00:00Z"}),
@@ -892,16 +866,11 @@ fn full_history_fixture() -> String {
         rows.push(json!({"type":"message","id":id.clone(),"parentId":parent,"message":{"role":"user","content":format!("hello {i}"),"timestamp":0}}));
         parent = Some(id);
     }
-    // One refinement audit row: the in-session history class the refine
-    // transcript's audit scan reads through this snapshot.
+    // One refinement audit row (the class the refine transcript's audit scan reads).
     rows.push(json!({"type":"custom","id":"audit","parentId":parent,"customType":"prime-agent.refinement","data":{"id":"refine_0","summary":"seed","rationale":"r","expectedOutcome":"o","appliedEdits":[]}}));
     rows.into_iter().map(|row| row.to_string() + "\n").collect()
 }
 
-/// The historical snapshot over a full-history window serves the retained
-/// rows without the file: with the sole-writer lease held, deleting the
-/// session file cannot fail the snapshot (the fast path never touches the
-/// path), and the served entries are the historical read's exact result.
 #[tokio::test]
 async fn full_history_snapshot_serves_retained_rows_without_the_file() {
     let dir = tempfile::tempdir().unwrap();
@@ -942,9 +911,7 @@ async fn full_history_snapshot_serves_retained_rows_without_the_file() {
     );
 }
 
-/// Without the sole-writer lease another writer may have appended out of
-/// band, so the gate stays closed and the historical read still serves
-/// whatever the file gained.
+/// Without the sole-writer lease another writer may have appended out of band.
 #[tokio::test]
 async fn full_history_snapshot_without_lease_keeps_the_historical_read() {
     use std::io::Write as _;
@@ -969,9 +936,7 @@ async fn full_history_snapshot_without_lease_keeps_the_historical_read() {
     );
 }
 
-/// A compaction boundary window discards a prefix by design: the fast
-/// path must never claim coverage, and the historical read must keep
-/// serving the pre-window rows even under the lease.
+/// A compaction boundary discards a prefix by design; the fast path never claims coverage.
 #[tokio::test]
 async fn boundary_window_snapshot_keeps_the_historical_read() {
     let dir = tempfile::tempdir().unwrap();
