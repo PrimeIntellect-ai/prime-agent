@@ -341,6 +341,9 @@ pub fn apply_model_override(model: &Model, over: &ModelOverride) -> Model {
     }
     if let Some(max_tokens) = over.max_tokens {
         result.max_tokens = max_tokens;
+        // An override-supplied `maxTokens` is configuration: it bypasses
+        // the default output ceiling.
+        result.max_tokens_explicit = true;
     }
     if let Some(cost) = &over.cost {
         let base = &result.cost;
@@ -453,6 +456,9 @@ pub fn load_custom_models(
                 ),
                 context_window: model_def.context_window.unwrap_or(128_000),
                 max_tokens: model_def.max_tokens.unwrap_or(16_384),
+                // A configured `maxTokens` is explicit; the 16_384
+                // default is not, so a defaulted model stays capped.
+                max_tokens_explicit: model_def.max_tokens.is_some(),
                 featured: None,
                 headers: None,
                 compat,
@@ -541,6 +547,75 @@ mod tests {
             map.get(&pa_types::ai::ModelThinkingLevel::Xhigh),
             Some(&Some("xhigh".to_string()))
         );
+    }
+
+    /// TS `755-configured-max-tokens.test.ts`: a models.json `maxTokens`
+    /// is explicit — the configured value reaches the provider unchanged
+    /// instead of being clamped to the 32000 default ceiling.
+    #[test]
+    fn a_models_json_max_tokens_is_explicit() {
+        let result = load_custom_models(
+            r#"{ "providers": { "glm-h200": {
+                "baseUrl": "http://vllm.example.test:8000/v1",
+                "api": "openai-completions",
+                "apiKey": "TEST_KEY",
+                "models": [ { "id": "glm-5.2", "reasoning": true,
+                              "contextWindow": 393216, "maxTokens": 131072 } ]
+            } } }"#,
+            &|_| false,
+            &|_| None,
+        );
+        assert!(result.error.is_none());
+        let model = &result.models[0];
+        assert_eq!(model.max_tokens, 131_072);
+        assert!(model.max_tokens_explicit);
+    }
+
+    /// A custom model that omits `maxTokens` defaults to 16384 and stays
+    /// catalog-like (capped): the flag marks a CONFIGURED value only.
+    #[test]
+    fn a_custom_model_without_max_tokens_stays_unmarked() {
+        let result = load_custom_models(
+            r#"{ "providers": { "ollama": {
+                "baseUrl": "http://localhost:11434",
+                "apiKey": "none",
+                "api": "openai-completions",
+                "models": [ { "id": "llama3" } ]
+            } } }"#,
+            &|_| false,
+            &|_| None,
+        );
+        assert!(result.error.is_none());
+        let model = &result.models[0];
+        assert_eq!(model.max_tokens, 16_384);
+        assert!(!model.max_tokens_explicit);
+    }
+
+    /// TS `applyModelOverride`: an override-supplied `maxTokens` is
+    /// configuration too — the flag flips true so the value bypasses the
+    /// ceiling (a per-model override of a built-in model is the #755
+    /// shape with no custom provider involved).
+    #[test]
+    fn a_per_model_override_marks_max_tokens_explicit() {
+        let base: Model = serde_json::from_value(serde_json::json!({
+            "id": "claude-sonnet-4-5", "name": "Claude", "api": "anthropic",
+            "provider": "anthropic", "baseUrl": "https://x", "reasoning": false,
+            "input": [],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 200_000, "maxTokens": 65_536
+        }))
+        .unwrap();
+        assert!(!base.max_tokens_explicit);
+        let over = ModelOverride {
+            max_tokens: Some(200_000),
+            ..Default::default()
+        };
+        let merged = apply_model_override(&base, &over);
+        assert_eq!(merged.max_tokens, 200_000);
+        assert!(merged.max_tokens_explicit);
+        // An override that does not touch maxTokens leaves the flag alone.
+        let untouched = apply_model_override(&base, &ModelOverride::default());
+        assert!(!untouched.max_tokens_explicit);
     }
 
     #[test]
