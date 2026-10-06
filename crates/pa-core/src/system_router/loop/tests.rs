@@ -117,6 +117,47 @@ async fn a_non_terminal_observation_at_the_deadline_times_out() {
     assert!(result.summary.contains("elapsed while observing"));
 }
 
+/// A decision that finishes in the same poll the segment deadline fires wins
+/// the biased race and clears its gate, then meets the leftover-budget
+/// check: the segment ends before the dispatch, and the finished decision
+/// still lands in the trace with its usage - System 2 sees every spent
+/// decision - while the environment stays untouched (no side effect ran).
+#[tokio::test(start_paused = true)]
+async fn a_finished_decision_at_the_deadline_is_recorded_undispatched() {
+    let env = support::ScriptedEnvironment::new(vec![support::observation("the last frame")]);
+    let mut options = options(
+        Arc::clone(&env),
+        support::delayed_decide(
+            50,
+            support::valid_decision("press", &[("button", "a")], 0.9),
+        ),
+    );
+    options.timeout_ms = 50;
+    let result = run_system_router_loop(options).await.unwrap();
+    assert_eq!(result.status, RouterRunStatus::Incomplete);
+    assert_eq!(result.reason, "timeout");
+    assert_eq!(result.steps, 1);
+    assert_eq!(result.executed, 0);
+    assert_eq!(result.trace[0].action.as_deref(), Some("press"));
+    assert_eq!(result.trace[0].gate.verdict, RouterGateVerdict::Pass);
+    assert!(result.trace[0].result.contains("not dispatched"));
+    assert_eq!(
+        result.trace[0].usage,
+        Some(RouterUsage {
+            input_tokens: 7,
+            output_tokens: 3
+        })
+    );
+    assert_eq!(result.usage.input_tokens, 7);
+    assert_eq!(result.usage.output_tokens, 3);
+    assert!(result.summary.contains("elapsed before execution"));
+    // The held-back decision never reached the environment.
+    assert_eq!(
+        *env.calls.lock().unwrap(),
+        vec!["reset".to_string(), "observe".to_string()]
+    );
+}
+
 #[tokio::test]
 async fn a_terminal_execution_ends_the_segment_done() {
     let env = support::ScriptedEnvironment::with_observation(support::observation("boss room"))

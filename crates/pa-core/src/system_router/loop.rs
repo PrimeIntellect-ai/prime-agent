@@ -579,8 +579,33 @@ async fn run_loop(
         }
 
         // Execute only while the wall-clock budget remains: a dispatched action
-        // applies a side effect the loop cannot take back.
+        // applies a side effect the loop cannot take back. The decision is
+        // finished work whose tokens are already in the usage aggregate, so
+        // it lands in the trace before the segment ends: System 2 sees the
+        // choice it paid for and steers from it, the same ledger the
+        // mid-execution timeout keeps for its unknown outcome.
         if Instant::now() >= deadline {
+            state.trace.push(RouterStepTrace {
+                step,
+                timestamp_ms: decision_started_ms,
+                latency_ms,
+                action: Some(action.name.clone()),
+                params: decision.params.clone(),
+                confidence: Some(confidence),
+                gate: RouterGateTrace {
+                    threshold,
+                    verdict: RouterGateVerdict::Pass,
+                },
+                observation_digest: digest,
+                observation_chars: observation_chars(&observation),
+                result: format!(
+                    "held back {}; not dispatched (segment timeout elapsed before execution)",
+                    action.name
+                ),
+                terminal: false,
+                thinking_level: options.model.thinking_level.clone(),
+                usage: decision.usage,
+            });
             return Ok(state.finish(
                 RouterRunStatus::Incomplete,
                 "timeout",

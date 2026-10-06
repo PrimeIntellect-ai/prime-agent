@@ -239,6 +239,20 @@ pub fn scripted_decide(outcomes: Vec<RouterDecisionOutcome>) -> RouterDecisionFn
     })
 }
 
+/// A decision function that waits `delay_ms` then returns `outcome` (the
+/// deadline-window batteries complete the reply in the same poll the
+/// budget fires).
+#[must_use]
+pub fn delayed_decide(delay_ms: u64, outcome: RouterDecisionOutcome) -> RouterDecisionFn {
+    Arc::new(move |_request: RouterDecisionRequest| {
+        let outcome = outcome.clone();
+        Box::pin(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            Ok(outcome)
+        })
+    })
+}
+
 /// A decision function that sleeps past any small segment budget.
 #[must_use]
 pub fn slow_decide() -> RouterDecisionFn {

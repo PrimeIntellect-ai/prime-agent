@@ -280,7 +280,8 @@ pub struct SystemRouterRunResult {
     pub status: RouterRunStatus,
     /// Machine-readable terminal reason (e.g. `environment_terminal`).
     pub reason: String,
-    /// Trace entries recorded this segment (executed + refused + terminal).
+    /// Trace entries recorded this segment (executed + refused + held back
+    /// + terminal).
     pub steps: usize,
     pub executed: u64,
     pub refused: u64,
