@@ -87,7 +87,11 @@ def parse_results(response, day):
             point_day = date.fromisoformat(raw_day)
             if point_day in points:
                 raise ReportError("PostHog returned duplicate dates.")
-            if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+            try:
+                finite = type(value) in (int, float) and math.isfinite(value)
+            except OverflowError:
+                finite = False
+            if not finite or value < 0:
                 raise ReportError("PostHog returned an unavailable or invalid metric value.")
             if name != "Tokens" and int(value) != value:
                 raise ReportError("PostHog returned a fractional event or user count.")

@@ -141,6 +141,23 @@ class ReportTests(unittest.TestCase):
         self.assertNotIn("private-response-value", stderr.getvalue())
         self.assertNotIn("synthetic-key", stderr.getvalue())
 
+    def test_oversized_metric_is_rejected_without_traceback_or_output(self):
+        response = fixture()
+        response["results"][0]["data"][0] = 10 ** 400
+        stderr = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "report.json"
+            with patch("sys.argv", ["stats", "prepare", "--output", str(output)]), \
+                    patch.object(stats, "report_day", return_value=DAY), \
+                    patch.dict(stats.os.environ, {"POSTHOG_PERSONAL_API_KEY": "synthetic-key"}), \
+                    patch.object(stats, "request", return_value=json.dumps(response).encode()), \
+                    contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+                stats.main()
+            self.assertEqual(raised.exception.code, 1)
+            self.assertFalse(output.exists())
+        self.assertEqual(stderr.getvalue(),
+                         "PostHog returned an unavailable or invalid metric value.\n")
+
     def test_missing_posthog_key_stops_before_network_or_output(self):
         with tempfile.TemporaryDirectory() as directory, \
                 patch("sys.argv", ["stats", "prepare", "--output", directory + "/report.json"]), \
