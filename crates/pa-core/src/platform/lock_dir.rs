@@ -357,10 +357,40 @@ impl LockDir {
     /// and a stale takeover racing the public pathname can never make the
     /// holder adopt a successor's lock: a lost publish is plain
     /// contention. EEXIST from the publish is the only collision.
+    /// A short, basename-independent candidate name in the lock's own
+    /// directory: the candidate never publishes at the lock's own name,
+    /// so its component length is its own budget - a lock path whose
+    /// component is near the filesystem's limit still acquires, where
+    /// the basename-derived sibling form failed the mkdir with
+    /// `ENAMETOOLONG` before the compatible fallback protocol could
+    /// run. The mkdir is already no-replace (EEXIST is a plain
+    /// collision), so a taken name regenerates the suffix instead.
+    #[cfg(target_os = "linux")]
+    fn claim_candidate_name(path: &Path) -> Option<PathBuf> {
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |age| age.as_nanos());
+        let pid = std::process::id();
+        for attempt in 0..8 {
+            let candidate = parent.join(format!(".c{pid:x}{nanos:x}{attempt:x}"));
+            match fs::create_dir(&candidate) {
+                Ok(()) => return Some(candidate),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(_) => return None,
+            }
+        }
+        None
+    }
+
     #[cfg(target_os = "linux")]
     fn create(path: &Path) -> io::Result<Created> {
-        let candidate = private_sibling_for(path, "candidate");
-        fs::create_dir(&candidate)?;
+        let Some(candidate) = Self::claim_candidate_name(path) else {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "no free lock candidate name",
+            ));
+        };
         let dir = match fs::File::open(&candidate) {
             Ok(dir) => dir,
             Err(error) => {

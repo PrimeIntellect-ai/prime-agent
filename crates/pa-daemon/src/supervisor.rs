@@ -557,24 +557,12 @@ impl Supervisor {
             }
             return Err(error);
         }
-        // Session-archive sweep (roadmap: the sessions directory must not
-        // grow forever): boot sweep, then the periodic re-sweep at the TS
-        // idle-eviction cadence. Housekeeping only — it never gates serving.
-        {
-            let supervisor = Arc::clone(&self);
-            tokio::spawn(async move {
-                crate::session_archive::archive_sweep_loop(&supervisor).await;
-            });
-        }
-
-        // Update-prepare watchdog: aborts deadline- or self-expiry-breached
-        // prepare transactions even when no command arrives to re-check.
-        {
-            let supervisor = Arc::clone(&self);
-            tokio::spawn(async move {
-                supervisor.update_prepare_watchdog().await;
-            });
-        }
+        // The archive-sweep and update-prepare-watchdog passes already
+        // started inside the boot-ownership block as fenceable
+        // boot_tasks: a lease compromise aborts them there, so the
+        // detached duplicates this block used to spawn (which no fence
+        // could reach) are gone - one sweeper, one watchdog, both
+        // fenced.
 
         // The accept loop OWNS the listener, so whichever arm ends serving
         // the listener is closed before the cleanup below probes the path:
