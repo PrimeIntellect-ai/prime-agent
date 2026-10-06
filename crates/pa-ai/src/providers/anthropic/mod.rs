@@ -609,6 +609,7 @@ mod subscription_identity_tests {
             cost: zero_model_cost(),
             context_window: 200_000,
             max_tokens: 32_000,
+            max_tokens_explicit: false,
             featured: None,
             headers: None,
             compat: None,
