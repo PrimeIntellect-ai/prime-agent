@@ -1610,7 +1610,11 @@ impl WorkerRecoveryJournal {
                 verdict: record.clone(),
                 snapshot: snapshot.clone(),
                 cloud_admission: admission.clone(),
-                digest: checkpoint_transaction_digest(record.as_ref(), &snapshot, admission.as_ref())?,
+                digest: checkpoint_transaction_digest(
+                    record.as_ref(),
+                    &snapshot,
+                    admission.as_ref(),
+                )?,
             };
             self.append_cloud_transaction(&transaction)?;
         } else {
