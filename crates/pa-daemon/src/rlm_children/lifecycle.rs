@@ -472,6 +472,7 @@ impl SupervisorChildSessionsInner {
                 // pending edge must be on the parent's ledger before the
                 // notice's follow-up turn mints its own request.
                 self.record_child_return(record).await;
+                self.emit_child_update(record).await;
                 // Only a successful run completes the display (TS
                 // `completeRlmSubagentRuntime`); a cancelled or failed run
                 // stays `running`, which a restart relists as `error`.
@@ -657,6 +658,7 @@ impl SupervisorChildSessionsInner {
             record.error = Some(error);
             message
         };
+        self.emit_child_update(record).await;
         // TS records a failed child's return too (`recordChildReturned` in
         // the thrown-run arm): a child that committed requests before
         // failing still returns them; a zero-commit child records nothing.
