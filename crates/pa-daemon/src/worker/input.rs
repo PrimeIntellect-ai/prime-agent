@@ -277,15 +277,17 @@ impl Worker {
             }
         }
         let sender = payload.get("sender").cloned().unwrap_or(Value::Null);
-        // A delivery from one of this session's RLM children counts as the
-        // child's reply: the settle watcher withholds the no-reply notice.
-        if let Some(child) = sender
+        // A delivery from one of this session's RLM children counts as
+        // the child's reply only once ACCEPTED: the settle watcher
+        // withholds the no-reply notice, so a refused delivery (the
+        // inbox cap, a failed durable append, the push queue cap) must
+        // not mark — the same acceptance-only contract the arrivals
+        // ring records under.
+        let replying_child = sender
             .get("activeSessionId")
             .and_then(Value::as_str)
             .filter(|id| !id.is_empty())
-        {
-            self.engine.mark_child_reply(child);
-        }
+            .map(str::to_string);
         // Sender label precedence (TS `createAgentSessionMessagePrompt`):
         // session name, session id, active session id, client id.
         let sender_name = ["sessionName", "sessionId", "activeSessionId", "clientId"]
@@ -319,6 +321,11 @@ impl Worker {
         );
         match routed {
             Ok(Some(digest)) => {
+                // Accepted on the digest lane: the row reached the durable
+                // inbox, so the child's reply stands.
+                if let Some(child) = replying_child.as_deref() {
+                    self.engine.mark_child_reply(child);
+                }
                 let mut receipt = json!({
                     "id": message_id,
                     "source": AGENT_MESSAGE_SOURCE,
@@ -429,6 +436,12 @@ impl Worker {
             let snapshot = Self::snapshot_locked(&core);
             (id, queued, snapshot, target)
         };
+        // Accepted on the push lane: the message is queued, so the
+        // child's reply stands (the cap-refused arm above returned
+        // without marking).
+        if let Some(child) = replying_child.as_deref() {
+            self.engine.mark_child_reply(child);
+        }
         // The push lane's ACCEPTED arrival records here — after the
         // queue-cap admission above — and outside the core lock (the
         // controller's evaluate takes counters-then-core; taking the
