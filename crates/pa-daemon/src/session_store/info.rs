@@ -448,7 +448,8 @@ pub(super) struct SessionInfoEntry<'a> {
     child_usage: Option<crate::session_usage::ScanUsage>,
     #[serde(default)]
     aggregate_usage: Option<crate::session_usage::ScanUsage>,
-    /// `compaction`/`branch_summary`: the summarization call's own usage.
+    /// `compaction`/`branch_summary`: the summarization call's own usage;
+    /// `cache_keep_alive`: the warm request's own usage (the same fold).
     #[serde(default)]
     usage: Option<crate::session_usage::ScanUsage>,
 }
@@ -770,7 +771,7 @@ pub(super) fn fold_scan_entry(acc: &mut SessionScanAccumulator, raw: &str) -> Op
                 entry.aggregate_usage.map(Usage::from),
             );
         }
-        "compaction" | "branch_summary" => {
+        "compaction" | "branch_summary" | "cache_keep_alive" => {
             acc.usage_scan
                 .fold_summarization(entry.usage.map(Usage::from));
         }

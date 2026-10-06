@@ -277,6 +277,10 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     // snapshot is fixed for the session anyway — while the `PI_REQUEST_TIMING`
     // env half stays live inside the wrappers' per-request check.
     let request_timing_settings = settings.get_request_timing();
+    // Prompt-cache keep-alive (the `cacheKeepAlive` setting; a Rust-era
+    // feature): the resolver re-resolves the policy per run model, so the
+    // flag read here is the only fixed half.
+    let cache_keep_alive_setting = settings.get_cache_keep_alive();
     // Captured before `settings` moves into the resource loader: the
     // factory host bridge's preflight facts (the daemon `allowedModels`
     // pin), like the request-timing snapshot above.
@@ -729,6 +733,14 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         // the session's configured modes (default "one-at-a-time").
         steering_mode: config.steering_mode,
         follow_up_mode: config.follow_up_mode,
+        // The per-model keep-alive policy (the `cacheKeepAlive` setting):
+        // warm requests fire only for models whose requests carry
+        // prompt-cache blocks, and their usage lands as a durable
+        // `cache_keep_alive` row on the session.
+        cache_keep_alive: Some(super::cache_keep_alive::keep_alive_resolver(
+            cache_keep_alive_setting,
+            wiring.session.clone(),
+        )),
         ..Default::default()
     });
 

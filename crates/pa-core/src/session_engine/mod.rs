@@ -12,6 +12,7 @@ pub mod auto_refine_trigger;
 pub mod auto_retry;
 pub mod auxiliary_model;
 pub mod branch_summarization;
+pub mod cache_keep_alive;
 pub mod compact_session;
 pub mod compaction;
 pub mod compaction_exec;
