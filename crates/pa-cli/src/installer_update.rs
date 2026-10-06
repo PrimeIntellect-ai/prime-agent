@@ -110,9 +110,8 @@ pub fn run(options: &UpdateOptions) -> i32 {
                 .and_then(Result::ok);
             if let Some(runtime) = telemetry_runtime {
                 runtime.block_on(async {
-                    let client = pa_core::session_engine::telemetry::build_client(
-                        &settings, &agent_dir,
-                    );
+                    let client =
+                        pa_core::session_engine::telemetry::build_client(&settings, &agent_dir);
                     pa_telemetry::UpdateHomebrewRefusal {
                         kind: kind.as_str(),
                     }
