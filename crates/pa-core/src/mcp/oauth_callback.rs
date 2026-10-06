@@ -1,9 +1,6 @@
-//! The local OAuth callback server.
-//!
-//! One fresh listener per candidate port (a failed bind cannot reuse a
-//! socket), on the registered redirect ports; the login flow races the
-//! browser callback against a manual paste. The served pages keep the TS
-//! product's success/error wording (a dark page carrying the label).
+//! The local OAuth callback server: one fresh listener per candidate port on the registered
+//! redirect ports; the login flow races the browser callback against a manual paste. The served
+//! pages keep the TS product's success/error wording.
 
 use std::sync::Arc;
 
@@ -16,9 +13,8 @@ fn callback_host() -> String {
     std::env::var("PI_OAUTH_CALLBACK_HOST").unwrap_or_else(|_| "127.0.0.1".to_string())
 }
 
-/// A range (not one port) so a leaked or concurrent login cannot wedge all
-/// logins with one occupied socket. Distinct from the Anthropic callback
-/// port (53692); every candidate is a registered redirect URI.
+/// A range (not one port) so a leaked or concurrent login cannot wedge all logins with one occupied
+/// socket. Distinct from the Anthropic callback port (53692).
 const CALLBACK_PORT_BASE: u16 = 53_700;
 const CALLBACK_PORT_COUNT: u16 = 10;
 const CALLBACK_PATH: &str = "/callback";
@@ -43,9 +39,8 @@ pub struct CallbackCode {
     pub state: String,
 }
 
-/// What a login waits for: [`Some`] code from the browser redirect, or
-/// `None` when the callback settled without one (error response, missing
-/// parameters, or cancellation).
+/// What a login waits for: [`Some`] code from the browser redirect, or `None` when the callback
+/// settled without one.
 pub type CallbackResult = Option<CallbackCode>;
 
 /// Settled once per login; the first settle wins.
@@ -319,9 +314,8 @@ mod tests {
 
     #[tokio::test]
     async fn falls_back_to_the_next_free_port() {
-        // The base port is occupied, so the login lands on a later
-        // candidate (a leaked login cannot wedge all of them). Skip when a
-        // concurrent test already holds the base port.
+        // The base port is occupied, so the login lands on a later candidate (a leaked login
+        // cannot wedge all of them). Skip when a concurrent test already holds the base port.
         let Ok(blocker) = std::net::TcpListener::bind(("127.0.0.1", CALLBACK_PORT_BASE)) else {
             return;
         };

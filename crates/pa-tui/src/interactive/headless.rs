@@ -1,6 +1,5 @@
-//! The headless source (moved with its concern): the scripted plan's
-//! vocabulary and the exit gate's settle snapshot - the verifier seam that
-//! drives the identical attach/submit/stream/render path without a TTY.
+//! The headless source: the scripted plan's vocabulary and the exit gate's settle snapshot - the
+//! verifier seam that drives the identical attach/submit/stream/render path without a TTY.
 
 use super::{AgentView, SessionUi};
 
@@ -41,75 +40,51 @@ pub enum HeadlessStep {
     /// Type text character by character (raw editor input, so autocomplete
     /// and editor state react exactly as to a keystroke).
     Type(String),
-    /// A bracketed-paste payload (the same editor paste path a terminal's
-    /// paste takes, including the large-paste marker rules).
+    /// A bracketed-paste payload (the same editor paste path a terminal's paste takes).
     Paste(String),
-    /// Materialize the parked editor suggestions — the state a live user
-    /// gets after pausing typing for one input-idle tick, so the next step
-    /// (typically `Enter`) completes against the open dropdown. A burst of
-    /// `Type` steps without this barrier submits as typed, exactly like a
-    /// terminal keystroke burst.
+    /// Materialize the parked editor suggestions — the state a live user gets after pausing typing
+    /// for one input-idle tick, so the next step (typically `Enter`) completes against the open
+    /// dropdown.
     SettleIdle,
     /// Hold until the current turn finishes (bounded by `timeout_ms`).
     WaitIdle { timeout_ms: u64 },
-    /// Hold until a frame rendered after this step contains `needle`
-    /// (bounded by `timeout_ms`): the condition wait for daemon-driven
-    /// rows (side-question answers, streamed notices), which arrive on
-    /// the event cadence rather than a known wall-clock delay.
+    /// Hold until a frame rendered after this step contains `needle`: the condition wait for
+    /// daemon-driven rows, which arrive on the event cadence rather than a known wall-clock delay.
     WaitRender { needle: String, timeout_ms: u64 },
-    /// Hold until the newest frame no longer contains `needle` (bounded by
-    /// `timeout_ms`): the verifier's condition wait for a surface closing
-    /// (the pane going away, a banner clearing).
+    /// Hold until the newest frame no longer contains `needle` (bounded by `timeout_ms`): the
+    /// verifier's condition wait for a surface closing.
     WaitGone { needle: String, timeout_ms: u64 },
-    /// Hold the plan for `ms` before the next step: the verifier's timing
-    /// window (queue prompts deterministically inside a scripted
-    /// `delayMs` hold, where the turn is provably busy).
+    /// Hold the plan for `ms` before the next step: the verifier's timing window (queue prompts
+    /// deterministically inside a scripted `delayMs` hold, where the turn is provably busy).
     WaitMs(u64),
-    /// Scroll the transcript to its top row (the `tui.viewport.top` key
-    /// path): the verifier's window into the head of the transcript.
+    /// Scroll the transcript to its top row (the `tui.viewport.top` key path): the
+    /// verifier's window into the head of the transcript.
     ScrollTop,
-    /// A raw mouse sequence: decoded by the same parser the terminal's SGR
-    /// reports flow through, so the verifier drives the wheel dispatch with
-    /// byte-identical sequences.
+    /// A raw mouse sequence: decoded by the same parser the terminal's SGR reports flow
+    /// through, so the verifier drives the wheel dispatch with byte-identical sequences.
     Mouse(String),
-    /// One raw key event: the verifier's window into the selector/picker
-    /// surfaces (arrows, escape), which typed text cannot express.
+    /// One raw key event: the verifier's window into the selector/picker surfaces (arrows, escape),
+    /// which typed text cannot express.
     Key(crossterm::event::KeyEvent),
 }
 
-/// The headless exit gate's settle, snapshotted: the members the gate
-/// requires before the run may end (every one is work the harness must
-/// not cut short — a live terminal never ends the run on its own; TS
-/// exits the PROCESS at shutdown and lets in-flight work dangle, so the
-/// harness's settle has no TS counterpart). `settled()` is the gate;
-/// `blockers()` is the same members named, so the settle bound's failure
-/// names exactly what stuck (the wedge family's conversion from a
-/// job-budget hang with no failure name into an attributable error).
+/// The headless exit gate's settle, snapshotted: the members the gate requires before the run may
+/// end (a live terminal never ends the run on its own; TS exits the PROCESS at shutdown and lets
+/// in-flight work dangle, so the settle has no TS counterpart). `settled()` is the gate;
+/// `blockers()` names the same members, so the settle bound's failure names exactly what stuck.
 #[derive(Debug, Default)]
 pub(super) struct HeadlessSettle {
-    /// Plan inputs still queued behind a barrier.
     pub(super) pending_inputs: usize,
-    /// A turn still streaming (or latched).
     pub(super) turn_active: bool,
-    /// Prompt round trips whose ack has not landed.
     pub(super) submits_in_flight: usize,
-    /// The queued-message strip's items.
     pub(super) queued: usize,
-    /// An armed idle barrier waiting out its deadline.
     pub(super) idle_barrier: bool,
-    /// A frame the loop has not painted yet.
     pub(super) dirty: bool,
-    /// A `/share` upload whose outcome has not landed.
     pub(super) share_pending: bool,
-    /// A `/reload` whose outcome has not landed.
     pub(super) reload_pending: bool,
-    /// A `/traces` upload whose outcome has not landed.
     pub(super) traces_upload_pending: bool,
-    /// The inline auth panel is mounted.
     pub(super) auth_panel_open: bool,
-    /// A `/traces login` flow is pending.
     pub(super) traces_login_pending: bool,
-    /// An MCP auth flow is pending.
     pub(super) mcp_auth_pending: bool,
     /// The Anthropic subscription warning's `mark_anthropic_warning_shown`
     /// write is still in flight (fire-and-forget in the product — the run
@@ -119,8 +94,8 @@ pub(super) struct HeadlessSettle {
 }
 
 impl HeadlessSettle {
-    /// Read the gate's members off the loop state (the gate's exact
-    /// conditions, in the same order the gate historically checked them).
+    /// Read the gate's members off the loop state (the gate's exact conditions, in the
+    /// same order the gate historically checked them).
     pub(super) fn snapshot(
         session: &SessionUi,
         view: &AgentView,
@@ -149,8 +124,7 @@ impl HeadlessSettle {
         self.blockers().is_empty()
     }
 
-    /// The members that are holding the run open, named for the settle
-    /// bound's failure (empty when settled).
+    /// The members holding the run open (empty when settled).
     pub(super) fn blockers(&self) -> Vec<String> {
         let mut blockers = Vec::new();
         if self.pending_inputs > 0 {

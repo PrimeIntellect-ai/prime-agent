@@ -8,12 +8,8 @@ use super::{
     Result, RouteAdmission, Supervisor, Value, ROUTE_TIMEOUT_MS,
 };
 
-/// One spawn-name reservation held across a fresh-launch create (TS
-/// `createRlmSubagentRuntime`'s `pendingSessionNames` hold, #2396): the
-/// reservation is the only cross-create serializer for a same-name
-/// admission (the per-file single-flight below cannot see a different
-/// session file), and the guard releases the key when the create ends,
-/// whatever its outcome.
+/// One spawn-name reservation held across a fresh-launch create (TS #2396): the only
+/// cross-create serializer for a same-name admission.
 struct CreateNameReservation {
     supervisor: Arc<Supervisor>,
     key: String,
@@ -30,11 +26,8 @@ impl Drop for CreateNameReservation {
 }
 
 impl Supervisor {
-    /// Record one session binding (the stale-id rebind table). A supersede
-    /// (a new worker taking over a session file another id was bound to)
-    /// notifies the clients still attached to the superseded id through the
-    /// `session_binding` event, so they re-attach to the session's current
-    /// id and keep receiving its events.
+    /// Record one session binding (the stale-id rebind table). A supersede notifies the
+    /// attached clients through the `session_binding` event, so they re-attach.
     pub(super) fn record_session_binding(
         &self,
         active_session_id: &str,
@@ -62,17 +55,9 @@ impl Supervisor {
         }
     }
 
-    /// Retarget one connection at a session's current resident after its
-    /// selector was superseded (the stale-active-id rebind seam shared by
-    /// the generic route and the admission route). The connection keeps
-    /// exactly its prior attached-ness under the current id, and a
-    /// previously-attached client is told where it now points through a
-    /// `session_binding` frame routed to the id it now holds - the
-    /// supersede-time notice raced the attach roster, so this one cannot
-    /// be dropped. A Detach never reaches the rebind: the seam answers it
-    /// supervisor-side (the stale worker is gone, and the replacement's
-    /// attach must not be dropped). Returns the current id the routed
-    /// frame must carry.
+    /// Retarget one connection at a session's current resident after its selector was
+    /// superseded: the connection keeps its prior attached-ness, and a previously-attached
+    /// client is told where it now points. A Detach never reaches the rebind.
     pub(crate) async fn rebind_connection(
         &self,
         selector: &str,
@@ -107,52 +92,40 @@ impl Supervisor {
         current
     }
 
-    /// The current resident a superseded selector rebinds to (the
-    /// stale-id rebind seam): the binding table maps the selector to its
-    /// session's durable identity, the registry's live roster holds the
-    /// resident that identity currently belongs to. `None` keeps the
-    /// unknown-selector failure - only a binding whose session has a live
-    /// resident rebinds.
+    /// The current resident a superseded selector rebinds to: the binding table maps the
+    /// selector to its durable identity, the registry holds its resident. `None` keeps the
+    /// unknown-selector failure.
     pub(crate) async fn binding_target(&self, selector: &str) -> Option<Arc<ResidentWorker>> {
         let binding = self.session_bindings.binding_for(selector)?;
-        // A binding without a session id identifies no durable session:
-        // its create never completed, and whatever later owns the file
-        // path is a different session (or none at all) - rebinding into
-        // it is the foreign-session hazard, not a recovery.
+        // A binding without a session id identifies no durable session: its create
+        // never completed, and whatever later owns the file path is a different
+        // session — rebinding into it is the foreign-session hazard.
         let binding_session_id = binding.session_id.as_deref()?.to_string();
         let session_file = binding.session_file.as_deref()?.to_string();
         let resident = self.registry.find_by_session_file(&session_file).await?;
-        // The resident must BE the binding's session, not merely hold its
-        // file: a reused path must not let one session's stale ids
-        // rebind into the different session that now owns the path - the
-        // durable id is the identity the rebind follows.
+        // The resident must BE the binding's session, not merely hold its file: a
+        // reused path must not let one session's stale ids rebind into the
+        // different session that now owns the path.
         let resident_session = resident.descriptor.lock().await.root_session_id.clone();
         if resident_session.as_deref() != Some(binding_session_id.as_str()) {
             return None;
         }
-        // Only a connected resident rebinds: a worker mid-teardown or one
-        // left by a failed launch would answer `Session worker is not
-        // connected` instead of the unknown-session failure the client can
-        // act on.
+        // Only a connected resident rebinds: one mid-teardown would answer the
+        // not-connected error instead of the unknown-session failure the client can act on.
         if resident.cmd_tx.lock().await.is_none() {
             return None;
         }
-        // Only a session-ready resident rebinds: a replacement's command
-        // channel exists before its create replay finishes, so a command
-        // routed mid-replay would bounce off the worker's require-created
-        // gate instead of waiting out the replacement. `None` keeps the
-        // unknown-session failure - the client's own retry (the TUI
-        // re-attaches by the durable session id) rides the
-        // replacement-aware route and lands once the replay answers.
+        // Only a session-ready resident rebinds: a replacement's command channel exists
+        // before its create replay finishes, so a mid-replay route would bounce off the
+        // created gate.
         if !resident.route_state().session_ready {
             return None;
         }
         Some(resident)
     }
 
-    /// `list_saved_sessions` (port of `handleSavedSessionList`): stream
-    /// `session_list_item`/`session_list_progress` events, then a final
-    /// response with the full saved-session rows.
+    /// `list_saved_sessions`: stream `session_list_item`/`session_list_progress` events,
+    /// then a final response with the full saved-session rows.
     pub(super) async fn handle_saved_session_list(
         self: &Arc<Self>,
         command: &DaemonCommand,
@@ -228,13 +201,9 @@ impl Supervisor {
             }
         };
         let scope_current = scope.as_str() == Some("current");
-        // The catalog streams WHILE the scan runs (TS
-        // `listSessionsFromDir`'s per-file `onSession`/`onProgress`: the
-        // client's rows appear through the scan instead of after it). The
-        // frames ride the SAME per-connection channel the final response
-        // later travels, so the stream stays strictly ordered ahead of its
-        // own response; the fold runs on the blocking pool, so a grown
-        // store never head-of-lines a runtime worker (the #2723 class).
+        // The catalog streams WHILE the scan runs: the frames ride the SAME channel the final
+        // response travels, so the stream stays ordered; the fold runs on the blocking pool,
+        // so a grown store never head-of-lines a runtime worker.
         let stream_rows = stream.clone();
         let scan_command_id = command_id.to_string();
         let scan_active_session_id = active_session_id.clone();
@@ -267,17 +236,9 @@ impl Supervisor {
                 if let Some(active_session_id) = scan_active_session_id.as_deref() {
                     progress["activeSessionId"] = json!(active_session_id);
                 }
-                // A failed send is the connection loop's death notice (its
-                // receiver is gone): the remaining folds serve nobody, so
-                // the callback stops the scan (the response travels the
-                // same dead channel and drops with it). The scan runs on
-                // the blocking pool, so it must never wait on client I/O:
-                // a FULL queue skips the PROGRESS frame first and retries
-                // the row (the row is the data; the frame is a UI hint),
-                // and a still-full queue skips the row too — the terminal
-                // response carries the authoritative rows regardless,
-                // and the fold still has to visit every file for the data
-                // itself.
+                // A failed send is the connection loop's death notice: the callback stops the
+                // scan. The blocking-pool scan never waits on client I/O: a FULL queue skips
+                // the PROGRESS frame first, a still-full queue skips the row too.
                 let mut bundle = (vec![Outbound::Line(item), Outbound::Line(progress)], false);
                 loop {
                     match stream_rows.try_send(bundle) {
@@ -307,24 +268,17 @@ impl Supervisor {
                 ))];
             }
         };
-        // The scan's per-line parse trees folded and freed inside the
-        // blocking task; return their arena high-water to the OS at the
-        // phase boundary instead of letting every grown catalog's scan
-        // peak stay resident for the daemon's lifetime (the #2872
-        // phase-boundary pattern). The per-file cached scan states are
-        // live cache and stay untouched.
+        // The scan's parse trees folded and freed inside the blocking task; return their
+        // arena high-water to the OS at the phase boundary (live cache untouched).
         pa_types::memory_release::trim_freed_heap();
-        // The current-cwd scope keeps only the session's own rows in the
-        // terminal array (the stream above already skipped the others'
-        // frames): the response is the authoritative catalog.
+        // The current-cwd scope keeps only the session's own rows in the terminal
+        // array: the response is the authoritative catalog.
         if scope_current {
             infos.retain(|info| info.cwd == cwd);
         }
-        // The saved catalog scan never visits session-artifacts, where RLM
-        // children persist: merge the passive ledger walk so a passivated
-        // descendant stays catalog-visible (TS
-        // `withPassiveRlmDescendantInfos`; a broken ledger degrades to the
-        // saved rows alone, it never fails the catalog).
+        // The saved catalog scan never visits session-artifacts, where RLM children
+        // persist: merge the passive ledger walk so a passivated descendant stays
+        // catalog-visible.
         let mut roots: Vec<crate::rlm_roster::RosterWalkRoot> = infos
             .iter()
             .map(|info| crate::rlm_roster::RosterWalkRoot {
@@ -361,9 +315,8 @@ impl Supervisor {
                 Vec::new()
             }
         };
-        // The passive ledger children stream too (TS
-        // `withPassiveRlmDescendantInfos`'s `onSession`): items only, no
-        // progress - the saved phase above owns the progress counts.
+        // The passive ledger children stream too (items only, no progress - the
+        // saved phase above owns the progress counts).
         let mut merged: Vec<_> = passive
             .iter()
             .map(crate::rlm_roster::passive_child_info)
@@ -383,12 +336,8 @@ impl Supervisor {
             let _ = stream.send((vec![Outbound::Line(item)], false)).await;
         }
         infos.append(&mut merged);
-        // Every row - scanned or passive-merged - carries its tombstoned
-        // descendants' spend (TS `withPassiveRlmDescendantInfos`'s
-        // deleted-usage half): one bucket read per list, attached by
-        // canonical parent path so the agents-view recursive rollup bills
-        // deleted subagents to the parent that spent them. A broken ledger
-        // degrades to bare rows, exactly like the passive merge above.
+        // Every row carries its tombstoned descendants' spend, attached by canonical
+        // parent path so the rollup bills deleted subagents to the parent that spent them.
         match ledger.deleted_descendant_usage_by_parent() {
             Ok(bucket) => {
                 for info in &mut infos {
@@ -404,13 +353,9 @@ impl Supervisor {
                 ));
             }
         }
-        // The scan's completion marker: the per-file progress counts
-        // DIRECTORY entries, while the rows only stream for valid files,
-        // so the last per-row progress can land short of the total when
-        // an invalid file yields no row (TS's onProgress counts every
-        // file, valid or not, so its stream always reaches its total).
-        // One final frame names the scan's end exactly; a consumer
-        // waiting for `loaded == total` observes completion.
+        // The scan's completion marker: the progress counts DIRECTORY entries while rows
+        // only stream for valid files, so the last progress can land short of the total; a
+        // consumer waiting for `loaded == total` observes completion on the final frame.
         if file_total > 0 {
             let mut completion = json!({
                 "id": command_id,
@@ -424,9 +369,8 @@ impl Supervisor {
             }
             let _ = stream.send((vec![Outbound::Line(completion)], false)).await;
         }
-        // The streamed rows already reached the client through the scan
-        // (and the passive merge above); the terminal response is the
-        // authoritative array (the scan never re-orders after streaming).
+        // The streamed rows already reached the client; the terminal response is
+        // the authoritative array (the scan never re-orders after streaming).
         let mut lines = Vec::new();
         let sessions: Vec<Value> = infos.iter().map(saved_session_row).collect();
         lines.push(response_line(&response_success(
@@ -434,9 +378,8 @@ impl Supervisor {
             "list_saved_sessions",
             Some(json!({ "sessions": sessions })),
         )));
-        // Telemetry: how many served rows carry a usage summary — the
-        // agents-view spend columns' data (a count only, never session
-        // payload).
+        // Telemetry: how many served rows carry a usage summary (a count only,
+        // never session payload).
         let rows_with_usage = infos.iter().filter(|info| info.usage.is_some()).count();
         self.note_saved_sessions_listed(rows_with_usage);
         lines
@@ -461,9 +404,8 @@ impl Supervisor {
             }
         };
         let summaries: Vec<Value> = if let Some(true) = all {
-            // TS `buildSessionList` order: saved rows (resident ones
-            // replaced in place by their live summary), then passive
-            // ledger children, then resident-only rows.
+            // TS `buildSessionList` order: saved rows (resident ones replaced in place by
+            // their live summary), then passive children, then resident-only rows.
             let mut infos = list_sessions(&dir);
             if let Some(cwd) = cwd {
                 infos.retain(|info| info.cwd == cwd);
@@ -476,9 +418,8 @@ impl Supervisor {
                     resident_by_file.push(ResidentRoot {
                         session_file: crate::lease::canonical_session_path(Path::new(session_file)),
                         resident: Arc::clone(resident),
-                        // Resident roots carry their active session id
-                        // so passive children of a resident parent
-                        // report parentActiveSessionId.
+                        // Resident roots carry their active session id so passive children of a
+                        // resident parent report parentActiveSessionId.
                         active_session_id: Some(descriptor.root_active_session_id.clone()),
                     });
                 }
@@ -535,8 +476,7 @@ impl Supervisor {
                     return response_failure(Some(&command_id), &type_name, &message, None);
                 }
             }
-            // TS `buildSessionList` order: saved rows, passive children,
-            // then resident-only rows.
+
             summaries.append(&mut resident_only);
             summaries
         } else {
@@ -579,36 +519,20 @@ impl Supervisor {
         command: &DaemonCommand,
         client_id: String,
     ) -> Result<Value> {
-        // The per-file open single-flight (TS `openingWorkers`): one
-        // create at a time per session file. A concurrent open waits
-        // behind this one and then reuses the worker it launched — both
-        // reaching the launch would race the runtime session lease.
+        // The per-file open single-flight: a concurrent open waits behind this one and then
+        // reuses the worker it launched (both launches would race the session lease).
         let opening_guard = self.opening_guard(command).await?;
-        // TS `createOrReuseWorker`'s reuse seam: an open of a session file
-        // a live worker already serves answers the LIVE binding (the
-        // client attaches next) instead of launching a second worker over
-        // the same file — a launch the runtime session lease would reject
-        // with `Session is already active`. `None` keeps the launch path.
-        // The seam runs BEFORE the name check (TS reserves names only on
-        // the fresh-launch path): a named open of an already-active
-        // session reuses it — its own name is not a conflict.
+        // The reuse seam: an open of a file a live worker already serves answers the LIVE
+        // binding instead of launching a second worker; it runs BEFORE the name check.
         if let Some(summary) = self
             .reuse_live_worker_for_create(command, &client_id)
             .await?
         {
             return Ok(summary);
         }
-        // TS `createRlmSubagentRuntime` (#2396): the sibling name is held
-        // under a daemon-wide reservation for the whole fresh-launch
-        // admission and re-asserted at this boundary, so a same-name
-        // sibling that lands mid-admission fails closed before the durable
-        // ledger edge is appended. TS reserves names only on the subagent
-        // admission path (a named open of a live session reuses it above,
-        // and a root create keeps the plain live check), so only a
-        // `kind: "subagent"` create reserves.
-        // The binding owns the reservation guard: it releases the key
-        // only when `handle_create` returns (the RAII drop), holding the
-        // name across the whole launch and durable admission.
+        // TS `createRlmSubagentRuntime` (#2396): the sibling name is held under a daemon-wide
+        // reservation for the whole admission, so a same-name sibling landing mid-admission
+        // fails closed. Only a `kind: "subagent"` create reserves; the binding owns the guard.
         let _name_reservation = self.reserve_subagent_create_name(command)?;
         if let DaemonCommand::Create {
             name: Some(name), ..
@@ -616,17 +540,9 @@ impl Supervisor {
         {
             self.assert_session_name_available(name).await?;
         }
-        // TS daemon-supervisor.ts: only a `client_owned`-lifecycle create
-        // is client-owned (`ownerClientId = command.lifecycle ===
-        // "client_owned" ? clientId : undefined`); unspecified and
-        // `Resident` lifecycles are unowned. Every RLM child spawn
-        // declares `Resident`, so a spawned child never inherits the
-        // spawning client's ownership: passivation deletes an owned
-        // worker's rows, and a stopped child under a surviving root must
-        // passivate instead (the walk e2e asserts the passive row
-        // survives the kill). A `None`-lifecycle create being owner-
-        // marked would hide its live session from every other client
-        // (`assertWorkerAccessibleToClient`), so it stays unowned too.
+        // Only a `client_owned`-lifecycle create is client-owned; unspecified and `Resident`
+        // are unowned. RLM child spawns declare `Resident`, so a spawned child never
+        // inherits the client's ownership (an owned child's rows would die with a stop).
         let create_lifecycle = match command {
             DaemonCommand::Create { lifecycle, .. } => *lifecycle,
             _ => None,
@@ -636,22 +552,9 @@ impl Supervisor {
             _ => None,
         };
         let (resident, create_summary) = self.launch_worker(command, owner_client_id).await?;
-        // The launch registered its worker (the registry insert precedes
-        // the spawn). The single-flight stays held through the spawn
-        // admission below: an admission failure tears the resident down,
-        // and a concurrent open that had just reused it would hold a
-        // summary for a worker that no longer exists.
-        // Spawn admission is the moment the supervisor knows the child's
-        // edge firsthand. The ledger is the only topology store, so the
-        // append's outcome is load-bearing: admission fails if the spawn
-        // record cannot be made durable (a swallowed failure would admit a
-        // child that listing and hydration can never find after
-        // passivation). Admission reads the CREATE response: it is
-        // authoritative (launch_worker rejects a sessioned create without
-        // a durable non-empty session file). A fresh get_state here races
-        // worker replacement (a rebooting worker mid-replay answers
-        // without the session file yet) and would tear down a healthy
-        // child on a stale miss.
+        // The single-flight stays held through the spawn admission below: an admission
+        // failure tears the resident down, and a concurrent open that had just reused it
+        // would hold a summary for a gone worker. The ledger is the only topology store.
         if let Err(error) = self
             .record_rlm_child_admission(command, &create_summary)
             .await
@@ -664,10 +567,8 @@ impl Supervisor {
         // The admission settled: the single-flight may release (a
         // concurrent open's classification now finds a durable resident).
         drop(opening_guard);
-        // The response still matches attach/list rows exactly: prefer a
-        // fresh get_state, but a degraded one falls back to the
-        // authoritative create summary instead of failing the spawn (the
-        // session is durable at this point; the child is healthy).
+        // Prefer a fresh get_state, but a degraded one falls back to the authoritative
+        // create summary instead of failing the spawn.
         let summary = match self
             .route_command_typed(
                 &resident,
@@ -683,23 +584,13 @@ impl Supervisor {
             }
             _ => create_summary.clone(),
         };
-        // The new session joins the agent roster immediately (subscribers
-        // see the roster_update before their next list) — as an
-        // authoritative pull write, so its embedded counter raises the
-        // stale-delta watermark for the resident.
+        // The new session joins the agent roster immediately, as an authoritative pull
+        // write (its counter raises the resident's stale-delta watermark).
         self.write_roster_summary_for_resident(&resident, &summary)
             .await;
-        // The new root's passive family renders immediately from the
-        // ledger edges - no transcript read on the event path - then one
-        // bounded background hydration fills each newly seeded row's
-        // durable display fields (cwd, model, thinking level) and
-        // publishes them as one update. A fresh session has no family;
-        // the guards skip every row another surface already seeded. The
-        // root is the CREATE response's session file (the authoritative
-        // durable path, exactly what admission reads): a get_state that
-        // answers mid-replay without its session file must not skip a
-        // resume's family, and a live get_state file that differs is
-        // still the same session.
+        // The new root's passive family renders immediately from the ledger edges, then
+        // one bounded background hydration fills each seeded row's display fields. The root
+        // is the CREATE response's session file (a mid-replay get_state must not skip it).
         if let Some(root) = summary
             .get("sessionFile")
             .and_then(Value::as_str)
@@ -744,15 +635,8 @@ impl Supervisor {
         Ok(())
     }
 
-    /// Reserve a subagent spawn's name for the whole fresh-launch admission
-    /// (TS #2396 `createRlmSubagentRuntime`): the reservation spans the
-    /// availability re-assert, the worker launch, and the durable ledger
-    /// admission, and the guard releases the key when the create ends,
-    /// whatever its outcome. Creates that do not reserve - a root create,
-    /// or an open that reuses a live worker above - answer `None` and keep
-    /// the plain live check (TS reserves names only on the subagent
-    /// admission path); a racing same-name admission of the same parent
-    /// scope fails the create with the TS unavailability error.
+    /// Reserve a subagent spawn's name for the whole fresh-launch admission (TS #2396):
+    /// non-reserving creates answer `None`; a racing same-name admission fails closed.
     fn reserve_subagent_create_name(
         self: &Arc<Self>,
         command: &DaemonCommand,
@@ -771,9 +655,8 @@ impl Supervisor {
         if metadata.get("kind").and_then(Value::as_str) != Some("subagent") {
             return Ok(None);
         }
-        // The child's scope keys the reservation exactly like a rename's
-        // (TS `sessionNameReservationKey`): `[depth, parent, name]`, the
-        // parent keyed by its session file when it has one.
+        // The child's scope keys the reservation exactly like a rename's: `[depth, parent,
+        // name]`, the parent keyed by its session file when it has one.
         let scope = NameScope {
             id: String::new(),
             name: name.clone(),
@@ -816,9 +699,8 @@ struct ResidentRoot {
 pub(super) fn saved_session_summary(info: &crate::session_store::SessionInfo) -> Value {
     let mut row = json!({
         "id": info.id,
-        // TS `inactiveLifecycleForSession`: archived/crash markers stay
-        // archived; everything else is live once a message exists, draft
-        // otherwise.
+        // TS `inactiveLifecycleForSession`: archived/crash markers stay archived;
+        // everything else is live once a message exists, draft otherwise.
         "lifecycle": match info.state.as_deref() {
             Some("archived" | "crash") => "archived",
             _ if info.message_count > 0 => "live",
@@ -848,19 +730,16 @@ pub(super) fn saved_session_summary(info: &crate::session_store::SessionInfo) ->
             object.insert("parentSessionPath".to_string(), json!(parent));
         }
     }
-    // The persisted thinking level rides every saved-session summary row
-    // (the durable `thinking_level_change` entry): the agents-view Model
-    // column renders "model:level" for sessions without a live worker,
-    // top-level and subagent alike.
+    // The persisted thinking level rides every saved-session summary row: the agents-view
+    // Model column renders "model:level" for sessions without a live worker.
     if let Some(level) = &info.thinking_level {
         if let Some(object) = row.as_object_mut() {
             object.insert("thinkingLevel".to_string(), json!(level));
         }
     }
-    // TS `summaryForInactiveSession` publishes the scan's own-usage
-    // summary: the agents-view roster record reads it before the saved
-    // catalog row's (own cost `daemon.usage ?? saved.usage`). The child's
-    // own row carries the child spend, so rollups never double count.
+    // TS `summaryForInactiveSession` publishes the scan's own-usage summary:
+    // the roster record reads it before the saved catalog row's (own cost
+    // `daemon.usage ?? saved.usage`), so rollups never double count.
     if let Some(usage) = &info.usage {
         if let Some(object) = row.as_object_mut() {
             object.insert("usage".to_string(), json!(usage));
@@ -885,7 +764,6 @@ fn offline_summary(worker_id: &str) -> Value {
     })
 }
 
-/// Saved-session row (port of `serializeSavedSessionInfo`).
 pub(super) fn saved_session_row(info: &crate::session_store::SessionInfo) -> Value {
     let mut row = json!({
         "path": info.path.to_string_lossy(),
@@ -914,24 +792,20 @@ pub(super) fn saved_session_row(info: &crate::session_store::SessionInfo) -> Val
             json!({ "provider": provider, "modelId": model_id }),
         );
     }
-    // TS `serializeSavedSessionInfo` publishes the scan's own-usage
-    // summary: the agents-view spend columns and the archived-row
-    // keep-condition read `saved.usage.cost`. The child's own row
-    // carries the child spend, so rollups never double count.
+    // TS `serializeSavedSessionInfo` publishes the scan's own-usage summary:
+    // the spend columns and the archived-row keep-condition read
+    // `saved.usage.cost`, so rollups never double count.
     if let Some(usage) = &info.usage {
         object.insert("usage".to_string(), json!(usage));
     }
-    // TS #2506 `serializeSavedSessionInfo`'s optional
-    // `deletedDescendantUsage`: the recursive spend of ledger-tombstoned
-    // descendants (the listing arm attaches it from the spawn ledger's
-    // bucket). The agents-view recursive cost rollup adds it to this
-    // row's own cost — the deleted child keeps no row anywhere, its
-    // spend bills here exactly once.
+    // TS #2506 `serializeSavedSessionInfo`'s optional `deletedDescendantUsage`: the
+    // recursive spend of tombstoned descendants — the deleted child keeps no row anywhere,
+    // its spend bills here exactly once.
     if let Some(deleted) = &info.deleted_descendant_usage {
         object.insert("deletedDescendantUsage".to_string(), json!(deleted));
     }
-    // The persisted thinking level rides the catalog row too: the TUI merges
-    // it into live summaries that lack one (the same enrichment as `model`).
+    // The persisted thinking level rides the catalog row too: the TUI merges it into
+    // live summaries that lack one.
     if let Some(level) = &info.thinking_level {
         object.insert("thinkingLevel".to_string(), json!(level));
     }

@@ -1,8 +1,5 @@
 //! Supervisor-side roster serving: subscribe/unsubscribe handling, worker
-//! roster deltas, the stop-path passivation, and the `roster_update`
-//! pushes subscribers receive (the roster arms of TS
-//! `daemon-supervisor.ts`; the store itself lives in `agent_roster.rs`,
-//! and the seeding/hydration arms live in `supervisor_roster_seed.rs`).
+//! roster deltas, the stop-path passivation, and the `roster_update` pushes subscribers receive.
 
 use serde_json::Map;
 use std::collections::{HashMap, HashSet};
@@ -20,13 +17,10 @@ use crate::registry::ResidentWorker;
 use crate::supervisor::{ClientRouting, Supervisor, ROUTE_TIMEOUT_MS};
 use crate::supervisor_roster_seed::family_descends_from;
 
-/// `worker_roster_delta`'s parsed frame (worker.rs `push_roster_delta`):
-/// the summary, the removals, the sending worker's per-connection sequence
-/// counter (the stale-delta gate's input: the roster's per-worker watermark
-/// drops a delayed older snapshot, matching the TS worker's ordered socket
-/// delivery), and the sending worker process instance (the generation the
-/// roster's stale-delta slot names; a replacement process restarts the
-/// counter under a new instance and the registration flips the slot to it).
+/// `worker_roster_delta`'s parsed frame. `sequence` feeds the stale-delta
+/// gate (the per-worker watermark drops a delayed older snapshot);
+/// `worker_instance_id` is the generation the gate's slot names (a
+/// replacement process restarts the counter under a new instance).
 pub(crate) struct WorkerRosterDelta {
     pub worker_token: String,
     pub summary: Value,
@@ -36,23 +30,15 @@ pub(crate) struct WorkerRosterDelta {
 }
 
 impl Supervisor {
-    /// `roster_subscribe` (TS: sets the client flag and answers with the
-    /// full roster snapshot; the caller stores the flag). Pure in-memory:
-    /// the boot seed and the create path's family seed
-    /// (`supervisor_roster_seed.rs`) publish `roster_update` for rows
-    /// that land between subscribes, so the answer itself never reads
-    /// the ledger or a transcript.
+    /// `roster_subscribe`: answer with the full roster snapshot (the
+    /// caller stores the client flag). Pure in-memory.
     pub(crate) async fn handle_roster_subscribe(
         self: &Arc<Self>,
         command_id: &str,
         type_name: &str,
     ) -> DaemonResponse {
         // A registration seed's pushes must never overtake this answer
-        // (a client that applies the push first and then the snapshot
-        // would lose the seeded rows): drain the in-flight seed tasks
-        // and await them to completion BEFORE the snapshot is read.
-        // Finished handles await instantly; the take-and-await also
-        // bounds the retained set on every subscribe.
+        // (a client applying the push first loses the seeded rows).
         let pending = std::mem::take(&mut *self.pending_registration_seeds.lock().unwrap());
         for handle in pending {
             let _ = handle.await;
@@ -65,8 +51,8 @@ impl Supervisor {
         )
     }
 
-    /// The seed roots (TS: every worker's `sessionFile` with the durable
-    /// create's `sessionPath` as fallback), canonicalized.
+    /// The seed roots: every worker's `sessionFile` (the durable create's
+    /// `sessionPath` as fallback), canonicalized.
     pub(crate) async fn roster_seed_roots(self: &Arc<Self>) -> HashSet<PathBuf> {
         let mut roots = HashSet::new();
         for resident in self.registry.list().await {
@@ -82,7 +68,6 @@ impl Supervisor {
         roots
     }
 
-    /// `roster_unsubscribe`.
     pub(crate) fn handle_roster_unsubscribe(command_id: &str, type_name: &str) -> DaemonResponse {
         response_success(Some(command_id), type_name, None)
     }
@@ -108,25 +93,10 @@ impl Supervisor {
                 None,
             );
         };
-        // One per-worker critical section spans the roster write AND the
-        // identity follow (the resident's descriptor lock — the same lock
-        // every identity reader takes): a routing reader can never observe
-        // a half-applied swap, and an older follow can never persist after
-        // a newer one (each accepted row carries its own follow inside the
-        // same guard, so the persists apply in accept order).
-        //
-        // The stale-delta gate and the write share ONE roster lock
-        // acquisition: two accepted deltas must never write in reverse
-        // order (each supervisor connection runs its own task), so the
-        // accept order is the apply order. The gate drops both a delayed
-        // older snapshot (a newer sequence already applied) and any frame
-        // from a generation the roster's slot no longer names (a replaced
-        // process's delayed delivery — stale by construction), and the
-        // supervisor answers success for a stale delta (delivered, just
-        // superseded). The summary write and any removals batch into the
-        // single frame the one push carries (TS `applyWorkerRosterDelta`
-        // + its coalescing `scheduleRosterPush`), never one push per
-        // mutation.
+        // One per-worker critical section spans the roster write and the
+        // identity follow (the descriptor lock): no half-applied swap; the
+        // gate and the write share one roster lock, so accept order is
+        // apply order.
         let mut changed = Vec::new();
         let mut removed_ids = Vec::new();
         {
@@ -141,13 +111,8 @@ impl Supervisor {
                     return response_success(Some(command_id), type_name, None);
                 }
                 let entry = roster.write_summary(summary.clone(), Some(&resident.worker_id), None);
-                // The worker's root slot can swap to a new durable session
-                // (a `new_session`/`switch_session`/`import_jsonl`/`fork`
-                // replacement serves a new file under the same address):
-                // the row it previously owned for that address described
-                // the superseded session, and the roster must not keep
-                // presenting it as the worker's live root (TS
-                // `flushRoster`'s swapped-in-place removal).
+                // The worker's root slot can swap to a new durable
+                // session: the superseded row must not present as live.
                 for swapped in roster.swapped_out_root_rows(&resident.worker_id, &entry) {
                     roster.delete(&swapped);
                     removed_ids.push(swapped);
@@ -160,16 +125,9 @@ impl Supervisor {
                     }
                 }
             }
-            // The roster write is the worker's live word on what it
-            // serves: the supervisor-side identity follows it inside the
-            // same critical section (the fork-isolation seam — the
-            // descriptor, the persisted record, the durable create
-            // command, and the binding table all move onto the worker's
-            // current session). The boot reconciliation quarantine lifts
-            // ONLY on a root-identity-bearing write: the sync answers
-            // whether the worker's own root row carried the live word —
-            // a subagent/child summary (keying under its own address)
-            // never lifts the root's fence.
+            // The supervisor-side identity follows the write inside the
+            // same critical section; the boot quarantine lifts ONLY on a
+            // root-identity-bearing write.
             let root_identity_bearing =
                 self.sync_root_identity_from_roster(&resident, &mut descriptor);
             if root_identity_bearing {
@@ -180,12 +138,8 @@ impl Supervisor {
         response_success(Some(command_id), type_name, None)
     }
 
-    /// Write one summary into the roster and push the change to
-    /// subscribers. Returns the classified entry. Test-support arm: the
-    /// production paths write through the sequence-gated
-    /// [`Self::write_roster_summary_for_resident`] (the authoritative
-    /// pull write); the plain write remains for the roster tests that
-    /// place rows directly.
+    /// Test-support arm: production paths write through the sequence-gated
+    /// [`Self::write_roster_summary_for_resident`].
     #[cfg(test)]
     pub(crate) fn write_roster_summary(
         &self,
@@ -220,23 +174,15 @@ impl Supervisor {
                 .clone()
                 .unwrap_or_default(),
         };
-        // The counter stamp stays an Option: ABSENT means unsequenced
-        // (a legacy summary that predates the sequence wire field) — an
-        // authoritative write — while PRESENT-and-zero is the worker's
-        // counter before its first push, a sequenced snapshot the gate
-        // orders like any other (a delayed zero-counter pull must not
-        // overwrite a newer delta's state, and a predecessor's must not
-        // overwrite the replacement's row).
+        // The counter stamp stays an Option: ABSENT means unsequenced (a
+        // legacy summary predating the field) — an authoritative write;
+        // PRESENT-and-zero orders like any other snapshot.
         let counter = summary
             .get("rosterDeltaSequence")
             .and_then(serde_json::Value::as_u64);
         let (entry, swapped) = {
             // The pull shares the delta path's per-worker critical
-            // section (the resident's descriptor lock across the roster
-            // write and the identity follow): the registration and
-            // refresh pulls land their descriptor/persist/binding moves
-            // as one transition, in accept order, never observable
-            // half-applied.
+            // section.
             let mut descriptor = resident.descriptor.lock().await;
             let (entry, swapped) = {
                 let mut roster = self.roster.lock().unwrap();
@@ -244,21 +190,14 @@ impl Supervisor {
                     return None;
                 }
                 let entry = roster.write_summary(summary.clone(), Some(&resident.worker_id), None);
-                // The pull sees the same root-slot swap the deltas do (a
-                // registration or refresh landing after a
-                // `new_session`/`switch_session`/`import_jsonl`/`fork`
-                // replacement): the superseded row retires with the write,
-                // and the identity follow below re-binds the
-                // supervisor-side identity onto the moved-to session.
+                // The pull sees the same root-slot swap: the superseded
+                // row retires, and the identity follow re-binds.
                 let swapped = roster.swapped_out_root_rows(&resident.worker_id, &entry);
                 for agent_id in &swapped {
                     roster.delete(agent_id);
                 }
                 (entry, swapped)
             };
-            // The pull is the worker's own root state by construction, so
-            // its accepted write lifts the boot reconciliation quarantine
-            // with the identity it just reconciled.
             let root_identity_bearing =
                 self.sync_root_identity_from_roster(resident, &mut descriptor);
             if root_identity_bearing {
@@ -270,12 +209,8 @@ impl Supervisor {
         Some(entry)
     }
 
-    /// Refresh one resident worker's entry from its live `get_state`
-    /// (registration, adoption, and create flows). Returns whether the
-    /// live state landed: the write carries the root-identity follow, so
-    /// a `false` answer means the reconciliation did not run — the caller
-    /// logs it and the persisted identity keeps serving until the next
-    /// roster write.
+    /// Refresh one resident worker's entry from its live `get_state` (registration, adoption, and
+    /// create flows); `false` means the identity reconciliation did not run.
     pub(crate) async fn refresh_roster_entry(
         self: &Arc<Self>,
         resident: &Arc<ResidentWorker>,
@@ -303,21 +238,10 @@ impl Supervisor {
             .is_some()
     }
 
-    /// TS `flipWorkerRosterEntriesInactive` (the Rust form: one pass in
-    /// place, no ledger reseed, no transcript read): a stopped worker's
-    /// rows settle where they are. An ephemeral (client-owned) worker's
-    /// rows and queued children die with the registration; the TOP-LEVEL
-    /// row passivates, exactly like TS (TS
-    /// `passivatedWorkerRosterEntry` keeps every durable display field -
-    /// model, thinking level, cwd - and `lifecycle` stays `"live"`), so a
-    /// stopped session's row stays visible in the agents view instead of
-    /// vanishing until the next catalog scan re-lists it from disk; a
-    /// subagent row keeps the family walk (the live edge and a surviving
-    /// resident root anchor it; the tombstoned edge of a deleted child
-    /// dies with the deletion). The roster's growth with passivated
-    /// top-level rows is daemon-lifetime bounded (TS accepts the same),
-    /// and the unowned sweep below still settles the dead seeded
-    /// families (the #2716 flash).
+    /// `passivate_roster_worker` (TS `flipWorkerRosterEntriesInactive`,
+    /// in place — no ledger reseed): the TOP-LEVEL row passivates keeping
+    /// every durable display field (`lifecycle` stays `"live"`); an
+    /// ephemeral worker's rows die; a subagent row keeps the family walk.
     pub(crate) async fn passivate_roster_worker(
         self: &Arc<Self>,
         worker_id: &str,
@@ -330,42 +254,23 @@ impl Supervisor {
                 .into_iter()
                 .cloned()
                 .collect();
-            // The unowned rows this pass may settle, snapshotted where
-            // `owned` is: a family whose root registers while this pass
-            // awaits (its registration seed writes fresh unowned rows)
-            // is missing from the pass's roots/ledger view, so a sweep
-            // over the LIVE roster would read those just-seeded rows as
-            // unanchored and drop a live resident family's display. The
-            // snapshot scopes the sweep to the rows that existed when
-            // the stop began - the only rows whose anchors this stop can
-            // have changed - and the revalidation below still settles
-            // rows a later pass owns.
+            // The unowned rows are snapshotted here: a family whose root
+            // registers while this pass awaits would read as unanchored; the
+            // snapshot scopes the sweep to rows existing at stop start.
             let unowned_at_start: Vec<AgentRosterEntry> = roster
                 .entries()
                 .into_iter()
                 .filter(|entry| entry.worker_id.is_none())
                 .collect();
-            // The sequence slot dies with the rows' snapshot, BEFORE the
-            // ledger/roots awaits: a stop that awaits first races a
-            // re-registration of the same session (the replacement flips
-            // the slot to its own instance and starts pushing) and would
-            // then delete the FRESH slot here, after which the gate
-            // accepts a predecessor frame as a fresh generation and
-            // drops the replacement's live deltas. Clearing under this
-            // first lock also bounds the slot map on every stop, even
-            // when the worker owns no roster rows.
+            // The sequence slot dies BEFORE the ledger/roots awaits: a
+            // stop that awaits first would race a re-registration and
+            // delete the replacement's FRESH slot.
             roster.forget_worker_sequences(worker_id);
             (owned, unowned_at_start)
         };
-        // The stopping worker's family view - live edges and the
-        // surviving resident roots (the caller removed the worker from
-        // the registry first) - decides each subagent row's fate. This is
-        // the old remove+reseed's reach, without its per-family
-        // transcript reads; a ledger failure degrades to an empty view
-        // for the owned rows, exactly like the old reseed degraded to no
-        // rows, while the unowned sweep below stays armed only on the
-        // successful read (a transient ledger failure must not read as
-        // "no anchors anywhere" for the display rows).
+        // The stopping worker's family view — live edges and surviving
+        // resident roots — decides each subagent row's fate; a ledger
+        // failure degrades to an empty view.
         let ledger_view = self.live_edges_and_parents().await;
         let empty_view: (
             Vec<crate::rlm_ledger::RlmLedgerEdge>,
@@ -421,29 +326,15 @@ impl Supervisor {
                 }
             }
             for entry in settle {
-                // The snapshot predates the ledger/roots awaits: a
-                // resumed worker can replace a row meanwhile, and only
-                // rows this worker still owns settle here.
                 if roster
                     .get(&entry.agent_id)
                     .is_none_or(|current| current.worker_id.as_deref() != Some(worker_id))
                 {
                     continue;
                 }
-                // TS `flipWorkerRosterEntriesInactive` (the non-ephemeral,
-                // non-queued arms): a stopped worker's TOP-LEVEL row
-                // rewrites passivated (TS `passivatedWorkerRosterEntry`
-                // keeps `lifecycle: "live"` and every durable display
-                // field), so a stopped session's row stays visible in the
-                // view instead of vanishing until a catalog scan re-lists
-                // it from disk - the agents view merges the passivated
-                // row with its saved catalog row by identity, so it never
-                // renders twice, and a re-registration replaces the
-                // passive row in place. A SUBAGENT row keeps the family
-                // walk: the live edge and a surviving resident root anchor
-                // it (the tombstoned edge of a deleted child dies with the
-                // deletion; a dead family's child returns to the saved
-                // catalog alone - the #2716 flash design).
+                // TOP-LEVEL rows passivate in place (the view merges them
+                // with the saved catalog row); a SUBAGENT row keeps the
+                // family walk.
                 let subagent = entry
                     .summary
                     .get("rlmChildId")
@@ -470,27 +361,9 @@ impl Supervisor {
                     removed.push(entry.agent_id);
                 }
             }
-            // The unowned rows - the ones the boot/registration seeds
-            // wrote and the loop above passivated - carry no worker, so
-            // no stop ever revisited them: the rows a departed root's
-            // registration seeded outlived the root (the registration
-            // walk runs at register time, while the root is resident),
-            // and the agents view rendered them as top-level rows until
-            // the saved catalog re-parented them minutes later - the
-            // operator's agents-view flash. The passivation's own anchor
-            // rule settles them with the same verdict as the owned rows:
-            // a subagent row whose family walk no longer reaches a
-            // surviving resident root returns to the saved catalog
-            // alone (the dead family stays resumable there), while the
-            // anchored passivated rows keep their display. The sweep is
-            // scoped to the unowned rows snapshotted at the pass's start
-            // (rows seeded while this pass awaits belong to a family
-            // this stop never anchored - their own registration proved
-            // the root resident), and each row is revalidated under this
-            // lock: a row that vanished, or a worker claimed since the
-            // snapshot, is not this pass's to settle. The sweep needs
-            // the ledger view the pass already read; a failed read
-            // leaves the display rows untouched.
+            // The seeded unowned rows outlived their departed root and
+            // flashed as top-level rows: settle them with the same anchor
+            // verdict as the owned rows, scoped to the snapshot.
             if ledger_view.is_ok() {
                 for entry in &unowned_at_start {
                     if roster
@@ -505,9 +378,8 @@ impl Supervisor {
                         .and_then(Value::as_str)
                         .is_some();
                     // Only seeded subagent rows are the sweep's business:
-                    // a passivated TOP-LEVEL row is unowned too (the stop
-                    // pass cleared its worker), but it is a stopped
-                    // session's visible row, not a dead family's flash.
+                    // a passivated TOP-LEVEL row is not a dead family's
+                    // flash.
                     if !subagent {
                         continue;
                     }
@@ -532,22 +404,12 @@ impl Supervisor {
         self.push_roster_update(changed, removed);
     }
 
-    /// Push one `roster_update` to subscribed clients. The TS supervisor
-    /// batches pending mutations into one push and content-diffs each
-    /// entry against what it last published (TS #2481): an identical
-    /// rewrite is dropped from the push (an update whose entries all
-    /// match their last published forms broadcasts nothing), so the wire
-    /// never re-ships an unchanged row. The diff is per entry, not per
-    /// frame: a changed row still reaches subscribers alongside an
-    /// unchanged sibling in one push.
+    /// Push one `roster_update` to subscribed clients, content-diffed
+    /// per entry against the last published form: an identical rewrite broadcasts nothing.
     pub(crate) fn push_roster_update(&self, changed: Vec<AgentRosterEntry>, removed: Vec<String>) {
-        // ONE lock acquisition spans the diff decision, the baseline
-        // rebase, and the send: two concurrent pushes cannot interleave
-        // as A-diff+A-rebase, B-diff+B-rebase+B-send, A-send —
-        // subscribers would apply stale A after B while the map records
-        // B (and then suppresses the correction). The broadcast send is
-        // sync (the tokio broadcast channel delivers in send order), so
-        // holding the std mutex across it serializes the pushes exactly.
+        // ONE lock acquisition spans the diff, the rebase, and the send:
+        // interleaved pushes would deliver stale A after B and then
+        // suppress the correction.
         let mut last = self.last_published_roster.lock().unwrap();
         let mut changed = changed;
         changed.retain(|entry| {
@@ -584,15 +446,9 @@ impl Supervisor {
         ));
     }
 
-    /// Broadcast one `roster_update` WITHOUT the content-diff guard: the
-    /// seeded-row publish's replay contract (a row the roster still holds
-    /// verbatim re-ships to make sure subscribers have it — see
-    /// [`Self::push_seeded_rows`]'s own identity gate, which is that
-    /// path's unchanged-row filter). Every mutation-driven push goes
-    /// through the guarded [`Self::push_roster_update`] instead. The
-    /// shipped content still REBASES the last-published map — the replay
-    /// did publish, so a later identical mutation is correctly dropped
-    /// and a later removal of the row correctly passes the guard.
+    /// Broadcast one `roster_update` WITHOUT the content-diff guard (the
+    /// seeded-row publish's replay contract): the content still REBASES the
+    /// last-published map, so a later identical mutation drops.
     pub(crate) fn push_roster_update_unguarded(
         &self,
         changed: &[AgentRosterEntry],
@@ -601,17 +457,14 @@ impl Supervisor {
         if changed.is_empty() && removed.is_empty() {
             return;
         }
-        // The rebase and the send share one lock hold: the replay's
-        // baseline update and its broadcast are one serialized operation
-        // (the same ordering guarantee the guarded arm holds).
+        // The rebase and the send share one lock hold.
         let mut last = self.last_published_roster.lock().unwrap();
         for entry in changed {
             if let Ok(published) = serde_json::to_value(entry) {
                 last.insert(entry.agent_id.clone(), published);
             }
             // An unserializable row still shipped; dropping its map
-            // entry only makes a later identical push ship again
-            // (idempotent by agent id), never skips one.
+            // entry only makes a later push ship again.
         }
         for id in &removed {
             last.remove(id);
@@ -632,10 +485,8 @@ impl Supervisor {
     }
 }
 
-/// TS `passivatedWorkerRosterEntry`: the stop keeps every durable display
-/// field - the model selector, the thinking level, the cwd, the session
-/// identity rows - and strips only the live-runtime fields; the heartbeat
-/// and cron registration marks survive when they were true.
+/// TS `passivatedWorkerRosterEntry`: keep every durable display field,
+/// strip only the live-runtime fields (heartbeat/cron marks survive).
 fn passivated_summary(summary: Value) -> Value {
     let mut summary = summary;
     let Some(object) = summary.as_object_mut() else {
@@ -678,14 +529,8 @@ fn passivated_summary(summary: Value) -> Value {
     summary
 }
 
-/// The passivated row's `model` is the DURABLE pair
-/// `{provider, modelId}` - the same row shape the ledger-seed hydrate
-/// writes (`hydrate_summary_display`) and the TS `SessionSummary.model`
-/// the agents view reads. A live worker's `get_state` summary carries the
-/// fuller live-catalog descriptor `{id, name, provider, reasoning}` (the
-/// #2631 reasoning-controls metadata); the stop keeps the durable
-/// display field, so the live descriptor collapses to the pair - the id
-/// IS the durable model id.
+/// The passivated row's `model` is the DURABLE pair `{provider, modelId}` the ledger-seed hydrate
+/// writes and the agents view reads; a live summary's fuller descriptor collapses to it.
 fn normalize_model_to_durable_pair(object: &mut serde_json::Map<String, Value>) {
     let Some(model) = object.get("model") else {
         return;

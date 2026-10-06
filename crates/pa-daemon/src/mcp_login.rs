@@ -1,8 +1,7 @@
 //! The daemon worker's MCP login surface behind the `mcp.begin_login` host
-//! request: browser + local callback only. The worker is detached from any
-//! terminal, so the paste path stays closed here; the interactive client
-//! surfaces its own login (`/mcp login`) with a paste fallback, and both
-//! persist to the same `auth.json`.
+//! request: browser + local callback only — the detached worker has no
+//! paste path; the interactive client surfaces its own login (`/mcp
+//! login`), and both persist to the same `auth.json`.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -78,8 +77,7 @@ impl McpLoginUi for WorkerMcpLoginUi {
 
 /// Wire the worker login into a manager so its `mcp.begin_login` host
 /// request runs the full OAuth flow. Call before the session registers
-/// host handlers. The worker passes its browser UI; tests inject a
-/// capture-only UI through the same seam.
+/// host handlers. Tests inject a capture-only UI through the same seam.
 pub fn wire_worker_mcp_login(
     manager: &Arc<std::sync::Mutex<McpManager>>,
     ui: Arc<dyn McpLoginUi>,
@@ -158,11 +156,10 @@ mod tests {
         }
     }
 
-    /// The test login surface (the TS tests' capture-only `onAuth`): every
-    /// progress message and authorization URL lands in the record, and
-    /// nothing ever drives the platform browser — no test may open a real
-    /// one. The paste contract matches the worker's: no manual channel,
-    /// the fallback prompt refuses.
+    /// The test login surface (the TS tests' capture-only `onAuth`):
+    /// every progress message and authorization URL lands in the record,
+    /// nothing drives the browser, and the prompt refuses (the worker's
+    /// paste contract).
     struct RecordingLoginUi {
         auth_url_file: Option<PathBuf>,
         progress: Arc<std::sync::Mutex<Vec<String>>>,
@@ -212,10 +209,8 @@ mod tests {
         }
     }
 
-    /// The fixture OAuth server's discovery/registration/token responses
-    /// answer through the scripted transport; the capture-only test UI
-    /// records the authorization URL without a browser launch (the real
-    /// callback listener catches the simulated redirect).
+    /// The fixture OAuth server's responses answer through the scripted
+    /// transport; the real callback listener catches the redirect.
     #[tokio::test]
     async fn worker_begin_login_persists_creds_and_unlocks_gating() -> Result<()> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -332,9 +327,7 @@ mod tests {
 
         login.await??;
 
-        // The authorization surface was captured, never launched: the
-        // flow narrated through the UI and produced exactly the one URL
-        // the callback drive consumed.
+        // The authorization surface was captured, never launched.
         assert!(
             !ui.progress.lock().unwrap().is_empty(),
             "the login narrated its steps through the UI"

@@ -1,7 +1,6 @@
-//! Semver comparison and update-channel policy (the TS `version-check.ts`
-//! port): the coordinator's `Planning` phase decides update-vs-skip-vs-
-//! rollback with exactly these rules, so a candidate decision can never
-//! disagree with the installer's.
+//! Semver comparison and update-channel policy: the coordinator's
+//! `Planning` phase decides update-vs-skip-vs-rollback with exactly these
+//! rules, so a candidate decision can never disagree with the installer's.
 
 /// A parsed semver: `major.minor.patch` plus an optional prerelease tag,
 /// borrowing the parsed string.
@@ -14,9 +13,8 @@ pub struct ParsedVersion<'a> {
     pub prerelease: Option<&'a str>,
 }
 
-/// Parse `v?-?`-prefixed semver (`1.2.3`, `v1.2.3`, `1.2.3-beta.4+meta`).
-/// Returns `None` for anything else (TS `parsePackageVersion` parity: an
-/// unparseable version is never a downgrade and never a strict upgrade).
+/// Parse `v?-?`-prefixed semver (`1.2.3`, `v1.2.3`, `1.2.3-beta.4+meta`); `None` for
+/// anything else (an unparseable version is never a downgrade or upgrade).
 #[must_use]
 pub fn parse_package_version(version: &str) -> Option<ParsedVersion<'_>> {
     let trimmed = version.trim().trim_start_matches('v');
@@ -39,9 +37,8 @@ pub fn parse_package_version(version: &str) -> Option<ParsedVersion<'_>> {
     })
 }
 
-/// Compare two prerelease tags (TS `comparePrereleaseIdentifiers`: numeric
-/// identifiers compare numerically, numeric < alphanumeric, dot-separated
-/// left-to-right, shorter prefix loses when equal so far).
+/// Compare two prerelease tags: numeric identifiers compare numerically, numeric < alphanumeric,
+/// dot-separated left-to-right, shorter prefix loses when equal so far.
 fn compare_prerelease_identifiers(left: &str, right: &str) -> std::cmp::Ordering {
     let left_parts: Vec<&str> = left.split('.').collect();
     let right_parts: Vec<&str> = right.split('.').collect();
@@ -77,8 +74,7 @@ fn compare_prerelease_identifiers(left: &str, right: &str) -> std::cmp::Ordering
     std::cmp::Ordering::Equal
 }
 
-/// Three-way semver compare (`Some(-1|0|1)`); `None` when either side does
-/// not parse (TS `comparePackageVersions`).
+/// Three-way semver compare; `None` when either side does not parse.
 #[must_use]
 pub fn compare_package_versions(left: &str, right: &str) -> Option<std::cmp::Ordering> {
     let left = parse_package_version(left)?;
@@ -100,9 +96,8 @@ pub fn compare_package_versions(left: &str, right: &str) -> Option<std::cmp::Ord
     })
 }
 
-/// Whether `candidate_version` is strictly newer than `current_version`
-/// (TS `isNewerPackageVersion`; unparsable sides fall back to string
-/// inequality).
+/// Whether `candidate_version` is strictly newer than `current_version`;
+/// unparsable sides fall back to string inequality.
 #[must_use]
 pub fn is_newer_package_version(candidate_version: &str, current_version: &str) -> bool {
     match compare_package_versions(candidate_version, current_version) {
@@ -112,8 +107,7 @@ pub fn is_newer_package_version(candidate_version: &str, current_version: &str) 
 }
 
 /// Whether installing `candidate_version` would lower the
-/// `major.minor.patch` base (prerelease tags aside) — the `Planning`
-/// refusal (TS `isBaseVersionDowngrade`).
+/// `major.minor.patch` base (prerelease tags aside) — the `Planning` refusal.
 #[must_use]
 pub fn is_base_version_downgrade(candidate_version: &str, current_version: &str) -> bool {
     let Some(candidate) = parse_package_version(candidate_version) else {
@@ -131,17 +125,14 @@ pub fn is_base_version_downgrade(candidate_version: &str, current_version: &str)
     candidate.patch < current.patch
 }
 
-/// Strip a leading `v` and surrounding whitespace (TS
-/// `normalizeReleaseVersion`).
+/// Strip a leading `v` and surrounding whitespace.
 #[must_use]
 pub fn normalize_release_version(version: &str) -> &str {
     version.trim().trim_start_matches('v')
 }
 
-/// The update channel of a version (TS `resolveUpdateChannel`): a preferred
-/// channel wins; otherwise a `-beta*` prerelease stays on nightly and
-/// anything else follows stable. Nightly builds are what the release
-/// bucket publishes as beta.
+/// The update channel of a version: a preferred channel wins; otherwise a
+/// `-beta*` prerelease stays on nightly and anything else follows stable.
 #[must_use]
 pub fn resolve_update_channel(
     current_version: &str,
@@ -173,7 +164,7 @@ impl UpdateChannel {
         }
     }
 
-    /// The channel's wire name (the TS `UpdateChannel` string values).
+    /// The channel's wire name.
     #[must_use]
     pub fn wire_name(self) -> &'static str {
         match self {
@@ -194,11 +185,8 @@ impl UpdateChannel {
     }
 }
 
-/// Whether a version carries a prerelease tag (`0.10.0-rust-64f66e3d`,
-/// `0.9.5-beta.1986.1.6f413ac`). The stable channel publishes untagged
-/// releases; a tagged version there is a build train that was never
-/// promoted, and installing it can replace newer code with an obsolete
-/// train (the `0.10.0-rust-*` dogfood trains over the port).
+/// Whether a version carries a prerelease tag: the stable channel publishes untagged
+/// releases; a tagged version there is an unpromoted train that can replace newer code.
 #[must_use]
 pub fn has_prerelease_tag(version: &str) -> bool {
     parse_package_version(version)
@@ -206,14 +194,9 @@ pub fn has_prerelease_tag(version: &str) -> bool {
         .is_some()
 }
 
-/// Whether `candidate_version` beats `current_version` only through an
-/// opaque alphanumeric build-tag comparison at the same base version.
-/// `0.10.0-rust-64f66e3d` ranks above `0.10.0-rust-4a8bcb15` by git-sha
-/// string order, which is not build recency: the identifier pair that
-/// decides the comparison must both be numeric (nightly trains number
-/// their builds, `beta.1986.1` < `beta.1987.2`) for the ordering to be
-/// update evidence. Same-base tag shuffles are never auto-selected
-/// candidates (`--force` reinstalls explicitly).
+/// Whether `candidate_version` beats `current_version` only through an opaque alphanumeric
+/// build-tag comparison at the same base version: git-sha tags are not build recency, so the
+/// deciding identifier pair must both be numeric for the ordering to be update evidence.
 fn same_base_opaque_build_tag(candidate_version: &str, current_version: &str) -> bool {
     let Some(candidate) = parse_package_version(candidate_version) else {
         return false;
@@ -236,9 +219,8 @@ fn same_base_opaque_build_tag(candidate_version: &str, current_version: &str) ->
     for index in 0..candidate_parts.len().max(current_parts.len()) {
         match (candidate_parts.get(index), current_parts.get(index)) {
             (Some(left), Some(right)) if left == right => {}
-            // A missing side loses (semver), but both tags are still opaque:
-            // a prefix extension (`beta.1986.1` over `beta.1986`) is not a
-            // recency claim either.
+            // A missing side loses (semver), but both tags are still opaque: a prefix
+            // extension (`beta.1986.1` over `beta.1986`) is not a recency claim either.
             (Some(_), None) | (None, Some(_)) => return true,
             (Some(left), Some(right)) => {
                 let left_numeric = left.chars().all(|c| c.is_ascii_digit());
@@ -252,21 +234,16 @@ fn same_base_opaque_build_tag(candidate_version: &str, current_version: &str) ->
 }
 
 /// Whether `candidate_version` should replace `current_version` on the
-/// effective channel (TS `isReleaseUpdateCandidate`): same-channel updates
-/// must be strictly newer; an explicit switch to another channel accepts any
-/// different version whose base version is not older, so a stable `1.2.3`
-/// can move onto `1.2.3-beta.5` even though prerelease ordering ranks that
-/// lower.
+/// effective channel: same-channel updates must be strictly newer; an
+/// explicit switch accepts any different version whose base is not older.
 #[must_use]
 pub fn is_release_update_candidate(
     candidate_version: &str,
     current_version: &str,
     channel: Option<UpdateChannel>,
 ) -> bool {
-    // The opaque-tag refusal applies to the current channel (the default
-    // path, where the `0.10.0-rust-<sha>` dogfood trains installed an
-    // obsolete build) — an explicit switch to another channel is operator
-    // intent and the channel-switch branch below evaluates it.
+    // The opaque-tag refusal applies to the current channel — an explicit switch
+    // to another channel is operator intent and the switch branch below decides it.
     if (channel.is_none() || channel == Some(resolve_update_channel(current_version, None)))
         && same_base_opaque_build_tag(candidate_version, current_version)
     {
@@ -343,8 +320,6 @@ mod tests {
 
     #[test]
     fn opaque_build_tag_shuffles_are_never_candidates() {
-        // Same-base dogfood trains: the git-sha tag orders by string, not
-        // by build recency — never auto-selected.
         assert!(same_base_opaque_build_tag(
             "0.10.0-rust-64f66e3d",
             "0.10.0-rust-4a8bcb15"
@@ -354,8 +329,6 @@ mod tests {
             "0.10.0-rust-4a8bcb15",
             None
         ));
-        // An explicit switch to another channel is operator intent and is
-        // evaluated by the channel-switch branch, not by the opaque guard.
         assert!(is_release_update_candidate(
             "1.2.3-beta.5",
             "1.2.3-rust-aaaa",
@@ -366,12 +339,10 @@ mod tests {
             "0.10.0-rust-4a8bcb15",
             Some(UpdateChannel::Nightly)
         ));
-        // A rebuilt train with identical numbers: still an opaque shuffle.
         assert!(same_base_opaque_build_tag(
             "0.9.5-beta.1986.1.6f413ac",
             "0.9.5-beta.1986.1.9d2ecd0b"
         ));
-        // Numbered nightly trains order meaningfully and stay candidates.
         assert!(!same_base_opaque_build_tag(
             "0.9.5-beta.1987.1.9d2ecd0b",
             "0.9.5-beta.1986.1.6f413ac"
@@ -381,8 +352,6 @@ mod tests {
             "0.9.5-beta.1986.1.6f413ac",
             None
         ));
-        // Different base versions are normal semver decisions, and an
-        // untagged side is the TS channel-switch territory, not a shuffle.
         assert!(!same_base_opaque_build_tag(
             "0.10.1",
             "0.10.0-rust-64f66e3d"
@@ -412,10 +381,8 @@ mod tests {
         );
         assert_eq!(UpdateChannel::Stable.manifest_path(), "latest.json");
         assert_eq!(UpdateChannel::Nightly.manifest_path(), "beta.json");
-        // Same-channel updates must be strictly newer.
         assert!(!is_release_update_candidate("1.2.3", "1.2.4", None));
         assert!(is_release_update_candidate("1.2.4", "1.2.3", None));
-        // A channel switch accepts an equal base with a different tag.
         assert!(is_release_update_candidate(
             "1.2.3-beta.5",
             "1.2.3",

@@ -1,10 +1,7 @@
-//! The RLM child-management surface (protocol breadth wave b6): the
-//! worker arms for `cancel_rlm_child`, `delete_rlm_subagent`, and
-//! `set_rlm_max_depth` (TS daemon-mode `case "cancel_rlm_child"` ... `case
-//! "set_rlm_max_depth"`). Each handler answers the exact TS wire shape; the
-//! behavior lives in the engine seams (`SessionEngine::cancel_rlm_child` /
-//! `delete_rlm_subagent` / `set_rlm_max_depth`) and the supervisor-backed
-//! children registry (`rlm_children.rs`).
+//! The RLM child-management surface: the worker arms for
+//! `cancel_rlm_child`, `delete_rlm_subagent`, and `set_rlm_max_depth`.
+//! Each handler answers the exact TS wire shape; the behavior lives in
+//! the engine seams and the supervisor-backed children registry.
 
 use serde_json::{json, Value};
 
@@ -12,9 +9,8 @@ use crate::protocol::{response_failure, response_success, DaemonResponse};
 use crate::worker::Worker;
 
 impl Worker {
-    /// `cancel_rlm_child`: cancel one live child run by id. The TS wire
-    /// contract is `{ cancelled: boolean }` - an unknown or already-settled
-    /// child id answers `false`, never an error.
+    /// `cancel_rlm_child`: cancel one live child run by id. The TS wire contract is `{ cancelled:
+    /// boolean }` - an unknown or already-settled child id answers `false`, never an error.
     pub(crate) async fn handle_cancel_rlm_child(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("cancel_rlm_child") {
             return response;
@@ -35,11 +31,9 @@ impl Worker {
         )
     }
 
-    /// `delete_rlm_subagent`: delete one inactive child by id. The TS wire
-    /// contract is `{ deleted: boolean }`, plus `reason: "running"` when a
-    /// live child refused the delete (TS spread: `...(result === "running"
-    /// ? { reason: "running" } : {})`); a teardown failure surfaces as the
-    /// command failure.
+    /// `delete_rlm_subagent`: delete one inactive child by id. The TS
+    /// wire contract is `{ deleted: boolean }`, plus `reason: "running"`
+    /// when a live child refused the delete; a teardown failure surfaces as the command failure.
     pub(crate) async fn handle_delete_rlm_subagent(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("delete_rlm_subagent") {
             return response;
@@ -72,10 +66,8 @@ impl Worker {
         }
     }
 
-    /// `set_rlm_max_depth`: set the session's recursion bound, optionally
-    /// persisting it as the global settings default. The response is the TS
-    /// `SetRlmMaxDepthResult` wire object (`{ maxDepth, source,
-    /// globalSaved }` plus `globalError` when the global write failed).
+    /// `set_rlm_max_depth`: set the session's recursion bound, optionally persisting it as the
+    /// global settings default. The response is the TS `SetRlmMaxDepthResult` wire object.
     pub(crate) async fn handle_set_rlm_max_depth(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("set_rlm_max_depth") {
             return response;
@@ -91,9 +83,8 @@ impl Worker {
         let global = payload.get("global").and_then(Value::as_bool) == Some(true);
         // The engine call blocks on the engine runtime (the durable
         // `rlm_max_depth_state` write takes the engine session lock), so it
-        // runs on a blocking thread like every other engine call — a direct
-        // call from this async task would `block_on` from inside the
-        // worker's runtime and die.
+        // runs on a blocking thread — a direct call would `block_on` from
+        // inside the worker's runtime and die.
         let engine = std::sync::Arc::clone(&self.engine);
         let result =
             tokio::task::spawn_blocking(move || engine.set_rlm_max_depth(max_depth, global))
@@ -137,8 +128,6 @@ mod tests {
         worker
     }
 
-    /// Wire shape: `cancel_rlm_child` answers `{ cancelled }` - false for an
-    /// unknown child (TS `cancelRlmChildRun` on an unmatched id).
     #[tokio::test]
     async fn cancel_rlm_child_answers_the_ts_cancelled_shape() {
         let worker = created_worker().await;
@@ -152,8 +141,6 @@ mod tests {
         assert_eq!(response.data, Some(json!({ "cancelled": false })));
     }
 
-    /// Wire shape: `delete_rlm_subagent` answers `{ deleted: false }` for an
-    /// unknown child (TS `deleteInactiveRlmSubagent` -> "`not_found`").
     #[tokio::test]
     async fn delete_rlm_subagent_answers_the_ts_not_found_shape() {
         let worker = created_worker().await;
@@ -167,9 +154,6 @@ mod tests {
         assert_eq!(response.data, Some(json!({ "deleted": false })));
     }
 
-    /// Wire shape: `set_rlm_max_depth` answers the TS `SetRlmMaxDepthResult`
-    /// (`maxDepth`, `source: "chat"`, `globalSaved`), and a global request
-    /// writes the settings default.
     #[tokio::test]
     async fn set_rlm_max_depth_answers_the_ts_result_shape() {
         let worker = created_worker().await;
@@ -209,8 +193,6 @@ mod tests {
         );
     }
 
-    /// Wire shape: a missing `childId`/`maxDepth` fails the command (the
-    /// TS parse of the required wire field).
     #[tokio::test]
     async fn missing_required_fields_fail() {
         let worker = created_worker().await;

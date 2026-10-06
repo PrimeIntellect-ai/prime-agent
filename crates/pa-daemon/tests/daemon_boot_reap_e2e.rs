@@ -1,18 +1,7 @@
-//! Daemon-boot reap e2e: the operator's exact scenario — a supervisor dies
-//! leaving a worker alive whose descriptor was deleted (the pre-reap
-//! terminal-stop orphaning), a new supervisor boots on the SAME socket, and
-//! opening that session must work. Before the boot-reap lane this flow
-//! refused forever: the leftover worker held its runtime session lease,
-//! nothing on the new daemon could reach it (no descriptor to adopt, its
-//! re-registration refused), and its supervisor-lost window reset against
-//! the new daemon's socket — so every create over the session file bounced
-//! with `Session is already active in <leftover id>`.
-//!
-//! The containment rule rides along: a daemon (and its workers) on a
-//! DIFFERENT socket is never touched by the reap.
-//!
-//! Linux-only e2e (`AF_UNIX` sockets, /proc): compiles to nothing elsewhere,
-//! like the other pa-daemon e2e verifiers.
+//! Daemon-boot reap e2e: the operator's exact scenario — a supervisor dies leaving a worker
+//! alive whose descriptor was deleted, a new supervisor boots on the SAME socket, and opening
+//! that session must work (before the boot-reap lane this flow refused forever). The
+//! containment rule: a daemon on a DIFFERENT socket is never touched. Linux-only (/proc).
 #![cfg(target_os = "linux")]
 
 use std::io::{BufRead, BufReader, Write};
@@ -36,10 +25,8 @@ impl Drop for Daemon {
     }
 }
 
-/// A supervisor with a LONG supervisor-lost window: the test's orphaned
-/// worker must survive every other exit path so only the boot reap can be
-/// what killed it (the harness default 15s window would let the worker
-/// self-exit against a dead socket before the new daemon boots).
+/// A supervisor with a LONG supervisor-lost window: the orphaned worker must survive every
+/// other exit path so only the boot reap can kill it (the 15s default lets it self-exit).
 fn spawn_supervisor(socket: &Path, agent_dir: &Path) -> Daemon {
     let binary = env!("CARGO_BIN_EXE_pa-daemon");
     let mut command = Command::new(binary);
@@ -177,8 +164,7 @@ impl Client {
     }
 }
 
-/// One scripted session: create + attach, returning the durable session id
-/// and the worker pid.
+/// One scripted session: create + attach, returning the durable session id and worker pid.
 fn create_session(
     client: &mut Client,
     dir: &Path,
@@ -232,16 +218,14 @@ fn create_session(
     (session_id, worker_pid)
 }
 
-/// The worker descriptor path for one session on one socket (the on-disk
-/// layout the terminal stop deletes and the boot reap protects).
+/// The worker descriptor path for one session on one socket.
 fn descriptor_path(agent_dir: &Path, socket: &Path, session_id: &str) -> PathBuf {
     let key = pa_daemon::descriptor::descriptor_dir(agent_dir, socket);
     key.join(format!("{session_id}.json"))
 }
 
-/// One session's durable file path, from its worker descriptor (the create
-/// response's `id` is the ACTIVE session id; the file on disk is named by
-/// the durable session UUID).
+/// One session's durable file path, from its worker descriptor (the create response's
+/// `id` is the ACTIVE session id; the file on disk is named by the durable UUID).
 fn session_file_of(agent_dir: &Path, socket: &Path, session_id: &str) -> PathBuf {
     let descriptor = std::fs::read_to_string(descriptor_path(agent_dir, socket, session_id))
         .expect("descriptor");
@@ -254,8 +238,7 @@ fn session_file_of(agent_dir: &Path, socket: &Path, session_id: &str) -> PathBuf
     )
 }
 
-/// One worker process's own socket file, from its environment (the same
-/// `WORKER_SOCKET_ENV` the reap reads).
+/// One worker's own socket file, from its environment (the same env the reap reads).
 fn worker_socket_of(pid: u32) -> Option<PathBuf> {
     let environ = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
     environ
@@ -271,10 +254,8 @@ fn worker_socket_of(pid: u32) -> Option<PathBuf> {
         })
 }
 
-/// Kill the supervisor, delete the worker's descriptor: the orphaned-worker
-/// precondition the old terminal stop produced (a live worker whose
-/// identity on disk is gone — nothing on any later daemon can adopt,
-/// register, or reuse it, while it keeps holding its session lease).
+/// Kill the supervisor, delete the worker's descriptor: the orphaned-worker precondition
+/// (a live worker nothing on any later daemon can adopt, holding its session lease).
 fn orphan_the_worker(daemon: &mut Daemon, agent_dir: &Path, socket: &Path, session_id: &str) {
     daemon.child.kill().expect("kill -9 supervisor");
     let _ = daemon.child.wait();
@@ -282,11 +263,8 @@ fn orphan_the_worker(daemon: &mut Daemon, agent_dir: &Path, socket: &Path, sessi
     std::fs::remove_file(&descriptor).expect("delete the worker descriptor");
 }
 
-/// The operator's exact report, end to end: shut a daemon down (here:
-/// kill -9 plus the descriptor loss the old terminal stop produced), boot
-/// a new daemon on the SAME socket, open the session — the new boot reaps
-/// the leftover worker (its lease clears) and the open succeeds instead of
-/// refusing with `Session is already active in <leftover id>`.
+/// The operator's exact report, end to end: kill -9 the daemon plus the descriptor loss,
+/// boot a new daemon on the SAME socket, open the session — the boot reaps the leftover.
 #[test]
 fn boot_reap_clears_the_leftover_and_the_session_reopens() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -303,21 +281,17 @@ fn boot_reap_clears_the_leftover_and_the_session_reopens() {
     let (session_id, worker_pid) =
         create_session(&mut client, dir.path(), &sessions_dir, supervisor_pid, 0);
 
-    // The worker holds its session lease (the runtime ownership every
-    // file-backed create acquires), and the session's durable file sits
-    // on disk named by its UUID (the create response's `id` is the ACTIVE
-    // session id, not the file name).
+    // The worker holds its session lease, and the session's durable file sits on disk
+    // named by its UUID (the create response's `id` is the ACTIVE session id).
     let session_file = session_file_of(&agent_dir, &socket, &session_id);
     assert!(session_file.exists(), "the session file persists");
 
     // The leftover's own socket file (the reap removes it with the process).
     let worker_socket = worker_socket_of(worker_pid).expect("the leftover's socket env");
 
-    // THE ENV-PROPAGATION GUARD: a process that merely INHERITED the
-    // worker environment (a session kernel, a bash child - the readoption
-    // regression: an env-only reap killed the session's whole process
-    // tree) must survive the new daemon's boot. It runs `sleep` with the
-    // worker env set but is NOT the worker role.
+    // THE ENV-PROPAGATION GUARD: a process that merely INHERITED the worker
+    // environment must survive the new daemon's boot (the readoption regression: an
+    // env-only reap killed the session's whole process tree).
     let mut inherited_env_child = std::process::Command::new("sleep")
         .arg("300")
         .env(
@@ -354,10 +328,8 @@ fn boot_reap_clears_the_leftover_and_the_session_reopens() {
         std::thread::sleep(Duration::from_millis(100));
     }
 
-    // The operator's open: the same session file, through the new daemon.
-    // Without the reap this create refuses with `Session is already
-    // active in <leftover id>`; with it, the fresh worker's lease acquire
-    // reclaims the dead holder's stale lease and the session opens.
+    // The operator's open: the same session file, through the new daemon. Without the
+    // reap this create refuses; with it, the fresh lease reclaims the dead holder's.
     let (mut client2, hello2) = Client::connect(&socket);
     assert_eq!(hello2["type"], "daemon_hello");
     client2.send_command(
@@ -378,8 +350,8 @@ fn boot_reap_clears_the_leftover_and_the_session_reopens() {
         "the session must reopen after the reap (the operator's flow): {reopened}"
     );
 
-    // The inherited-env child SURVIVED the reap (the argv gate: it is not
-    // the worker role) - and dies now, at the test's own hand, so no leak.
+    // The inherited-env child SURVIVED the reap (the argv gate) - and dies now, at the
+    // test's own hand.
     assert!(
         process_alive(inherited_env_child.id()),
         "an inherited-env non-worker process survives the boot reap"
@@ -387,8 +359,7 @@ fn boot_reap_clears_the_leftover_and_the_session_reopens() {
     let _ = inherited_env_child.kill();
     let _ = inherited_env_child.wait();
 
-    // The reap logged its verdict, and the dead leftover's own socket
-    // file left with it (a killed process cannot clean up after itself).
+    // The reap logged its verdict, and the leftover's own socket file left with it.
     let log_path = pa_daemon::paths::daemon_log_path(&socket, &agent_dir);
     let log = std::fs::read_to_string(&log_path).unwrap_or_default();
     assert!(
@@ -401,8 +372,7 @@ fn boot_reap_clears_the_leftover_and_the_session_reopens() {
         worker_socket.display()
     );
 
-    // A clean terminal stop for the reopened session: the new daemon's
-    // own worker dies with its supervisor (no leak into later tests).
+    // A clean terminal stop for the reopened session: the worker dies with its supervisor.
     client2.send_command("bye", &json!({ "type": "shutdown" }));
     let deadline = Instant::now() + Duration::from_secs(10);
     while process_alive(daemon2.child.id()) {
@@ -411,9 +381,6 @@ fn boot_reap_clears_the_leftover_and_the_session_reopens() {
     }
 }
 
-/// The containment rule: a daemon (and its workers) on a DIFFERENT socket
-/// is never a reap target. The new daemon on socket A clears A's leftover
-/// while a healthy daemon on socket B keeps serving its live session.
 #[test]
 fn boot_reap_never_touches_a_different_socket_daemon() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -436,8 +403,7 @@ fn boot_reap_never_touches_a_different_socket_daemon() {
         0,
     );
 
-    // The same-socket lineage gets the leftover: kill daemon A after its
-    // session's descriptor vanished.
+    // The same-socket lineage gets the leftover: kill daemon A after its descriptor vanished.
     let mut daemon_a = spawn_supervisor(&socket_a, &agent_dir);
     wait_socket_ready(&socket_a);
     let (mut client_a, hello_a) = Client::connect(&socket_a);
@@ -464,8 +430,7 @@ fn boot_reap_never_touches_a_different_socket_daemon() {
         std::thread::sleep(Duration::from_millis(100));
     }
 
-    // The other-socket daemon and its worker are untouched and still
-    // serving: a prompt through B completes the turn.
+    // The other-socket daemon and its worker are untouched: a prompt through B completes.
     assert!(
         process_alive(daemon_b.child.id()),
         "the other-socket supervisor was never a reap target"
@@ -489,9 +454,7 @@ fn boot_reap_never_touches_a_different_socket_daemon() {
         }
     }
 
-    // Teardown: no workers leak into later tests. Both supervisors take
-    // the protocol stop (a clean terminal stop under the fixed
-    // begin_shutdown), and both processes exit inside the window.
+    // Teardown: both supervisors take the protocol stop and exit inside the window.
     client_b.send_command("bye-b", &json!({ "type": "shutdown" }));
     client_a_send_shutdown(&socket_a);
     let deadline = Instant::now() + Duration::from_secs(10);

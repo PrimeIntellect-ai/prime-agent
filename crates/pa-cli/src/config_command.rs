@@ -1,6 +1,5 @@
-//! `prime-agent config`: the resource-configuration view (TS
-//! `handleConfigCommand`): resolve session resources, report settings
-//! errors, then open the interactive selector until Esc.
+//! `prime-agent config`: the resource-configuration view — resolve session
+//! resources, report settings errors, then open the interactive selector.
 
 use std::path::PathBuf;
 
@@ -11,8 +10,8 @@ use pa_tui::config_selector::{
 };
 use pa_tui::keybindings::KeybindingsManager;
 
-/// Run the config command. Returns the process exit code; the TS product
-/// exits 0 after the view closes (Esc) or immediately on Ctrl+C.
+/// Run the config command. Returns the process exit code; exits 0
+/// after the view closes (Esc) or immediately on Ctrl+C.
 pub fn run() -> i32 {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let agent_dir = crate::config::get_agent_dir();
@@ -31,8 +30,7 @@ pub fn run() -> i32 {
     let (rows, items) = selector_rows(&groups);
     let selector = ConfigSelector::new(rows);
     let theme = pa_tui::app::load_theme(&theme_name);
-    // TS `setKeybindings(KeybindingsManager.create())` in main.ts: the
-    // config selector navigates with the user's effective bindings too.
+    // The config selector navigates with the user's effective bindings.
     let keybindings = KeybindingsManager::create(&agent_dir);
     let options = ConfigSelectorOptions::new(theme, keybindings);
     let mut toggle_settings = SettingsManager::create(&cwd, &agent_dir);

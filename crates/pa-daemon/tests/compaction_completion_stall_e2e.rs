@@ -1,45 +1,16 @@
-//! The compaction completion contract (the compaction-completion-stall fix):
-//! the settled compaction's completion event and the next prompt's
-//! admission never wait on the compact-trigger auto-refine review's model
-//! call (TS `_scheduleAutoRefineAfterCompaction` runs it as a background
-//! `setTimeout(0)` round, never between the compaction and the settled
-//! turn).
-//!
-//! Three regressions over a seeded mega session (~12MB):
-//! * an approving review that lands while the next turn is streaming
-//!   defers its refinement to the next settle (TS
-//!   `_pendingAutoRefineReview`): no refinement rows surface mid-stream,
-//!   the streaming turn settles untouched, and the retained review runs
-//!   its refinement without a new review model call;
-//! * a mocked-slow review (6s reply) cannot hold the crossing turn's
-//!   settle — the `prompt_and_wait` response lands while the review is
-//!   still in flight, a prompt admitted mid-review runs against the
-//!   COMPACTED context (the summary rides the request, the compacted-away
-//!   bulk does not), and the trace proves the completion event fired
-//!   within a bounded window of the durable summary persist, before the
-//!   review started;
-//! * the operator's ctrl+c datapoint: an `abort_compaction` against the
-//!   in-flight threshold run (the loader) settles to the aborted
-//!   `compaction_end` with a consistent session (no compaction entry, the
-//!   parent chain intact), and the next prompt runs against the
-//!   un-compacted context.
-// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
-// the full rationale).
-// Stack-resident futures by design on the daemon's hot paths; boxing the
-// call sites for a lint tick is a perf regression with zero correctness gain.
+//! The compaction completion contract: the settled compaction's completion
+//! event and the next prompt's admission never wait on the compact-trigger
+//! auto-refine review's model call (TS `_scheduleAutoRefineAfterCompaction`
+//! runs it as a background round, never between the compaction and the settle).
 #![allow(clippy::large_futures)]
-// 64-bit-only targets; the narrowing casts sit at OS boundaries
-// (pid/fd/time/size) where the values are bounded by the kernel - the
-// dead-guard expect()s would add panic paths where silent wrap was
-// deliberate.
+// 64-bit-only targets; the narrowing casts sit at bounded OS boundaries.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// The fn-length threshold is a style gate, not correctness; the structure
-// campaign owns the god-fn splits as a follow-up.
+// Fn length is a style gate, not correctness.
 #![allow(clippy::too_many_lines)]
 // API-shape opinions, not defects; the surfaces are deliberate.
 #![allow(
@@ -61,7 +32,6 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-/// One fattening assistant reply (the seeded session bulk).
 const FATTENING_TURNS: usize = 3;
 const FATTEN_REPLY_CHARS: usize = 4 * 1024 * 1024;
 
@@ -73,18 +43,16 @@ const REVIEW_DELAY_MS: u64 = 6_000;
 /// window the ctrl+c lands in).
 const SUMMARIZER_DELAY_MS: u64 = 6_000;
 
-/// The bounded window between the durable summary persist and the
-/// completion event (the trace's `emit.compaction_persist` ->
-/// `auto.end_emitted`): sub-second is the measured contract on the mega
-/// session; the bound leaves headroom for a loaded gate VM.
+/// The bounded window between the durable summary persist and the completion
+/// event: sub-second is the measured contract; the bound leaves headroom for
+/// a loaded gate VM.
 const COMPLETION_BOUND_MS: u64 = 2_000;
 
 /// A declining review reply (the TS `AutoRefineReview` JSON shape).
 const REVIEW_DECLINE: &str = r#"{"shouldRefine": false, "rationale": "one-off tool output"}"#;
 
-/// The deferral test's failure diagnostics: the mock's request
-/// classifications and the daemon trace's auto-refine phases, so a
-/// timeout names the phase the round actually reached.
+/// The deferral test's failure diagnostics, so a timeout names the phase the round actually
+/// reached.
 fn deferral_diagnostics(mock: &StallMock, trace_path: &Path) -> String {
     let requests = mock.requests.lock().expect("mock lock").clone();
     let mut parts: Vec<String> = vec![format!(
@@ -132,8 +100,8 @@ fn deferral_diagnostics(mock: &StallMock, trace_path: &Path) -> String {
 const REVIEW_APPROVE: &str =
     r#"{"shouldRefine": true, "rationale": "the fattening markers recur"}"#;
 
-/// The refinement plan the mock answers the retained review's planner
-/// call with: an empty edits array, the shape `plan_refinement` parses.
+/// The refinement plan for the retained review's planner call: an empty edits array, the shape
+/// `plan_refinement` parses.
 const REFINE_EMPTY_PLAN: &str = r#"{"edits": [], "rationale": "no durable evidence"}"#;
 
 /// The fixed compaction summary the mock answers the summarizer with
@@ -142,8 +110,7 @@ const CHECKPOINT_SUMMARY: &str = "the checkpoint summary";
 
 struct Supervisor {
     child: Child,
-    // Spawn bookkeeping only: the daemon binds the socket path; the test
-    // drives the daemon through the client port, never this field.
+    // Spawn bookkeeping only: the test drives the daemon through the client port, never this field.
     #[allow(dead_code)]
     socket: PathBuf,
 }
@@ -155,13 +122,9 @@ impl Drop for Supervisor {
     }
 }
 
-/// An OpenAI-compatible SSE mock with per-request-type behavior: normal
-/// turns answer the scripted reply (the fattening turns grow the
-/// session; the crossing turn reports the over-threshold usage), the
-/// compaction summarizer answers the fixed summary (optionally delayed —
-/// the in-flight compaction the ctrl+c interrupts), and the auto-refine
-/// review's reply is delayed past the whole settle (the heavyweight
-/// phase the completion path must never wait on).
+/// An OpenAI-compatible SSE mock with per-request-type behavior: turns answer the
+/// scripted reply, the summarizer the fixed summary (optionally delayed — the in-flight
+/// compaction the ctrl+c interrupts), and the review's reply is delayed past the settle.
 struct StallMock {
     requests: Arc<Mutex<Vec<Value>>>,
     turn_requests: Arc<Mutex<Vec<Instant>>>,
@@ -385,9 +348,7 @@ fn write_sse(stream: &mut TcpStream, reply: &str, usage: &Value) -> std::io::Res
     )
 }
 
-// One Arc per captured concern keeps the mock's request handlers
-// independent (requests, turn timing/bodies, review timing, delays);
-// a parameter struct would only shuttle the same Arcs around.
+// One Arc per captured concern keeps the mock's handlers independent.
 #[allow(clippy::too_many_arguments)]
 fn serve(
     mut stream: TcpStream,
@@ -442,10 +403,8 @@ fn serve(
     let crossing_index = FATTENING_TURNS + 1;
     let (reply, usage) = match index {
         0 => ("seed reply".to_string(), small_usage()),
-        // Each fattening reply carries its own marker: the compaction's
-        // cut keeps whole messages (the last fattening reply rides the
-        // kept tail; the earlier ones are the compacted-away bulk the
-        // context assertions read).
+        // Each fattening reply carries its own marker: the last rides the cut's kept tail;
+        // the earlier ones are the compacted-away bulk the context assertions read.
         index if (1..=FATTENING_TURNS).contains(&index) => (
             format!("fatten-{}-{}", index - 1, "a".repeat(FATTEN_REPLY_CHARS)),
             small_usage(),
@@ -456,15 +415,12 @@ fn serve(
     write_sse(&mut stream, &reply, &usage)
 }
 
-/// The daemon child's stderr lands beside the trace (its `eprintln`
-/// diagnostics — a failed background round names its error) so the
-/// deferral test can surface them.
+/// The daemon child's stderr lands beside the trace (a failed background round names its error).
 fn daemon_stderr_path(trace_path: &Path) -> std::path::PathBuf {
     trace_path.with_file_name("daemon-stderr.log")
 }
 
-// The child is reaped in Supervisor::drop (kill + wait); clippy's
-// zombie_processes cannot see the Drop guard from the spawn site.
+// The child is reaped in Supervisor::drop (kill + wait); the lint cannot see the Drop guard.
 #[allow(clippy::zombie_processes)]
 fn spawn_supervisor(socket: &Path, agent_dir: &Path, trace_path: &Path) -> Supervisor {
     std::fs::create_dir_all(agent_dir).expect("agent dir");
@@ -570,7 +526,6 @@ impl TimedClient {
         }
     }
 
-    /// Park session events for `quiet_ms` more.
     fn drain_events(&mut self, quiet_ms: u64) {
         let deadline = Instant::now() + Duration::from_millis(quiet_ms);
         self.reader
@@ -613,8 +568,8 @@ fn read_trace(path: &Path) -> Vec<(String, u128)> {
         .collect()
 }
 
-/// One entry id -> parent id map of the session file; panics on an
-/// unparsable line (the consistency contract).
+/// Entry id -> parent id map of the session file; panics on an unparsable line (the consistency
+/// contract).
 fn session_chain(session_dir: &Path) -> (bool, Vec<(String, String)>) {
     let session_file = session_dir
         .read_dir()
@@ -721,9 +676,8 @@ fn prompt_and_wait(client: &mut TimedClient, id: &str, session_id: &str, message
     response
 }
 
-/// The seeded mega session (~12MB): the seed turn plus the fattening
-/// turns, then the crossing turn whose reported usage fires the
-/// threshold arm.
+/// The seeded mega session (~12MB): seed and fattening turns, then the crossing turn whose usage
+/// fires the threshold arm.
 fn seed_mega_session(client: &mut TimedClient, session_id: &str, mock: &StallMock) {
     prompt_and_wait(client, "p0", session_id, "seed turn");
     for turn in 0..FATTENING_TURNS {
@@ -734,8 +688,8 @@ fn seed_mega_session(client: &mut TimedClient, session_id: &str, mock: &StallMoc
             &format!("fattening turn {turn}"),
         );
     }
-    // Every fattening turn's request reached the mock before the crossing
-    // turn admits (the seeded bulk is on the wire).
+    // Every fattening turn reached the mock before the crossing turn admits (the seeded bulk is on
+    // the wire).
     let expected_turns = 1 + FATTENING_TURNS;
     assert!(
         mock.turn_request_count() >= expected_turns,
@@ -744,11 +698,6 @@ fn seed_mega_session(client: &mut TimedClient, session_id: &str, mock: &StallMoc
     );
 }
 
-/// A mocked-slow review never holds the settled compaction: the crossing
-/// turn's `prompt_and_wait` resolves while the review is still in
-/// flight, the completion event fired within the bounded window of the
-/// durable summary persist (trace), a prompt admitted mid-review runs
-/// against the compacted context, and the session file stays consistent.
 #[test]
 #[ignore = "seeds ~12MB; asserts the compaction completion contract"]
 fn mocked_slow_review_never_holds_the_settled_compaction() {
@@ -769,8 +718,6 @@ fn mocked_slow_review_never_holds_the_settled_compaction() {
     let settle_at = Instant::now();
     let settle_duration = settle_at.duration_since(settle_started);
 
-    // The review was armed and its (delayed) reply had NOT landed when
-    // the settle resolved: the completion path never waited on it.
     assert!(
         mock.review_request_at
             .lock()
@@ -788,12 +735,9 @@ fn mocked_slow_review_never_holds_the_settled_compaction() {
         "the settle took {settle_duration:?} — it must not wait for the review"
     );
 
-    // A prompt admitted while the review is still in flight runs against
-    // the COMPACTED context: the summary rides the request, the
-    // compacted-away bulk does not. The assertion targets the last TURN
-    // request — the background review makes
-    // its own provider calls around the settle (the review deliberately
-    // reads the full trajectory), so `requests.last()` is not the turn.
+    // A prompt admitted mid-review runs against the COMPACTED context: the summary
+    // rides the request, the compacted-away bulk does not. The assertion targets the
+    // last TURN request — the background review makes its own calls around the settle.
     prompt_and_wait(
         &mut client,
         "pn",
@@ -813,9 +757,8 @@ fn mocked_slow_review_never_holds_the_settled_compaction() {
         "the compacted context did not carry the summary: {}",
         request_text.chars().take(2_000).collect::<String>()
     );
-    // The compacted-away bulk is gone: the earlier fattening replies
-    // never ride the request (the cut's kept tail keeps whole messages,
-    // so the LAST fattening reply may legitimately remain).
+    // The compacted-away bulk is gone: the earlier fattening replies never ride the
+    // request (the kept tail keeps whole messages, so the LAST may remain).
     for dropped in 0..FATTENING_TURNS.saturating_sub(1) {
         assert!(
             !request_text.contains(&format!("fatten-{dropped}-")),
@@ -823,7 +766,6 @@ fn mocked_slow_review_never_holds_the_settled_compaction() {
         );
     }
 
-    // The review's delayed reply lands in the background (bounded wait).
     let deadline = Instant::now() + Duration::from_secs(20);
     while Instant::now() < deadline {
         if mock
@@ -846,8 +788,6 @@ fn mocked_slow_review_never_holds_the_settled_compaction() {
         "the settle resolved before the review's reply ({settle_at:?} < {review_replied_at:?})"
     );
 
-    // The trace: the completion event fired within the bounded window of
-    // the durable summary persist, and the review started after it.
     let trace = read_trace(&trace_path);
     let persist = trace
         .iter()
@@ -864,10 +804,8 @@ fn mocked_slow_review_never_holds_the_settled_compaction() {
         end_emitted.1.saturating_sub(persist_elapsed),
         COMPLETION_BOUND_MS
     );
-    // The armed round starts AFTER the completion event: the trace line
-    // fires for every settle's round (the no-op rounds when no trigger is
-    // armed trace too), so the invariant is that a review round started
-    // past this compaction's completion — never before it.
+    // The trace line fires for every settle's round (no-op rounds trace too): the invariant
+    // is a review round started past this compaction's completion, never before it.
     assert!(
         trace.iter().any(|(phase, elapsed)| {
             phase == "autorefine.review_started" && *elapsed > end_emitted.1
@@ -875,8 +813,6 @@ fn mocked_slow_review_never_holds_the_settled_compaction() {
         "no review round started after the completion event"
     );
 
-    // The declined review surfaces nothing, and the session file stays
-    // consistent with the compacted history.
     client.drain_events(500);
     assert!(
         !client.events.iter().any(|(event, _)| {
@@ -888,12 +824,6 @@ fn mocked_slow_review_never_holds_the_settled_compaction() {
     assert!(has_compaction, "the compaction entry persisted");
 }
 
-/// The operator's ctrl+c datapoint: an `abort_compaction` against the
-/// in-flight threshold run (the loader) settles to the aborted
-/// `compaction_end` with a consistent session (no compaction entry, the
-/// parent chain intact), and the next prompt runs against the
-/// un-compacted context — the interruptible/idempotent contract the
-/// post-summary bookkeeping must keep.
 #[test]
 #[ignore = "seeds ~12MB; asserts the interrupted-compaction contract"]
 fn interrupted_threshold_compaction_settles_consistent() {
@@ -902,8 +832,7 @@ fn interrupted_threshold_compaction_settles_consistent() {
     let session_dir = agent_dir.join("sessions");
     let mock = StallMock::start();
     write_fixture(&agent_dir, &session_dir, &mock.url());
-    // The summarizer's reply is held in flight: the ctrl+c lands in the
-    // compaction's loader window.
+    // The summarizer's reply is held in flight: the ctrl+c lands in the loader window.
     mock.summarizer_delay_ms
         .store(SUMMARIZER_DELAY_MS, Ordering::SeqCst);
     let trace_path = dir.path().join("compaction-trace.jsonl");
@@ -913,14 +842,13 @@ fn interrupted_threshold_compaction_settles_consistent() {
     let session_id = create_and_attach(&mut client, &session_dir);
     seed_mega_session(&mut client, &session_id, &mock);
 
-    // The crossing turn: the threshold arm's summarizer is held.
     client.send_command(
         "px",
         &json!({"type": "prompt_and_wait", "activeSessionId": session_id, "message": "crossing turn"}),
     );
 
-    // The compaction_start broadcast arrives (the loader), then the
-    // ctrl+c (`abort_compaction` on the wire) from a second client.
+    // The compaction_start broadcast arrives, then the ctrl+c (`abort_compaction` on the wire) from
+    // a second client.
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         if client
@@ -954,8 +882,6 @@ fn interrupted_threshold_compaction_settles_consistent() {
     assert_eq!(aborted["success"], true, "abort failed: {aborted}");
     let abort_ack = Instant::now();
 
-    // The interrupted run settles fast (the abort never waits out the
-    // held summarizer).
     let crossed = client.read_response("px");
     let settled_at = Instant::now();
     assert_eq!(
@@ -969,7 +895,6 @@ fn interrupted_threshold_compaction_settles_consistent() {
     );
     client.drain_events(500);
 
-    // The aborted end event and the durable cancelled row broadcast.
     assert!(
         client.events.iter().any(|(event, _)| {
             event["type"] == "compaction_end"
@@ -992,14 +917,9 @@ fn interrupted_threshold_compaction_settles_consistent() {
         "the cancelled outcome row never broadcast"
     );
 
-    // No compaction entry landed (the abort pre-dated the commit) and
-    // the session file stays consistent.
     let (has_compaction, _) = session_chain(&session_dir);
     assert!(!has_compaction, "an aborted compaction committed an entry");
 
-    // The next prompt runs against the un-compacted context (the seeded
-    // bulk still rides the TURN request — nothing was lost to the
-    // interrupt).
     prompt_and_wait(
         &mut client,
         "pn",
@@ -1014,13 +934,8 @@ fn interrupted_threshold_compaction_settles_consistent() {
         .cloned()
         .unwrap_or(Value::Null);
     let request_text = serde_json::to_string(&last_turn_request).unwrap_or_default();
-    // The interrupted run left the session usable: the next prompt's turn
-    // served against a consistent context — either the un-compacted bulk
-    // (no further compaction) or the summary of a LEGITIMATE post-abort
-    // compaction at the prompt's own pre-turn boundary (the crossing
-    // turn's usage is still the context estimate anchor, so the threshold
-    // arm may fire again on the newly admitted prompt). Both are the
-    // product's behavior; neither loses work to the interrupt.
+    // The interrupted run left the session usable: the next prompt served
+    // against a consistent context, either the un-compacted or the compacted one.
     let un_compacted =
         (0..FATTENING_TURNS).all(|kept| request_text.contains(&format!("fatten-{kept}-")));
     let legitimately_compacted = request_text.contains(CHECKPOINT_SUMMARY);
@@ -1032,12 +947,8 @@ fn interrupted_threshold_compaction_settles_consistent() {
     );
 }
 
-/// An approving review that lands while the next turn is streaming never
-/// runs its refinement mid-stream: the round defers (TS
-/// `_pendingAutoRefineReview` retained behind
-/// `_shouldSkipAutoRefineForActiveAgent`), the streaming turn settles
-/// untouched, and the retained review runs its refinement at the next
-/// serviced boundary without a new review model call.
+/// An approving review landing mid-stream defers its refinement (TS `_pendingAutoRefineReview`);
+/// the streaming turn settles untouched, and the retained review runs without a new model call.
 #[test]
 #[ignore = "seeds ~12MB; asserts the deferred-refinement contract"]
 fn approving_review_while_a_turn_streams_defers_its_refinement() {
@@ -1053,18 +964,14 @@ fn approving_review_while_a_turn_streams_defers_its_refinement() {
     let session_id = create_and_attach(&mut client, &session_dir);
     seed_mega_session(&mut client, &session_id, &mock);
 
-    // The review approves, and both the review's reply (3s) and the next
-    // turn's provider reply (7s) are mocked slow: the approval lands
-    // while the turn is still streaming.
+    // The review approves; both its reply (3s) and the next turn's provider reply (7s)
+    // are mocked slow, so the approval lands while the turn streams.
     mock.review_delay_ms.store(3_000, Ordering::SeqCst);
     mock.approve_review.store(true, Ordering::SeqCst);
     mock.turn_delay_ms.store(7_000, Ordering::SeqCst);
 
     prompt_and_wait(&mut client, "px", &session_id, "crossing turn");
 
-    // The next turn is admitted while the round's review is in flight;
-    // its response arrives when the turn settles (the 7s provider
-    // reply).
     client.send_command(
         "pn",
         &json!({
@@ -1074,8 +981,6 @@ fn approving_review_while_a_turn_streams_defers_its_refinement() {
         }),
     );
 
-    // The approval lands mid-stream (bounded wait on the mock's reply
-    // stamp).
     let deadline = Instant::now() + Duration::from_secs(20);
     while Instant::now() < deadline
         && mock
@@ -1094,8 +999,6 @@ fn approving_review_while_a_turn_streams_defers_its_refinement() {
         "the approval never landed"
     );
 
-    // The deferred round surfaced no refinement rows while the turn was
-    // streaming.
     client.drain_events(300);
     assert!(
         !client.events.iter().any(|(event, _)| {
@@ -1104,8 +1007,6 @@ fn approving_review_while_a_turn_streams_defers_its_refinement() {
         "the deferred refinement surfaced rows while the turn streamed"
     );
 
-    // The streaming turn settles normally; its settle services the
-    // retained review.
     let settled = client.read_response("pn");
     assert_eq!(
         settled["success"], true,
@@ -1113,8 +1014,6 @@ fn approving_review_while_a_turn_streams_defers_its_refinement() {
     );
     let turn_settled_at = Instant::now();
 
-    // The retained review's refinement outcome row arrives (bounded
-    // wait) AFTER the streaming turn settled — never mid-stream.
     let mut outcome_at = None;
     let deadline = Instant::now() + Duration::from_secs(20);
     while Instant::now() < deadline {
@@ -1142,9 +1041,6 @@ fn approving_review_while_a_turn_streams_defers_its_refinement() {
         "the refinement ran before the streaming turn settled ({outcome_at:?} < {turn_settled_at:?})"
     );
 
-    // The retained round ran its refinement without a new review model
-    // call: exactly one review request and one refinement plan request
-    // ever reached the mock.
     let requests = mock.requests.lock().expect("mock lock").clone();
     let review_count = requests
         .iter()

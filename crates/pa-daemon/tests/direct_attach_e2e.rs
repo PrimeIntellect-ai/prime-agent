@@ -1,29 +1,16 @@
-//! Direct-attach transport e2e (thin-supervisor stage 2): a client attaches to
-//! a session through a supervisor-issued ticket, streams the session over the
-//! worker's OWN socket, `kill -9`s the supervisor mid-stream, keeps receiving
-//! events, restarts the supervisor, and reattaches with a fresh ticket for the
-//! same session. Also verifies the peer gate (single-use grants, session-plane
-//! command allowlist) at the socket level.
-//!
-//! Linux-only e2e (`AF_UNIX` sockets, `kill -9` semantics): compiles to
-//! nothing elsewhere, like the other pa-daemon e2e verifiers.
-// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
-// the full rationale).
-// Stack-resident futures by design on the daemon's hot paths; boxing the
-// call sites for a lint tick is a perf regression with zero correctness gain.
+//! Direct-attach transport e2e: a client attaches through a supervisor-
+//! issued ticket, streams over the worker's OWN socket, survives a
+//! supervisor `kill -9` mid-stream, and reattaches after a restart; also
+//! verifies the peer gate (single-use grants, session-plane allowlist).
 #![allow(clippy::large_futures)]
-// 64-bit-only targets; the narrowing casts sit at OS boundaries
-// (pid/fd/time/size) where the values are bounded by the kernel - the
-// dead-guard expect()s would add panic paths where silent wrap was
-// deliberate.
+// 64-bit-only targets; the narrowing casts sit at bounded OS boundaries.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// The fn-length threshold is a style gate, not correctness; the structure
-// campaign owns the god-fn splits as a follow-up.
+// Fn length is a style gate, not correctness.
 #![allow(clippy::too_many_lines)]
 // API-shape opinions, not defects; the surfaces are deliberate.
 #![allow(
@@ -65,10 +52,9 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path) -> Daemon {
         .arg(agent_dir)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        // A supervisor killed at teardown must not leak its session workers
-        // into later test binaries: the worker's supervisor-lost exit (TS
-        // `exitIfSupervisorOrphanedForTooLong`) runs on this short window
-        // instead of the 5-minute default.
+        // A supervisor killed at teardown must not leak its session workers: the worker's
+        // supervisor-lost exit (TS `exitIfSupervisorOrphanedForTooLong`) runs on this short
+        // window, not the 5-minute default.
         .env(
             pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
             "15000",
@@ -92,7 +78,6 @@ fn wait_socket_ready(socket: &Path) {
     }
 }
 
-/// JSONL supervisor client (command envelopes, id-matched responses).
 struct Client {
     reader: BufReader<UnixStream>,
     writer: UnixStream,
@@ -160,7 +145,6 @@ impl Client {
     }
 }
 
-/// A raw private-frame client for the session worker's own socket.
 struct WorkerClient {
     stream: UnixStream,
 }
@@ -203,7 +187,6 @@ impl WorkerClient {
         (header, payload)
     }
 
-    /// One request/response round trip with a fresh request id.
     fn request(&mut self, command_type: &str, payload: &Value) -> Value {
         static NEXT_REQUEST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let request_id = format!(
@@ -230,8 +213,7 @@ impl WorkerClient {
         }
     }
 
-    /// The next session-event frame payload, or `None` once the connection
-    /// is closed.
+    /// The next session-event frame payload, or `None` once the connection closes.
     fn next_event(&mut self, timeout: Duration) -> Option<Value> {
         let deadline = Instant::now() + timeout;
         loop {
@@ -259,7 +241,6 @@ fn read_exact_timeout(stream: &mut UnixStream, buffer: &mut [u8], deadline: Inst
     }
 }
 
-/// The persisted worker descriptor's live identity fields.
 struct WorkerIdentity {
     socket_path: PathBuf,
     worker_instance_id: String,
@@ -279,7 +260,6 @@ fn load_worker_identity(agent_dir: &Path, socket: &Path, worker_id: &str) -> Wor
     }
 }
 
-/// Read one `get_direct_worker_transport` ticket from the supervisor.
 fn get_ticket(client: &mut Client, session_id: &str) -> Value {
     client.send_command(
         "ticket",
@@ -293,7 +273,6 @@ fn get_ticket(client: &mut Client, session_id: &str) -> Value {
     response["data"].clone()
 }
 
-/// `peer_auth` over a fresh worker connection.
 fn peer_auth(worker: &mut WorkerClient, ticket: &Value) -> Value {
     worker.request(
         "peer_auth",
@@ -315,8 +294,7 @@ fn direct_attach_ticket_streams_across_supervisor_kill9() {
     let sessions_dir = agent_dir.join("sessions");
     std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
 
-    // A scripted session: turn 1 is slow so it is streaming when the
-    // supervisor dies; turn 2 proves the reattach works end to end.
+    // Turn 1 is slow so it is streaming when the supervisor dies; turn 2 proves the reattach works.
     let script_path = dir.path().join("script.json");
     std::fs::write(
         &script_path,
@@ -341,7 +319,6 @@ fn direct_attach_ticket_streams_across_supervisor_kill9() {
         "supervisor advertises direct peer transport"
     );
 
-    // Create the session through the supervisor (control plane).
     client.send_command(
         "create",
         &json!({
@@ -362,7 +339,6 @@ fn direct_attach_ticket_streams_across_supervisor_kill9() {
         .to_string();
     let identity = load_worker_identity(&agent_dir, &socket, &session_id);
 
-    // Ticket: single-use, short-lived, pinned to the worker's own socket.
     let ticket = get_ticket(&mut client, &session_id);
     assert_eq!(ticket["purpose"], "session_client");
     assert_eq!(ticket["activeSessionId"], session_id);
@@ -379,8 +355,8 @@ fn direct_attach_ticket_streams_across_supervisor_kill9() {
         "ticket TTL is the TS 10s window"
     );
 
-    // The grant is registered in the worker's memory: peer_auth admits the
-    // ticket, and the grant burns on first use.
+    // The grant is registered in the worker's memory: peer_auth admits the ticket, and
+    // the grant burns on first use.
     let (mut worker, _hello) = WorkerClient::connect(&identity.socket_path);
     let auth = peer_auth(&mut worker, &ticket);
     assert_eq!(auth["success"], true, "peer auth failed: {auth}");
@@ -403,7 +379,6 @@ fn direct_attach_ticket_streams_across_supervisor_kill9() {
     );
     replay.stream.shutdown(std::net::Shutdown::Both).ok();
 
-    // The direct attach snapshot comes from the session process.
     let attach = worker.request(
         "attach",
         &json!({
@@ -428,8 +403,8 @@ fn direct_attach_ticket_streams_across_supervisor_kill9() {
         "TS gate string"
     );
 
-    // Turn 1 streams over the DIRECT socket; the supervisor dies mid-stream
-    // and the stream must not even hiccup.
+    // Turn 1 streams over the DIRECT socket; the supervisor dies mid-stream and
+    // the stream must not even hiccup.
     let prompt = worker.request(
         "prompt",
         &json!({
@@ -439,11 +414,9 @@ fn direct_attach_ticket_streams_across_supervisor_kill9() {
         }),
     );
     assert_eq!(prompt["success"], true, "direct prompt failed: {prompt}");
-    // The wire emits the accepted user message as a message_start +
-    // message_end pair at turn start; the scripted reply arrives after its
-    // delayMs, so killing at the user row is still mid-turn. The break lands
-    // on the assistant message_end (the user pair's message_end is not the
-    // reply).
+    // The accepted user message arrives as a message_start + message_end pair at turn
+    // start; the scripted reply arrives after its delayMs, so killing at the user row
+    // is still mid-turn.
     let mut saw_message_start = false;
     let event = loop {
         let event = worker
@@ -452,7 +425,6 @@ fn direct_attach_ticket_streams_across_supervisor_kill9() {
         match event["event"]["type"].as_str() {
             Some("message_start") if !saw_message_start => {
                 saw_message_start = true;
-                // Mid-turn: kill -9 the supervisor NOW.
                 daemon.child.kill().expect("kill -9 supervisor");
                 let _ = daemon.child.wait();
             }
@@ -467,7 +439,6 @@ fn direct_attach_ticket_streams_across_supervisor_kill9() {
         event["event"]["message"]["content"], "turn-1",
         "the in-flight turn completed over the direct socket with the supervisor dead"
     );
-    // The full event lifecycle still arrived: turn_end follows.
     let mut saw_turn_end = false;
     while !saw_turn_end {
         let event = worker
@@ -478,8 +449,8 @@ fn direct_attach_ticket_streams_across_supervisor_kill9() {
         }
     }
 
-    // Restart the supervisor on the same socket path; the roster rebuilds
-    // from the worker's re-registration.
+    // Restart the supervisor on the same socket path; the roster rebuilds from the
+    // worker's re-registration.
     let mut daemon2 = spawn_supervisor(&socket, &agent_dir);
     wait_socket_ready(&socket);
     let (mut client2, _hello) = Client::connect(&socket);
@@ -502,8 +473,8 @@ fn direct_attach_ticket_streams_across_supervisor_kill9() {
     };
     assert_eq!(roster.len(), 1, "roster rebuilt with the same session");
 
-    // A NEW ticket for the same session from the restarted supervisor, and a
-    // fresh direct attach with it.
+    // A NEW ticket for the same session from the restarted supervisor, and a fresh
+    // direct attach with it.
     let ticket2 = get_ticket(&mut client2, &session_id);
     assert_eq!(ticket2["activeSessionId"], session_id);
     assert_ne!(
@@ -531,7 +502,6 @@ fn direct_attach_ticket_streams_across_supervisor_kill9() {
         "the snapshot carries the persisted first turn: {attach2}"
     );
 
-    // The second turn completes over the new direct link.
     let prompt2 = worker2.request(
         "prompt",
         &json!({
@@ -545,8 +515,8 @@ fn direct_attach_ticket_streams_across_supervisor_kill9() {
         let event = worker2
             .next_event(Duration::from_secs(10))
             .expect("second turn event");
-        // The user row arrives as its own message_end pair first; the
-        // answer is the assistant's final message_end.
+        // The user row arrives as its own message_end pair first; the answer is the
+        // assistant's final message_end.
         if event["event"]["type"] == "message_end"
             && event["event"]["message"]["role"] == "assistant"
         {
@@ -555,7 +525,6 @@ fn direct_attach_ticket_streams_across_supervisor_kill9() {
     };
     assert_eq!(answer, "turn-2", "second scripted turn completed");
 
-    // Shutdown: the restarted supervisor takes the adopted worker down.
     client2.send_command("sd", &json!({ "type": "shutdown" }));
     let shutdown = client2.read_response("sd");
     assert_eq!(shutdown["success"], true, "shutdown failed: {shutdown}");
@@ -566,8 +535,6 @@ fn direct_attach_ticket_streams_across_supervisor_kill9() {
     }
 }
 
-/// The grant lifecycle's expiry side, live: a ticket that is never used dies
-/// with its TTL and cannot be presented anymore.
 #[test]
 fn unused_ticket_expires() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -607,7 +574,6 @@ fn unused_ticket_expires() {
     let _ = &daemon; // kept alive until the end; reaped by the Drop guard
 
     let ticket = get_ticket(&mut client, &session_id);
-    // Wait out the 10s TTL (with slack) without using the grant.
     let expires = pa_daemon::util::iso_to_unix_ms(ticket["expiresAt"].as_str().expect("expiry"))
         .expect("expiry");
     let wait = expires.saturating_sub(pa_daemon::util::now_ms()) + 500;
@@ -620,9 +586,8 @@ fn unused_ticket_expires() {
         "an expired grant must not authenticate: {auth}"
     );
 
-    // A fresh ticket still works: expiry is per grant. The rejected
-    // connection was closed by the worker (TS ends failed peer_auth
-    // sockets), so the fresh grant is presented on a new connection.
+    // A fresh ticket still works: expiry is per grant (the rejected connection was closed
+    // by the worker, so the fresh grant presents on a new connection).
     let fresh = get_ticket(&mut client, &session_id);
     let (mut worker2, _hello) = WorkerClient::connect(&identity.socket_path);
     let auth_fresh = peer_auth(&mut worker2, &fresh);

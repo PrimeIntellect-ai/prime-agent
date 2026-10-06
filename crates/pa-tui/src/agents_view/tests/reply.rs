@@ -1,5 +1,4 @@
-//! The reply composer family (TS `toggleReplyTarget`/`sendReply`/the
-//! armed key routing): the arm and its headline, the guards, the submit
+//! The reply composer family: the arm and its headline, the guards, the submit
 //! paths, the view commands, and the hint rows.
 
 use super::*;
@@ -46,9 +45,8 @@ fn frame_text(mode: &mut AgentsViewMode) -> String {
     frame.iter().map(flat).collect::<Vec<_>>().join("\n")
 }
 
-/// The arm: space on the live parent arms the composer, fires the
-/// headline fetch, and renders the loading header; the landed headline
-/// renders its first line (TS `createAgentsViewReplyHeadline`).
+/// The arm on the live parent fires the headline fetch; the landed headline
+/// renders its first line only.
 #[test]
 fn space_arms_the_live_reply_and_fetches_the_headline() {
     let mut mode = armed_live();
@@ -61,21 +59,17 @@ fn space_arms_the_live_reply_and_fetches_the_headline() {
         frame_text(&mut mode).contains("Loading last response..."),
         "the live header shows the loading line"
     );
-    // The landed headline renders its first line; a re-targeted or
-    // disarmed composer drops a late result (the key guard).
+    // A re-targeted or disarmed composer drops a late result.
     mode.headline_result("p-live", Ok(Some("line one\nline two".to_string())));
     let frame = frame_text(&mut mode);
     assert!(
         frame.contains("line one") && !frame.contains("line two"),
         "the header renders the first collapsed line only:\n{frame}"
     );
-    // A result for another key drops.
     mode.headline_result("other", Ok(Some("nope".to_string())));
     assert!(frame_text(&mut mode).contains("line one"));
 }
 
-/// The saved arm starts from the recap: no fetch, the placeholder names
-/// the resume, and the header's time is the row's relative age.
 #[test]
 fn space_arms_the_saved_reply_from_the_recap() {
     let mut mode = armed_saved();
@@ -91,10 +85,6 @@ fn space_arms_the_saved_reply_from_the_recap() {
     );
 }
 
-/// The keys while armed (TS `handleInput`'s gates over the editor):
-/// down goes to the editor (the selection never moves), ctrl+n is
-/// inert, the cancel keys disarm without touching the query, and the
-/// exit hint never arms from the composer's cancel.
 #[test]
 fn armed_keys_route_to_the_editor_and_the_cancels_disarm() {
     let mut mode = armed_live();
@@ -102,7 +92,6 @@ fn armed_keys_route_to_the_editor_and_the_cancels_disarm() {
     mode.handle_key("down");
     assert_eq!(mode.selected, selected, "down never moves the selection");
     assert!(matches!(&mode.composer, Composer::Reply(_)));
-    // ctrl+n (the new-session action) is disabled while armed.
     mode.handle_key("ctrl+n");
     assert!(matches!(&mode.composer, Composer::Reply(_)));
     assert!(mode.opened.is_none());
@@ -110,13 +99,11 @@ fn armed_keys_route_to_the_editor_and_the_cancels_disarm() {
     // it).
     mode.handle_key("escape");
     assert!(matches!(mode.composer, Composer::Search));
-    // Re-arm; left disarms (TS: onAgentsBack runs before the editor's
-    // cursor motions, so Left never moves the cursor while armed).
+    // Re-arm; left disarms (onAgentsBack runs before the editor's cursor motions,
+    // so Left never moves the cursor while armed).
     mode.handle_key("space");
     mode.handle_key("left");
     assert!(matches!(mode.composer, Composer::Search));
-    // Re-arm; ctrl+c disarms without arming the exit hint, and the
-    // force-quit guard saw the handled press.
     mode.handle_key("space");
     mode.handle_key("ctrl+c");
     assert!(matches!(mode.composer, Composer::Search));
@@ -126,11 +113,9 @@ fn armed_keys_route_to_the_editor_and_the_cancels_disarm() {
     );
 }
 
-/// A selection move off the targeted row disarms (TS `moveSelection`'s
-/// guard, :1487-1493). The guard rides the move itself, not the key:
-/// while armed the composer owns the navigation keys (they edit the
-/// draft, exactly like TS's gated list navigation), so the drive calls
-/// the production move directly — the shape a future move path takes.
+/// A selection move off the targeted row disarms. The guard rides the move itself,
+/// not the key: while armed the composer owns the navigation keys, so the test
+/// drives the production move directly.
 #[test]
 fn a_selection_move_off_the_target_disarms() {
     let mut mode = armed_live();
@@ -139,20 +124,16 @@ fn a_selection_move_off_the_target_disarms() {
         matches!(mode.composer, Composer::Search),
         "the move disarms the reply"
     );
-    // The move back onto the row does not re-arm (the arm is the space
-    // key's act, never a selection side effect).
+    // The move back does not re-arm (the arm is the space key's act, never a
+    // selection side effect).
     mode.move_selection(-1);
     assert!(matches!(mode.composer, Composer::Search));
 }
 
-/// The submit: Enter on a typed draft dispatches the whole-object
-/// request; alt+enter queues the follow-up; a streaming target steers;
-/// the failure restores the draft, the success disarms and reports.
 #[test]
 fn enter_submits_the_reply_and_the_outcomes_land() {
     let mut mode = armed_live();
-    // A trailing backslash + Enter is the editor's newline (TS's
-    // shift+enter workaround), not a send; the plain Enter sends.
+    // A trailing backslash + Enter is the editor's newline workaround, not a send.
     for key in ["f", "o", "o", "\\", "enter", "b", "a", "r", "enter"] {
         mode.handle_key(key);
     }
@@ -169,8 +150,8 @@ fn enter_submits_the_reply_and_the_outcomes_land() {
         },
         "the live send dispatches against the current summary"
     );
-    // The failure restores the draft and reports; a re-armed composer on
-    // the same key keeps its fresh compose (the in-flight guard).
+    // The failure restores the draft; a re-armed composer keeps its fresh compose
+    // (the in-flight guard).
     mode.reply_result("p-live", Err("daemon down".to_string()));
     assert_eq!(
         mode.status_text(),
@@ -180,8 +161,8 @@ fn enter_submits_the_reply_and_the_outcomes_land() {
         matches!(&mode.composer, Composer::Reply(reply) if reply.editor.get_text() == "foo\nbar"),
         "the failure restores the draft"
     );
-    // The success disarms (the empty-editor guard) and reports; the
-    // adoption action rides the outcome.
+    // The success disarms (the empty-editor guard); the adoption action rides the
+    // outcome.
     mode.handle_key("enter");
     assert!(
         mode.pending_reply.take().is_some(),
@@ -202,14 +183,11 @@ fn enter_submits_the_reply_and_the_outcomes_land() {
     assert_eq!(mode.actions.last(), Some(&"reply_sent"));
 }
 
-/// The follow-up key and the streaming behavior (TS `sendReply`'s
-/// ladder): alt+enter queues, a streaming target steers, and the saved
-/// path resolves the resume config with its missing-directory notice.
 #[test]
 fn the_follow_up_queues_and_streaming_steers() {
     let mut mode = armed_live();
-    // TS `handleReplyFollowUp`: the blank draft is a no-op — nothing
-    // dispatches and the composer stays armed.
+    // The blank draft is a no-op — nothing dispatches and the composer stays
+    // armed.
     mode.handle_key("alt+enter");
     assert!(mode.pending_reply.is_none());
     assert!(matches!(&mode.composer, Composer::Reply(_)));
@@ -237,10 +215,9 @@ fn the_follow_up_queues_and_streaming_steers() {
         streaming.pending_reply.take().expect("the send").behavior,
         Some(StreamingBehavior::Steer)
     );
-    // The saved target resumes: the config drops the cwd, or overrides
-    // it with the notice when the saved directory is gone (the catalog
-    // row's cwd points at a path that does not exist — the submit
-    // resolves the CURRENT summary from the records).
+    // The saved target resumes: the config drops the cwd, or overrides it with
+    // the notice when the saved directory is gone (the fixture row's cwd
+    // deliberately points at a missing path).
     let mut saved = mode_with_anchor(None, Vec::new());
     let mut row = saved_catalog_row("/x/saved.jsonl", "saved-1", "a saved session");
     row["cwd"] = serde_json::json!("/nonexistent-reply-e2e");
@@ -268,10 +245,6 @@ fn the_follow_up_queues_and_streaming_steers() {
     assert_eq!(request.behavior, None, "a fresh resume never steers");
 }
 
-/// The view commands and the rejection (TS `parseAgentsViewCommand` +
-/// `getReplyComposerCommandRejection`): `/name` reuses the rename flow,
-/// `/kill` refuses an inactive target, and a client builtin never goes
-/// to the model as prompt text.
 #[test]
 fn view_commands_route_and_reject() {
     let mut mode = armed_live();
@@ -287,9 +260,8 @@ fn view_commands_route_and_reject() {
         matches!(&mode.composer, Composer::Reply(reply) if reply.editor.get_text() == "/tree"),
         "the rejected command keeps its draft"
     );
-    // /name with no args: the usage warning, the draft stays (the
-    // restored old draft clears first — the editor kept the rejected
-    // command, TS's restore).
+    // /name with no args: the usage warning, the draft stays (the restored old
+    // draft clears first — the editor kept the rejected command).
     mode.handle_key("ctrl+u");
     for ch in "/name".chars() {
         mode.handle_key(ch.to_string().as_str());
@@ -300,7 +272,6 @@ fn view_commands_route_and_reject() {
         mode.pending_rename.is_none(),
         "the usage warning dispatches nothing"
     );
-    // /name with args dispatches the rename against the live target.
     mode.handle_key(" ");
     for ch in "new".chars() {
         mode.handle_key(ch.to_string().as_str());
@@ -316,7 +287,6 @@ fn view_commands_route_and_reject() {
         }),
         "the /name dispatch reuses the rename flow"
     );
-    // /kill on the saved row: the inactive warning.
     let mut saved = armed_saved();
     for ch in "/kill".chars() {
         saved.handle_key(ch.to_string().as_str());
@@ -326,8 +296,7 @@ fn view_commands_route_and_reject() {
         saved.status_text(),
         Some("/kill needs a running agent; this session is inactive")
     );
-    // The run loop materializes the completion between keys: Enter on
-    // the typed-exact `/kill` falls through the open popup and submits.
+    // Enter on the typed-exact `/kill` falls through the open popup and submits.
     let mut live = armed_live();
     for ch in "/kill".chars() {
         live.handle_key(ch.to_string().as_str());
@@ -353,9 +322,6 @@ fn view_commands_route_and_reject() {
     assert_eq!(live.actions.last(), Some(&"killed"));
 }
 
-/// The hint rows (TS `renderReplyComposerHints`): the confirm word by
-/// the target's state, the queue hint while the draft has text, and
-/// cancel over the whole cancel binding.
 #[test]
 fn the_reply_hints_follow_the_target_state() {
     let mode = armed_live();
@@ -385,9 +351,6 @@ fn the_reply_hints_follow_the_target_state() {
     );
 }
 
-/// The reply autocomplete (TS `createReplyComposerAutocompleteProvider`):
-/// only the armed composer completes — the session-owned builtins plus
-/// the view commands, never the client builtins (the rejection family).
 #[test]
 fn the_reply_completion_lists_session_and_view_commands() {
     let mut mode = armed_live();
@@ -419,9 +382,8 @@ fn the_reply_completion_lists_session_and_view_commands() {
     );
 }
 
-/// An open completion owns Enter (TS's editor applies the selected
-/// item; the typed-exact fall-through is what submits): typing `/`
-/// completes into the buffer instead of submitting the partial.
+/// An open completion owns Enter (the typed-exact fall-through is what submits):
+/// typing `/` completes into the buffer instead of submitting the partial.
 #[test]
 fn an_open_completion_owns_enter() {
     let mut mode = armed_live();
@@ -447,10 +409,9 @@ fn an_open_completion_owns_enter() {
     );
 }
 
-/// A persisted target that left the live catalog resumes as saved: the
-/// stale runtime id leaves the summary (TS drops it with the archived
-/// lifecycle), so the steer gate and the resuming status read it as
-/// saved even when the captured summary still says streaming.
+/// A persisted target that left the live catalog resumes as saved: the stale
+/// runtime id leaves the summary, so the steer gate and the resuming status read
+/// it as saved.
 #[test]
 fn a_target_gone_from_the_catalog_submits_as_a_resume() {
     let mut mode = mode_with_parent_and_child();
@@ -473,9 +434,6 @@ fn a_target_gone_from_the_catalog_submits_as_a_resume() {
     assert_eq!(mode.status_text(), Some("Resuming session..."));
 }
 
-/// A paste never opens the completion (TS `handlePaste` cancels
-/// autocomplete and inserts without a new request, editor.ts:1301);
-/// the menu waits for the next keystroke.
 #[test]
 fn a_pasted_slash_never_opens_the_completion() {
     let mut mode = armed_live();
@@ -490,9 +448,7 @@ fn a_pasted_slash_never_opens_the_completion() {
     );
 }
 
-/// The open completion renders its panel above the box (the chat's
-/// stacking; TS shows the same dropdown through the editor's TUI
-/// overlay).
+/// The open completion renders its panel above the box (the chat's stacking).
 #[test]
 fn the_open_completion_renders_the_overlay_panel() {
     let mut mode = armed_live();
@@ -505,10 +461,6 @@ fn the_open_completion_renders_the_overlay_panel() {
     );
 }
 
-/// A click that moves the selection runs the keyboard rule (TS
-/// `moveSelection`'s reply guard): a toggle-click on a nested row stays
-/// in the view, and the composer never stays armed against a row the
-/// highlight left.
 #[test]
 fn a_click_off_the_target_disarms_like_a_key_move() {
     let _guard = match crate::mouse_tracking::STATE_TEST_LOCK.lock() {

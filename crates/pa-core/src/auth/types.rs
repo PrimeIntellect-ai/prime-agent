@@ -1,4 +1,4 @@
-//! Auth credential types (auth-storage.ts + prime-inference-auth.ts).
+//! Auth credential types.
 
 use serde::{Deserialize, Serialize};
 
@@ -22,9 +22,8 @@ pub struct PrimeTeamCredential {
     pub created_at: Option<String>,
 }
 
-/// The team half of a Prime Inference key write (TS `setPrimeInferenceApiKey`'s
-/// `primeTeam?: PrimeTeam | null`): an absent argument preserves the stored
-/// team when the key is unchanged, `null` is the personal account.
+/// The team half of a Prime Inference key write: an absent argument preserves the stored team,
+/// `null` is the personal account.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PrimeTeamAssignment {
     /// TS `undefined`: keep the stored team, but only on the same key.
@@ -35,12 +34,8 @@ pub enum PrimeTeamAssignment {
     Team(PrimeTeamCredential),
 }
 
-/// The stored Prime team selection (TS `getPrimeInferenceTeamSelection`'s
-/// `PrimeTeamCredential | null | undefined`): `undefined` means no stored
-/// selection applies (`PRIME_TEAM_ID` is set, or no api-key credential is
-/// stored). Fleet divergence (P5): a runtime or environment API-key
-/// override does not hide the stored team — it survives, so daemons on
-/// boxes with ambient `PRIME_API_KEY` need no `PRIME_TEAM_ID` pin.
+/// The stored Prime team selection: `undefined` means no stored selection applies. Fleet divergence
+/// (P5): a runtime or environment API-key override does not hide the stored team.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StoredPrimeTeam {
     /// TS `undefined`.
@@ -60,10 +55,8 @@ pub enum AuthCredential {
         #[serde(rename = "primeTeam", default, skip_serializing_if = "Option::is_none")]
         prime_team: Option<PrimeTeamCredential>,
     },
-    /// A pasted MCP static token (the inline paste flow for
-    /// `requires-setup` token services): the literal bearer value plus the
-    /// endpoint it is bound to. No expiry — usable until removed or replaced.
-    /// Setup field ids are metadata, never environment variables to read.
+    /// A pasted MCP static token (the inline paste flow for `requires-setup` token
+    /// services): the literal bearer value plus the endpoint it is bound to. No expiry.
     #[serde(rename = "mcp_static_token")]
     McpStaticToken {
         bearer: String,
@@ -75,25 +68,20 @@ pub enum AuthCredential {
         access: String,
         refresh: Option<String>,
         expires: i64,
-        /// The `ChatGPT` account the Codex Subscription token carries
-        /// (TS stores the codex login's `accountId` next to the
-        /// credentials; the request path re-extracts it from the token,
-        /// like TS).
+        /// The `ChatGPT` account the Codex token carries; the request
+        /// path re-extracts it from the token, like TS.
         #[serde(rename = "accountId", default, skip_serializing_if = "Option::is_none")]
         account_id: Option<String>,
-        /// The GitHub Enterprise domain the Copilot login ran against (TS
-        /// stores the copilot login's `enterpriseUrl` next to the
-        /// credentials; the refresh and the model base URL resolve through
-        /// it).
+        /// The GitHub Enterprise domain the Copilot login ran against;
+        /// the refresh and the model base URL resolve through it.
         #[serde(
             rename = "enterpriseUrl",
             default,
             skip_serializing_if = "Option::is_none"
         )]
         enterprise_url: Option<String>,
-        /// Endpoint binding for MCP logins (`mcp:<server>` credentials): the
-        /// MCP endpoint the token was issued for; consumers refuse to send
-        /// it elsewhere.
+        /// Endpoint binding for MCP logins (`mcp:<server>` credentials): the MCP endpoint
+        /// the token was issued for; consumers refuse to send it elsewhere.
         #[serde(rename = "endpoint", default, skip_serializing_if = "Option::is_none")]
         endpoint: Option<String>,
         /// The token endpoint the token was exchanged at (refreshes reuse it).

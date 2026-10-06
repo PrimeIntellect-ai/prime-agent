@@ -4,11 +4,8 @@
 
 use super::*;
 
-/// B-1 parity: explicit `--provider`/`--model` flags ride the create config
-/// over the wire and are authoritative for the worker's model resolution —
-/// no process-wide fallback (env or registry default) may answer instead.
-/// The resolved model is observable through `get_session_stats`'s
-/// `contextUsage.contextWindow`, which comes from the engine's model.
+/// Explicit `--provider`/`--model` flags are authoritative for the worker's
+/// model resolution — no process-wide fallback may answer instead.
 #[test]
 fn create_config_model_flags_reach_the_worker_engine() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -67,8 +64,6 @@ fn create_config_model_flags_reach_the_worker_engine() {
     );
     let stats = client.read_response("s1");
     assert_eq!(stats["success"], true, "get_session_stats failed: {stats}");
-    // The flagged model's context window (128000) proves the worker engine
-    // resolved `battery/mock-1` from the create config.
     assert_eq!(
         stats["data"]["contextUsage"]["contextWindow"], 128_000,
         "context usage reflects the wire-flagged model: {stats}"
@@ -92,7 +87,6 @@ fn create_path_duplicate_name_fails_with_current_ts_string() {
     )
     .expect("write script");
 
-    // First create reserves the name (worker reports it via get_state).
     client.send_command(
         "c1",
         &serde_json::json!({
@@ -108,11 +102,8 @@ fn create_path_duplicate_name_fails_with_current_ts_string() {
     let created = client.read_response("c1");
     assert_eq!(created["success"], true, "first create failed: {created}");
 
-    // Second create with the same name fails with the current TS string
-    // (`formatAgentSessionNameUnavailable`, agent-messages.ts): the CLI's
-    // auto-rename retry keys off the `Agent name "..." is unavailable`
-    // prefix, so the old `Session name ... is unavailable for depth 0`
-    // phrasing broke both parity and that fallback.
+    // The TS string (`formatAgentSessionNameUnavailable`): the CLI's
+    // auto-rename retry keys off the `Agent name "..." is unavailable` prefix.
     client.send_command(
         "c2",
         &serde_json::json!({
@@ -157,13 +148,10 @@ fn create_path_duplicate_name_fails_with_current_ts_string() {
     assert_eq!(empty["error"], "Session name cannot be empty");
 }
 
-/// The continue-recent safety contract at the daemon wire: a create that
-/// asks the daemon to pick the session blindly (`continueRecent: true`) is
-/// refused outright (a sanctioned divergence — the TS worker resolves it to
-/// the newest saved session for the cwd, which on a shared session dir can
-/// be any session, including one whose context and scheduled jobs resurrect
-/// on the reopened worker). A create without the field still succeeds, so
-/// the refusal only pins the blind-resume form.
+/// A sanctioned divergence: the TS worker resolves `continueRecent` to the
+/// newest saved session for the cwd (any session on a shared dir, including
+/// one whose context and scheduled jobs resurrect); the daemon refuses the
+/// blind-resume form, and a create without the field still succeeds.
 #[test]
 fn create_with_continue_recent_is_refused() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -174,9 +162,8 @@ fn create_with_continue_recent_is_refused() {
     let (mut client, hello) = Client::connect(&socket);
     assert_eq!(hello["type"], "daemon_hello");
 
-    // A saved session for the cwd exists, so a blind continue-recent would
-    // have a candidate: the refusal is the contract, not the empty-dir
-    // error it replaces ("No recent session found for <cwd>").
+    // A saved session exists, so the refusal is the contract, not the
+    // empty-dir error it replaces.
     let session_dir = agent_dir.join("sessions");
     std::fs::create_dir_all(&session_dir).expect("sessions dir");
     let cwd = dir.path().display().to_string();
@@ -214,8 +201,6 @@ fn create_with_continue_recent_is_refused() {
         "continueRecent is not supported: pass sessionPath to reopen a session, or open one through the agents view"
     );
 
-    // The plain create without the field still opens a fresh session: the
-    // refusal never widened into a general create gate.
     client.send_command(
         "c2",
         &serde_json::json!({

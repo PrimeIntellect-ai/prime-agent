@@ -1,7 +1,6 @@
 //! Bash/Python command preview extraction for tool-call rendering.
-//!
-//! Port of `packages/coding-agent/src/core/tools/code-preview.ts`. Regexes keep
-//! JavaScript semantics (whitespace/word classes, UTF-16 string indexing).
+//! Regexes keep JavaScript semantics (whitespace/word classes, UTF-16
+//! string indexing).
 
 use super::python::preview_python_code;
 #[cfg(test)]
@@ -14,12 +13,9 @@ pub(crate) const S: &str = r"[\t\n\x0B\f\r \u{00A0}\u{1680}\u{2000}-\u{200A}\u{2
 /// JavaScript backslash-w character class.
 pub(crate) const W: &str = r"[A-Za-z0-9_]";
 
-/// One preview regex, on either engine. Nearly every pattern is plain
-/// (character classes, groups, alternation) and runs as a linear-time
-/// `regex` program; the handful that need lookarounds or backreferences
-/// (the redaction and quoted-string patterns) fall back to `fancy_regex`.
-/// Preview regexes run per rendered row on the transcript path, so the
-/// engine choice is a rendering cost, not a style preference.
+/// One preview regex, on either engine: plain patterns run as a linear-time `regex` program,
+/// the handful that need lookarounds or backreferences fall back to `fancy_regex` (preview
+/// regexes run per rendered row, so the engine choice is a rendering cost).
 #[derive(Clone)]
 pub(crate) enum Rx {
     Fast(regex::Regex),
@@ -27,7 +23,7 @@ pub(crate) enum Rx {
 }
 
 /// One capture set from either engine, exposing the group spans the
-/// preview code reads (`get(i)`, with `as_str`/`end` on the result).
+/// preview code reads.
 pub(crate) struct Cap<'t> {
     fast: Option<regex::Captures<'t>>,
     fancy: Option<fancy_regex::Captures<'t>>,
@@ -68,10 +64,8 @@ impl<'t> Cap<'t> {
     }
 }
 
-/// The interned-regex pool: preview patterns are format-built at call sites
-/// but drawn from a small constant set, so one global cache keeps the
-/// compiled program alive across calls (compiling a regex per call costs
-/// milliseconds — a transcript-scale render pays it per row).
+/// The interned-regex pool: one global cache keeps the compiled program alive across calls
+/// (compiling per call costs milliseconds — a transcript-scale render pays it per row).
 fn regex_pool() -> &'static std::sync::Mutex<std::collections::HashMap<String, Rx>> {
     static POOL: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, Rx>>> =
         std::sync::OnceLock::new();
@@ -80,19 +74,16 @@ fn regex_pool() -> &'static std::sync::Mutex<std::collections::HashMap<String, R
 
 impl Rx {
     /// Look up (or compile) a preview regex; errors abort (patterns are
-    /// compile-time constants).
+    /// constants).
     pub(crate) fn new(pattern: &str) -> Self {
         let mut pool = regex_pool()
             .lock()
             .expect("code-preview regex pool poisoned");
-        // The hit path stays allocation-free: the key borrows, only a miss
-        // interns the pattern string.
         if let Some(rx) = pool.get(pattern) {
             return rx.clone();
         }
-        // Plain patterns compile on the fast engine; fancy-only syntax
-        // (lookarounds, backreferences) falls back to the backtracking
-        // engine.
+        // Fancy-only syntax (lookarounds, backreferences) falls back to
+        // the backtracking engine.
         let rx = match regex::Regex::new(pattern) {
             Ok(inner) => Rx::Fast(inner),
             Err(_) => Rx::Fancy(
@@ -170,9 +161,8 @@ impl Rx {
         }
     }
 
-    /// Split on every separator match. The `regex` crate has no stable
-    /// split, so the fast engine slices around its separator matches; the
-    /// fancy engine uses its own split.
+    /// Split on every separator match (the fast engine slices around its
+    /// separator matches; the fancy engine splits its own way).
     pub(crate) fn split<'t>(&self, text: &'t str) -> Vec<&'t str> {
         match self {
             Rx::Fast(inner) => {
@@ -190,11 +180,8 @@ impl Rx {
     }
 }
 
-/// One interned preview regex at a call site: the pattern expression runs
-/// exactly once per site (every preview pattern is a constant built from
-/// the shared `S`/`W` classes), and later calls clone the pooled program.
-/// This is the code-preview equivalent of a JS regex literal, which the TS
-/// side gets for free.
+/// One interned preview regex at a call site: the pattern runs once per site and later calls
+/// clone the pooled program (the code-preview equivalent of a JS regex literal).
 macro_rules! re_once {
     ($pattern:expr $(,)?) => {{
         static INTERNED: std::sync::OnceLock<$crate::code_preview::bash::Rx> =
@@ -403,7 +390,6 @@ fn simplify_runner_command(line: &str) -> Option<String> {
         }
         return None;
     }
-    // TS findIndex: word === "pytest" (the -m clause is unreachable there).
     if words.first().map(String::as_str) == Some("uv")
         && words.get(1).map(String::as_str) == Some("run")
     {
@@ -485,7 +471,7 @@ pub(crate) fn split_command_chain(line: &str) -> Vec<String> {
 
 fn heredoc_body(lines: &[String], start_index: usize, delimiter: &str) -> Option<String> {
     // While args stream, preview the partial heredoc body rather than the
-    // low-signal heredoc opener.
+    // opener.
     let mut body: Vec<&str> = Vec::new();
     for line in lines.iter().skip(start_index + 1) {
         if js_trim(line) == delimiter {

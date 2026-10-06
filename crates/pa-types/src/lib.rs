@@ -1,17 +1,10 @@
-//! Shared domain and wire types for Prime Agent.
-//!
-//! This crate is the serde port of the TypeScript wire and domain contracts:
-//!
-//! - [`ai`]: the model-facing message surface from `packages/ai/src/types.ts`
-//!   (content blocks, messages, usage, stop reasons, stream events, models, tools).
+//! Shared domain and wire types for Prime Agent: the serde port of the TypeScript wire and domain
+//! contracts ([`ai`] holds the model-facing message surface from TS `packages/ai/src/types.ts`).
 //!
 //! # Lossless round-trips
 //!
-//! Every wire struct carries a `#[serde(flatten)] rest: JsonMap` catch-all so
-//! fields the typed structs do not model yet are preserved on serialize. The
-//! round-trip contract used throughout the tests is: parse a JSON line into a
-//! typed value, serialize it back, and require the re-parsed JSON to equal the
-//! original parsed JSON.
+//! Every wire struct carries a `#[serde(flatten)] rest: JsonMap` catch-all, so unmodeled fields
+//! survive a parse/serialize round trip: the re-parsed JSON must equal the original.
 
 pub mod ai;
 pub mod daemon;
@@ -30,13 +23,12 @@ use serde::{Deserialize, Serialize};
 /// JSON object map used for opaque payloads and unknown-field catch-alls.
 pub type JsonMap = serde_json::Map<String, serde_json::Value>;
 
-/// An f64 that (de)serializes with JavaScript `JSON.stringify` number parity.
-///
-/// TypeScript numbers are f64 and `JSON.stringify` prints integral values
-/// without a fractional part (`0`, not `0.0`). Rust's `f64` serialization
-/// always prints `0.0`, which would change the JSON bytes and break lossless
-/// round-trips against TS-produced files. This newtype prints integral values
-/// as integers and everything else via the shortest f64 representation.
+/// An f64 that (de)serializes with JavaScript `JSON.stringify` number parity. TypeScript numbers
+/// are
+/// f64 and `JSON.stringify` prints integral values without a fractional part (`0`, not `0.0`);
+/// Rust's `f64` serialization always prints `0.0`, which would break lossless round-trips against
+/// TS-produced files. This newtype prints integral values as integers, everything else via the
+/// shortest f64 representation.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct JsNumber(pub f64);
 

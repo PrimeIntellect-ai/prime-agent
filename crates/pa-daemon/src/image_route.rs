@@ -1,17 +1,8 @@
-//! Image-model routing for the daemon worker's dispatched turns (TS
-//! #2453's `settings.imageModel`): a batch whose delivered messages attach
-//! image blocks runs on the configured image-capable model while the
-//! session model keeps identifying the session for UI and persistence.
-//! An unusable or missing reference fails the turn with the actionable
-//! refusal naming the setting — nothing silently downgrades the images to
-//! "(image omitted)" placeholders.
-//!
-//! The decision is armed at turn dispatch (`run_prompt`), re-applied at
-//! every model-turn attempt (so retries and post-compaction continuations
-//! keep serving the routed model, and the session build cannot clobber
-//! the swap), and cleared with the session target restored when the
-//! episode settles. The helpers live here; the dispatch, preflight, and
-//! failover integration points stay in [`crate::agent_engine`].
+//! Image-model routing for dispatched turns (`settings.imageModel`): a
+//! batch attaching image blocks runs on the configured image model while
+//! the session model keeps identifying the session; an unusable reference
+//! fails the turn with the actionable refusal — nothing silently
+//! downgrades the images.
 
 use pa_core::session_engine::provider_adapter::{
     json_round_trip, map_thinking_level, ProviderTarget,
@@ -19,11 +10,8 @@ use pa_core::session_engine::provider_adapter::{
 
 use crate::agent_engine::AgentSessionEngine;
 
-/// The routed image-model serving state for one dispatched episode (TS
-/// `AgentModelOverride` + the provider target the daemon's stream reads per
-/// call): turns whose delivered messages attach image blocks run on the
-/// configured `settings.imageModel` while the session model keeps
-/// identifying the session for UI and persistence.
+/// The routed image-model serving state for one dispatched episode: the
+/// image model serves while the session model keeps identifying the session.
 #[derive(Clone)]
 pub(crate) struct ImageRoute {
     /// The stream's provider target for the episode (the image model, its
@@ -34,18 +22,14 @@ pub(crate) struct ImageRoute {
     pub(crate) agent_override: pa_agent::agent::AgentModelOverride,
     /// The session's serving target captured at the first swap: the
     /// episode-settle restore writes it back when the fresh recompute
-    /// cannot run (a resolution failure must not leave the routed target
-    /// serving later turns).
+    /// cannot run.
     pub(crate) session_target: Option<ProviderTarget>,
 }
 
 impl AgentSessionEngine {
-    /// TS `_imageModelOverrideForTurns` + `resolveImageModelOverride`: the
-    /// routing decision for one dispatched turn batch. `carries_images` is
-    /// the batch's delivered image blocks (the primary prompt's plus the
-    /// batched rows'). `Ok(None)` when the batch does not route (no
-    /// images, a vision session model, or `images.blockImages`); `Err` is
-    /// the actionable refusal that fails the turn.
+    /// The routing decision for one dispatched turn batch: `Ok(None)` when
+    /// the batch does not route (no images, a vision session model, or
+    /// `images.blockImages`); `Err` is the actionable refusal.
     pub(crate) fn resolve_image_turn_route(
         &self,
         carries_images: bool,
@@ -65,18 +49,12 @@ impl AgentSessionEngine {
         let available: Vec<pa_types::ai::Model> =
             registry.get_available().into_iter().cloned().collect();
         // Route acceptance uses the same resolved-auth result the arm
-        // installs (the create-config key pin aside): a provider can be
-        // signed in while its key resolution still fails, and a route
-        // accepted on the status probe alone would arm an
-        // unauthenticated target — the image turn's content would reach
-        // the provider without credentials instead of the actionable
-        // unresolvable-reference refusal (TS resolves the auth at request
-        // time and fails the turn before any request leaves; the port
-        // refuses the reference up front).
+        // installs: a provider can be signed in while its key resolution
+        // still fails, and a route accepted on the status probe alone
+        // would arm an unauthenticated target. Keyed (provider, id): one
+        // provider's authenticated row must not vouch for another
+        // provider's same-id model.
         let pinned_api_key = self.current_selection().api_key.is_some();
-        // Keyed (provider, id): one provider's authenticated row must not
-        // vouch for another provider's same-id model (the catalog allows
-        // shared ids across providers).
         let resolvable_auth: std::collections::HashSet<(String, String)> = available
             .iter()
             .filter(|model| {
@@ -93,9 +71,8 @@ impl AgentSessionEngine {
                 service_tier: *self.service_tier.read().expect("service tier lock"),
                 image_model_reference: image_model_reference.as_deref(),
                 available_models: &available,
-                // Keyed (provider, id): one provider's authenticated row
-                // must not vouch for another provider's same-id model
-                // (the catalog allows shared ids across providers).
+                // Keyed (provider, id): one provider's authenticated row must
+                // not vouch for another provider's same-id model.
                 has_configured_auth: &|model| {
                     pinned_api_key
                         || resolvable_auth.contains(&(model.provider.clone(), model.id.clone()))
@@ -108,21 +85,18 @@ impl AgentSessionEngine {
     }
 
     /// Arm (or clear) the dispatched batch's image-model route: the
-    /// resolved image model becomes the episode's serving target (the
-    /// provider slot + the agent's per-run override), applied at every
-    /// model-turn attempt so retries and post-compaction continuations
-    /// keep serving it. A text-only session model with an unusable or
-    /// missing `settings.imageModel` returns the actionable refusal.
+    /// resolved image model becomes the episode's serving target, applied
+    /// at every model-turn attempt; a text-only session model with an
+    /// unusable or missing `settings.imageModel` returns the refusal.
     pub(crate) fn arm_image_turn_route(&self, carries_images: bool) -> Result<(), String> {
         let route = self
             .resolve_image_turn_route(carries_images)
             .map_err(|error| format!("{error:#}"))?;
         let route = match route {
             Some(resolved) => {
-                // The daemon's model allowlist is fail-closed on every model
-                // the session runs on (the switch, child-model, and failover
-                // paths all assert it): a routed image model excluded by
-                // `allowedModels` must not bypass it.
+                // The daemon's model allowlist is fail-closed on every
+                // model the session runs on: a routed image model excluded
+                // by `allowedModels` must not bypass it.
                 let selector = format!("{}/{}", resolved.model.provider, resolved.model.id);
                 let allowlist = crate::model_allowlist::load(&self.cwd(), &self.config.agent_dir);
                 if let Err(refusal) = crate::model_allowlist::assert_allowed(&allowlist, &selector)
@@ -163,9 +137,8 @@ impl AgentSessionEngine {
         Ok(())
     }
 
-    /// Whether an injected custom row attaches image blocks (TS
-    /// `messageCarriesImages` checks every delivered message's content, the
-    /// custom rows included): injected rows route like user turns.
+    /// Whether an injected custom row attaches image blocks: injected
+    /// rows route like user turns.
     pub(crate) fn custom_message_carries_images(
         message: &pa_types::session::CustomMessage,
     ) -> bool {
@@ -178,9 +151,8 @@ impl AgentSessionEngine {
     }
 
     /// Apply the armed route to a model turn (after the session build, so
-    /// the build-time target cannot clobber it): the stream's provider
-    /// target and the agent's per-run model override swap to the routed
-    /// image model for the episode.
+    /// the build-time target cannot clobber it): the provider target and
+    /// the agent's per-run override swap to the routed image model.
     pub(crate) fn apply_armed_image_route(&self, agent: &std::sync::Arc<pa_agent::agent::Agent>) {
         let mut slot = self
             .image_route
@@ -191,7 +163,7 @@ impl AgentSessionEngine {
         };
         // The first swap of the episode captures the session target it
         // replaces (the later builds re-write the slot with the session
-        // model, so only the swap preceding them holds it).
+        // model).
         if route.session_target.is_none() {
             route
                 .session_target
@@ -205,8 +177,7 @@ impl AgentSessionEngine {
 
     /// Clear the armed route and restore the session's serving target (a
     /// fresh resolution, so a mid-episode model switch is honored): the
-    /// next dispatched batch re-evaluates the routing against it (TS
-    /// `_clearModelOverrideWhenIdle` + the next-dispatch re-evaluation).
+    /// next dispatched batch re-evaluates the routing against it.
     pub(crate) fn clear_image_route(&self) {
         let route = self
             .image_route
@@ -217,10 +188,8 @@ impl AgentSessionEngine {
             return;
         };
         // The agent override clears even when the session target cannot be
-        // rebuilt (an auth/read failure): the next run must not silently
-        // serve on the routed image model — the captured session target
-        // restores the slot instead (a stale pin beats a leftover routed
-        // image target serving later image-free turns).
+        // rebuilt: the next run must not silently serve on the routed
+        // image model (a stale pin beats a leftover routed image target).
         let agent = self.turn_agent.lock().expect("turn agent lock").clone();
         if let Some(agent) = agent {
             agent.set_model_override(None);
@@ -244,7 +213,7 @@ impl AgentSessionEngine {
 
     /// Whether an image-model route is armed for the running episode (the
     /// failover primary capture keys off it: a routed episode's failover
-    /// restores the routed target, not the session model).
+    /// restores the routed target).
     pub(crate) fn armed_image_route(&self) -> Option<ImageRoute> {
         self.image_route
             .lock()
@@ -259,13 +228,6 @@ mod tests {
     use crate::agent_engine::{tests::FAUX_TEST_LOCK, AgentEngineConfig};
     use crate::engine::SessionEngine as _;
     use crate::engine::{EngineEvent, EngineModelSelection, PromptRequest};
-
-    // Image-model routing (TS #2453's `settings.imageModel`): a
-    // text-only session model + an image-attaching batch routes to the
-    // configured image model, or the turn fails with the actionable
-    // refusal. The battery pair: a text-only session model and a
-    // vision-capable image model, both on a models.json provider whose
-    // api the faux registry serves.
 
     fn write_image_pair_models_json(agent_dir: &std::path::Path) {
         std::fs::create_dir_all(agent_dir).unwrap();
@@ -365,7 +327,6 @@ mod tests {
         let route = route.expect("the text-only session model routes");
         assert_eq!(route.model.id, "mock-vision");
         assert_eq!(route.model.provider, "battery");
-        // An image-free batch never routes.
         let none = engine
             .resolve_image_turn_route(false)
             .expect("image-free batches stay on the session model");
@@ -375,8 +336,6 @@ mod tests {
     #[test]
     fn image_route_refusals_name_the_setting() {
         let dir = tempfile::TempDir::new().unwrap();
-        // Without imageModel the turn fails with the TS refusal naming the
-        // setting and the session model.
         let engine = image_route_engine(dir.path(), &serde_json::json!({}));
         let error = engine
             .resolve_image_turn_route(true)
@@ -390,7 +349,6 @@ mod tests {
             format!("{error}").contains("Set imageModel in settings.json"),
             "{error}"
         );
-        // An unusable reference refuses with its own message.
         let dir = tempfile::TempDir::new().unwrap();
         let engine = image_route_engine(
             dir.path(),
@@ -403,7 +361,6 @@ mod tests {
             format!("{error}").contains("could not be resolved"),
             "{error}"
         );
-        // `images.blockImages` disables routing: no refusal, no route.
         let dir = tempfile::TempDir::new().unwrap();
         let engine = image_route_engine(
             dir.path(),
@@ -418,11 +375,9 @@ mod tests {
         assert!(none.is_none());
     }
 
-    /// The end-to-end routed episode: an image-attaching prompt on the
-    /// text-only session model serves on the configured image model (the
-    /// settled assistant row tags it), and the episode's settle restores
-    /// the session target and clears the agent override (TS: the next
-    /// dispatch re-evaluates the routing against the session model).
+    /// The end-to-end routed episode: the settled assistant row tags the
+    /// image model, and the settle restores the session target (TS: the
+    /// next dispatch re-evaluates the routing).
     #[test]
     fn image_turn_serves_on_the_image_model_and_restores() {
         let _faux = FAUX_TEST_LOCK
@@ -493,12 +448,10 @@ mod tests {
             })
             .expect("the routed turn settled");
         // The routed run's assistant row tags the image model that served
-        // it (TS: run failures and assistant attribution follow the
-        // override model, never the session model).
+        // it (attribution follows the override model, never the session
+        // model).
         assert_eq!(turn_end["model"], serde_json::json!("mock-vision"));
         assert_eq!(turn_end["provider"], serde_json::json!("battery"));
-        // The episode's settle restored the session target and cleared the
-        // agent override: the next image-free turn serves mock-1 again.
         assert_eq!(engine.session_model().unwrap().id, "mock-1");
         let agent = engine
             .turn_agent
@@ -510,9 +463,6 @@ mod tests {
         registration.unregister();
     }
 
-    /// Without `imageModel`, the image-attaching turn fails at dispatch
-    /// with the actionable refusal (no silent image downgrade): the run
-    /// ends with `Done(Err(refusal))` and no assistant row ran.
     #[test]
     fn image_turn_without_image_model_fails_with_the_refusal() {
         let _faux = FAUX_TEST_LOCK
@@ -570,7 +520,6 @@ mod tests {
             refusal.contains("Set imageModel in settings.json"),
             "{refusal}"
         );
-        // No assistant row ran: the provider never saw the turn.
         assert!(
             !events
                 .iter()

@@ -14,7 +14,7 @@ use serde_json::Value;
 use crate::properties::Properties;
 use crate::TelemetryClient;
 
-/// The #2117 run trigger: a fresh prompt or a loop continuation.
+/// A fresh prompt or a loop continuation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunTrigger {
     Prompt,
@@ -34,8 +34,8 @@ impl RunTrigger {
     }
 }
 
-/// The #2117 tool category (the fixed vocabulary; `from_tool_name` maps a
-/// concrete tool name onto it, `unknown` for anything unrecognized).
+/// The fixed tool-category vocabulary: `from_tool_name` maps a concrete tool
+/// name onto it, `unknown` for anything unrecognized.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ToolCategory {
     Read,

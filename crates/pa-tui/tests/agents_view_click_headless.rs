@@ -1,33 +1,21 @@
-//! Headless e2e for the agents view's row-click grammar: a mock
-//! supervisor serves a two-row roster, and the headless harness feeds the
-//! same SGR press/release pair a terminal's plain click sends.
-//!
-//! Verifies the operator's named interaction: a plain click on a session
-//! row selects and opens it — the Enter action — while a dragged
+//! Headless e2e for the agents view's row-click grammar: a plain click on
+//! a session row selects and opens it (the Enter action); a dragged
 //! release never opens.
 #![cfg(unix)]
-// Pedantic-gate exceptions (every other pedantic warning in this crate is
-// fixed in place; each exception carries its one-line justification):
-// - the casts: terminal-layout arithmetic narrows structurally bounded
-//   values (screen coordinates, byte counts, timestamps); guarded
-//   conversions would add panic paths the bounds guarantee away.
+// Casts: structurally bounded terminal-layout arithmetic; guarded conversions add panic paths.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// - the render routes are flat tables (one arm per route); splitting them
-//   would add indirection without changing the flow.
+// Render routes are flat tables (one arm per route); splitting adds indirection.
 #![allow(clippy::too_many_lines)]
-// - widget state structs carry independent flag bits; a nested struct
-//   would add indirection without changing the shape.
+// Widget state structs carry independent flag bits.
 #![allow(clippy::struct_excessive_bools, clippy::fn_params_excessive_bools)]
-// - the futures are bounded by the surface's lifetime; boxing them would
-//   add an allocation to the steady-state loop.
+// Futures are bounded by the surface's lifetime; boxing adds a steady-state allocation.
 #![allow(clippy::large_futures)]
-// - the wrappers preserve a uniform Result-returning API surface; unwrap
-//   removals would ripple through the callers without changing behavior.
+// The wrappers preserve a uniform Result-returning API surface.
 #![allow(clippy::unnecessary_wraps)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -41,9 +29,8 @@ use pa_tui::agents_view::{
 use pa_tui::interactive::SessionSelection;
 use serde_json::{json, Value};
 
-/// Mouse tracking is process-global state, so the headless runs
-/// serialize through one lock (the click dispatch gates on it). The
-/// lock is tokio's so the guard can ride the run's awaits.
+/// Mouse tracking is process-global state, so the headless runs serialize through one lock (the
+/// click dispatch gates on it; tokio's, so the guard rides the run's awaits).
 static RUN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// One roster row's wire summary (the mock `roster_subscribe` snapshot).
@@ -173,8 +160,7 @@ fn respond_failure(writer: &mut UnixStream, id: &str, command: &str, error: &str
     );
 }
 
-/// One line with a bounded quiet window; `None` ends the serve loop on
-/// EOF or the quiet cap.
+/// One line with a bounded quiet window; `None` ends the serve loop on EOF or the quiet cap.
 fn read_line(reader: &mut BufReader<UnixStream>) -> Option<String> {
     const QUIET_WINDOW_MS: u32 = 90;
     let mut quiet_windows: u32 = 0;
@@ -225,9 +211,8 @@ fn view_options(socket: &std::path::Path) -> AgentsViewOptions {
     }
 }
 
-/// Run one headless plan against a fresh mock supervisor and return the
-/// outcome. Holds the run lock: the click dispatch gates on the
-/// process-global tracking state the headless setup arms.
+/// Run one headless plan and return the outcome. Holds the run lock: the click dispatch gates on
+/// the process-global tracking state.
 async fn run_plan(steps: Vec<AgentsStep>) -> pa_tui::agents_view::AgentsViewOutcome {
     let _guard = RUN_LOCK.lock().await;
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -251,7 +236,7 @@ async fn run_plan(steps: Vec<AgentsStep>) -> pa_tui::agents_view::AgentsViewOutc
     outcome
 }
 
-/// The last frame holding a needle and the needle's row within it.
+/// The last frame holding a needle and its row.
 fn locate_row(frames: &[String], needle: &str) -> Option<usize> {
     frames
         .iter()
@@ -265,9 +250,8 @@ fn locate_row(frames: &[String], needle: &str) -> Option<usize> {
         .map(|(row, _)| row)
 }
 
-/// A plain click on a session row opens it: the press/release pair on
-/// the second row's line selects and opens that row — Enter's action
-/// (the default Enter would have opened the FIRST row).
+/// A plain click on a session row opens it: the press/release pair on the second row's line selects
+/// and opens that row (the default Enter would have opened the FIRST row).
 #[tokio::test]
 async fn a_click_on_a_session_row_opens_it() {
     let outcome = run_plan(vec![AgentsStep::WaitSettle { timeout_ms: 2500 }]).await;
@@ -284,15 +268,14 @@ async fn a_click_on_a_session_row_opens_it() {
     );
 }
 
-/// A dragged release never opens the row under it (the press-drag
-/// release is a select gesture, not a click).
+/// A dragged release never opens the row under it (the press-drag release is a select gesture, not
+/// a click).
 #[tokio::test]
 async fn a_dragged_release_never_opens_the_row() {
     let outcome = run_plan(vec![AgentsStep::WaitSettle { timeout_ms: 2500 }]).await;
     let row = locate_row(&outcome.frames, "second one").expect("the second roster row renders");
-    // The raw reports a drag sends: the press, the motion report (button
-    // 0 + the motion bit), then the release — the drag kills the pending
-    // click.
+    // The raw reports a drag sends: the press, the motion report (button 0 + the motion bit), then
+    // the release — the drag kills the pending click.
     let press = format!("\x1b[<0;3;{}M", row + 1);
     let drag = format!("\x1b[<32;3;{}M", row + 1);
     let release = format!("\x1b[<0;3;{}m", row + 1);

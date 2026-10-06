@@ -1,13 +1,6 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
-// by design on hot paths (boxing 130 fns is allocation-churn with zero
-// correctness gain); the fn-length threshold is a style gate, not
-// correctness (the harness fns are intentionally linear); 64-bit targets -
-// the narrowing sits at OS/protocol boundaries where the values are
-// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
-// guarded parses), and checked conversions would add panic paths where
-// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
-// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
-// dossier for the conductor).
+// large_futures: stack-resident futures on hot paths by design.
+// too_many_lines: style gate, not correctness. Casts: 64-bit targets;
+// narrowing sits at bounded OS/protocol boundaries.
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -18,20 +11,9 @@
 )]
 
 //! Real-terminal e2e for the inline auth panel (the `/login` Prime
-//! Inference team picker): the product's terminal renderer runs on a
-//! pty, and the harness proves the login flow NEVER takes the terminal
+//! Inference team picker): the login flow must NEVER take the terminal
 //! over — no alternate-screen leave, no screen clear, no mouse-tracking
-//! release — while the panel and the team picker render inline (the TS
-//! `LoginDialogComponent` + `PrimeTeamSelectorComponent` surfaces).
-//!
-//! The child halves re-execute this binary in terminal mode against a
-//! mock supervisor: the `/login` Prime Inference child (a scripted
-//! provider-auth hook that drives the panel through the team picker) and
-//! the `/mcp`-view child (a scripted client-auth hook + the roster whose
-//! Enter runs the login). The byte stream the pty collects is the
-//! product's own rendering path. A plain `cargo test` run (no
-//! `PA_LOGIN_PANEL_CHILD_SOCKET`) passes trivially — only the parent
-//! tests drive the real path.
+//! release — while the panel and the team picker render inline.
 #![cfg(unix)]
 
 use std::io::{BufRead, Read, Write};
@@ -56,14 +38,11 @@ use pa_tui::provider_auth::{
 use std::pin::Pin;
 use std::sync::Arc;
 
-/// The child-mode socket: set (with the socket path) only when this very
-/// binary is re-executed as the product-under-test.
+/// Set only when this binary is re-executed as the product-under-test.
 const CHILD_SOCKET_ENV: &str = "PA_LOGIN_PANEL_CHILD_SOCKET";
 
-/// The child half of the e2e: runs the real interactive loop in terminal
-/// mode (the harness pty) against the parent's mock supervisor, with the
-/// scripted provider-auth hook that drives the panel. A plain `cargo
-/// test` run (no `CHILD_SOCKET_ENV`) passes trivially.
+/// The child half: the real interactive loop against the parent's mock
+/// supervisor, with the scripted provider-auth hook.
 #[test]
 fn login_panel_child_mode() {
     let Ok(socket) = std::env::var(CHILD_SOCKET_ENV) else {
@@ -77,9 +56,8 @@ fn login_panel_child_mode() {
     let _ = runtime.block_on(run_interactive(options, UiMode::Terminal));
 }
 
-/// The `/mcp`-view child half: the same real interactive loop with a
-/// scripted client-auth hook (the `/mcp` view's login dispatch) and a
-/// roster that carries the connectable `linear` service.
+/// The `/mcp`-view child half: the same loop with a scripted client-auth
+/// hook and a roster carrying the `linear` service.
 #[test]
 fn login_panel_mcp_child_mode() {
     let Ok(socket) = std::env::var(CHILD_SOCKET_ENV) else {
@@ -93,11 +71,8 @@ fn login_panel_mcp_child_mode() {
     let _ = runtime.block_on(run_interactive(options, UiMode::Terminal));
 }
 
-/// The model-picker sign-in child half: the real interactive loop with a
-/// catalog whose one model comes from a provider the client does not
-/// count as signed in (the picker's "require sign in" discovery row) and
-/// a scripted provider-auth hook whose API-key login succeeds — the
-/// picked model must route through the login flow and apply after it.
+/// The model-picker sign-in child: the real loop with an unsigned
+/// provider's model in the catalog and a scripted API-key login.
 #[test]
 fn model_sign_in_child_mode() {
     let Ok(socket) = std::env::var(CHILD_SOCKET_ENV) else {
@@ -111,9 +86,7 @@ fn model_sign_in_child_mode() {
     let _ = runtime.block_on(run_interactive(options, UiMode::Terminal));
 }
 
-/// The scripted provider-auth hook: the Prime Inference row and the
-/// panel-driven login (a progress line, then the team picker, then the
-/// TS status row).
+/// The scripted provider-auth hook: the Prime Inference row and the panel-driven login.
 struct ScriptedProviderAuth;
 
 impl ProviderAuthCommands for ScriptedProviderAuth {
@@ -235,9 +208,7 @@ fn child_options(socket: PathBuf) -> InteractiveOptions {
     }
 }
 
-/// The `/mcp` view's client-auth hook (the login the view's Enter runs):
-/// one progress line, then the TS status. The paste arm shares the panel
-/// (the masked field).
+/// The `/mcp` view's client-auth hook: one progress line, then the status.
 struct ScriptedClientAuth;
 
 impl pa_tui::client_auth::ClientAuthCommands for ScriptedClientAuth {
@@ -290,9 +261,8 @@ fn mcp_child_options(socket: PathBuf) -> InteractiveOptions {
     }
 }
 
-/// The model-picker sign-in catalog: one model from a provider the client
-/// does not count as signed in (the operator's discovery path — the
-/// picker keeps the row visible, marked "require sign in").
+/// One model from a provider the client does not count as signed in
+/// (the picker's "require sign in" discovery row).
 fn unauthenticated_catalog_model() -> pa_types::ai::Model {
     serde_json::from_value(serde_json::json!({
         "id": "glm-5.3-fast", "name": "GLM 5.3 Fast",
@@ -305,9 +275,7 @@ fn unauthenticated_catalog_model() -> pa_types::ai::Model {
     .expect("mock model deserializes")
 }
 
-/// The model-picker sign-in provider-auth hook: the `zai` API-key row and
-/// a login that succeeds for any submitted key (the sign-in the picked
-/// model routes through).
+/// The `zai` API-key row and a login that succeeds for any submitted key.
 struct ScriptedModelPickerAuth;
 
 impl ProviderAuthCommands for ScriptedModelPickerAuth {
@@ -319,9 +287,8 @@ impl ProviderAuthCommands for ScriptedModelPickerAuth {
             status: None,
             flow: AuthFlow::ApiKeyPrompt,
             configured: false,
-            // The menu rule: a working API-key login row is available
-            // (Enter routes the picked model's sign-in through it; an
-            // unavailable row renders dimmed and inert).
+            // A working API-key login row is available (an unavailable one
+            // renders dimmed and inert).
             available: true,
         };
         Box::pin(async move { vec![row] })
@@ -337,8 +304,7 @@ impl ProviderAuthCommands for ScriptedModelPickerAuth {
         api_key: Option<&str>,
     ) -> Pin<Box<dyn std::future::Future<Output = ProviderAuthOutcome> + Send>> {
         let name = provider.name.clone();
-        // Own the borrowed key before the boxed future (the trait's
-        // future has no lifetime).
+        // Own the borrowed key before the boxed future (no lifetime).
         let api_key = api_key.map(str::to_string);
         Box::pin(async move {
             if api_key.as_deref().is_some_and(|key| !key.is_empty()) {
@@ -375,9 +341,8 @@ impl ProviderAuthCommands for ScriptedModelPickerAuth {
     }
 }
 
-/// The model-picker sign-in child's options: the unauthenticated-provider
-/// catalog, no configured providers (the picker marks the row), and the
-/// scripted provider-auth hook.
+/// The sign-in child's options: the unauthenticated catalog, no
+/// configured providers, the scripted auth hook.
 fn model_sign_in_child_options(socket: PathBuf) -> InteractiveOptions {
     InteractiveOptions {
         models: None,
@@ -389,53 +354,39 @@ fn model_sign_in_child_options(socket: PathBuf) -> InteractiveOptions {
     }
 }
 
-/// The terminal takeover signatures the login flow must never emit: the
-/// alternate-screen leave (`?1049l`), the screen clear (`\x1b[2J`), and
-/// the SGR mouse-tracking release (the `renderer.suspend` bracket's
-/// bytes).
+/// The takeover signatures the login flow must never emit: alt-screen
+/// leave, screen clear, mouse release.
 const ALT_SCREEN_LEAVE: &str = "\x1b[?1049l";
 const SCREEN_CLEAR: &str = "\x1b[2J";
 const MOUSE_DISABLE: &str = "\x1b[?1006l\x1b[?1002l";
 
-/// The terminal-sequence e2e: `/login` selects the Prime Inference row,
-/// the login drives the inline auth panel, and the pty's byte stream
-/// shows the panel and the team picker rendering WITHOUT any terminal
-/// takeover — the old flow's alt-screen leave + screen clear + raw
-/// stdin prompt never happen.
+/// The terminal-sequence e2e: `/login` drives the inline auth panel, and
+/// the byte stream shows no terminal takeover (the old flow's alt-screen
+/// leave + clear + raw stdin prompt never happen).
 #[test]
 fn prime_login_renders_the_team_picker_without_a_terminal_takeover() {
     let mut harness = LoginPanelHarness::start();
 
-    // The startup contract: the fullscreen surface enters the alternate
-    // screen before any input is handled.
     harness.wait_from_start("\x1b[?1049h", "the startup alternate-screen enter");
 
-    // `/login` opens the provider selector.
     harness.write(b"/login\r");
     harness.wait_from_start("Search providers", "the provider selector panel");
 
-    // Enter selects the Prime Inference row: the login flow starts. The
-    // window from here to the settled status is the takeover-free proof.
+    // Enter selects the Prime Inference row; the window to the settled
+    // status is the takeover-free proof.
     let mark = harness.mark();
     harness.write(b"\r");
-    // The picker's mount needle is its styled subtitle: ratatui's diff
-    // paints only changed cells, and a direct open's transcript (the
-    // splash-suppressed content frame) leaves the picker's title row
-    // blank behind — the title's default-styled spaces match the blank
-    // cells and are skipped, so the title paints word by word. The
-    // subtitle carries its own style, so its whole line paints in one
-    // contiguous run.
+    // The mount needle is the picker's styled subtitle: ratatui's diff
+    // skips the title's default-styled spaces, so the subtitle paints in one contiguous run.
     harness.wait_from(
         mark,
         "Choose which account pays for Prime Inference usage.",
         "the inline team picker",
     );
 
-    // The picker's rows render inline (the TS selector rows).
     harness.wait_from(mark, "Acme Corp", "the team row");
     harness.wait_from(mark, "personal account", "the personal row");
 
-    // Enter picks the personal account; the settled status lands.
     harness.write(b"\r");
     harness.wait_from(
         mark,
@@ -443,9 +394,6 @@ fn prime_login_renders_the_team_picker_without_a_terminal_takeover() {
         "the settled login status",
     );
 
-    // The terminal takeover never happened: no alternate-screen leave,
-    // no screen clear, no mouse-tracking release anywhere in the login
-    // window (the whole flow stayed on the TUI's alternate screen).
     let window = harness.window_since(mark);
     assert!(
         find_subsequence(window, ALT_SCREEN_LEAVE.as_bytes()).is_none(),
@@ -459,8 +407,7 @@ fn prime_login_renders_the_team_picker_without_a_terminal_takeover() {
         find_subsequence(window, MOUSE_DISABLE.as_bytes()).is_none(),
         "the login never releases the mouse tracking (the old suspend bracket)"
     );
-    // The numbered stdin prompt is gone too: the flow renders through
-    // the panel, not the plain terminal.
+    // The numbered stdin prompt is gone too: the flow renders in the panel.
     assert!(
         find_subsequence(window, "Enter a team number".as_bytes()).is_none(),
         "the numbered stdin prompt never prints"
@@ -469,35 +416,22 @@ fn prime_login_renders_the_team_picker_without_a_terminal_takeover() {
     harness.finish();
 }
 
-/// The `/mcp`-view login e2e (the operator's exact action): Enter on the
-/// connection row runs the login flow, and the pty's byte stream shows
-/// the panel rendering INLINE — no alternate-screen leave, no screen
-/// clear, no mouse-tracking release — with the settled status landing
-/// as a transcript note.
+/// The `/mcp`-view login e2e: Enter on the connection row runs the login
+/// flow, and the byte stream shows the panel rendering INLINE.
 #[test]
 fn mcp_view_enter_login_renders_inline_without_a_terminal_takeover() {
     let mut harness = LoginPanelHarness::start_mcp();
 
     harness.wait_from_start("\x1b[?1049h", "the startup alternate-screen enter");
 
-    // `/mcp` opens the connections view with the roster's Linear row.
     harness.write(b"/mcp\r");
     harness.wait_from_start("Linear", "the connections view row");
 
-    // Enter runs the row's login flow: the panel mounts inline (the TS
-    // login dialog), the flow's progress renders, and the settled status
-    // lands as a transcript note — the window from here proves no
-    // terminal takeover.
+    // Enter runs the row's login flow; the window from here proves no takeover.
     let mark = harness.mark();
     harness.write(b"\r");
-    // Ratatui's diff paints changed cells word by word, so the waits pin
-    // single-word needles: the progress line only renders inside the
-    // panel, and the settle note's word is unique after the view closed.
-    // Ratatui's diff paints changed cells word by word and the frame
-    // scheduler coalesces (a fast scripted flow can settle inside one
-    // frame), so the wait pins the settle note's word — unique after the
-    // view closed — and the window assertion below proves the panel
-    // mounted inline (its title's first word).
+    // Ratatui's diff paints word by word and the frame scheduler can
+    // settle a fast flow inside one frame, so the wait pins the unique word.
     harness.wait_from(mark, "Connected", "the settled login status");
 
     let window = harness.window_since(mark);
@@ -521,31 +455,20 @@ fn mcp_view_enter_login_renders_inline_without_a_terminal_takeover() {
     harness.finish();
 }
 
-/// The model-picker sign-in e2e (the operator's bug report): a model from
-/// a provider the user is not signed in to stays visible in the picker
-/// (marked "require sign in"), selecting it sends the switch, the
-/// daemon's typed not-signed-in refusal routes the provider's sign-in
-/// flow (the `/login` provider menu, preselected on the provider's row,
-/// then the API-key prompt), and a successful sign-in applies the model
-/// automatically (the `Model: <id>` status row after the login's own
-/// status row, never the old dead-end refusal).
+/// The model-picker sign-in e2e (the operator's bug report): the unsigned
+/// provider's row stays visible ("require sign in"), selecting it routes the
+/// sign-in flow, and a successful sign-in applies the model automatically.
 #[test]
 fn model_picker_routes_the_sign_in_flow_and_applies_after_login() {
     let mut harness = LoginPanelHarness::start_model_sign_in();
 
     harness.wait_from_start("\x1b[?1049h", "the startup alternate-screen enter");
 
-    // `/model` opens the picker: the unauthenticated provider's row stays
-    // visible and carries the sign-in marking (the TS "require sign in"
-    // trailing).
     harness.write(b"/model\r");
     harness.wait_from_start("Search models", "the model picker");
     harness.wait_from_start("GLM 5.3 Fast", "the unauthenticated provider's model row");
     harness.wait_from_start("require sign in", "the row's sign-in marking");
 
-    // Enter selects the model: the daemon's typed not-signed-in refusal
-    // routes the sign-in flow — the note explains why, the `/login`
-    // provider menu mounts, the provider's row is preselected.
     let mark = harness.mark();
     harness.write(b"\r");
     harness.wait_from(
@@ -556,22 +479,15 @@ fn model_picker_routes_the_sign_in_flow_and_applies_after_login() {
     harness.wait_from(mark, "Search providers", "the provider login menu");
     harness.wait_from(mark, "ZAI", "the preselected provider row");
 
-    // Enter opens the API-key prompt; the submitted key signs in.
     harness.write(b"\r");
     harness.wait_from(mark, "Enter API key:", "the API-key prompt");
     harness.write(b"sk-fake\r");
 
-    // The sign-in automatically applies the parked model. The login's
-    // status row and the switch's `Model:` row are back-to-back TS
-    // `showStatus` notes — the model note rewrites the login note in
-    // place (the last-wins rule), so the pty only ever carries the
-    // final row: the `Model:` retry landing is itself the proof the
-    // login succeeded (the retry fires only on the parked provider's
-    // successful login).
+    // The sign-in applies the parked model: the login and `Model:` notes
+    // rewrite in place (TS last-wins), so the `Model:` landing is itself the
+    // proof the login succeeded (the retry fires only then).
     harness.wait_from(mark, "Model: glm-5.3-fast", "the automatic model retry");
 
-    // The old dead-end refusal never appeared: the daemon rejection the
-    // operator reported is gone from the whole flow.
     let window = harness.window_since(mark);
     assert!(
         find_subsequence(window, "Model not found".as_bytes()).is_none(),
@@ -584,8 +500,7 @@ fn model_picker_routes_the_sign_in_flow_and_applies_after_login() {
 /// One pty-backed product child plus the mock supervisor it attaches to.
 struct LoginPanelHarness {
     child: Child,
-    /// The mock-supervisor server thread's join handle (it exits with
-    /// the child's connection).
+    /// The mock-supervisor server thread's join handle (it exits with the child's connection).
     _server: std::thread::JoinHandle<()>,
     master: PtyReader,
 }
@@ -601,8 +516,7 @@ impl LoginPanelHarness {
         LoginPanelHarness::start_for("login_panel_mcp_child_mode")
     }
 
-    /// The model-picker sign-in child (the unauthenticated catalog + the
-    /// provider-auth hook).
+    /// The sign-in child (the unauthenticated catalog + the auth hook).
     fn start_model_sign_in() -> LoginPanelHarness {
         LoginPanelHarness::start_for("model_sign_in_child_mode")
     }
@@ -625,9 +539,7 @@ impl LoginPanelHarness {
         .expect("open pty");
 
         let child = spawn_child(&socket, &pty.slave, child_test);
-        // Leak the temp dir's socket path on purpose: the child needs the
-        // socket for the lifetime of the test, and the whole tree dies
-        // with the child at teardown.
+        // Leak the socket dir on purpose: the child needs it for the test's lifetime.
         std::mem::forget(dir);
         LoginPanelHarness {
             child,
@@ -658,7 +570,6 @@ impl LoginPanelHarness {
 
     fn finish(mut self) {
         let _ = self.child.kill();
-        // Reap the child so no zombie is left behind.
         let _ = self.child.wait();
     }
 }
@@ -680,8 +591,7 @@ fn slave_as_stdio(slave: &OwnedFd) -> Stdio {
     slave.try_clone().expect("clone pty slave").into()
 }
 
-/// Non-blocking reader over the pty master, collecting the raw byte
-/// stream the child writes.
+/// Non-blocking reader over the pty master, collecting the child's bytes.
 struct PtyReader {
     file: std::fs::File,
     output: Vec<u8>,
@@ -705,9 +615,8 @@ impl PtyReader {
         self.file.write_all(payload).expect("write to the pty");
     }
 
-    /// Drain the master until the needle appears in the output collected
-    /// since the given mark, bounded by a generous harness deadline
-    /// (attach + first renders).
+    /// Drain the master until the needle appears since the given mark,
+    /// bounded by a generous harness deadline.
     fn wait_from(&mut self, mark: usize, needle: &str, what: &str) {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
@@ -736,8 +645,7 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
-/// One attached session behind a mock supervisor socket (the same frame
-/// contract the headless e2e harness serves).
+/// One attached session behind a mock supervisor socket (the headless e2e's frame contract).
 struct MockSupervisor {
     listener: std::os::unix::net::UnixListener,
 }
@@ -765,10 +673,8 @@ impl MockSupervisor {
                 "clientId": "mock",
             }),
         );
-        // The model-picker sign-in child's set_model sequence: the
-        // unsigned provider's first switch answers with the daemon's
-        // typed refusal (the wire shape `resolve_set_model_selection`
-        // produces), the post-login retry succeeds.
+        // The set_model sequence: the first switch answers with the
+        // typed refusal, the post-login retry succeeds.
         let mut set_model_count = 0usize;
         let mut line = String::new();
         loop {
@@ -811,9 +717,8 @@ impl MockSupervisor {
                 "set_model" => {
                     set_model_count += 1;
                     if set_model_count == 1 {
-                        // The not-signed-in class: the typed refusal the
-                        // TUI routes to the sign-in flow (never the old
-                        // dead-end "Model not found" text).
+                        // The typed refusal the TUI routes to the sign-in
+                        // flow (never the dead-end "Model not found").
                         write_json(
                             &mut writer,
                             &json!({
@@ -842,11 +747,8 @@ impl MockSupervisor {
                     }
                 }
                 "get_model_catalog" => {
-                    // The model-picker sign-in child's catalog: the
-                    // unauthenticated provider's model stays listed
-                    // (discovery), the provider stays unconfigured (the
-                    // row keeps its "require sign in" marking and the
-                    // selection routes to the login flow).
+                    // The model stays listed (discovery), the provider
+                    // stays unconfigured (the row keeps its marking).
                     write_json(
                         &mut writer,
                         &json!({
@@ -863,8 +765,7 @@ impl MockSupervisor {
                     );
                 }
                 "get_mcp_connections" => {
-                    // The roster the `/mcp` view renders: one connectable
-                    // OAuth service (Enter runs its login flow).
+                    // One connectable OAuth service (Enter runs its login flow).
                     write_json(
                         &mut writer,
                         &json!({

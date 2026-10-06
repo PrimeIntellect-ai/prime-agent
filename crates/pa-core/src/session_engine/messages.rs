@@ -1,5 +1,5 @@
-//! LLM-facing message conversion. Port of convertToLlm and the message
-//! presentation constants in core/messages.ts.
+//! LLM-facing message conversion (TS `convertToLlm` plus the message
+//! presentation constants).
 
 use super::agent_messaging::sanitize_message_header_value;
 use crate::cron::AgentCronJob;
@@ -22,18 +22,13 @@ pub use pa_types::slash_commands::{
 pub const COMPACTION_OUTCOME_CUSTOM_TYPE: &str = "compaction_outcome";
 pub const REFINEMENT_OUTCOME_CUSTOM_TYPE: &str = "refinement_outcome";
 pub const REFINEMENT_NOTICE_CUSTOM_TYPE: &str = "refinement_notice";
-/// The durable single-row disclosure of one provider-retry episode
-/// (SANCTIONED DIVERGENCE from TS, operator ruling 2026-09-23: the TS chat
-/// leaves one error row per failed attempt, which a 429-storm turned into
-/// chat spam): a `provider_retry_outcome` custom message carrying the one
-/// resolved/terminal row of the whole episode, with
-/// `{success, attempts, finalError}` details. Like the compaction outcome
-/// it is a user-facing disclosure, never model context — `convert_to_llm`
-/// drops it.
+/// The durable single-row disclosure of one provider-retry episode (SANCTIONED
+/// DIVERGENCE, operator ruling 2026-09-23): a user-facing disclosure, never
+/// model context — `convert_to_llm` drops it.
 pub const PROVIDER_RETRY_OUTCOME_CUSTOM_TYPE: &str = "provider_retry_outcome";
 pub const HEARTBEAT_PROMPT_CUSTOM_TYPE: &str = "heartbeat_prompt";
-/// TS `ASYNC_BASH_COMPLETION_CUSTOM_TYPE`: the durable row a detached
-/// kernel bash completion admits as the woken turn's injected prompt.
+/// The durable row a detached kernel bash completion admits as the
+/// woken turn's injected prompt.
 pub const ASYNC_BASH_COMPLETION_CUSTOM_TYPE: &str = "async_bash_completion";
 /// TS `SESSION_RENAMED_CUSTOM_TYPE` (#2529): the displayed notice a
 /// rename that changed an existing name leaves in the renamed session's
@@ -43,21 +38,15 @@ pub const SESSION_RENAMED_CUSTOM_TYPE: &str = "session_renamed";
 /// notice's queued row carries (the TUI renders it with its own label,
 /// no lane prefix).
 pub const ASYNC_BASH_COMPLETION_PREVIEW_LABEL: &str = "Background command finished";
-/// The queue-strip preview label for a parked heartbeat fire (TS
-/// `HEARTBEAT_PROMPT_PREVIEW_LABEL`): the queued row reads
+/// The queue-strip preview label for a parked heartbeat fire; the queued row reads
 /// `Heartbeat prompt: <content>` instead of the lane-labeled preview.
 pub const HEARTBEAT_PROMPT_PREVIEW_LABEL: &str = "Heartbeat prompt";
 
-/// Why an unsuccessful compaction ran (TS `CompactionOutcomeReason`): the
-/// automatic threshold trigger, the overflow recovery, or the model's
-/// `compact.run` request consumed at a turn boundary.
+/// Why an unsuccessful compaction ran.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompactionOutcomeReason {
-    /// The context crossed the auto-compaction threshold.
     Threshold,
-    /// A context-overflow recovery attempt.
     Overflow,
-    /// The model requested the compaction (`compact.run`).
     Requested,
 }
 
@@ -74,7 +63,7 @@ impl CompactionOutcomeReason {
     }
 }
 
-/// How an unsuccessful compaction ended (TS `CompactionOutcome`).
+/// How an unsuccessful compaction ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompactionOutcomeKind {
     /// Nothing to summarize (TS `CompactionSkippedError`).
@@ -103,22 +92,16 @@ fn now_millis() -> u64 {
         .map_or(0, |duration| duration.as_millis() as u64)
 }
 
-/// The resolved-line text of a retry episode that recovered: the last
-/// error plus how many retries it took. This is the ONE line the episode
-/// leaves in the chat (live and rebuilt), replacing the per-attempt error
-/// rows TS keeps.
+/// The ONE line a recovered episode leaves in the chat, replacing the
+/// per-attempt error rows TS keeps.
 #[must_use]
 pub fn provider_retry_recovered_text(attempts: u32, last_error: &str) -> String {
     format!("Recovered after {attempts} retries: {last_error}")
 }
 
-/// The terminal-line text of a retry episode that gave up: the same text
-/// the TS `auto_retry_end` live row carries, so the durable row and the
-/// live one read identically. A zero-attempt failure (the
-/// failure-scoped disclosure of a permanent classification on the first
-/// attempt) never retried, so it reads as the plain provider failure it
-/// is — TS never emits this shape (that omission is the silent empty
-/// message the disclosure now covers).
+/// The terminal-line text of a retry episode that gave up: the same text the TS
+/// `auto_retry_end` live row carries. A zero-attempt failure never retried — TS
+/// never emits this shape.
 #[must_use]
 pub fn provider_retry_exhausted_text(attempts: u32, final_error: &str) -> String {
     if attempts == 0 {
@@ -128,9 +111,7 @@ pub fn provider_retry_exhausted_text(attempts: u32, final_error: &str) -> String
     }
 }
 
-/// The durable disclosure row of one provider-retry episode (see
-/// [`PROVIDER_RETRY_OUTCOME_CUSTOM_TYPE`]): `content` carries the row text
-/// the chat renders, `details` the structured verdict.
+/// The durable disclosure row of one provider-retry episode.
 #[must_use]
 pub fn create_provider_retry_outcome_message(
     success: bool,
@@ -156,11 +137,9 @@ pub fn create_provider_retry_outcome_message(
     }
 }
 
-/// The durable disclosure row for an unsuccessful compaction (TS
-/// `createCompactionOutcomeMessage`): a `compaction_outcome` custom message
-/// carrying the outcome message and `{reason, outcome}` details. It is a
-/// user-facing disclosure, never model context — `convert_to_llm` drops it,
-/// so the KV-cacheable prefix is unaffected.
+/// The durable disclosure row for an unsuccessful compaction: never
+/// model context — `convert_to_llm` drops it, so the KV-cacheable
+/// prefix is unaffected.
 #[must_use]
 pub fn create_compaction_outcome_message(
     content: &str,
@@ -180,13 +159,8 @@ pub fn create_compaction_outcome_message(
     }
 }
 
-/// The durable heartbeat delivery row (TS `createHeartbeatPromptMessage`):
-/// a `heartbeat_prompt` custom message carrying the job's prompt under the
-/// `[heartbeat: <schedule> run#<n>]` header, with the job's run bookkeeping
-/// in details. The header value is sanitized like every other
-/// `[<kind> ...]` header (TS `sanitizeMessageHeaderValue`); the daemon's
-/// fire delivers the row as the turn's injected prompt, so the transcript
-/// renders the heartbeat component instead of a plain user message.
+/// The durable heartbeat delivery row: the job's prompt under the `[heartbeat:
+/// <schedule> run#<n>]` header, with the run bookkeeping in details.
 #[must_use]
 pub fn create_heartbeat_prompt_message(
     job: &AgentCronJob,
@@ -197,10 +171,9 @@ pub fn create_heartbeat_prompt_message(
         "[heartbeat: {schedule} run#{}]\n\n{}",
         job.run_count, job.prompt
     );
-    // The details block mirrors the TS JSON exactly: the fixed keys in
-    // the TS order, and the optional `nextRunAt`/`lastRunAt` omitted
-    // while undefined (TS `JSON.stringify` drops undefined fields, so a
-    // first fire carries no `lastRunAt`).
+    // The details block mirrors the TS JSON exactly: the fixed keys in the TS
+    // order, and the optional `nextRunAt`/`lastRunAt` omitted while undefined (TS
+    // `JSON.stringify` drops undefined fields, so a first fire carries no `lastRunAt`).
     let mut details = serde_json::Map::new();
     details.insert("jobId".to_string(), serde_json::json!(job.id));
     details.insert(
@@ -228,15 +201,9 @@ pub fn create_heartbeat_prompt_message(
     }
 }
 
-/// The detached kernel bash completion notice (TS
-/// `createAsyncBashCompletionMessage`): an `async_bash_completion`
-/// custom message carrying `[bash-done pid:N exit:M]` plus the
-/// JSON-encoded command, with the completion's `{pid, command,
-/// exitCode}` in details. The daemon's `bash.completed` host handler
-/// admits the row as the woken turn's injected prompt (the turn runs on
-/// the row, so the transcript renders the bash-done component); a
-/// later kernel read that reaches the model first withdraws it through
-/// its details (`bash.consumed`).
+/// The detached kernel bash completion notice: the `[bash-done pid:N exit:M]` header
+/// plus the JSON-encoded command. A later kernel read that reaches the model first
+/// withdraws it through its details (`bash.consumed`).
 #[must_use]
 pub fn create_async_bash_completion_message(
     pid: u32,
@@ -412,13 +379,9 @@ pub fn convert_to_llm(messages: &[AgentMessage]) -> Vec<AgentMessage> {
 pub type LlmAssistantMessage = AssistantMessage;
 pub type LlmToolResultMessage = ToolResultMessage;
 
-/// The loop-boundary LLM conversion wired into the agent's `convert_to_llm`
-/// seam (TS `convertToLlm` at the agent prompt/request boundary): standard
-/// rows pass through; custom rows cross through the session wire shape so
-/// the session conversion rules apply — bookkeeping custom types and
-/// unknown roles drop, everything else becomes a user turn. This is what
-/// lets the harness-digest row ride the loop (prompt input and agent-end
-/// message list) while still reaching the provider as model context.
+/// The loop-boundary LLM conversion wired into the agent's seam: standard rows pass
+/// through; custom rows cross through the session wire shape so the session conversion
+/// rules apply (what lets the harness-digest row ride the loop to the provider).
 #[must_use]
 pub fn loop_convert_to_llm(
     messages: Vec<pa_agent::types::AgentMessage>,
@@ -442,18 +405,15 @@ pub fn loop_convert_to_llm(
     out
 }
 
-/// One loop custom row as its session wire shape, when the row matches a
-/// known session role (`custom`, `bashExecution`, `branchSummary`,
-/// `compactionSummary`). Unknown shapes read as unconvertible (TS drops
-/// them via the exhaustive-switch default).
+/// One loop custom row as its session wire shape, when it matches a known session
+/// role; unknown shapes read as unconvertible (TS drops them via the default arm).
 fn custom_message_to_session(custom: &pa_agent::types::CustomAgentMessage) -> Option<AgentMessage> {
     let wire = serde_json::to_value(custom).ok()?;
     serde_json::from_value(wire).ok()
 }
 
-/// One converted session row back into its loop wire shape (the shared
-/// camelCase wire form crosses the pa-core/pa-agent boundary by JSON
-/// round-trip).
+/// One converted session row back into its loop wire shape (the shared camelCase wire
+/// form crosses the pa-core/pa-agent boundary by JSON round-trip).
 fn session_llm_row_to_loop(message: &AgentMessage) -> Option<pa_agent::types::Message> {
     serde_json::from_value(serde_json::to_value(message).ok()?).ok()
 }
@@ -471,9 +431,8 @@ pub fn engine_convert_to_llm() -> pa_agent::agent_loop::ConvertToLlmFn {
 mod tests {
     use super::*;
 
-    /// The retry-outcome row (SANCTIONED DIVERGENCE, operator ruling
-    /// 2026-09-23): one durable line per episode — the recovered and
-    /// exhausted texts, the structured details — and never model context.
+    /// SANCTIONED DIVERGENCE, operator ruling 2026-09-23: one durable
+    /// line per episode, never model context.
     #[test]
     fn provider_retry_outcome_row_is_the_one_line_and_never_context() {
         let recovered =
@@ -501,7 +460,6 @@ mod tests {
                 "\u{26a0} Error: Retry failed after 2 attempts: provider down".to_string()
             )
         );
-        // The disclosure never enters the model context.
         let converted = convert_to_llm(&[AgentMessage::Custom(recovered)]);
         assert!(
             converted.is_empty(),
@@ -569,7 +527,6 @@ mod tests {
             }),
         ];
         let converted = convert_to_llm(&messages);
-        // Bookkeeping custom dropped; other custom becomes user.
         assert_eq!(converted.len(), 4);
         assert!(matches!(converted[0], AgentMessage::User(_)));
         let note = match &converted[1] {
@@ -623,13 +580,11 @@ state
                 .unwrap();
         let user = pa_agent::types::AgentMessage::user("keep");
         let converted = loop_convert_to_llm(vec![digest_row, user, outcome_row, unknown_row]);
-        // The digest row converts to a user turn; bookkeeping custom rows
-        // and unknown roles drop; standard rows pass through.
         assert_eq!(converted.len(), 2);
         match &converted[0] {
             pa_agent::types::Message::User(user) => {
-                // The digest row converts to a text-part array (TS wraps
-                // string custom content), not a bare string.
+                // The digest row converts to a text-part array, not a
+                // bare string.
                 assert!(
                     matches!(&user.content, pa_agent::types::UserContent::Parts(parts)
                         if parts.iter().any(|part| matches!(part,
@@ -682,8 +637,7 @@ state
         assert_eq!(message.custom_type, "heartbeat_prompt");
         assert!(message.display);
         assert_eq!(message.timestamp, 1_000);
-        // The header sanitizes its schedule value; the prompt rides as
-        // the body (TS `createHeartbeatPromptMessage`).
+        // The header sanitizes its schedule value.
         assert_eq!(
             message.content,
             UserContent::Text("[heartbeat: every 10m run#0]\n\ncheck the mission".to_string())
@@ -697,7 +651,6 @@ state
         // An undefined lastRunAt is omitted, not null (TS JSON.stringify
         // drops undefined fields; a first fire carries no lastRunAt).
         assert!(details.get("lastRunAt").is_none());
-        // A schedule with header delimiters collapses to spaces.
         let delimited = crate::cron::AgentCronJob {
             schedule: crate::cron::AgentCronSchedule {
                 kind: crate::cron::ScheduleKind::Cron,
@@ -709,7 +662,6 @@ state
         let message = create_heartbeat_prompt_message(&delimited, 2_000);
         assert!(matches!(message.content, UserContent::Text(text)
                 if text.starts_with("[heartbeat: 0 0 12 every day run#0]")));
-        // A repeat fire carries the previous run's lastRunAt.
         let repeat = crate::cron::AgentCronJob {
             last_run_at: Some("2026-09-22T00:10:00.000Z".to_string()),
             run_count: 1,
@@ -725,9 +677,6 @@ state
 
     #[test]
     fn async_bash_completion_message_matches_the_ts_shape() {
-        // TS `createAsyncBashCompletionMessage`: the custom type, the
-        // `[bash-done pid:N exit:M]` header with the JSON-encoded
-        // command, display, and the `{pid, command, exitCode}` details.
         let message =
             create_async_bash_completion_message(4321, "sleep 12; echo RW_WAKE_DONE", 0, 1_000);
         assert_eq!(message.custom_type, "async_bash_completion");
@@ -744,7 +693,6 @@ state
         assert_eq!(details["pid"], 4321);
         assert_eq!(details["command"], "sleep 12; echo RW_WAKE_DONE");
         assert_eq!(details["exitCode"], 0);
-        // A nonzero exit and embedded quotes round the same shape.
         let message = create_async_bash_completion_message(11, "echo \"done\" && exit 2", 2, 2_000);
         assert_eq!(message.timestamp, 2_000);
         assert!(matches!(message.content, UserContent::Text(text)
@@ -773,7 +721,6 @@ state
             }
             _ => panic!("expected user"),
         }
-        // Excluded executions drop out entirely.
         let excluded = AgentMessage::BashExecution(pa_types::session::BashExecutionMessage {
             exclude_from_context: Some(true),
             command: "secret".to_string(),

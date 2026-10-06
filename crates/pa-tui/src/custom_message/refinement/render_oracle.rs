@@ -1,8 +1,6 @@
 //! Reference renderer for full-object differential tests: a second,
 //! independent implementation of the refinement row whose output must
 //! byte-match the production traversal at every width and detail level.
-//! The expanded block hangs off the `◆` header on the `╰─ ` gutter with
-//! continuation rows at the branch depth.
 use super::*;
 
 pub(crate) fn render_refinement_outcome(
@@ -25,9 +23,8 @@ pub(crate) fn render_refinement_outcome(
     } else {
         row.summary.trim()
     };
-    // TS `ExpandableEventMessage.addSummary`: the summary follows the
-    // component's `setExpanded` state (`toolOutputExpanded`), not the
-    // edit-diffs toggle. Expanded hangs on the branch grammar.
+    // The summary follows the tool-output expansion state, not the
+    // edit-diffs toggle.
     out.extend(event_summary_rows(
         summary,
         detail.tool_output_expanded(),
@@ -52,9 +49,8 @@ pub(crate) fn render_refinement_outcome(
     out
 }
 
-/// The summary row set: collapsed keeps the TS `EventSummary` shape
-/// (whitespace-collapsed, `width - 1`, one-column inset inside the styled
-/// span, clamped to two lines); expanded hangs on the branch gutter.
+/// The summary row set: collapsed keeps the whitespace-collapsed
+/// two-line-clamped shape; expanded hangs on the branch gutter.
 fn event_summary_rows(
     summary: &str,
     expanded: bool,
@@ -95,9 +91,8 @@ fn event_summary_rows(
     lines
         .into_iter()
         .map(|line| {
-            // TS `EventSummary` colors the inset space with the summary
-            // color (`theme.fg(color, \` ${line}\`)`), so the first span
-            // carries the leading space.
+            // The inset space carries the summary color, so the first
+            // span carries the leading space.
             let mut row: Line = Vec::new();
             for (index, span) in line.into_iter().enumerate() {
                 let content = if index == 0 {
@@ -112,9 +107,8 @@ fn event_summary_rows(
         .collect()
 }
 
-/// The expanded-content row set on the branch grammar: wrap at the branch
-/// content width, first row the dim `╰─ ` gutter, continuation rows the
-/// matching indent, truncated to the full width.
+/// The expanded-content row set on the branch grammar: wrap at the branch content width, first
+/// row the dim `╰─ ` gutter, continuation rows the matching indent, truncated to the full width.
 fn branch_rows_over(line: &Line, theme: &Theme, width: usize) -> Vec<Line> {
     crate::branch::branch_block(line, theme, width)
 }
@@ -138,9 +132,8 @@ fn continuation_rows_over(line: &Line, width: usize) -> Vec<Line> {
     rows
 }
 
-/// One edit section: the label row hangs off the branch, then one muted
-/// field-label row per field with plain value rows or -/+ change rows on
-/// the continuation indent.
+/// One edit section: the label row hangs off the branch, then one muted field-label row per
+/// field with plain value rows or -/+ change rows on the continuation indent.
 fn edit_section_rows(edit: &RefinementEditRow, theme: &Theme, width: usize) -> Vec<Line> {
     let mut label: Line = Vec::new();
     for part in &edit.label {
@@ -171,9 +164,8 @@ fn edit_section_rows(edit: &RefinementEditRow, theme: &Theme, width: usize) -> V
                 ) {
                     let mut inset: Line = vec![Span::raw(crate::branch::BRANCH_INDENT)];
                     inset.extend(row);
-                    // At tiny widths the branch prefix alone outgrows the
-                    // viewport: clip the prefixed row like the production
-                    // traversal does before paint.
+                    // At tiny widths the branch prefix alone outgrows the viewport: clip the
+                    // prefixed row like the production traversal does before paint.
                     out.push(crate::width::truncate_line(&inset, width, ""));
                 }
             }
@@ -199,9 +191,8 @@ fn label_part(part: &LabelPart, theme: &Theme) -> Span {
     }
 }
 
-/// Full-context line diff rows in the rich-diff row shape (TS
-/// `buildRichDiffLine` over `generateDiffString` with infinite context):
-/// a ` <num> <prefix> ` gutter on the diff backgrounds, wrapped content in
+/// Full-context line diff rows in the rich-diff row shape: a
+/// ` <num> <prefix> ` gutter on the diff backgrounds, wrapped content in
 /// `mdCodeBlock`, continuation rows keep a blank gutter.
 fn rich_change_rows(
     removed: &[String],
@@ -216,9 +207,8 @@ fn rich_change_rows(
     for op in line_diff(removed, added) {
         let (prefix, num, line) = match op {
             DiffOp::Context(line) => {
-                // TS `generateDiffString` advances both counters on
-                // context lines, so added rows after a change keep the
-                // new-file numbering.
+                // Both counters advance on context lines, so added rows
+                // after a change keep the new-file numbering.
                 let num = old_num;
                 old_num += 1;
                 new_num += 1;

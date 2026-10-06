@@ -1,14 +1,6 @@
-//! Locations and result shapes for the kernel's persisted user namespace,
-//! which is revived when a session resumes. The kernel is otherwise spawned
-//! fresh on resume, leaving the model believing it still has access to
-//! variables/imports it defined earlier.
-//!
-//! Snapshotting is best-effort and per-variable: each top-level name is pickled
-//! with `dill` independently, so a single unpicklable object (open file,
-//! socket, GPU tensor, ...) is skipped and reported rather than aborting the
-//! whole snapshot.
-//!
-//! Ported from `core/kernel/state-snapshot.ts`.
+//! Locations and result shapes for the kernel's persisted user namespace, revived on session
+//! resume. Snapshotting is best-effort and per-variable: a single unpicklable object is skipped and
+//! reported, never aborting the whole snapshot.
 
 use std::path::{Path, PathBuf};
 

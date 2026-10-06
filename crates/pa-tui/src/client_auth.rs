@@ -16,15 +16,13 @@ pub type AuthFuture = Pin<Box<dyn std::future::Future<Output = anyhow::Result<St
 
 /// `/mcp login` and `/mcp logout`, implemented by the composition root.
 pub trait ClientAuthCommands: Send + Sync {
-    /// Run one interactive MCP OAuth login (browser plus paste fallback)
-    /// against the inline auth panel (the flow's progress, URL block,
-    /// and prompts render there). Resolves with the status line to show
-    /// (TS: `Connected <name>.`) or the error to surface.
+    /// Run one interactive MCP OAuth login against the inline auth panel
+    /// (the flow's progress, URL block, and prompts render there).
+    /// Resolves with the status line to show or the error to surface.
     fn login(&self, server: &str, panel: crate::auth_panel::AuthPanelHandle) -> AuthFuture;
-    /// The inline paste panel's client surface: prompt (masked, TS
-    /// `McpTokenPastePanelComponent`) for one pasted static token, store
-    /// it bound to the service endpoint, and verify. Resolves with the
-    /// status line (TS: `Connected <name>.`).
+    /// The inline paste panel's client surface: prompt for one pasted
+    /// static token, store it bound to the service endpoint, and verify.
+    /// Resolves with the status line to show.
     fn paste_token(&self, server: &str, panel: crate::auth_panel::AuthPanelHandle) -> AuthFuture;
     /// The api-key credential flow (the `/mcp` view's stored keys, e.g.
     /// the web-search one): prompt (masked) for one pasted key and store
@@ -36,8 +34,8 @@ pub trait ClientAuthCommands: Send + Sync {
     fn logout(&self, server: &str) -> AuthFuture;
 }
 
-/// The handle the interactive options carry (a manual `Debug`, like the
-/// onboarding sink: the hook is opaque to the options printer).
+/// The handle the interactive options carry (a manual `Debug`: the hook
+/// is opaque to the options printer).
 #[derive(Clone)]
 pub struct ClientAuthCommandsHandle(pub Arc<dyn ClientAuthCommands>);
 

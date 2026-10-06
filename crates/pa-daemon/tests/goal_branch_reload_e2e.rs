@@ -1,10 +1,7 @@
-//! End-to-end verifier for the goal state\'s branch reload (TS
-//! `_reloadGoalStateFromBranch` at the `_navigateTree` tail, the #241
-//! adjacent gap): a tree navigation rebuilds the session\'s context onto
-//! the moved branch, and the goal state follows the cut — a branch that
-//! predates the goal rows reloads the empty state, navigating back onto
-//! the abandoned branch restores its own goal rows, and each reload\'s
-//! change announces as a `goal_update` at the moment it happens.
+//! Goal-state branch reload e2e (TS `_reloadGoalStateFromBranch`, the #241 gap):
+//! a tree navigation rebuilds the context onto the moved branch, and the goal
+//! state follows the cut — a pre-goal branch reloads the empty state, moving
+//! back restores the branch's own rows, each announced as a `goal_update`.
 
 #![cfg(unix)]
 
@@ -45,8 +42,8 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path) -> Supervisor {
         .stderr(Stdio::null())
         .env_remove("PRIME_API_KEY")
         .env_remove("PRIME_AGENT_CODING_AGENT_DIR")
-        // A supervisor killed at teardown must not leak its session workers
-        // into later test binaries.
+        // A supervisor killed at teardown must not leak its session workers into later test
+        // binaries.
         .env(
             pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
             "15000",
@@ -66,8 +63,8 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path) -> Supervisor {
     panic!("supervisor socket never appeared");
 }
 
-/// One client connection: request/response plus every session event that
-/// streamed while the response was outstanding.
+/// One client connection: request/response plus the session events that stream while a response is
+/// outstanding.
 struct Client {
     reader: BufReader<std::os::unix::net::UnixStream>,
     writer: std::os::unix::net::UnixStream,
@@ -124,7 +121,6 @@ impl Client {
             .unwrap_or_else(|error| panic!("write command {id}: {error}"));
     }
 
-    /// The response for `id`, collecting every session event on the way.
     fn request(&mut self, id: &str) -> Value {
         let deadline = Instant::now() + Duration::from_mins(5);
         loop {
@@ -143,7 +139,6 @@ impl Client {
         }
     }
 
-    /// Drain pending session events until the socket stays quiet.
     fn drain_events(&mut self, quiet_ms: Duration) {
         let deadline = Instant::now() + Duration::from_secs(30);
         let mut last_line = Instant::now();
@@ -172,9 +167,7 @@ impl Client {
     }
 }
 
-/// The harness: a supervisor, a faux-scripted session over the real agent
-/// engine, and an attached client (session events only reach attached
-/// wire clients).
+/// The harness: a supervisor, a faux-scripted session, and an attached client.
 struct Harness {
     dir: tempfile::TempDir,
     _supervisor: Supervisor,
@@ -257,8 +250,8 @@ impl Harness {
         self.client.drain_events(Duration::from_secs(1));
     }
 
-    /// The f18-battery prompt form: send and wait for the response without
-    /// the quiet drain (the goal-continuation loop keeps the socket busy).
+    /// The f18-battery prompt form: send and wait without the quiet drain (the goal-continuation
+    /// loop keeps the socket busy).
     fn prompt_racing_the_loop(&mut self, id: &str, message: &str) {
         self.client.send_command(
             id,
@@ -272,10 +265,8 @@ impl Harness {
         assert_eq!(done["success"], true, "prompt {id} failed: {done:?}");
     }
 
-    /// The `/goal` status the session last answered (the driver\'s view —
-    /// the durable `session_slash_command_result` rows the command wrote,
-    /// latest first from the collected wire events, falling back to the
-    /// session file for rows drained before collection).
+    /// The `/goal` status the session last answered (from the durable
+    /// `session_slash_command_result` rows, latest first, falling back to the session file).
     fn last_goal_status(&self) -> String {
         let wire = self
             .client
@@ -312,7 +303,6 @@ impl Harness {
             .unwrap_or_default()
     }
 
-    /// The `goal_update` announcements\' statuses, in wire order.
     fn announced_goal_statuses(&self) -> Vec<String> {
         self.client
             .events
@@ -322,7 +312,6 @@ impl Harness {
             .collect()
     }
 
-    /// The flat tree\'s entry nodes (id + raw entry).
     fn flat_entries(&mut self, id: &str) -> Vec<Value> {
         self.client.send_command(
             id,
@@ -354,7 +343,6 @@ impl Harness {
         response
     }
 
-    /// The id of the user message with exactly `text`.
     fn user_entry_id(nodes: &[Value], text: &str) -> String {
         nodes
             .iter()
@@ -369,7 +357,6 @@ impl Harness {
             )
     }
 
-    /// The tree\'s current leaf id.
     fn leaf_id(nodes: &[Value]) -> String {
         nodes
             .last()
@@ -378,8 +365,7 @@ impl Harness {
     }
 }
 
-/// The text of one user message row's content: the string form or the
-/// concatenated text blocks.
+/// One user message row's content: the string form or the concatenated text blocks.
 fn message_text(content: &Value) -> Option<String> {
     match content {
         Value::String(text) => Some(text.clone()),
@@ -395,50 +381,39 @@ fn message_text(content: &Value) -> Option<String> {
     }
 }
 
-/// A tree navigation reloads the goal state from the moved branch (TS
-/// `_reloadGoalStateFromBranch`): moving below every `thread_goal_state`
-/// row leaves the driver on the branch\'s empty state (faithful time
-/// travel), moving back onto the branch that owns the goal rows restores
-/// them, and each reload announces its change as a `goal_update` the
-/// navigation itself emits.
 #[test]
 fn navigate_tree_moves_follow_the_branchs_goal_state() {
     let mut harness = setup("goal-branch-reload");
 
-    // A pre-goal seed turn: the branch below its user message predates
-    // every goal row, so navigating there is the strongest faithful move.
+    // A pre-goal seed turn: navigating below its user message is the strongest
+    // faithful move.
     harness.prompt("s0", "seed turn before the goal");
 
-    // Start a goal and pause it (the f18 battery pattern: the pause
-    // withdraws the minted continuation and the loop goes quiet), so the
-    // goal rows (active, then paused) sit on the branch after the seed.
+    // Start a goal and pause it (the f18 pattern: the pause withdraws the minted
+    // continuation and the loop goes quiet), so the goal rows sit after the seed.
     harness.prompt_racing_the_loop("g1", &format!("/goal {OBJECTIVE}"));
     harness.prompt_racing_the_loop("g2", "/goal pause");
     harness.client.drain_events(Duration::from_secs(1));
 
-    // The driver is on the paused goal.
     harness.prompt("q1", "/goal");
     assert_eq!(
         harness.last_goal_status(),
         format!("Goal paused: {OBJECTIVE}")
     );
 
-    // The tree: the seed user row is the pre-goal target; the current
-    // leaf is the abandoned branch\'s tip to navigate back to.
+    // The seed user row is the pre-goal target; the current leaf is the abandoned branch's tip.
     let nodes = harness.flat_entries("t1");
     let seed_user = Harness::user_entry_id(&nodes, "seed turn before the goal");
     let abandoned_leaf = Harness::leaf_id(&nodes);
 
-    // Plain move below the goal rows: the moved branch carries no
-    // `thread_goal_state` entry, so the driver reloads the branch\'s own
-    // state — the empty state (TS faithful branch semantics), announced
-    // as a `goal_update` by the navigation itself (TS `_emitGoalUpdate`).
+    // Plain move below the goal rows: the branch carries no `thread_goal_state`
+    // entry, so the driver reloads the empty state (TS faithful branch semantics),
+    // announced as a `goal_update` by the navigation itself (TS `_emitGoalUpdate`).
     let statuses_before = harness.announced_goal_statuses();
     harness.navigate("n1", &seed_user, false);
-    // The reload's empty-state `goal_update` is an async broadcast that
-    // can trail the navigate response (TS `_emitGoalUpdate` fires after
-    // the branch state loads); drain the wire before asserting on the
-    // announced statuses, or the announcement may not be collected yet.
+    // The empty-state `goal_update` is an async broadcast that can trail the navigate
+    // response (TS `_emitGoalUpdate` fires after the branch state loads): drain the wire
+    // before asserting on the announced statuses.
     harness.client.drain_events(Duration::from_millis(150));
     assert!(
         harness.announced_goal_statuses()[statuses_before.len()..]
@@ -450,9 +425,8 @@ fn navigate_tree_moves_follow_the_branchs_goal_state() {
     harness.prompt("q2", "/goal");
     assert_eq!(harness.last_goal_status(), "No active goal.");
 
-    // Move back onto the abandoned branch: its own goal rows are the
-    // branch\'s latest state again, and the paused goal restores with
-    // them (the objective and id preserved, the durable counters).
+    // Move back onto the abandoned branch: its own goal rows are the branch's
+    // latest state again, and the paused goal restores with them.
     harness.navigate("n2", &abandoned_leaf, false);
     harness.prompt("q3", "/goal");
     assert_eq!(
@@ -460,8 +434,8 @@ fn navigate_tree_moves_follow_the_branchs_goal_state() {
         format!("Goal paused: {OBJECTIVE}")
     );
 
-    // The durable rows on the abandoned branch survived the round trip
-    // untouched: the reload reads, it never rewrites.
+    // The abandoned branch's durable rows survived the round trip: the reload reads, it never
+    // rewrites.
     let rows = std::fs::read_to_string(harness.session_file())
         .expect("session file readable")
         .lines()
@@ -479,25 +453,19 @@ fn navigate_tree_moves_follow_the_branchs_goal_state() {
     );
 }
 
-/// The clear's reply reflects the action it took (the operator's
-/// 2026-09-25 bug report): clearing a held goal record answers
-/// "Goal cleared." — never the nothing-to-clear "No active goal." the TS
-/// post-state read produces — announces the empty state, and clearing
-/// again answers the plain status text.
+/// The clear's reply reflects the action it took (the operator's 2026-09-25 bug report):
+/// clearing a held record answers "Goal cleared.", never the post-state read's text.
 #[test]
 fn goal_clear_answers_the_action_it_took() {
     let mut harness = setup("goal-clear-reply");
 
-    // The f18 battery pattern: seed a turn, start the goal, then pause it
-    // so the minted continuation is withdrawn and the loop goes quiet
-    // with the goal record (paused) held on the branch.
+    // The f18 pattern: seed a turn, start the goal, then pause it so the loop goes
+    // quiet with the goal record (paused) held on the branch.
     harness.prompt("s0", "seed turn before the goal");
     harness.prompt_racing_the_loop("g1", &format!("/goal {OBJECTIVE}"));
     harness.prompt_racing_the_loop("g2", "/goal pause");
     harness.client.drain_events(Duration::from_secs(1));
 
-    // Clearing the held record answers the action and announces the
-    // empty state.
     let announced = harness.announced_goal_statuses().len();
     harness.prompt("q1", "/goal clear");
     assert_eq!(harness.last_goal_status(), "Goal cleared.");
@@ -509,8 +477,6 @@ fn goal_clear_answers_the_action_it_took() {
         harness.client.events
     );
 
-    // Clearing again (nothing to clear) and the plain status both answer
-    // the unchanged status text.
     harness.prompt("q2", "/goal clear");
     assert_eq!(harness.last_goal_status(), "No active goal.");
     harness.prompt("q3", "/goal status");
