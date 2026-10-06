@@ -187,12 +187,23 @@ fn the_depth_two_chain_reports_the_folded_aggregate() {
         "totalTokens": 1_040,
         "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0.10 },
     });
+    let kickoff = |id: &str, parent: Option<&str>| {
+        json!({
+            "type": "custom_message", "id": id, "parentId": parent,
+            "timestamp": "2026-09-24T00:00:00.000Z",
+            "customType": "agent_message",
+            "content": "[task from parent]\n\ntask",
+            "display": true,
+            "details": { "id": "spawn:sub-1", "message": "task" },
+        })
+        .to_string()
+    };
     let lines = [
             json!({"type": "session", "version": 3, "id": "child-s1", "timestamp": "2026-09-24T00:00:00.000Z", "cwd": "/tmp"}).to_string(),
-            row("u1", None, json!({"role": "user", "content": "task"})),
+            kickoff("c0", None),
             row(
                 "a1",
-                Some("u1"),
+                Some("c0"),
                 json!({
                     "role": "assistant",
                     "provider": "prime-inference", "model": "internal/glm-5.3-fast",

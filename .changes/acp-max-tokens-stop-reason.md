@@ -1,0 +1,1 @@
+- ACP mode now resolves a prompt turn whose final model response stopped at the provider's output-token limit with `stopReason: "max_tokens"` instead of `end_turn`, so a truncated answer is no longer indistinguishable from a finished one; autonomous-run limits keep their existing stop reasons (the TypeScript version does not map the truncation case).

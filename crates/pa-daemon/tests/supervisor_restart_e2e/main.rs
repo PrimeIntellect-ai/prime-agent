@@ -345,8 +345,7 @@ fn wait_for_busy_journal_evidence(agent_dir: &Path, socket: &Path, session_id: &
         }
         assert!(
             Instant::now() < deadline,
-            "busy journal evidence never landed for {session_id}: {}",
-            journal_path.display()
+            "busy journal evidence never landed"
         );
         std::thread::sleep(Duration::from_millis(50));
     }
