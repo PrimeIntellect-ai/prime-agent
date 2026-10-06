@@ -1,30 +1,16 @@
 //! MCP product-path e2e: a settings-declared stdio MCP server reaches the
-//! kernel's generic MCP client through the whole product stack.
-//!
-//! The verifier writes a `mcpServers` entry into the worker's agent-dir
-//! `settings.json` pointing at the committed echo fixture, creates a real
-//! daemon session over the real kernel (scripted faux provider), and runs a
-//! turn whose ipython cell exercises `rlm.mcp.list_tools` and
-//! `rlm.mcp.call_tool`. The kernel must resolve `mcp.config` through the
-//! session's host handlers, spawn the fixture over stdio, list its `echo`
-//! tool, and call it with the echoed argument.
-// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
-// the full rationale).
-// Stack-resident futures by design on the daemon's hot paths; boxing the
-// call sites for a lint tick is a perf regression with zero correctness gain.
+//! kernel's MCP client through the whole product stack — settings entry ->
+//! create -> `mcp.config` host request -> fixture spawn over stdio ->
+//! `tools/list` -> `tools/call` on the real kernel.
 #![allow(clippy::large_futures)]
-// 64-bit-only targets; the narrowing casts sit at OS boundaries
-// (pid/fd/time/size) where the values are bounded by the kernel - the
-// dead-guard expect()s would add panic paths where silent wrap was
-// deliberate.
+// 64-bit-only targets; the narrowing casts sit at bounded OS boundaries.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// The fn-length threshold is a style gate, not correctness; the structure
-// campaign owns the god-fn splits as a follow-up.
+// Fn length is a style gate, not correctness.
 #![allow(clippy::too_many_lines)]
 // API-shape opinions, not defects; the surfaces are deliberate.
 #![allow(
@@ -56,8 +42,8 @@ impl Drop for Daemon {
     }
 }
 
-/// The kernel Python with prime-agent-runtime (and its `mcp` package)
-/// installed. Skipped (with a note) on machines without a live install.
+/// The kernel Python with prime-agent-runtime (and its `mcp` package) installed; skipped (with a
+/// note) without a live install.
 fn kernel_python() -> Option<PathBuf> {
     if let Some(explicit) = std::env::var_os("PA_E2E_KERNEL_PYTHON") {
         let explicit = PathBuf::from(explicit);
@@ -92,18 +78,15 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path, kernel_python: &Path) -> Da
         .arg("--agent-dir")
         .arg(agent_dir)
         .env("PRIME_AGENT_KERNEL_PYTHON", kernel_python)
-        // Hermetic agent dir: the ambient environment exports this var
-        // globally; point it at the test agent dir so every fallback that
-        // reads it (supervisor, worker, kernel) resolves inside the test
-        // sandbox instead of the shared real agent dir.
+        // Hermetic agent dir: the ambient environment exports this var globally; point
+        // it at the test agent dir so every fallback (supervisor, worker, kernel)
+        // resolves inside the sandbox.
         .env("PRIME_AGENT_CODING_AGENT_DIR", agent_dir)
         .env_remove("PRIME_API_KEY")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        // A supervisor killed at teardown must not leak its session workers
-        // into later test binaries: the worker's supervisor-lost exit (TS
-        // `exitIfSupervisorOrphanedForTooLong`) runs on this short window
-        // instead of the 5-minute default.
+        // A supervisor killed at teardown must not leak its session workers into later
+        // test binaries: the supervisor-lost exit runs here.
         .env(
             pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
             "15000",
@@ -127,7 +110,6 @@ fn wait_socket_ready(socket: &Path) {
     }
 }
 
-/// JSONL supervisor client (command envelopes, id-matched responses).
 struct Client {
     reader: BufReader<UnixStream>,
     writer: UnixStream,
@@ -195,9 +177,8 @@ impl Client {
     }
 }
 
-/// The kernel cell: list the fixture server's tools, call `echo`, record the
-/// round trip on disk for the test (and print it so the tool result carries
-/// the same proof).
+/// The kernel cell: list the fixture's tools, call `echo`, record the round trip on
+/// disk (and print it so the tool result carries the same proof).
 fn mcp_cell(receipt_path: &Path) -> String {
     format!(
         "from rlm import mcp\nimport json, traceback\ntry:\n    tools = await mcp.list_tools(\"fixture-echo\")\n    result = await mcp.call_tool(\"fixture-echo\", \"echo\", {{\"message\": \"hello from the daemon e2e\"}})\n    payload = {{\"tools\": tools, \"result\": result}}\n    open({receipt_path:?}, \"w\").write(json.dumps(payload))\n    print(json.dumps(payload))\nexcept Exception:\n    open({error_path:?}, \"w\").write(traceback.format_exc())\n    raise",
@@ -206,7 +187,6 @@ fn mcp_cell(receipt_path: &Path) -> String {
     )
 }
 
-/// The session's messages through the supervisor route.
 fn messages(client: &mut Client, id: &str, active_session_id: &str) -> Vec<Value> {
     client.send_command(
         id,
@@ -220,7 +200,6 @@ fn messages(client: &mut Client, id: &str, active_session_id: &str) -> Vec<Value
         .expect("messages array")
 }
 
-/// The tool-result message rows the session recorded (TS `role: "toolResult"`).
 fn tool_result_texts(session_messages: &[Value]) -> Vec<String> {
     session_messages
         .iter()
@@ -248,8 +227,6 @@ fn tool_result_texts(session_messages: &[Value]) -> Vec<String> {
         .collect()
 }
 
-/// Settings-declared stdio server -> prompt gating -> `mcp.config` host
-/// request -> kernel MCP client spawn -> `tools/list` -> `tools/call`.
 #[test]
 fn settings_declared_stdio_server_round_trips_through_the_kernel_mcp_client() {
     let Some(kernel_python) = kernel_python() else {
@@ -260,15 +237,14 @@ fn settings_declared_stdio_server_round_trips_through_the_kernel_mcp_client() {
     let sessions_dir = agent_dir.join("sessions");
     std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
 
-    // The committed stdio echo fixture (test env isolation: absolute paths,
-    // because the kernel spawns the server process itself).
+    // The committed stdio echo fixture (absolute paths: the kernel spawns the
+    // server process itself).
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("fixtures")
         .join("mcp_echo_server.py");
     assert!(fixture.exists(), "fixture missing: {fixture:?}");
 
-    // The settings declaration the mcp gating reads at session create.
     std::fs::write(
         agent_dir.join("settings.json"),
         json!({
@@ -284,8 +260,8 @@ fn settings_declared_stdio_server_round_trips_through_the_kernel_mcp_client() {
     )
     .expect("write settings.json");
 
-    // The turn script: one ipython cell that runs the MCP round trip, then
-    // a closing text turn.
+    // The turn script: one ipython cell that runs the MCP round trip, then a closing
+    // text turn.
     let receipts_dir = dir.path().join("receipts");
     std::fs::create_dir_all(&receipts_dir).expect("receipts dir");
     let receipt = receipts_dir.join("mcp.json");
@@ -345,8 +321,7 @@ fn settings_declared_stdio_server_round_trips_through_the_kernel_mcp_client() {
     let idle = client.read_response("w1");
     assert_eq!(idle["success"], true, "wait_for_idle failed: {idle}");
 
-    // The kernel cell recorded the round trip (or its failure, with the
-    // traceback).
+    // The kernel cell recorded the round trip (or its failure, with the traceback).
     let error_path = receipt.with_extension("error");
     let deadline = Instant::now() + Duration::from_secs(5);
     let payload = loop {
@@ -363,7 +338,6 @@ fn settings_declared_stdio_server_round_trips_through_the_kernel_mcp_client() {
         );
         std::thread::sleep(Duration::from_millis(50));
     };
-    // tools/list: the fixture's single `echo` tool.
     let tools = payload["tools"].as_array().expect("tools array");
     assert_eq!(tools.len(), 1, "one tool: {payload}");
     assert_eq!(tools[0]["name"], "echo", "tool payload: {payload}");
@@ -371,14 +345,13 @@ fn settings_declared_stdio_server_round_trips_through_the_kernel_mcp_client() {
         tools[0]["description"], "Echoes the message argument back.",
         "tool payload: {payload}"
     );
-    // tools/call: the echoed argument.
     assert_eq!(
         payload["result"], "hello from the daemon e2e",
         "echo result: {payload}"
     );
 
-    // The same proof reached the session: the ipython tool result (cell
-    // output) carries the tool name and the echoed argument.
+    // The same proof reached the session: the ipython tool result carries the
+    // tool name and the echoed argument.
     let session_messages = messages(&mut client, "m1", &session_id);
     let tool_results = tool_result_texts(&session_messages);
     let ipython_result = tool_results
@@ -391,11 +364,6 @@ fn settings_declared_stdio_server_round_trips_through_the_kernel_mcp_client() {
     );
 }
 
-/// The `begin_login` host request is live in the daemon worker product path:
-/// the kernel reaches the session's real MCP manager, which answers with
-/// the TS wording for unknown servers (the full login flow is verified
-/// against the fixture OAuth transport in the `mcp_login` unit tests — a
-/// real login needs a live HTTPS provider, so this e2e pins the wiring).
 #[test]
 fn begin_login_host_request_is_live_in_the_worker() {
     let Some(kernel_python) = kernel_python() else {
@@ -507,8 +475,6 @@ fn begin_login_host_request_is_live_in_the_worker() {
         }
         std::thread::sleep(Duration::from_millis(50));
     };
-    // The manager answered with the TS wording: unknown integration, then
-    // the missing-server error.
     let outcomes = outcomes.as_array().expect("outcomes array");
     assert_eq!(outcomes.len(), 2, "probe outcomes: {outcomes:?}");
     assert_eq!(

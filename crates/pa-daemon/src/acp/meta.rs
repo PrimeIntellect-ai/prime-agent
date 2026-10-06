@@ -1,10 +1,7 @@
-//! Namespaced `_meta` payloads for prime-agent capabilities that ACP has no
-//! native concept for (cwd reporting, quiescence observation, correlation).
-//!
-//! ACP reserves `_meta` on capability objects, notifications, and content
-//! blocks so agents can carry non-standard data. Vanilla ACP clients ignore
-//! these keys; a prime-agent-aware client reads them. Non-standard fields
-//! never appear at an ACP object root.
+//! Namespaced `_meta` payloads for prime-agent capabilities that ACP has
+//! no native concept for (cwd reporting, quiescence observation,
+//! correlation). Vanilla ACP clients ignore `_meta` keys; a prime-agent-aware
+//! client reads them; non-standard fields never appear at an ACP root.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -55,9 +52,8 @@ pub enum PrimeAgentOutcome {
 /// The prime-agent payload under the `_meta` namespace key.
 ///
 /// `prompt_turn_id` is allocated when ACP accepts a prompt, never inferred
-/// from whichever prompt happens to be running when an update is delivered;
-/// `0` means a session-scoped event with no prompt origin. `event_sequence`
-/// is connection-wide and strictly increases for every published update.
+/// from the running prompt; `0` means a session-scoped event with no prompt
+/// origin. `event_sequence` is connection-wide, strictly increasing.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PrimeAgentSessionMeta {
@@ -206,9 +202,9 @@ pub fn autonomous_meta(
     }
 }
 
-/// Map a finished turn onto an ACP stop reason (TS `acpStopReason` in
-/// acp-stop-reason.ts: autonomous quality gates deliberately never surface
-/// as a stop reason; token exhaustion is the one natively-expressed limit).
+/// Map a finished turn onto an ACP stop reason: autonomous quality gates
+/// deliberately never surface as a stop reason; token exhaustion is the one
+/// natively-expressed limit.
 pub fn acp_stop_reason_for_status(
     cancelled: bool,
     status: Option<&pa_core::autonomous::AgentAutonomousStatus>,

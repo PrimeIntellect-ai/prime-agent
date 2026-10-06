@@ -43,11 +43,8 @@ pub struct SessionConfigOption {
     pub options: Vec<SessionConfigSelectOption>,
 }
 
-/// The current model as the pickers present it (the TS `state.model`):
-/// identity plus the coarse `reasoning` flag (the no-registry-entry
-/// ladder's only capability signal on the agent-model shape, which
-/// carries no thinking-level map). The daemon-attached transport parses
-/// the same shape off the `get_connection_state` wire.
+/// The current model as the pickers present it: identity plus the coarse
+/// `reasoning` flag (the no-registry-entry ladder's only capability signal).
 #[derive(Debug, Clone, PartialEq)]
 pub struct PickerModel {
     pub id: String,
@@ -86,16 +83,15 @@ impl PickerModel {
 }
 
 /// The opaque model value the picker hands to clients: the serialized
-/// `[provider, model-id]` pair (TS `modelValue`).
+/// `[provider, model-id]` pair.
 pub fn model_value(provider: &str, model_id: &str) -> String {
     serde_json::json!([provider, model_id]).to_string()
 }
 
-/// Build the session's configuration options (TS `sessionConfigOptions`):
-/// a `model` select over the discovered models (the current model always
-/// selectable), plus a `thought_level` select when the model has
-/// selectable levels (#2858's map-driven capability — see the gate below).
-/// No model resolves to no options, exactly like the TS builder.
+/// Build the session's configuration options: a `model` select over the
+/// discovered models (the current model always selectable), plus a
+/// `thought_level` select when the model has selectable levels. No model
+/// resolves to no options.
 pub fn session_config_options(
     model: Option<PickerModel>,
     thinking_level: &str,
@@ -168,9 +164,8 @@ pub fn config_options_value(options: &[SessionConfigOption]) -> Value {
 }
 
 /// Publish the options as a `config_option_update` when they actually
-/// changed (TS `refreshConfig`'s JSON-compare gate), stamping the new
-/// set as the published state either way. Connection-scoped: the update
-/// rides origin turn 0, exactly like the TS publish call.
+/// changed, stamping the new set as the published state either way.
+/// Connection-scoped: the update rides origin turn 0.
 pub async fn publish_config_options(
     producer: &Arc<UpdateProducer>,
     published: &tokio::sync::Mutex<Vec<SessionConfigOption>>,
@@ -219,6 +214,7 @@ mod tests {
             },
             context_window: 128_000,
             max_tokens: 4_096,
+            max_tokens_explicit: false,
             featured: None,
             headers: None,
             compat: None,
@@ -240,11 +236,6 @@ mod tests {
         assert!(session_config_options(None, "medium", &levels(&["off"]), &[]).is_empty());
     }
 
-    /// #2858's map-driven capability: the effort picker follows the
-    /// model's addressable levels, not the coarse `reasoning` flag — a
-    /// `reasoning: false` model whose map addresses levels serves the
-    /// picker, and a list without a non-`off` entry (the `["off"]`-only
-    /// or empty shape) hides it.
     #[test]
     fn the_effort_picker_follows_the_map_driven_capability() {
         let flagged_false =
@@ -321,8 +312,8 @@ mod tests {
     #[test]
     fn duplicate_values_collapse_and_the_current_model_wins_its_slot() {
         let current = PickerModel::from_model(&model("faux", "shared", "Live Name", false));
-        // A discovered model with the same (provider, id): the current
-        // model replaces the discovered entry in place (TS `Map.set`).
+        // A discovered model with the same (provider, id): the current model
+        // replaces the discovered entry in place.
         let models = vec![model("faux", "shared", "Discovered Name", false)];
         let options = session_config_options(Some(current), "off", &levels(&["off"]), &models);
         assert_eq!(options[0].options.len(), 1);

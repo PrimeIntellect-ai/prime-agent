@@ -1,17 +1,7 @@
 //! Session registry: the supervisor's roster of resident session workers,
-//! their durable identities, and worker self-registration records.
-//!
-//! The registry is the supervisor's core state under the thin-supervisor
-//! architecture: which sessions exist, where each worker's socket is, and
-//! how clients select them. Process supervision (spawn/restart/health) and
-//! client command routing live in `supervisor.rs`; later migration stages
-//! move routing out while the registry stays.
-//!
-//! Two paths build registry entries: the supervisor's own launch/adoption
-//! flows, and session-worker self-registration
-//! (`DaemonCommand::WorkerRegister`) - the path that rebuilds the roster
-//! after a supervisor restart. A per-worker adoption gate serializes the two
-//! so a worker is never adopted twice concurrently.
+//! their durable identities, and worker self-registration records. Both
+//! the supervisor's launch/adoption flows and worker self-registration
+//! build entries; the per-worker adoption gate serializes the two paths.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -25,7 +15,6 @@ use tokio::sync::{Mutex, OwnedMutexGuard};
 
 use crate::protocol::DaemonResponse;
 
-/// One supervisor -> worker private-frame request.
 pub(crate) struct WorkerRequest {
     pub(crate) request_id: String,
     pub(crate) command_type: String,
@@ -33,18 +22,14 @@ pub(crate) struct WorkerRequest {
 }
 
 /// The worker's reply to one routed request: the typed response tree, or
-/// the worker's own serialized response payload relayed untouched (the
-/// zero-copy route: a client line is the worker payload with the client's
-/// command id spliced in front, so the supervisor need not parse, re-clone
-/// and re-serialize every routed response).
+/// the relayed bytes untouched (zero-copy route).
 pub(crate) enum WorkerReply {
     Typed(DaemonResponse),
     Relayed(WorkerRelay),
 }
 
-/// A response the supervisor relays by bytes, with the small scalars the
-/// response frame's routing header carries (the worker emits them for
-/// attach-family responses; `None` means the header said nothing).
+/// A response the supervisor relays by bytes, plus the routing-header
+/// scalars the frame carries (`None` means the header said nothing).
 pub(crate) struct WorkerRelay {
     pub(crate) success: Option<bool>,
     pub(crate) active_session_id: Option<String>,
@@ -54,8 +39,6 @@ pub(crate) struct WorkerRelay {
 }
 
 impl WorkerReply {
-    /// The typed response, parsing the relayed bytes when this reply came
-    /// back by the byte path.
     pub(crate) fn typed(self) -> anyhow::Result<DaemonResponse> {
         match self {
             WorkerReply::Typed(response) => Ok(response),
@@ -64,7 +47,6 @@ impl WorkerReply {
         }
     }
 
-    /// The relayed payload bytes when this reply carries them.
     pub(crate) fn relayed_payload(&self) -> Option<&[u8]> {
         match self {
             WorkerReply::Relayed(relay) => Some(&relay.payload),
@@ -72,8 +54,6 @@ impl WorkerReply {
         }
     }
 
-    /// The header hint for whether the worker's command succeeded, when the
-    /// relay frame carried it.
     pub(crate) fn relayed_success(&self) -> Option<bool> {
         match self {
             WorkerReply::Relayed(relay) => relay.success,
@@ -81,8 +61,6 @@ impl WorkerReply {
         }
     }
 
-    /// The header hint for the session the worker reports as active, when
-    /// the relay frame carried it.
     pub(crate) fn relayed_active_session_id(&self) -> Option<&str> {
         match self {
             WorkerReply::Relayed(relay) => relay.active_session_id.as_deref(),
@@ -91,14 +69,9 @@ impl WorkerReply {
     }
 }
 
-/// Command-route liveness for one resident worker, watched by the
-/// supervisor's replacement-aware route (`route_command_ready`):
-/// `connected` tracks the live worker socket (both supervisor-side pumps
-/// flip it false when the connection dies), `session_ready` marks the
-/// worker's session-create boundary (a fresh create and a replacement's
-/// create replay; a client command must never overtake it), and `retired`
-/// marks a worker that will not come back (restart give-up, intentional
-/// stop) so waiting routes fail fast instead of parking on the deadline.
+/// Command-route liveness for one resident worker: `connected` tracks the
+/// live socket, `session_ready` marks the create boundary a client command
+/// must never overtake, `retired` marks a worker that will not come back.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct WorkerRouteState {
     pub(crate) connected: bool,
@@ -122,97 +95,59 @@ pub(crate) struct ResidentWorker {
     pub(crate) worker_id: String,
     pub(crate) descriptor: Mutex<DaemonWorkerDescriptor>,
     pub(crate) descriptor_path: PathBuf,
-    /// The worker's command pump channel. Bounded at
-    /// [`crate::backpressure::WORKER_INFLIGHT_CAPACITY`]: admission (the
-    /// in-flight permits below) precedes enqueue, so the queue and the
-    /// in-flight set share one bound.
+    /// The worker's command pump channel, bounded at
+    /// [`crate::backpressure::WORKER_INFLIGHT_CAPACITY`]: admission precedes
+    /// enqueue, so the queue and in-flight set share one bound.
     pub(crate) cmd_tx: Mutex<Option<tokio::sync::mpsc::Sender<WorkerRequest>>>,
-    /// The worker's in-flight permits (one per admitted request, held
-    /// until its reply resolves): the bounded-admission seam of
-    /// [`crate::backpressure`]. A client command that finds this empty is
-    /// refused with the typed overload error; supervisor-internal routes
-    /// wait.
+    /// The worker's in-flight permits (held until each reply resolves): a client command that finds
+    /// this empty is refused with the typed overload error; supervisor-internal routes wait.
     pub(crate) inflight: Arc<tokio::sync::Semaphore>,
-    /// Pending replies for in-flight requests on the current connection.
     pub(crate) pending: Mutex<HashMap<String, tokio::sync::oneshot::Sender<WorkerReply>>>,
     pub(crate) intentional_stop: AtomicBool,
     pub(crate) consecutive_failures: AtomicU32,
-    /// Unix-millis timestamp of the current child's spawn (0 for an adopted
-    /// pid we never spawned): the crash path measures the child's lifetime
-    /// against it - only a lifetime past the stable window earns a counter
-    /// reset, so spawn-dies-fast churn accumulates to the give-up cap.
+    /// Unix-millis spawn time of the current child (0 for an adopted pid): only a lifetime past the
+    /// stable window earns a counter reset (spawn-dies-fast churn accumulates).
     pub(crate) spawned_at_ms: AtomicU64,
-    /// The worker advertised `direct_peer_transport` in its `worker_auth`
-    /// response (TS `workerAuthAdvertisesPeerTransport`).
+    /// The worker advertised `direct_peer_transport` in its `worker_auth` response.
     pub(crate) peer_transport_capable: AtomicBool,
-    /// The last-good selector-less heartbeats catalog the worker answered
-    /// with (TS `worker.heartbeatSnapshot`), tagged with the catalog
-    /// generation it was read at: served when the worker is too busy to
-    /// answer a fresh list, so a slow turn cannot empty the merged catalog
-    /// while its scheduler keeps firing. Fresh only while the generation
-    /// is still current (see `heartbeat_snapshot_generation`).
+    /// The last-good heartbeats catalog answer, tagged with its generation: served when the worker
+    /// is too busy for a fresh list (fresh only while current).
     pub(crate) heartbeat_snapshot: Mutex<Option<WorkerHeartbeatSnapshot>>,
-    /// The worker's last selector-less `cron_list` answer (its own slice
-    /// of the supervisor snapshot, TS #2487): served by the supervisor
-    /// without forwarding while its generation is current, so a
-    /// `cron_list` consults this worker at most once per generation.
+    /// The last selector-less `cron_list` answer, tagged with its generation: served without
+    /// forwarding while current (at most one consult per generation).
     pub(crate) cron_snapshot: Mutex<Option<WorkerCronSnapshot>>,
-    /// The worker's heartbeat-catalog generation (TS
-    /// `worker.heartbeatSnapshotStale` + the queued re-read): bumped by
-    /// every `heartbeats_changed` invalidation. A snapshot is fresh only
-    /// while its generation is current, so an in-flight catalog read —
-    /// which captured an older generation — can never store itself back
-    /// as fresh over a newer invalidation.
+    /// The heartbeat-catalog generation, bumped by every
+    /// `heartbeats_changed`: a snapshot is fresh only while its generation is current.
     pub(crate) heartbeat_snapshot_generation: AtomicU64,
-    /// Route liveness, published to waiters through a watch channel (the
-    /// replacement-aware route clones a receiver and sleeps until the
-    /// worker is route-ready or retired).
+    /// Route liveness, published to waiters through a watch channel
+    /// (routes sleep until route-ready or retired).
     route_state_tx: tokio::sync::watch::Sender<WorkerRouteState>,
-    /// The root-identity transition's persist is unresolved (the
-    /// descriptor moved but the durable record write failed): the next
-    /// roster write re-runs the transition's persist from the live state
-    /// before a restart can replay the superseded session.
+    /// The root-identity persist is unresolved (the descriptor moved but the durable write failed):
+    /// the next roster write re-runs it before a restart replays the superseded session.
     identity_persist_pending: AtomicBool,
-    /// The boot-reconciliation quarantine: a resident adopted from a
-    /// persisted record whose live reconciliation pull FAILED is fenced
-    /// from every identity-based route (the selector resolution, the
-    /// by-file reuse, the stale-id rebind) until the live word lands (an
-    /// accepted roster write) or the worker's death removes the resident.
-    /// A failed pull is not proof the worker is dead: routing on the
-    /// unreconciled persisted identity can deliver across sessions (the
-    /// fork leak's boot form), so the fence refuses — the conservative
-    /// miss, never a mis-delivery.
+    /// The boot-reconciliation quarantine: a resident whose live reconciliation pull failed is
+    /// fenced from every identity-based route (the conservative miss, never a mis-delivery).
     identity_quarantined: AtomicBool,
-    /// Monotonic connection epoch: only the pumps of the current
-    /// connection may flip `connected` false, so a superseded socket's
-    /// late EOF cannot retire a live replacement.
+    /// Monotonic connection epoch: only the current connection's pumps may flip `connected` false
+    /// (a superseded socket's late EOF cannot retire a live replacement).
     connection_epoch: AtomicU64,
-    /// The supervisor's compaction-abort token for this session's worker
-    /// (the abort supervision): armed by the forwarded
-    /// `compaction_start`, cleared by the forwarded `compaction_end`, so
-    /// an `abort_compaction` never needs the worker's own answer.
+    /// The compaction-abort token: armed by `compaction_start`, cleared by
+    /// `compaction_end`, so an `abort_compaction` never needs the worker's own answer.
     pub(crate) compaction: crate::compaction_supervision::CompactionSupervision,
     /// The pending owner-disconnect stop (TS `ownerCleanupTimer`).
     pub(crate) owner_cleanup: std::sync::Mutex<Option<tokio::task::AbortHandle>>,
 }
 
-/// The last-good heartbeats rows a worker answered with, tagged with the
-/// catalog generation they were read at (TS `worker.heartbeatSnapshot`):
-/// the rows are only trustworthy while their generation is still current
-/// (TS `worker.heartbeatSnapshotStale !== true`).
+/// The last-good heartbeats rows, tagged with the catalog generation they
+/// were read at; only trustworthy while their generation is still current.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WorkerHeartbeatSnapshot {
     pub(crate) rows: Vec<Value>,
     pub(crate) generation: u64,
 }
 
-/// The last cron jobs a worker answered a selector-less `cron_list` with
-/// (TS #2487: the supervisor serves each worker's own catalog slice from
-/// the supervisor-side snapshot instead of forwarding every request to
-/// every worker), tagged with the catalog generation it was read at: the
-/// slice is only trustworthy while its generation is still current, so a
-/// `heartbeats_changed` invalidation forces the next `cron_list` to consult
-/// that worker again (at most one forward per generation).
+/// The last cron jobs a worker answered a selector-less `cron_list` with, tagged with their
+/// generation: trustworthy only while current, so an invalidation forces the next consult.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct WorkerCronSnapshot {
     pub(crate) jobs: Vec<pa_core::cron::AgentCronJob>,
@@ -255,8 +190,6 @@ impl ResidentWorker {
         *self.route_state_tx.borrow()
     }
 
-    /// A receiver that follows every route-state transition (the
-    /// replacement-aware route waits on it).
     pub(crate) fn route_state_watcher(&self) -> tokio::sync::watch::Receiver<WorkerRouteState> {
         self.route_state_tx.subscribe()
     }
@@ -274,10 +207,8 @@ impl ResidentWorker {
         });
     }
 
-    /// The supervisor wired a live worker socket (a fresh launch, a
-    /// replacement relaunch, or an adoption): connections become routable
-    /// from this moment. Returns the connection's epoch, which the
-    /// reader/writer pumps carry so only this connection can retire it.
+    /// A live worker socket was wired. Returns the connection's epoch,
+    /// which its pumps carry so only they can retire it.
     pub(crate) fn note_connection_live(&self) -> u64 {
         let epoch = self
             .connection_epoch
@@ -287,9 +218,6 @@ impl ResidentWorker {
         epoch
     }
 
-    /// Whether `epoch` is still the live connection's epoch: the abort
-    /// supervision's end-of-stream handling acts only on the current
-    /// connection's word.
     pub(crate) fn connection_is_current(&self, epoch: u64) -> bool {
         epoch
             == self
@@ -297,25 +225,15 @@ impl ResidentWorker {
                 .load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// Install the connection's channel for routing (TS
-    /// `worker.client = client`, set only after `authenticateWorker`
-    /// answered): a pre-auth connection stays private to its handshake —
-    /// the worker answers any non-`worker_auth` first command with the
-    /// authentication refusal and closes the connection, so a route that
-    /// wins the enqueue race against the handshake would kill the
-    /// connection and strand the handshake for the whole connect budget.
-    /// A superseded connect (a replacement already owns a newer epoch)
-    /// never installs over the live one.
+    /// Install the connection's channel for routing (post-auth only): a pre-auth connection stays
+    /// private to its handshake (a route winning the enqueue race would strand it).
     pub(crate) async fn install_command_channel(
         &self,
         epoch: u64,
         cmd_tx: tokio::sync::mpsc::Sender<WorkerRequest>,
     ) {
         // The epoch recheck runs UNDER the channel lock: a stale connect
-        // that passed the pre-lock check while a newer connection was
-        // installing must never overwrite the newer channel (the
-        // check-then-act window between the liveness read and the mutex
-        // acquisition is exactly the race the guard exists for).
+        // must never overwrite a newer connection's channel.
         let mut guard = self.cmd_tx.lock().await;
         if !self.connection_is_current(epoch) {
             return;
@@ -323,8 +241,6 @@ impl ResidentWorker {
         *guard = Some(cmd_tx);
     }
 
-    /// A connection's pumps ended (worker death or socket close). Stale
-    /// epochs (a superseded connection ending late) never flip the state.
     pub(crate) fn note_connection_lost(&self, epoch: u64) {
         if epoch
             != self
@@ -336,63 +252,45 @@ impl ResidentWorker {
         self.publish_route_state(|state| state.connected = false);
     }
 
-    /// The worker's session create completed (the fresh create response or
-    /// the replacement's create replay): client commands may now be routed
-    /// to it without overtaking the session into existence.
     pub(crate) fn note_session_ready(&self) {
         self.publish_route_state(|state| state.session_ready = true);
     }
 
-    /// A replacement started: the create replay is pending, so routed
-    /// commands must wait for the replayed session.
     pub(crate) fn note_session_replaying(&self) {
         self.publish_route_state(|state| state.session_ready = false);
     }
 
-    /// The worker will not come back (restart give-up or an intentional
-    /// stop): waiting routes fail fast instead of parking.
     pub(crate) fn note_retired(&self) {
         self.publish_route_state(|state| state.retired = true);
     }
 
-    /// Whether the root-identity transition's durable record write is
-    /// still unresolved (the live descriptor moved; the persist failed).
     pub(crate) fn identity_persist_pending(&self) -> bool {
         self.identity_persist_pending
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// Mark the root-identity persist unresolved: the next roster write
-    /// repairs it from the live state.
+    /// Mark the root-identity persist unresolved; the next roster write repairs it.
     pub(crate) fn mark_identity_persist_pending(&self) {
         self.identity_persist_pending
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
-    /// Clear the unresolved marker (the durable record matches the live
-    /// identity again).
     pub(crate) fn clear_identity_persist_pending(&self) {
         self.identity_persist_pending
             .store(false, std::sync::atomic::Ordering::SeqCst);
     }
 
-    /// Fence this resident from every identity-based route (the
-    /// boot-reconciliation quarantine: the persisted identity was not
-    /// reconciled from the live worker).
     pub(crate) fn mark_identity_quarantined(&self) {
         self.identity_quarantined
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
-    /// Open the routing again: an accepted roster write carried the
-    /// identity follow, so the live identity is reconciled.
+    /// Open the routing again: an accepted roster write carried the identity follow.
     pub(crate) fn clear_identity_quarantine(&self) {
         self.identity_quarantined
             .store(false, std::sync::atomic::Ordering::SeqCst);
     }
 
-    /// Whether this resident is fenced from identity-based routing (the
-    /// unreconciled quarantine).
     pub(crate) fn identity_quarantined(&self) -> bool {
         self.identity_quarantined
             .load(std::sync::atomic::Ordering::SeqCst)
@@ -416,15 +314,8 @@ impl ResidentWorker {
         (descriptor.root_active_session_id.clone(), file_stem, name)
     }
 
-    /// Store a catalog read as the worker's last-good heartbeat snapshot.
-    ///
-    /// The store is generation-monotonic: a read whose captured generation
-    /// is older than the stored snapshot's never replaces it, so a late
-    /// in-flight read cannot retag a newer snapshot as stale (freshness is
-    /// `stored.generation == current`) or drop the last-good rows a
-    /// busy-worker fallback serves. A read in the stored generation still
-    /// refreshes the rows, because the catalog is constant within a
-    /// generation.
+    /// Store a catalog read as the last-good heartbeat snapshot,
+    /// generation-monotonic (a late read cannot retag a newer one).
     pub(crate) async fn store_heartbeat_snapshot(&self, rows: Vec<Value>, generation: u64) {
         let mut snapshot = self.heartbeat_snapshot.lock().await;
         if snapshot
@@ -435,12 +326,8 @@ impl ResidentWorker {
         }
     }
 
-    /// Store the worker's last selector-less `cron_list` answer under the
-    /// same generation-monotonic discipline as
-    /// [`Self::store_heartbeat_snapshot`]: a late in-flight read can never
-    /// retag a newer snapshot as stale, and a read in the stored
-    /// generation still refreshes the rows (the catalog is constant
-    /// within a generation).
+    /// Store the last selector-less `cron_list` answer, under the same
+    /// generation-monotonic discipline as [`Self::store_heartbeat_snapshot`].
     pub(crate) async fn store_cron_snapshot(
         &self,
         jobs: Vec<pa_core::cron::AgentCronJob>,
@@ -466,9 +353,8 @@ pub(crate) struct WorkerRegistration {
     pub(crate) pid: u64,
 }
 
-/// Accepted registration state per worker: the identity plus how many times
-/// this supervisor has seen it register (epoch 1 = boot registration,
-/// epoch > 1 = re-registration after a supervisor restart).
+/// Accepted registration state per worker: the identity plus the
+/// registration count (epoch 1 = boot, epoch > 1 = re-registration after a supervisor restart).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RegistrationRecord {
     pub(crate) registration: WorkerRegistration,
@@ -479,7 +365,6 @@ pub(crate) struct RegistrationRecord {
 /// Per-worker adoption lock: `lock_owned()` on the returned guard.
 type AdoptionLock = Mutex<()>;
 
-/// The roster of resident session workers and their registration records.
 pub(crate) struct SessionRegistry {
     workers: Mutex<HashMap<String, Arc<ResidentWorker>>>,
     registrations: Mutex<HashMap<String, RegistrationRecord>>,
@@ -502,7 +387,6 @@ impl SessionRegistry {
             .insert(resident.worker_id.clone(), resident);
     }
 
-    /// Remove a worker; returns it when it was registered.
     pub(crate) async fn remove(&self, worker_id: &str) -> Option<Arc<ResidentWorker>> {
         self.workers.lock().await.remove(worker_id)
     }
@@ -511,12 +395,9 @@ impl SessionRegistry {
         self.workers.lock().await.clear();
     }
 
-    /// Forget a worker's registration bookkeeping: its registration record
-    /// and adoption gate. Called when the worker is terminally gone (a kill
-    /// or the max-failure stop) so long-lived supervisors do not
-    /// accumulate one map entry per session ever created. A forgotten
-    /// worker cannot re-register: its descriptor is removed with it, so a
-    /// later `worker_register` fails with the TS unknown-worker error.
+    /// Forget a worker's registration bookkeeping (a terminal kill or
+    /// max-failure stop) so long-lived supervisors do not accumulate one
+    /// entry per session; a forgotten worker cannot re-register.
     pub(crate) async fn forget(&self, worker_id: &str) {
         self.registrations.lock().await.remove(worker_id);
         self.adoption_locks.lock().await.remove(worker_id);
@@ -531,10 +412,8 @@ impl SessionRegistry {
         self.workers.lock().await.values().cloned().collect()
     }
 
-    /// The resident hosting one session file (TS `findWorkerBySessionFile`):
-    /// the wake path reuses a worker that already owns the saved file instead
-    /// of spawning a second one over it. Canonicalized comparison, so a
-    /// respawned worker's descriptor path still matches.
+    /// The resident hosting one session file (the wake path reuses the
+    /// owner); canonicalized, so a respawned descriptor path still matches.
     pub(crate) async fn find_by_session_file(
         &self,
         session_file: &str,
@@ -545,11 +424,8 @@ impl SessionRegistry {
             .next()
     }
 
-    /// Every resident registered for one session file, insertion order
-    /// unspecified (TS `findWorkerBySessionFile`'s match loop, plural): a
-    /// replacement window can briefly hold the retiring and the incoming
-    /// worker over the same file, and the caller classifies the matches
-    /// (the create-reuse seam) instead of guessing one.
+    /// Every resident registered for one session file, order unspecified:
+    /// a replacement window can briefly hold two; the caller classifies.
     pub(crate) async fn list_by_session_file(
         &self,
         session_file: &str,
@@ -562,11 +438,8 @@ impl SessionRegistry {
             );
         let mut matches = Vec::new();
         for resident in self.list().await {
-            // The boot-reconciliation quarantine: an unreconciled
-            // persisted identity never serves a by-file reuse (a create
-            // over the superseded file must launch fresh, and a create
-            // over the worker's own file answers the lease refusal —
-            // never this worker on the wrong session).
+            // The boot-reconciliation quarantine: an unreconciled persisted
+            // identity never serves a by-file reuse.
             if resident.identity_quarantined() {
                 continue;
             }
@@ -588,9 +461,7 @@ impl SessionRegistry {
         matches
     }
 
-    /// The resident whose durable authentication token matches (worker-
-    /// authenticated supervisor requests, the TS `list_agent_peers`
-    /// requester lookup). `None` rejects with the TS auth error.
+    /// The resident whose durable authentication token matches; `None` rejects with the auth error.
     pub(crate) async fn find_by_token(&self, token: &str) -> Option<Arc<ResidentWorker>> {
         for resident in self.list().await {
             if resident.descriptor.lock().await.authentication_token == token {
@@ -600,8 +471,6 @@ impl SessionRegistry {
         None
     }
 
-    /// Record an accepted registration; bumps the epoch when the worker had
-    /// already registered on this supervisor (re-registration).
     pub(crate) async fn record_registration(
         &self,
         registration: WorkerRegistration,
@@ -624,11 +493,8 @@ impl SessionRegistry {
 
     /// Resolve one session worker by any accepted selector: the full root
     /// active session id, a suffix of it, the session-file stem, or the
-    /// session name. Errors for unknown and ambiguous selectors. A
-    /// quarantined resident never resolves (the unreconciled boot
-    /// identity): the failure reads as the unknown session, and the
-    /// client's own retry drives the reconciliation retry — the
-    /// conservative miss, never a route on the persisted identity.
+    /// session name; errors for unknown and ambiguous selectors (the
+    /// quarantined miss drives reconciliation).
     pub(crate) async fn resolve(&self, selector: &str) -> Result<Arc<ResidentWorker>> {
         if let Some(resident) = self.get(selector).await {
             if !resident.identity_quarantined() {
@@ -670,9 +536,8 @@ impl SessionRegistry {
         Err(anyhow!("Unknown active session: {selector}"))
     }
 
-    /// Per-worker gate serializing launch-adoption against self-registration
-    /// for the same worker id. Holders must not acquire another worker's
-    /// gate while holding this one.
+    /// Per-worker gate serializing launch-adoption against
+    /// self-registration; holders must not acquire another worker's gate while holding this one.
     pub(crate) async fn adoption_guard(&self, worker_id: &str) -> OwnedMutexGuard<()> {
         let lock = {
             let mut locks = self.adoption_locks.lock().await;
@@ -790,12 +655,10 @@ mod tests {
             .record_registration(registration("abc123def456"))
             .await;
         registry.forget("abc123def456").await;
-        // Long-lived supervisors must not accumulate one map entry per
-        // session ever created: a terminal kill forgets the bookkeeping.
+        // A terminal kill forgets the bookkeeping; no entry accumulates.
         assert!(registry.registrations.lock().await.is_empty());
         assert!(registry.adoption_locks.lock().await.is_empty());
-        // A forgotten worker re-registering is epoch 1 again: it is
-        // unknown to this supervisor until re-adopted.
+        // A forgotten worker re-registering is epoch 1 again: unknown until re-adopted.
         let record = registry
             .record_registration(registration("abc123def456"))
             .await;

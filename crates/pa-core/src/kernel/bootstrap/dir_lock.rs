@@ -1,6 +1,6 @@
-//! Cross-process bootstrap lock for the kernel venv, ported from
-//! `utils/dir-lock.ts`: a `link(2)`-published lock file whose owner is a
-//! live pid; stale locks are renamed aside, verified, then reclaimed.
+//! Cross-process bootstrap lock for the kernel venv: a `link(2)`-published
+//! lock file whose owner is a live pid; stale locks are renamed aside,
+//! verified, then reclaimed.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -14,8 +14,7 @@ fn is_process_alive(pid: u32) -> bool {
 }
 
 /// A `link(2)`-published lock file: born with owner content, EEXIST the only
-/// collision signal; stale locks are renamed aside, verified, then reclaimed.
-/// Ported from `utils/dir-lock.ts`.
+/// collision signal.
 pub(crate) enum DirLockAttempt {
     Acquired,
     Held,

@@ -1,12 +1,7 @@
 //! The `prime-agent sessions` operator table: one line per agent — name,
-//! status, activity, staleness, last error, usage — rendered from the same
-//! daemon `list` summaries `prime-agent list` reads, ported from
-//! `cli/sessions-table-format.ts`. The activity wording comes from the
-//! shared roster branch table
-//! ([`pa_types::daemon::agent_roster::session_activity_detail`]) so this
-//! table and the agents view tell the same story. Colors are TTY-only in
-//! TS; this output is color-free like TS piped output (the `list` table's
-//! rule).
+//! status, activity, staleness, last error, usage — from the same daemon
+//! `list` summaries, with the activity wording from the shared roster
+//! branch table (color-free, like TS piped output).
 
 use pa_tui::ansi::strip_ansi;
 use pa_tui::info_commands::js_to_fixed;
@@ -20,16 +15,14 @@ use crate::daemon_session_list::{
     format_session_age, format_session_display_id, format_table, string_field,
 };
 
-/// Display-width cap for free-text cells (names, recaps, error text) so one
-/// long line never stretches the row; wide glyphs count as their terminal
-/// columns (TS `MAX_CELL_CHARS`).
+/// Display-width cap for free-text cells so one long line never stretches the row; wide glyphs
+/// count as their terminal columns.
 const MAX_CELL_CHARS: usize = 60;
 
 /// The sessions table's columns.
 const SESSIONS_HEADERS: [&str; 6] = ["name", "status", "activity", "last heard", "error", "usage"];
 
-/// One-line-per-agent operator table for `prime-agent sessions` (TS
-/// `formatSessionsTable`).
+/// One-line-per-agent operator table for `prime-agent sessions`.
 pub(crate) fn format_sessions_table(sessions: &[&Value], now_ms: u64) -> String {
     let mut sorted = sessions.to_vec();
     sorted.sort_by_key(|summary| sessions_sort_key(summary));
@@ -40,12 +33,8 @@ pub(crate) fn format_sessions_table(sessions: &[&Value], now_ms: u64) -> String 
                 truncate_cell(&session_name_cell(summary)),
                 sessions_status_label(summary).to_string(),
                 truncate_cell(&session_activity_cell(summary)),
-                // lastHeardFromAt is the supervisor's staleness mark, served
-                // only when a worker's roster frames go stale; healthy
-                // workers carry no heard-from timestamp, so the cell stays
-                // empty rather than mislabeling the session-file mtime as a
-                // heard-from time (the agents view keys the same label on
-                // the mark's presence).
+                // lastHeardFromAt is the supervisor's staleness mark, served only when a worker's
+                // roster frames go stale; healthy workers carry none, so the cell stays empty.
                 format_session_age(string_field(summary, "lastHeardFromAt"), now_ms),
                 truncate_cell(&session_error_cell(summary).unwrap_or_default()),
                 format_usage_cell(summary.get("usage")),
@@ -55,9 +44,8 @@ pub(crate) fn format_sessions_table(sessions: &[&Value], now_ms: u64) -> String 
     format_table(&SESSIONS_HEADERS, &rows)
 }
 
-/// Failures first, then recovering/running, then idle, then everything else
-/// (TS `sessionsSortKey`); the sort is stable so equal-key rows keep their
-/// roster order.
+/// Failures first, then recovering/running, then idle, then everything
+/// else; the sort is stable so equal-key rows keep their roster order.
 fn sessions_sort_key(summary: &Value) -> u8 {
     let status_label = string_field(summary, "statusLabel");
     let worker_state = string_field(summary, "workerState");
@@ -77,8 +65,8 @@ fn sessions_sort_key(summary: &Value) -> u8 {
     4
 }
 
-/// The roster status of one row (TS `sessionRosterStatus`): the ledger's
-/// classification when the wire carries it, else the shared formula.
+/// The roster status of one row: the ledger's classification when the wire carries it, else the
+/// shared formula.
 fn sessions_roster_status(summary: &Value) -> &str {
     string_field(summary, "rosterStatus").unwrap_or_else(|| {
         match classify_summary_value(summary, false) {
@@ -89,17 +77,13 @@ fn sessions_roster_status(summary: &Value) -> &str {
     })
 }
 
-/// The status column (TS `sessionsStatusLabel`): an exceptional ledger mark
-/// overrides the plain roster status.
+/// The status column: an exceptional ledger mark overrides the plain roster status.
 fn sessions_status_label(summary: &Value) -> &str {
     string_field(summary, "statusLabel").unwrap_or_else(|| sessions_roster_status(summary))
 }
 
-/// The activity column (TS `sessionActivityCell`): the shared branch
-/// table's detail, with the session recap after a separator when one
-/// exists. The table's knobs: the heartbeat mark is just "heartbeat" (no
-/// countdown; a static table has no live next-run timer) and the idle
-/// fallback is empty (the status column already says idle).
+/// The activity column: the shared branch table's detail, with the session recap
+/// after a separator when one exists (idle stays empty).
 fn session_activity_cell(summary: &Value) -> String {
     let detail = session_activity_detail(
         summary,
@@ -109,8 +93,8 @@ fn session_activity_cell(summary: &Value) -> String {
         },
     );
     let recap = compact_cell_text(string_field(summary, "summary"));
-    // TS filters the empty parts before joining, so an idle session with a
-    // recap renders the recap alone, no leading separator.
+    // TS filters the empty parts before joining, so an idle session with a recap renders the recap
+    // alone, no leading separator.
     [(!detail.is_empty()).then_some(detail), recap]
         .into_iter()
         .flatten()
@@ -118,21 +102,20 @@ fn session_activity_cell(summary: &Value) -> String {
         .join(" \u{b7} ")
 }
 
-/// The name cell (TS `sessionNameCell`): names are user-provided; sanitize
-/// them and fall back to the display id when sanitizing leaves nothing.
+/// The name cell: names are user-provided; sanitize them and fall back
+/// to the display id when sanitizing leaves nothing.
 ///
 /// # Panics
 ///
-/// Panics when the summary carries no `id`: the table only reads rows the
-/// summary guard validated, and the guard requires it.
+/// Panics when the summary carries no `id` (the summary guard requires it).
 fn session_name_cell(summary: &Value) -> String {
     let id = string_field(summary, "id").expect("validated summary carries id");
     compact_cell_text(string_field(summary, "sessionName"))
         .unwrap_or_else(|| format_session_display_id(id))
 }
 
-/// The error column (TS `sessionErrorCell`): the worker failure mark or the
-/// model fallback notice; rows that report neither keep the cell empty.
+/// The error column: the worker failure mark or the model fallback notice; rows that report neither
+/// keep the cell empty.
 fn session_error_cell(summary: &Value) -> Option<String> {
     if string_field(summary, "statusLabel") == Some("failed")
         || string_field(summary, "workerState") == Some("failed")
@@ -167,7 +150,7 @@ fn format_usage_cell(usage: Option<&Value>) -> String {
     )
 }
 
-/// Token counts at k/m/b scale with one decimal (TS `formatTokenCount`).
+/// Token counts at k/m/b scale with one decimal.
 fn format_token_count(tokens: u64) -> String {
     if tokens < 1_000 {
         return tokens.to_string();
@@ -182,11 +165,10 @@ fn format_token_count(tokens: u64) -> String {
     format!("{}{suffix}", js_to_fixed(tokens as f64 / divisor, 1))
 }
 
-/// All free-text cells (names, recaps, error notices) share one sanitizer
-/// (TS `compactCellText`): strip ANSI escapes and the C0/C1 controls the
-/// strip misses, then compact whitespace, so no cell can clear the screen,
-/// move the cursor, restyle later columns, or add table lines. The result
-/// is `None` when nothing visible remains.
+/// All free-text cells share one sanitizer: strip ANSI escapes and the C0/C1
+/// controls the strip misses, then compact whitespace, so no cell can clear the
+/// screen, restyle later columns, or add table lines. `None` when nothing
+/// visible remains.
 fn compact_cell_text(value: Option<&str>) -> Option<String> {
     let stripped = strip_ansi(value.unwrap_or_default());
     let mut compacted = String::with_capacity(stripped.len());
@@ -210,8 +192,7 @@ fn compact_cell_text(value: Option<&str>) -> Option<String> {
     (!text.is_empty()).then(|| text.to_string())
 }
 
-/// The C0/C1 controls that `stripAnsi` misses and whitespace compaction
-/// cannot remove (TS `CONTROL_CHARACTERS`).
+/// The C0/C1 controls that `stripAnsi` misses and whitespace compaction cannot remove.
 fn is_stripped_control(c: char) -> bool {
     let code = c as u32;
     code <= 0x08 || (0x0e..=0x1f).contains(&code) || (0x7f..=0x9f).contains(&code)
@@ -250,8 +231,8 @@ mod tests {
         })
     }
 
-    /// TS `makeSummary`: merge the overrides, then report an active turn
-    /// exactly when the activity is `working`.
+    /// TS `makeSummary`: merge the overrides, then report an active turn exactly when the activity
+    /// is `working`.
     fn make_summary(overrides: Value) -> Value {
         let mut summary = base_summary();
         if let (Value::Object(base), Value::Object(over)) = (&mut summary, overrides) {
@@ -263,8 +244,8 @@ mod tests {
         summary
     }
 
-    /// The exact-row harness (TS `expectTable`): the rendered table must be
-    /// the expected rows padded to their own widest cell.
+    /// The exact-row harness (TS `expectTable`): the rendered table must be the expected rows
+    /// padded to their own widest cell.
     fn expect_table(case: &str, sessions: &[Value], expected_rows: &[[&str; 6]]) {
         let rows: Vec<&Value> = sessions.iter().collect();
         let table = format_sessions_table(&rows, NOW_MS);
@@ -437,7 +418,6 @@ mod tests {
         for (case, overrides, expected) in vectors {
             expect_table(case, &[make_summary(overrides)], &[expected]);
         }
-        // The empty roster renders the header only.
         expect_table("empty roster renders the header only", &[], &[]);
     }
 
@@ -452,8 +432,8 @@ mod tests {
             make_summary(
                 json!({ "sessionName": "worker", "activity": "working", "isStreaming": true }),
             ),
-            // The diagnostics entry is never served by the supervisor list
-            // RPC; the row must keep showing the worker mark.
+            // The diagnostics entry is never served by the list RPC; the row keeps
+            // the worker mark.
             make_summary(json!({
                 "sessionName": "crashed",
                 "workerState": "failed",
@@ -487,8 +467,8 @@ mod tests {
         let rows: Vec<&Value> = sessions.iter().collect();
         let table = format_sessions_table(&rows, NOW_MS);
         let lines: Vec<&str> = table.lines().collect();
-        // Scalar-length padding would misalign the CJK name; the recap cap
-        // counts display columns, pair-safe.
+        // Scalar-length padding would misalign the CJK name; the recap cap counts display columns,
+        // pair-safe.
         assert!(lines[1].starts_with("中文   idle"), "{lines:?}");
         assert!(
             lines[2].contains(&format!("{}…", "\u{1f680}".repeat(29))),

@@ -1,16 +1,11 @@
-//! Compact-session tests, the second-compaction family (moved with
-//! their concerns): the iterative update mode — the prior summary
-//! riding the history call, the stripped previous summary plus
-//! recency anchor, and the split-turn arm whose prefix call never
-//! carries the previous summary.
+//! Compact-session tests, the second-compaction family: the iterative
+//! update mode — the prior summary riding the history call, the
+//! stripped previous summary plus recency anchor, and the split-turn
+//! arm whose prefix call never carries the previous summary.
 use super::*;
 
-/// A session compacted twice (the iterative update mode, TS `compact`
-/// passing `previousSummary` into the history call): the second
-/// compaction's summarizer request carries the update prompt with the
-/// prior summary in `<previous-summary>` tags and summarizes only the
-/// conversation since the first compaction's boundary — never the
-/// history the first compaction already summarized.
+/// A session compacted twice: the second request carries the update prompt
+/// with the prior summary and summarizes only the conversation since.
 #[tokio::test]
 async fn second_compaction_updates_the_prior_summary_over_new_history() {
     let registration = faux_registration();
@@ -55,8 +50,8 @@ async fn second_compaction_updates_the_prior_summary_over_new_history() {
         keep_recent_tokens: 2,
         ..Default::default()
     };
-    // First compaction: the initial checkpoint prompt over turns zero
-    // and one, keeping turn two.
+    // First compaction: initial prompt over turns zero and one,
+    // keeping turn two.
     let outcome = execute_compaction(
         &mut session,
         CompactOptions {
@@ -83,7 +78,6 @@ async fn second_compaction_updates_the_prior_summary_over_new_history() {
     assert!(requests[0].contains("[User]: turn zero"));
     assert!(!requests[0].contains("<previous-summary>"));
 
-    // New turns after the first compaction.
     session.append_message(user("turn three")).unwrap();
     session.append_message(user("turn four")).unwrap();
     let outcome = execute_compaction(
@@ -105,10 +99,8 @@ async fn second_compaction_updates_the_prior_summary_over_new_history() {
     let CompactOutcome::Ran(second) = outcome else {
         panic!("expected the second compaction to run")
     };
-    // One update-mode wire call: the update prompt, the prior summary
-    // in <previous-summary> tags, and only the conversation since the
-    // first compaction's boundary (turn two was RETAINED by the first
-    // compaction, so it is new history; turn zero was summarized away).
+    // The update prompt carries the prior summary and only the conversation
+    // since the first boundary (turn two was RETAINED, so it is new history).
     assert_eq!(registration.call_count(), 2);
     requests = seen.lock().unwrap().clone();
     assert_eq!(requests.len(), 2);
@@ -130,7 +122,6 @@ async fn second_compaction_updates_the_prior_summary_over_new_history() {
         .expect("kept entry id")
         .to_string();
     assert_eq!(second.result.first_kept_entry_id, kept_id);
-    // Both compactions persisted.
     let compactions = session
         .get_entries()
         .iter()
@@ -143,14 +134,9 @@ async fn second_compaction_updates_the_prior_summary_over_new_history() {
     registration.unregister();
 }
 
-/// The second compaction anchors on the kept tail and never
-/// re-summarizes the file lists (TS #2385's end-to-end wiring): the
-/// stored first summary ends with its mechanically appended file
-/// block, but the update request carries a STRIPPED
-/// `<previous-summary>` plus the newest retained assistant text in a
-/// `<recent-state-anchor>` block, and the fresh file block still
-/// appends to the new stored summary — the entry details plus the
-/// mechanical append stay the single source of truth.
+/// The second compaction anchors on the kept tail and never re-summarizes
+/// the file lists: the update request carries a STRIPPED `<previous-summary>`
+/// plus the newest retained assistant text in a `<recent-state-anchor>` block.
 #[tokio::test]
 async fn second_compaction_request_carries_the_anchor_and_strips_file_blocks() {
     let registration = faux_registration();
@@ -218,9 +204,8 @@ async fn second_compaction_request_carries_the_anchor_and_strips_file_blocks() {
         .unwrap();
     session.append_message(user("turn one")).unwrap();
     session.append_message(user("turn two")).unwrap();
-    // First compaction (keep 2: the cut keeps turn two): the edit rides
-    // the summarized history, so the stored summary ends with the
-    // mechanically appended file block.
+    // First compaction (keep 2): the edit rides the summarized history, so
+    // the stored summary ends with the appended file block.
     let outcome = execute_compaction(
         &mut session,
         CompactOptions {
@@ -247,7 +232,6 @@ async fn second_compaction_request_carries_the_anchor_and_strips_file_blocks() {
         first.result.summary,
         "the first summary\n\n<modified-files>\na.rs\n</modified-files>"
     );
-    // The initial-prompt path: no previous summary, no anchor.
     let requests = seen.lock().unwrap().clone();
     assert_eq!(requests.len(), 1);
     assert!(!requests[0].contains("<previous-summary>"));
@@ -281,8 +265,7 @@ async fn second_compaction_request_carries_the_anchor_and_strips_file_blocks() {
         .unwrap();
     session.append_message(user("turn four")).unwrap();
     // Second compaction (keep 10: the cut keeps turn three, the reply,
-    // and turn four, so the reply is the newest retained assistant
-    // text).
+    // and turn four, so the reply is the newest retained assistant text).
     let outcome = execute_compaction(
         &mut session,
         CompactOptions {
@@ -307,22 +290,15 @@ async fn second_compaction_request_carries_the_anchor_and_strips_file_blocks() {
     };
     assert_eq!(registration.call_count(), 2);
     let request = seen.lock().unwrap().clone()[1].clone();
-    // The previous summary strips its file blocks before the update
-    // prompt: the lists stop compounding across compactions.
     assert!(request.contains("<previous-summary>\nthe first summary\n</previous-summary>"));
     assert!(!request.contains("<modified-files>"));
     assert!(!request.contains("<read-files>"));
-    // The newest retained assistant text anchors the update after the
-    // previous summary (the turn-prefix arm never carries one).
     let previous_end = request
         .find("</previous-summary>")
         .expect("previous summary block");
     let anchor_start = request.find("<recent-state-anchor>").expect("anchor block");
     assert!(anchor_start > previous_end);
     assert!(request.contains("\n\nthe newest kept reply\n</recent-state-anchor>\n\n"));
-    // The fresh file block still rides the NEW stored summary: the
-    // entry details plus the mechanical append are the single source
-    // of truth for file lists.
     assert_eq!(
         second.result.summary,
         "the second summary\n\n<modified-files>\na.rs\n</modified-files>"
@@ -330,11 +306,8 @@ async fn second_compaction_request_carries_the_anchor_and_strips_file_blocks() {
     registration.unregister();
 }
 
-/// A split-turn cut after a prior compaction (the iterative update
-/// mode on the split path, #225's note): the history call runs in
-/// update mode over the conversation since the boundary, while the
-/// turn-prefix call stays a plain prefix summary — never the previous
-/// summary.
+/// A split-turn cut after a prior compaction: the history call runs in
+/// update mode, while the turn-prefix call stays a plain prefix summary.
 #[tokio::test]
 async fn second_compaction_split_turn_history_updates_prefix_does_not() {
     let registration = faux_registration();
@@ -420,10 +393,8 @@ async fn second_compaction_split_turn_history_updates_prefix_does_not() {
     .unwrap();
     assert!(matches!(outcome, CompactOutcome::Ran(_)));
 
-    // A small retained turn, then a big turn the cut splits: the cut
-    // lands mid big turn (keep budget 10), with the first compaction's
-    // retained turns as the history and the big turn's user message as
-    // the split prefix.
+    // A small retained turn, then a big turn the cut splits (keep budget 10):
+    // the retained turns are the history, the big turn's user message the prefix.
     session.append_message(user("kept small turn")).unwrap();
     session.append_message(reply("small kept reply")).unwrap();
     session
@@ -458,10 +429,8 @@ async fn second_compaction_split_turn_history_updates_prefix_does_not() {
     };
     let requests = seen.lock().unwrap().clone();
     assert_eq!(requests.len(), 3);
-    // The history call: update mode over the conversation since the
-    // first compaction's boundary (turn one was retained, kept small
-    // turn, small kept reply) — with the previous summary; turn zero
-    // was summarized away and never reappears.
+    // The history call: update mode, with the previous summary; turn
+    // zero was summarized away and never reappears.
     let history_request = requests
         .iter()
         .find(|text| text.contains("NEW conversation messages to incorporate"))
@@ -470,8 +439,6 @@ async fn second_compaction_split_turn_history_updates_prefix_does_not() {
     assert!(history_request.contains("[User]: turn one"));
     assert!(history_request.contains("[User]: kept small turn"));
     assert!(!history_request.contains("[User]: turn zero"));
-    // The turn-prefix call: its own instruction, never the update
-    // prompt or the previous summary.
     let prefix_request = requests
         .iter()
         .find(|text| text.contains("PREFIX of a turn"))
@@ -479,8 +446,6 @@ async fn second_compaction_split_turn_history_updates_prefix_does_not() {
     assert!(prefix_request.contains("[User]: big turn"));
     assert!(!prefix_request.contains("<previous-summary>"));
     assert!(!prefix_request.contains("NEW conversation messages to incorporate"));
-    // The merged summary carries the split marker behind the updated
-    // history summary.
     assert_eq!(
         second.result.summary,
         "the updated history summary\n\n---\n\n**Turn Context (split turn):**\n\nthe turn prefix summary"

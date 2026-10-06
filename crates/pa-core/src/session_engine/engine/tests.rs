@@ -42,9 +42,9 @@ async fn engine_runs_tool_loop_and_persists() {
         cost: pa_agent::types::UsageCost::default(),
         context_window: 1_000,
         max_tokens: 100,
+        max_tokens_explicit: false,
     };
     let provider = Arc::new(ScriptedProvider::new(model.clone()));
-    // First turn: call the tool. Second turn: final text.
     provider.push_tool_call_turn(
         Some("checking"),
         vec![("call-1", "echo", serde_json::json!({ "text": "hi" }))],
@@ -105,7 +105,6 @@ async fn engine_runs_tool_loop_and_persists() {
     assert_eq!(outcome, PromptOutcome::Prompt);
     engine.session.agent().wait_for_idle().await;
 
-    // The loop executed the tool and produced the final message.
     let state = engine.session.agent().state().await;
     assert!(state.messages.iter().any(|message| match message {
         pa_agent::types::AgentMessage::Standard(pa_agent::types::Message::ToolResult(result)) => {
@@ -124,7 +123,6 @@ async fn engine_runs_tool_loop_and_persists() {
         }
         _ => false,
     }));
-    // The session persisted user + assistant turns.
     let entries = engine.session.entries().await;
     assert!(entries.iter().any(|entry| matches!(
         entry,
@@ -137,8 +135,7 @@ async fn engine_runs_tool_loop_and_persists() {
 }
 
 /// A spawned child's prompt stamps its recursion depth: `create_session`
-/// at depth N reads "depth: N (not root)", never the root identity the
-/// pre-fix default (None -> 0) stamped on every child.
+/// at depth N reads "depth: N (not root)", never the root identity.
 #[tokio::test]
 async fn spawned_child_prompt_stamps_its_depth() {
     let model = pa_agent::types::Model {
@@ -151,6 +148,7 @@ async fn spawned_child_prompt_stamps_its_depth() {
         cost: pa_agent::types::UsageCost::default(),
         context_window: 1_000,
         max_tokens: 100,
+        max_tokens_explicit: false,
     };
     let provider = Arc::new(ScriptedProvider::new(model.clone()));
     let tmp = tempfile::tempdir().unwrap();
@@ -199,11 +197,9 @@ async fn spawned_child_prompt_stamps_its_depth() {
     assert!(!engine.system_prompt.contains("depth: 0 (root)"));
 }
 
-/// The login chain's prompt-gating end to end at the engine level: a
-/// settings-declared OAuth server stays gated, an endpoint-bound
-/// credential (exactly what `mcp.begin_login` persists) unlocks it in
-/// the NEXT session the engine builds, and a credential bound to
-/// another endpoint does not.
+/// The login chain's prompt-gating end to end: a settings-declared OAuth
+/// server stays gated, an endpoint-bound credential unlocks it in the NEXT
+/// session, and one bound to another endpoint does not.
 #[tokio::test]
 async fn oauth_creds_unlock_generic_mcp_gating_in_new_sessions() {
     fn model() -> pa_agent::types::Model {
@@ -217,6 +213,7 @@ async fn oauth_creds_unlock_generic_mcp_gating_in_new_sessions() {
             cost: pa_agent::types::UsageCost::default(),
             context_window: 1_000,
             max_tokens: 100,
+            max_tokens_explicit: false,
         }
     }
 
@@ -284,7 +281,6 @@ async fn oauth_creds_unlock_generic_mcp_gating_in_new_sessions() {
     .unwrap();
     let provider = Arc::new(ScriptedProvider::new(model()));
 
-    // Gated: no credentials, no generic MCP guidance in the prompt.
     let engine = create_session(config(&cwd, &agent_dir, provider.stream_fn()))
         .await
         .unwrap();
@@ -312,16 +308,13 @@ async fn oauth_creds_unlock_generic_mcp_gating_in_new_sessions() {
     };
 
     // A credential bound to another endpoint stays gated: the token
-    // must prove where it belongs (a retargeted entry forces a
-    // re-login).
+    // must prove where it belongs.
     write_credential("https://other.example/mcp");
     let engine = create_session(config(&cwd, &agent_dir, provider.stream_fn()))
         .await
         .unwrap();
     assert!(!engine.system_prompt.contains("# Generic MCP Connections"));
 
-    // The endpoint-bound credential unlocks the prompt guidance in the
-    // next session the engine builds.
     write_credential("https://fixture.example/mcp");
     let engine = create_session(config(&cwd, &agent_dir, provider.stream_fn()))
         .await
@@ -366,7 +359,6 @@ async fn create_session_registers_goal_and_heartbeat_handlers() {
     })
     .await
     .unwrap();
-    // The agent loop gained the ipython tool backed by the kernel.
     let names: Vec<String> = engine
         .session
         .agent()

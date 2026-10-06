@@ -1,53 +1,18 @@
-//! RLM children lifecycle on a hard-killed parent worker: the supervisor's
-//! parent-death cleanup e2e (the #246 documented adjacent gap).
-//!
-//! TS ground truth (`packages/coding-agent/src/modes/daemon/daemon-mode.ts`):
-//! RLM children are hosted IN the parent's process, so they die with it -
-//! a `SIGKILLed` parent session takes its children down, and the durable
-//! spawn ledger keeps each closed child as a passive roster row
-//! (`getChildActiveSessionStates` joins children by
-//! `metadata.parentActiveSessionId`; `closeChildSessions` is the cascade).
-//! The Rust redesign hosts each child as its own supervisor-owned worker
-//! process, and the #246 close runs inside the parent worker's teardown
-//! paths - all bypassed by SIGKILL. So the supervisor's worker-death
-//! monitoring performs the close: on an unexpected exit, every resident
-//! worker whose durable create names the dead worker as its parent stops
-//! with it (a plain stop like the #246 close: no ledger tombstone, so the
-//! spawn edge and the passive roster row survive), routed through the
-//! child worker's own kill handler so grandchildren cascade.
-//!
-//! Verified end to end against a real supervisor, a real parent worker
-//! session whose kernel cell spawns the child through the product
-//! `rlm.spawn` surface, and a scripted child worker kept mid-run:
-//!
-//! 1. `SIGKILLing` the parent worker closes the spawned child: its worker
-//!    leaves the supervisor roster, its session file archives, the
-//!    respawned parent's `get_rlm_children` reads empty, and the `list
-//!    --all` surface shows the child as a passive ledger row (the spawn
-//!    edge survived - the close is a stop, not a delete).
-//! 2. `SIGKILLing` the parent KEEPS an `rlm.create_session` depth-0 root
-//!    session running: the close touches parent-linked children only.
-//!
-//! The parent's kernel Python is ambient product state; like the other
-//! live-kernel verifiers these tests skip (with a note) on machines
-//! without a live install.
-// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
-// the full rationale).
-// Stack-resident futures by design on the daemon's hot paths; boxing the
-// call sites for a lint tick is a perf regression with zero correctness gain.
+//! RLM children on a hard-killed parent worker (the #246 adjacent gap): TS hosts children
+//! IN the parent's process, so a `SIGKILLed` parent takes them down; the Rust redesign hosts
+//! each child as its own worker and the #246 close lives in the parent's teardown paths,
+//! all bypassed by SIGKILL — so the supervisor's worker-death monitoring performs the close
+//! (a plain stop; grandchildren cascade). Tests skip without a live kernel install.
+// Stack-resident futures by design; boxing for a lint tick is a perf regression.
 #![allow(clippy::large_futures)]
-// 64-bit-only targets; the narrowing casts sit at OS boundaries
-// (pid/fd/time/size) where the values are bounded by the kernel - the
-// dead-guard expect()s would add panic paths where silent wrap was
-// deliberate.
+// 64-bit-only targets; narrowing casts sit at bounded OS/protocol boundaries.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// The fn-length threshold is a style gate, not correctness; the structure
-// campaign owns the god-fn splits as a follow-up.
+// Fn length is a style gate, not correctness.
 #![allow(clippy::too_many_lines)]
 // API-shape opinions, not defects; the surfaces are deliberate.
 #![allow(
@@ -81,8 +46,7 @@ impl Drop for Daemon {
     }
 }
 
-// The timeout panic path cannot wait on the child; the test process exits
-// immediately afterwards, reaping it.
+// The timeout panic path cannot wait on the child; the test exits and reaps it.
 #[allow(clippy::zombie_processes)]
 fn spawn_supervisor(socket: &Path, agent_dir: &Path, kernel_python: &Path) -> Daemon {
     let binary = env!("CARGO_BIN_EXE_pa-daemon");
@@ -99,10 +63,8 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path, kernel_python: &Path) -> Da
         .env_remove("PRIME_API_KEY")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        // A supervisor killed at teardown must not leak its session workers
-        // into later test binaries: the worker's supervisor-lost exit (TS
-        // `exitIfSupervisorOrphanedForTooLong`) runs on this short window
-        // instead of the 5-minute default.
+        // A supervisor killed at teardown must not leak its session workers into later
+        // test binaries: the supervisor-lost exit runs here.
         .env(
             pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
             "15000",
@@ -115,8 +77,7 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path, kernel_python: &Path) -> Da
     }
 }
 
-/// The kernel Python with prime-agent-runtime installed; set
-/// `PA_E2E_KERNEL_PYTHON` to point at an explicit interpreter instead.
+/// The kernel Python; `PA_E2E_KERNEL_PYTHON` points at an explicit interpreter instead.
 fn kernel_python() -> Option<PathBuf> {
     if let Some(explicit) = std::env::var_os("PA_E2E_KERNEL_PYTHON") {
         let explicit = PathBuf::from(explicit);
@@ -233,8 +194,7 @@ fn wait_until<T>(
     }
 }
 
-/// The supervisor roster's resident session summaries (the plain `list`
-/// wire surface).
+/// The supervisor roster's resident session summaries (the plain `list` wire surface).
 fn roster_summaries(client: &mut Client, id: &str) -> Vec<Value> {
     client.send_command(id, &json!({ "type": "list" }));
     let list = client.read_response(id);
@@ -245,8 +205,7 @@ fn roster_summaries(client: &mut Client, id: &str) -> Vec<Value> {
         .expect("sessions array")
 }
 
-/// The `list --all` surface: resident summaries plus the passive ledger
-/// rows (TS `buildSessionList`).
+/// The `list --all` surface: resident summaries plus the passive ledger rows.
 fn all_roster_summaries(client: &mut Client, id: &str) -> Vec<Value> {
     client.send_command(id, &json!({ "type": "list", "all": true }));
     let list = client.read_response(id);
@@ -330,9 +289,8 @@ fn create_session_cell(receipt: &Path, error_receipt: &Path) -> String {
     )
 }
 
-/// The child's scripted engine: one held response keeps its task turn
-/// running while the parent dies, so the death close lands on a live child
-/// (TS closes running children - abort, archive, dispose).
+/// The child's scripted engine: one held response keeps its task turn running while
+/// the parent dies, so the death close lands on a live child.
 fn write_child_script(dir: &Path) -> PathBuf {
     let script = dir.join("child.json");
     std::fs::write(
@@ -363,10 +321,8 @@ fn write_parent_script(dir: &Path, first_cell: &str) -> PathBuf {
     script
 }
 
-/// Create a scripted parent session through the supervisor. The create's
-/// `childScript` (the harness seam mirroring the TS child runtime's
-/// inherited `sessionConfig`) makes every `rlm.spawn` child a scripted
-/// worker.
+/// Create a scripted parent session through the supervisor. The create's `childScript`
+/// (the harness seam for the TS inherited `sessionConfig`) makes every child scripted.
 fn create_parent(
     client: &mut Client,
     dir: &Path,
@@ -394,10 +350,8 @@ fn create_parent(
     created["data"].clone()
 }
 
-/// The parent worker's process id, read from its durable descriptor (the
-/// supervisor persists the live pid at every spawn). The environ check
-/// guards the kill against a stale pid: the process we SIGKILL must be
-/// the worker that owns `parent_id`.
+/// The parent worker's process id, read from its durable descriptor; the environ check
+/// guards the kill against a stale pid.
 fn parent_worker_pid(agent_dir: &Path, socket: &Path, parent_id: &str) -> u32 {
     let descriptor_path =
         pa_daemon::descriptor::descriptor_dir(agent_dir, socket).join(format!("{parent_id}.json"));
@@ -463,8 +417,7 @@ fn sigkill_closes_the_spawned_child_and_passivates_the_row() {
         .to_string();
     let parent_session_id = parent["sessionId"].as_str().expect("parent session id");
 
-    // Turn 1: the kernel cell spawns the child through the parent's own
-    // registry (the `rlm.spawn` host surface).
+    // Turn 1: the kernel cell spawns the child through the parent's registry.
     run_turn(&mut client, &parent_id, "spawn the kid", "t1");
     let spawned: Value =
         serde_json::from_str(&await_receipt(&spawn_receipt)).expect("spawn receipt json");
@@ -482,8 +435,7 @@ fn sigkill_closes_the_spawned_child_and_passivates_the_row() {
         std::fs::read_to_string(&spawn_error).unwrap_or_default()
     );
 
-    // The child runs: its worker session is resident in the supervisor and
-    // tracked in the parent's registry.
+    // The child runs: resident in the supervisor and tracked in the parent's registry.
     let child_row = wait_until(&mut client, Duration::from_mins(1), |client| {
         let rows = rlm_children_rows(client, "g1", &parent_id);
         rows.into_iter()
@@ -504,8 +456,7 @@ fn sigkill_closes_the_spawned_child_and_passivates_the_row() {
     let pid = parent_worker_pid(&agent_dir, &socket, &parent_id);
     sigkill(pid);
 
-    // The supervisor's death monitoring closes the child: its worker
-    // leaves the resident roster.
+    // The supervisor's death monitoring closes the child: its worker leaves the roster.
     wait_until(&mut client, Duration::from_mins(1), |client| {
         let summaries = roster_summaries(client, "l2");
         summaries
@@ -514,12 +465,8 @@ fn sigkill_closes_the_spawned_child_and_passivates_the_row() {
             .then_some(())
     });
 
-    // The close is the shutdown-close shape (TS's in-process child dies
-    // with its parent worker without a close; the Rust worker must be
-    // told, and the `shutdown` reason keeps the child's resume entry):
-    // the child's session file keeps its live state and its scheduled
-    // jobs, so the wake model can still own reviving it later — it is
-    // NOT archived like a killed close (the stop lifecycle lane).
+    // The close is the shutdown-close shape: the `shutdown` reason keeps the child's resume
+    // entry — NOT archived like a killed close (the stop lifecycle lane).
     let child_session_file = {
         let child_dir = agent_dir
             .join("session-artifacts")
@@ -549,9 +496,8 @@ fn sigkill_closes_the_spawned_child_and_passivates_the_row() {
             .find(|row| row["id"] == json!(child_id) && row["status"] == "error")
     });
 
-    // The passive row per TS: the spawn edge survived the close (a stop,
-    // not a delete), so `list --all` shows the child as a passive ledger
-    // row under the parent.
+    // The passive row per TS: the spawn edge survived the close (a stop, not a delete),
+    // so `list --all` shows the child under the parent.
     let passive_row = wait_until(&mut client, Duration::from_secs(30), |client| {
         all_roster_summaries(client, "l3")
             .into_iter()
@@ -562,8 +508,7 @@ fn sigkill_closes_the_spawned_child_and_passivates_the_row() {
     assert_eq!(passive_row["isSessionActive"], false);
     assert_eq!(passive_row["parentActiveSessionId"], json!(parent_id));
 
-    // The ledger carried the close as a stop, never a delete: the spawn
-    // record stands and no tombstone exists.
+    // The ledger carried the close as a stop, never a delete: no tombstone exists.
     let ledger_dir = agent_dir.join(pa_daemon::rlm_ledger::RLM_LEDGER_DIR);
     let ledger = std::fs::read_dir(&ledger_dir)
         .expect("ledger dir")
@@ -581,12 +526,9 @@ fn sigkill_closes_the_spawned_child_and_passivates_the_row() {
     );
 }
 
-/// `rlm.create_session` depth-0 root sessions are NOT parent-linked (TS
-/// `createRlmRootSession` builds a root `ActiveSessionState` with no
-/// `parentActiveSessionId`), so `getChildActiveSessionStates` never
-/// matches them: a created root session survives the parent's hard death
-/// (the supervisor restarts the parent and the root keeps running),
-/// while the parent's own registry reads empty.
+/// `rlm.create_session` depth-0 roots are NOT parent-linked (TS `createRlmRootSession`
+/// carries no `parentActiveSessionId`, so `getChildActiveSessionStates` never matches
+/// them): a created root survives the parent's hard death.
 #[test]
 fn sigkill_keeps_a_created_root_session_running() {
     let Some(kernel_python) = kernel_python() else {
@@ -646,8 +588,7 @@ fn sigkill_keeps_a_created_root_session_running() {
     // close touches parent-linked children only.
     let pid = parent_worker_pid(&agent_dir, &socket, &parent_id);
     sigkill(pid);
-    // The respawn (and with it the death close) settles before the
-    // registry reads empty.
+    // The respawn (and with it the death close) settles before the registry reads empty.
     wait_until(&mut client, Duration::from_mins(1), |client| {
         client.send_command(
             "g1",
@@ -661,8 +602,7 @@ fn sigkill_keeps_a_created_root_session_running() {
         .then_some(())
     });
 
-    // The created root session is still resident and running: the close
-    // touches parent-linked children only (TS `getChildActiveSessionStates`).
+    // The created root session is still resident: the close touches parent-linked children only.
     let survivor = wait_until(&mut client, Duration::from_secs(30), |client| {
         roster_summaries(client, "l2")
             .into_iter()

@@ -338,19 +338,17 @@ mod tests {
         assert_eq!(e.get_text(), "hello world");
         e.handle_input("ctrl+w");
         assert_eq!(e.get_text(), "hello ");
-        // ctrl+k at end of line is a no-op (TS parity: only kills forward text).
         e.handle_input("ctrl+k");
         assert_eq!(e.get_text(), "hello ");
         e.handle_input("ctrl+y");
         assert_eq!(e.get_text(), "hello world");
-        // Ring holds one entry: yank-pop is a no-op.
         e.handle_input("alt+y");
         assert_eq!(e.get_text(), "hello world");
     }
 
-    /// Forward delete drops the grapheme after the cursor (found red by
-    /// the paste-marker suite: the pre-fix split kept the deleted span, so
-    /// delete was a no-op everywhere).
+    /// Forward delete drops the grapheme after the cursor (found red by the
+    /// paste-marker suite: the pre-fix split kept the deleted span, so delete
+    /// was a no-op everywhere).
     #[test]
     fn forward_delete_drops_the_next_grapheme() {
         let mut e = ed();
@@ -362,7 +360,6 @@ mod tests {
         assert_eq!(e.get_cursor(), (0, 1));
         e.handle_input("delete");
         assert_eq!(e.get_text(), "ac");
-        // At line end it merges with the next line (TS parity).
         e.set_text("ac\nxy");
         e.handle_input("up");
         assert_eq!(e.get_cursor(), (0, 2));

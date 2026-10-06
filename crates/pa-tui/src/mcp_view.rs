@@ -27,34 +27,25 @@ use rows::{flatten_to_single_line, McpCredentialRow, McpRow, McpServiceRow};
 /// connections")`).
 const SEARCH_PLACEHOLDER: &str = "Search MCP connections";
 
-/// The picker's preferred visible rows (TS `PREFERRED_VISIBLE_SERVICES`).
 const PREFERRED_VISIBLE_SERVICES: usize = 8;
 
-/// The inline search field's rows (the bordered field).
 const SEARCH_FIELD_ROWS: usize = 3;
 
-/// The trailing key hint's row.
 const HINT_ROWS: usize = 1;
 
-/// The scroll indicator's row (shown when the window is partial).
 const SCROLL_INDICATOR_ROWS: usize = 1;
 
-/// The one fixed detail line under the list (TS `DETAIL_ROWS`).
 const DETAIL_ROWS: usize = 1;
 
-/// The blank line between the last row and the detail line (TS
-/// `DETAIL_SPACER_ROWS`).
 const DETAIL_SPACER_ROWS: usize = 1;
 
-/// Viewports below this height cannot fit the search field, one result
-/// row, the counter, the spacer, the detail line, and the hint; the
-/// detail line drops instead of overflowing the terminal (TS
-/// `MIN_ROWS_FOR_DETAIL`, measured against the picker's row budget).
+/// Viewports below this height cannot fit the search field, one result row, the counter, the
+/// spacer, the detail line, and the hint; the detail line drops instead (TS `MIN_ROWS_FOR_DETAIL`).
 const MIN_ROWS_FOR_DETAIL: usize =
     SEARCH_FIELD_ROWS + HINT_ROWS + SCROLL_INDICATOR_ROWS + DETAIL_ROWS + DETAIL_SPACER_ROWS + 2;
 
-/// The empty state's window rows (the message plus its blank row before
-/// the hint): the layout must budget them before the message renders.
+/// The empty state's window rows (the message plus its blank row before the hint): the layout must
+/// budget them before the message renders.
 const EMPTY_STATE_ROWS: usize = 2;
 
 // Search bands (TS `service-catalog-picker.ts`): lower scores rank
@@ -70,8 +61,7 @@ const SCORE_SUBSEQUENCE: f64 = 400.0;
 const SCORE_DESCRIPTION_WORD_START: f64 = 500.0;
 const SCORE_DESCRIPTION_SUBSTRING: f64 = 600.0;
 
-/// The query's word split (TS `words`): Unicode letters and numbers,
-/// lowercased, empties dropped.
+/// The query's word split (TS `words`): Unicode letters and numbers, lowercased, empties dropped.
 fn words(text: &str) -> Vec<String> {
     text.to_lowercase()
         .split(|c: char| !c.is_alphanumeric())
@@ -80,16 +70,15 @@ fn words(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// TS string operations run on UTF-16 code units (`.length`, indexing,
-/// `indexOf`), so the scoring bands and tiebreaks must measure the same
-/// units: a surrogate pair counts as two and a substring position is a
-/// unit index, or non-ASCII queries rank differently from the TS picker.
+/// TS string operations run on UTF-16 code units (`.length`, indexing, `indexOf`), so the scoring
+/// bands and tiebreaks must measure the same units: a surrogate pair counts as two and a substring
+/// position is a unit index, or non-ASCII queries rank differently from the TS picker.
 fn utf16_len(text: &str) -> usize {
     text.chars().map(char::len_utf16).sum()
 }
 
-/// The first UTF-16 code-unit index of `needle` in `haystack`, like TS
-/// `indexOf` (byte offsets diverge past ASCII).
+/// The first UTF-16 code-unit index of `needle` in `haystack`, like TS `indexOf` (byte offsets
+/// diverge past ASCII).
 fn utf16_index(haystack: &[u16], needle: &[u16]) -> Option<usize> {
     if needle.is_empty() || haystack.len() < needle.len() {
         return None;
@@ -99,9 +88,8 @@ fn utf16_index(haystack: &[u16], needle: &[u16]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
-/// Identity match: exact, prefix (plus the remaining-length tiebreak),
-/// word start, substring (plus the position tiebreak), then the
-/// subsequence fallback with its span penalty.
+/// Identity match: exact, prefix (plus the remaining-length tiebreak), word start, substring (plus
+/// the position tiebreak), then the subsequence fallback with its span penalty.
 fn identity_match_score(text: &str, token: &str) -> Option<f64> {
     let haystack = text.to_lowercase();
     if haystack == *token {
@@ -121,12 +109,9 @@ fn identity_match_score(text: &str, token: &str) -> Option<f64> {
     subsequence_match_score(&units, &token_units)
 }
 
-/// Identity-only subsequence fallback (TS `subsequenceMatchScore`,
-/// over UTF-16 code units — the TS walk indexes units, so a surrogate
-/// pair is two). The consecutive-run floor — half the query, minimum
-/// two units — keeps the fallback for tight abbreviations ("crdb"
-/// finds cockroachdb) while rejecting the scattered matches; the span
-/// tiebreak spreads matches.
+/// Identity-only subsequence fallback (TS `subsequenceMatchScore`, over UTF-16 code units). The
+/// consecutive-run floor — half the query, minimum two units — keeps the fallback for tight
+/// abbreviations while rejecting the scattered matches; the span tiebreak spreads matches.
 fn subsequence_match_score(haystack: &[u16], token: &[u16]) -> Option<f64> {
     if token.len() < 2 || token.len() > haystack.len() {
         return None;
@@ -163,8 +148,8 @@ fn subsequence_match_score(haystack: &[u16], token: &[u16]) -> Option<f64> {
     Some(SCORE_SUBSEQUENCE + span as f64 * 2.0)
 }
 
-/// Description text matches only as a word start or substring (plus the
-/// UTF-16 position tiebreak, like TS `indexOf`) — never a subsequence.
+/// Description text matches only as a word start or substring (plus the UTF-16 position tiebreak) —
+/// never a subsequence.
 fn description_match_score(text: &str, token: &str) -> Option<f64> {
     let haystack = text.to_lowercase();
     if words(&haystack).iter().any(|word| word.starts_with(token)) {
@@ -212,14 +197,11 @@ fn row_search_score(row: &McpRow, query: &str) -> Option<f64> {
 /// One key press while the view is open.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum McpViewAction {
-    /// Enter on a connectable connection/service: run its login flow (the
-    /// caller resolves the auth hook; TS `authenticate`). `label` is the
-    /// service's display name (the inline auth panel's title reads
-    /// "Login to {label}").
+    /// Enter on a connectable connection/service: run its login flow (the caller resolves
+    /// the auth hook; TS `authenticate`). `label` feeds the inline auth panel's title.
     Select { server: String, label: String },
-    /// Enter on a pasteable token service with no installed account: open
-    /// the paste flow (TS `actionText` "paste token"). `label` is the
-    /// service's display name (the panel's title reads "Connect {label}").
+    /// Enter on a pasteable token service with no installed account: open the paste flow
+    /// ("paste token"). `label` feeds the panel's title.
     Paste { server: String, label: String },
     /// Enter on an api-key credential row (the stored keys the view
     /// manages alongside the connections): open the paste-the-key prompt
@@ -319,12 +301,10 @@ impl McpView {
             .map(McpRow::target)
     }
 
-    /// One key press (TS `ServiceCatalogPickerComponent.handleInput`):
-    /// arrows clamp at the list's bounds (never wrap), page keys step by
-    /// the visible window, Enter routes by the selected row, Esc closes,
-    /// and everything else edits the search field — including the left
-    /// arrow (the catalog surface has no parent to go back to, so it
-    /// stays inert instead of cancelling).
+    /// One key press (TS `handleInput`): arrows clamp at the list's bounds (never wrap), page
+    /// keys step by the visible window, Enter routes by the selected row, Esc closes, and
+    /// everything else edits the search field — including the left arrow (the catalog surface has
+    /// no parent to go back to).
     pub fn handle_key(&mut self, key: &str, kb: &KeybindingsManager) -> McpViewAction {
         if key == "ctrl+c" {
             return McpViewAction::Cancel;
@@ -377,14 +357,13 @@ impl McpView {
                 None => McpViewAction::None,
             };
         }
-        // Esc/Ctrl+C close; the modal back key closes from an empty
-        // search (its left-edge editing otherwise feeds the field).
+        // Esc/Ctrl+C close; the modal back key closes from an empty search (its left-edge editing
+        // otherwise feeds the field).
         if kb.matches(key, "tui.select.cancel")
             || (kb.matches(key, "app.modal.back") && self.search.cursor() == 0)
         {
             return McpViewAction::Cancel;
         }
-        // Everything else edits the search field.
         let previous = self.search.value().to_string();
         self.search.handle_key(key, kb);
         if self.search.value() != previous {
@@ -393,15 +372,13 @@ impl McpView {
         McpViewAction::None
     }
 
-    /// Prefill the filter (`/mcp <partial>` + Tab or `/plugins <q>`
-    /// opens the view filtered to the typed match), the caret at the
-    /// partial's end so typing extends it.
+    /// Prefill the filter (`/mcp <partial>` + Tab or `/plugins <q>`), the caret at the partial's
+    /// end.
     pub fn set_search(&mut self, query: &str) {
         self.search.prefill(query);
         self.refilter();
     }
 
-    /// A bracketed paste into the search field.
     pub fn paste(&mut self, text: &str) {
         let previous = self.search.value().to_string();
         self.search.paste(text);
@@ -410,9 +387,8 @@ impl McpView {
         }
     }
 
-    /// The picked frame (TS `updateList` + `render`, the inline panel:
-    /// the bordered search field, the visible window's rows, the scroll
-    /// indicator, ONE fixed detail line under a blank row, the hint).
+    /// The picked frame (TS `updateList` + `render`: the bordered search field, the visible
+    /// window's rows, the scroll indicator, ONE fixed detail line under a blank row, the hint).
     pub fn render(&mut self, theme: &Theme, width: usize, kb: &KeybindingsManager) -> Vec<Line> {
         self.visible_items = self.list_layout();
 
@@ -435,8 +411,7 @@ impl McpView {
             };
             let selected = index == self.selected;
             let primary: Line = vec![Span::raw(row.primary_line())];
-            // Rows carry their status flush right (TS inline `MenuRow`
-            // trailing meta): the honest state vocabulary.
+            // Rows carry their status flush right (TS `MenuRow` trailing meta).
             let (color, status) = row.status_text();
             let status = status.as_str();
             let trailing = vec![(color, status)];
@@ -445,43 +420,33 @@ impl McpView {
             ));
         }
 
-        // Nothing to scroll when the frame renders no rows (the
-        // reserved-height guard's 0): the indicator would spend a row
-        // the viewport does not have.
+        // The indicator would spend a row the viewport does not have.
         if self.visible_items > 0 && (start > 0 || end < self.filtered.len()) {
             let indicator = format!("  ({}/{})", self.selected + 1, self.filtered.len());
-            // A narrow frame truncates the indicator to its width (the
-            // menu-panel status-row shape): it never overwrites the
-            // adjacent cells.
+            // A narrow frame truncates the indicator to its width, never overwriting adjacent
+            // cells.
             let line = vec![theme.fg_span(ThemeColor::Muted, indicator)];
             lines.push(crate::width::truncate_line(&line, width, ""));
         }
 
         if self.visible_items > 0 {
             if self.filtered.is_empty() {
-                // The empty state's message and its blank row spend the
-                // two rows the window budgets: a viewport too short for
-                // both keeps the skeleton alone (the frame never draws
-                // past its viewport).
+                // The empty state's message and its blank row spend the two rows the window
+                // budgets: a viewport too short for both keeps the skeleton alone (the
+                // frame never draws past its viewport).
                 if self.visible_items >= EMPTY_STATE_ROWS {
                     let message = if self.rows.is_empty() {
                         "No external services available"
                     } else {
                         "No matching services"
                     };
-                    // The message row aligns with the rows' labels (the
-                    // TS `TruncatedText` pad plus the text's own leading
-                    // space) and truncates to the frame width.
+                    // The message row aligns with the row labels and truncates to the frame width.
                     let line = vec![theme.fg_span(ThemeColor::Muted, format!("  {message}"))];
                     lines.push(crate::width::truncate_line(&line, width, ""));
-                    // One blank row between the empty state and the
-                    // shortcuts line (TS): the message never touches the
-                    // keybinds.
                     lines.push(Vec::new());
                 }
             } else if self.detail_rows() > 0 {
-                // One blank line between the last row and the description
-                // (TS), then the ONE fixed detail line.
+                // One blank line between the last row and the ONE fixed detail line (TS).
                 lines.push(Vec::new());
                 if let Some(row) = self
                     .filtered
@@ -489,10 +454,8 @@ impl McpView {
                     .and_then(|index| self.rows.get(*index))
                     .cloned()
                 {
-                    // TS `secondaryText ?? statusText`: the detail falls
-                    // back to the row's status when the entry carries no
-                    // copy; the shared menu grammar's detail_row
-                    // truncates and pads the line.
+                    // TS `secondaryText ?? statusText`: the detail falls back to the row's
+                    // status when the entry carries no copy.
                     let text = flatten_to_single_line(
                         &row.detail_text().unwrap_or_else(|| row.status_text().1),
                     );
@@ -511,14 +474,12 @@ impl McpView {
         lines
     }
 
-    /// The inline list layout (TS `getMenuListLayout` shape): the
-    /// reserved rows are the search field and the hint, plus the detail
-    /// group when the viewport can fit it.
+    /// The inline list layout (TS `getMenuListLayout` shape): the reserved rows are the
+    /// search field and the hint, plus the detail group when the viewport can fit it.
     fn list_layout(&self) -> usize {
-        // The shared layout floors at one row so a picker never reads
-        // empty; this view must never render past its viewport, so a
-        // frame too short for any row renders none (the scroll
-        // indicator follows: nothing to scroll).
+        // The shared layout floors at one row so a picker never reads empty; this view must
+        // never render past its viewport, so a frame too short for any row renders none
+        // (the scroll indicator follows: nothing to scroll).
         let reserved = SEARCH_FIELD_ROWS + HINT_ROWS + self.detail_rows();
         if self.viewport_rows <= reserved {
             return 0;
@@ -532,9 +493,8 @@ impl McpView {
         )
     }
 
-    /// The detail group's rows (TS `DETAIL_ROWS` + `DETAIL_SPACER_ROWS`),
-    /// dropped when the viewport cannot fit the panel skeleton (TS
-    /// `MIN_ROWS_FOR_DETAIL`).
+    /// The detail group's rows (TS `DETAIL_ROWS`), dropped when the viewport cannot fit
+    /// the panel skeleton (TS `MIN_ROWS_FOR_DETAIL`).
     fn detail_rows(&self) -> usize {
         if self.viewport_rows >= MIN_ROWS_FOR_DETAIL {
             DETAIL_ROWS + DETAIL_SPACER_ROWS
@@ -543,9 +503,8 @@ impl McpView {
         }
     }
 
-    /// The visible row window centered on the selection. A frame too
-    /// short for any row carries the EMPTY window — never raised back
-    /// to one row (`list_layout`'s reserved-height guard owns the 0).
+    /// The visible row window centered on the selection. A frame too short for any row carries the
+    /// EMPTY window — never raised back to one row (`list_layout`'s guard owns the 0).
     fn window(&self) -> (usize, usize) {
         if self.visible_items == 0 {
             return (0, 0);
@@ -559,11 +518,10 @@ impl McpView {
         (start, end)
     }
 
-    /// Rebuild the filtered view (TS `filterServices`): an empty query
-    /// shows everything; a query scores every row against the query's
-    /// tokens (identity fields first, then the description band), every
-    /// token must match, and rows rank by their summed score — stable,
-    /// so equal scores keep the catalog's connected-first order.
+    /// Rebuild the filtered view (TS `filterServices`): an empty query shows everything; a
+    /// query scores every row against the query's tokens (identity fields first, then the
+    /// description band), every token must match, and rows rank by their summed score —
+    /// stable, so equal scores keep the catalog's connected-first order.
     fn refilter(&mut self) {
         let query = self.search.value().to_string();
         let query_changed = query != self.last_query;
@@ -590,8 +548,8 @@ impl McpView {
     }
 }
 
-/// One inline menu row with a THEMED trailing cell (the `menu_row` layout
-/// with the TS `statusText` colors: success/warning/error/muted).
+/// One inline menu row with a THEMED trailing cell (the `menu_row` layout with the TS `statusText`
+/// colors).
 fn trailing_menu_row(
     theme: &Theme,
     width: usize,
@@ -600,11 +558,9 @@ fn trailing_menu_row(
     selected: bool,
 ) -> Line {
     let inner_width = width.saturating_sub(2).max(1);
-    // TS `getInlineTrailing`: the trailing cluster lives on a budget of
-    // the inner width minus five — segments reduce from the front until
-    // the cluster fits, then the joined text truncates with the
-    // ellipsis, so a narrow row keeps a SHORTENED status instead of
-    // losing it to the row's right-edge truncation.
+    // TS `getInlineTrailing`: the trailing cluster lives on a budget of the inner width minus five
+    // — segments reduce from the front until the cluster fits, then the joined text truncates with
+    // the ellipsis, so a narrow row keeps a SHORTENED status instead of losing it.
     let budget = inner_width.saturating_sub(5).max(1);
     let mut reduced: Vec<&(ThemeColor, &str)> = trailing
         .iter()
@@ -678,10 +634,8 @@ fn trailing_menu_row(
     row
 }
 
-/// The trailing key hint (TS `ServiceCatalogPickerComponent.render`, the
-/// shortcuts row): navigate · Enter <action> · close — the action
-/// segment appears only when a row is selected (TS renders no `Enter
-/// select` filler).
+/// The trailing key hint (TS the shortcuts row): navigate · Enter <action> · close — the action
+/// segment appears only when a row is selected (TS renders no `Enter select` filler).
 fn hint_line(theme: &Theme, width: usize, kb: &KeybindingsManager, action: Option<&str>) -> Line {
     let select_key = kb
         .first_key("tui.select.confirm")

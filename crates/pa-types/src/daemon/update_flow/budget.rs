@@ -1,42 +1,38 @@
-//! The update flow's timeout budget (spec §9): the watchdog table, its
-//! defaults, and the `PRIME_AGENT_UPDATE_<NAME>_MS` overrides that let CI
-//! run the whole FSM in seconds.
+//! The update flow's timeout budget (spec §9): the watchdog table, its defaults, and the
+//! `PRIME_AGENT_UPDATE_<NAME>_MS` overrides that let CI run the whole FSM in seconds.
 
 /// Prefix of every update-flow timeout override variable.
 pub const UPDATE_ENV_PREFIX: &str = "PRIME_AGENT_UPDATE_";
 
-/// Every watchdog budget of the update flow (spec §9). Each field names the
-/// state it guards; on expiry the coordinator/supervisor takes the
-/// transition listed there (`Aborted`, `Rollback`, or `Failed` — never a
-/// SIGKILL of a session mid-run: invariant I3).
+/// Every watchdog budget of the update flow (spec §9). Each field names the state it guards; on
+/// expiry the coordinator/supervisor takes the transition listed there (`Aborted`, `Rollback`, or
+/// `Failed` - never a SIGKILL mid-run: invariant I3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UpdateTimeoutBudget {
-    /// `Downloading`: network + checksum budget (300 s, 3 attempts).
+    /// `Downloading`: network + checksum budget.
     pub download_ms: u64,
     /// Download attempts before `Aborted`.
     pub download_attempts: u32,
-    /// `Staged -> Preparing`: prepare RPC timeout (10 s; retried once).
+    /// `Staged -> Preparing`: prepare RPC timeout (retried once).
     pub prepare_rpc_ms: u64,
-    /// `Preparing`: the old supervisor's hard prepare deadline
-    /// (90 s — TS `UPDATE_RESTART_PREPARE_TIMEOUT_MS` parity).
+    /// `Preparing`: the old supervisor's hard prepare deadline (TS
+    /// `UPDATE_RESTART_PREPARE_TIMEOUT_MS` parity).
     pub prepare_ms: u64,
-    /// `Prepared`: durable self-expiry window recorded in `marker.json` (45 s).
+    /// `Prepared`: durable self-expiry window recorded in `marker.json`.
     pub prepared_expiry_ms: u64,
-    /// `Stopping`: graceful stop budget per worker (30 s).
+    /// `Stopping`: graceful stop budget per worker.
     pub worker_stop_ms: u64,
-    /// Extension granted while a worker has an acked flush in progress
-    /// (+30 s).
+    /// Extension granted while a worker has an acked flush in progress.
     pub worker_stop_extension_ms: u64,
-    /// `Stopped`: fence-free liveness wait for the predecessor to exit
-    /// (pid + start-id poll, 30 s).
+    /// `Stopped`: fence-free liveness wait for the predecessor to exit (pid + start-id poll).
     pub predecessor_exit_ms: u64,
-    /// `Activating`: symlink swap + validation probes (20 s).
+    /// `Activating`: symlink swap + validation probes.
     pub activate_ms: u64,
-    /// `Booting`: supervisor hello (bind + `daemon_hello`) (45 s).
+    /// `Booting`: supervisor hello (bind + `daemon_hello`).
     pub boot_ms: u64,
-    /// `Restoring`: restore RPC per session (60 s).
+    /// `Restoring`: restore RPC per session.
     pub restore_per_session_ms: u64,
-    /// `Restoring`: overall restore budget (300 s).
+    /// `Restoring`: overall restore budget.
     pub restore_overall_ms: u64,
 }
 
@@ -60,19 +56,17 @@ impl Default for UpdateTimeoutBudget {
 }
 
 impl UpdateTimeoutBudget {
-    /// The budget with `PRIME_AGENT_UPDATE_<NAME>_MS` (`_ATTEMPTS` for the
-    /// download retry count) overrides from the process environment applied.
-    /// An unparsable override falls back to the default: an override is test
+    /// The budget with `PRIME_AGENT_UPDATE_<NAME>_MS` overrides (`_ATTEMPTS` for the download retry
+    /// count) applied. An unparsable override falls back to the default: an override is test
     /// plumbing, and a typo must never wedge the FSM behind a huge budget.
     #[must_use]
     pub fn from_env() -> Self {
         Self::from_overrides(|key| std::env::var(key).ok())
     }
 
-    /// The budget with overrides from an arbitrary lookup (env in
-    /// production, a map in tests). Names are the bare `NAME` parts
-    /// (`DOWNLOAD_MS`, `PREPARE_MS`, ...) resolved against
-    /// [`UPDATE_ENV_PREFIX`].
+    /// The budget with overrides from an arbitrary lookup (env in production, a map in tests);
+    /// names
+    /// are the bare `NAME` parts resolved against [`UPDATE_ENV_PREFIX`].
     pub fn from_overrides(lookup: impl Fn(&str) -> Option<String>) -> Self {
         let mut budget = Self::default();
         let full = |name: &str| format!("{UPDATE_ENV_PREFIX}{name}");
@@ -102,8 +96,8 @@ impl UpdateTimeoutBudget {
     }
 }
 
-/// Apply one numeric override: `lookup(name)` parsed, or the current value.
-/// Garbage (unparsable) overrides keep the default.
+/// Apply one numeric override: `lookup(name)` parsed, or the current value
+/// (garbage keeps the default).
 fn override_value<T: std::str::FromStr>(
     lookup: &impl Fn(&str) -> Option<String>,
     name: &str,

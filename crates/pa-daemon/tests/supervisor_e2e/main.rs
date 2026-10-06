@@ -1,23 +1,17 @@
 //! End-to-end supervisor tests against the real `pa-daemon` binary: spawn the
 //! supervisor on a temp socket, drive it with a JSONL socket client, verify
 //! session lifecycle and streamed events with the scripted engine.
-// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
-// the full rationale).
-// Stack-resident futures by design on the daemon's hot paths; boxing the
-// call sites for a lint tick is a perf regression with zero correctness gain.
+// Stack-resident futures by design on the daemon's hot paths.
 #![allow(clippy::large_futures)]
-// 64-bit-only targets; the narrowing casts sit at OS boundaries
-// (pid/fd/time/size) where the values are bounded by the kernel - the
-// dead-guard expect()s would add panic paths where silent wrap was
-// deliberate.
+// Narrowing casts sit at OS boundaries (pid/fd/time/size) where the kernel
+// bounds the values.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// The fn-length threshold is a style gate, not correctness; the structure
-// campaign owns the god-fn splits as a follow-up.
+// Style gate only, not correctness.
 #![allow(clippy::too_many_lines)]
 // API-shape opinions, not defects; the surfaces are deliberate.
 #![allow(
@@ -71,9 +65,8 @@ fn spawn_daemon(socket: &std::path::Path, agent_dir: &std::path::Path) -> Daemon
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         // A supervisor killed at teardown must not leak its session workers
-        // into later test binaries: the worker's supervisor-lost exit (TS
-        // `exitIfSupervisorOrphanedForTooLong`) runs on this short window
-        // instead of the 5-minute default.
+        // into later test binaries: the worker's supervisor-lost exit runs
+        // on this short window instead of the 5-minute default.
         .env(
             pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
             "15000",
@@ -159,7 +152,6 @@ impl Client {
         }
     }
 
-    /// Read lines until one answers the given command id.
     fn read_response(&mut self, id: &str) -> serde_json::Value {
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
@@ -193,9 +185,6 @@ impl Client {
         }
     }
 
-    /// The first buffered-or-live outbound line of `line_type`. Buffered
-    /// lines of other types stay buffered; live lines of other types are
-    /// skipped, like a filtering read loop.
     fn next_line_of_type(
         &mut self,
         lines: &mut std::collections::VecDeque<serde_json::Value>,
@@ -214,7 +203,6 @@ impl Client {
         }
     }
 
-    /// The first buffered-or-live `session_event` of `event_type`.
     fn take_session_event(
         &mut self,
         lines: &mut std::collections::VecDeque<serde_json::Value>,

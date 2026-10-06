@@ -1,13 +1,7 @@
-//! Pacing for the supervisor's background recovery work.
-//!
-//! The boot recovery (descriptor adoption, then the roster restore pass)
-//! runs on background tasks so serving never waits for it. But
-//! "background" must not mean "unbounded": a sessions dir with hundreds
-//! of persisted descriptors must not fan out one worker relaunch (a full
-//! process spawn plus create replay) per descriptor at once — the spawn
-//! storm starves the control plane (new client hellos, `list`, routed
-//! commands) for the whole pass. This module bounds that fan-out with a
-//! small fixed cap while keeping every job off the serving path.
+//! Pacing for the supervisor's background recovery work: the boot
+//! recovery runs on background tasks so serving never waits, but a
+//! huge sessions dir must not fan out one relaunch per descriptor at
+//! once — this module bounds that fan-out.
 
 use futures::StreamExt;
 
@@ -17,13 +11,8 @@ use futures::StreamExt;
 pub(crate) const ADOPTION_CONCURRENCY: usize = 4;
 
 /// Run background jobs with bounded concurrency: at most `limit` tasks
-/// alive at once, the next job spawned only when one finishes (a huge
-/// descriptor directory must not materialize a task and a `JoinHandle`
-/// per job before the cap ever applies). The pass stays fully
-/// concurrent with the accept loop and control-plane commands; only the
-/// jobs' own fan-out is bounded. Returns when every job has finished
-/// (a panicked job settles with its `JoinError`, like the previous
-/// unbounded fan-out, and the freed slot spawns the next job).
+/// alive at once, the next spawned only when one finishes. Returns when
+/// every job has finished (a panicked job settles with its `JoinError`).
 pub(crate) async fn run_bounded<F, Fut>(jobs: Vec<F>, limit: usize)
 where
     F: FnOnce() -> Fut + Send + 'static,

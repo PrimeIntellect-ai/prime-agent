@@ -1,6 +1,5 @@
-//! The render surface (moved with its concern): the per-surface chrome,
-//! the progress block, the URL block with the OSC 8 wrap, the paste
-//! field, the team picker rows, and the auth-actions row the provider
+//! The render surface: the per-surface chrome, the progress block, the URL block with the
+//! OSC 8 wrap, the paste field, the team picker rows, and the auth-actions row the provider
 //! selector's API-key prompt reuses.
 
 use super::{
@@ -12,21 +11,12 @@ use super::{
 };
 
 impl AuthPanel {
-    /// The panel's rendered rows (TS `MenuPanel`'s per-surface chrome over
-    /// the `LoginDialogComponent` content: the session's dock opens with
-    /// the borderMuted rule and the muted one-space title, the onboarding
-    /// block mounts the content chrome-less; the content is the blank
-    /// `startContent` row, the progress block, the URL block, the paste
-    /// field, and the auth-actions row last — no bottom rule on either
-    /// surface).
+    /// The panel's rendered rows: the session's dock opens with the rule and the muted one-space
+    /// title; the content is the blank `startContent` row, the progress block, the URL block,
+    /// the paste field, and the auth-actions row last.
     pub fn render(&mut self, theme: &Theme, width: usize, kb: &KeybindingsManager) -> Vec<Line> {
         let width = width.max(1);
         let mut lines: Vec<Line> = Vec::new();
-        // TS `MenuPanel` inline's per-surface chrome: the session dock
-        // opens with the borderMuted rule and the muted one-space title
-        // (TS `loginDialogOptions`'s non-onboarding shape); the
-        // onboarding block mounts the panel chrome-less (`topRule:
-        // false, hideTitle: true` — the splash renders the heading).
         if self.surface == PanelSurface::Session {
             lines.push(vec![
                 theme.fg_span(ThemeColor::BorderMuted, "\u{2500}".repeat(width))
@@ -36,10 +26,8 @@ impl AuthPanel {
                 lines.push(content_row(theme, width, ThemeColor::Muted, subtitle));
             }
         }
-        // The team picker is TS `PrimeTeamSelectorComponent` — its own
-        // panel: the rule, the title, the subtitle, the bordered field,
-        // the rows (no leading content blank, no auth-actions row, no nav
-        // hint).
+        // The team picker is its own panel: the rule, the title, the subtitle, the bordered
+        // field, the rows (no leading content blank, no auth-actions row, no nav hint).
         if let PanelInput::Teams { picker, .. } = &mut self.input {
             lines.append(&mut search_field_lines(
                 theme,
@@ -86,14 +74,12 @@ impl AuthPanel {
             return lines;
         }
         if !self.content_open() {
-            // TS renders the empty dialog as zero rows: only the
-            // surface's chrome (nothing, on the onboarding block) shows.
+            // The empty dialog renders zero rows: only the surface's chrome shows.
             return lines;
         }
-        // TS `startContent`'s Spacer(1): the content's leading blank row.
+        // The content's leading blank row (`startContent`'s Spacer(1)).
         lines.push(Vec::new());
-        // TS `showProgress`'s empty-content arm: the section title rides
-        // the first progress line (text colour, TS `addSectionTitle`).
+        // The section title rides the first progress line (text colour).
         if self.progress_open {
             lines.push(content_row(
                 theme,
@@ -106,19 +92,13 @@ impl AuthPanel {
             lines.push(content_row(theme, width, ThemeColor::Muted, message));
         }
         if let Some(url) = &self.auth_url {
-            // The URL and the instructions are provider-supplied: control
-            // characters can never execute terminal control operations
-            // when rendered (the same hygiene every daemon-supplied row
-            // carries); a URL is additionally single-line, so newlines
-            // drop. TS `showAuth` renders the link in the text colour
-            // and wraps it in OSC 8 (the URL is the link's own display
-            // text) when the terminal is known to implement hyperlinks,
-            // else prints it plain.
+            // The URL and the instructions are provider-supplied: control characters can never
+            // execute terminal control operations; a URL is single-line. The link renders wrapped
+            // in OSC 8 (the URL is the display text) when the terminal implements hyperlinks.
             let safe = scrub_controls(url).replace('\n', "");
-            // The OSC 8 wrap survives truncation intact: the display text
-            // truncates to the column budget BEFORE the wrap (a long URL
-            // cut mid-sequence would leave the terminal's link region
-            // open), and the URI parameter always carries the full URL.
+            // The OSC 8 wrap survives truncation intact: the display text truncates BEFORE the
+            // wrap (a long URL cut mid-sequence would leave the link region open); the URI
+            // carries the full URL.
             let budget = width.saturating_sub(2);
             let display = if crate::width::str_width(&safe) > budget {
                 crate::width::truncate_line(&vec![Span::raw(safe.clone())], budget, "")
@@ -134,16 +114,14 @@ impl AuthPanel {
                 display
             };
             lines.push(content_row(theme, width, ThemeColor::Text, &linked));
-            // TS `addSectionSpacer`: the browser-step text reads apart
-            // from the URL.
+            // The browser-step text reads apart from the URL.
             lines.push(Vec::new());
             let instructions = self.auth_instructions.clone().map_or_else(
                 || BROWSER_DEFAULT_INSTRUCTIONS.to_string(),
                 |text| scrub_controls(&text),
             );
             if let Some(code) = verification_code(&instructions) {
-                // TS `addInstructions`' code arm: a blank row separates
-                // the sign-in link from the code below it.
+                // A blank row separates the sign-in link from the code below it.
                 lines.push(Vec::new());
                 lines.push(content_row(
                     theme,
@@ -162,11 +140,9 @@ impl AuthPanel {
                 ];
                 lines.push(crate::width::truncate_line(&bold_code, width, ""));
             } else if self.auth_instructions.is_some() {
-                // Provider instructions already describe the browser step
-                // (TS renders them in the text colour).
+                // Provider instructions already describe the browser step.
                 lines.push(content_row(theme, width, ThemeColor::Text, &instructions));
             } else {
-                // TS `addMutedText`'s default browser-step line.
                 lines.push(content_row(theme, width, ThemeColor::Muted, &instructions));
             }
         }
@@ -179,10 +155,8 @@ impl AuthPanel {
                 field,
                 ..
             } => {
-                // TS `addSectionSpacer`: the blank before the prompt
-                // rides only when content already rendered above (an
-                // empty panel's `startContent` blank already opened the
-                // body).
+                // The blank before the prompt rides only when content already rendered above
+                // (an empty panel's `startContent` blank already opened the body).
                 if !self.progress.is_empty() || self.auth_url.is_some() {
                     lines.push(Vec::new());
                 }
@@ -196,9 +170,8 @@ impl AuthPanel {
                     PasteStyle::Masked => TOKEN_PLACEHOLDER,
                 };
                 match style {
-                    // The login dialog's field is the plain prompt-bearing
-                    // field (TS `MenuSearchInput` inline + plain, no
-                    // enclosing rules).
+                    // The login dialog's field is the plain prompt-bearing field (no enclosing
+                    // rules).
                     PasteStyle::Visible => lines.push(login_field_row(
                         theme,
                         width,
@@ -207,9 +180,8 @@ impl AuthPanel {
                         true,
                         placeholder,
                     )),
-                    // A masked render never contains the secret: only the
-                    // bullet projection rides the prompt-less plain field
-                    // (TS `McpTokenPastePanelComponent`).
+                    // A masked render never contains the secret: only the bullet projection
+                    // rides the plain field.
                     PasteStyle::Masked => lines.push(search_field_plain_row(
                         theme,
                         width,
@@ -222,10 +194,8 @@ impl AuthPanel {
                 if let Some(notice) = &self.notice {
                     lines.push(content_row(theme, width, ThemeColor::Warning, notice));
                 }
-                // TS `addInputField`'s inputSpacer: the blank row between
-                // the field and the actions (the actions row rides last
-                // while the URL block shows; a paste-only panel — the MCP
-                // token surface — keeps its own hint row instead).
+                // The blank row between the field and the actions (the actions row rides last
+                // while the URL block shows; a paste-only panel keeps its own hint row).
                 if self.auth_url.is_some() {
                     lines.push(Vec::new());
                 } else {
@@ -242,10 +212,8 @@ impl AuthPanel {
             }
             PanelInput::Teams { .. } => unreachable!("the team picker returned above"),
         }
-        // TS `showWaiting`: the waiting line joins above the actions row
-        // in the accent colour — its `addSectionSpacer` blank rides only
-        // under already-rendered content (the empty arm's `startContent`
-        // blank is the panel's leading row already).
+        // The waiting line joins above the actions row in the accent colour; its blank rides
+        // only under already-rendered content.
         if let Some(waiting) = &self.waiting {
             if self.progress_open
                 || !self.progress.is_empty()
@@ -256,9 +224,8 @@ impl AuthPanel {
             }
             lines.push(content_row(theme, width, ThemeColor::Accent, waiting));
         }
-        // TS `getAuthActionsText`: the URL block's actions row rides last —
-        // the copy-key hint with the status of the last copy, the submit
-        // hint while the paste field is mounted, and the cancel hint.
+        // The URL block's actions row rides last — the copy-key hint with the copy status,
+        // the submit hint while the paste field is mounted, and the cancel hint.
         if self.auth_url.is_some() {
             lines.push(auth_actions_row(
                 theme,
@@ -272,9 +239,8 @@ impl AuthPanel {
     }
 }
 
-/// TS `isTextEntryKeybinding` over one bound key id: a binding whose
-/// final part is a single character (or `space`) with no ctrl/alt
-/// modifier is the field's text while the paste field shows.
+/// A binding whose final part is a single character (or `space`) with no ctrl/alt modifier is
+/// the field's text while the paste field shows.
 fn is_text_entry_keybinding(key: &str) -> bool {
     let parts: Vec<&str> = key.split('+').collect();
     let key_part = parts.last().copied().unwrap_or("");
@@ -282,10 +248,8 @@ fn is_text_entry_keybinding(key: &str) -> bool {
         && (key_part == "space" || key_part.chars().count() == 1)
 }
 
-/// TS `getAuthActionsText`: the key-hint row that rides the panel's last
-/// row — the submit hint while the field is visible, the copy status, the
-/// copy hint, and the cancel hint, joined by two spaces (the provider
-/// selector's API-key prompt renders the same row).
+/// The key-hint row that rides the panel's last row — the submit hint while the field is
+/// visible, the copy status, the copy hint, and the cancel hint, joined by two spaces.
 pub(crate) fn auth_actions_row(
     theme: &Theme,
     width: usize,
@@ -313,9 +277,8 @@ pub(crate) fn auth_actions_row(
         };
         parts.push(vec![theme.fg_span(tone, text.to_string())]);
     }
-    // TS `copyHint`: the copy keys (the plain text-entry keys drop out
-    // while the field is visible — a typed key is field input), the
-    // description turning to "retry" after a failed copy.
+    // The copy keys (the plain text-entry keys drop out while the field is visible — a typed
+    // key is field input), the description turning to "retry" after a failed copy.
     let configured_copy_keys = keybindings.get_keys("app.clipboard.copyLoginUrl");
     let copy_keys = if input_visible {
         configured_copy_keys
@@ -356,9 +319,8 @@ pub(crate) fn auth_actions_row(
     crate::width::truncate_line(&row, width, "")
 }
 
-/// One content row at the panel's single-column indent: `" {text}"` in
-/// `tone`, truncated to the frame width (TS `MenuPanel` inline prefixes
-/// each child row with one space).
+/// One content row at the panel's single-column indent: `" {text}"` in `tone`, truncated to
+/// the frame width.
 fn content_row(theme: &Theme, width: usize, tone: ThemeColor, text: &str) -> Line {
     crate::width::truncate_line(
         &vec![
@@ -370,9 +332,8 @@ fn content_row(theme: &Theme, width: usize, tone: ThemeColor, text: &str) -> Lin
     )
 }
 
-/// TS `keyHint`: the dim key label over the muted ` {action}` — one
-/// hint part of the auth-actions row. An unbound action is omitted: the
-/// hint never advertises a key the surface does not handle.
+/// The dim key label over the muted ` {action}` — one hint part of the auth-actions row. An
+/// unbound action is omitted: the hint never advertises a key the surface does not handle.
 fn key_hint_row(
     theme: &Theme,
     keybindings: &KeybindingsManager,
@@ -389,12 +350,10 @@ fn key_hint_row(
     ])
 }
 
-/// TS `addInstructions`' code arm (`/^(?:Code|Enter code):\s*(.+)$/i`):
-/// the verification code the browser instructions carry, rendered below
-/// the muted label. The TS `.` stops at line terminators and `$` anchors
-/// the string's end, so a multi-line `Code: ABC\nmore instructions`
-/// matches no code arm at all — the instructions render as provider
-/// text.
+/// TS `addInstructions`' code arm (`/^(?:Code|Enter code):\s*(.+)$/i`): the verification
+/// code the browser instructions carry, rendered below the muted label. The TS `.` stops at
+/// line terminators and `$` anchors the string's end, so a multi-line `Code: ABC\nmore
+/// instructions` matches no code arm at all.
 pub(super) fn verification_code(instructions: &str) -> Option<String> {
     let trimmed = instructions.trim();
     for prefix in ["Enter code:", "Code:"] {

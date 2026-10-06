@@ -1,10 +1,7 @@
-//! The HTTP transport seam for the MCP OAuth flow.
-//!
-//! The flow itself is transport-agnostic: it issues exact requests and
-//! validates exact responses, so tests inject a scripted transport (the TS
-//! suite stubs `fetch` the same way) and the product uses a `reqwest` client
-//! that never follows redirects (the TS flow passes `redirect: "error"`,
-//! so a redirected request must fail instead of silently following).
+//! The HTTP transport seam for the MCP OAuth flow: the flow is transport-agnostic, so
+//! tests inject a scripted transport and the product uses a `reqwest` client that never
+//! follows redirects (the TS flow passes `redirect: "error"` — a redirected request must
+//! fail, not silently follow).
 
 use anyhow::{Context, Result};
 
@@ -79,9 +76,7 @@ impl Default for ReqwestOAuthHttp {
 impl ReqwestOAuthHttp {
     /// # Panics
     ///
-    /// Panics when the underlying `reqwest` client cannot be built; with no
-    /// TLS configuration and redirects disabled this construction cannot
-    /// fail.
+    /// Panics when the underlying `reqwest` client cannot be built; this construction cannot fail.
     #[must_use]
     pub fn new() -> Self {
         ReqwestOAuthHttp {

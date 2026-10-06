@@ -24,7 +24,6 @@ use crate::skills::{
 /// (ordered: first entry wins, matching the TS metadata map).
 pub(crate) type SourceInfoIndex = Vec<(String, SkillSourceInfo)>;
 
-/// Build a session-facing provenance record from resolve metadata.
 fn metadata_source_info(metadata: &PathMetadata, path: &Path) -> SkillSourceInfo {
     SkillSourceInfo {
         path: path.display().to_string(),
@@ -105,7 +104,6 @@ fn map_skill_path(resource: &ResolvedResource) -> PathBuf {
     resource.path.clone()
 }
 
-/// Enabled paths of one resolved kind.
 pub(crate) fn enabled_paths(resources: &[ResolvedResource]) -> Vec<PathBuf> {
     resources
         .iter()

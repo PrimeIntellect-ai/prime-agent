@@ -1,34 +1,18 @@
-//! End-to-end verifier for the multi-steer tool-boundary batching (the
-//! product default, Kevin's spec): a long multi-tool-call turn parks
-//! several steering messages mid-run, and at the next tool-call boundary
-//! ALL of them co-deliver as ONE batched turn — one delivery
-//! `agent_start`, every steer row in lane order, ONE assistant reply
-//! addressing the whole batch — exactly like the abort path's armed
-//! batch (`abort_and_send_queued`, which stays untouched). The TS
-//! product's default (`steeringMode: "one-at-a-time"`) delivers one
-//! steer per boundary; the batched-at-the-boundary default is the
-//! deliberate divergence (Kevin 2026-09-23: "if we have many messages in
-//! the steer queue, then ALL of them should be sent after the next tool
-//! call"), with "one-at-a-time" still selectable through the same
-//! setting surface. The follow-up lane never merges into the batch: it
-//! drains behind it as its own turn.
-// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
-// the full rationale).
-// Stack-resident futures by design on the daemon's hot paths; boxing the
-// call sites for a lint tick is a perf regression with zero correctness gain.
+//! Multi-steer tool-boundary batching: parked steering messages co-deliver
+//! at the next tool-call boundary as ONE batched turn. Deliberate divergence
+//! from TS "one-at-a-time" (Kevin 2026-09-23); "one-at-a-time" stays
+//! selectable.
+// Stack-resident futures by design on the daemon's hot paths.
 #![allow(clippy::large_futures)]
-// 64-bit-only targets; the narrowing casts sit at OS boundaries
-// (pid/fd/time/size) where the values are bounded by the kernel - the
-// dead-guard expect()s would add panic paths where silent wrap was
-// deliberate.
+// Narrowing casts sit at OS boundaries (pid/fd/time/size) where the kernel
+// bounds the values.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// The fn-length threshold is a style gate, not correctness; the structure
-// campaign owns the god-fn splits as a follow-up.
+// Style gate only, not correctness.
 #![allow(clippy::too_many_lines)]
 // API-shape opinions, not defects; the surfaces are deliberate.
 #![allow(
@@ -258,8 +242,6 @@ impl Client {
     }
 }
 
-/// The delivered user rows (text) and the delivery `agent_starts` after the
-/// long turn's `agent_end`: the batch evidence.
 #[test]
 fn multi_steer_parked_mid_run_co_delivers_as_one_batched_turn() {
     let Some(_kernel) = kernel_python() else {
@@ -295,7 +277,6 @@ fn multi_steer_parked_mid_run_co_delivers_as_one_batched_turn() {
     );
     assert_eq!(attached["success"], true, "attach failed: {attached}");
 
-    // The long turn starts: its first model response runs the sleep cell.
     let started = client.send(
         "p1",
         &json!({ "type": "prompt", "activeSessionId": session_id, "message": "run the sleeps" }),
@@ -327,16 +308,14 @@ fn multi_steer_parked_mid_run_co_delivers_as_one_batched_turn() {
         );
         assert_eq!(steered["success"], true, "{id} failed: {steered}");
     }
-    // The follow-up parks behind the steering lane (never merges in).
     let follow = client.send(
         "f1",
         &json!({ "type": "follow_up", "activeSessionId": session_id, "message": "follow up last" }),
     );
     assert_eq!(follow["success"], true, "follow_up failed: {follow}");
 
-    // Drain until the wire is quiet AND the follow-up row landed (the
-    // follow-up lane delivers behind the steering lane, so its row plus a
-    // quiet wire means the queue fully drained — true under either
+    // Drain until the wire is quiet AND the follow-up row landed: its row
+    // plus a quiet wire means the queue fully drained (true under either
     // delivery shape).
     let settled = Instant::now() + Duration::from_mins(3);
     loop {
@@ -355,9 +334,8 @@ fn multi_steer_parked_mid_run_co_delivers_as_one_batched_turn() {
     }
     client.drain_events(Duration::from_secs(2));
 
-    // The tool boundary ended the long turn (the queued steer owns the
-    // stop hook) and the parked prefix delivered: the delivery window is
-    // everything after the long turn's first agent_end.
+    // The delivery window is everything after the long turn's first
+    // `agent_end`.
     let types = event_types(&client.events);
     let first_agent_end = types
         .iter()
@@ -365,8 +343,6 @@ fn multi_steer_parked_mid_run_co_delivers_as_one_batched_turn() {
         .expect("the long turn settled");
     let delivery = &types[first_agent_end + 1..];
 
-    // THE SPEC: one delivery agent_start for the whole batch (not one
-    // per steer — the drip-feed), then the follow-up's own turn.
     let agent_starts: usize = delivery
         .iter()
         .filter(|t| *t == &"agent_start".to_string())
@@ -376,9 +352,6 @@ fn multi_steer_parked_mid_run_co_delivers_as_one_batched_turn() {
         "the steer batch runs as ONE turn, the follow-up as its own: {delivery:?}"
     );
 
-    // The three steers co-delivered as consecutive user rows of the one
-    // batched turn, followed by ONE assistant reply addressing the batch
-    // — then the follow-up row and its own reply.
     let texts = event_texts(&client.events);
     let steer_one = texts
         .iter()
@@ -424,8 +397,6 @@ fn event_types(events: &[Value]) -> Vec<String> {
         .collect()
 }
 
-/// The (role, text) of every `message_end` row, in wire order — the
-/// delivered-message trace (user rows and assistant replies).
 fn event_rows(events: &[Value]) -> Vec<(String, String)> {
     events
         .iter()
@@ -447,8 +418,8 @@ fn event_rows(events: &[Value]) -> Vec<(String, String)> {
         .collect()
 }
 
-/// The flat text of every delivered user/assistant row, in wire order —
-/// the delivery trace (tool results stay out of the positional asserts).
+/// The flat text of every delivered user/assistant row; tool results stay
+/// out of the positional asserts.
 fn event_texts(events: &[Value]) -> Vec<String> {
     event_rows(events)
         .into_iter()

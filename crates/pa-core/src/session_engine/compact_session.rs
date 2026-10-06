@@ -13,12 +13,8 @@ use super::compaction_exec::{
 use super::compaction_utils;
 use crate::session::manager::SessionManager;
 
-// The summarization math (the two summary calls' completion budgets, the
-// chars/4 request estimate, and the exact-request window estimator the
-// auxiliary-model routing consults) moved to the child module; the module
-// bindings above keep the child's `super::compaction_exec::` and
-// `super::compaction_utils::` path literals resolving unchanged, and the
-// re-exports keep the facade and `branch_summarization` caller paths stable.
+// The bindings above re-anchor the child's `super::compaction_exec::` and
+// `super::compaction_utils::` paths.
 mod summarization;
 pub(crate) use summarization::summarizer_request_tokens;
 use summarization::{
@@ -26,71 +22,35 @@ use summarization::{
     turn_prefix_summary_completion_budget,
 };
 
-// The recent-state-anchor selection (the newest retained assistant text
-// the history summary anchors on, with its tail-truncation bound) moved to
-// the child module; the pub(super) bump serves its cross-module caller
-// (prepare_compaction).
 mod recent_state_anchor;
 
-// The preparation (the skip guards, the prior-compaction boundary and
-// previous-summary anchors, the cut resolution, and the session-cut test
-// seam) moved to the child module; the pub use re-exports keep every
-// compact_session:: path stable (turn_boundary, the facade's
-// execute_compaction, and the tests glob).
+// The re-exports keep every `compact_session::` path stable.
 mod prepare;
 pub use prepare::{compute_cut, prepare_compaction, CompactSkip, CompactionPreparation};
 
-// The test mass (the in-file unit battery) moved to the child module at
-// the same tree position (compact_session::tests) and splits by test
-// family under compact_session::tests; the moved blocks keep their
-// `super` and `super::super` path literals, and these session_engine
-// module bindings re-anchor those literals one level deeper (the same
-// pattern the summarization bindings above serve for
-// `super::compaction_exec::`).
 #[cfg(test)]
 use super::{compaction, harness_digest, messages, session_message_to_loop};
 #[cfg(test)]
 mod tests;
 
-/// Options for `execute_compaction`.
 pub struct CompactOptions<'a> {
-    /// The model used for summarization.
     pub model: pa_types::ai::Model,
     /// Resolved API key (None falls back to provider env resolution).
     pub api_key: Option<String>,
     /// `/compact <instructions>` guidance.
     pub custom_instructions: Option<&'a str>,
-    /// Compaction settings (reserve/keep budgets).
     pub settings: super::compaction::CompactionSettings,
-    /// The run's abort signal (TS `AbortSignal` threaded through
-    /// `_performCompaction` -> `compact`): checked before the summarizer
-    /// request and again after it resolves, before the compaction commits —
-    /// a late abort never lands a committed compaction. `None` for
-    /// surfaces without an abort trigger (headless runs).
+    /// Checked before the summarizer request and again before the commit — a
+    /// late abort never lands a committed compaction; `None` without a trigger.
     pub abort: Option<&'a pa_agent::abort::AbortSignal>,
-    /// Harness digest inputs captured from the live session (TS
-    /// `_harnessDigest`): the snapshot rides the durable row as
-    /// `harnessDigest`. The merged harness-state disk read happens at the
-    /// commit, so state written mid-run is a fresh read. `None` for
-    /// sessions without harness state (verification harnesses building
-    /// the loop directly; the engine always wires one).
+    /// The snapshot rides the durable row as `harnessDigest`; the disk read
+    /// happens at the commit, so mid-run state is a fresh read.
     pub harness_digest: Option<super::harness_digest::HarnessDigestInputs>,
-    /// The auxiliary-model routing context (TS #2411): when present, the
-    /// summarizer wire calls resolve their model through the
-    /// `auxiliaryModel` setting with a context-window fit check, falling
-    /// back to the caller's session model. `None` keeps the session model.
+    /// When present, the summarizer calls resolve their model through the `auxiliaryModel`
+    /// setting with a context-window fit check, falling back to the session model.
     pub auxiliary: Option<&'a super::auxiliary_model::AuxiliaryModelContext>,
-    /// The live summary-delta sink ([`SummaryDeltaSink`]): the history
-    /// summarizer call streams its text deltas through it live, in
-    /// arrival order, and the run flushes the parts the live stream
-    /// cannot carry in order — a split turn's marker with its completed
-    /// turn-prefix summary (the concurrent call's raw chunks would
-    /// interleave out of final order) and the file-operations suffix —
-    /// so a client accumulating every delta holds exactly the summary
-    /// the run commits (the daemon's `compaction_summary_delta`
-    /// broadcast for the expanded TUI's live block). `None` keeps the
-    /// one-shot completion — the summarizer call itself is identical
-    /// either way; only the stream consumption differs.
+    /// The history summarizer call streams its text deltas through it live,
+    /// and the run flushes the parts the live stream cannot carry in order.
     pub summary_delta: Option<SummaryDeltaSink>,
     /// The session's semantic-edge recorder (TS `semanticCompaction` in
     /// `_performCompaction`): each summary wire call carries its own
@@ -132,14 +92,9 @@ fn message_from_entry(entry: &FileEntry) -> Option<AgentMessage> {
     }
 }
 
-/// The pre-compaction context estimate the compaction entry records as
-/// `tokensBefore` (TS `prepareCompaction`:
-/// `estimateContextTokens(buildSessionContext(pathEntries).messages)`): the
-/// last non-error/aborted assistant usage — the probe-measured context of
-/// the live provider — plus a chars/4 estimate of the messages that trail
-/// it, or a full chars/4 estimate when no valid usage exists yet. Error
-/// and aborted turns never anchor the estimate: their usage is not a real
-/// measurement, and TS `getLastAssistantUsageInfo` skips them too.
+/// The pre-compaction context estimate recorded as `tokensBefore`: the last
+/// non-error/aborted assistant usage plus a chars/4 estimate of the messages
+/// that trail it — error and aborted usage is not a real measurement.
 fn context_tokens(entries: &[FileEntry], leaf_id: Option<&str>) -> u64 {
     let context = crate::session::build_session_context(entries, leaf_id);
     estimate_context_tokens(&context.messages).tokens
@@ -154,16 +109,13 @@ pub struct CompactRun {
     /// `compaction_duration_ms`; measured here once, centrally, for every
     /// arm).
     pub duration_ms: u64,
-    /// The post-compaction `ipython_state` kernel-persistence notice, when a
-    /// kernel was running (TS `_syncKernelStateAfterCompaction`): the row is
-    /// already durable and in the live context; surfaces broadcast it as a
-    /// `message_start`/`message_end` pair.
+    /// The post-compaction `ipython_state` notice, when a kernel was running:
+    /// the row is already durable and in the live context; surfaces broadcast it.
     pub ipython_state: Option<pa_types::session::CustomMessage>,
 }
 
-/// What `/compact` did. `Skipped` carries the TS `CompactionSkippedError`
-/// message; the caller treats a skip as a silent no-op (TS
-/// `_executeQueuedSessionCommand` returns without a result row).
+/// What `/compact` did. `Skipped` carries the skip message; the caller
+/// treats a skip as a silent no-op.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CompactOutcome {
     Ran(Box<CompactRun>),
@@ -175,9 +127,8 @@ pub enum CompactOutcome {
 ///
 /// # Errors
 ///
-/// Returns an error when the compaction preparation or the summarizer call
-/// fails, or when the compaction entry cannot be persisted. A skipped
-/// compaction is a normal `Ok` outcome carrying the skip message.
+/// Returns an error when the preparation or the summarizer call fails,
+/// or the entry cannot be persisted; a skip is a normal `Ok` outcome.
 pub async fn execute_compaction(
     session: &mut SessionManager,
     options: CompactOptions<'_>,
@@ -203,9 +154,8 @@ pub async fn execute_compaction(
         .unwrap_or_default()
         .to_string();
 
-    // Messages the summarizer sees (TS prepareCompaction): the conversation
-    // since the prior compaction's retained boundary, plus the prefix of a
-    // split turn (turnPrefixMessages).
+    // The summarizer sees the conversation since the prior compaction's
+    // retained boundary, plus the prefix of a split turn.
     let history_end = if cut.is_split_turn {
         cut.turn_start_index.unwrap_or(cut.first_kept_entry_index)
     } else {
@@ -237,38 +187,21 @@ pub async fn execute_compaction(
     let prev_compaction_index = entries[..cut.first_kept_entry_index]
         .iter()
         .rposition(|entry| matches!(entry, FileEntry::Compaction { .. }));
-    // Split turns retain their suffix, but their prefix file operations
-    // still belong in the summary details (TS prepareCompaction extracts
-    // from messagesToSummarize plus turnPrefixMessages).
+    // A split turn's prefix file operations still belong in the summary
+    // details.
     let mut file_op_messages = history.clone();
     file_op_messages.extend(turn_prefix_messages.iter().cloned());
     let details: CompactionDetails =
         details_for(&file_op_messages, &entries, prev_compaction_index);
 
-    // A run aborted before the summarizer request never starts one (TS
-    // `throwIfAborted` at the top of the provider call).
+    // A run aborted before the summarizer request never starts one.
     pa_agent::abort::throw_if_aborted_signal(options.abort)?;
 
-    // TS `compact`: a split-turn cut runs TWO summarizer calls — the
-    // history summary (the normal summarizer, floor(0.8*reserve) tokens)
-    // and the turn-prefix summary (its own instruction, floor(0.5*reserve)
-    // tokens) — concurrently; a non-split cut makes the single history
-    // call. A split with no summarizable history makes no history wire
-    // call at all and stands in the literal "No prior history.". The
-    // history call carries the previous-summary update mode on both paths
-    // (TS passes the prior compaction's summary to `generateSummary`; the
-    // turn-prefix call never gets it) — a non-split cut with no new
-    // history still makes the update wire call.
-    // TS #2411 (`_resolveAuxiliaryModel`): the summary calls run with
-    // their own prompt prefix (a different system prompt, no tools), so
-    // on the session model they can never hit the session's cached
-    // prefix and re-read their whole input at peak price — route them to
-    // the configured auxiliary model when it is set, usable, and its
-    // known window fits the exact requests this run will issue; fall back
-    // to the session model otherwise (the pre-#2411 behavior). The
-    // resolution reads settings.json/models.json/auth storage (and a
-    // `!command` secret key resolves a subprocess when configured), so it
-    // runs on the blocking pool, never the async executor.
+    // A split-turn cut runs TWO summarizer calls concurrently — the history
+    // summary and the turn-prefix summary; a non-split cut makes the single
+    // history call. A split with no summarizable history stands in "No prior history.".
+    // The summary calls run with their own prompt prefix, so on the session model they
+    // can never hit the cached prefix — route them to the auxiliary model when its window fits.
     let (model, api_key, summary_headers) = match options.auxiliary {
         Some(context) => {
             let required = estimate_summary_request_tokens(
@@ -295,10 +228,7 @@ pub async fn execute_compaction(
                 })
             };
             // A JoinError (the closure panicked) degrades to the session
-            // fallback; the resolver itself never panics — every unusable
-            // selector resolves to the fallback with the warning. The
-            // fallback keeps the merged headers (the registry's single
-            // owner of the team header).
+            // fallback, which keeps the merged headers.
             let routed = join.await.unwrap_or_else(|_| {
                 super::auxiliary_model::session_fallback_with_headers(
                     context,
@@ -321,14 +251,11 @@ pub async fn execute_compaction(
         }),
     );
     let history_call = async {
-        // The stand-in applies only inside the split arm (TS
-        // `messagesToSummarize.length > 0 ? generateSummary(...) : "No
-        // prior history."` — the arm runs when a turn prefix exists); a
-        // cut without a turn prefix makes the history call below.
+        // The stand-in applies only inside the split arm; a cut without
+        // a turn prefix makes the history call below.
         if cut.is_split_turn && !turn_prefix_messages.is_empty() && history.is_empty() {
-            // The literal stand-in is the history slice the live block
-            // carries too (the flush below appends the split marker and
-            // the prefix behind it, exactly like the committed summary).
+            // The literal stand-in rides the live sink too, exactly
+            // like the committed summary.
             if let Some(sink) = options.summary_delta.as_ref() {
                 sink(NO_PRIOR_HISTORY);
             }
@@ -411,9 +338,8 @@ pub async fn execute_compaction(
         }),
     );
 
-    // The summarizer resolved while the run was aborted: the compaction is
-    // cancelled before it commits (TS `_performCompaction`'s
-    // `if (signal.aborted) throw` between the summary and the ledger).
+    // The summarizer resolved while the run was aborted: the compaction
+    // is cancelled before it commits.
     if options
         .abort
         .is_some_and(pa_agent::abort::AbortSignal::is_aborted)
@@ -421,15 +347,8 @@ pub async fn execute_compaction(
         return Err(pa_agent::abort::aborted_error());
     }
 
-    // The live block converges to the exact committed summary: the
-    // history streamed live above (its own call, in order), and the
-    // parts the live stream has not carried — the split marker with the
-    // completed turn-prefix summary (kept off the concurrent call so its
-    // chunks never interleave out of final order) and the
-    // file-operations suffix (which never flows through the summarizer)
-    // flush through the sink here, in the final summary's own order. A
-    // client accumulating every delta therefore holds precisely the text
-    // the settled `compaction_end` carries.
+    // The live block converges to the exact committed summary: the split marker
+    // with the completed turn-prefix summary and the file-operations suffix flush here.
     if let Some(sink) = options.summary_delta.as_ref() {
         let mut remainder = match &turn_prefix_slice {
             Some(prefix) => split_summary("", &prefix.summary),
@@ -443,9 +362,8 @@ pub async fn execute_compaction(
             sink(&remainder);
         }
     }
-    // Result + persistence (TS `compact`): the split join carries the
-    // turn-prefix summary behind the history summary under the TS marker,
-    // and the file-operation block rides the summary on both paths.
+    // The split join carries the turn-prefix summary behind the history
+    // summary; the file-operation block rides the summary on both paths.
     let mut summary = match &turn_prefix_slice {
         Some(prefix) => split_summary(&history_slice.summary, &prefix.summary),
         None => history_slice.summary.clone(),
@@ -464,13 +382,8 @@ pub async fn execute_compaction(
         tokens_before,
         usage: summed_usage(&slices),
     };
-    // TS `_performCompaction` passes `this._harnessDigestWithFingerprint()`
-    // into `appendCompaction`: the snapshot plus the fingerprint of the
-    // state behind it are attached mechanically at the commit and never
-    // flow through the summarizer. The harness-state read happens here,
-    // after the summarizer resolved, so harness state written during the
-    // run is a fresh read — one read feeds the digest and its
-    // fingerprint.
+    // The digest snapshot and its fingerprint attach at the commit and never flow
+    // through the summarizer; the read happens after the summarizer resolved.
     let (harness_digest, harness_state_fingerprint) = options
         .harness_digest
         .as_ref()

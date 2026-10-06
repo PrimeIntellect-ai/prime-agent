@@ -1,25 +1,19 @@
-//! The interactive loop's unit battery (moved with its concern): the
-//! shutdown-recovery constants, the headless settle gate, and the exit
-//! restore contract.
+//! The interactive loop's unit battery: the shutdown-recovery constants, the headless settle gate,
+//! and the exit restore contract.
 
 use super::*;
 use std::collections::HashSet;
 
 #[tokio::test]
 async fn headless_error_returns_never_touch_the_terminal() {
-    // A socket that never listens: the attach fails and the run
-    // returns Err. The headless harness never owned the terminal —
-    // the wrapper's restore is gated on the terminal ui mode, so a
-    // headless error return must not attempt one (the terminal-mode
-    // restore is the exit-restore e2e's error-exit scenario, driven
-    // on a real terminal).
+    // A socket that never listens: the headless harness never owned the terminal — the restore is
+    // gated on the terminal ui mode, so a headless error return must not attempt one.
     let socket =
         std::env::temp_dir().join(format!("tui-exit-restore-dead-{}.sock", std::process::id()));
     let mut opts = options(ModelSelection::default());
     opts.socket_path = socket;
-    // The attempts counter is process-global and the unwind-guard test
-    // also moves it: this reader holds the shared state lock across
-    // its whole read window.
+    // The attempts counter is process-global and the unwind-guard test also moves it: this reader
+    // holds the shared state lock across its whole read window.
     let _state = crate::exit_restore::TEST_STATE_LOCK.lock();
     let before = crate::exit_restore::RESTORE_ATTEMPTS.load(std::sync::atomic::Ordering::SeqCst);
     let result = run_interactive(
@@ -39,28 +33,25 @@ async fn headless_error_returns_never_touch_the_terminal() {
     );
 }
 
-/// TS #2458's shutdown recovery constants: the announced non-update
-/// closing waits the TS reconnect timeout (60s) on the TS fixed poll
-/// (100ms, never doubling) — not the §10.2 resume window or the
-/// hiccup loop's doubling backoff.
+/// TS #2458's shutdown recovery constants: the announced non-update closing waits the TS
+/// reconnect timeout (60s) on the TS fixed poll (100ms, never doubling) — not the §10.2
+/// resume window or the hiccup loop's doubling backoff.
 #[test]
 fn the_shutdown_recovery_uses_the_ts_window_and_poll() {
     let before = tokio::time::Instant::now();
     let state = ReconnectLoop::start_shutdown();
     let after = tokio::time::Instant::now();
     assert_eq!(state.kind, RecoveryKind::Shutdown);
-    // The window is 60s off the arming instant: the deadline sits
-    // inside [before + 60s, after + 60s] (the arming ran between the
-    // two clock reads — a single `now + 60s` bound can miss by the
-    // nanoseconds between the reads).
+    // The window is 60s off the arming instant: the deadline sits inside [before + 60s,
+    // after + 60s] (the arming ran between the two clock reads).
     assert!(
         state.deadline >= before + DAEMON_SHUTDOWN_RECONNECT_WINDOW
             && state.deadline <= after + DAEMON_SHUTDOWN_RECONNECT_WINDOW,
         "the window is TS #2458's 60s reconnect timeout"
     );
     assert_eq!(state.delay, SHUTDOWN_RECONNECT_RETRY);
-    // The first poll is the TS 100ms cadence off the same arming
-    // instant, inside the same two clock reads.
+    // The first poll is the TS 100ms cadence off the same arming instant, inside the
+    // same two clock reads.
     assert!(
         state.next_attempt >= before + SHUTDOWN_RECONNECT_RETRY
             && state.next_attempt <= after + SHUTDOWN_RECONNECT_RETRY,
@@ -76,10 +67,9 @@ fn the_shutdown_recovery_uses_the_ts_window_and_poll() {
 
 #[test]
 fn flush_rows_write_crlf_and_keep_zone_markers() {
-    // A marked row keeps its zero-width zone sequence inline (the
-    // flushed row persists into scrollback, where absolute-position
-    // marker re-emission cannot reach) and every row lands on its own
-    // line with explicit CR (raw mode maps `\n` to a bare line feed).
+    // A marked row keeps its zero-width zone sequence inline (the flushed row persists
+    // into scrollback, where absolute-position marker re-emission cannot reach) and every
+    // row lands on its own line with explicit CR (raw mode maps `\n` to a bare line feed).
     let mut marked = vec![crate::Span::raw("hello")];
     crate::osc133::mark_start(&mut marked);
     let styled = vec![crate::Span::styled(
@@ -195,8 +185,8 @@ fn resume_hint_names_a_flushed_session() {
         crate::session_ui::resume_hint_from_stats(&stats),
         Some("Resume this session with: prime-agent --resume s1".to_string())
     );
-    // An unflushed empty session and a missing session file are both
-    // unresumable (TS omits the hint for either).
+    // An unflushed empty session and a missing session file are both unresumable
+    // (TS omits the hint for either).
     assert_eq!(
         crate::session_ui::resume_hint_from_stats(&json!({
             "sessionId": "s1",
@@ -215,10 +205,8 @@ fn resume_hint_names_a_flushed_session() {
     );
 }
 
-/// The headless settle snapshot: `settled()` is exactly the old exit
-/// gate (every member clear), and each member that sticks is named in
-/// the bound's failure — the diagnostic IS the wedge family's
-/// failure name.
+/// The headless settle snapshot: `settled()` is exactly the old exit gate (every member clear), and
+/// each member that sticks is named in the bound's failure.
 #[test]
 fn the_headless_settle_names_every_stuck_member() {
     // Everything clear: settled, no blockers.

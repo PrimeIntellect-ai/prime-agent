@@ -1,11 +1,8 @@
-//! Global keybinding registry with TS DEFAULT_* defaults.
-//!
-//! Port of `packages/tui/src/keybindings.ts` + `coding-agent/src/core/keybindings.ts`.
-//! Every binding is configurable via `~/.prime/agent/keybindings.json`; the
-//! defaults below are the TS product's DEFAULT_* tables verbatim. User
-//! bindings load with the TS parse semantics (`toKeybindingsConfig` +
-//! `migrateKeybindingsConfig`): legacy names migrate, malformed values drop,
-//! and an empty array disables a binding.
+//! Global keybinding registry with TS DEFAULT_* defaults, port of
+//! `packages/tui/src/keybindings.ts` +
+//! `coding-agent/src/core/keybindings.ts`. Every binding is configurable via
+//! `~/.prime/agent/keybindings.json`; user bindings load with the TS parse semantics: legacy names
+//! migrate, malformed values drop, an empty array disables a binding.
 
 use anyhow::Result;
 use std::collections::BTreeMap;
@@ -42,18 +39,15 @@ pub use definitions::{APP_KEYBINDINGS, TUI_KEYBINDINGS};
 
 pub type KeybindingsConfig = BTreeMap<String, Vec<String>>;
 
-/// One explicit user-config conflict (TS `KeybindingConflict`): a key
-/// claimed by more than one user binding.
+/// One explicit conflict (TS `KeybindingConflict`): a key claimed by more than one user binding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeybindingConflict {
     pub key: String,
     pub keybindings: Vec<String>,
 }
 
-/// A parsed key id (TS `parseKeyId`): the modifier set plus the base key,
-/// lowercase, so matching is case- and order-insensitive exactly like
-/// `matchesKey` (a config value `Ctrl+O` matches the `ctrl+o` a key event
-/// decodes to; `ctrl+shift+down` matches the event id `shift+ctrl+down`).
+/// A parsed key id (TS `parseKeyId`): the modifier set plus the base key, lowercase, so
+/// matching is case- and order-insensitive exactly like `matchesKey`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ParsedKeyId {
     key: String,
@@ -63,9 +57,8 @@ struct ParsedKeyId {
     super_key: bool,
 }
 
-/// TS `parseKeyId`: split on `+`, the last part is the key, the rest are
-/// modifiers; `esc` and `escape` name the same key. An empty key id or
-/// trailing `+` parses to `None` (never matches).
+/// TS `parseKeyId`: split on `+`, the last part is the key, the rest are modifiers; `esc` and
+/// `escape` name the same key. An empty key id or trailing `+` parses to `None` (never matches).
 fn parse_key_id(id: &str) -> Option<ParsedKeyId> {
     let parts: Vec<&str> = id.split('+').collect();
     let raw_key = parts.last()?.trim().to_lowercase();
@@ -95,8 +88,8 @@ fn parse_key_id(id: &str) -> Option<ParsedKeyId> {
     Some(parsed)
 }
 
-/// TS `normalizeKeys`: dedupe preserving first-seen order; a single key is a
-/// one-element list. Malformed ids stay (they simply never match, like TS).
+/// TS `normalizeKeys`: dedupe preserving first-seen order; a single key is a one-element
+/// list. Malformed ids stay (they simply never match, like TS).
 fn normalize_keys(keys: &[String]) -> Vec<String> {
     let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut out = Vec::new();
@@ -178,16 +171,13 @@ fn legacy_migration(id: &str) -> Option<&'static str> {
         .map(|(_, current)| *current)
 }
 
-/// The config object as an ordered entry list (`serde_json` maps sort keys,
-/// so the TS object order — definition ids first, extras sorted after — is
-/// carried by this vector; [`write_json_object`] renders it in order).
+/// The config object as an ordered entry list (`serde_json` maps sort keys, so the TS object order
+/// — definition ids first, extras sorted after — is carried by this vector).
 pub type OrderedConfig = Vec<(String, serde_json::Value)>;
 
-/// TS `migrateKeybindingsConfig`: rename legacy ids (a legacy entry is
-/// dropped when its current name also exists) and order the object with
-/// known ids first in definition order, extras sorted after. Values are
-/// carried over unchanged (filtering happens in [`to_keybindings_config`]).
-/// Returns the migrated entries and whether any rename happened.
+/// TS `migrateKeybindingsConfig`: rename legacy ids (a legacy entry is dropped when its
+/// current name also exists) and order the object with known ids first. Values are
+/// carried over unchanged. Returns the migrated entries and whether any rename happened.
 #[must_use]
 pub fn migrate_keybindings_config(
     raw: &serde_json::Map<String, serde_json::Value>,
@@ -209,8 +199,7 @@ pub fn migrate_keybindings_config(
     (order_keybindings_config(config), migrated)
 }
 
-/// TS `orderKeybindingsConfig`: known ids first in definition order, the
-/// rest sorted.
+/// TS `orderKeybindingsConfig`: known ids first in definition order, the rest sorted.
 fn order_keybindings_config(mut config: OrderedConfig) -> OrderedConfig {
     let mut ordered: OrderedConfig = Vec::new();
     for (id, _) in TUI_KEYBINDINGS.iter().chain(APP_KEYBINDINGS.iter()) {
@@ -224,10 +213,8 @@ fn order_keybindings_config(mut config: OrderedConfig) -> OrderedConfig {
     ordered
 }
 
-/// TS `toKeybindingsConfig`: a value is a key list only when it is a string
-/// or an array whose every entry is a string (an empty array disables the
-/// binding); anything else drops. Unknown ids survive — they never
-/// resolve, but stay in the round-tripped config.
+/// TS `toKeybindingsConfig`: a value is a key list only when it is a string or an array whose every
+/// entry is a string (an empty array disables the binding); anything else drops.
 fn to_keybindings_config(value: &serde_json::Value) -> Option<Vec<String>> {
     match value {
         serde_json::Value::String(key) => Some(vec![key.clone()]),
@@ -266,9 +253,8 @@ fn load_config(path: &Path) -> KeybindingsConfig {
     bindings
 }
 
-/// Write a JSON object with the TS `JSON.stringify(config, null, 2)`
-/// formatting: two-space nesting, a trailing newline. Written by hand
-/// (not via `serde_json`) so the definition-first key ordering survives.
+/// Write a JSON object with the TS `JSON.stringify(config, null, 2)` formatting: two-space nesting,
+/// a trailing newline. Written by hand so the definition-first key ordering survives.
 fn write_json_object(path: &Path, entries: &OrderedConfig) -> Result<()> {
     let mut out = String::from("{\n");
     let count = entries.len();
@@ -276,9 +262,8 @@ fn write_json_object(path: &Path, entries: &OrderedConfig) -> Result<()> {
         out.push_str("  ");
         out.push_str(&serde_json::to_string(key)?);
         out.push_str(": ");
-        // `JSON.stringify(config, null, 2)`: a property's nested values
-        // sit two deeper than the property's own indent (key at 2, nested
-        // elements at 4, closing bracket back at 2).
+        // `JSON.stringify(config, null, 2)`: a property's nested values sit two deeper than the
+        // property's own indent (key at 2, nested elements at 4, closing bracket back at 2).
         out.push_str(&stringify_value(value, 4)?);
         if index + 1 < count {
             out.push(',');
@@ -341,15 +326,13 @@ fn stringify_value(value: &serde_json::Value, indent: usize) -> Result<String> {
 }
 
 /// TS `migrateKeybindingsConfigFile` (the startup migration in
-/// `coding-agent/src/migrations.ts`): rewrite `<agentDir>/keybindings.json`
-/// with migrated names (and the definition-first ordering) when any legacy
-/// id was found; a missing or malformed file is a no-op. Returns whether
-/// the file was rewritten.
+/// `coding-agent/src/migrations.ts`): rewrite `<agentDir>/keybindings.json` with migrated
+/// names when any legacy id was found; a missing or malformed file is a no-op. Returns
+/// whether the file was rewritten.
 ///
 /// # Errors
 ///
-/// Returns `Err` when serializing or writing the rewritten
-/// `keybindings.json` fails.
+/// Returns `Err` when serializing or writing the rewritten `keybindings.json` fails.
 pub fn migrate_keybindings_file(agent_dir: &Path) -> Result<bool> {
     let config_path = agent_dir.join("keybindings.json");
     let Some(raw) = load_raw_config(&config_path) else {
@@ -403,8 +386,8 @@ impl KeybindingsManager {
     }
 
     /// TS `KeybindingsManager.create(agentDir)`: the user bindings from
-    /// `<agentDir>/keybindings.json` (legacy names migrated, malformed
-    /// values dropped), remembered for [`reload`](Self::reload).
+    /// `<agentDir>/keybindings.json` (legacy names migrated, malformed values dropped),
+    /// remembered for [`reload`](Self::reload).
     #[must_use]
     pub fn create(agent_dir: &Path) -> Self {
         let config_path = agent_dir.join("keybindings.json");
@@ -431,21 +414,18 @@ impl KeybindingsManager {
         self.rebuild();
     }
 
-    /// Mirrors TS `KeybindingsManager.rebuild()`: user bindings replace a
-    /// definition's keys outright; within the same default scope, a key a
-    /// user binding adds (outside its own defaults) is freed from the
-    /// other defaults in that scope; keys explicitly claimed by more than
-    /// one user binding are reported as conflicts.
+    /// Mirrors TS `KeybindingsManager.rebuild()`: user bindings replace a definition's keys
+    /// outright; within the same default scope, a key a user binding adds is freed from the other
+    /// defaults in that scope; keys claimed by more than one user binding are reported as
+    /// conflicts.
     fn rebuild(&mut self) {
-        // Explicit claims: every key each known user binding names; added
-        // claims: the ones outside that binding's own defaults (these free
-        // same-scope defaults of other bindings).
+        // Explicit claims: every key each known user binding names; added claims: the ones outside
+        // that binding's own defaults (these free same-scope defaults of other bindings).
         let mut explicit_claims: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let mut added_claims: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for (id, keys) in &self.user_bindings {
             let Some(definition) = self.definitions.get(id.as_str()) else {
-                // Unknown ids never resolve; they stay in the config for
-                // the round-trip.
+                // Unknown ids never resolve; they stay in the config for the round-trip.
                 continue;
             };
             for key in normalize_keys(keys) {
@@ -512,11 +492,10 @@ impl KeybindingsManager {
         self.resolved.get(keybinding).cloned().unwrap_or_default()
     }
 
-    /// Whether `data` is the macOS option-composed form of one of the id's
-    /// bound keys (TS `matches(keyData, id, { optionComposed: true })`:
-    /// Option+S types `ß` on layouts without option-as-meta, and the
-    /// composed character must toggle like Alt+S; only an alt-only
-    /// binding composes).
+    /// Whether `data` is the macOS option-composed form of one of the id's bound keys (TS
+    /// `matches(keyData, id, { optionComposed: true })`: Option+S types `ß` on layouts without
+    /// option-as-meta, and the composed character must toggle like Alt+S; only an alt-only binding
+    /// composes).
     #[must_use]
     pub fn matches_option_composed(&self, data: &str, keybinding: &str) -> bool {
         self.resolved.get(keybinding).is_some_and(|keys| {
@@ -539,8 +518,8 @@ impl KeybindingsManager {
         self.get_keys(keybinding).into_iter().next()
     }
 
-    /// TS `keyText(keybinding)`: every key of the binding formatted and
-    /// joined with "/" ("Esc/Ctrl+C"); an unbound id renders empty.
+    /// TS `keyText(keybinding)`: every key of the binding formatted and joined with "/"
+    /// ("Esc/Ctrl+C"); an unbound id renders empty.
     #[must_use]
     pub fn key_text(&self, keybinding: &str) -> String {
         format_key_text(&self.get_keys(keybinding).join("/"))
@@ -551,22 +530,21 @@ impl KeybindingsManager {
         self.definitions.get(keybinding)
     }
 
-    /// The raw user bindings (TS `getUserBindings`): migrated ids with the
-    /// well-formed key lists, unknown ids included.
+    /// The raw user bindings (TS `getUserBindings`): migrated ids with the well-formed
+    /// key lists, unknown ids included.
     #[must_use]
     pub fn get_user_bindings(&self) -> &KeybindingsConfig {
         &self.user_bindings
     }
 
-    /// TS `getConflicts`: keys explicitly claimed by more than one user
-    /// binding.
+    /// TS `getConflicts`: keys explicitly claimed by more than one user binding.
     #[must_use]
     pub fn get_conflicts(&self) -> &[KeybindingConflict] {
         &self.conflicts
     }
 
-    /// TS `getEffectiveConfig` / `getResolvedBindings`: the effective key
-    /// list per definition id (used by shortcut conflict rules).
+    /// TS `getEffectiveConfig` / `getResolvedBindings`: the effective key list
+    /// per definition id (used by shortcut conflict rules).
     #[must_use]
     pub fn get_effective_config(&self) -> BTreeMap<String, Vec<String>> {
         self.resolved.clone()
@@ -590,10 +568,8 @@ impl Default for KeybindingsManager {
     }
 }
 
-/// The platform flavor used to label modifier keys in hints (TS
-/// `formatKeyPart`'s `platform` parameter, `process.platform` at the call
-/// sites): macOS terminals send the literal Control key, so `alt` is
-/// labeled `Option` and control is never relabeled as Cmd.
+/// The platform flavor used to label modifier keys in hints (TS `formatKeyPart`'s `platform`
+/// parameter): macOS labels `alt` as `Option` and never relabels control as Cmd.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum LabelPlatform {
     /// `process.platform === "darwin"`: `alt` renders as `Option`.
@@ -617,8 +593,8 @@ impl LabelPlatform {
     }
 }
 
-/// Format a key id for display in hints ("ctrl+o" -> "Ctrl+O", arrows to
-/// glyphs; `alt` renders as `Option` on macOS, `Alt` elsewhere).
+/// Format a key id for display in hints ("ctrl+o" -> "Ctrl+O", arrows to glyphs;
+/// `alt` renders as `Option` on macOS, `Alt` elsewhere).
 #[must_use]
 pub fn format_key_text(key: &str) -> String {
     format_key_text_on(key, LabelPlatform::host())

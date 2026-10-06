@@ -1,10 +1,7 @@
-// Test-only: the exact-float `assert_eq!`s assert parsed fixture values
-// (the byte-identity contract of JSON-written prices); an epsilon compare
-// would weaken the assertion, not fix a lint.
+// The exact-float `assert_eq!`s assert parsed fixture values (byte-identity
+// of JSON-written prices); an epsilon compare would weaken the assertion.
 #![allow(clippy::float_cmp)]
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28) - this target's own
-// crate root: the same bounded-boundary disposition as src/lib.rs
-// (large_futures/too_many_lines/the cast family; details there).
+// Pedantic-gate dispositions as src/lib.rs (large_futures/too_many_lines/casts).
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -14,12 +11,9 @@
     clippy::cast_precision_loss
 )]
 
-//! Verifiers for the live catalog wiring (plan pieces 2-3): the
-//! credentialed refresh lands the account's private `internal/*` models,
-//! the catalog-repo (layer A) entries, and live pricing in the served
-//! registry; without credentials the compiled fallback serves unchanged.
-//! Both fetch layers run against a scripted loopback server through the
-//! `with_urls` / `install_catalog` seams — nothing leaves localhost.
+//! Verifiers for the live catalog wiring: the credentialed refresh lands the account's private
+//! `internal/*` models, the catalog-repo (layer A) entries, and live pricing; without credentials
+//! the compiled fallback serves unchanged. Everything runs against a scripted loopback server.
 
 mod common;
 
@@ -34,19 +28,15 @@ use pa_core::models::{
 use pa_models::ModelCatalog;
 use serde_json::{json, Value};
 
-/// A catalog-repo entry the compiled fallback provably lacks (asserted as a
-/// premise: the test fails loudly if the id ever lands in the compiled
-/// catalog). Rides the compiled openai transport tuple — the pinning
+/// A catalog-repo entry the compiled fallback provably lacks (asserted as
+/// a premise). Rides the compiled openai transport tuple — the pinning
 /// invariant keeps fetched entries to compiled transports.
 const LAYER_A_PROBE_ID: &str = "gpt-5.7-probe";
 
-/// The hermetic auth storage: one Prime Inference key+team, with no
-/// ambient environment credential source (an env `PRIME_API_KEY` would
-/// otherwise win over the stored credential — environment before stored,
-/// by design — and the test would resolve a different, team-less scope).
-/// Write the file auth.json the supervisor's credential read uses: one
-/// Prime Inference key+team (the warm-up and the polled registry resolve
-/// through the same file auth, so their scopes match).
+/// The hermetic auth storage: one Prime Inference key+team, with no ambient environment credential
+/// source (an env `PRIME_API_KEY` would otherwise win over the stored credential). Write the file
+/// auth.json the supervisor's credential read uses: one Prime Inference key+team (the warm-up and
+/// the polled registry resolve through the same file auth).
 fn write_prime_auth(agent_dir: &Path, api_key: &str, team_id: &str) {
     std::fs::write(
         agent_dir.join("auth.json"),
@@ -99,10 +89,8 @@ fn install_mock_catalog(agent_dir: &Path, bundled_dir: &Path, server: &common::M
     install_catalog(&agent_dir.join("models.json"), Arc::new(catalog));
 }
 
-/// A layer-A (provider catalog) entry riding a compiled transport tuple:
-/// the pinning invariant keeps the fetched catalog to transports this
-/// client compiled in, so a new model id must ride an existing
-/// `(provider, api, baseUrl)` tuple.
+/// A layer-A (provider catalog) entry riding a compiled transport tuple
+/// (the pinning invariant keeps fetched entries to compiled transports).
 fn layer_a_entry(id: &str, input: f64) -> Value {
     let compiled = pa_models::transports::compiled_models();
     assert!(
@@ -124,8 +112,7 @@ fn layer_a_entry(id: &str, input: f64) -> Value {
 }
 
 /// The Prime Inference `/models` payload: every compiled entry repriced
-/// (`repriced_id` carries the marker price — the $0-pricing bug is that
-/// production served unauthenticated defaults), a live-only public entry,
+/// (`repriced_id` carries the marker price), a live-only public entry,
 /// and the private `internal/glm-5.3-fast` the compiled fallback lacks.
 fn pi_payload(repriced_id: &str, repriced_input: f64) -> String {
     let compiled = pa_models::transports::prime_inference_offline_entries();
@@ -148,7 +135,6 @@ fn pi_payload(repriced_id: &str, repriced_input: f64) -> String {
             })
         })
         .collect();
-    // A public live-only entry (no compiled template): full specs keep it.
     data.push(json!({
         "id": "anthropic/live-only-model",
         "display_name": "Live Only Model",
@@ -159,8 +145,6 @@ fn pi_payload(repriced_id: &str, repriced_input: f64) -> String {
             "modalities": { "input": ["text"], "output": ["text"] },
         },
     }));
-    // The private entitlement: absent from the compiled fallback, visible
-    // only through the credentialed private-authorization lane.
     data.push(json!({
         "id": "internal/glm-5.3-fast",
         "display_name": "GLM 5.3 Fast (internal)",
@@ -174,11 +158,8 @@ fn pi_payload(repriced_id: &str, repriced_input: f64) -> String {
     json!({ "data": data }).to_string()
 }
 
-/// Piece 5 (a): with credentials present, the worker-boot refresh lands
-/// the credentialed layers — live pricing, the private `internal/*`
-/// entitlement, and the layer-A catalog-repo entry the compiled fallback
-/// lacks — and the credentialed fetches carry the Bearer + team headers
-/// (the $0-pricing bug: production fetched without them).
+/// The credentialed fetches carry the Bearer + team headers (the
+/// $0-pricing bug: production fetched without them).
 #[tokio::test]
 async fn refresh_lands_live_pricing_private_models_and_layer_a_entries() {
     let agent_dir = tempfile::tempdir().unwrap();
@@ -208,13 +189,11 @@ async fn refresh_lands_live_pricing_private_models_and_layer_a_entries() {
     registry.refresh_available_models().await;
 
     let all = registry.get_all();
-    // Layer A: the catalog-repo entry the compiled fallback lacks.
     let gpt = all
         .iter()
         .find(|model| model.id == LAYER_A_PROBE_ID && model.provider == "openai")
         .expect("layer-A entry served");
     assert!((gpt.cost.input.as_f64() - 1.25).abs() < 1e-9);
-    // Layer B: live pricing replaces the compiled template.
     let glm = all
         .iter()
         .find(|model| model.id == "z-ai/glm-5.3" && model.provider == "prime-inference")
@@ -252,10 +231,6 @@ async fn refresh_lands_live_pricing_private_models_and_layer_a_entries() {
     }
 }
 
-/// Piece 3's supervisor entry point: the forced, fire-and-forget Startup
-/// refresh warms the process-shared catalog, and every registry the
-/// process constructs afterwards serves the refreshed chain (the
-/// supervisor keeps the disk caches warm for the workers it spawns).
 #[tokio::test]
 async fn startup_refresh_warms_the_process_shared_catalog() {
     let agent_dir = tempfile::tempdir().unwrap();
@@ -298,8 +273,6 @@ async fn startup_refresh_warms_the_process_shared_catalog() {
     }
 }
 
-/// Piece 5 (b): without credentials (and with every fetch failing), the
-/// compiled fallback serves unchanged — the no-cold-start chain.
 #[tokio::test]
 async fn without_credentials_the_compiled_fallback_serves_unchanged() {
     let agent_dir = tempfile::tempdir().unwrap();
@@ -325,12 +298,9 @@ async fn without_credentials_the_compiled_fallback_serves_unchanged() {
         .iter()
         .find(|model| model.id == "z-ai/glm-5.3" && model.provider == "prime-inference")
         .expect("compiled fallback model");
-    // Compiled pricing, not live: no credentialed fetch ever ran.
     assert_eq!(glm.cost.input.as_f64(), compiled_glm.cost.input.as_f64());
-    // No layer-A entry (the fetch failed), no private entitlement.
     assert!(!all.iter().any(|model| model.id == LAYER_A_PROBE_ID));
     assert!(!all.iter().any(|model| model.id == "internal/glm-5.3-fast"));
-    // The bundled private table is present but auth-gated out.
     assert!(all.iter().any(|model| model.id == "internal/glm-5.2-fast"));
     assert!(!registry
         .get_available()
@@ -338,9 +308,6 @@ async fn without_credentials_the_compiled_fallback_serves_unchanged() {
         .any(|model| model.id == "internal/glm-5.2-fast"));
 }
 
-/// Piece 5 (d): a catalog-repo entry absent from the compiled fallback
-/// appears after the layer-A fetch (unauthenticated: no credentials
-/// needed for the provider catalog).
 #[tokio::test]
 async fn layer_a_fetch_adds_entries_the_compiled_fallback_lacks() {
     let agent_dir = tempfile::tempdir().unwrap();
@@ -369,19 +336,15 @@ async fn layer_a_fetch_adds_entries_the_compiled_fallback_lacks() {
         .expect("layer-A entry appears after the fetch");
     assert_eq!(gpt.context_window, 400_000);
     assert!((gpt.cost.input.as_f64() - 1.25).abs() < 1e-9);
-    // The compiled Prime Inference section still serves beside it.
     assert!(all
         .iter()
         .any(|model| model.provider == "prime-inference" && model.id == "z-ai/glm-5.3"));
 }
 
-/// Piece 5 (e): the picker regression — the fetched catalog-repo entry
-/// shows in the picker's available list (`get_available`, the same list
-/// the interactive model picker renders and `get_model_catalog`'s
-/// configuredProviders derives from) once its provider's auth is
-/// configured in models.json; without the provider auth the entry stays in
-/// the full catalog but is gated out of the picker (the production
-/// openai-codex picker gap was missing auth, not missing wiring).
+/// The picker regression — the fetched catalog-repo entry shows in the picker's available list once
+/// its provider's auth is configured in models.json; without the provider auth the entry stays in
+/// the full catalog but is gated out of the picker (the production openai-codex picker gap was
+/// missing auth, not missing wiring).
 #[tokio::test]
 async fn the_picker_available_list_shows_a_fetched_entry_once_its_provider_auth_is_configured() {
     async fn refreshed_registry_with_openai_auth(
@@ -424,7 +387,6 @@ async fn the_picker_available_list_shows_a_fetched_entry_once_its_provider_auth_
         (agent_dir, registry)
     }
 
-    // With the provider auth configured, the fetched entry is pickable.
     let (_dir, registry) = refreshed_registry_with_openai_auth(true).await;
     let available = registry.get_available();
     let probe = available
@@ -438,8 +400,6 @@ async fn the_picker_available_list_shows_a_fetched_entry_once_its_provider_auth_
         .iter()
         .any(|model| model.id == LAYER_A_PROBE_ID));
 
-    // Without the provider auth: still in the full catalog, gated out of
-    // the picker's available list.
     let (_bare_dir, bare_registry) = refreshed_registry_with_openai_auth(false).await;
     assert!(bare_registry
         .get_all()
@@ -451,12 +411,10 @@ async fn the_picker_available_list_shows_a_fetched_entry_once_its_provider_auth_
         .any(|model| model.id == LAYER_A_PROBE_ID));
 }
 
-/// The session-model restore (the revival race this crate's catalog wiring
-/// must cover): a saved private model missing from the cold registry
-/// (no disk caches yet) restores through the readiness window while the
-/// catalog fetch is still in flight. TS `findSessionModelWithReadinessWait`
-/// — the sdk.ts session boot gives the daemon restart's fetch a bounded
-/// window before the lookup is allowed to fail.
+/// A saved private model missing from the cold registry (no disk caches yet) restores through the
+/// readiness window while the catalog fetch is still in flight (TS
+/// `findSessionModelWithReadinessWait`: the session boot gives the daemon restart's fetch a bounded
+/// window before the lookup is allowed to fail).
 #[tokio::test]
 async fn session_model_restore_waits_out_a_slow_catalog_fetch() {
     let agent_dir = tempfile::tempdir().unwrap();
@@ -475,8 +433,6 @@ async fn session_model_restore_waits_out_a_slow_catalog_fetch() {
     .await;
     install_mock_catalog(agent_dir.path(), bundled_dir.path(), &server);
 
-    // The fresh worker's registry: file auth, cold disk caches — the saved
-    // private model is nowhere in the compiled fallback.
     let mut registry = ModelRegistry::create(
         prime_auth("test-key", "team-1"),
         agent_dir.path().join("models.json"),
@@ -494,9 +450,6 @@ async fn session_model_restore_waits_out_a_slow_catalog_fetch() {
     assert!(registry.has_configured_auth(&restored));
 }
 
-/// The restore is bounded: a catalog fetch that never settles cannot hold a
-/// revived session's boot hostage — the lookup fails after the window and
-/// the caller falls back (and must say so, never silently).
 #[tokio::test]
 async fn session_model_restore_is_bounded_when_the_fetch_never_lands() {
     let agent_dir = tempfile::tempdir().unwrap();
@@ -523,8 +476,6 @@ async fn session_model_restore_is_bounded_when_the_fetch_never_lands() {
     );
 }
 
-/// The fast path: a registered, auth-configured model restores with no
-/// refresh at all (TS `findRestorable`'s sync lookup — no network).
 #[tokio::test]
 async fn session_model_restore_fast_path_never_fetches() {
     let agent_dir = tempfile::tempdir().unwrap();

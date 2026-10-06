@@ -1,5 +1,5 @@
-//! The RLM ledger test battery (moved with its concern): grammar,
-//! replay, tombstone, seed, display, and usage-bucket families.
+//! The RLM ledger test battery: grammar, replay, tombstone, seed, display,
+//! and usage-bucket families.
 use super::*;
 use crate::session_usage::SessionUsageSummary;
 
@@ -13,15 +13,11 @@ fn ledger_for(dir: &Path) -> RlmSpawnLedger {
     RlmSpawnLedger::new(dir, &dir.join("sessions"), |_| {})
 }
 
-/// A ledger over an explicit agent dir and sessions dir (the artifact
-/// tree roots under the agent dir).
+/// A ledger over an explicit agent dir and sessions dir (the artifact tree roots there).
 fn ledger_over(agent_dir: &Path, sessions_dir: &Path) -> RlmSpawnLedger {
     RlmSpawnLedger::new(agent_dir, sessions_dir, |_| {})
 }
 
-/// The legacy registry probe reads the parent's FIRST line bounded
-/// (the header id), never the whole transcript: a parent far past the
-/// cap still resolves, and an over-long first line reads as absent.
 #[test]
 fn legacy_registry_probe_reads_the_header_line_bounded() {
     let dir = temp_dir("legacy-bounded");
@@ -49,11 +45,6 @@ fn legacy_registry_probe_reads_the_header_line_bounded() {
     );
 }
 
-/// The bounded probe resolves a readable header over a corrupt tail:
-/// the whole-file read the probe replaced failed on any invalid UTF-8
-/// in the file; the first-line read judges the header alone (a torn
-/// write mid-file no longer masks a live parent - display-grade
-/// metadata either way, disclosed in the bounded probe's commit).
 #[test]
 fn legacy_registry_probe_resolves_a_readable_header_over_a_corrupt_tail() {
     let dir = temp_dir("legacy-corrupt-tail");
@@ -143,13 +134,10 @@ fn edge_is_live_reflects_tombstones_and_files() {
         })
         .unwrap();
     assert!(ledger.edge_is_live("sub-1", &child_path));
-    // The child file vanishing flips the answer even without a
-    // tombstone.
     fs::remove_file(&child).unwrap();
     assert!(!ledger.edge_is_live("sub-1", &child_path));
     fs::write(&child, "{}").unwrap();
     assert!(ledger.edge_is_live("sub-1", &child_path));
-    // A dead parent reads as not-live, like `live_edges` drops it.
     fs::remove_file(&parent).unwrap();
     assert!(!ledger.edge_is_live("sub-1", &child_path));
     fs::write(&parent, "{}").unwrap();
@@ -180,7 +168,6 @@ fn edge_is_live_reflects_tombstones_and_files() {
         ledger.edge_is_live("sub-1", &other_child.to_string_lossy()),
         "the live sibling still reads live"
     );
-    // An unknown child reads as not-live.
     assert!(!ledger.edge_is_live("sub-none", &child_path));
 }
 
@@ -204,14 +191,11 @@ fn dead_child_or_parent_drops_from_live_edges() {
     assert_eq!(ledger.live_edges().unwrap().len(), 1);
     fs::remove_file(&child).unwrap();
     assert!(ledger.live_edges().unwrap().is_empty());
-    // The edge stays in the raw replay.
     assert_eq!(ledger.edges(false).unwrap().len(), 1);
 }
 
-/// A recorded edge path whose file moved (a storage-root migration)
-/// resolves through its durable session id — the sessions dir or the
-/// session-artifacts tree — and the returned edge carries the
-/// resolved path; a session with no file anywhere stays dead.
+/// A recorded edge path whose file moved resolves through its durable session id, and the returned
+/// edge carries the resolved path; a session with no file anywhere stays dead.
 #[test]
 fn moved_edge_paths_resolve_through_the_session_id() {
     let agent_dir = temp_dir("agent");
@@ -262,10 +246,8 @@ fn moved_edge_paths_resolve_through_the_session_id() {
         "the child edge resolves to the migrated path"
     );
 
-    // A session with no file anywhere is dead: the edge drops.
     fs::remove_file(&live_child).unwrap();
     assert!(ledger.live_edges().unwrap().is_empty());
-    // The raw replay keeps the recorded paths untouched.
     let raw = ledger.edges(false).unwrap();
     assert_eq!(raw.len(), 1);
     assert_eq!(raw[0].parent, recorded_parent);
@@ -382,7 +364,6 @@ fn seeds_from_legacy_registries_once_and_atomically() {
             .to_string_lossy()
             .to_string()
     );
-    // The seed file carries the meta header first.
     let content = fs::read_to_string(ledger.ledger_path()).unwrap();
     let first = content.lines().next().unwrap();
     assert!(first.contains("\"op\":\"meta\""));
@@ -413,7 +394,6 @@ fn display_entries_round_trip_and_tombstones_stick() {
     let mut tombstone = entry.clone();
     tombstone.status = "deleted".into();
     assert!(write_rlm_subagent_display(&tombstone).unwrap());
-    // A resurrection write is refused over a tombstone.
     assert!(!write_rlm_subagent_display(&entry).unwrap());
 }
 
@@ -458,8 +438,7 @@ fn usage_summary(cost: f64) -> crate::session_usage::SessionUsageSummary {
     }
 }
 
-/// One assistant row with billable usage (the scan's only foldable
-/// row shape).
+/// One assistant row with billable usage (the scan's only foldable row shape).
 fn assistant_usage_row(id: &str, cost: f64) -> String {
     serde_json::json!({
         "type": "message",
@@ -479,9 +458,8 @@ fn assistant_usage_row(id: &str, cost: f64) -> String {
     .to_string()
 }
 
-/// The deletion amendment's snapshot rides the delete record, merges
-/// into the same tombstoned edge, and survives an idempotent
-/// re-tombstone (sticky) until a fresh capture replaces it.
+/// The deletion amendment's snapshot rides the delete record, merges into the same tombstoned edge,
+/// and survives an idempotent re-tombstone until a fresh capture replaces it.
 #[test]
 fn delete_amendment_carries_the_usage_snapshot() {
     let dir = temp_dir("amendment");
@@ -524,7 +502,6 @@ fn delete_amendment_carries_the_usage_snapshot() {
     assert_eq!(edges.len(), 1, "the amendment merges into the one edge");
     assert_eq!(edges[0].deleted, Some(RlmLedgerDeleteReason::User));
     assert_eq!(edges[0].deleted_usage, Some(usage_summary(0.40)));
-    // A re-tombstone without usage never clears a captured snapshot.
     ledger
         .append_delete(
             "sub-1",
@@ -537,7 +514,6 @@ fn delete_amendment_carries_the_usage_snapshot() {
         Some(usage_summary(0.40)),
         "the snapshot is sticky across re-tombstones"
     );
-    // A retried capture replaces it (last writer wins).
     ledger
         .append_delete_with_usage(
             "sub-1",
@@ -552,10 +528,8 @@ fn delete_amendment_carries_the_usage_snapshot() {
     );
 }
 
-/// The writer never records what the reader refuses: a negative or
-/// NaN usage cost rides as absent (a bare delete record), so the
-/// ledger stays readable after deleting a session whose file carried
-/// a negative cost.
+/// The writer never records what the reader refuses: a negative or NaN
+/// usage cost rides as absent (a bare delete record), so the ledger stays readable.
 #[test]
 fn append_delete_with_usage_sanitizes_a_rejectable_cost() {
     let dir = temp_dir("usage-neg");
@@ -588,7 +562,6 @@ fn append_delete_with_usage_sanitizes_a_rejectable_cost() {
             "a cost the reader would reject rides as absent ({bad_cost})",
         );
     }
-    // A valid capture after the sanitized ones still lands.
     ledger
         .append_delete_with_usage(
             "neg",
@@ -603,8 +576,6 @@ fn append_delete_with_usage_sanitizes_a_rejectable_cost() {
     );
 }
 
-/// A bulk path tombstone (the saved-session delete) carries the
-/// captured usage onto every edge at the path.
 #[test]
 fn tombstone_child_path_with_usage_snapshots_every_edge() {
     let dir = temp_dir("path-usage");
@@ -645,12 +616,9 @@ fn tombstone_child_path_with_usage_snapshots_every_edge() {
 }
 
 /// The deleted-descendant bucket: the numeric fixture (own $0 + deleted
-/// child $0.40 + its deleted grandchild $0.10 + live child $0.20 +
-/// surviving grandchild $0.30 => the parent's bucket $0.50, and the
-/// agents-view subtree total $1.00 once the live descendant rows add
-/// their own spend). The snapshots are OWN-ONLY: a snapshot that wrongly
-/// carried the child's aggregate (its own + its attributed grandchild)
-/// would double count the deleted grandchild into $0.60.
+/// child $0.40 + its deleted grandchild $0.10 => the parent's bucket
+/// $0.50). The snapshots are OWN-ONLY: one carrying the child's
+/// aggregate would double count the grandchild.
 #[test]
 fn bucket_folds_own_snapshots_post_order_without_double_counting() {
     let dir = temp_dir("bucket-fixture");
@@ -710,7 +678,6 @@ fn bucket_folds_own_snapshots_post_order_without_double_counting() {
     // skips it).
     fs::remove_file(&child_1).unwrap();
     fs::remove_file(&grandchild_1).unwrap();
-    // The live child subtree never enters the bucket.
     let bucket = ledger.deleted_descendant_usage_by_parent().unwrap();
     let parent_key = crate::lease::canonical_session_path(&parent)
         .to_string_lossy()
@@ -726,9 +693,8 @@ fn bucket_folds_own_snapshots_post_order_without_double_counting() {
         "own 0.40 + deleted grandchild 0.10 = 0.50, got {}",
         deleted.cost
     );
-    // TS `usageByParent` also keys the tombstoned intermediate parent
-    // (its grandchild's fold) - inert: no row exists at a tombstoned
-    // child's path to consume it. Live descendants never enter.
+    // TS `usageByParent` also keys the tombstoned intermediate parent:
+    // inert, no row exists there to consume it.
     assert!(
         (bucket.get(&child_key).map_or(0.0, |d| d.cost) - 0.10).abs() < 1e-9,
         "the tombstoned intermediate keeps its inert TS key"
@@ -755,10 +721,8 @@ fn bucket_folds_own_snapshots_post_order_without_double_counting() {
     );
 }
 
-/// Legacy tombstones (pre-capture): a live transcript rides its own
-/// row (the bucket never claims a live file — billing both would
-/// double the spend); once the transcript is gone the documented
-/// historical gap bills zero — never a fabricated number.
+/// Legacy tombstones (pre-capture): a live transcript rides its own row
+/// (billing both would double the spend); once it is gone the documented historical gap bills zero.
 #[test]
 fn bucket_legacy_tombstones_fall_back_then_gap_to_zero() {
     let dir = temp_dir("bucket-legacy");
@@ -942,10 +906,9 @@ fn bucket_claims_each_tombstoned_path_once() {
         json!({
             "v": 1, "op": "delete", "at": "2026-01-01T00:00:01Z",
             "childId": "x1", "child": child.to_string_lossy(), "reason": "user",
-            // The captured snapshot rides the tombstone (the
-            // post-settlement amendment): a claim with real spend is
-            // observable in the bucket, so the first-writer-wins
-            // claim pins the parent by VALUE, not just by presence.
+            // The captured snapshot rides the tombstone: a claim with
+            // real spend is observable in the bucket, so the
+            // first-writer-wins claim pins the parent by VALUE.
             "usage": {"inputTokens": 1000, "outputTokens": 100, "cost": 0.15},
         }),
         json!({
@@ -1020,7 +983,6 @@ fn bucket_skips_recreated_live_paths() {
             &usage_summary(0.20),
         )
         .unwrap();
-    // A fresh child spawns at the same path: the path is live again.
     ledger
         .append_spawn(&RlmSpawnInput {
             child_id: "new".into(),

@@ -1,12 +1,11 @@
-//! The runtime source concern (moved with its concern): the packaged
+//! The runtime source concern: the packaged
 //! sidecar layout, the source-checkout fallback, and the content identity
 //! that invalidates an existing venv on any runtime change.
 
 use super::{expand_home, Digest, Path, PathBuf, RUNTIME_REQUIREMENT};
 
-/// Directory of the installed `prime-agent-runtime` sources. The Rust binary
-/// ships the same sidecar layout the compiled TS executable uses; an explicit
-/// `PI_PACKAGE_DIR` override wins (matching the TS `getPackageDir`).
+/// Directory of the installed `prime-agent-runtime` sources. The Rust binary ships the same sidecar
+/// layout the compiled TS executable uses.
 pub(in crate::kernel::bootstrap) fn package_dir() -> PathBuf {
     if let Ok(env_dir) = std::env::var("PI_PACKAGE_DIR") {
         if !env_dir.is_empty() {
@@ -20,9 +19,8 @@ pub(in crate::kernel::bootstrap) fn package_dir() -> PathBuf {
     exe_dir
 }
 
-/// The packaged sidecar directory (the exe-adjacent layout): the TS
-/// `runtimeCandidateDirs` bun-binary candidates, `PI_PACKAGE_DIR` included
-/// through [`package_dir`].
+/// The packaged sidecar directory (the exe-adjacent layout): the TS `runtimeCandidateDirs`
+/// bun-binary candidates.
 pub(in crate::kernel::bootstrap) fn packaged_runtime_dir() -> Option<PathBuf> {
     let package = package_dir();
     [
@@ -58,8 +56,7 @@ pub(super) fn resolve_runtime_source_dir() -> Option<PathBuf> {
 ///
 /// # Panics
 ///
-/// Panics when hashing the resolved local runtime source fails (unreadable
-/// or missing runtime files).
+/// Panics when hashing the resolved local runtime source fails.
 #[must_use]
 pub fn resolve_runtime_identity() -> String {
     let Some(source_dir) = resolve_runtime_source_dir() else {

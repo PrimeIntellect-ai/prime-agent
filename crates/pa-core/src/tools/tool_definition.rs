@@ -1,9 +1,5 @@
-//! Tool definition surface: the model-facing contract of a tool.
-//!
-//! Port of `packages/coding-agent/src/core/tools/tool-definition-wrapper.ts`
-//! plus the TS `ToolDefinition` shape. TUI
-//! renderers stay in `pa-tui`; this layer owns the model-facing contract
-//! (name, schema, description) and execution.
+//! Tool definition surface: the model-facing contract of a tool (name,
+//! schema, description) and execution; TUI renderers stay in `pa-tui`.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -15,8 +11,7 @@ use pa_types::ai::Tool;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionMode {
-    /// The backing resource is single-threaded; calls must not run in parallel
-    /// within a batch.
+    /// The backing resource is single-threaded; calls must not run in parallel within a batch.
     Sequential,
 }
 
@@ -28,7 +23,6 @@ pub enum ToolContentBlock {
         text: String,
     },
     Image {
-        /// Base64 image payload.
         data: String,
         #[serde(rename = "mimeType")]
         mime_type: String,
@@ -57,10 +51,8 @@ pub struct ToolUpdate {
     pub details: Option<serde_json::Value>,
 }
 
-/// The result of a tool execution.
-///
-/// Errors are not a variant here: like the TS product, a failing tool call
-/// surfaces as an `Err` (thrown error) whose message is the model-facing text.
+/// The result of a tool execution. Errors are not a variant here: like the TS product, a
+/// failing tool call surfaces as an `Err` whose message is the model-facing text.
 #[derive(Debug, Clone, Default)]
 pub struct ToolExecutionResult {
     pub content: Vec<ToolContentBlock>,
@@ -98,19 +90,14 @@ pub type PrepareArgumentsFn = fn(serde_json::Value) -> serde_json::Value;
 /// A model-facing tool definition: exact name, JSON schema, and executor.
 #[derive(Clone)]
 pub struct ToolDefinition {
-    /// Tool name exposed to the model.
     pub name: String,
-    /// Human-facing label.
     pub label: String,
-    /// Model-facing description.
     pub description: String,
     /// Short snippet included in the system prompt.
     pub prompt_snippet: String,
-    /// JSON schema for the tool input.
     pub parameters: serde_json::Value,
     /// Scheduling constraints; `None` means unconstrained.
     pub execution_mode: Option<ExecutionMode>,
-    /// Argument normalization before validation.
     pub prepare_arguments: Option<PrepareArgumentsFn>,
     /// Executes the tool. The error message is the model-facing error text.
     pub execute: ExecuteFn,

@@ -1,9 +1,7 @@
-//! The `Agent` class, porting `packages/agent/src/agent.ts`.
-//!
 //! Owns agent state, the steering/follow-up message queues, event listeners,
 //! and the active-run lifecycle. The low-level loop comes from
 //! [`crate::agent_loop`]; every event the loop emits is reduced into state here
-//! (TS `processEvents`) and then awaited by listeners in subscription order.
+//! and then awaited by listeners in subscription order.
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -22,17 +20,13 @@ use crate::types::{
     Usage,
 };
 
-/// Queue drain mode (TS `QueueMode`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum QueueMode {
-    /// Drain every batch at once.
     All,
-    /// Drain one batch per poll (default).
     #[default]
     OneAtATime,
 }
 
-/// Why [`Agent::continue_run`] refused to start a continuation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum AgentContinueErrorCode {
     #[error("busy")]
@@ -42,10 +36,7 @@ pub enum AgentContinueErrorCode {
 }
 
 /// Model that serves the LLM requests of a routed run, with per-request
-/// fields clamped for it (TS `AgentModelOverride`). When set, every LLM
-/// request for prompt and continuation runs uses this model with its own
-/// thinking level, while the agent state keeps identifying the session
-/// model for UI and persistence.
+/// fields clamped for it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentModelOverride {
     pub model: Model,
@@ -53,7 +44,7 @@ pub struct AgentModelOverride {
 }
 
 /// Typed precondition failure from [`Agent::continue_run`], so callers
-/// classify by code instead of message text (TS `AgentContinueError`).
+/// classify by code instead of message text.
 #[derive(Debug, thiserror::Error)]
 #[error("{message}")]
 pub struct AgentContinueError {
@@ -70,7 +61,6 @@ impl AgentContinueError {
     }
 }
 
-/// Snapshot of the public agent state (TS `AgentState`).
 #[derive(Clone)]
 pub struct AgentStateSnapshot {
     pub system_prompt: String,
@@ -84,7 +74,6 @@ pub struct AgentStateSnapshot {
     pub error_message: Option<String>,
 }
 
-/// Initial state accepted by [`AgentOptions`].
 #[derive(Default)]
 pub struct AgentInitialState {
     pub system_prompt: Option<String>,
@@ -94,12 +83,8 @@ pub struct AgentInitialState {
     pub messages: Option<Vec<AgentMessage>>,
 }
 
-/// Options for constructing an [`Agent`] (TS `AgentOptions`).
-///
-/// Provider plumbing options of the TS type (`onPayload`, `onResponse`,
-/// `transport`, `thinkingBudgets`) are provider-level concerns and land with
-/// the `pa-ai` unification; the loop's request surface (temperature, max
-/// tokens, reasoning, session id, API key) is carried by
+/// Options for constructing an [`Agent`]. The loop's request surface
+/// (temperature, max tokens, reasoning, session id, API key) is carried by
 /// [`crate::agent_loop::AgentLoopConfig`] / [`crate::stream::StreamRequestOptions`].
 #[derive(Default)]
 pub struct AgentOptions {
@@ -147,7 +132,6 @@ impl Default for MutableAgentState {
     }
 }
 
-/// Port of TS `PendingMessageQueue`.
 struct PendingMessageQueue {
     mode: QueueMode,
     batches: Vec<Vec<AgentMessage>>,
@@ -208,7 +192,7 @@ impl PendingMessageQueue {
 }
 
 /// One queued batch's text preview: the text of the batch's user
-/// messages (text parts concatenated), the TS action-preview shape.
+/// messages (text parts concatenated).
 fn batch_preview(batch: &[AgentMessage]) -> String {
     batch
         .iter()
@@ -236,8 +220,7 @@ fn batch_preview(batch: &[AgentMessage]) -> String {
 }
 
 /// One or a batch of messages queued through `steer`/`followUp`.
-// The `Single` variant mirrors the TS union member shape; boxing both arms
-// would complicate every call site for no memory benefit in queue paths.
+// Boxing both arms would complicate every call site for no memory benefit.
 #[allow(clippy::large_enum_variant)]
 pub enum AgentMessageBatch {
     Single(AgentMessage),
@@ -256,8 +239,6 @@ impl From<Vec<AgentMessage>> for AgentMessageBatch {
     }
 }
 
-/// Prompt input: a message, a batch of messages, or text with optional images
-/// (TS `prompt` overloads).
 pub enum AgentPromptInput {
     Messages(Vec<AgentMessage>),
     Text {
@@ -297,16 +278,15 @@ type AgentEventListener = Arc<
     dyn Fn(AgentEvent, AbortSignal) -> crate::BoxFut<'static, anyhow::Result<()>> + Send + Sync,
 >;
 
-/// Unsubscribe handle mirroring the TS `unsubscribe` function returned by
-/// `agent.subscribe`. Dropping the handle does NOT unsubscribe (TS semantics);
-/// call [`Subscription::unsubscribe`] explicitly to remove the listener.
+/// Unsubscribe handle: dropping it does NOT unsubscribe; call
+/// [`Subscription::unsubscribe`] explicitly to remove the listener.
 pub struct Subscription {
     agent: Option<Arc<AgentInner>>,
     id: u64,
 }
 
 impl Subscription {
-    /// Remove the listener this handle owns (the TS `unsubscribe()` call).
+    /// Remove the listener this handle owns.
     pub async fn unsubscribe(mut self) {
         if let Some(agent) = self.agent.take() {
             agent.remove_listener(self.id).await;
@@ -323,15 +303,13 @@ struct Shared {
 struct ActiveRun {
     controller: AbortController,
     idle_tx: watch::Sender<bool>,
-    /// Model serving the run when it started; failures stay attributed to
-    /// it (TS `ActiveRun.model`).
+    /// Model serving the run when it started; failures stay attributed to it.
     model: Model,
 }
 
 struct AgentInner {
-    /// One lock serializes state reduction and listener awaits, mirroring the
-    /// single-threaded TS event loop: emitted events are processed strictly in
-    /// the order the loop emits them.
+    /// One lock serializes state reduction and listener awaits: emitted
+    /// events are processed strictly in the order the loop emits them.
     shared: tokio::sync::Mutex<Shared>,
     steering_queue: Mutex<PendingMessageQueue>,
     follow_up_queue: Mutex<PendingMessageQueue>,
@@ -345,26 +323,18 @@ struct AgentInner {
     after_tool_call: Option<AfterToolCallFn>,
     should_stop_after_turn: Option<ShouldStopAfterTurnFn>,
     should_stop_before_turn: Option<ShouldStopBeforeTurnFn>,
-    /// The natural-turn-end continuation hook (TS `agent.getContinuationMessages`):
-    /// settable after construction so embeddings that assemble the session
-    /// engine first (the goal continuation arms) can install it once their
-    /// own state exists. A plain mutex: cloned at run-config build, never
-    /// held across an await.
+    /// The natural-turn-end continuation hook: settable after construction so the session engine
+    /// can install it. A plain mutex: cloned at run-config build, never held across an await.
     get_continuation_messages: Mutex<Option<GetContinuationMessagesFn>>,
-    /// Per-run model override (TS `Agent.modelOverride`): when set, the
-    /// loop config serves every LLM request of the run on this model with
-    /// its own thinking level, while the agent state keeps identifying the
-    /// session model. A plain mutex: read at run-config build, never held
-    /// across an await. The owner sets it right before starting a routed
-    /// run and clears it before the next dispatch, so retries and
-    /// post-compaction continuations of a routed turn keep serving it.
+    /// Per-run model override; the owner sets it right before starting a routed run and clears it
+    /// before the next dispatch. A plain mutex: read at run-config build, never held across an
+    /// await.
     model_override: Mutex<Option<AgentModelOverride>>,
     session_id: Option<String>,
     tool_execution: ToolExecutionMode,
 }
 
 impl AgentInner {
-    /// Remove a listener by id ([`Subscription::unsubscribe`]).
     async fn remove_listener(self: &Arc<Self>, id: u64) {
         let mut shared = self.shared.lock().await;
         shared
@@ -379,8 +349,6 @@ impl AgentInner {
         run.as_ref().map(|run| run.controller.signal())
     }
 
-    /// Port of `processEvents`: reduce the event into state, then await
-    /// listeners in subscription order.
     async fn process_events(self: &Arc<Self>, event: AgentEvent) -> anyhow::Result<()> {
         let mut shared = self.shared.lock().await;
 
@@ -432,14 +400,12 @@ impl AgentInner {
         Ok(())
     }
 
-    /// Port of `handleRunFailure`.
     async fn handle_run_failure(self: &Arc<Self>, error: &anyhow::Error, aborted: bool) {
         let failure_message = {
             let shared = self.shared.lock().await;
             // The model that served the run when it started tags its
-            // failures: a routed run keeps the override, and even a
-            // mid-run override change cannot re-attribute an in-flight
-            // request to a model that never saw it (TS `handleRunFailure`).
+            // failures; a mid-run override change cannot re-attribute an
+            // in-flight request to a model that never saw it.
             let model = self
                 .run
                 .lock()
@@ -557,12 +523,6 @@ impl AgentInner {
         let continuation = self.get_continuation_messages.lock().unwrap().clone();
         let should_stop_after_turn = self.should_stop_after_turn.clone();
 
-        // A routed run serves every LLM request on the override model with
-        // its own thinking level (TS `createLoopConfig`'s `modelOverride`
-        // reads); the agent state keeps identifying the session model. The
-        // override is the run's own snapshot (read once per run, so a
-        // concurrent `set_model_override` cannot split the run's model from
-        // its request fields).
         let (model, reasoning) = match model_override {
             Some(routed) => (routed.model.clone(), routed.thinking_level),
             None => (shared.state.model.clone(), shared.state.thinking_level),
@@ -588,7 +548,6 @@ impl AgentInner {
         config
     }
 
-    /// Port of `runWithLifecycle`.
     async fn run_with_lifecycle<F, Fut>(self: &Arc<Self>, executor: F) -> anyhow::Result<()>
     where
         F: FnOnce(AbortSignal, Option<AgentModelOverride>) -> Fut,
@@ -596,14 +555,9 @@ impl AgentInner {
     {
         let controller = AbortController::new();
         let (idle_tx, _idle_rx) = watch::channel(false);
-        // The run's model-override snapshot, read ONCE (TS `ActiveRun.model`
-        // + `createLoopConfig`'s `modelOverride` read the same value in the
-        // same synchronous block): every LLM request of the run, and its
-        // failure attribution, follow this one snapshot, so a concurrent
-        // `set_model_override` cannot split the run's model from its
-        // request fields or re-attribute an in-flight request to a model
-        // that never saw it. Read before taking the run lock: the shared
-        // lock awaits, and a std guard must never ride it.
+        // The run's model-override snapshot, read once: a concurrent
+        // `set_model_override` cannot split the run's model from its request fields.
+        // Read before the run lock: the shared lock awaits, a std guard must never ride it.
         let run_override: Option<AgentModelOverride> = self.model_override.lock().unwrap().clone();
         let run_model = {
             let shared = self.shared.lock().await;
@@ -639,7 +593,6 @@ impl AgentInner {
             self.handle_run_failure(error, aborted).await;
         }
 
-        // finishRun
         {
             let mut shared = self.shared.lock().await;
             shared.state.is_streaming = false;
@@ -664,9 +617,8 @@ impl AgentInner {
             .await
     }
 
-    /// The same run, firing `started` once the run registers (the
-    /// [`Agent::prompt_until_accepted`] admission seam: the caller returns
-    /// while this run settles on its own).
+    /// The same run, firing `started` once the run registers; the caller
+    /// returns while this run settles on its own.
     async fn run_prompt_messages_with_start_signal(
         self: &Arc<Self>,
         messages: Vec<AgentMessage>,
@@ -736,9 +688,8 @@ impl AgentInner {
         .await
     }
 
-    /// Drains queued steering/follow-up messages as a run, mirroring the
-    /// `runQueuedMessages` helper in `continue()`. Returns whether a run
-    /// was started.
+    /// Drains queued steering/follow-up messages as a run. Returns whether
+    /// a run was started.
     async fn run_queued_messages(self: &Arc<Self>) -> anyhow::Result<bool> {
         let queued_steering = self.steering_queue.lock().unwrap().drain();
         if !queued_steering.is_empty() {
@@ -753,7 +704,6 @@ impl AgentInner {
         Ok(false)
     }
 
-    /// Port of `normalizePromptInput`.
     fn normalize_prompt_input(input: AgentPromptInput) -> Vec<AgentMessage> {
         match input {
             AgentPromptInput::Messages(messages) => messages,
@@ -776,7 +726,6 @@ impl AgentInner {
     }
 }
 
-/// The public `Agent` (TS `class Agent`).
 pub struct Agent {
     inner: Arc<AgentInner>,
 }
@@ -829,13 +778,10 @@ impl Agent {
         Agent { inner }
     }
 
-    /// Subscribe to agent lifecycle events (TS `subscribe`).
+    /// Subscribe to agent lifecycle events.
     ///
-    /// Listener futures are awaited in subscription order and are included in
-    /// the current run's settlement; a failing listener fails the run (a
-    /// `throw` in a TS listener). `agent_end` is the final emitted event for a
-    /// run, but the agent becomes idle only after all awaited listeners for
-    /// that event finish.
+    /// Listener futures are awaited in subscription order; a failing listener
+    /// fails the run. The agent becomes idle only after all listeners finish.
     pub async fn subscribe<F>(&self, listener: F) -> Subscription
     where
         F: Fn(AgentEvent, AbortSignal) -> crate::BoxFut<'static, anyhow::Result<()>>
@@ -863,7 +809,6 @@ impl Agent {
             .retain(|(listener_id, _)| *listener_id != id);
     }
 
-    /// Current agent state (snapshot).
     pub async fn state(&self) -> AgentStateSnapshot {
         let shared = self.inner.shared.lock().await;
         AgentStateSnapshot {
@@ -879,36 +824,28 @@ impl Agent {
         }
     }
 
-    /// Set the system prompt used for future turns.
     pub async fn set_system_prompt(&self, system_prompt: impl Into<String>) {
         self.inner.shared.lock().await.state.system_prompt = system_prompt.into();
     }
 
-    /// Set the model used for future turns.
     pub async fn set_model(&self, model: Model) {
         self.inner.shared.lock().await.state.model = model;
     }
 
-    /// Set the requested reasoning level for future turns.
     pub async fn set_thinking_level(&self, level: ThinkingLevel) {
         self.inner.shared.lock().await.state.thinking_level = level;
     }
 
     /// Set the model and the requested reasoning level in ONE state-lock
-    /// acquisition: a model switch re-syncs the request's carried level
-    /// (the loop snapshots both fields together), so a turn admitted
-    /// mid-switch can never observe the new model with the old level.
+    /// acquisition: the loop snapshots both fields together, so a turn
+    /// admitted mid-switch can never observe the new model with the old level.
     pub async fn set_model_and_thinking_level(&self, model: Model, thinking_level: ThinkingLevel) {
         let mut shared = self.inner.shared.lock().await;
         shared.state.model = model;
         shared.state.thinking_level = thinking_level;
     }
 
-    /// Per-run model override (TS `Agent.modelOverride`): `Some` serves
-    /// every LLM request of the runs started while it is set on the
-    /// override model (with its own thinking level), `None` returns to the
-    /// session model. Set right before a routed run and re-evaluated
-    /// before the next dispatch.
+    /// Per-run model override: `None` returns to the session model.
     pub fn set_model_override(&self, model_override: Option<AgentModelOverride>) {
         *self
             .inner
@@ -917,7 +854,6 @@ impl Agent {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = model_override;
     }
 
-    /// The current per-run model override (TS `Agent.modelOverride`).
     pub fn model_override(&self) -> Option<AgentModelOverride> {
         self.inner
             .model_override
@@ -926,23 +862,16 @@ impl Agent {
             .clone()
     }
 
-    /// Set the tools available to future turns (the array is owned; the TS
-    /// setter copies the top-level array).
     pub async fn set_tools(&self, tools: Vec<Arc<dyn AgentTool>>) {
         self.inner.shared.lock().await.state.tools = tools;
     }
 
-    /// Replace the transcript (the array is owned; the TS setter copies the
-    /// top-level array).
     pub async fn set_messages(&self, messages: Vec<AgentMessage>) {
         self.inner.shared.lock().await.state.messages = messages;
     }
 
-    /// Append rows to the transcript under ONE state lock: the atomic form
-    /// of the `state()` + `set_messages` read-modify-write the session
-    /// engine's push sites use, so a concurrent writer's rows cannot be
-    /// dropped between the two locks (TS's synchronous
-    /// `agent.state.messages.push`).
+    /// Append rows to the transcript under ONE state lock (the atomic
+    /// form of the `state()` + `set_messages` read-modify-write).
     pub async fn append_messages(&self, messages: Vec<AgentMessage>) {
         self.inner
             .shared
@@ -953,76 +882,58 @@ impl Agent {
             .extend(messages);
     }
 
-    /// Mutate the transcript under ONE state lock: the atomic form of the
-    /// `state()` + `set_messages` read-modify-write the removal arms use,
-    /// so a concurrent writer's rows cannot be dropped between the two
-    /// locks (the snapshot-then-replace race the stateless setters carry).
+    /// Mutate the transcript under ONE state lock (the atomic form of the
+    /// `state()` + `set_messages` read-modify-write).
     pub async fn mutate_messages(&self, mutate: impl FnOnce(&mut Vec<AgentMessage>)) {
         mutate(&mut self.inner.shared.lock().await.state.messages);
     }
 
-    /// The steering queue's mode.
-    ///
     /// # Panics
     ///
-    /// Panics if the `steering_queue` mutex is poisoned (another thread
-    /// panicked while holding it).
+    /// Panics if the `steering_queue` mutex is poisoned.
     #[must_use]
     pub fn steering_mode(&self) -> QueueMode {
         self.inner.steering_queue.lock().unwrap().mode
     }
 
-    /// Set the steering queue's mode.
-    ///
     /// # Panics
     ///
-    /// Panics if the `steering_queue` mutex is poisoned (another thread
-    /// panicked while holding it).
+    /// Panics if the `steering_queue` mutex is poisoned.
     pub fn set_steering_mode(&self, mode: QueueMode) {
         self.inner.steering_queue.lock().unwrap().mode = mode;
     }
 
-    /// The follow-up queue's mode.
-    ///
     /// # Panics
     ///
-    /// Panics if the `follow_up_queue` mutex is poisoned (another thread
-    /// panicked while holding it).
+    /// Panics if the `follow_up_queue` mutex is poisoned.
     #[must_use]
     pub fn follow_up_mode(&self) -> QueueMode {
         self.inner.follow_up_queue.lock().unwrap().mode
     }
 
-    /// Install or replace the natural-turn-end continuation hook (TS
-    /// `_installAgentContinuationHook`'s seam: the embedding that owns the
-    /// goal/autonomous continuation policy wires it after the agent exists).
-    /// `None` uninstalls the hook; the loop's natural stop returns.
+    /// Install or replace the natural-turn-end continuation hook: the embedding that owns the
+    /// goal/autonomous continuation policy wires it after the agent exists. `None` uninstalls the
+    /// hook.
     ///
     /// # Panics
     ///
-    /// Panics if the `get_continuation_messages` mutex is poisoned (another
-    /// thread panicked while holding it).
+    /// Panics if the `get_continuation_messages` mutex is poisoned.
     pub fn set_continuation_hook(&self, hook: Option<GetContinuationMessagesFn>) {
         *self.inner.get_continuation_messages.lock().unwrap() = hook;
     }
 
-    /// Set the follow-up queue's mode.
-    ///
     /// # Panics
     ///
-    /// Panics if the `follow_up_queue` mutex is poisoned (another thread
-    /// panicked while holding it).
+    /// Panics if the `follow_up_queue` mutex is poisoned.
     pub fn set_follow_up_mode(&self, mode: QueueMode) {
         self.inner.follow_up_queue.lock().unwrap().mode = mode;
     }
 
-    /// Queue a message batch to be injected after the current assistant turn
-    /// finishes (TS `steer`).
+    /// Queue a message batch to be injected after the current assistant turn finishes.
     ///
     /// # Panics
     ///
-    /// Panics if the `steering_queue` mutex is poisoned (another thread
-    /// panicked while holding it).
+    /// Panics if the `steering_queue` mutex is poisoned.
     pub fn steer(&self, message: impl Into<AgentMessageBatch>) {
         self.inner
             .steering_queue
@@ -1031,13 +942,11 @@ impl Agent {
             .enqueue(message.into());
     }
 
-    /// Queue a message batch to run only after the agent would otherwise stop
-    /// (TS `followUp`).
+    /// Queue a message batch to run only after the agent would otherwise stop.
     ///
     /// # Panics
     ///
-    /// Panics if the `follow_up_queue` mutex is poisoned (another thread
-    /// panicked while holding it).
+    /// Panics if the `follow_up_queue` mutex is poisoned.
     pub fn follow_up(&self, message: impl Into<AgentMessageBatch>) {
         self.inner
             .follow_up_queue
@@ -1046,22 +955,16 @@ impl Agent {
             .enqueue(message.into());
     }
 
-    /// Clear the steering queue.
-    ///
     /// # Panics
     ///
-    /// Panics if the `steering_queue` mutex is poisoned (another thread
-    /// panicked while holding it).
+    /// Panics if the `steering_queue` mutex is poisoned.
     pub fn clear_steering_queue(&self) {
         self.inner.steering_queue.lock().unwrap().clear();
     }
 
-    /// Clear the follow-up queue.
-    ///
     /// # Panics
     ///
-    /// Panics if the `follow_up_queue` mutex is poisoned (another thread
-    /// panicked while holding it).
+    /// Panics if the `follow_up_queue` mutex is poisoned.
     pub fn clear_follow_up_queue(&self) {
         self.inner.follow_up_queue.lock().unwrap().clear();
     }
@@ -1072,8 +975,7 @@ impl Agent {
     ///
     /// # Panics
     ///
-    /// Panics if the `steering_queue` mutex is poisoned (another thread
-    /// panicked while holding it).
+    /// Panics if the `steering_queue` mutex is poisoned.
     #[must_use]
     pub fn steering_previews(&self) -> Vec<String> {
         self.inner
@@ -1086,14 +988,11 @@ impl Agent {
             .collect()
     }
 
-    /// Previews of the queued follow-up batches (TS
-    /// `getFollowUpMessagePreviews`): one text preview per queued batch,
-    /// in queue order.
+    /// Previews of the queued follow-up batches: one text preview per queued batch, in queue order.
     ///
     /// # Panics
     ///
-    /// Panics if the `follow_up_queue` mutex is poisoned (another thread
-    /// panicked while holding it).
+    /// Panics if the `follow_up_queue` mutex is poisoned.
     #[must_use]
     pub fn follow_up_previews(&self) -> Vec<String> {
         self.inner
@@ -1106,12 +1005,9 @@ impl Agent {
             .collect()
     }
 
-    /// Remove queued messages matching a predicate (TS `removeQueuedMessages`).
-    ///
     /// # Panics
     ///
-    /// Panics if the `steering_queue` or `follow_up_queue` mutex is poisoned
-    /// (another thread panicked while holding one of them).
+    /// Panics if the `steering_queue` or `follow_up_queue` mutex is poisoned.
     pub fn remove_queued_messages(
         &self,
         predicate: impl Fn(&AgentMessage) -> bool,
@@ -1128,12 +1024,9 @@ impl Agent {
         removed
     }
 
-    /// Whether any steering or follow-up messages are queued.
-    ///
     /// # Panics
     ///
-    /// Panics if the `steering_queue` or `follow_up_queue` mutex is poisoned
-    /// (another thread panicked while holding one of them).
+    /// Panics if the `steering_queue` or `follow_up_queue` mutex is poisoned.
     #[must_use]
     pub fn has_queued_messages(&self) -> bool {
         self.inner.steering_queue.lock().unwrap().has_items()
@@ -1141,44 +1034,36 @@ impl Agent {
     }
 
     /// The loop's provider stream function (the side-thread clone passes the
-    /// same function to its own loop, TS `parent.streamFn`).
+    /// same function to its own loop).
     #[must_use]
     pub fn stream_fn(&self) -> Option<&StreamFn> {
         self.inner.stream_fn.as_ref()
     }
 
-    /// The active run's abort signal, if any (TS `get signal`).
     #[must_use]
     pub fn signal(&self) -> Option<AbortSignal> {
         self.inner.current_signal()
     }
 
-    /// Abort the active run (TS `abort`).
-    ///
     /// # Panics
     ///
-    /// Panics if the `run` mutex is poisoned (another thread panicked while
-    /// holding it).
+    /// Panics if the `run` mutex is poisoned.
     pub fn abort(&self) {
         if let Some(run) = self.inner.run.lock().unwrap().as_ref() {
             run.controller.abort();
         }
     }
 
-    /// Resolve when the current run and all awaited event listeners have
-    /// finished - after `agent_end` listeners settle (TS `waitForIdle`).
+    /// Resolve when the current run and all awaited event listeners have finished.
     ///
     /// # Panics
     ///
-    /// Panics if the `run` mutex is poisoned (another thread panicked while
-    /// holding it).
+    /// Panics if the `run` mutex is poisoned.
     pub async fn wait_for_idle(&self) {
         let idle_rx = {
             let run = self.inner.run.lock().unwrap();
             run.as_ref().map(|run| run.idle_tx.subscribe())
         };
-        // If no run slot exists the run may still be finishing; watch until the
-        // slot is present and settles, or nothing is active at all.
         let Some(mut idle_rx) = idle_rx else {
             return;
         };
@@ -1194,7 +1079,6 @@ impl Agent {
         }
     }
 
-    /// Reset the transcript and queued messages (TS `reset`).
     pub async fn reset(&self) {
         {
             let mut shared = self.inner.shared.lock().await;
@@ -1208,19 +1092,15 @@ impl Agent {
         self.clear_steering_queue();
     }
 
-    /// Run the loop with a new prompt (TS `prompt`).
+    /// Run the loop with a new prompt.
     ///
     /// # Errors
     ///
-    /// Errors with the TS message when a run is already active; use `steer()`
-    /// or `follow_up()` to queue messages instead. Otherwise the result of the
-    /// run started by this prompt is propagated, so it errors if that run
-    /// fails.
+    /// Errors when a run is already active, or with the started run's failure.
     ///
     /// # Panics
     ///
-    /// Panics if the `run` mutex is poisoned (another thread panicked while
-    /// holding it).
+    /// Panics if the `run` mutex is poisoned.
     pub async fn prompt(&self, input: impl Into<AgentPromptInput>) -> anyhow::Result<()> {
         if self.inner.run.lock().unwrap().is_some() {
             anyhow::bail!(
@@ -1231,23 +1111,16 @@ impl Agent {
         self.inner.run_prompt_messages(messages, false).await
     }
 
-    /// Port of `promptUntilAccepted` (TS `_prompt` with
-    /// `returnAfterAccepted: true`): admit the prompt, return once its
-    /// run registers, and let the run settle on its own — the turn's
-    /// events follow through the subscriptions and later run failures
-    /// ride them (the admission has already returned).
+    /// Admit the prompt, return once its run registers, and let the run
+    /// settle on its own; later failures ride the events, not this result.
     ///
     /// # Errors
     ///
-    /// Errors with the TS message when a run is already active (use
-    /// `steer()` or `follow_up()` to queue messages instead), or when the
-    /// run refuses to start after admission; a failure AFTER the run
-    /// registers rides the events, not this result.
+    /// Errors when a run is already active, or the run refuses to start after admission.
     ///
     /// # Panics
     ///
-    /// Panics if the `run` mutex is poisoned (another task panicked while
-    /// holding it).
+    /// Panics if the `run` mutex is poisoned.
     pub async fn prompt_until_accepted(
         &self,
         input: impl Into<AgentPromptInput>,
@@ -1266,17 +1139,11 @@ impl Agent {
                 .run_prompt_messages_with_start_signal(messages, false, Some(started_tx))
                 .await;
             if let Err(error) = result {
-                // After the start signal this is a post-admission failure
-                // (it rides the events); before it, it is the refusal the
-                // waiting admission returns.
                 let _ = failed_tx.send(error);
             }
         });
-        // The start signal fires inside the run's executor (after the run
-        // registers); a dropped signal means the run refused to start
-        // before its executor ran, and the failure channel carries the
-        // refusal. A failure AFTER the start signal is post-admission
-        // (it rides the events); the started outcome wins.
+        // A dropped start signal means the run refused to start before its
+        // executor ran; the failure channel carries the refusal.
         if started_rx.await.is_ok() {
             return Ok(());
         }
@@ -1285,22 +1152,18 @@ impl Agent {
             .expect("a dropped start signal answers with the refusal"))
     }
 
-    /// Continue from the current context (TS `continue`).
+    /// Continue from the current context.
     ///
-    /// Returns typed [`AgentContinueError`] failures inside `anyhow::Error`;
-    /// downcast with `error.downcast_ref::<AgentContinueError>()`.
+    /// Downcast failures with `error.downcast_ref::<AgentContinueError>()`.
     ///
     /// # Errors
     ///
-    /// Returns an [`AgentContinueError`] wrapped in `anyhow::Error`: code
-    /// `Busy` when a run is already active, or code `NothingToContinue` when
-    /// there is nothing to continue from. Errors from running queued messages
-    /// and the result of the continuation run are propagated as well.
+    /// Returns an [`AgentContinueError`] in `anyhow::Error`: `Busy` or
+    /// `NothingToContinue`; queued-message errors propagate too.
     ///
     /// # Panics
     ///
-    /// Panics if the `run` mutex is poisoned (another thread panicked while
-    /// holding it).
+    /// Panics if the `run` mutex is poisoned.
     pub async fn continue_run(&self) -> anyhow::Result<()> {
         if self.inner.run.lock().unwrap().is_some() {
             return Err(anyhow::Error::new(AgentContinueError::new(
@@ -1343,8 +1206,7 @@ impl Agent {
     }
 
     /// The loop's event sink for external embedding: forwards events through
-    /// this agent's listener processing (not part of the TS public API; the
-    /// TS class keeps this private).
+    /// this agent's listener processing (the TS class keeps this private).
     #[must_use]
     pub fn event_sink(self: &Arc<Self>) -> AgentEventSink {
         let inner = Arc::clone(&self.inner);
@@ -1402,10 +1264,6 @@ mod tests {
         assert!(queue.has_items());
     }
 
-    // The per-run model override (TS `Agent.modelOverride`): the stream's
-    // requested model + reasoning follow the override while the state keeps
-    // the session model (TS: `state.model` identifies the session, the
-    // override serves the run).
     #[tokio::test]
     async fn model_override_serves_the_run_and_keeps_the_session_model() {
         use std::sync::Mutex as StdMutex;
@@ -1421,6 +1279,7 @@ mod tests {
                 cost: crate::types::UsageCost::default(),
                 context_window: 200_000,
                 max_tokens: 8_192,
+                max_tokens_explicit: false,
             }
         }
 
@@ -1499,9 +1358,6 @@ mod tests {
         let state = agent.state().await;
         assert_eq!(state.model.id, "session-model");
 
-        // Clearing the override returns the next run to the session model
-        // with the state's thinking level (TS: the next dispatch
-        // re-evaluates the override).
         agent.set_model_override(None);
         agent
             .prompt(AgentPromptInput::text("again"))
@@ -1514,8 +1370,6 @@ mod tests {
         assert_eq!(calls[1].1, crate::types::ThinkingLevel::Off);
     }
 
-    // A run that fails while an override is armed attributes its failure to
-    // the override model (TS `ActiveRun.model` in `handleRunFailure`).
     #[tokio::test]
     async fn failed_run_tags_the_override_model() {
         fn model(id: &str) -> Model {
@@ -1529,6 +1383,7 @@ mod tests {
                 cost: crate::types::UsageCost::default(),
                 context_window: 200_000,
                 max_tokens: 8_192,
+                max_tokens_explicit: false,
             }
         }
 
@@ -1571,11 +1426,6 @@ mod tests {
         assert_eq!(failure.stop_reason, crate::types::StopReason::Error);
     }
 
-    // A model switch re-syncs the request's carried level in ONE
-    // agent-lock acquisition: the loop snapshots model and thinking
-    // level together (the same lock), so a concurrently admitted turn
-    // must never observe the new model with the old level — the mixed
-    // state only exists between two separate acquisitions.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_model_switch_updates_the_model_and_level_atomically() {
         fn model(id: &str) -> Model {
@@ -1589,6 +1439,7 @@ mod tests {
                 cost: crate::types::UsageCost::default(),
                 context_window: 200_000,
                 max_tokens: 8_192,
+                max_tokens_explicit: false,
             }
         }
 

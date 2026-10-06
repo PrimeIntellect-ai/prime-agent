@@ -1,26 +1,7 @@
-//! Worker-to-worker peer messaging e2e (thin-supervisor stage 3).
-//!
-//! Three verifiers over real spawned worker processes and real supervisor
-//! processes:
-//!
-//! 1. A kernel `agent_message.send` in worker A resolves the target through
-//!    the supervisor roster, mints a single-use `worker` ticket, burns it on
-//!    worker B's own socket, and delivers the message with the TS sender
-//!    identity block; B runs the rendered prompt exactly once.
-//! 2. The previously-hanging client-to-client shape (two attached clients,
-//!    a message from A's kernel into session B) completes: the receipt is
-//!    observed, the prompt renders once in B, and the supervisor's route
-//!    plane never starves (both clients stay served afterwards).
-//! 3. A supervisor `kill -9` mid-conversation does not stop messaging: the
-//!    workers re-register with the restarted supervisor and the next kernel
-//!    send still delivers.
-//!
-//! The sessions run the real agent engine over the scripted faux provider
-//! (`engine: "faux"`), so the kernel host request, the supervisor link, the
-//! peer ticket, and the direct socket delivery are all exercised for real.
-//!
-//! Linux-only e2e (`AF_UNIX` sockets, process-group kills): compiles to
-//! nothing elsewhere, like the other pa-daemon e2e verifiers.
+//! Worker-to-worker peer messaging e2e: a kernel `agent_message.send` in A
+//! burns a single-use worker ticket on B's socket and delivers with the TS
+//! sender identity; the two-client shape completes without starving the
+//! route plane; a supervisor `kill -9` does not stop messaging.
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -44,10 +25,8 @@ impl Drop for Daemon {
     }
 }
 
-/// The kernel Python with prime-agent-runtime installed (the same
-/// interpreter the TS product's ambient kernel venv provides). The tests
-/// need it: the kernel executes the `agent_message.send` host request.
-/// Skipped (with a note) on machines without a live install.
+/// The kernel Python with prime-agent-runtime installed: the kernel executes
+/// the `agent_message.send` host request. Skipped (with a note) without a live install.
 fn kernel_python() -> Option<PathBuf> {
     if let Some(explicit) = std::env::var_os("PA_E2E_KERNEL_PYTHON") {
         let explicit = PathBuf::from(explicit);
@@ -83,10 +62,9 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path, kernel_python: &Path) -> Da
         .env("PRIME_AGENT_KERNEL_PYTHON", kernel_python)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        // A supervisor killed at teardown must not leak its session workers
-        // into later test binaries: the worker's supervisor-lost exit (TS
-        // `exitIfSupervisorOrphanedForTooLong`) runs on this short window
-        // instead of the 5-minute default.
+        // A supervisor killed at teardown must not leak its session workers: the worker's
+        // supervisor-lost exit (TS `exitIfSupervisorOrphanedForTooLong`) runs on this short
+        // window, not the 5-minute default.
         .env(
             pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
             "15000",
@@ -110,7 +88,6 @@ fn wait_socket_ready(socket: &Path) {
     }
 }
 
-/// JSONL supervisor client (command envelopes, id-matched responses).
 struct Client {
     reader: BufReader<UnixStream>,
     writer: UnixStream,
@@ -178,7 +155,6 @@ impl Client {
     }
 }
 
-/// One faux-engine session script written to disk.
 fn write_faux_script(dir: &Path, name: &str, responses: &Value) -> PathBuf {
     let path = dir.join(format!("{name}.json"));
     std::fs::write(
@@ -189,9 +165,8 @@ fn write_faux_script(dir: &Path, name: &str, responses: &Value) -> PathBuf {
     path
 }
 
-/// The kernel cell that sends one agent message and records the receipt
-/// (or the failure) on disk for the test to read. The kernel's `rlm` name is
-/// the namespace object; `host_request` imports from the runtime module.
+/// The kernel cell that sends one agent message and records the receipt (or
+/// the failure) on disk; `host_request` imports from the runtime module.
 fn send_cell(message: &str, receiver_name: &str, receipt_path: &Path) -> String {
     format!(
         "from rlm import host_request\nimport json, traceback\ntry:\n    receipt = await host_request(\"agent_message.send\", {{\"message\": {message:?}, \"receiver_role\": \"sibling\", \"receiver_name\": {receiver_name:?}}})\n    open({receipt_path:?}, \"w\").write(json.dumps(receipt))\nexcept Exception:\n    open({error_path:?}, \"w\").write(traceback.format_exc())",
@@ -205,7 +180,6 @@ struct Session {
     session_id: String,
 }
 
-/// Create one named faux-engine session through the supervisor.
 fn create_session(
     client: &mut Client,
     id: &str,
@@ -263,7 +237,6 @@ fn wait_idle(client: &mut Client, id: &str, active_session_id: &str) {
     );
 }
 
-/// The session's messages through the supervisor route.
 fn messages(client: &mut Client, id: &str, active_session_id: &str) -> String {
     client.send_command(
         id,
@@ -274,7 +247,6 @@ fn messages(client: &mut Client, id: &str, active_session_id: &str) -> String {
     serde_json::to_string(&response["data"]).expect("messages json")
 }
 
-/// A proof harness: supervisor, two faux sessions, a client.
 struct Messaging {
     dir: tempfile::TempDir,
     daemon: Daemon,
@@ -284,8 +256,8 @@ struct Messaging {
     beta: Session,
 }
 
-/// The receipt the kernel cell recorded for `index`, or the recorded
-/// failure (which fails the test with the traceback).
+/// The receipt the kernel cell recorded for `index`, or the recorded failure
+/// (which fails the test with the traceback).
 fn read_receipt(messaging: &Messaging, index: usize) -> Value {
     let receipt_path = messaging.receipts_dir.join(format!("{index}.json"));
     let error_path = messaging.receipts_dir.join(format!("{index}.error"));
@@ -306,13 +278,11 @@ fn read_receipt(messaging: &Messaging, index: usize) -> Value {
     }
 }
 
-/// The alpha script: one tool-call turn that sends a message (recording
-/// its receipt at `receipts/0.json`), followed by a closing text turn. The
-/// worker's faux engine re-registers the response queue per turn, so every
-/// prompted turn replays this pair.
-/// Two full turns of alpha script (a send tool call plus the closing text
-/// each): the faux provider queues its responses across the whole session,
-/// so the second post-restart turn consumes the second pair.
+/// The alpha script: one tool-call turn that sends a message (recording its receipt
+/// at `receipts/0.json`), then a closing text turn. The faux engine re-registers the
+/// response queue per turn, so every prompted turn replays this pair; the provider
+/// queues responses across the whole session, so the second post-restart turn
+/// consumes the second pair.
 fn alpha_responses(receipts_dir: &Path) -> Value {
     let receipt_path = receipts_dir.join("0.json");
     json!([
@@ -342,7 +312,6 @@ fn setup_messaging() -> Option<Messaging> {
     let receipts_dir = dir.path().join("receipts");
     std::fs::create_dir_all(&receipts_dir).expect("receipts dir");
     let alpha_path = write_faux_script(dir.path(), "alpha", &alpha_responses(&receipts_dir));
-    // One reply per delivered prompt (two turns arrive over the session).
     let beta_path = write_faux_script(
         dir.path(),
         "beta",
@@ -379,8 +348,6 @@ fn setup_messaging() -> Option<Messaging> {
     })
 }
 
-/// Verifier 1: a kernel send in worker A delivers straight through the
-/// peer transport into worker B, with the TS sender identity.
 #[test]
 fn worker_to_worker_kernel_send_delivers_over_the_peer_transport() {
     let Some(messaging) = setup_messaging() else {
@@ -400,11 +367,8 @@ fn worker_to_worker_kernel_send_delivers_over_the_peer_transport() {
         "introduce yourself to beta",
     );
     wait_idle(&mut client, "w1", &alpha.active_session_id);
-    // B runs the delivered prompt.
     wait_idle(&mut client, "w2", &beta.active_session_id);
 
-    // The kernel cell observed the delivery receipt: the TS receipt shape
-    // with the target endpoint and the delivery status.
     let receipt = read_receipt(&messaging, 0);
     assert_eq!(
         receipt["target"]["activeSessionId"], beta.active_session_id,
@@ -420,8 +384,6 @@ fn worker_to_worker_kernel_send_delivers_over_the_peer_transport() {
         "A's turn finished: {alpha_messages}"
     );
 
-    // B rendered the agent-message prompt exactly once, from the TS sender
-    // identity (the sending session's name).
     let beta_messages = messages(&mut client, "gm2", &beta.active_session_id);
     let prompt = "[agent-message from alpha]\\n\\nhello from alpha";
     assert_eq!(
@@ -433,11 +395,9 @@ fn worker_to_worker_kernel_send_delivers_over_the_peer_transport() {
         beta_messages.contains("beta reply"),
         "B answered the delivered prompt: {beta_messages}"
     );
-    // The delivery renders as the agent_message custom row (TS
-    // `createAgentSessionMessage`): the rendered prompt is the row content
-    // and the raw body rides `details.message`, so the body shows up in
-    // both. The delivered prompt is still the only extra prompt B ever
-    // saw.
+    // The delivery renders as the agent_message custom row (TS `createAgentSessionMessage`):
+    // the rendered prompt is the row content and the raw body rides `details.message`,
+    // so the body shows up in both.
     assert_eq!(
         beta_messages.matches("hello from alpha").count(),
         2,
@@ -465,17 +425,12 @@ fn worker_to_worker_kernel_send_delivers_over_the_peer_transport() {
         "the card details carry the delivery id: {delivered}"
     );
 
-    // A's closing turn completed too.
     assert!(
         alpha_messages.contains("alpha turn done"),
         "A's turn finished: {alpha_messages}"
     );
 }
 
-/// Verifier 2: the previously-hanging client-to-client shape. Both clients
-/// are attached; a kernel send from A into B completes with a receipt, B
-/// renders the prompt once, and the supervisor's route plane stays healthy
-/// (both clients keep getting answers afterwards).
 #[test]
 fn attached_client_to_client_send_completes_without_route_starvation() {
     let Some(messaging) = setup_messaging() else {
@@ -488,7 +443,6 @@ fn attached_client_to_client_send_completes_without_route_starvation() {
         ..
     } = messaging;
 
-    // Two attached clients, one per session.
     let (mut client_a, _hello_a) = Client::connect(socket);
     client_a.send_command(
         "attach-a",
@@ -504,7 +458,6 @@ fn attached_client_to_client_send_completes_without_route_starvation() {
     let attached_b = client_b.read_response("attach-b");
     assert_eq!(attached_b["success"], true, "attach B failed: {attached_b}");
 
-    // The send turn: A's kernel messages B while both clients are attached.
     prompt(
         &mut client_a,
         "p1",
@@ -513,7 +466,6 @@ fn attached_client_to_client_send_completes_without_route_starvation() {
     );
     wait_idle(&mut client_a, "w1", &alpha.active_session_id);
 
-    // B's attached client sees the delivered prompt turn.
     let started = Instant::now();
     let beta_messages = loop {
         assert!(
@@ -533,15 +485,12 @@ fn attached_client_to_client_send_completes_without_route_starvation() {
     );
     assert!(beta_messages.contains("beta reply"), "{beta_messages}");
 
-    // The receipt was observed by A's kernel.
     let receipt = read_receipt(&messaging, 0);
     assert_eq!(
         receipt["target"]["activeSessionId"], beta.active_session_id,
         "receipt observed: {receipt}"
     );
 
-    // No route starvation: both clients keep getting fresh answers, and
-    // events still flow to the attached clients.
     let served_by = Instant::now();
     client_a.send_command(
         "state-a",
@@ -567,9 +516,6 @@ fn attached_client_to_client_send_completes_without_route_starvation() {
     );
 }
 
-/// Verifier 3: a supervisor death mid-conversation does not stop the
-/// workers; after they re-register with the restarted supervisor, the next
-/// kernel send still delivers over the peer transport.
 #[test]
 fn supervisor_death_mid_conversation_still_delivers_after_re_registration() {
     let Some(mut messaging) = setup_messaging() else {
@@ -580,7 +526,6 @@ fn supervisor_death_mid_conversation_still_delivers_after_re_registration() {
     let agent_dir = messaging.dir.path().join("agent");
 
     let (mut client, _hello) = Client::connect(&messaging.socket);
-    // Turn 1 completes before the supervisor dies.
     prompt(&mut client, "p1", &alpha_id, "first message");
     wait_idle(&mut client, "w1", &alpha_id);
     wait_idle(&mut client, "w2", &beta_id);
@@ -590,19 +535,17 @@ fn supervisor_death_mid_conversation_still_delivers_after_re_registration() {
         1
     );
 
-    // kill -9 the supervisor; both workers keep running.
     messaging.daemon.child.kill().expect("kill -9 supervisor");
     let _ = messaging.daemon.child.wait();
 
-    // Restart the supervisor on the same socket and agent dir.
     let kernel_python = kernel_python().expect("kernel python was found in setup");
     let daemon = spawn_supervisor(&messaging.socket, &agent_dir, &kernel_python);
     messaging.daemon = daemon;
     wait_socket_ready(&messaging.socket);
     let (mut client, _hello2) = Client::connect(&messaging.socket);
 
-    // Both workers re-register within a bounded window (the roster and the
-    // worker connections come back with them).
+    // Both workers re-register within a bounded window (the roster and the worker
+    // connections come back with them).
     let started = Instant::now();
     let re_registered = loop {
         assert!(
@@ -629,14 +572,10 @@ fn supervisor_death_mid_conversation_still_delivers_after_re_registration() {
     };
     assert_eq!(re_registered.len(), 2);
 
-    // The next kernel send still delivers: the supervisor link reconnects,
-    // the ticket mints against the rebuilt roster, and B runs the prompt.
     prompt(&mut client, "p2", &alpha_id, "second message");
     wait_idle(&mut client, "w3", &alpha_id);
     wait_idle(&mut client, "w4", &beta_id);
 
-    // The post-restart send observed its own receipt (the script's second
-    // turn rewrites the receipt file).
     let receipt = read_receipt(&messaging, 0);
     assert_eq!(
         receipt["target"]["activeSessionId"], beta_id,
@@ -648,9 +587,8 @@ fn supervisor_death_mid_conversation_still_delivers_after_re_registration() {
         2,
         "both delivered prompts rendered in B: {beta_messages}"
     );
-    // Each delivery's card carries the body twice (content plus
-    // details.message), so two sends render the body four times while the
-    // bracketed prompt stays once per send.
+    // Each delivery's card carries the body twice (content plus details.message), so two
+    // sends render the body four times while the bracketed prompt stays once per send.
     assert_eq!(
         beta_messages.matches("hello from alpha").count(),
         4,

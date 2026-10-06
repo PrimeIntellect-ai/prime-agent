@@ -1,31 +1,16 @@
-//! Control-plane priority e2e (design R3): a supervisor booting over a
-//! sessions dir full of dead workers must keep the control plane
-//! (hello, list) responsive while the background recovery (descriptor
-//! adoption with a capped relaunch fan-out) is still running, and every
-//! queued recovery must complete. The starved shape this guards against —
-//! serving awaiting the recovery — would fail both halves: the hello and
-//! list answers would land only after the whole pass, past the latency
-//! bound, with every relaunched worker already up.
-//!
-//! Linux-only e2e (`AF_UNIX` sockets, `kill -9` semantics): compiles to
-//! nothing elsewhere, like the other pa-daemon e2e verifiers.
-// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
-// the full rationale).
-// Stack-resident futures by design on the daemon's hot paths; boxing the
-// call sites for a lint tick is a perf regression with zero correctness gain.
+//! Control-plane priority e2e (design R3): a supervisor booting over a sessions
+//! dir full of dead workers must keep hello/list responsive while the
+//! background recovery (capped relaunch fan-out) runs, and every queued
+//! recovery must complete. Linux-only e2e (`AF_UNIX` sockets, `kill -9` semantics).
 #![allow(clippy::large_futures)]
-// 64-bit-only targets; the narrowing casts sit at OS boundaries
-// (pid/fd/time/size) where the values are bounded by the kernel - the
-// dead-guard expect()s would add panic paths where silent wrap was
-// deliberate.
+// 64-bit-only targets; the narrowing casts sit at bounded OS boundaries.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// The fn-length threshold is a style gate, not correctness; the structure
-// campaign owns the god-fn splits as a follow-up.
+// Fn length is a style gate, not correctness.
 #![allow(clippy::too_many_lines)]
 // API-shape opinions, not defects; the surfaces are deliberate.
 #![allow(
@@ -65,9 +50,8 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path) -> Daemon {
         .arg(agent_dir)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        // A supervisor killed at teardown must not leak its session workers
-        // into later test binaries: the worker's supervisor-lost exit runs
-        // on this short window instead of the 5-minute default.
+        // A supervisor killed at teardown must not leak its session workers: the
+        // supervisor-lost exit runs on this short window, not the 5-minute default.
         .env(
             pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
             "15000",
@@ -77,8 +61,8 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path) -> Daemon {
     Daemon { child }
 }
 
-/// Wait until the supervisor socket accepts connections (file existence is
-/// not readiness: a restarted supervisor replaces a stale socket file).
+/// Wait until the socket accepts connections (file existence is not readiness:
+/// a restarted supervisor replaces a stale socket file).
 fn wait_socket_ready(socket: &Path) {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
@@ -90,7 +74,6 @@ fn wait_socket_ready(socket: &Path) {
     }
 }
 
-/// Pids whose parent is `ppid`.
 fn child_pids_of(ppid: u32) -> Vec<u32> {
     let mut pids = Vec::new();
     let entries = std::fs::read_dir("/proc").expect("read /proc");
@@ -116,9 +99,8 @@ fn child_pids_of(ppid: u32) -> Vec<u32> {
     pids
 }
 
-/// Worker ids with a registration log line at or after `since` (the
-/// log line lands after the registry records the worker, so it is the
-/// "routable" signal, not just a spawned process).
+/// Worker ids with a registration log line at or after `since` (the log line lands
+/// after the registry records the worker — the "routable" signal).
 fn workers_registered_since(log_path: &Path, since: &str) -> Vec<String> {
     let Ok(content) = std::fs::read_to_string(log_path) else {
         return Vec::new();
@@ -157,8 +139,8 @@ fn distinct(values: Vec<String>) -> Vec<String> {
     values
 }
 
-/// `kill -9` an arbitrary pid: the harness only holds Child handles for
-/// the supervisors, while the workers are adopted pids on the wire.
+/// `kill -9` an arbitrary pid: the harness holds Child handles only for the
+/// supervisors; the workers are adopted pids on the wire.
 fn kill9(pid: u32) {
     let status = Command::new("kill")
         .arg("-9")
@@ -235,9 +217,9 @@ impl Client {
     }
 }
 
-/// One adoption wave relaunches at most `ADOPTION_CONCURRENCY` workers, so
-/// twelve dead descriptors is three capped waves: a recovery that is
-/// observably long enough to race the control plane, not just a blip.
+/// One adoption wave relaunches at most `ADOPTION_CONCURRENCY` workers, so twelve
+/// dead descriptors is three capped waves — a recovery observably long enough to
+/// race the control plane.
 const SESSIONS: usize = 12;
 
 #[test]
@@ -259,7 +241,6 @@ fn control_plane_stays_responsive_while_a_large_adoption_pass_recovers() {
     let (mut client, hello) = Client::connect(&socket);
     assert_eq!(hello["type"], "daemon_hello");
 
-    // A large sessions dir: twelve scripted sessions, one worker each.
     let mut session_ids = Vec::new();
     for index in 0..SESSIONS {
         client.send_command(
@@ -294,24 +275,19 @@ fn control_plane_stays_responsive_while_a_large_adoption_pass_recovers() {
         std::thread::sleep(Duration::from_millis(50));
     };
 
-    // The recovery workload: every worker dead, its descriptor persisted.
     daemon.child.kill().expect("kill -9 supervisor");
     let _ = daemon.child.wait();
     for pid in &worker_pids {
         kill9(*pid);
     }
 
-    // Restart: the adoption pass must relaunch all twelve in the
-    // background while serving starts immediately.
     let restart_before = pa_daemon::util::now_iso();
     let daemon2 = spawn_supervisor(&socket, &agent_dir);
     wait_socket_ready(&socket);
     let restart_supervisor_pid = daemon2.child.id();
 
-    // The control plane answers mid-recovery: hello within the latency
-    // bound while the pass is visibly unfinished (strictly fewer than
-    // twelve relaunched children). If serving ever awaited the recovery,
-    // this hello would land after the whole pass with all twelve up.
+    // The control plane answers mid-recovery: hello within the latency bound while
+    // the pass is visibly unfinished (fewer than twelve relaunched children).
     let hello_start = Instant::now();
     let (mut client, hello) = Client::connect(&socket);
     let hello_latency = hello_start.elapsed();
@@ -326,8 +302,8 @@ fn control_plane_stays_responsive_while_a_large_adoption_pass_recovers() {
         child_pids_of(restart_supervisor_pid)
     );
 
-    // list answers mid-recovery too: it serves the registered rows instead
-    // of queueing behind the rest of the pass.
+    // list answers mid-recovery too: it serves the registered rows instead of
+    // queueing behind the pass.
     let list_start = Instant::now();
     client.send_command("list-mid-recovery", &json!({ "type": "list" }));
     let list_response = client.read_response("list-mid-recovery");
@@ -341,14 +317,9 @@ fn control_plane_stays_responsive_while_a_large_adoption_pass_recovers() {
         "list starved behind the recovery: {list_latency:?}"
     );
 
-    // Queued recoveries complete: every dead descriptor is relaunched and
-    // registers within a bounded window. The wait is on registrations (the
-    // log line lands after the registry records the worker), not on child
-    // processes: a relaunched worker process exists before its create
-    // replay finishes, and a routed command for a not-yet-registered
-    // session correctly fails fast (the roster-scoped queue of spec 10.4
-    // covers the update restore pass; plain-restart adoption is covered by
-    // the client's reconnect retry).
+    // Queued recoveries complete: every descriptor relaunches and registers within a
+    // bounded window. The wait is on registrations (the log line lands after the registry
+    // records the worker), not on child processes.
     let log_path = pa_daemon::paths::daemon_log_path(&socket, &agent_dir);
     let deadline = Instant::now() + Duration::from_mins(2);
     loop {
@@ -363,8 +334,8 @@ fn control_plane_stays_responsive_while_a_large_adoption_pass_recovers() {
         std::thread::sleep(Duration::from_millis(100));
     }
 
-    // A routed command lands through the rebuilt roster: attach to one of
-    // the recovered sessions.
+    // A routed command lands through the rebuilt roster: attach to one of the
+    // recovered sessions.
     client.send_command(
         "attach-recovered",
         &json!({ "type": "attach", "activeSessionId": session_ids[0] }),

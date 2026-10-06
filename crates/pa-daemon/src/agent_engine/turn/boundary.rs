@@ -1,13 +1,11 @@
-//! The turn boundary (moved with its concern): the boundary run
-//! (compaction + overflow arms + goal continuation), the stale
-//! boundary-request drop, and the auto-compaction abort clear.
+//! The turn boundary: the boundary run (compaction + overflow arms +
+//! goal continuation), the stale boundary-request drop, and the
+//! auto-compaction abort clear.
 use super::{AbortController, AgentSessionEngine, BoundaryRun, EngineEvent, Value};
 
 impl AgentSessionEngine {
     /// Clear the automatic-compaction abort slot when `controller`'s run
-    /// settles (TS `_runAutoCompaction`'s `finally`: only the run that
-    /// assigned the controller clears it, so a stale run cannot clear a
-    /// newer run's slot).
+    /// settles: only the run that assigned the controller clears it.
     pub(crate) fn clear_auto_compaction_abort(&self, controller: &std::sync::Arc<AbortController>) {
         let mut slot = self
             .auto_compaction_abort
@@ -21,8 +19,7 @@ impl AgentSessionEngine {
         }
     }
 
-    /// Drop pending turn-boundary requests (aborted turns; TS `_checkCompaction`
-    /// abort arm clears both the compaction and the refine request).
+    /// Drop pending turn-boundary requests (aborted turns clear both).
     pub(super) fn drop_turn_boundary_requests(&self) {
         let guard = self.session.blocking_lock();
         if let Some(engine) = guard.as_deref() {
@@ -31,13 +28,9 @@ impl AgentSessionEngine {
     }
 
     /// Consume pending `compact.run`/`refine.run` requests at the settled
-    /// turn boundary, in TS order (compaction, then refinement). The
-    /// compaction outcome reaches the transcript like `/compact` (the
-    /// worker persists the entry and broadcasts `compaction_end`); the
-    /// model-facing refinement notice reaches it like the `/refine` notice
-    /// row. A consumed compaction stops the run (TS: requested compaction
-    /// stops the loop on purpose; the model resumes on the next prompt or
-    /// queued continuation).
+    /// turn boundary, compaction first, then refinement. A consumed
+    /// compaction stops the run on purpose; the model resumes on the next
+    /// prompt.
     pub(super) fn run_turn_boundary(
         &self,
         emit: &mut dyn FnMut(EngineEvent) -> bool,
@@ -56,9 +49,9 @@ impl AgentSessionEngine {
         if !has_pending {
             return BoundaryRun::Proceed;
         }
-        // The session's live model (the provider target the turn stream
-        // reads), never a fresh startup-chain resolution (R8: a
-        // re-resolution landed the summarizer on an unconfigured provider).
+        // The session's live model, never a fresh startup-chain resolution
+        // (a re-resolution landed the summarizer on an unconfigured
+        // provider).
         let model = match self.session_model() {
             Ok(model) => model,
             Err(error) => {
@@ -68,9 +61,8 @@ impl AgentSessionEngine {
         };
         let api_key = self.resolve_request_api_key(&model);
         let global_harness_dir = self.config.agent_dir.clone();
-        // TS `_runAutoCompaction("requested")` emits the start event before
-        // the summarizer runs (the `Agent requested compaction, compacting
-        // context...` loader swap), carrying the pending instructions.
+        // The start event goes out before the summarizer runs, carrying the
+        // pending instructions.
         let scheduled = {
             let guard = self.session.blocking_lock();
             match guard.as_deref() {
@@ -90,9 +82,9 @@ impl AgentSessionEngine {
                 return BoundaryRun::Cancelled;
             }
         }
-        // TS `_runAutoCompaction` assigns `_autoCompactionAbortController`
-        // for the requested run's duration: an `abort_compaction` command
-        // lands in the slot and cancels the in-flight summarizer.
+        // The requested run owns the abort slot for its duration: an
+        // `abort_compaction` lands in the slot and cancels the in-flight
+        // summarizer.
         let controller = std::sync::Arc::new(AbortController::new());
         let signal = controller.signal();
         {
@@ -124,10 +116,8 @@ impl AgentSessionEngine {
         let mut compacted = false;
         match consumption.compaction {
             Some(Ok(pa_core::session_engine::compact_session::CompactOutcome::Ran(run))) => {
-                // The post-compaction kernel notice goes out before the
-                // settled end (TS `_syncKernelStateAfterCompaction` runs
-                // inside `_performCompaction`): its `message_start` /
-                // `message_end` pair precedes `compaction_end`.
+                // The post-compaction kernel notice goes out before the settled end;
+                // its pair precedes `compaction_end`.
                 if let Some(message) = &run.ipython_state {
                     if !emit(EngineEvent::CustomMessage(
                         crate::session_commands::custom_message_value(message),
@@ -135,9 +125,6 @@ impl AgentSessionEngine {
                         return BoundaryRun::Cancelled;
                     }
                 }
-                // Adoption telemetry (TS `compaction_end` handling counts
-                // every completed compaction into the active run; the
-                // centrally-measured duration fires the timing stage).
                 {
                     let guard = self.session.blocking_lock();
                     if let Some(telemetry) = guard
@@ -147,15 +134,12 @@ impl AgentSessionEngine {
                         telemetry.note_compaction(Some(run.duration_ms));
                     }
                 }
-                // TS `_scheduleAutoRefineAfterCompaction`: the compaction
-                // arms the compact-trigger review; the run stops on
-                // purpose, and the worker services the armed round off the
-                // turn's settle (the review never runs before the `Done`).
+                // The run stops on purpose; the worker services the armed review off
+                // the settle (never before the `Done`).
                 self.mark_compact_auto_refine_pending();
                 let entry = serde_json::to_value(&run.entry).unwrap_or(Value::Null);
-                // The wire result is the TS `CompactionResult` shape
-                // (`_performCompaction`'s return, details included); the
-                // event reason is `requested` (TS `_runAutoCompaction`).
+                // The wire result is the `CompactionResult` shape; the event reason
+                // is `requested`.
                 let result = crate::compaction::compaction_result_value(&run.result, &run.entry);
                 let event =
                     crate::compaction::compaction_end_success("requested", &result, false, None);
@@ -165,9 +149,8 @@ impl AgentSessionEngine {
                 stopped_for_compaction = true;
                 compacted = true;
             }
-            // A skip consumed the request (the Rust `/compact` contract):
-            // the durable disclosure row goes out with its message pair,
-            // then the end event carries the TS warning.
+            // A skip consumed the request: the disclosure row goes out
+            // with its pair, then the end event carries the TS warning.
             Some(Ok(pa_core::session_engine::compact_session::CompactOutcome::Skipped(
                 message,
             ))) => {
@@ -184,10 +167,8 @@ impl AgentSessionEngine {
                 stopped_for_compaction = true;
             }
             Some(Err(error)) => {
-                // An aborted run is user-initiated, not a failure (TS
-                // `_runAutoCompaction`'s `aborted` check before the skip and
-                // failure arms): the request is consumed either way, so the
-                // run stops like a completed requested compaction.
+                // An aborted run is user-initiated, not a failure: the request is
+                // consumed either way, so the run stops.
                 let cancelled = pa_agent::abort::is_abort_error(&error);
                 let message = if cancelled {
                     "Requested compaction cancelled".to_string()
@@ -215,8 +196,6 @@ impl AgentSessionEngine {
         }
         match consumption.refinement {
             Some(Ok(refinement)) => {
-                // The model-facing notice row (durable, like the session
-                // persistence of TS `refine()`).
                 if refinement.applied_edits.iter().any(|edit| edit.applied) {
                     let notice = pa_core::session_engine::refine::create_refinement_notice_message(
                         &refinement,

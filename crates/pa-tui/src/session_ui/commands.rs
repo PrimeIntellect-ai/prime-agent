@@ -1,7 +1,5 @@
-//! The client-command dispatch concern: the slash-command ladder
-//! (`handle_slash`), the builtin client-command dispatch tail, the
-//! command-catalog refresh/fold, and the connection-state read the
-//! commands share.
+//! The slash-command ladder (`handle_slash`), the builtin client-command dispatch tail, the
+//! command-catalog refresh/fold, and the shared connection-state read.
 use super::{
     create_session, effort_picker, info_commands, terminal_columns, AgentView, AuthSelectorKind,
     ChatEntry, CommandCatalogUpdate, DaemonCommand, DockFold, Duration, InfoContent, Map,
@@ -10,18 +8,9 @@ use super::{
 };
 
 impl SessionUi {
-    /// Slash-command dispatch (the TS interactive submission ladder reduced
-    /// to this client's surface): local client commands run here, builtin
-    /// client commands without a UI yet report unavailability, session
-    /// commands (`compact`/`refine`/`goal`/`autonomous`) forward to the
-    /// session, and unknown commands get the TS suggestion error — anything
-    /// without a suggestion passes through as a prompt.
-    ///
-    /// `behavior` is TS `onSubmit`'s captured `streamingBehavior`: the
-    /// submit lane that carried the text (alt+enter = followUp), passed
-    /// through to every fallthrough prompt — TS sends the fallthrough with
-    /// the submit's own lane, so a slash-prefixed follow-up keeps parking
-    /// on the follow-up lane (Bugbot's lost-lane finding).
+    /// Slash-command dispatch: builtin client commands without a UI report unavailability, session
+    /// commands forward to the session, unknown commands get the suggestion error or pass through
+    /// as a prompt; `behavior` passes through, so a slash-prefixed follow-up keeps its lane.
     pub(super) async fn handle_slash(
         &mut self,
         text: &str,
@@ -32,19 +21,11 @@ impl SessionUi {
         let (name, args) = pa_types::slash_commands::parse_slash_command(text)
             .unwrap_or_else(|| (String::new(), String::new()));
 
-        // A bare `/skill:<name>` submit never sends. The daemon's
-        // admission seam replaces a sent skill command with its expanded
-        // protocol block, so a bare invocation would hand the model the
-        // protocol as its only user message with no task attached (the
-        // engine floor appends a harness-owned instruction at the far
-        // end; this guard keeps the taskless submission from ever
-        // starting). The draft restores into the editor, the notice
-        // names the fix, and the user stays put to type the request.
+        // A bare `/skill:<name>` never sends: the daemon's admission seam would hand the model the
+        // expanded protocol as its only user message with no task attached.
         if name.starts_with("skill:") && args.trim().is_empty() {
-            // The draft restores INTO THE ARGUMENT POSITION (the trailing
-            // space the completion added survives the round trip): the
-            // next keystrokes become the request instead of gluing onto
-            // the command name, so the recovery flow is one step.
+            // The draft restores into the argument position: the next keystrokes
+            // become the request.
             view.editor.set_text(&format!("{text} "));
             self.note(
                 "add your request after the skill, e.g. /skill:prime-agent-release make a release of PR #2731",
@@ -82,9 +63,8 @@ impl SessionUi {
         }
 
         let Some(resolved) = registry.parse(text) else {
-            // Oversized names are prompts (TS `_throwIfUnknownSlashCommand`
-            // bails out before fuzzy matching). Close typos get the exact TS
-            // error; everything else passes through to the model.
+            // Oversized names are prompts; close typos get the suggestion error,
+            // everything else passes through to the model.
             if name.chars().count() > 64 {
                 return self.send_prompt(text, behavior, view);
             }
@@ -117,21 +97,17 @@ impl SessionUi {
         }
     }
 
-    /// TS `handleClearCommand` (the `/new` flow, interactive-mode.ts:4703,
-    /// :12486): create a fresh session and rebind the view to it. The
-    /// `/new` command and the `app.session.new` action share it.
+    /// Create a fresh session and rebind the view to it (the `/new` flow,
+    /// shared with the `app.session.new` action).
     pub(super) async fn start_new_session(&mut self, view: &mut AgentView) -> Result<()> {
         let id = create_session(&self.client, &self.create_options(), None).await?;
         self.attach_session(&id, DockFold::Fresh).await?;
-        // The title's pair is session-scoped: fetch the new session's
-        // stats before the rebuild copies them into the chrome, or the
-        // rebind would ride the session being left's own cost and
-        // subagent aggregate.
+        // The title's pair is session-scoped: fetch the new session's stats before the rebuild
+        // copies them into the chrome, or the rebind would ride the session being left's cost.
         self.refresh_stats().await;
         self.rebuild_view(view, &RebuildKind::Rebind);
-        // TS `resetCurrentSessionRenderState`: a new session starts with
-        // no draft and no prompt history (the submitted `/new` drains the
-        // draft already, so only the history clear changes there).
+        // A new session starts with no draft and no prompt history (the submitted
+        // `/new` drains the draft already).
         view.editor.clear_history();
         view.editor.set_text("");
         self.note(&format!("started session {id}"), view);
@@ -139,9 +115,8 @@ impl SessionUi {
         Ok(())
     }
 
-    /// A builtin client command. Only the implemented subset runs locally;
-    /// commands whose UI does not exist yet report unavailability. `text` is
-    /// the typed submission (the client echo rows render it verbatim).
+    /// A builtin client command: only the implemented subset runs locally;
+    /// the rest report unavailability.
     async fn dispatch_client_command(
         &mut self,
         resolved: &pa_types::slash_commands::ResolvedSlashCommand,
@@ -149,26 +124,17 @@ impl SessionUi {
         view: &mut AgentView,
     ) -> Result<()> {
         match resolved.name {
-            // `/clear` stays the no-argument compatibility alias of `/new`
-            // (TS refuses arguments to it).
+            // `/clear` stays the no-argument alias of `/new`.
             "new" if resolved.original_name == "clear" && !resolved.args.is_empty() => {
                 self.note("Usage: /clear", view);
             }
             "new" => {
-                // The lane's app.session.new dispatch owns /new: the
-                // startup-scope-aware session start (draft and prompt
-                // history cleared, the status row, the feature outcome)
-                // lives in one place, the same route the key takes.
                 self.start_new_session(view).await?;
             }
-            // TS `/quit` shuts the client down; this build's exit detaches
-            // and exits (the session keeps running in the daemon).
+            // `/quit` detaches and exits (the session keeps running in the daemon).
             "quit" => {
                 self.exit_requested = true;
             }
-            // `/resume` (TS: open the agents view, or resume a session by
-            // id or path). Both paths detach this session first; the CLI
-            // loop then opens the agents view or the resolved selection.
             "resume" => {
                 if resolved.args.is_empty() {
                     self.open_agents_view = true;
@@ -188,11 +154,8 @@ impl SessionUi {
                     }
                 }
             }
-            // `/model` opens the model picker (menu-only: the TS
-            // `handleModelCommand` inline-arg form — an exact match applies
-            // directly, anything else prefills the search — is deliberately
-            // removed; a partial + Tab opens the picker filtered instead,
-            // and a submitted argument is the usage error).
+            // `/model` opens the model picker (menu-only: the TS inline-arg form is deliberately
+            // removed — a partial + Tab opens the picker filtered instead).
             "model" => {
                 if !resolved.args.trim().is_empty() {
                     view.editor
@@ -204,10 +167,6 @@ impl SessionUi {
                 self.track_menu_opened("model", "command");
                 self.track_feature_outcome("model", "initiated", None);
             }
-            // `/effort [level]` (TS `handleEffortCommand`): the
-            // session's thinking levels drive the outcome — a model
-            // without reasoning reports the TS note, a missing argument
-            // opens the picker, and a valid argument applies directly.
             "effort" => {
                 let Some(state) = self.connection_state(view).await else {
                     return Ok(());
@@ -223,8 +182,7 @@ impl SessionUi {
                             .collect()
                     })
                     .unwrap_or_default();
-                // TS `getAvailableThinkingLevels`: an "off"-only list is
-                // no thinking surface.
+                // An "off"-only list is no thinking surface.
                 let levels: Vec<String> = if levels.len() == 1 && levels[0] == "off" {
                     Vec::new()
                 } else {
@@ -243,7 +201,7 @@ impl SessionUi {
                         self.note("Current model does not support thinking", view);
                     }
                     effort_picker::EffortCommandOutcome::Unknown { requested, levels } => {
-                        // TS `showError`: the ⚠ Error row, not the muted note.
+                        // The ⚠ Error row, not the muted note.
                         view.push_entry(ChatEntry::Status {
                             text: format!(
                                 "\u{26a0} Error: Unknown thinking level '{requested}'. Available: {}",
@@ -258,7 +216,6 @@ impl SessionUi {
                     }
                 }
             }
-            // `/tree` (TS `showTreeSelector`): the session-tree navigator.
             "tree" => {
                 if resolved.args.is_empty() {
                     self.track_feature_outcome("tree", "initiated", None);
@@ -267,8 +224,6 @@ impl SessionUi {
                     self.note("Usage: /tree", view);
                 }
             }
-            // `/fork` (TS `showUserMessageSelector`): fork from a user
-            // message into a new session.
             "fork" => {
                 if resolved.args.is_empty() {
                     self.track_feature_outcome("fork", "initiated", None);
@@ -277,8 +232,6 @@ impl SessionUi {
                     self.note("Usage: /fork", view);
                 }
             }
-            // `/clone` (TS `handleCloneCommand`): duplicate the session at
-            // the current position.
             "clone" => {
                 if resolved.args.is_empty() {
                     self.track_feature_outcome("clone", "initiated", None);
@@ -287,10 +240,6 @@ impl SessionUi {
                     self.note("Usage: /clone", view);
                 }
             }
-            // TS `handleCopyCommand`: the last assistant text (the
-            // daemon `get_last_assistant_text` lookup) copied to the
-            // clipboard (platform tools, OSC 52 fallback). An argument is
-            // the usage error with the text kept in the editor.
             "copy" => {
                 if resolved.args.is_empty() {
                     self.handle_copy_command(view).await?;
@@ -300,10 +249,8 @@ impl SessionUi {
                     self.error_row("Usage: /copy", view);
                 }
             }
-            // `/login` (TS `showConfigurationMenu("providers")`): the
-            // providers selector this build ports of that tab (the full
-            // configuration menu stays unported; the panel is the same
-            // TS `OAuthSelectorComponent` the tab mounts).
+            // `/login` opens the providers selector (the full configuration menu
+            // stays unported).
             "login" => {
                 if resolved.args.is_empty() {
                     self.open_provider_auth(AuthSelectorKind::Login, view)
@@ -315,8 +262,6 @@ impl SessionUi {
                     self.error_row("Usage: /login", view);
                 }
             }
-            // `/logout` (TS `showLogoutSelector`): the stored-credential
-            // selector; an empty store answers the TS status directly.
             "logout" => {
                 if resolved.args.is_empty() {
                     self.open_provider_auth(AuthSelectorKind::Logout, view)
@@ -328,9 +273,6 @@ impl SessionUi {
                     self.error_row("Usage: /logout", view);
                 }
             }
-            // `/import <path.jsonl>` (TS `handleImportCommand`): the
-            // path parses like `/export`'s, then the confirm guards the
-            // replacement.
             "import" => {
                 let command_text = if resolved.args.is_empty() {
                     "/import".to_string()
@@ -339,10 +281,6 @@ impl SessionUi {
                 };
                 self.open_import_confirm(&command_text, view);
             }
-            // `/traces [status|on|off|preview|upload|upload-current|
-            // upload-all|login]` (TS `handleTracesCommand`): the status
-            // block, the settings writes, and the TS command shapes over
-            // the upload subsystem this build has.
             "traces" => {
                 self.handle_traces_command(resolved, view).await?;
             }
@@ -353,10 +291,8 @@ impl SessionUi {
             "nightly" => {
                 let arg = resolved.args.trim().to_lowercase();
                 if arg == "status" {
-                    // The effective channel resolves through the
-                    // client-settings seam (pa-tui cannot reach the
-                    // update flow's resolver); a surface without the
-                    // seam never claims a channel.
+                    // The channel resolves through the client-settings seam; a surface
+                    // without it never claims a channel.
                     let Some(settings) = &self.client_settings else {
                         self.note("/nightly is not available in this client yet", view);
                         return Ok(());
@@ -378,10 +314,8 @@ impl SessionUi {
                     return Ok(());
                 }
                 if arg == "off" || arg == "stable" {
-                    // The pin persists through the client-settings seam; a
-                    // surface without the seam never claims the pin (TS
-                    // always has a settings manager, so the gate is this
-                    // client's honesty guard).
+                    // The pin persists through the client-settings seam; a surface without
+                    // it never claims the pin.
                     let Some(settings) = &self.client_settings else {
                         self.note("/nightly is not available in this client yet", view);
                         return Ok(());
@@ -579,17 +513,11 @@ impl SessionUi {
                 self.pending_confirm = Some(PendingConfirm::Update);
                 self.dirty = true;
             }
-            // TS `handleMcpCommand`'s login/logout branches: the auth
-            // flows run in the client process (the composition root's
-            // hook); the other management subcommands surface through the
-            // `mcp` CLI command instead of the TUI.
+            // The auth flows run in the client process; other management subcommands
+            // surface through the `mcp` CLI command instead of the TUI.
             "mcp" => self.handle_mcp_command(resolved, view).await?,
-            // `/plugins [search]` (TS `handlePluginsCommand` ->
-            // `showServiceCatalogPicker`): the external-services catalog
-            // picker. This client folds the catalog into the `/mcp` view
-            // (the same resolved `services` cards the daemon serves both
-            // surfaces), so the command opens that view; an argument
-            // prefills its search field like TS's initial search.
+            // `/plugins [search]` opens the `/mcp` view (this client folds the
+            // catalog into it); an argument prefills its search field.
             "plugins" => {
                 self.open_mcp_view("/plugins", view, "").await?;
                 let search = resolved.args.trim();
@@ -599,15 +527,12 @@ impl SessionUi {
                     }
                 }
             }
-            // TS `handleExportCommand`: an explicit `.jsonl` path exports
-            // the current branch; anything else (including no argument)
+            // An explicit `.jsonl` path exports the current branch; anything else
             // exports HTML.
             "export" => {
                 self.handle_export_command(resolved, view).await?;
             }
-            // TS `handleShareCommand`: an argument is the usage error (the
-            // text stays in the editor); otherwise the session exports to a
-            // temp file and uploads as a secret gist.
+            // The session exports to a temp file and uploads as a secret gist.
             "share" => {
                 if resolved.args.is_empty() {
                     self.handle_share_command(view).await?;
@@ -617,24 +542,17 @@ impl SessionUi {
                     self.error_row("Usage: /share", view);
                 }
             }
-            // `/hotkeys` (TS `handleHotkeysCommand` after
-            // `echoLocalCommand`): the typed command echoes as a user
-            // message block, then the full keyboard-shortcut reference
-            // renders from the EFFECTIVE bindings so user
-            // `keybindings.json` overrides show their keys. Client-side
-            // rows only, never durable session entries.
+            // `/hotkeys`: the full keyboard-shortcut reference renders from the EFFECTIVE bindings
+            // so user `keybindings.json` overrides show their keys (client-side rows only).
             "hotkeys" => {
                 if !resolved.args.is_empty() {
-                    // TS keeps the text in the editor on the usage error.
                     view.editor
                         .set_text(&format!("/{} {}", resolved.original_name, resolved.args));
                     self.error_row("Usage: /hotkeys", view);
                     return Ok(());
                 }
-                // The operator's 2026-09-26 directive: the full guide
-                // renders as the read-only info panel instead of the
-                // multi-screen markdown flood in the transcript (the
-                // content itself is unchanged).
+                // The operator's 2026-09-26 directive: the guide renders as the read-only
+                // info panel instead of the transcript flood.
                 self.open_info_panel(
                     view,
                     Some("Hotkeys".to_string()),
@@ -643,10 +561,6 @@ impl SessionUi {
                 self.track_menu_opened("hotkeys", "command");
             }
 
-            // `/session` (TS `handleSessionCommand`): the daemon's
-            // session stats as the `Session Info` rows — rendered in the
-            // read-only info panel (the operator's 2026-09-26
-            // directive), not as transcript rows.
             "session" => {
                 if !resolved.args.is_empty() {
                     view.editor.set_text(text);
@@ -666,8 +580,6 @@ impl SessionUi {
                 match stats {
                     Ok(stats) => {
                         let name = self.session_name.clone();
-                        // The content's own `Session Info` header row is
-                        // the panel's head (no title duplication).
                         self.open_info_panel(
                             view,
                             None,
@@ -683,15 +595,10 @@ impl SessionUi {
                     }
                 }
             }
-            // `/context` and its `/usage` alias (TS
-            // `handleContextCommand` over `formatContextTree`): the agent
-            // tree with own token/cost columns and context utilization —
-            // rendered in the scrollable read-only info panel (the
-            // operator's 2026-09-26 directive), not as transcript rows.
-            // The optional `all` argument is #2842's deliberate TS delta
-            // (TS takes none): over the row budget the default view
-            // collapses to the highest-usage agents plus a summary row
-            // and the expand hint, and `all` renders the whole tree.
+            // `/context` (and its `/usage` alias): the agent tree with token/cost columns and
+            // context utilization. The optional `all` argument is a deliberate TS delta (TS takes
+            // none): past the row budget the default view collapses to the highest-usage agents;
+            // `all` renders the whole tree.
             "context" => {
                 let scope = match resolved.args.as_str() {
                     "" => info_commands::ContextTreeScope::Collapsed,
@@ -716,8 +623,6 @@ impl SessionUi {
                     Ok(tree) => {
                         // TS render width: clamp(columns - 2, 60, 120).
                         let width = terminal_columns().saturating_sub(2).clamp(60, 120);
-                        // The content's own `Context` header row is the
-                        // panel's head (no title duplication).
                         self.open_info_panel(
                             view,
                             None,
@@ -732,11 +637,8 @@ impl SessionUi {
                     }
                 }
             }
-            // `/system-prompt` (TS `handleSystemPromptCommand`): the header
-            // with the char count, then the exact assembled prompt — a
-            // document of unbounded size, so it renders in the
-            // scrollable read-only info panel (the operator's 2026-09-26
-            // directive) instead of flooding the transcript.
+            // The exact assembled prompt is unbounded, so it renders in the
+            // scrollable info panel instead of flooding the transcript.
             "system-prompt" => {
                 if !resolved.args.is_empty() {
                     view.editor.set_text(text);
@@ -762,8 +664,6 @@ impl SessionUi {
                         let mut rows = info_commands::system_prompt_header_rows(prompt);
                         rows.push(Vec::new());
                         rows.extend(info_commands::system_prompt_body_rows(prompt));
-                        // The header row (`System Prompt (N chars)`) is
-                        // the panel's head.
                         self.open_info_panel(view, None, InfoContent::Rows(rows));
                         self.track_menu_opened("system-prompt", "command");
                     }
@@ -772,10 +672,8 @@ impl SessionUi {
                     }
                 }
             }
-            // `/logs` (TS `handleLogsCommand`): a client-side read of the
-            // logs directory (the daemon writes it, this client lists
-            // it), rendered in the read-only info panel (the operator's
-            // 2026-09-26 directive).
+            // A client-side read of the logs directory (the daemon writes it, this
+            // client lists it).
             "logs" => {
                 if !resolved.args.is_empty() {
                     view.editor.set_text(text);
@@ -789,8 +687,6 @@ impl SessionUi {
                     );
                     return Ok(());
                 };
-                // The content's own `Logs` header row is the panel's
-                // head.
                 self.open_info_panel(
                     view,
                     None,
@@ -798,10 +694,8 @@ impl SessionUi {
                 );
                 self.track_menu_opened("logs", "command");
             }
-            // `/changelog` (TS `handleChangelogCommand`): the shipped
-            // CHANGELOG.md entries, newest first, in the read-only info
-            // panel (the operator's 2026-09-26 directive; the TS accent
-            // `What's New` title is the panel's title).
+            // The shipped CHANGELOG.md entries, newest first; the TS accent `What's
+            // New` title is the panel's title.
             "changelog" => {
                 if !resolved.args.is_empty() {
                     view.editor.set_text(text);
@@ -817,8 +711,6 @@ impl SessionUi {
                 );
                 self.track_menu_opened("changelog", "command");
             }
-            // `/settings` (TS `showSettingsSelector`): the inline settings
-            // menu; the rows read the daemon state and the settings seam.
             "settings" => {
                 if !resolved.args.is_empty() {
                     view.editor
@@ -828,10 +720,8 @@ impl SessionUi {
                 }
                 self.open_settings_menu(view).await;
             }
-            // `/btw` (TS `handleSideQuestion` via the submit ladder; `/side`
-            // resolves to it): start a side question without touching the
-            // session transcript; the pane stays open for follow-ups until
-            // esc returns to the main thread.
+            // Start a side question without touching the transcript; the pane stays
+            // open for follow-ups until esc returns to the main thread.
             "btw" => {
                 if resolved.args.is_empty() {
                     self.note_as("Usage: /btw <question>", StatusKind::Warning, view);
@@ -839,10 +729,6 @@ impl SessionUi {
                 }
                 self.start_side_question(&resolved.args, view).await?;
             }
-            // `/name` (TS `handleNameCommand`; `/rename` resolves to it):
-            // a missing argument reports the current name, otherwise the
-            // rename travels to the daemon (`set_session_name` persists
-            // the `session_info` entry and broadcasts the change).
             "name" => {
                 let name = resolved.args.trim();
                 if name.is_empty() {
@@ -873,9 +759,6 @@ impl SessionUi {
                     Err(error) => self.error_row(&format!("{error:#}"), view),
                 }
             }
-            // `/fast` (TS `handleFastCommand`): toggle the priority service
-            // tier on a fast-mode-eligible model; the state refresh after
-            // the switch drives the status row.
             "fast" => {
                 if !resolved.args.is_empty() {
                     self.error_row("Usage: /fast", view);
@@ -883,20 +766,13 @@ impl SessionUi {
                 }
                 self.handle_fast_command(view).await;
             }
-            // `/tier [tier]` (TS `handleTierCommand`): show or set the
-            // session service tier.
             "tier" => {
                 self.handle_tier_command(view, &resolved.args).await;
             }
-            // `/rlm-max-depth` (TS `handleRlmMaxDepthCommand`): view or set
-            // the per-chat recursive depth limit.
             "rlm-max-depth" => {
                 self.handle_rlm_max_depth_command(view, &resolved.args)
                     .await;
             }
-            // `/speed [on|off]` (TS `setSpeedDisplay`): toggle the footer
-            // tok/sec readout for this session — the dim dock row with the
-            // latest response's rate and the session average.
             "speed" => {
                 let arg = resolved.args.trim().to_lowercase();
                 if !arg.is_empty() && arg != "on" && arg != "off" {
@@ -910,10 +786,6 @@ impl SessionUi {
                 };
                 self.set_speed_display(enable, view);
             }
-            // `/reload` (TS `handleReloadCommand`): the guards first (a
-            // streaming turn or compaction defers the reload), then the
-            // bordered loader replaces the editor while the daemon and the
-            // client re-read their inputs.
             "reload" => {
                 if !resolved.args.is_empty() {
                     view.editor
@@ -939,11 +811,6 @@ impl SessionUi {
                 }
                 self.handle_reload_command(view)?;
             }
-            // `/heartbeats` (TS `showHeartbeatManager`): the inline
-            // management view over the session-scoped heartbeat catalog —
-            // this session's and its RLM children's user and agent
-            // heartbeats. An argument is the TS usage error (the text
-            // stays in the editor).
             "heartbeats" => {
                 if !resolved.args.is_empty() {
                     view.editor
@@ -963,9 +830,8 @@ impl SessionUi {
         Ok(())
     }
 
-    /// Report a menu surface opening (`tui menu opened`, fire-and-forget
-    /// like the other adoption seams): `menu` names the surface (`model`,
-    /// `mcp`), `source` how it opened (`command`, `tab`).
+    /// Report a menu surface opening (`tui menu opened`), fire-and-forget;
+    /// `menu` names the surface, `source` how it opened.
     pub(super) fn track_menu_opened(&self, menu: &'static str, source: &'static str) {
         if let Some(telemetry) = self.telemetry.clone() {
             tokio::spawn(async move {
@@ -974,22 +840,13 @@ impl SessionUi {
         }
     }
 
-    /// Fetch the session's slash-command catalog in the background (TS
-    /// `refreshConnectionCatalog`'s `getCommands` arm, best-effort with a
-    /// bounded wait like the heartbeat refresh): the response carries the
-    /// `skill:` commands the autocomplete provider lists. A fetch races a
-    /// rebind silently — the epoch drops the stale response at fold time.
+    /// Fetch the session's slash-command catalog in the background: the response carries the
+    /// `skill:` commands; a fetch races a rebind silently — the epoch drops the stale response.
     pub(crate) fn spawn_command_catalog_refresh(&mut self) {
         self.command_refresh_epoch += 1;
         let epoch = self.command_refresh_epoch;
-        // TS's rebind completes only after the fresh catalog lands
-        // (`refreshConnectionCatalog` is awaited before the provider
-        // rebuild), so the menu never serves the previous session's
-        // skills. The clear rides the same FIFO channel ahead of the
-        // fetch's response (this send completes before the spawn below
-        // runs), so the old rows drop immediately and the fresh fetch
-        // repopulates — a rebind never offers stale cross-session
-        // commands.
+        // The clear rides the same FIFO channel ahead of the fetch's response, so the old rows drop
+        // immediately — a rebind never offers stale cross-session commands.
         let _ = self.command_updates.send(CommandCatalogUpdate {
             epoch,
             skill_commands: Vec::new(),
@@ -1010,9 +867,7 @@ impl SessionUi {
             .await;
             let skill_commands = match fetched {
                 Ok(Ok(data)) => crate::autocomplete::skill_command_entries(&data),
-                // TS `refreshCommandCatalogForCurrentSession` clears the
-                // catalog on failure (`connectionCommands = []`); the
-                // attach-time fetch keeps nothing either.
+                // The catalog clears on failure.
                 Ok(Err(_)) | Err(_) => Vec::new(),
             };
             let _ = updates.send(CommandCatalogUpdate {
@@ -1022,11 +877,8 @@ impl SessionUi {
         });
     }
 
-    /// Fold a landed command-catalog refresh into the session (TS
-    /// `refreshConnectionCatalog` -> `setupAutocompleteProvider`): the
-    /// `skill:` commands replace the provider's list — gated by the
-    /// `enableSkillCommands` setting (TS default true) — and a stale
-    /// epoch never applies.
+    /// Fold a landed command-catalog refresh into the session: the `skill:` commands replace the
+    /// provider's list, gated by the `enableSkillCommands` setting; a stale epoch never applies.
     pub(crate) fn apply_command_catalog(
         &mut self,
         update: CommandCatalogUpdate,
@@ -1035,10 +887,8 @@ impl SessionUi {
         if update.epoch < self.command_refresh_epoch {
             return;
         }
-        // The cache keeps the raw fetch (the toggle re-applies it under
-        // the setting's new value); the setting gates only what the
-        // provider lists. The TS default (true) applies when the
-        // composition root supplies no settings seam.
+        // The cache keeps the raw fetch (the toggle re-applies it under the
+        // setting's new value); the default applies when no settings seam exists.
         self.skill_commands_cache = update.skill_commands;
         let skills = if self
             .client_settings
@@ -1053,12 +903,8 @@ impl SessionUi {
         self.dirty = true;
     }
 
-    /// The session's connection state (TS `AgentConnectionState`): the
-    /// worker's `get_connection_state` response, which carries the
-    /// connection fields (`availableThinkingLevels`, `thinkingLevel`,
-    /// `steeringMode`, `serviceTier`, ...) — `get_state` serves the
-    /// roster summary instead. `None` surfaces the failure as a note;
-    /// callers keep the transcript unchanged then.
+    /// The session's connection state (`get_connection_state` carries the connection fields;
+    /// `get_state` serves the roster summary instead). `None` surfaces the failure as a note.
     pub(super) async fn connection_state(&mut self, view: &mut AgentView) -> Option<Value> {
         match self
             .bounded_request(
@@ -1072,10 +918,8 @@ impl SessionUi {
             .await
         {
             Ok(data) => {
-                // The queue delivery mode rides the state (TS
-                // `steeringMode`): cached here — every state read is the
-                // single refresh seam — so the queued-input adoption
-                // event reports the live mode without a fetch.
+                // The queue delivery mode rides the state and is cached here (every state
+                // read is the single refresh seam).
                 if let Some(mode) = data.get("steeringMode").and_then(Value::as_str) {
                     self.steering_mode = mode.to_string();
                 }

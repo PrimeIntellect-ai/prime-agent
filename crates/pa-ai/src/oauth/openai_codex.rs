@@ -1,16 +1,7 @@
-//! The `ChatGPT` Plus/Pro (Codex Subscription) OAuth flow — the port of
-//! `packages/ai/src/utils/oauth/openai-codex.ts` (+ `pkce.ts`): the PKCE
-//! authorization request against the app registration, the localhost
-//! callback server raced against the manual paste, the token exchange,
-//! the JWT account-id claim, and the token refresh. The credentials the
-//! flow returns carry the TS shape (`access`, `refresh`, `expires`,
-//! `accountId`) and persist under the provider id `openai-codex`.
-//!
-//! Cancellation follows the fleet's cooperative pattern (#2770): the
-//! driving surface marks a shared flag when it exits; the flow checks it
-//! between the race's poll steps and before its network steps, so an
-//! exited surface never receives a completed login (a task abort cannot
-//! reach a started blocking body).
+//! The `ChatGPT` (Codex Subscription) OAuth flow: the PKCE request, the
+//! localhost callback server raced against the manual paste, the token
+//! exchange, and the refresh. Cancellation is cooperative: the surface
+//! marks a shared flag on exit; the flow checks it between poll steps.
 
 use std::fmt::Write as _;
 use std::future::Future;
@@ -25,96 +16,61 @@ use url::Url;
 use super::callback::CodexCallbackServer;
 use super::CodexHttp;
 
-/// The app registration the TS flow ships (TS `CLIENT_ID`).
 pub const OPENAI_CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
-/// TS `AUTHORIZE_URL`.
 const AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
-/// TS `TOKEN_URL`.
 const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
-/// The registered redirect (TS `REDIRECT_URI`): the callback server's
-/// own address.
+/// The registered redirect: the callback server's own address.
 const REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
-/// TS `SCOPE`.
 const SCOPE: &str = "openid profile email offline_access";
-/// The TS flow's default originator.
 pub const DEFAULT_ORIGINATOR: &str = "pi";
-/// One token request's bound (the port's request-timeout norm).
 pub const DEFAULT_TOKEN_TIMEOUT_MS: u64 = 30_000;
-/// The refresh grant's tighter bound: the auth storage runs it under its
-/// file lock, which a peer declares stale after 10 seconds — the request
-/// must fit inside that window so a slow endpoint fails the refresh
-/// (kept for a retry) instead of holding the lock past its staleness.
+/// The refresh runs under the auth storage's file lock, which a peer declares stale after 10
+/// seconds; the request must fit inside that window.
 pub const REFRESH_TIMEOUT_MS: u64 = 8_000;
-/// TS the `onAuth` instructions line.
 const AUTH_INSTRUCTIONS: &str = "A browser window should open. Complete login to finish.";
-/// TS the `onPrompt` fallback line.
 const PROMPT_MESSAGE: &str = "Paste the authorization code (or full redirect URL):";
-/// The cancel error the driving surface maps to the silent cancelled
-/// outcome (TS the dialog throws the same text; `auth-flows.ts` matches
-/// it).
+/// The cancel error the driving surface maps to the silent cancelled outcome.
 pub const LOGIN_CANCELLED: &str = "Login cancelled";
-/// The race's poll step: how often the loop re-checks the cooperative
-/// cancel flag (the #2770 pattern — the flag is checked between poll
-/// steps).
 const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
-/// The credentials the flow returns and persists (TS `OAuthCredentials`
-/// plus the codex provider's `accountId`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OAuthCredentials {
     pub access: String,
     pub refresh: String,
-    /// Wall-clock epoch milliseconds (TS `Date.now() + expires_in * 1000`).
+    /// Wall-clock epoch milliseconds.
     pub expires: i64,
     pub account_id: String,
 }
 
-/// The login's UI surface (TS `OAuthLoginCallbacks`): the browser URL
-/// block, the manual paste racing the browser callback, and the
-/// fallback prompt. Implementations render the inline auth panel (the
-/// TUI) or script the flow (tests).
+/// The login's UI surface: present the authorization URL, take the
+/// manual paste racing the browser callback, and the fallback prompt.
 pub trait CodexLoginUi: Send + Sync {
-    /// TS `onAuth`: the authorization URL to open, plus the flow's
-    /// instructions line.
     fn on_auth(&self, url: &str, instructions: &str);
-    /// TS `onManualCodeInput`: the paste racing the browser callback;
-    /// `None` when the surface offers none. Resolving `None` cancels
+    /// The paste racing the browser callback; resolving `None` cancels
     /// the login.
     fn on_manual_code_input(&self) -> Option<Pin<Box<dyn Future<Output = Option<String>> + Send>>>;
-    /// TS `onPrompt`: the fallback prompt when neither the callback
-    /// nor the paste produced a code. Resolving `None` cancels the
-    /// login.
+    /// The fallback prompt when neither the callback nor the paste
+    /// produced a code; resolving `None` cancels the login.
     fn on_prompt(&self, message: &str) -> Pin<Box<dyn Future<Output = Option<String>> + Send>>;
-    /// The driving surface's cooperative cancel state: `true` once the
-    /// pane that mounted the login exited. The flow checks it between
-    /// the race's poll steps and before its network steps — a task
-    /// abort cannot reach a started blocking body, so the pane marks
-    /// this instead (#2770). The default (`false`) serves the surfaces
-    /// that never cancel mid-flow.
+    /// `true` once the pane that mounted the login exited: a task abort
+    /// cannot reach a started blocking body, so the pane marks this.
     fn is_cancelled(&self) -> bool {
         false
     }
 }
 
-/// Run the login (TS `loginOpenAICodex`): build the PKCE request, start
-/// the callback server, present the URL, race the browser callback
-/// against the manual paste, exchange the code, and return the
-/// credentials to persist.
+/// Race the browser callback against the manual paste, exchange the
+/// code, and return the credentials to persist.
 ///
 /// # Errors
 ///
-/// Returns an error when the surface cancelled the login
-/// ([`LOGIN_CANCELLED`]), the pasted redirect's state mismatches, no
-/// authorization code ever arrives, the token exchange fails, or the
-/// access token carries no account id.
+/// Returns an error when the login is cancelled ([`LOGIN_CANCELLED`]), the
+/// paste mismatches, the exchange fails, or the token carries no account id.
 pub async fn login_openai_codex(
     http: &dyn CodexHttp,
     ui: &dyn CodexLoginUi,
     originator: &str,
 ) -> Result<OAuthCredentials, String> {
-    // The surface exited before the flow started: no server, no
-    // browser launch — the exit ends the flow (the first of the
-    // between-poll cancel checks, #2770).
     if ui.is_cancelled() {
         return Err(LOGIN_CANCELLED.to_string());
     }
@@ -125,9 +81,6 @@ pub async fn login_openai_codex(
     ui.on_auth(&url, AUTH_INSTRUCTIONS);
 
     let code = wait_for_code(&callback, ui, &state).await?;
-    // The pane exited while the login waited: no exchange, no
-    // credential — the exit ends the flow (TS the dialog's abort
-    // signal; #2770: the flag is the seam).
     if ui.is_cancelled() {
         return Err(LOGIN_CANCELLED.to_string());
     }
@@ -141,12 +94,11 @@ pub async fn login_openai_codex(
     })
 }
 
-/// Refresh an expired credential (TS `refreshOpenAICodexToken`).
+/// Refresh an expired credential.
 ///
 /// # Errors
 ///
-/// Returns an error when the token refresh fails or the fresh access
-/// token carries no account id.
+/// Returns an error when the token refresh fails or the fresh access token carries no account id.
 pub async fn refresh_openai_codex_token(
     http: &dyn CodexHttp,
     refresh_token: &str,
@@ -161,16 +113,12 @@ pub async fn refresh_openai_codex_token(
     })
 }
 
-/// One token response (TS `TokenSuccess`).
 struct TokenSuccess {
     access: String,
     refresh: String,
     expires: i64,
 }
 
-/// The race + the fallbacks (TS `loginOpenAICodex`'s middle): the
-/// browser callback against the manual paste, then the prompt fallback.
-/// The tick re-checks the cooperative cancel between poll steps.
 async fn wait_for_code(
     callback: &CodexCallbackServer,
     ui: &dyn CodexLoginUi,
@@ -188,8 +136,6 @@ async fn wait_for_code(
     let wait = callback.wait_for_code();
     tokio::pin!(wait);
     let mut tick = tokio::time::interval(CANCEL_POLL_INTERVAL);
-    // The outcome of the race: the callback's settled code (its state
-    // was validated by the server), or the manual paste's answer.
     let raced = loop {
         if ui.is_cancelled() {
             return Err(LOGIN_CANCELLED.to_string());
@@ -201,17 +147,12 @@ async fn wait_for_code(
         }
     };
     let code: Option<String> = match raced {
-        // A settled callback (the server validated the state).
         CallbackOutcome::Code(Some(code)) => Some(code),
-        // A settled-empty wait (a bind failure leaves the dead server):
-        // with a paste surface TS awaits the manual promise before the
-        // prompt fallback; without one the prompt is the only path.
+        // A settled-empty wait (a bind failure leaves the dead server).
         CallbackOutcome::Code(None) => {
             if manual_available {
                 match answer_or_cancelled(ui, manual_answer).await {
                     Ok(Some(input)) => parse_paste(&input, state)?,
-                    // A cancelled paste answer and a cancelled wait both
-                    // end the login.
                     Ok(None) | Err(_) => return Err(LOGIN_CANCELLED.to_string()),
                 }
             } else {
@@ -224,16 +165,13 @@ async fn wait_for_code(
     if let Some(code) = code {
         return Ok(code);
     }
-    // The fallback prompt (TS `onPrompt`): neither the callback nor the
-    // paste produced a code.
     let answer = answer_or_cancelled(ui, ui.on_prompt(PROMPT_MESSAGE)).await?;
     let input = answer.ok_or_else(|| LOGIN_CANCELLED.to_string())?;
     parse_paste(&input, state)?.ok_or_else(|| "Missing authorization code".to_string())
 }
 
-/// Await one answer while re-checking the cooperative cancel between
-/// poll steps (the surface may exit without ever answering — a pending
-/// paste or prompt must not hold a cancelled flow).
+/// Await one answer while re-checking the cancel flag: the surface may
+/// exit without ever answering.
 async fn answer_or_cancelled<T>(
     ui: &dyn CodexLoginUi,
     answer: impl Future<Output = T>,
@@ -251,8 +189,6 @@ async fn answer_or_cancelled<T>(
     }
 }
 
-/// Parse one pasted input and check its echoed state (TS
-/// `parseAuthorizationInput` + the state guard).
 fn parse_paste(input: &str, expected_state: &str) -> Result<Option<String>, String> {
     let (code, echoed) = parse_authorization_input(input);
     if let Some(echoed) = echoed {
@@ -263,25 +199,22 @@ fn parse_paste(input: &str, expected_state: &str) -> Result<Option<String>, Stri
     Ok(code)
 }
 
-/// What the race settled on.
 enum CallbackOutcome {
-    /// The callback wait settled: the code, or `None` when it settled
-    /// empty (a dead server or a cancelled wait).
+    /// The code, or `None` on a settled-empty wait (a dead server).
     Code(Option<String>),
-    /// The manual paste answered: the input, or `None` when cancelled.
+    /// The paste input, or `None` when cancelled.
     Manual(Option<String>),
 }
 
-/// A PKCE pair (TS `generatePKCE`): the verifier is the token-exchange
-/// secret, the challenge travels in the authorization URL.
+/// The verifier is the token-exchange secret; the challenge travels in
+/// the authorization URL.
 fn generate_pkce() -> (String, String) {
     let verifier = base64url(&random_bytes(32));
     let challenge = base64url(Sha256::digest(verifier.as_bytes()).as_slice());
     (verifier, challenge)
 }
 
-/// A random, hex CSRF `state` (TS `createState`: 16 random bytes as
-/// hex).
+/// A random, hex CSRF `state`.
 fn create_state() -> String {
     let mut state = String::with_capacity(32);
     for byte in random_bytes(16) {
@@ -300,9 +233,6 @@ fn base64url(bytes: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
-/// The authorization URL (TS `createAuthorizationFlow`'s URL: the
-/// challenge, the CSRF state, the registration's redirect and scope,
-/// the simplified-flow flags, and the originator).
 fn authorization_url(challenge: &str, state: &str, originator: &str) -> String {
     let mut url = Url::parse(AUTHORIZE_URL).expect("the authorize url parses");
     for (name, value) in [
@@ -322,10 +252,6 @@ fn authorization_url(challenge: &str, state: &str, originator: &str) -> String {
     url.to_string()
 }
 
-/// Parse a pasted authorization input (TS `parseAuthorizationInput`): a
-/// full redirect URL, a `code#state` pair, `code=`-shaped parameters, or
-/// a bare code. Returns the code and the echoed state (`None` when the
-/// input carries none — TS's falsy state skips the check).
 fn parse_authorization_input(input: &str) -> (Option<String>, Option<String>) {
     let value = input.trim();
     if value.is_empty() {
@@ -364,20 +290,12 @@ fn parse_authorization_input(input: &str) -> (Option<String>, Option<String>) {
     (non_empty(Some(value.to_string())), None)
 }
 
-/// The account id the access token carries (TS `getAccountId`: the
-/// `chatgpt_account_id` claim under the JWT auth claim path — the
-/// provider's own extraction is the one owner).
+/// The provider's own extraction is the one owner of the claim path.
 fn account_id_of(access_token: &str) -> Result<String, String> {
     crate::providers::openai_codex_responses::request::extract_account_id(access_token)
         .map_err(|_| "Failed to extract accountId from token".to_string())
 }
 
-/// One token POST's outcome validation (TS `exchangeAuthorizationCode` /
-/// `refreshAccessToken` share the shape): a 2xx answer with the three
-/// fields the flow requires.
-/// One token POST with an explicit request bound (the login keeps the
-/// port's default; the refresh runs under the storage lock and takes the
-/// tighter one).
 async fn token_post_bounded(
     http: &dyn CodexHttp,
     params: &[(&str, &str)],
@@ -430,20 +348,17 @@ async fn token_post_bounded(
     };
     if !expires_in.is_finite() {
         // A NaN/`inf` lifetime is not a lifetime (TS's arithmetic yields
-        // a never-expiring credential; the port refuses it as a broken
-        // response instead).
+        // a never-expiring credential; the port refuses it).
         return Err(format!(
             "OpenAI Codex token {label} response missing fields: {json}"
         ));
     }
-    // Epoch millis fit i64 for ~292 million years; the u128 duration's millis are the i64 convention here.
+    // Epoch millis fit i64 for ~292 million years.
     #[allow(clippy::cast_possible_truncation)]
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(i64::MAX, |elapsed| elapsed.as_millis() as i64);
-    // Saturating: an oversized `expires_in` cannot overflow the
-    // epoch-millisecond sum (the worst case saturates at the never
-    // until it refreshes).
+    // Saturating: an oversized `expires_in` cannot overflow the sum.
     // The wire's expires_in is a second count read through JSON f64; i64 ms is the credentials' convention.
     #[allow(clippy::cast_possible_truncation)]
     let expires = now.saturating_add((expires_in * 1000.0) as i64);
@@ -454,8 +369,6 @@ async fn token_post_bounded(
     })
 }
 
-/// TS `exchangeAuthorizationCode`: the authorization-code grant with the
-/// PKCE verifier against the registered redirect.
 async fn exchange_authorization_code(
     http: &dyn CodexHttp,
     code: &str,
@@ -476,7 +389,6 @@ async fn exchange_authorization_code(
     .await
 }
 
-/// TS `refreshAccessToken`: the refresh-token grant.
 async fn refresh_access_token(
     http: &dyn CodexHttp,
     refresh_token: &str,
@@ -503,18 +415,10 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tokio::io::AsyncWriteExt as _;
 
-    /// The app registration's redirect port is one fixed socket and every
-    /// `login_openai_codex` flow binds it, while the default harness runs
-    /// this module's tests on parallel threads: each flow stages the
-    /// port under this lock, so a sibling's bind can never land in the
-    /// browser race's probe-to-bind window and leave its flow's listener
-    /// dead. The lock is the async-aware one — the guard is held across
-    /// the flow's awaits by design (and never poisons).
+    /// Every flow binds the one fixed redirect port while the tests run on parallel threads: each
+    /// flow stages it under this lock. The guard is held across the flow's awaits by design.
     static REDIRECT_PORT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-    /// A scripted transport: url -> response, recording every posted
-    /// body. Unknown urls fail the request (the TS suite throws on
-    /// unexpected fetches).
     struct ScriptedHttp {
         responses: std::collections::HashMap<String, CodexHttpResponse>,
         seen: Mutex<Vec<(String, String)>>,
@@ -566,10 +470,6 @@ mod tests {
         }
     }
 
-    /// One scripted UI answer: an immediate value (`Some`), an
-    /// immediate cancel (`None`), a never-resolving surface, or a
-    /// surface that marks the cancel flag on its first poll and then
-    /// never resolves.
     enum ScriptedAnswer {
         Once(Option<String>),
         Pending,
@@ -585,8 +485,6 @@ mod tests {
             ScriptedAnswer::Once(Some(text.to_string()))
         }
 
-        /// The answer future; `cancel` is the surface's own shared flag
-        /// (the marks-then-pends mode sets it on the first poll).
         fn future(
             &self,
             cancel: &Arc<AtomicBool>,
@@ -608,8 +506,6 @@ mod tests {
         }
     }
 
-    /// The scripted login surface: the captured authorization URL, the
-    /// paste racing the callback, and the fallback prompt.
     struct ScriptedUi {
         auth_url: Mutex<Option<String>>,
         manual: Option<ScriptedAnswer>,
@@ -629,9 +525,8 @@ mod tests {
             }
         }
 
-        /// The captured authorization URL: waits for the flow's
-        /// `onAuth` — observable readiness, bounded by a deadline that
-        /// fails the test (never a green-on-timeout retry loop).
+        /// Waits for the flow's `onAuth`, bounded by a deadline that
+        /// fails the test.
         async fn captured_url(&self) -> String {
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
             loop {
@@ -675,9 +570,8 @@ mod tests {
         }
     }
 
-    /// One fake access token: a three-segment JWT whose payload carries
-    /// the account id under the TS claim path (no signature — the flow
-    /// never verifies one, like the TS `atob` decode).
+    /// A fake three-segment JWT with the account id claim; no signature
+    /// — the flow never verifies one.
     fn account_jwt(account_id: Option<&str>) -> String {
         let payload = match account_id {
             Some(account_id) => json!({
@@ -703,7 +597,6 @@ mod tests {
         .to_string()
     }
 
-    /// The scripted token endpoint: one answer for the whole flow.
     fn token_http(access: &str) -> ScriptedHttp {
         ScriptedHttp::new(vec![(TOKEN_URL, 200, &token_body(access))])
     }
@@ -715,16 +608,10 @@ mod tests {
             .unwrap_or_default()
     }
 
-    /// Stage the app registration's redirect port busy for a
-    /// dead-callback flow, on the same host the flow itself binds (the
-    /// `PI_OAUTH_CALLBACK_HOST` override, default `127.0.0.1`).
-    /// `Some(listener)` means the caller actively holds the port, so
-    /// the flow's own bind cannot succeed against it (an active
-    /// listener blocks the same-address bind — both sockets set
-    /// `SO_REUSEADDR`, neither sets `SO_REUSEPORT`) and the flow's
-    /// callback server is dead by construction; `None` means the port
-    /// cannot be staged this run and the caller skips rather than run
-    /// a login against a listener it does not own.
+    /// Stage the registered redirect port busy on the flow's own host (`PI_OAUTH_CALLBACK_HOST`):
+    /// an active listener blocks the same-address bind (both sockets set `SO_REUSEADDR`, neither
+    /// sets `SO_REUSEPORT`), so the flow's callback server is dead. `None`: the port cannot be
+    /// staged this run.
     fn stage_busy_registered_port() -> Option<std::net::TcpListener> {
         let host = std::env::var(crate::oauth::callback::CALLBACK_HOST_ENV)
             .unwrap_or_else(|_| "127.0.0.1".to_string());
@@ -756,8 +643,6 @@ mod tests {
             43,
             "the PKCE verifier is 32 base64url bytes"
         );
-        // The manual paste carried no state: TS's falsy state skips the
-        // echo check and the code is used as-is.
     }
 
     #[tokio::test]
@@ -814,8 +699,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_unreachable_token_endpoint_surfaces_a_transport_error() {
-        // Nothing scripted: the transport fails the request (the
-        // scripted stand-in for the request timeout).
+        // Nothing scripted: the transport fails the request.
         let http = ScriptedHttp::new(Vec::new());
         let error = refresh_openai_codex_token(&http, "r-old")
             .await
@@ -843,8 +727,8 @@ mod tests {
     #[tokio::test]
     async fn a_cancelled_surface_ends_the_login_between_polls() {
         let _registered_port = REDIRECT_PORT.lock().await;
-        // The flag flips when the url lands: the race loop's first
-        // poll-step check ends the flow before any code arrives.
+        // The flag flips when the url lands: the first poll-step check
+        // ends the flow.
         let http = token_http(&account_jwt(Some("acct-1")));
         let mut ui = ScriptedUi::new(Some(ScriptedAnswer::Pending), ScriptedAnswer::Pending);
         ui.cancel_on_auth = true;
@@ -852,7 +736,6 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error, LOGIN_CANCELLED);
-        // No token request ever posted.
         assert!(http.seen_bodies(TOKEN_URL).is_empty());
     }
 
@@ -889,7 +772,6 @@ mod tests {
     #[tokio::test]
     async fn a_paste_without_a_code_falls_back_to_the_prompt() {
         let _registered_port = REDIRECT_PORT.lock().await;
-        // The redirect carries no code: the prompt fallback answers it.
         let http = token_http(&account_jwt(Some("acct-1")));
         let ui = ScriptedUi::new(
             Some(ScriptedAnswer::value(REDIRECT_URI)),
@@ -936,14 +818,8 @@ mod tests {
     #[tokio::test]
     async fn a_dead_callback_falls_to_the_prompt_without_a_paste_surface() {
         let _registered_port = REDIRECT_PORT.lock().await;
-        // The app registration's redirect port is the flow's wire
-        // contract (a bind-anywhere test would not exercise it): the
-        // staged listener blocks the flow's own bind, so its server is
-        // dead by construction and the paste-free prompt is the only
-        // path, settling in microseconds. A port that cannot be staged
-        // this run skips the flow rather than races it.
         let Some(held) = stage_busy_registered_port() else {
-            return; // the registered port is busy: this run cannot stage it.
+            return;
         };
         let http = token_http(&account_jwt(Some("acct-1")));
         let ui = ScriptedUi::new(None, ScriptedAnswer::value("the-code"));
@@ -962,19 +838,13 @@ mod tests {
         drop(held);
     }
 
-    /// The staging contract, pinned with the flow's own bind call: a
-    /// listener from `stage_busy_registered_port` actively holds the
-    /// registered port, so the flow's callback bind fails against it —
-    /// the dead-server premise is a fact, not an assumption — and the
-    /// released port hosts the bind again. Any staging that stops
-    /// blocking (a probe-and-release shape, a freed port) reds here
-    /// deterministically: that is the load window the registered
-    /// settle red came from.
+    /// Pins the staging premise: a staged listener blocks the flow's bind and the released port
+    /// hosts it again, so any staging that stops blocking reds here.
     #[tokio::test]
     async fn the_staged_registered_port_blocks_the_flow_bind() {
         let _registered_port = REDIRECT_PORT.lock().await;
         let Some(held) = stage_busy_registered_port() else {
-            return; // the registered port is busy: this run cannot stage it.
+            return;
         };
         let blocked = CodexCallbackServer::bind("127.0.0.1", 1455, "the-state").await;
         assert!(
@@ -989,18 +859,13 @@ mod tests {
         );
     }
 
-    /// The cancellation-aware-wait regression: a dead callback server
-    /// plus a paste that never resolves — the surface's cancel flag (set
-    /// by the paste's own first poll, standing in for the pane exit)
-    /// must end the flow with the cancel, never hang the wait.
+    /// Regression: a dead callback server plus a never-resolving paste
+    /// must end on the cancel flag, never hang the wait.
     #[tokio::test]
     async fn a_pending_paste_never_holds_a_cancelled_flow() {
         let _registered_port = REDIRECT_PORT.lock().await;
-        // The same verified staging as the dead-callback test: the
-        // premise must not be silent, and an unstaged port skips
-        // instead of handing the flow a listener of its own.
         let Some(held) = stage_busy_registered_port() else {
-            return; // the registered port is busy: this run cannot stage it.
+            return;
         };
         let http = token_http(&account_jwt(Some("acct-1")));
         let ui = ScriptedUi::new(
@@ -1019,13 +884,8 @@ mod tests {
         drop(held);
     }
 
-    /// A login without a paste surface has no settle of its own while
-    /// its callback server waits (the browser path is the only
-    /// settler, live or dead), so the surface's cancel flag is the
-    /// only bound. The flag flips from outside the flow here — the
-    /// pane-exit shape (#2770) — and the login must end cancelled
-    /// inside the poll bound with no exchange, whichever way its
-    /// callback server's bind went.
+    /// Without a paste surface the cancel flag is the only bound on the callback wait: the login
+    /// must end cancelled with no exchange, whichever way its callback server's bind went.
     #[tokio::test]
     async fn a_cancelled_surface_ends_a_login_without_a_paste_surface() {
         let _registered_port = REDIRECT_PORT.lock().await;
@@ -1050,13 +910,10 @@ mod tests {
     #[tokio::test]
     async fn the_browser_callback_wins_the_race() {
         let _registered_port = REDIRECT_PORT.lock().await;
-        // The app registration's redirect port is the flow's wire
-        // contract (a bind-anywhere test would not exercise the real
-        // listener): the flow binds its callback server and the browser
-        // redirect settles the code. Skip when another process holds the
-        // port — the bind-failure path is covered above.
+        // Skip when another process holds the registered port; the
+        // bind-failure path is covered above.
         let Ok(probe) = std::net::TcpListener::bind(("127.0.0.1", 1455)) else {
-            return; // the registered port is busy: this run cannot stage it.
+            return;
         };
         drop(probe);
         let http = Arc::new(token_http(&account_jwt(Some("acct-live"))));
@@ -1078,11 +935,8 @@ mod tests {
             .find(|(key, _)| key == "state")
             .map(|(_, value)| value.to_string())
             .expect("the authorization url carries the state");
-        // The captured url implies the flow's bind already resolved (the
-        // server starts before the url is presented), so a refused
-        // connect here is a port stolen after the probe: wait for the
-        // listener itself — observable readiness, bounded by a deadline
-        // that fails the test (never a green-on-timeout retry loop).
+        // A refused connect here is a port stolen after the probe: wait for the listener itself,
+        // bounded by a deadline that fails the test.
         let deadline = std::time::Instant::now() + Duration::from_secs(1);
         let mut stream = loop {
             match tokio::net::TcpStream::connect(("127.0.0.1", 1455)).await {
@@ -1155,34 +1009,27 @@ mod tests {
 
     #[test]
     fn the_pasted_input_parses_like_the_ts_table() {
-        // A full redirect URL.
         assert_eq!(
             parse_authorization_input("https://auth.example/cb?code=a&state=b"),
             (Some("a".to_string()), Some("b".to_string()))
         );
-        // A percent-decoded code.
         assert_eq!(
             parse_authorization_input("https://auth.example/cb?code=a%20b"),
             (Some("a b".to_string()), None)
         );
-        // A `code#state` pair.
         assert_eq!(
             parse_authorization_input("the-code#the-state"),
             (Some("the-code".to_string()), Some("the-state".to_string()))
         );
-        // `code=`-shaped parameters.
         assert_eq!(
             parse_authorization_input("code=a+b&state=c"),
             (Some("a b".to_string()), Some("c".to_string()))
         );
-        // A bare code.
         assert_eq!(
             parse_authorization_input(" bare "),
             (Some("bare".to_string()), None)
         );
-        // Empty input carries neither.
         assert_eq!(parse_authorization_input("  "), (None, None));
-        // A redirect without a code.
         assert_eq!(
             parse_authorization_input("https://auth.example/cb?state=b"),
             (None, Some("b".to_string()))

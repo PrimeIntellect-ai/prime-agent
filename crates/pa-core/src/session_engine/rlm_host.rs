@@ -31,9 +31,7 @@ pub const RLM_PROGRESS_NOTE_MAX_LENGTH: usize = 512;
 pub const RLM_PROGRESS_NOTE_MIN_INTERVAL_MS: u64 = 10_000;
 const RLM_COLLECT_MAX_TIMEOUT_MS: u64 = 2_147_483_647;
 
-// ---------------------------------------------------------------------------
 // Wire shapes (strict snake_case, parsed by the Python rlm module)
-// ---------------------------------------------------------------------------
 
 /// `rlm.spawn` handle returned once the child task is admitted.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -125,9 +123,7 @@ pub struct RlmChildResult {
     pub replied_since_task: Option<bool>,
 }
 
-// ---------------------------------------------------------------------------
 // Requests into the host
-// ---------------------------------------------------------------------------
 
 /// Validated `rlm.spawn` request handed to the child-session host.
 #[derive(Debug, Clone)]
@@ -155,27 +151,22 @@ pub struct RlmCreateSessionRequest {
     pub cwd: Option<String>,
 }
 
-/// One pending host call. Boxed (not RPITIT) because the host crosses the
-/// pa-core/pa-daemon boundary as a dyn object: the daemon supplies the
-/// implementation and pa-core only owns the contract.
+/// One pending host call. Boxed (not RPITIT): the host crosses the pa-core/pa-daemon boundary
+/// as a dyn object — the daemon supplies the implementation, pa-core owns the contract.
 pub type RlmHostFuture<T> = std::pin::Pin<Box<dyn Future<Output = anyhow::Result<T>> + Send>>;
 
-/// The child-session machinery the daemon supplies. Sessions without a host
-/// (headless print mode today) answer with the no-children behavior:
-/// rosters are empty, spawns fail explicitly, and selectors cannot match.
+/// The child-session machinery the daemon supplies. Sessions without a
+/// host answer with the no-children behavior: empty rosters, explicit
+/// spawn failures, no selector matches.
 pub trait RlmSubagentHost: Send + Sync {
-    /// Spawn a recursive child session and return once its task is admitted.
     fn spawn(&self, request: RlmSpawnRequest) -> RlmHostFuture<RlmSpawnHandle>;
-    /// Create and prompt a resident depth-0 daemon session.
     fn create_session(
         &self,
         request: RlmCreateSessionRequest,
     ) -> RlmHostFuture<RlmCreateSessionHandle>;
-    /// Roster of direct children retained by this parent session.
     fn list_subagents(&self) -> RlmHostFuture<Vec<RlmSubagentEntry>>;
-    /// Delete one running or retained direct child.
     fn delete_subagent(&self, target: String) -> RlmHostFuture<RlmDeleteSubagentResult>;
-    /// Typed fan-in of child results; a timeout returns snapshots, never errors.
+    /// A timeout returns snapshots, never errors.
     fn collect(&self, targets: Vec<String>, timeout_ms: u64) -> RlmHostFuture<Vec<RlmChildResult>>;
     /// Rename the current session (`session_id` absent) or one direct
     /// child (TS `rlm.rename`); answers the applied name.
@@ -262,9 +253,7 @@ pub fn no_children_collect(targets: &[String]) -> anyhow::Result<Vec<RlmChildRes
     Ok(Vec::new())
 }
 
-// ---------------------------------------------------------------------------
 // Progress notes
-// ---------------------------------------------------------------------------
 
 /// Outcome of one `rlm.progress.note`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -338,9 +327,7 @@ pub fn utf16_length(message: &str) -> usize {
     message.chars().map(char::len_utf16).sum()
 }
 
-// ---------------------------------------------------------------------------
 // Handler registration
-// ---------------------------------------------------------------------------
 
 /// The parent-side spawn anchor (TS `_startRlmChildRun`'s
 /// `spawnedByRequestId` snapshot): the in-flight turn's request id a
@@ -524,9 +511,8 @@ fn register_run(handlers: &mut HostRequestHandlers, bridge: &Arc<RlmHostBridge>)
     );
 }
 
-/// Shared kwargs validation for `rlm.run`: unsupported keys are rejected with
-/// the sorted key list, and name/model/thinking normalize through the pure
-/// helpers.
+/// Shared kwargs validation for `rlm.run`: unsupported keys are rejected
+/// with the sorted key list.
 fn spawn_request_from_payload(prompt: &str, data: &Value) -> anyhow::Result<RlmSpawnRequest> {
     const OPERATION: &str = "rlm.spawn";
     let kwargs = kwargs_from_payload(data);
@@ -1009,7 +995,6 @@ mod tests {
         .await
         .unwrap();
         let models = response["models"].as_array().unwrap();
-        // Exact selector first; the turbo sibling matches by substring.
         assert_eq!(models.len(), 2);
         assert_eq!(
             models[0],
@@ -1021,7 +1006,6 @@ mod tests {
             })
         );
         assert_eq!(models[1]["selector"], "test-provider/glm-5.3-turbo");
-        // A shared id fragment ranks the exact selector match first.
         let response = call(
             &wiring,
             "rlm.find_models",
@@ -1103,7 +1087,6 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(still_throttled["accepted"], false);
-        // An immediate second note is throttled with a retry hint.
         let throttled = call(
             &wiring,
             "rlm.progress.note",

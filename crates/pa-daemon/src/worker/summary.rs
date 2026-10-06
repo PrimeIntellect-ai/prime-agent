@@ -12,11 +12,8 @@ use crate::types::SessionSummary;
 
 impl Worker {
     pub(crate) fn summary_locked(&self, core: &SessionCore) -> SessionSummary {
-        // The one summary composer (TS `summaryForActiveSession`): the
-        // roster feed, `get_state`, and list rows all serve it, so the
-        // live flags (`isRunningTools` from the core's in-flight tool
-        // calls, `isBashRunning` from the user bash) never drift between
-        // surfaces.
+        // The one summary composer: the roster feed, `get_state`, and list rows
+        // all serve it, so the live flags never drift between surfaces.
         let mut summary = session_summary(
             core,
             &self
@@ -30,21 +27,9 @@ impl Worker {
             self.engine.has_running_subagents(),
             self.engine.progress_note(),
         );
-        // The worker's roster-delta counter at snapshot time, and the
-        // process instance that read it — the pair is one snapshot:
-        // the supervisor's pull gate orders the summary against the
-        // watermark of the generation that took it, so a delta still
-        // in flight when the pull answered (a sequence at or below
-        // the counter) is dropped instead of overwriting the pull's
-        // fresher state. Both reads run under the caller's core
-        // lock, and every push stamps its snapshot after the state
-        // change it describes and before its counter increment, so
-        // a counter this summary embeds already includes every
-        // change the snapshot reflects. The PRE-first-push stamp of
-        // zero is a sequenced counter (the supervisor gates it like
-        // any other — a delayed pre-push pull never overwrites a
-        // newer delta's state); only a summary that carries no
-        // counter at all is the unsequenced legacy write.
+        // The roster-delta counter at snapshot time: the pull gate orders the
+        // summary against its watermark, so a delta still in flight when the pull
+        // answered is dropped instead of overwriting the pull's fresher state.
         summary.roster_delta_sequence = Some(
             self.roster_delta_sequence
                 .load(std::sync::atomic::Ordering::SeqCst),
@@ -59,11 +44,8 @@ impl Worker {
     }
 
     /// Push one roster delta from a command arm (the model/thinking
-    /// switch seams): the same frame the turn runner's busy flips push,
-    /// so a switch reaches the subscribed roster surfaces (the agents
-    /// view) without a turn — the TS roster-flush parity for
-    /// `thinking_level_changed` and the `set_model`/`cycle_model`
-    /// handlers.
+    /// switches), so a switch reaches the subscribed roster surfaces
+    /// without a turn.
     pub(crate) fn push_roster_delta(&self) {
         self.roster_pushes.push();
     }
@@ -82,17 +64,15 @@ impl Worker {
                 .engine
                 .effective_thinking_level()
                 .unwrap_or_else(|| "default".to_string()),
-            // The ACTIVE tier: the preference clamped to the model's
-            // tier support (`clampServiceTier`; the worker keeps the
-            // clamped value current on every switch and restore).
+            // The ACTIVE tier: the preference clamped to the model's tier support.
             service_tier: crate::setting_switches::service_tier_wire_name(
                 core.active_service_tier
                     .unwrap_or(pa_types::ai::ServiceTier::Auto),
             )
             .to_string(),
-            // The resolved model's supported levels (TS `getSupportedThinkingLevels`
-            // in `getState`): a non-reasoning model reports ["off"], which the
-            // client treats as no thinking surface.
+            // The resolved model's supported levels (TS `getSupportedThinkingLevels`):
+            // a non-reasoning model reports ["off"], which the client treats as no
+            // thinking surface.
             available_thinking_levels: self
                 .engine
                 .supported_thinking_levels()
@@ -121,10 +101,9 @@ impl Worker {
         }
     }
 
-    /// Persist the queue lanes to the worker recovery journal (crash-safe
-    /// queue recovery; TS keeps session files free of daemon bookkeeping).
-    /// Call after releasing the core lock: `record_recovery` takes the locks
-    /// in the opposite order.
+    /// Persist the queue lanes to the recovery journal. Call after
+    /// releasing the core lock: `record_recovery` takes the locks in
+    /// the opposite order.
     pub(crate) fn persist_queue_snapshot(&self, active_session_id: &str, lanes: &QueueLanes) {
         let mut guard = self.recovery.lock().unwrap();
         let Some(journal) = guard.as_mut() else {
@@ -133,9 +112,8 @@ impl Worker {
         let _ = journal.record_queue_snapshot(active_session_id, &lanes.steering, &lanes.follow_up);
     }
 
-    /// One queue-lane recovery checkpoint through the worker's own
-    /// journal: the lane snapshot and the busy verdict ride one locked
-    /// read (`checkpoint_queue_recovery`).
+    /// One queue-lane recovery checkpoint: the lane snapshot and the
+    /// busy verdict ride one locked read.
     pub(crate) fn checkpoint_queue(&self, checkpoint: QueueCheckpoint) {
         checkpoint_queue_recovery(&self.recovery, &self.core, checkpoint);
     }
@@ -159,15 +137,13 @@ impl Worker {
     }
 
     /// Sequence and broadcast one `session_event` frame at the worker
-    /// level (the TS `_emit` backing for switch notifications).
+    /// level.
     pub(crate) fn emit_worker_event(&self, event: Value) {
         emit_worker_event_with(&self.core, &self.events, event);
     }
 
-    /// Record one durable custom row and broadcast its
-    /// `message_start`/`message_end` pair (the TS `_emit` for rows the
-    /// session appends outside a turn: `append_custom_message`, the
-    /// `refine` outcome and notice, restored prefix rows).
+    /// Record one durable custom row and broadcast its `message_start`/`message_end`
+    /// pair (rows the session appends outside a turn).
     pub(crate) fn emit_custom_row(&self, message: &Value) {
         {
             let mut core = self.core.lock().unwrap();
@@ -291,22 +267,10 @@ pub(crate) fn emit_worker_event_with(
     events.send(OutboundFrame::session_event(payload));
 }
 
-/// The worker's roster-delta push (the Rust-native form of the TS
-/// `roster_delta` worker frame): the fresh session summary rides the
-/// supervisor link, so subscribed roster surfaces (the agents view) see a
-/// state change without polling. Shared by the turn runner's busy flips
-/// and the worker's command arms (the model/thinking switches). The
-/// supervisor's roster refresh still backstops every push, so this stays
-/// fire-and-forget: a dead link reconnects on the next push, and a
-/// supervisor restart re-seeds the entry from registration.
-///
-/// The TS worker flushes its roster deltas over ONE ordered supervisor
-/// client socket (a coalesced window re-reads the current state), so a
-/// delayed older frame can never overwrite a newer one. The Rust
-/// supervisor link dials an independent socket per request — the pushes
-/// arrive unordered — so every delta carries the worker's monotonic
-/// counter and the supervisor's stale-delta gate drops the delayed older
-/// snapshots.
+/// The worker's roster-delta push: the fresh summary rides the supervisor link,
+/// fire-and-forget (the refresh backstops it). The link dials an independent
+/// socket per request — pushes arrive unordered — so every delta carries the
+/// worker's monotonic counter; the stale-delta gate drops the delayed snapshots.
 pub(crate) struct RosterPushContext {
     pub(crate) core: Arc<Mutex<SessionCore>>,
     pub(crate) engine: std::sync::Arc<dyn SessionEngine>,
@@ -326,10 +290,8 @@ pub(crate) fn push_roster_delta(context: &RosterPushContext) {
         return;
     }
     // The push-order lock holds the snapshot and its sequence stamp
-    // together: a busy-flip push racing a switch push must never let the
-    // older snapshot carry the newer sequence (the supervisor would then
-    // keep the stale row and drop the fresh one), so the pair is atomic
-    // and the pairs themselves order — sequence order is snapshot order.
+    // together: an older snapshot must never carry the newer sequence
+    // (the supervisor would keep the stale row and drop the fresh one).
     let _order = context.roster_push_order.lock().unwrap();
     let mut summary = {
         let core = context.core.lock().unwrap();
@@ -348,10 +310,7 @@ pub(crate) fn push_roster_delta(context: &RosterPushContext) {
         )
     };
     // The embedded counter is the pre-stamp value read under the order
-    // lock: every sequence this worker stamped before the snapshot is at
-    // or below it. The supervisor's authoritative pulls raise their
-    // watermark to it, so a delta still in flight when the pull answered
-    // is dropped instead of overwriting the pull's fresher state.
+    // lock: every sequence stamped before the snapshot is at or below it.
     summary.roster_delta_sequence = Some(
         context
             .roster_delta_sequence
@@ -409,8 +368,8 @@ pub(crate) fn session_summary(
             )
         });
     // The scalars derive from one borrowed walk of the same windowed
-    // sequence `SessionFile::messages` folds (scan and fold share the
-    // walk), so the summary never materializes the retained transcript.
+    // sequence `SessionFile::messages` folds, so the summary never
+    // materializes the retained transcript.
     let scalars = store
         .map(crate::session_store::SessionFile::scan_message_scalars)
         .unwrap_or_default();
@@ -419,9 +378,8 @@ pub(crate) fn session_summary(
         .map(crate::util::iso_from_unix_ms)
         .or_else(|| modified.clone())
         .or_else(|| store.map(|store| store.header.timestamp.clone()));
-    // Usage: the whole-file own-usage fold the saved row publishes (TS
-    // `getOwnUsageSummary`). A pathless `--no-session` store runs the
-    // same fold over its in-memory entries.
+    // Usage: the whole-file own-usage fold (TS `getOwnUsageSummary`);
+    // a pathless store folds its in-memory entries.
     let usage = store
         .and_then(|store| {
             if store.path.as_os_str().is_empty() {
@@ -476,11 +434,8 @@ pub(crate) fn session_summary(
         usage,
         worker_state: Some("ready".to_string()),
         worker_pid: Some(std::process::id()),
-        // Set by the caller when the snapshot backs a roster push (the
-        // push-order lock reads the pre-stamp counter); authoritative
+        // Set by the caller when the snapshot backs a roster push; authoritative
         // pulls embed the live counter in `summary_locked` instead.
-        // The push's sending instance rides the frame envelope, so the
-        // summary itself never carries one here.
         roster_delta_sequence: None,
         worker_instance_id: None,
         model,
@@ -492,8 +447,8 @@ pub(crate) fn session_summary(
     }
 }
 
-/// One lane's typed-provenance indices: the parked items matching the
-/// classifier, by lane index (the rider shape both projections share).
+/// One lane's indices: the parked items matching the classifier, by
+/// lane index.
 fn indices(
     items: &std::collections::VecDeque<QueuedItem>,
     classified: impl Fn(&QueuedItem) -> bool,
@@ -508,26 +463,21 @@ fn indices(
 
 /// The queue snapshot for one core (TS `sessionActions`).
 pub(crate) fn session_snapshot(core: &SessionCore) -> SessionActionSnapshot {
-    // TS `queuedAgentMessagePreview`: a parked row reads the
-    // delivery's labeled preview when it carries one, else the
-    // message text.
+    // A parked row reads the labeled preview when it carries one,
+    // else the message text.
     let lane = |items: &std::collections::VecDeque<QueuedItem>| {
         items
             .iter()
             .map(|item| item.preview.clone().unwrap_or_else(|| item.message.clone()))
             .collect::<Vec<String>>()
     };
-    // The RLM child status notices fold by TYPED provenance: the indices
-    // derive from the parked rows' injected custom rows, so the
-    // classification rides the wire and a user-typed message that
-    // merely looks like a notice preview never marks.
+    // The RLM child status notices fold by TYPED provenance: a user-typed message
+    // that merely looks like a notice preview never marks.
     let rlm_child_status =
         |items: &std::collections::VecDeque<QueuedItem>| indices(items, is_rlm_child_status_item);
-    // The engine-minted continuations fold by their own typed
-    // provenance (the injected, queue-invisible admissions): TS's
-    // projection filters these items out entirely — Rust keeps them
-    // visible as the strip's counted row instead (operator directive
-    // 2026-09-28), so the human still sees the parked harness work.
+    // The engine-minted continuations fold by their own typed provenance: Rust
+    // keeps them visible as the strip's counted row (operator directive
+    // 2026-09-28), unlike TS's filtered-out projection.
     let injected_prompts =
         |items: &std::collections::VecDeque<QueuedItem>| indices(items, is_injected_prompt_item);
     SessionActionSnapshot {
