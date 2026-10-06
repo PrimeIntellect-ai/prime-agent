@@ -1067,7 +1067,16 @@ uv_on_path() {
   # an unquoted for-loop word-split GLOB-expands a PATH entry like
   # /tmp/glob-* into a different directory the child never searches - a
   # literal split cannot glob.
-  uv_on_path_rest="$PATH"
+  # An UNSET PATH is distinct from a SET-EMPTY one: the child resolves
+  # NOTHING without a PATH (no match, and no set -u abort - the uv
+  # download/system-Python fallback below continues), while a set-empty
+  # PATH resolves the cwd. The trailing sentinel colon then guarantees
+  # EVERY component its own iteration - a trailing or sole EMPTY
+  # component resolves as the cwd for the child.
+  if [ -z "${PATH+x}" ]; then
+    return 1
+  fi
+  uv_on_path_rest="${PATH}:"
   while [ -n "$uv_on_path_rest" ]; do
     uv_on_path_entry="${uv_on_path_rest%%:*}"
     if [ "$uv_on_path_entry" = "$uv_on_path_rest" ]; then
@@ -1075,7 +1084,9 @@ uv_on_path() {
     else
       uv_on_path_rest="${uv_on_path_rest#*:}"
     fi
-    [ -n "$uv_on_path_entry" ] || continue
+    # An EMPTY component means the CURRENT DIRECTORY in the child's PATH
+    # resolution semantics - the scan searches it, never skips it.
+    [ -n "$uv_on_path_entry" ] || uv_on_path_entry="."
     # An executable FILE (never a searchable directory that merely shares
     # the name).
     [ -f "${uv_on_path_entry}/${uv_name}" ] || continue
@@ -2958,13 +2969,19 @@ fi
 # near the end of this script must describe the user's NEXT session, never
 # this process's temporary prepend - so the pre-warm fix below captures the
 # incoming PATH first and the guidance compares against that.
-incoming_path="$PATH"
+incoming_path="${PATH:-}"
 # THE GUARD (the reviewer's finding): the prepend runs only when no uv
 # already answers on PATH - a working PATH uv is never shadowed by a stale
 # target file - and it serves the uv at the target (the product's ensure_uv
 # does not know the knob's dir).
 if ! uv_on_path && [ -n "$uv_bin_dir" ] && [ "$uv_bin_dir" != "${HOME}/.local/bin" ]; then
-  PATH="${uv_bin_dir}:${PATH}"
+  # An unset PATH must not become a trailing colon (that would expose the
+  # cwd to the child's PATH search): the prepend sets the PATH outright.
+  if [ -z "${PATH+x}" ]; then
+    PATH="$uv_bin_dir"
+  else
+    PATH="${uv_bin_dir}:${PATH}"
+  fi
   export PATH
 fi
 if uv_on_path \

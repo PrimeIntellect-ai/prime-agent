@@ -371,7 +371,7 @@ fn install_ps1_adds_bin_to_the_user_path_and_the_session_path() {
         .find("# --- verify: the launcher must answer --version")
         .expect("the smoke test section exists");
     let section = &text[section_start..section_end];
-    let markers: [(&str, &str); 12] = [
+    let markers: [(&str, &str); 13] = [
         (
             "the PATH-add targets: the launcher's bin dir, plus the custom uv target when the knob placed one (a documented install target must stay discoverable)",
             "$pathDirs = @($bin)",
@@ -388,6 +388,10 @@ fn install_ps1_adds_bin_to_the_user_path_and_the_session_path() {
         (
             "the registry key open (writable: the append needs it anyway)",
             "[Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)",
+        ),
+        (
+            "the missing-key fallback (OpenSubKey returns null when HKCU\\Environment does not exist - a stripped profile - and the null would only print manual guidance; the key is created instead)",
+            "[Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')",
         ),
         (
             "the RAW user PATH read (never [Environment]::GetEnvironmentVariable: it returns the EXPANDED value, and the flattened write-back would freeze %VAR%-style entries at this run's expansion)",
@@ -523,6 +527,15 @@ fn install_rust_sh_honors_the_uv_bin_dir_knob() {
         "the PATH entries must be split by parameter expansion alone (never globbed)"
     );
     assert!(
+        text.contains("uv_on_path_rest=\"${PATH}:\"")
+            && text.contains("[ -z \"${PATH+x}\" ]"),
+        "the lookup must DISTINGUISH an UNSET PATH (the child resolves nothing: no match, no abort) from a SET-EMPTY one (the child resolves the cwd: the sentinel colon visits it), and every component including a trailing or sole empty one gets its own iteration"
+    );
+    assert!(
+        text.contains("[ -n \"$uv_on_path_entry\" ] || uv_on_path_entry=\".\""),
+        "an EMPTY PATH component means the current directory in the child's resolution semantics - the scan must search it, not skip it"
+    );
+    assert!(
         text.contains("uv_bin=\"$uv_on_path_bin\""),
         "the sh's discovery must use the RESOLVED executable from the PATH scan, never command -v's bare-name output"
     );
@@ -539,7 +552,9 @@ fn install_rust_sh_honors_the_uv_bin_dir_knob() {
         "the kernel pre-warm gate must agree with the 'uv found' gate (a default-location uv must actually warm the kernel, not just be reported found)"
     );
     assert!(
-        text.contains("! uv_on_path && [ -n \"$uv_bin_dir\" ]"),
+        text.contains("! uv_on_path && [ -n \"$uv_bin_dir\" ]")
+            && text.contains("PATH=\"$uv_bin_dir\"")
+            && text.contains("PATH=\"${uv_bin_dir}:${PATH}\""),
         "the sh's pre-warm PATH prepend must run only when no uv already answers on PATH (never shadow a working system uv)"
     );
     assert!(
@@ -548,8 +563,8 @@ fn install_rust_sh_honors_the_uv_bin_dir_knob() {
         "the sh's PATH guidance must cover the custom uv target too (a documented install target must stay discoverable)"
     );
     assert!(
-        text.contains("incoming_path=\"$PATH\"") && text.contains("case \":$incoming_path:\" in"),
-        "the sh's PATH guidance must compare against the INCOMING PATH (the pre-warm's temporary prepend must never suppress the persistent-PATH guidance)"
+        text.contains("incoming_path=\"${PATH:-}\"") && text.contains("case \":$incoming_path:\" in"),
+        "the incoming-PATH capture must also survive an unset PATH under set -u (the whole installer continues past the uv helper); the guidance compares against the INCOMING PATH (the pre-warm's temporary prepend must never suppress the persistent-PATH guidance)"
     );
 }
 

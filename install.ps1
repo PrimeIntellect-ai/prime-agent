@@ -849,6 +849,10 @@ foreach ($binDir in $pathDirs) {
     $envKey = $null
     try {
         $envKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+        if (-not $envKey) {
+            # A stripped profile can lack HKCU\Environment entirely.
+            $envKey = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')
+        }
         $rawUserPath = $envKey.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
         $rawUserKind = [Microsoft.Win32.RegistryValueKind]::ExpandString
         if ($envKey.GetValueNames() -contains 'Path') {
