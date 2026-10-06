@@ -1,20 +1,7 @@
-//! Minimal model-facing streaming surface for the agent loop.
-//!
-//! This is a *local* trait for the `pa-agent` loop, deliberately narrow and
-//! documented for later unification with the `pa-ai` provider layer. It
-//! mirrors the parts of the TS provider layer (packages/ai) the loop consumes:
-//!
-//! - `AssistantMessageEvent` protocol: `start`, content deltas/ends, then a
-//!   terminal `done` or `error` event carrying the final [`types::AssistantMessage`].
-//! - `AssistantMessageEventStream`: push events from a producer, iterate them
-//!   as a consumer, and resolve a final result once a terminal event arrives
-//!   (the TS `EventStream` shape).
-//!
-//! Contract identical to the TS `StreamFn`: the provider must not throw for
-//! request/model/runtime failures - failures are encoded in the returned stream
-//! as a terminal `error` event with `stopReason` "error" or "aborted" and an
-//! `errorMessage`. A `StreamFn` in Rust may still return `Err`, which the loop
-//! treats as a run failure (TS ends the stream with an empty result there).
+//! Minimal model-facing streaming surface for the agent loop, mirroring the
+//! parts of the TS provider layer the loop consumes. Provider failures are
+//! encoded as a terminal `error` event, not thrown; a Rust `StreamFn` may
+//! still return `Err`, which the loop treats as a run failure.
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -22,11 +9,8 @@ use tokio::sync::{mpsc, Notify};
 
 use crate::types::{AssistantMessage, Model, StopReason, ThinkingLevel, ToolCall};
 
-/// Event protocol for a model stream (the TS `AssistantMessageEvent` shape).
-///
-/// Streams emit `Start` before partial updates, then terminate with either
-/// `Done` carrying the final successful message or `Error` carrying the final
-/// message with `stop_reason` `Error` or `Aborted`.
+/// Event protocol for a model stream: `Start` before partial updates, then a
+/// terminal `Done`/`Error` carrying the final message.
 #[derive(Debug, Clone)]
 pub enum AssistantMessageEvent {
     Start {
@@ -84,7 +68,6 @@ pub enum AssistantMessageEvent {
 }
 
 impl AssistantMessageEvent {
-    /// Terminal message for a `Done`/`Error` event (TS `getTerminalMessage`).
     #[must_use]
     pub fn terminal_message(&self) -> Option<&AssistantMessage> {
         match self {
@@ -94,8 +77,6 @@ impl AssistantMessageEvent {
         }
     }
 
-    /// True for the partial-update events the loop applies to the streaming
-    /// message (`text_*`, `thinking_*`, `toolcall_*`).
     #[must_use]
     pub fn is_delta(&self) -> bool {
         matches!(
@@ -118,11 +99,9 @@ impl AssistantMessageEvent {
 pub struct ToolDefinition {
     pub name: String,
     pub description: String,
-    /// JSON Schema for the parameters.
     pub parameters: serde_json::Value,
 }
 
-/// LLM-bound context (the TS `Context` shape).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LlmContext {
     pub system_prompt: Option<String>,
@@ -130,8 +109,8 @@ pub struct LlmContext {
     pub tools: Vec<ToolDefinition>,
 }
 
-/// Provider response as the response hook sees it (the TS `ProviderResponse`
-/// `{ status, headers }` shape; the pa-ai mirror lives in `pa-types`).
+/// Provider response as the response hook sees it (the pa-ai mirror lives
+/// in `pa-types`).
 #[derive(Debug, Clone)]
 pub struct ProviderResponse {
     pub status: u16,
@@ -142,13 +121,13 @@ pub struct ProviderResponse {
 }
 
 /// Hook invoked with the outbound provider payload before sending; return
-/// `Some` to replace the payload (TS `onPayload`). The payload crosses in
-/// its wire shape (JSON), not as a provider-crate type.
+/// `Some` to replace the payload. The payload crosses in its wire shape
+/// (JSON), not as a provider-crate type.
 pub type OnPayloadHook =
     std::sync::Arc<dyn Fn(serde_json::Value, &Model) -> Option<serde_json::Value> + Send + Sync>;
 
 /// Hook invoked after the HTTP response is received and before the body is
-/// read (TS `onResponse`).
+/// read.
 pub type OnResponseHook = std::sync::Arc<dyn Fn(ProviderResponse, &Model) + Send + Sync>;
 
 /// Stream request options (subset of the TS `SimpleStreamOptions` the loop
@@ -164,18 +143,11 @@ pub struct StreamRequestOptions {
     pub max_tokens: Option<u64>,
     pub reasoning: ThinkingLevel,
     pub session_id: Option<String>,
-    /// TS `SimpleStreamOptions.serviceTier`: the requested provider
-    /// service tier for the request. `None` (the TS `null`) means no tier
-    /// request.
+    /// The requested provider service tier; `None` means no tier request.
     pub service_tier: Option<crate::types::ServiceTier>,
     pub api_key: Option<String>,
     pub signal: crate::abort::AbortSignal,
-    /// Outbound-payload hook (TS `SimpleStreamOptions.onPayload`). `None`
-    /// leaves the payload untouched; the provider client invokes it once
-    /// per request before the body is sent.
     pub on_payload: Option<OnPayloadHook>,
-    /// Response-headers hook (TS `SimpleStreamOptions.onResponse`). Invoked
-    /// once per request after the response headers arrive.
     pub on_response: Option<OnResponseHook>,
     /// Extra request headers (TS `SimpleStreamOptions.headers`), merged
     /// over the provider's auth-resolved headers at the adapter seam.
@@ -218,25 +190,19 @@ impl Default for StreamRequestOptions {
 
 /// The streaming surface the agent loop consumes.
 ///
-/// The TS reference iterates an `AssistantMessageEventStream` and awaits
-/// `result()`; this trait is the Rust equivalent. `next_event` returns `None`
-/// when the event sequence is exhausted. `result` must resolve after a
-/// terminal event; a stream that ends without one returns an error (the TS
-/// version would hang forever - that deadlock is converted into an `Err`).
+/// `next_event` returns `None` when the event sequence is exhausted; `result`
+/// must resolve after a terminal event. A stream that ends without one
+/// returns an error (the TS version would hang forever).
 pub trait ModelStream: Send {
     fn next_event(&mut self) -> crate::BoxFut<'_, Option<AssistantMessageEvent>>;
     /// Final assistant message; resolves after a terminal `done`/`error` event
     /// or an explicit `end(result)`.
     fn result(&mut self) -> crate::BoxFut<'_, anyhow::Result<AssistantMessage>>;
-    /// Close/cancel the underlying stream (TS `iterator.return()`), used when
-    /// the agent aborts mid-stream. Must be idempotent.
+    /// Close/cancel the underlying stream, used when the agent aborts
+    /// mid-stream. Must be idempotent.
     fn close(&mut self) {}
 }
 
-/// Stream function used by the agent loop (TS `StreamFn`).
-///
-/// Receives the model, the LLM-bound context, and the request options, and
-/// returns a [`ModelStream`] asynchronously.
 pub type StreamFn = Arc<
     dyn Fn(
             Model,
@@ -253,8 +219,7 @@ struct SharedStreamState {
     closed: std::sync::Mutex<bool>,
 }
 
-/// Producer handle of an [`AssistantMessageEventStream`] (the TS
-/// `EventStream<AssistantMessageEvent, AssistantMessage>` shape).
+/// Producer handle of an [`AssistantMessageEventStream`].
 #[derive(Clone)]
 pub struct AssistantMessageEventStreamHandle {
     tx: mpsc::UnboundedSender<AssistantMessageEvent>,
@@ -268,7 +233,6 @@ pub struct AssistantMessageEventStream {
     closed: bool,
 }
 
-/// Create a connected event stream pair.
 #[must_use]
 pub fn event_stream() -> (
     AssistantMessageEventStreamHandle,
@@ -294,14 +258,12 @@ pub fn event_stream() -> (
 }
 
 impl AssistantMessageEventStreamHandle {
-    /// Push an event. Ignored after the stream was ended or closed, and after a
-    /// terminal event resolved the result (TS `EventStream.push` after `done`).
+    /// Push an event. Ignored after the stream was ended or closed, and
+    /// after a terminal event resolved the result.
     ///
     /// # Panics
     ///
-    /// Panics if the `closed` mutex is poisoned, or if the `result` mutex
-    /// is poisoned while storing a terminal event's message (another
-    /// thread panicked while holding one of them).
+    /// Panics if the `closed` or `result` mutex is poisoned.
     pub fn push(&self, event: AssistantMessageEvent) {
         if *self.shared.closed.lock().unwrap() {
             return;
@@ -316,16 +278,12 @@ impl AssistantMessageEventStreamHandle {
         let _ = self.tx.send(event);
     }
 
-    /// End the stream, optionally resolving `result()`.
-    ///
-    /// Like the TS `EventStream.end`, already-queued events are still yielded
-    /// by the consumer before iteration finishes; further pushes are ignored.
+    /// End the stream, optionally resolving `result()`. Already-queued
+    /// events are still yielded by the consumer before iteration finishes.
     ///
     /// # Panics
     ///
-    /// Panics if the `closed` mutex is poisoned, or if the `result` mutex
-    /// is poisoned while storing a supplied result (another thread
-    /// panicked while holding one of them).
+    /// Panics if the `closed` or `result` mutex is poisoned.
     pub fn end(&self, result: Option<AssistantMessage>) {
         *self.shared.closed.lock().unwrap() = true;
         if let Some(message) = result {

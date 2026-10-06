@@ -1,7 +1,7 @@
 //! Tests for the fresh-path create write collapse: the single durable write
-//! (header + prefix + state + name) is byte-equivalent to the sequential
-//! writes it replaces, the failure window leaves no session file, and an
-//! old build's header-only crash artifact is neither consumed nor bled into.
+//! (header + prefix + state + name) is byte-equivalent to the sequential writes
+//! it replaces, the failure window leaves no session file, and an old build's
+//! header-only crash artifact is neither consumed nor bled into.
 
 use std::path::PathBuf;
 
@@ -13,9 +13,7 @@ use crate::engine::{
 use crate::worker::WorkerConfig;
 
 /// The scripted harness engine: the create-path seams keep their trait
-/// defaults (no `model_change`, `"off"` thinking), and the run seams
-/// delegate to the scripted engine like the harness sessions these
-/// tests drive.
+/// defaults (no `model_change`, `"off"` thinking).
 struct OffEngine;
 impl SessionEngine for OffEngine {
     fn run_prompt(
@@ -77,9 +75,8 @@ fn worker_in(dir: &std::path::Path, session_id: &str) -> Worker {
 }
 
 /// The pre-collapse fresh-path write sequence, replayed with the same
-/// primitives the old arm used: a header-only rewrite, the creation
-/// prefix, the `active` state, a second rewrite, then the
-/// `persist_entry` name append.
+/// primitives the old arm used: header-only rewrite, creation prefix,
+/// `active` state, second rewrite, name append.
 fn legacy_sequence_file(
     dir: &std::path::Path,
     session_dir: &std::path::Path,
@@ -98,9 +95,8 @@ fn legacy_sequence_file(
     path
 }
 
-/// Parsed lines with the per-run identity masked: minted `id`s, the
-/// `parentId` chain, and the `timestamp`s differ across runs by
-/// construction — everything else must be byte-equal.
+/// Parsed lines with the per-run identity masked (minted `id`s, the
+/// `parentId` chain, the `timestamp`s); everything else must be byte-equal.
 fn masked_lines(path: &std::path::Path) -> Vec<Value> {
     let mut rows = Vec::new();
     for line in std::fs::read_to_string(path).unwrap().lines() {
@@ -209,10 +205,9 @@ async fn fresh_create_folds_name_into_the_single_write() {
 #[tokio::test]
 async fn fresh_create_failed_write_leaves_no_session_file() {
     let dir = tempfile::tempdir().unwrap();
-    // A FILE at the session-dir path makes the single write's
-    // create_dir_all fail: the create must surface the failure with no
-    // session file left behind (the collapsed window has no
-    // header-only intermediate to leak).
+    // A FILE at the session-dir path makes the single write's create_dir_all
+    // fail: the create must surface the failure with no session file left
+    // behind (no header-only intermediate to leak).
     let blocked_dir = dir.path().join("blocked");
     std::fs::write(&blocked_dir, b"not a directory").unwrap();
     let worker = worker_in(dir.path(), "collapse-fail");
@@ -238,10 +233,9 @@ async fn fresh_create_ignores_a_legacy_crash_orphan() {
     let dir = tempfile::tempdir().unwrap();
     let session_dir = dir.path().join("sessions");
     std::fs::create_dir_all(&session_dir).unwrap();
-    // The old build's crash-window artifact: a header-only file an
-    // interrupted fresh create left behind. The collapsed create mints
-    // its own session id, so the orphan must neither block the create
-    // nor bleed into the new file.
+    // The old build's crash-window artifact: a header-only file an interrupted
+    // fresh create left behind; the orphan must neither block the create nor
+    // bleed into the new file.
     let mut orphan = SessionFile::create("/tmp", None, 0);
     let orphan_path = session_dir.join(session_file_name(orphan.session_id()));
     orphan.set_path(orphan_path.clone());

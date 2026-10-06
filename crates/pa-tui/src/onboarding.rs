@@ -1,20 +1,7 @@
-//! First-run onboarding surface (TS `PrimeOnboardingSplashComponent` +
-//! `OnboardingChoiceComponent`): the compact brand mark over its animated
-//! lab field, the welcome line, and the flow panels the full first-run
-//! flow mounts inside the block (the login dialog, the connect-more
-//! providers picker, the trace question). [`OnboardingChoice`] is the
-//! reusable question panel (options with optional detail subtitles, a
-//! row-width override, a seeded cursor); the splash mounts one for the
-//! trace question and owns the pane until the flow completes; the
-//! answers and the completion flag persist through
-//! [`crate::interactive::OnboardingSink`].
-//!
-//! The two first-run shapes both live here: a home whose startup model
-//! is ready skips to the question (the splash mounts it immediately, TS
-//! `immediate: true`), while a home with no usable model runs the full
-//! flow (TS `runOnboardingFlow`'s not-ready branch) — the welcome
-//! screen's description and login action, then the flow panels in
-//! [`crate::onboarding_flow`], one at a time.
+//! First-run onboarding surface: the brand mark over its animated lab field, the welcome line, and
+//! the flow panels the first-run flow mounts inside the block. [`OnboardingChoice`] is the reusable
+//! question panel. A startup model that is ready skips to the question (TS `immediate: true`); no
+//! usable model runs the full flow (TS `runOnboardingFlow`).
 
 use crate::keybindings::KeybindingsManager;
 use crate::keys::KeyId;
@@ -24,15 +11,12 @@ use crate::theme::{Theme, ThemeColor};
 use crate::{Line, Span};
 use ratatui::style::{Color, Modifier, Style};
 
-/// The trace-sharing question (TS `askOnboardingTraceOptIn`).
 pub const TRACE_OPT_IN_PROMPT: &str = "Share agent traces with Prime Intellect?";
 const TRACE_OPT_IN_DESCRIPTION: &str = "Trace sharing helps us train better open-source models and improve the open agent ecosystem for everyone.";
 const TRACE_OPT_IN_NOTE: &str = "You can change this anytime with /traces.";
 /// Choice rows: `Share` opts in (index 0), `Not now` keeps traces off.
 const CHOICES: [&str; 2] = ["Share", "Not now"];
 
-/// The trace question's options (TS `askOnboardingTraceOptIn` mounts
-/// `[{ label: "Share" }, { label: "Not now" }]`).
 pub(crate) fn trace_question_options() -> Vec<OnboardingChoiceOption> {
     CHOICES
         .iter()
@@ -43,7 +27,6 @@ pub(crate) fn trace_question_options() -> Vec<OnboardingChoiceOption> {
         .collect()
 }
 
-/// The trace question's copy (TS `askOnboardingTraceOptIn`'s config).
 pub(crate) fn trace_question_config() -> OnboardingChoiceOptions {
     OnboardingChoiceOptions {
         prompt: Some(TRACE_OPT_IN_PROMPT.to_string()),
@@ -53,16 +36,11 @@ pub(crate) fn trace_question_config() -> OnboardingChoiceOptions {
     }
 }
 
-/// The onboarding team question's prompt (TS `showPrimeTeamSelector`'s
-/// onboarding arm mounts `OnboardingChoiceComponent` with this prompt).
 pub const TEAM_QUESTION_PROMPT: &str = "Which account should Prime Agent use?";
-/// The onboarding team question's first row (TS the `Personal account`
-/// option, index 0 — the personal answer).
 pub const PERSONAL_ACCOUNT_LABEL: &str = "Personal account";
 
-/// The onboarding team question's rows (TS the options: the personal
-/// account first, then one row per team with its slug as the dim
-/// `@detail` identifier).
+/// The team question's rows: the personal account first, then one row per
+/// team with its slug as the dim `@detail` identifier.
 pub(crate) fn team_question_options(
     teams: &[crate::auth_panel::PrimeTeamOption],
 ) -> Vec<OnboardingChoiceOption> {
@@ -72,9 +50,7 @@ pub(crate) fn team_question_options(
     }];
     options.extend(teams.iter().map(|team| {
         OnboardingChoiceOption {
-            // The team fields are provider-supplied: the same control
-            // character hygiene every daemon-supplied row carries (the
-            // session team picker scrubs them the same way).
+            // Provider-supplied rows get the control-character scrub.
             label: crate::menu_panel::scrub_controls(&team.name),
             detail: team
                 .slug
@@ -85,8 +61,6 @@ pub(crate) fn team_question_options(
     options
 }
 
-/// The onboarding team question's copy (TS the config: the prompt alone —
-/// no description, no note).
 pub(crate) fn team_question_config() -> OnboardingChoiceOptions {
     OnboardingChoiceOptions {
         prompt: Some(TEAM_QUESTION_PROMPT.to_string()),
@@ -96,7 +70,6 @@ pub(crate) fn team_question_config() -> OnboardingChoiceOptions {
     }
 }
 
-/// TS `PRIME_COMPACT_BUTTERFLY_LOGO` (7 rows, 22 visible columns).
 const LOGO_LINES: [&str; 7] = [
     "                 ▗▄▄█▀",
     "   ███▄       ▗▄███▀",
@@ -107,13 +80,9 @@ const LOGO_LINES: [&str; 7] = [
     "▜█▛▀▘  ▜█▛▀▘",
 ];
 const LOGO_WIDTH: usize = 22;
-/// The mark sits a little further right than the text column (TS
-/// `LOGO_INDENT`).
 const LOGO_INDENT: usize = 5;
-/// How far a selected row lifts off the canvas (TS `HIGHLIGHT_LIFT`).
 const HIGHLIGHT_LIFT: f64 = 0.08;
 
-/// One splash cell: a character, its tone, and the overwrite priority.
 #[derive(Clone)]
 struct SplashCell {
     character: char,
@@ -137,23 +106,20 @@ pub enum OnboardingDecision {
     Cancelled,
     /// Exit keys while onboarding owns the pane: quit the app.
     Exit,
-    /// Enter on the welcome screen's login action (TS the splash's
-    /// `onSelect`): the full flow starts.
+    /// Enter on the welcome screen's login action: the full flow starts.
     Begin,
-    /// The connect-more-providers picker's answer (TS `onSelect` /
-    /// `onContinue` / `onCancel`).
+    /// The connect-more-providers picker's answer.
     Pick(crate::onboarding_flow::ProviderPick),
 }
 
-/// The onboarding pane state: the animation frame, the started flag (TS
-/// `flowStarted` — the welcome text and action never return once a flow
-/// owns the block), and the mounted flow panel.
+/// The onboarding pane state: the animation frame, the started flag (the welcome text never returns
+/// once a flow owns the block), and the mounted flow panel.
 #[derive(Debug)]
 pub struct OnboardingScreen {
     frame: u64,
     flow_started: bool,
-    /// The mounted flow panel (TS `setPanel`'s top: the flow never nests
-    /// its panels, so one slot covers the sequence).
+    /// The mounted flow panel (the flow never nests its panels, so one slot
+    /// covers the sequence).
     panel: Option<OnboardingPanel>,
 }
 
@@ -179,8 +145,7 @@ impl OnboardingScreen {
         Self::default()
     }
 
-    /// The full flow's splash (TS the plain `showOnboardingSplash`): the
-    /// welcome text and the single login action, until Enter starts the
+    /// The full flow's splash: the welcome text and the single login action, until Enter starts the
     /// flow.
     #[must_use]
     pub fn welcome() -> Self {
@@ -191,68 +156,54 @@ impl OnboardingScreen {
         }
     }
 
-    /// TS `setPanel`: mount one flow panel — the flow has started from
-    /// here on, and the welcome text never comes back.
+    /// Mount one flow panel — the flow has started, and the welcome text never comes back.
     pub fn mount_panel(&mut self, panel: OnboardingPanel) {
         self.flow_started = true;
         self.panel = Some(panel);
     }
 
-    /// One animation step (TS `ANIMATION_INTERVAL_MS` tick).
     pub fn tick(&mut self) {
         self.frame = self.frame.wrapping_add(1);
     }
 
-    /// Handle one key id (TS splash + mounted panel `handleInput`). `None`
-    /// keeps the pane waiting. `osc_sink` carries a copy's OSC 52 fallback
-    /// (the login dialog's URL copy).
+    /// Handle one key id. `None` keeps the pane waiting. `osc_sink` carries a
+    /// copy's OSC 52 fallback (the login dialog's URL copy).
     pub(crate) fn handle_key(
         &mut self,
         key: &KeyId,
         kb: &KeybindingsManager,
         osc_sink: &mut crate::clipboard::OscSink,
     ) -> Option<OnboardingDecision> {
-        // Onboarding owns the pane before the editor exists, so its panels
-        // answer the exit keys themselves (TS `isOnboardingExitKey`).
+        // Onboarding owns the pane before the editor exists, so its panels answer the exit keys
+        // themselves.
         if kb.matches(key, "app.clear") || kb.matches(key, "app.exit") {
             return Some(OnboardingDecision::Exit);
         }
         if let Some(panel) = self.panel.as_mut() {
             return panel.handle_key(key, kb, osc_sink);
         }
-        // The welcome screen binds one key: Enter starts the flow (TS:
-        // cancel is deliberately unbound — signing in is the only way
-        // forward).
+        // The welcome screen binds one key: Enter starts the flow (cancel is
+        // deliberately unbound — signing in is the only way forward).
         if !self.flow_started && kb.matches(key, "tui.select.confirm") {
             return Some(OnboardingDecision::Begin);
         }
         None
     }
 
-    /// One paste payload (TS the mounted input's paste): the login dialog's
-    /// field or the picker's search.
+    /// One paste payload: the login dialog's field or the picker's search.
     pub fn handle_paste(&mut self, text: &str) {
         if let Some(panel) = self.panel.as_mut() {
             panel.handle_paste(text);
         }
     }
 
-    /// Fold one auth-panel request into the mounted login dialog (the
-    /// onboarding phase's channel arm — the same folding the run loop's
-    /// `apply_auth_panel_request` does for the session view): the render
-    /// requests mount into the panel, and a request with no mounted
-    /// dialog cancels its flow (the dropped oneshot reply, the same
-    /// contract a closed terminal input had). The settled requests never
-    /// arrive here: the onboarding flows settle through their own spawned
-    /// futures, so past-the-dialog requests are a no-op.
+    /// Fold one auth-panel request into the mounted login dialog: render requests mount into the
+    /// panel; a request with no mounted dialog cancels its flow.
     pub fn apply_auth_request(&mut self, request: crate::auth_panel::AuthPanelRequest) {
         use crate::auth_panel::AuthPanelRequest;
         match request {
-            // TS `runPrimeInferenceLogin`'s guarded arm: "onboarding
-            // narrates itself; step chatter stays in the chat flows" —
-            // the callback's step lines never render on this surface,
-            // while a direct `showProgress` line (the browser-sign-in
-            // fallback) does.
+            // The guarded arm: step chatter never renders on this surface ("onboarding narrates
+            // itself"), while a direct showProgress line (the browser-sign-in fallback) does.
             AuthPanelRequest::Progress { message, chatter } => {
                 let Some(OnboardingPanel::Auth { panel, .. }) = self.panel.as_mut() else {
                     return;
@@ -261,9 +212,7 @@ impl OnboardingScreen {
                     panel.push_progress(&message);
                 }
             }
-            // TS `showWaiting`: the dialog's own method carries no
-            // onboarding guard — the polling device flow's waiting line
-            // renders on this surface too.
+
             AuthPanelRequest::Waiting { message } => {
                 let Some(OnboardingPanel::Auth { panel, .. }) = self.panel.as_mut() else {
                     return;
@@ -288,11 +237,8 @@ impl OnboardingScreen {
                 };
                 panel.mount_paste(&prompt, tone, style, allow_empty, reply);
             }
-            // TS `showPrimeTeamSelector`'s onboarding arm: the team
-            // selection is a question in the onboarding selection
-            // language (`OnboardingChoiceComponent`, no heading — the
-            // brand line returns), not the `/login` surface's team
-            // picker.
+            // The team selection is a question in the onboarding selection language (no heading —
+            // the brand line returns), not the `/login` surface's team picker.
             AuthPanelRequest::SelectTeam {
                 teams,
                 current,
@@ -318,8 +264,7 @@ impl OnboardingScreen {
         }
     }
 
-    /// The full pane frame (TS `PrimeOnboardingSplashComponent.render`).
-    /// The keybindings manager feeds the mounted panel's hint row.
+    /// The full pane frame; the keybindings manager feeds the mounted panel's hint row.
     pub(crate) fn render(
         &mut self,
         theme: &Theme,
@@ -332,18 +277,14 @@ impl OnboardingScreen {
         lines.extend(self.mark_rows(theme, width));
         lines.push(Vec::new());
         lines.push(self.heading_line(theme));
-        // The welcome text and action render only before the flow starts;
-        // once a panel owns the block, its rows mount directly under the
-        // heading (TS: the panel brings its own leading padding, and it
-        // indents its own content by one column — panelLeft =
-        // contentLeft - 1; contentLeft = PADDING_X = 1).
+        // The welcome text and action render only before the flow starts; once a panel owns the
+        // block, its rows mount directly under the heading.
         match self.panel.as_mut() {
             None if !self.flow_started => {
                 lines.extend(welcome_rows(theme, width));
                 lines.push(welcome_action_row(theme, width));
             }
-            // A started flow with no mounted panel keeps one blank row in
-            // the gap (TS `if (!this.getActivePanel())`).
+            // A started flow with no mounted panel keeps one blank row in the gap.
             None => lines.push(Vec::new()),
             Some(panel) => lines.extend(panel.render(theme, width, kb)),
         }
@@ -354,8 +295,7 @@ impl OnboardingScreen {
         lines
     }
 
-    /// The block's heading (TS `renderHeadingLine`): the mounted panel
-    /// that names itself replaces the brand line.
+    /// The block's heading: the mounted panel that names itself replaces the brand line.
     fn heading_line(&self, theme: &Theme) -> Line {
         let heading = self.panel.as_ref().and_then(|panel| panel.heading());
         if let Some(heading) = heading {
@@ -371,8 +311,6 @@ impl OnboardingScreen {
         Self::brand_line(theme)
     }
 
-    /// "Welcome to **PRIME** *Agent*" (TS `renderBrandLine`), one column in
-    /// from the pane edge.
     fn brand_line(theme: &Theme) -> Line {
         let text = theme.fg_style(ThemeColor::Text);
         let mut row: Line = vec![Span::styled(" ".to_string(), Style::default())];
@@ -388,13 +326,11 @@ impl OnboardingScreen {
         row
     }
 
-    /// The brand mark over its animated field (TS `renderMarkRows`).
     fn mark_rows(&self, theme: &Theme, width: usize) -> Vec<Line> {
         let rows = LOGO_LINES.len();
         let mut canvas = vec![vec![cell(' ', ThemeColor::Dim, 0); width]; rows];
-        // The mark keeps a quiet zone on the field: ambient dots and
-        // contours still drift across the full width, scan columns only
-        // trail to the right of the zone.
+        // The mark keeps a quiet zone on the field: ambient dots and contours still drift across
+        // the full width, scan columns only trail to the right of the zone.
         let quiet = (LOGO_INDENT, LOGO_INDENT + LOGO_WIDTH - 1, 0, rows - 1);
         self.draw_field(&mut canvas, width, rows, quiet);
         for (y, line) in LOGO_LINES.iter().enumerate() {
@@ -417,9 +353,8 @@ impl OnboardingScreen {
             .collect()
     }
 
-    /// The lab field of the old full-screen splash, scaled to the mark's
-    /// band (TS `drawField`): drifting ambient dots, a contour wave, a
-    /// horizon of dashes, scan columns, and three particle traces.
+    /// The lab field of the old full-screen splash, scaled to the mark's band: drifting ambient
+    /// dots, a contour wave, a horizon of dashes, scan columns, and three particle traces.
     fn draw_field(
         &self,
         canvas: &mut [Vec<SplashCell>],
@@ -453,7 +388,6 @@ impl OnboardingScreen {
                     };
                     put(canvas, x, y, '─', tone, 3);
                 }
-                // Scan columns trail the mark to the right.
                 if x >= quiet.0 && !inside_quiet(x, y, quiet) && x % 4 == 0 {
                     let scan_index = x / 4;
                     let segment = (y + scan_index * 2 + (frame as usize / 2)) % 6;
@@ -468,7 +402,6 @@ impl OnboardingScreen {
                 }
             }
         }
-        // Three particle traces ride the field (TS trace loop).
         for trace_index in 0..3usize {
             let base = match trace_index {
                 0 => height * 30 / 100,
@@ -480,8 +413,8 @@ impl OnboardingScreen {
                 if wave > 7 {
                     wave = 15 - wave;
                 }
-                // TS `Math.trunc((wave - 3) / 2)`: negative waves pull the
-                // trace one row up, so keep the signed division.
+                // `Math.trunc((wave - 3) / 2)`: negative waves pull the trace one
+                // row up, so keep the signed division.
                 let trace_y = (base as i64 + (wave as i64 - 3) / 2).max(0) as usize;
                 if (x + frame as usize + trace_index * 13).is_multiple_of(41) {
                     put(canvas, x, trace_y, '◆', ThemeColor::Warning, 6);
@@ -495,8 +428,7 @@ impl OnboardingScreen {
     }
 }
 
-/// Overwrite one cell when the new priority is at least the current one
-/// (TS `put`).
+/// Overwrite one cell when the new priority is at least the current one.
 fn put(
     canvas: &mut [Vec<SplashCell>],
     x: usize,
@@ -518,7 +450,6 @@ fn inside_quiet(x: usize, y: usize, zone: (usize, usize, usize, usize)) -> bool 
     x >= zone.0 && x <= zone.1 && y >= zone.2 && y <= zone.3
 }
 
-/// One canvas row as same-tone runs (TS `renderCells`).
 fn render_cells(theme: &Theme, cells: Vec<SplashCell>) -> Line {
     let mut row: Line = Vec::new();
     let mut current: Option<ThemeColor> = None;
@@ -543,17 +474,12 @@ fn render_cells(theme: &Theme, cells: Vec<SplashCell>) -> Line {
     row
 }
 
-/// The selected-row wash (TS `onboardingHighlightBackground`): the canvas
-/// lifted a few percent toward the text colour. The canvas is the theme
-/// record's parseable `background` (TS `parseHexColor(colors.background)`),
-/// else the hardcoded dark/light canvas by the text luma — "on dark" follows
-/// TS `isLightColor` (luma > 128) with the terminal-default text counting
-/// as light. The built-in themes carry no `background` key, so they keep
-/// the hardcoded canvases.
+/// The selected-row wash: the canvas lifted a few percent toward the text colour — the theme
+/// record's `background`, else the hardcoded dark/light canvas by the text luma.
 pub(crate) fn highlight_wash(theme: &Theme) -> Color {
     let text = theme.fg_style(ThemeColor::Text).fg;
-    // TS: `onDark = !text || isLightColor(text)` — undefined (empty theme
-    // value) or a light colour both mean light text over a dark canvas.
+    // `onDark = !text || isLightColor(text)` — empty or light text both mean
+    // light text over a dark canvas.
     let on_dark = match text {
         Some(Color::Rgb(r, g, b)) => {
             0.299 * f64::from(r) + 0.587 * f64::from(g) + 0.114 * f64::from(b) > 128.0
@@ -565,8 +491,7 @@ pub(crate) fn highlight_wash(theme: &Theme) -> Color {
     } else {
         (0u16, 0, 0)
     };
-    // TS: `canvas = parseHexColor(colors.background) ?? (onDark ?
-    // DARK_CANVAS : LIGHT_CANVAS)`.
+    // `canvas = parseHexColor(colors.background) ?? (onDark ? DARK_CANVAS : LIGHT_CANVAS)`.
     let canvas = theme.background_rgb().map_or(
         if on_dark {
             (16u16, 16, 16)
@@ -633,11 +558,9 @@ mod tests {
         Theme::from_json(&json, mode)
     }
 
-    /// The trace-question pane at 80x24, byte-identical to the pre-PR-C
-    /// render: the golden was captured from the base commit's
-    /// `OnboardingScreen::render` Debug output in the CI VM, so the
-    /// parameterized choice panel must not move a single styled cell of
-    /// the splash the way it renders today.
+    /// The trace-question pane at 80x24, byte-identical to the pre-PR-C render: the golden was
+    /// captured from the base commit's `OnboardingScreen::render` Debug output in the CI VM, so the
+    /// parameterized choice panel must not move a single styled cell.
     #[test]
     fn trace_question_render_is_unchanged() {
         const GOLDEN: &str = r#"[[], [Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "·   " }, Span { style: Style::new().fg(Color::Rgb(82, 82, 91)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "                 " }, Span { style: Style::new().fg(Color::Reset), content: "▗▄▄█▀" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "              ·   " }, Span { style: Style::new().fg(Color::Rgb(82, 82, 91)), content: "╌" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "                         ·        " }], [Span { style: Style::new().fg(Color::Rgb(245, 158, 11)), content: "◆" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "      " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Reset), content: "███▄" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "   " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "  " }, Span { style: Style::new().fg(Color::Reset), content: "▗▄███▀" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "   " }, Span { style: Style::new().fg(Color::Rgb(82, 82, 91)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "· " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "   " }, Span { style: Style::new().fg(Color::Rgb(56, 189, 248)), content: "▎" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "  " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "      " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·•" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "      " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "   " }, Span { style: Style::new().fg(Color::Rgb(56, 189, 248)), content: "┃" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "  " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "      " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·•" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "    · " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }], [Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "···" }, Span { style: Style::new().fg(Color::Reset), content: "▗█▛▐█▙" }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Reset), content: "▗▄█▀▗█▀" }, Span { style: Style::new().fg(Color::Rgb(82, 82, 91)), content: "╌·" }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(245, 158, 11)), content: "◆" }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(82, 82, 91)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(56, 189, 248)), content: "▎" }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "•··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "  " }, Span { style: Style::new().fg(Color::Rgb(245, 158, 11)), content: "◆" }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(56, 189, 248)), content: "▎" }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "  " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "···" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(56, 189, 248)), content: "┃" }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "•··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "  " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(56, 189, 248)), content: "▎" }, Span { style: Style::new().fg(Color::Rgb(245, 158, 11)), content: "◆" }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "  " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "···" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }], [Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "  " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Reset), content: "▗█▛" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Reset), content: "▟██▙▄██▛" }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Reset), content: "▟▛" }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "   " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(56, 189, 248)), content: "▎" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "   " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(56, 189, 248)), content: "▎" }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "   " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(82, 82, 91)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(56, 189, 248)), content: "▎" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "   " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(56, 189, 248)), content: "┃" }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "   " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }], [Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "•·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "  " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Reset), content: "▗▟▌" }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Reset), content: "▐███▛▘▗▄█▖" }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "  " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·•·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "─ " }, Span { style: Style::new().fg(Color::Rgb(56, 189, 248)), content: "▎" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "  " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "···" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "  " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "•" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "  " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(56, 189, 248)), content: "▎" }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "  " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "  " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·•·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "  " }, Span { style: Style::new().fg(Color::Rgb(56, 189, 248)), content: "▎" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "  " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(245, 158, 11)), content: "◆" }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "  " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "•" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "  " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(56, 189, 248)), content: "┃" }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·─" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "  " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·•·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "· " }, Span { style: Style::new().fg(Color::Rgb(56, 189, 248)), content: "▎" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "─·" }], [Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "•" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Reset), content: "▟███▄" }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Reset), content: "▄▄▟███▀" }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "   " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·•" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(56, 189, 248)), content: "┃" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "  " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "   " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(56, 189, 248)), content: "▎" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "   " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·•" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(56, 189, 248)), content: "▎" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "  " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "   " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(56, 189, 248)), content: "▎" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "   " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·•" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(56, 189, 248)), content: "┃" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "  " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }], [Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "    " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Reset), content: "▜█▛▀▘" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "  " }, Span { style: Style::new().fg(Color::Reset), content: "▜█▛▀▘" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "   " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "     " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "     " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "•" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "   · " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(82, 82, 91)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "     " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "     " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "•" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " ·   " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "     " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }], [], [Span { style: Style::new(), content: " " }, Span { style: Style::new().fg(Color::Reset), content: "Welcome to " }, Span { style: Style::new().fg(Color::Reset).bold(), content: "PRIME" }, Span { style: Style::new().fg(Color::Reset).italic(), content: " Agent" }], [], [Span { style: Style::new().fg(Color::Reset), content: " Share agent traces with Prime Intellect?" }], [], [Span { style: Style::new().fg(Color::Rgb(161, 161, 170)), content: " Trace sharing helps us train better open-source" }], [Span { style: Style::new().fg(Color::Rgb(161, 161, 170)), content: " models and improve the open agent ecosystem for" }], [Span { style: Style::new().fg(Color::Rgb(161, 161, 170)), content: " everyone." }], [], [Span { style: Style::new(), content: " " }, Span { style: Style::new().fg(Color::Reset).bg(Color::Rgb(35, 35, 35)).bold(), content: "> Share" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)).bg(Color::Rgb(35, 35, 35)), content: "                       " }], [Span { style: Style::new(), content: " " }, Span { style: Style::new().fg(Color::Rgb(161, 161, 170)), content: "  Not now" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "                     " }], [], [Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " You can change this anytime with /traces." }], [], [], []]"#;
@@ -700,10 +623,8 @@ mod tests {
         assert_eq!(highlight_wash(&theme), Color::Rgb(235, 235, 235));
     }
 
-    /// TS `runPrimeInferenceLogin`'s guarded arm: the `onProgress`
-    /// callback's step chatter never renders on the onboarding block
-    /// ("onboarding narrates itself"), while the browser-fallback's
-    /// direct line does.
+    /// The guarded arm: `onProgress` step chatter never renders on the onboarding block, the
+    /// browser-fallback's direct line does.
     #[test]
     fn the_onboarding_fold_drops_step_chatter_keeps_direct_lines() {
         let mut screen = OnboardingScreen::welcome();
@@ -759,10 +680,8 @@ mod tests {
         );
     }
 
-    /// TS `showWaiting` (the Copilot device flow's status): the dialog's
-    /// own method carries no onboarding guard, so the waiting line
-    /// renders on this surface too — below the browser URL block (the
-    /// `onProgress` chatter the fold drops never reaches the panel).
+    /// `showWaiting` carries no onboarding guard, so the waiting line renders here too — below the
+    /// browser URL block.
     #[test]
     fn the_onboarding_fold_renders_the_device_flow_waiting_line() {
         let mut screen = OnboardingScreen::welcome();
@@ -803,11 +722,8 @@ mod tests {
         );
     }
 
-    /// TS `showPrimeTeamSelector`'s onboarding arm: the `SelectTeam`
-    /// request mounts the onboarding choice question (the brand line
-    /// returns — no heading) with the personal account first and the
-    /// teams' slugs as their dim identifiers, seeded on the stored
-    /// selection; Enter answers the request's oneshot.
+    /// The `SelectTeam` request mounts the onboarding choice question (the brand line returns — no
+    /// heading) with the personal account first and the teams' slugs as identifiers.
     #[test]
     fn the_team_selection_mounts_the_onboarding_choice_question() {
         use crate::auth_panel::{AuthPanelRequest, PrimeTeamOption, PrimeTeamPick};
@@ -849,8 +765,7 @@ mod tests {
                     .collect::<String>()
             })
             .collect::<Vec<_>>();
-        // The heading reverted to the brand line (TS: the choice mounts
-        // without a heading).
+        // The heading reverted to the brand line.
         assert!(
             text.iter().any(|row| row.contains("Welcome to ")),
             "the brand line returns over the team question: {text:?}"
@@ -861,8 +776,6 @@ mod tests {
                 .any(|row| row.contains("Login with Prime Intellect")),
             "no login heading rides the question: {text:?}"
         );
-        // The question frame: the prompt, the personal account first, the
-        // teams with their slug identifiers, the stored team seeded.
         assert!(
             text.iter().any(|row| row.contains(TEAM_QUESTION_PROMPT)),
             "the TS prompt: {text:?}"
@@ -883,7 +796,6 @@ mod tests {
             text.iter().any(|row| row.contains("@acme")),
             "the team slug renders as the dim identifier: {text:?}"
         );
-        // Enter answers the seeded row (Beta) through the oneshot.
         let kb = crate::keybindings::KeybindingsManager::new();
         let mut sink = crate::clipboard::OscSink::Buffer(Vec::new());
         screen.handle_key(&crate::keys::KeyId::from("enter"), &kb, &mut sink);

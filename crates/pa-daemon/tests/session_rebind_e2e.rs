@@ -1,28 +1,18 @@
-//! End-to-end coverage of the stale active-session rebind: a worker
-//! replacement supersedes the active id an attached client holds, and the
-//! supervisor resolves the superseded id through the session-binding table
-//! instead of failing with `Unknown active session`. Covers the
-//! `session_binding` supersede event, the prompt route (admission seam
-//! included), the attach route (the pane-restart path), the exactly-once
-//! delivery of the rebound prompt, and the unchanged raw error for a
-//! selector that never matched anything.
-// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
-// the full rationale).
-// Stack-resident futures by design on the daemon's hot paths; boxing the
-// call sites for a lint tick is a perf regression with zero correctness gain.
+//! Stale active-session rebind e2e: a worker replacement supersedes the
+//! active id an attached client holds, and the supervisor resolves the
+//! superseded id through the session-binding table instead of failing with
+//! `Unknown active session`.
+// Stack-resident futures by design on the daemon's hot paths.
 #![allow(clippy::large_futures)]
-// 64-bit-only targets; the narrowing casts sit at OS boundaries
-// (pid/fd/time/size) where the values are bounded by the kernel - the
-// dead-guard expect()s would add panic paths where silent wrap was
-// deliberate.
+// Narrowing casts sit at OS boundaries (pid/fd/time/size) where the kernel
+// bounds the values.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// The fn-length threshold is a style gate, not correctness; the structure
-// campaign owns the god-fn splits as a follow-up.
+// Style gate only, not correctness.
 #![allow(clippy::too_many_lines)]
 // API-shape opinions, not defects; the surfaces are deliberate.
 #![allow(
@@ -159,7 +149,6 @@ impl Client {
         }
     }
 
-    /// Read lines until one has the given `type`; other lines are skipped.
     fn read_line_of_type(&mut self, line_type: &str) -> serde_json::Value {
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
@@ -171,8 +160,7 @@ impl Client {
         }
     }
 
-    /// Drive one prompt to its final scripted text: send, await the ack,
-    /// then read streamed session events to the turn end.
+    /// Drive one prompt to its final scripted text, through the turn end.
     fn prompt_and_final_text(&mut self, id: &str, command: &serde_json::Value) -> String {
         self.send_command(id, command);
         let mut final_text = String::new();
@@ -228,8 +216,6 @@ fn stale_active_id_rebinds_after_worker_replacement() {
         "script": script_path.to_string_lossy(),
     });
 
-    // The session's first worker: create, attach, learn the durable
-    // identity.
     let mut attached_client = Client::connect(&socket);
     attached_client.send_command(
         "c1",
@@ -265,8 +251,8 @@ fn stale_active_id_rebinds_after_worker_replacement() {
         .to_string();
 
     // Forced replacement: kill the worker (registry entry and descriptor
-    // gone - the give-up shape), then re-open the same session file. The
-    // new worker mints a new active id over the same durable session.
+    // gone), then re-open the same session file; the new worker mints a
+    // new active id over the same durable session.
     let mut driver = Client::connect(&socket);
     driver.send_command(
         "k1",
@@ -291,10 +277,8 @@ fn stale_active_id_rebinds_after_worker_replacement() {
         .to_string();
     assert_ne!(new_id, old_id, "the replacement must mint a new active id");
 
-    // The supersede notice reaches the client still attached to the old id.
     // The advertised id is the replacement worker's own active id (the
-    // create response echoes the supervisor-side id, which may differ);
-    // its routability is proven by the reattach below.
+    // create response echoes the supervisor-side id, which may differ).
     let binding = attached_client.read_line_of_type("session_binding");
     assert_eq!(binding["previousActiveSessionId"], old_id.as_str());
     let new_active = binding["activeSessionId"]
@@ -305,8 +289,7 @@ fn stale_active_id_rebinds_after_worker_replacement() {
     assert_eq!(binding["sessionFile"].as_str(), Some(session_file.as_str()));
 
     // A prompt through the SUPERSEDED id (with an admission id: the
-    // admission route's rebind seam) succeeds and streams its turn back to
-    // this client - the rebind retargeted the connection's event routing.
+    // admission route's rebind seam) streams its turn back to this client.
     let first = attached_client.prompt_and_final_text(
         "p1",
         &serde_json::json!({
@@ -318,9 +301,8 @@ fn stale_active_id_rebinds_after_worker_replacement() {
     );
     assert_eq!(first, "first scripted");
 
-    // Exactly-once: the rebound prompt consumed exactly one scripted
-    // response, so a follow-up prompt through the CURRENT id gets the next
-    // one (a double delivery would have consumed both).
+    // Exactly-once: the rebound prompt consumed one scripted response, so
+    // a follow-up through the CURRENT id gets the next one.
     let second = attached_client.prompt_and_final_text(
         "p2",
         &serde_json::json!({
@@ -332,7 +314,7 @@ fn stale_active_id_rebinds_after_worker_replacement() {
     assert_eq!(second, "second scripted");
 
     // The pane-restart path: a fresh client attaching by the superseded id
-    // lands attached to the session's current worker.
+    // lands on the session's current worker.
     let mut restarted_pane = Client::connect(&socket);
     restarted_pane.send_command(
         "a2",
@@ -345,7 +327,7 @@ fn stale_active_id_rebinds_after_worker_replacement() {
     );
     assert_eq!(reattached["data"]["activeSessionId"], new_active.as_str());
 
-    // A selector that never matched anything keeps the raw TS error - the
+    // A selector that never matched anything keeps the raw TS error: the
     // rebind only applies to superseded ids with a live successor.
     driver.send_command(
         "p3",

@@ -1,17 +1,7 @@
-//! The `/settings` inline menu — a tabbed settings surface (Claude Code's
-//! `/config` groups its settings into tab categories; ours adapts the
-//! grouping to our rows, inline in the shared menu-panel grammar): a tab
-//! strip under the bordered search field, each tab a list of label/value
-//! rows with descriptions, the arrows and Enter/Space cycling values
-//! (the operator's 2026-09-28 rebind: the tabs move on Tab and the number
-//! keys only), Enter opening the submenus (thinking level, theme,
-//! warnings), Esc closing, and type-to-search over the active tab's
-//! labels. The caller owns the row data (daemon state + settings seam
-//! reads) and executes the change actions; this module owns navigation,
-//! filtering, and rendering, and `tabs` owns the grouping and the strip.
-//! The fullscreen row is retired: the surface always renders on the
-//! alternate screen, so a fullscreen toggle advertised a mode the product
-//! no longer has (the operator's 2026-09-28 retirement ruling).
+//! The `/settings` inline menu: a tab strip under the bordered search field, each tab a list of
+//! label/value rows the arrows and Enter/Space cycle (the operator's 2026-09-28 rebind: tabs move
+//! on Tab/number keys only), Enter opens submenus, type-to-search per tab. The caller owns the row
+//! data and change actions; this module navigation and rendering.
 
 mod tabs;
 
@@ -20,8 +10,7 @@ use crate::search_input::SearchInput;
 use crate::theme::{Theme, ThemeColor};
 use crate::width::wrap_text;
 
-/// The reasoning-level descriptions the TS thinking submenu lists (TS
-/// `THINKING_DESCRIPTIONS`).
+/// The reasoning-level descriptions the TS thinking submenu lists.
 fn thinking_description(level: &str) -> &'static str {
     match level {
         "off" => "No reasoning",
@@ -35,22 +24,20 @@ fn thinking_description(level: &str) -> &'static str {
     }
 }
 
-/// A submenu a row opens with Enter (TS `SettingItem.submenu`).
+/// A submenu a row opens with Enter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SettingsSubmenu {
     /// "Thinking Level" (the session's available levels).
     Thinking { levels: Vec<String> },
-    /// "Theme" (the registered themes; selection change previews).
+    /// "Theme" (the registered themes; selection previews).
     Theme { themes: Vec<String> },
-    /// "Warnings" (the single warning toggle as its own settings list).
+    /// "Warnings" (the single warning toggle as its own list).
     Warnings,
-    /// "Default Service Tier" (TS `SERVICE_TIER_OPTIONS`: default/flex/
-    /// priority/auto with their descriptions).
+    /// "Default Service Tier" (TS `SERVICE_TIER_OPTIONS`).
     ServiceTier,
 }
 
-/// The service-tier descriptions the TS settings submenu lists (TS
-/// `SERVICE_TIER_OPTIONS`).
+/// The service-tier descriptions the TS settings submenu lists.
 #[must_use]
 pub fn service_tier_description(tier: &str) -> &'static str {
     match tier {
@@ -62,10 +49,10 @@ pub fn service_tier_description(tier: &str) -> &'static str {
     }
 }
 
-/// The settings-row and autocomplete choice order (TS `SERVICE_TIER_CHOICES`).
+/// The settings-row and autocomplete choice order.
 pub const SERVICE_TIER_CHOICES: [&str; 4] = ["default", "flex", "priority", "auto"];
 
-/// One settings row (TS `SettingItem`).
+/// One settings row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettingsMenuRow {
     pub id: &'static str,
@@ -78,13 +65,12 @@ pub struct SettingsMenuRow {
     pub submenu: Option<SettingsSubmenu>,
 }
 
-/// One key press while the menu is open. `Change` mirrors the TS
-/// `onChange(id, newValue)` callback; the theme submenu's live preview and
-/// its Esc restore come through as their own actions.
+/// One key press while the menu is open. The theme submenu's live preview
+/// and its Esc restore come through as their own actions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SettingsMenuAction {
     None,
-    /// Esc from the top level (TS `onCancel`).
+    /// Esc from the top level.
     Cancel,
     /// Enter/Space changed a row (or a submenu selected a value).
     Change {
@@ -95,8 +81,7 @@ pub enum SettingsMenuAction {
     PreviewTheme {
         name: String,
     },
-    /// Esc inside a submenu closed it (TS `onCancel` → `done()`); the menu
-    /// itself stays open (a top-level Esc is the menu [`Cancel`]).
+    /// Esc inside a submenu closed it; the menu itself stays open.
     SubmenuClosed,
     /// The theme submenu closed with Esc: restore the row's theme.
     RestoreTheme {
@@ -104,7 +89,7 @@ pub enum SettingsMenuAction {
     },
 }
 
-/// The open submenu's own selection state (TS `SelectSubmenu`).
+/// The open submenu's own selection state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SubmenuState {
     row: usize,
@@ -112,26 +97,19 @@ struct SubmenuState {
     selected: usize,
 }
 
-/// The settings menu (TS `SettingsList` with `enableSearch`, grouped into
-/// tabs): the strip rides under the search field, each tab owns its own
-/// search input, filtered window, and selection.
+/// The settings menu: the strip rides under the search field, each tab
+/// owns its own search input, filtered window, and selection.
 #[derive(Debug)]
 pub struct SettingsMenu {
     rows: Vec<SettingsMenuRow>,
     tabs: Vec<SettingsTab>,
-    /// The active tab (its rows render under the strip).
     tab: usize,
     sub: Option<SubmenuState>,
-    /// TS `SettingsList` maxVisible (the component is constructed with 10).
     max_visible: usize,
 }
 
-/// One tab: the settings rows it groups (as indices into
-/// `SettingsMenu::rows`) with its own search input, filtered window, and
-/// selection — switching tabs moves the focus only (the TS
-/// `ConfigurationMenuComponent` keeps each tab's body, search input
-/// included, alive the same way), so coming back restores where the user
-/// was.
+/// One tab: the row indices it groups with its own search input, filtered window, and selection —
+/// switching moves the focus only, so coming back restores where the user was.
 #[derive(Debug)]
 struct SettingsTab {
     name: &'static str,
@@ -141,8 +119,8 @@ struct SettingsTab {
     selected: usize,
 }
 
-/// The TS settings-menu rows in the TS order, with the current values the
-/// caller assembled (daemon state plus the settings seam).
+/// The TS settings-menu rows in the TS order, with the caller-assembled
+/// current values.
 pub fn settings_menu_rows(current: &SettingsCurrentValues) -> Vec<SettingsMenuRow> {
     let bool_value = || vec!["true".to_string(), "false".to_string()];
     let mut idle_values: Vec<String> = ["off"]
@@ -340,8 +318,8 @@ pub fn settings_menu_rows(current: &SettingsCurrentValues) -> Vec<SettingsMenuRo
     ]
 }
 
-/// The row values the menu opens with: the daemon state (autocompact,
-/// steering/follow-up, thinking) plus the settings seam reads.
+/// The row values the menu opens with: the daemon state plus the settings
+/// seam reads.
 #[derive(Debug, Clone, Default)]
 pub struct SettingsCurrentValues {
     pub autocompact: bool,
@@ -392,18 +370,16 @@ impl SettingsMenu {
         }
     }
 
-    /// The active tab, mutably.
     fn active_mut(&mut self) -> &mut SettingsTab {
         &mut self.tabs[self.tab]
     }
 
-    /// One key id (TS `SettingsList.handleInput`, submenu first).
+    /// One key id: the submenu, when open, takes it first.
     pub fn handle_key(&mut self, key: &str, kb: &KeybindingsManager) -> SettingsMenuAction {
         if let Some(mut sub) = self.sub.take() {
             let action = self.handle_submenu_key(&mut sub, key, kb);
-            // A value select, a theme restore, or the submenu's Esc (TS
-            // `done()` and `onCancel` both close it) closes the submenu; a
-            // plain navigation or live preview keeps it open.
+            // A value select, a theme restore, or the submenu's Esc closes the
+            // submenu; a plain navigation or live preview keeps it open.
             let closed = matches!(
                 action,
                 SettingsMenuAction::Change { .. }
@@ -415,20 +391,16 @@ impl SettingsMenu {
             }
             return action;
         }
-        // An empty row set carries no tabs (the menu renders its empty
-        // state): only the close keys act.
+        // An empty row set carries no tabs: only the close keys act.
         if self.tabs.is_empty() {
             if kb.matches(key, "tui.select.cancel") || key == "ctrl+c" {
                 return SettingsMenuAction::Cancel;
             }
             return SettingsMenuAction::None;
         }
-        // Tab switching (the operator's 2026-09-28 rebind: the tabs move
-        // with Tab and the number keys ONLY, freeing the arrows for the
-        // value cycling below): Tab and Shift+Tab always switch; digits
-        // jump straight to their tab while the search field is empty (an
-        // active query takes digits as search text, so type-to-search is
-        // never blocked).
+        // Tab switching (the operator's 2026-09-28 rebind: the tabs move with Tab and the number
+        // keys ONLY, freeing the arrows for value cycling): digits jump straight to their tab while
+        // the search field is empty (an active query takes digits as search text).
         match key {
             "shift+tab" => {
                 self.switch_tab((self.tab + self.tabs.len() - 1) % self.tabs.len());
@@ -440,12 +412,8 @@ impl SettingsMenu {
             }
             _ => {}
         }
-        // The value cycling (the operator's 2026-09-28 directive): the
-        // arrows cycle the focused setting's value in place — left the
-        // previous option, right the next (toggles flip true/false,
-        // multi-option rows walk their list; a submenu row has no inline
-        // values, so the arrows no-op there). Enter keeps its own
-        // cycle/open behavior below.
+        // The arrows cycle the focused setting's value in place (a submenu row
+        // has no inline values, so they no-op there).
         if key == "left" {
             return self.cycle_selected(-1);
         }
@@ -540,8 +508,7 @@ impl SettingsMenu {
         };
         let row = &mut self.rows[row_index];
         if let Some(kind) = row.submenu.clone() {
-            // TS `SelectSubmenu` preselects the current value (the tier
-            // submenu opens on the row's current tier).
+            // The tier submenu preselects the row's current tier.
             let selected = match &kind {
                 SettingsSubmenu::ServiceTier => SERVICE_TIER_CHOICES
                     .iter()
@@ -559,11 +526,8 @@ impl SettingsMenu {
         self.cycle_selected(1)
     }
 
-    /// Cycle the selected row's value by `delta` steps (right/Enter +1,
-    /// left -1), wrapping at the list's ends, and report the change: the
-    /// caller's apply arm persists it through the same write path Enter's
-    /// cycle always used. A submenu row (no inline values) and a missing
-    /// selection no-op.
+    /// Cycle the selected row's value by `delta` steps, wrapping at the list's ends, and report the
+    /// change. A submenu row (no inline values) and a missing selection no-op.
     fn cycle_selected(&mut self, delta: isize) -> SettingsMenuAction {
         let Some(tab) = self.tabs.get(self.tab) else {
             return SettingsMenuAction::None;
@@ -587,8 +551,7 @@ impl SettingsMenu {
         SettingsMenuAction::Change { id: row.id, value }
     }
 
-    /// One key inside an open submenu (TS `SelectSubmenu.handleInput` —
-    /// the `SelectList` gets every key; Enter selects, Esc goes back).
+    /// One key inside an open submenu: Enter selects, Esc goes back.
     fn handle_submenu_key(
         &mut self,
         sub: &mut SubmenuState,
@@ -656,9 +619,7 @@ impl SettingsMenu {
                         value: tier.to_string(),
                     }),
             };
-            // TS `done(value)` closes the submenu and updates the row's
-            // displayed value; the caller keeps its selected index (the
-            // row it was opened from).
+            // A value select closes the submenu and updates the row's displayed value.
             if let Some(action) = value {
                 if let SettingsMenuAction::Change { value, .. } = &action {
                     self.rows[sub.row].current.clone_from(value);
@@ -668,15 +629,13 @@ impl SettingsMenu {
             return SettingsMenuAction::None;
         }
         if kb.matches(key, "tui.select.cancel") || key == "ctrl+c" {
-            // Theme: Esc restores the row's theme (TS `onThemePreview` with
-            // the previous value); every submenu just goes back.
+            // Theme: Esc restores the row's theme; every submenu just goes back.
             return self.submenu_cancel(sub);
         }
         SettingsMenuAction::None
     }
 
-    /// The selection-change side effect (TS `onSelectionChange` — only the
-    /// theme submenu previews live).
+    /// The selection-change side effect: only the theme submenu previews live.
     fn submenu_selection_change(sub: &SubmenuState) -> SettingsMenuAction {
         match &sub.kind {
             SettingsSubmenu::Theme { themes } => themes
@@ -688,29 +647,25 @@ impl SettingsMenu {
         }
     }
 
-    /// The submenu's Esc behavior (TS `onCancel`): the theme submenu
-    /// restores the theme the row opened with.
+    /// The submenu's Esc behavior: the theme submenu restores the theme the
+    /// row opened with.
     fn submenu_cancel(&self, sub: &SubmenuState) -> SettingsMenuAction {
         match &sub.kind {
             SettingsSubmenu::Theme { .. } => SettingsMenuAction::RestoreTheme {
                 name: self.rows[sub.row].current.clone(),
             },
-            // Every other submenu just goes back (TS `onCancel` →
-            // `done()`); the menu itself stays open.
+            // Every other submenu just goes back; the menu itself stays open.
             _ => SettingsMenuAction::SubmenuClosed,
         }
     }
 
-    /// Switch to a tab: a pure focus move — every tab keeps its own
-    /// search input, filtered window, and selection, so nothing resets
-    /// on the way back.
+    /// Switch to a tab: a pure focus move, nothing resets.
     fn switch_tab(&mut self, tab: usize) {
         self.tab = tab;
     }
 
-    /// Re-filter the active tab's rows (TS `applyFilter`, fuzzy over the
-    /// label): the query scopes to the tab it was typed in, and a fresh
-    /// query lands the tab's selection on its first match.
+    /// Re-filter the active tab's rows (fuzzy over the label): a fresh query
+    /// lands the tab's selection on its first match.
     fn apply_filter(&mut self) {
         let query = self.tabs[self.tab].search.value().to_string();
         let tab = &mut self.tabs[self.tab];
@@ -736,10 +691,8 @@ impl SettingsMenu {
         tab.selected = 0;
     }
 
-    /// Render (TS `render`): the shared menu panel over the settings rows
-    /// — the bordered search field, the windowed label/value rows, the
-    /// scroll indicator, the selected row's description, and the hint
-    /// line; a submenu replaces the whole list.
+    /// Render the shared menu panel over the settings rows; a submenu replaces
+    /// the whole list.
     #[must_use]
     pub fn render(&self, theme: &Theme, width: usize, kb: &KeybindingsManager) -> Vec<crate::Line> {
         if let Some(sub) = &self.sub {
@@ -756,8 +709,6 @@ impl SettingsMenu {
             return lines;
         }
         let tab = &self.tabs[self.tab];
-        // The search field: the shared bordered field with its
-        // placeholder, over the active tab's own query.
         lines.extend(crate::menu_panel::search_field_lines(
             theme,
             width,
@@ -766,10 +717,8 @@ impl SettingsMenu {
             true,
             "Search settings",
         ));
-        // The tab strip sits under the search field with a blank row on
-        // either side (the operator's 2026-09-28 spacing pass: the header
-        // area breathes away from the strip, and the strip away from the
-        // settings list it names).
+        // The tab strip sits under the search field with a blank row on either
+        // side (the operator's 2026-09-28 spacing pass).
         lines.push(Vec::new());
         let names: Vec<&'static str> = self.tabs.iter().map(|tab| tab.name).collect();
         lines.push(tabs::strip_row(theme, width, &names, self.tab));
@@ -823,10 +772,8 @@ impl SettingsMenu {
                         "",
                     ));
                 }
-                // The separator rule rides below the description, above
-                // the keyboard-shortcuts row (the operator's 2026-09-28
-                // directive): the same full-width border grammar the
-                // search field's rules carry, closing the detail block.
+                // The separator rule closes the detail block (the operator's 2026-09-28
+                // directive).
                 lines.push(crate::menu_panel::rule_row(theme, width));
             }
         }
@@ -834,9 +781,8 @@ impl SettingsMenu {
         lines
     }
 
-    /// The submenu render (TS `SelectSubmenu`): accent title, muted
-    /// description, the shared menu rows over the option list, and the
-    /// back hint.
+    /// The submenu render: accent title, muted description, the shared menu
+    /// rows, and the back hint.
     fn render_submenu(
         sub: &SubmenuState,
         theme: &Theme,
@@ -873,14 +819,11 @@ impl SettingsMenu {
                 ),
             };
         let mut lines: Vec<crate::Line> = Vec::new();
-        // The top bar the menu's list view opens with — the full-width
-        // rule under the prompt-context row — stays over the submenu too
-        // (the operator's 2026-09-28 regression pin): the settings
-        // surface keeps its bar separating it from the chat view.
+        // The list view's full-width top rule stays over the submenu too (the
+        // operator's 2026-09-28 regression pin).
         lines.push(crate::menu_panel::rule_row(theme, width));
-        // The setting's name and description carry the list rows' own
-        // padding-x (the operator's 2026-09-28 regression pin): the
-        // detail block never loses its horizontal padding.
+        // The setting's name and description carry the list rows' padding-x (the
+        // operator's 2026-09-28 regression pin).
         lines.push(crate::width::truncate_line(
             &vec![
                 crate::Span::raw("  ".to_string()),
@@ -927,11 +870,8 @@ impl SettingsMenu {
     }
 }
 
-/// The settings page's own key-hint row (the operator's 2026-09-28
-/// padding pass): the shared `menu_panel::hint_row` rides one space, but
-/// this surface's keyboard-shortcuts row carries the description's
-/// padding-x — the two-space inner column the detail block and the menu
-/// rows align on.
+/// The settings page's own key-hint row: this surface's keyboard-shortcuts row carries the
+/// two-space inner column the detail block aligns on (the operator's 2026-09-28 padding pass).
 fn hint_row(theme: &Theme, width: usize, hint: &str) -> crate::Line {
     let line = vec![
         crate::Span::raw("  ".to_string()),
@@ -940,11 +880,8 @@ fn hint_row(theme: &Theme, width: usize, hint: &str) -> crate::Line {
     crate::width::truncate_line(&line, width, "")
 }
 
-/// The menu's key hint: the shared hint-row grammar, this surface's
-/// vocabulary (the search field types, Tab and the number keys switch
-/// tabs, the arrows cycle the focused row's value with Enter/Space; Space
-/// is a literal key the menu always handles, an unbound Enter drops its
-/// label, an unbound Esc drops the close segment).
+/// The menu's key hint: Space is a literal key the menu always handles; an
+/// unbound Enter drops its label, an unbound Esc drops the close segment.
 fn hint(kb: &KeybindingsManager, tabs: usize) -> String {
     let mut segments = vec!["Type to search".to_string()];
     if tabs > 0 {
@@ -961,9 +898,8 @@ fn hint(kb: &KeybindingsManager, tabs: usize) -> String {
     segments.join(" · ")
 }
 
-/// The submenu's key hint (TS `SelectSubmenu`'s back row): the selected
-/// value applies, the cancel binding goes back (an unbound action is
-/// omitted, never advertised with a default key).
+/// The submenu's key hint: an unbound action is omitted, never advertised
+/// with a default key.
 fn submenu_hint(kb: &KeybindingsManager) -> String {
     [
         crate::menu_panel::key_hint(kb, &["tui.select.confirm"], "select"),
@@ -975,7 +911,5 @@ fn submenu_hint(kb: &KeybindingsManager) -> String {
     .join(" · ")
 }
 
-// The inline unit battery lives in the child module (settings_menu::menu_tests);
-// its use-super glob resolves through this facade's bindings.
 #[cfg(test)]
 mod menu_tests;

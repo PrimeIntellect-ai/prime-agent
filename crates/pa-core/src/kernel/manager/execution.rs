@@ -155,14 +155,8 @@ impl Inner {
                 if !execution.opts.internal {
                     g.user_executions += 1;
                 }
-                // The freshness memo describes the namespace as of its
-                // commit. A settled request that runs user-namespace code
-                // (an execute — the bootstrap class included, internal or
-                // not) or replaces the namespace wholesale (a restore) ends
-                // that description: the next capture must re-dump. The
-                // state reads (the listing) and the captures themselves do
-                // not clear it — the captures re-arm the memo at their own
-                // commits.
+                // The freshness memo describes the namespace as of its commit. A settled request
+                // that runs user-namespace code or replaces the namespace ends that description.
                 if execution.namespace_code || execution.restores_namespace {
                     g.capture_freshness = None;
                     g.freshness_epoch += 1;

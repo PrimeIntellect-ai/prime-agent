@@ -1,25 +1,7 @@
-//! Worker session-end kernel disposal e2e (TS `closeSession` parity):
-//! TS disposes a session's kernel at every session end — `closeSession` ->
-//! `AgentSessionRuntime.dispose` -> `AgentSession.disposeAsync` ->
-//! `IpythonKernelProvisioner.dispose` (final namespace snapshot, then the
-//! `python -m rlm.repl` process exits) — and the daemon worker is the host
-//! that keeps its engine object alive past the session, so the Rust port
-//! must call `AgentSessionEngine::dispose_kernel` explicitly on each end
-//! path. Every end path here ends the *worker process* too, and a process
-//! exit runs no destructors, so each assertion catches exactly the
-//! missing-dispose leak: a kernel that survives would be orphaned forever.
-//!
-//! 1. `kill` (user delete): the kernel must die with the session.
-//! 2. `shutdown` (daemon stop): the workers dispose their kernels before
-//!    the process exit.
-//! 3. Supervisor SIGKILL (the `exit_orphaned` supervisor-lost exit): the
-//!    orphaned worker disposes its kernel before its own exit.
-//!
-//! The kernel Python is ambient product state (the auto-bootstrapped kernel
-//! venv); like the other live-kernel verifiers, these tests skip (with a
-//! note) on machines without a live install. The process-table scans
-//! diff against a baseline snapshot, so ambient kernels (other agent
-//! sessions on the same box) never interfere.
+//! Worker session-end kernel disposal e2e (TS `closeSession` parity): every session-end path
+//! (`kill`, daemon `shutdown`, supervisor SIGKILL) must call `AgentSessionEngine::dispose_kernel`
+//! explicitly — a process exit runs no destructors, so a surviving kernel is orphaned forever.
+//! The process-table scans diff against a baseline (ambient kernels never interfere).
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -31,8 +13,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-/// The three tests scan the whole process table (the kernel is a worker
-/// child, not a test-process child), so this std lock serializes them.
+/// The three tests scan the whole process table, so this std lock serializes them.
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 
 fn test_lock() -> MutexGuard<'static, ()> {
@@ -67,8 +48,7 @@ fn kernel_python() -> Option<PathBuf> {
     None
 }
 
-/// Every live `python -m rlm.repl` pid on the box (ambient kernels from
-/// other sessions are part of the baseline the diffs below remove).
+/// Every live `python -m rlm.repl` pid on the box (ambient kernels are part of the baseline).
 fn kernel_pids() -> Vec<u32> {
     let mut found = Vec::new();
     let entries = std::fs::read_dir("/proc").unwrap_or_else(|e| panic!("read /proc: {e}"));
@@ -79,9 +59,8 @@ fn kernel_pids() -> Vec<u32> {
         let Ok(cmdline) = std::fs::read_to_string(format!("/proc/{pid}/cmdline")) else {
             continue;
         };
-        // The kernel is spawned as `python -m rlm.repl` (NUL-separated
-        // argv): the adjacent `-m rlm.repl` pair avoids matching an
-        // unrelated process that merely mentions the module.
+        // The kernel is spawned as `python -m rlm.repl` (NUL-separated argv): the adjacent
+        // pair avoids matching an unrelated process that merely mentions the module.
         let args: Vec<&str> = cmdline.split('\0').collect();
         if args.windows(2).any(|window| window == ["-m", "rlm.repl"]) {
             found.push(pid);
@@ -110,9 +89,8 @@ fn await_new_kernel(baseline: &[u32], budget: Duration) -> Vec<u32> {
     }
 }
 
-/// Poll until no kernel pid exists outside `baseline` — the session-end
-/// dispose is the teardown being verified, so a kernel that survives the
-/// end path past the budget is the leak this test exists to catch.
+/// Poll until no kernel pid exists outside `baseline` — the session-end dispose under test;
+/// a survivor past the budget is the leak this test exists to catch.
 fn await_kernels_gone(baseline: &[u32], budget: Duration) {
     let deadline = Instant::now() + budget;
     loop {
@@ -157,15 +135,13 @@ fn spawn_supervisor(
         .arg("--agent-dir")
         .arg(agent_dir)
         .env("PRIME_AGENT_KERNEL_PYTHON", kernel_python)
-        // Hermetic agent dir: the ambient environment may export a real
-        // agent dir; point every fallback at the test sandbox instead.
+        // Hermetic agent dir: point every fallback at the test sandbox.
         .env("PRIME_AGENT_CODING_AGENT_DIR", agent_dir)
         .env_remove("PRIME_API_KEY")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        // The supervisor-lost exit window its workers inherit (TS
-        // `workerSupervisorLostExitMs`; the env flows to the workers the
-        // supervisor spawns).
+        // The supervisor-lost exit window its workers inherit (TS `workerSupervisorLostExitMs`;
+        // the env flows to the workers the supervisor spawns).
         .env(
             pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
             lost_window_ms,
@@ -254,9 +230,8 @@ impl Client {
     }
 }
 
-/// A faux script whose single turn runs one ipython cell that writes a
-/// receipt: the turn proves the session built and its kernel executed
-/// real code (the create-time prewarm alone is not enough evidence).
+/// A faux script whose single turn runs one ipython cell that writes a receipt:
+/// proves the session built and its kernel executed real code.
 fn write_faux_script(dir: &Path) -> PathBuf {
     let receipts_dir = dir.join("receipts");
     std::fs::create_dir_all(&receipts_dir).expect("receipts dir");
@@ -285,8 +260,7 @@ fn write_faux_script(dir: &Path) -> PathBuf {
     script
 }
 
-/// Create a session on the supervisor and run its one scripted turn
-/// (prompt + idle wait). Returns the active session id.
+/// Create a session on the supervisor and run its one scripted turn (prompt + idle wait).
 fn create_session_with_kernel(client: &mut Client, dir: &Path, script: &Path, id: &str) -> String {
     let sessions_dir = dir.join("sessions");
     std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
@@ -343,10 +317,6 @@ fn await_receipt(dir: &Path) {
     }
 }
 
-/// `kill` disposes the session's kernel before the response: a worker
-/// holding its kernel past the session end (the #235 leak class) leaves
-/// the `python -m rlm.repl` process orphaned when the worker exits, and
-/// this test catches it as a kernel pid that never clears the diff.
 #[test]
 fn kill_disposes_the_session_kernel() {
     let Some(kernel_python) = kernel_python() else {
@@ -369,8 +339,7 @@ fn kill_disposes_the_session_kernel() {
     let kernels = await_new_kernel(&baseline, Duration::from_mins(2));
     await_receipt(dir.path());
 
-    // User delete: the routed `kill` closes the session (the supervisor
-    // stops the worker right after, so the whole path is exercised).
+    // User delete: the routed `kill` closes the session (the worker stops right after).
     client.send_command(
         "k1",
         &json!({ "type": "kill", "activeSessionId": session_id }),
@@ -384,9 +353,8 @@ fn kill_disposes_the_session_kernel() {
     await_kernels_gone(&baseline, Duration::from_secs(90));
 }
 
-/// Daemon `shutdown` routes a `shutdown` to every worker: each worker
-/// disposes its kernel before its own process exit (no destructors run on
-/// `std::process::exit`, so the dispose must happen in the handler).
+/// Daemon `shutdown` routes a `shutdown` to every worker: each disposes its kernel
+/// before its own process exit (no destructors run on `std::process::exit`).
 #[test]
 fn shutdown_disposes_session_kernels_before_the_worker_exits() {
     let Some(kernel_python) = kernel_python() else {
@@ -407,8 +375,7 @@ fn shutdown_disposes_session_kernels_before_the_worker_exits() {
     await_new_kernel(&baseline, Duration::from_mins(2));
     await_receipt(dir.path());
 
-    // Daemon stop: the supervisor routes `shutdown` to the workers and
-    // then exits itself.
+    // Daemon stop: the supervisor routes `shutdown` to the workers and exits.
     client.send_command("sd", &json!({ "type": "shutdown" }));
     let shutdown = client.read_response("sd");
     assert_eq!(shutdown["success"], true, "shutdown failed: {shutdown}");
@@ -416,10 +383,6 @@ fn shutdown_disposes_session_kernels_before_the_worker_exits() {
     await_kernels_gone(&baseline, Duration::from_secs(90));
 }
 
-/// A `SIGKILLed` supervisor leaves orphaned workers: the supervisor-lost
-/// monitor exits them after the lost window, and the exit path (TS
-/// `shutdown(0)`'s session close) disposes the kernel first — the exit
-/// itself would orphan it forever.
 #[test]
 fn orphan_exit_disposes_the_kernel_before_the_worker_exits() {
     let Some(kernel_python) = kernel_python() else {
@@ -432,8 +395,7 @@ fn orphan_exit_disposes_the_kernel_before_the_worker_exits() {
     let script = write_faux_script(dir.path());
     let baseline = kernel_pids();
 
-    // A short supervisor-lost window: the orphaned worker exits quickly
-    // once its supervisor is gone (the env flows to the spawned workers).
+    // A short supervisor-lost window: the orphan exits quickly once the supervisor is gone.
     let mut daemon = spawn_supervisor(&socket, &agent_dir, &kernel_python, "5000");
     wait_socket_ready(&socket);
     let (mut client, hello) = Client::connect(&socket);
@@ -447,8 +409,7 @@ fn orphan_exit_disposes_the_kernel_before_the_worker_exits() {
     daemon.child.kill().expect("SIGKILL supervisor");
     let _ = daemon.child.wait();
 
-    // The orphaned worker exits on the lost window and disposes its
-    // kernel on the way out. Budget: the first availability check lands
-    // 1.5s after boot and the window is 5s, so 90s covers slow boxes.
+    // The orphaned worker exits on the lost window and disposes its kernel; the first check
+    // lands 1.5s after boot and the window is 5s, so 90s covers slow boxes.
     await_kernels_gone(&baseline, Duration::from_secs(90));
 }

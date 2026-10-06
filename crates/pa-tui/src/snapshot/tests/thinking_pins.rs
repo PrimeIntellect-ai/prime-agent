@@ -1,18 +1,13 @@
-//! The thinking-channel render pins: the two stored row shapes a
-//! GLM-5.3-style session produces — the healthy row (a `thinking` block
+//! The thinking-channel render pins: the healthy row (a `thinking` block
 //! plus a `text` block) and the content-only row (the reasoning merged
-//! into the text block, no thinking block at all) — decode and render
-//! faithfully. The thinking block is the only collapsible, detail-gated
-//! surface; the content-only row's text renders as plain assistant output
-//! at every detail level (nothing to widen: no predicate can reclassify
-//! plain text).
+//! into the text block) decode and render faithfully; the thinking block
+//! is the only detail-gated surface.
 
 use super::*;
 
 #[test]
 fn the_two_stored_row_shapes_render_their_channels_faithfully() {
-    // The healthy row (trimmed): the reasoning rides a `thinking` block
-    // with the reasoning_content signature.
+    // The healthy row: the reasoning rides a `thinking` block.
     let healthy_row = json!({
         "role": "assistant",
         "model": "internal/glm-5.3-fast",
@@ -22,8 +17,7 @@ fn the_two_stored_row_shapes_render_their_channels_faithfully() {
             { "type": "text", "text": "**The nightly cron exists for three reasons.**" }
         ]
     });
-    // The content-only row (trimmed): the reasoning prose merged into the
-    // text block — no thinking block at all.
+    // The content-only row: the reasoning merged into the text block.
     let leak_row = json!({
         "role": "assistant",
         "model": "internal/glm-5.3-fast",
@@ -32,8 +26,6 @@ fn the_two_stored_row_shapes_render_their_channels_faithfully() {
             { "type": "text", "text": "The domain-flip PR is green. The plan: let me execute." }
         ]
     });
-    // The decode (the store-row classifier): the healthy row keeps both
-    // blocks, the content-only row only the text.
     let (healthy_blocks, healthy_calls) = assistant_message_parts(&healthy_row);
     assert_eq!(
         healthy_blocks,
@@ -60,9 +52,6 @@ fn the_two_stored_row_shapes_render_their_channels_faithfully() {
         view.render_frame(80, 30).iter().map(line_text).collect()
     };
 
-    // The healthy row renders the thinking block collapsible and
-    // detail-gated: hidden at the collapsed default level, visible once
-    // the detail cycle reveals thinking.
     let mut view = test_view();
     for entry in assistant_value_to_entries(&healthy_row) {
         view.push_entry(entry);
@@ -96,9 +85,6 @@ fn the_two_stored_row_shapes_render_their_channels_faithfully() {
         "the text block stays rendered at the revealed level: {expanded:?}"
     );
 
-    // The content-only row renders as plain assistant text at EVERY
-    // detail level: there is no thinking block to gate, so the frames
-    // are identical.
     let mut leak_view = test_view();
     for entry in assistant_value_to_entries(&leak_row) {
         leak_view.push_entry(entry);
@@ -113,9 +99,8 @@ fn the_two_stored_row_shapes_render_their_channels_faithfully() {
     );
     leak_view.detail = crate::chat::Detail::All;
     let leak_expanded = frame_text(&mut leak_view);
-    // The prompt-context row carries the detail label (the only frame
-    // element that changes with the level): the transcript itself is
-    // byte-identical — the text-only row has no gated content at all.
+    // The prompt-context strip carries the detail label (the only frame
+    // element that changes with the level), so the strip filters it.
     let strip_label = |rows: &[String]| -> Vec<String> {
         rows.iter()
             .filter(|row| !row.contains(" mode ("))

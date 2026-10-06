@@ -1,6 +1,4 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28) - this target's own
-// crate root: the same bounded-boundary disposition as src/lib.rs
-// (large_futures/too_many_lines/the cast family; details there).
+// Pedantic-gate dispositions as src/lib.rs (large_futures/too_many_lines/casts).
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -10,21 +8,9 @@
     clippy::cast_precision_loss
 )]
 
-//! Verifier: the turn-boundary host-request contract (`model.info`,
-//! `compact.*`, `refine.*`) over a REAL kernel, driven in-process through
-//! `create_session`.
-//!
-//! The scripted faux provider drives one turn whose `ipython` cell calls the
-//! kernel's `rlm.host_request` bridge directly — the exact surface the
-//! installed `refine`/`compact` skill modules use (`rlm.host_request("<type>",
-//! {...})`). The cell records the raw handler responses on disk; the test
-//! asserts them against the TS contract, then checks the scheduled refinement
-//! reached the turn-boundary seam the runtime consumes after the turn settles.
-//!
-//! The daemon-level dogfood (a daemon session's boundary consuming a
-//! kernel-scheduled refinement end to end) is the documented follow-up;
-//! this test proves the wire contract with a
-//! real kernel without the daemon turn choreography.
+//! Verifier: the turn-boundary host-request contract (`model.info`, `compact.*`, `refine.*`) over a
+//! REAL kernel: one turn's `ipython` cell calls the `rlm.host_request` bridge directly; the raw
+//! handler responses are asserted, then the scheduled refinement reaches the boundary seam.
 #![cfg(unix)]
 
 use std::path::{Path, PathBuf};
@@ -128,9 +114,6 @@ fn registry_model() -> pa_types::ai::Model {
     .expect("faux registry model")
 }
 
-/// The turn-boundary host requests round-trip through a real kernel: the
-/// registered handlers answer the `rlm.host_request` bridge with the TS
-/// contract shapes, and the scheduled refinement lands on the boundary seam.
 #[tokio::test]
 async fn turn_boundary_host_requests_round_trip_through_a_real_kernel() {
     let Some(kernel_python) = kernel_python() else {
@@ -162,10 +145,9 @@ async fn turn_boundary_host_requests_round_trip_through_a_real_kernel() {
 
     let model = scripted_model();
     let provider = std::sync::Arc::new(ScriptedProvider::new(model.clone()));
-    // One turn: the model calls the kernel cell. Then the turn settles.
-    // The scripted provider reports zero usage, but `compact.status` anchors
-    // its estimate on the last assistant usage (TS `getContextUsage`), so the
-    // tool-call turn carries a real one: 120 tokens.
+    // One turn: the model calls the kernel cell. Then the turn settles. The scripted provider
+    // reports zero usage, but `compact.status` anchors its estimate on the last assistant usage (TS
+    // `getContextUsage`), so the tool-call turn carries a real one: 120 tokens.
     let mut steps = tool_call_turn_steps(
         &model,
         Some("running the harness cell"),
@@ -238,44 +220,37 @@ async fn turn_boundary_host_requests_round_trip_through_a_real_kernel() {
         "the prompt must reach the model loop"
     );
 
-    // The kernel cell recorded the raw handler responses.
     let raw = std::fs::read_to_string(&receipt_path)
         .unwrap_or_else(|_| panic!("kernel cell wrote no receipt at {}", receipt_path.display()));
     let payload: Value = serde_json::from_str(&raw).expect("receipt json");
 
-    // model.info: the resolved model with its input modalities.
     assert_eq!(
         payload["model_info"],
         json!({ "id": "faux-1", "provider": "faux", "input": ["text"] }),
         "model_info: {}",
         payload["model_info"]
     );
-    // compact.status: the usage estimate over the session, nothing scheduled.
     let compact_status = &payload["compact_status"];
     assert_eq!(compact_status["scheduled"], false, "{payload}");
     assert_eq!(compact_status["context_window"], 200_000, "{payload}");
     // The usage anchor (the faux turn's 120 tokens) with nothing trailing it.
     assert_eq!(compact_status["tokens"], 120, "{payload}");
     assert_eq!(compact_status["percent"], 0.06, "{payload}");
-    // refine.status before the run: nothing pending, never in flight.
     assert_eq!(
         payload["refine_status_before"],
         json!({ "pending": false, "in_flight": false }),
         "{payload}"
     );
-    // refine.run mid-turn: scheduled with the TS note.
     assert_eq!(payload["refine_run"]["scheduled"], true, "{payload}");
     assert_eq!(
         payload["refine_run"]["note"],
         "Refinement runs when the current turn ends; applied edits are appended to your context as a refinement notice and you resume automatically. Continue working normally."
     );
-    // refine.status after the run: pending until the boundary consumes it.
     assert_eq!(
         payload["refine_status_after"],
         json!({ "pending": true, "in_flight": false }),
         "{payload}"
     );
-    // compact.run on the fresh session: the TS prepare skip reason.
     assert_eq!(payload["compact_run"]["scheduled"], false, "{payload}");
     assert_eq!(
         payload["compact_run"]["reason"],

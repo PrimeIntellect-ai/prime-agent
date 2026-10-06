@@ -2,11 +2,8 @@
 use super::*;
 
 /// An update boot relaunches the dead workers its roster keeps, plus any
-/// with durable busy evidence; a dead descriptor the update did NOT keep
-/// stays down even though update boots historically relaunched every
-/// descriptor (the parked session may have a newer worker from a client
-/// reopen — two workers on one session file — so an unkept idle
-/// descriptor must never revive).
+/// with durable busy evidence; an unkept idle descriptor must never revive
+/// (the parked session may have a newer worker from a client reopen).
 #[test]
 fn update_boot_revives_only_roster_kept_workers() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -19,9 +16,8 @@ fn update_boot_revives_only_roster_kept_workers() {
     wait_socket_ready(&socket);
     let (mut client, _hello) = Client::connect(&socket);
 
-    // Two scripted sessions, each with one completed turn: both settle
-    // to `busy: false` (`turn_end`), so neither carries busy evidence —
-    // only the roster's kept set can distinguish them.
+    // Both sessions settle to `busy: false` (`turn_end`), so neither
+    // carries busy evidence — only the roster's kept set can distinguish them.
     let mut sessions = Vec::new();
     for index in 0..2 {
         let script_path = dir.path().join(format!("update-{index}.json"));
@@ -64,9 +60,8 @@ fn update_boot_revives_only_roster_kept_workers() {
         sessions.push(session_id);
     }
 
-    // kill -9 the supervisor, then both workers.
-    // The workers are killed by the supervisor's live children, not the
-    // descriptor pids — a mid-test replacement can leave the descriptor
+    // Kill the workers by the supervisor's live children, not the
+    // descriptor pids: a mid-test replacement can leave the descriptor
     // stale, and a stale-pid kill would leave the real worker running.
     let supervisor_pid = daemon.child.id();
     let worker_pids = child_pids_of(supervisor_pid);
@@ -92,9 +87,8 @@ fn update_boot_revives_only_roster_kept_workers() {
         }
     }
 
-    // The update roster keeps only the first session's worker; no session
-    // rows (the adoption pass's filter is under test, not the restore
-    // pass's row walk).
+    // The roster keeps only the first session's worker; no session rows
+    // (the adoption pass's filter is under test).
     let roster_path = dir.path().join("update-roster.json");
     std::fs::write(
         &roster_path,
@@ -116,7 +110,6 @@ fn update_boot_revives_only_roster_kept_workers() {
     )
     .expect("write roster");
 
-    // Update boot on the same socket.
     let restart_before = pa_daemon::util::now_iso();
     let mut daemon2 = spawn_supervisor_env(
         &socket,
@@ -129,8 +122,6 @@ fn update_boot_revives_only_roster_kept_workers() {
     wait_socket_ready(&socket);
     let log_path = pa_daemon::paths::daemon_log_path(&socket, &agent_dir);
 
-    // The kept worker relaunches and re-registers; the unkept one never
-    // does.
     let deadline = Instant::now() + Duration::from_secs(15);
     let registered = loop {
         let registered = distinct(workers_registered_since(&log_path, &restart_before));

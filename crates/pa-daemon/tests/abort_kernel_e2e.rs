@@ -1,10 +1,7 @@
-//! End-to-end verifier for the interrupt on a running kernel cell (the
-//! dogfood P0 wedge): a daemon worker session whose turn executes a long
-//! kernel cell must abort at once - `abort` cancels the in-flight tool
-//! execution (kernel interrupt + force-abort), the turn unwinds, and the
-//! session returns to ready - instead of running the cell out or wedging
-//! with the loader spinning. Drives the exact worker stack (real kernel,
-//! real turn runner) over the daemon wire.
+//! End-to-end verifier for the interrupt on a running kernel cell (the dogfood
+//! P0 wedge): a worker session whose turn executes a long kernel cell must abort
+//! at once — the turn unwinds, the session returns to ready — instead of running
+//! the cell out or wedging with the loader spinning.
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -222,10 +219,7 @@ impl Client {
     }
 }
 
-/// An abort on a running kernel cell settles the worker's turn at once:
-/// the turn unwinds (`turn_end` + `agent_end` reach attached clients within
-/// the budget) and the cell dies (its finish marker never appears). A
-/// wedge keeps the loader spinning while the cell runs out.
+/// The turn unwinds within the budget and the cell dies (its finish marker never appears).
 #[test]
 fn abort_during_a_kernel_cell_settles_the_daemon_turn_immediately() {
     let Some(_) = kernel_python() else {

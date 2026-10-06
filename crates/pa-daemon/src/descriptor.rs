@@ -1,6 +1,5 @@
 //! Durable worker descriptors on disk (fs layer over the pa-types
-//! `DaemonWorkerDescriptor` contract, port of daemon-worker-protocol.ts
-//! persistence). A descriptor persisted under
+//! `DaemonWorkerDescriptor` contract). A descriptor persisted under
 //! `<agent-dir>/daemon-workers/<socket-key>/<workerId>.json` lets a
 //! replacement supervisor adopt or relaunch the worker's session.
 
@@ -40,15 +39,9 @@ pub fn durable_create_command(payload: &Value) -> DurableDaemonCreateCommand {
     }
 }
 
-/// The environment the supervisor spawns a worker with (spec §8's roster
-/// `launch_env`: "env snapshot to respawn the worker identically"). One
-/// definition shared by the spawn path and the update roster, so the
-/// snapshot cannot drift from the real spawn env. `instance_id` is
-/// per-spawn (a fresh uuid at every relaunch; the roster row pins the
-/// current one as the snapshot). The session-lease owner id is stamped
-/// per worker (TS `daemon-supervisor.ts` mints it at launch): a lease the
-/// worker acquires must name its own active session, never an id the
-/// supervisor inherited from an ancestor environment.
+/// The environment the supervisor spawns a worker with (spec §8's roster `launch_env`). One
+/// definition shared by the spawn path and the update roster, so the snapshot cannot drift.
+/// The session-lease owner id is stamped per worker: the lease must name its own session.
 pub fn worker_launch_env(
     agent_dir: &Path,
     supervisor_socket: &str,
@@ -123,9 +116,8 @@ pub fn worker_launch_env(
 ///
 /// # Panics
 ///
-/// Panics only on an internal invariant violation: the freshly built
-/// payload not being a JSON object (the `json!` literal always is, so the
-/// panic is not reachable in practice).
+/// Panics only on an internal invariant violation (the `json!` literal
+/// always is an object).
 #[must_use]
 pub fn create_command_payload(durable: &DurableDaemonCreateCommand) -> Value {
     let mut payload = json!({ "type": "create" });
@@ -146,10 +138,8 @@ pub fn create_command_payload(durable: &DurableDaemonCreateCommand) -> Value {
 ///
 /// # Errors
 ///
-/// Returns an error when the descriptor has an unsupported version,
-/// belongs to another supervisor socket, or is missing required fields
-/// (worker id, pid, socket path, authentication token, or root active
-/// session id).
+/// Errors on an unsupported version, another supervisor's socket, or
+/// missing required fields.
 pub fn validate_descriptor(
     descriptor: &WorkerDescriptor,
     supervisor_socket_path: &Path,
@@ -231,10 +221,8 @@ pub(crate) enum TempSync {
 ///
 /// # Errors
 ///
-/// Returns an error when the parent directory cannot be created, or when
-/// creating, writing, flushing, or syncing the temp file fails, or when
-/// the final rename onto `path` fails; the 0600 restriction is best
-/// effort and never fails the call.
+/// Returns an error when the parent directory cannot be created or the temp file's
+/// create/write/sync/rename fails (the 0600 restriction is best effort).
 pub fn write_file_atomic(path: &Path, content: &str) -> Result<()> {
     write_file_atomic_at(path, content, TempSync::Synced)
 }
@@ -315,8 +303,7 @@ pub(crate) mod atomic_write_probe {
 ///
 /// # Errors
 ///
-/// Returns an error when the descriptor cannot be serialized or the
-/// atomic write to `path` fails.
+/// Returns an error when serialization or the atomic write to `path` fails.
 pub fn persist_worker(path: &Path, descriptor: &WorkerDescriptor) -> Result<()> {
     persist_worker_at(path, descriptor, TempSync::Synced)
 }
@@ -341,22 +328,15 @@ pub(crate) fn persist_worker_at(
     write_file_atomic_at(path, &content, sync)
 }
 
-/// The identity-pending side record (the descriptor store's own
-/// durability marker for the root-identity follow): written beside the
-/// descriptor when a moved identity's persist failed on both attempts,
-/// carrying the moved-to identity AND the moment of the move so a
-/// restart never serves the superseded session from the stale record —
-/// and never rolls a NEWER persisted identity back onto an older move
-/// (the boot applies the pending only while it is fresher than the
-/// record's `updated_at`). Removed by the repair — the first persist
-/// that lands the repaired record.
+/// The identity-pending side record: written beside the descriptor when a moved identity's
+/// persist failed on both attempts, carrying the moved-to identity AND the move's moment,
+/// so a restart never serves the superseded session (applied only while fresher than `updated_at`).
 pub(crate) fn identity_pending_path(descriptor_path: &Path) -> PathBuf {
     descriptor_path.with_extension("identity-pending")
 }
 
-/// Record the moved-to identity durably (the follow's fallback when the
-/// descriptor write failed: the boot reads this and applies the moved
-/// identity to the resident before any routing or relaunch).
+/// Record the moved-to identity durably (the follow's fallback when the descriptor write
+/// failed: the boot applies it to the resident before any routing or relaunch).
 ///
 /// # Errors
 ///
@@ -399,9 +379,8 @@ pub(crate) fn read_identity_pending(descriptor_path: &Path) -> Option<(String, S
 ///
 /// # Errors
 ///
-/// Returns an error when the removal fails — a stale side record left
-/// behind could roll a later boot back onto this move, so the callers
-/// surface the failure and the next repair retries the removal.
+/// Returns an error when the removal fails (a stale record could roll a
+/// later boot back onto this move).
 pub(crate) fn clear_identity_pending(descriptor_path: &Path) -> Result<()> {
     match std::fs::remove_file(identity_pending_path(descriptor_path)) {
         Ok(()) => Ok(()),
@@ -464,8 +443,7 @@ pub fn load_supervisor_config(
 ///
 /// # Errors
 ///
-/// Returns an error when the config cannot be serialized or the atomic
-/// write to `path` fails.
+/// Returns an error when the config cannot be serialized or written.
 pub fn persist_supervisor_config(path: &Path, config: &PersistedSupervisorConfig) -> Result<()> {
     write_file_atomic_unsynced(path, &serde_json::to_string_pretty(config)?)
 }

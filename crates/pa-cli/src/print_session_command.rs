@@ -1,23 +1,7 @@
-//! Print-mode session slash-command execution: the print driver runs
-//! `/compact`, `/refine`, `/goal`, and `/autonomous` prompts through the
-//! pa-core session-command executor (the same seam the daemon worker
-//! drives — no parallel implementation) and streams the TS print-json
-//! shapes: the `session_action_update` phase frames around the durable
-//! echo row, the per-command events (`compaction_start`/`compaction_end`,
-//! the refinement rows plus `refine_complete`/`refine_failed`, the
-//! `goal_update` publish, the `autonomous_status` row), the result rows,
-//! and the settled queue frame.
-//!
-//! TS ground truth (probed against the installed binary over the shared
-//! faux-provider harness): session commands never reach the model loop —
-//! `AgentSession._normalizeSubmission` classifies them before admission,
-//! so `_runPreTurnCompaction` never fires for them and the prompt's turn
-//! never exists. A `/goal` start (or resume) schedules its continuation as
-//! queued session input, which `promptAndWait` drains inside the same
-//! wait — the driver admits it as the queued turn right after the
-//! command's frames. A failed command rejects the prompt wait: the print
-//! run prints the raw error to stderr, exits 1, and never runs later
-//! prompts (TS `runPrintMode`'s catch).
+//! Print-mode session slash-command execution: `/compact`, `/refine`,
+//! `/goal`, and `/autonomous` run through the pa-core session-command
+//! executor and stream the TS print-json shapes; a failed command rejects
+//! the prompt wait (stderr, exit 1, never the later prompts).
 
 use std::sync::Arc;
 
@@ -33,15 +17,13 @@ use serde_json::{json, Value};
 
 use crate::print_goal::PrintGoalSurface;
 
-/// `/compact <args>`: the args are the summary-focus instructions (the
-/// `customInstructions` field of both compaction events).
+/// `/compact <args>`: the args are the summary-focus instructions.
 fn compact_custom_instructions(command: &SessionSlashCommand) -> Option<String> {
     let args = command.args.trim();
     (!args.is_empty()).then(|| args.to_string())
 }
 
-/// The successful manual `compaction_end` event: the TS `CompactionResult`
-/// wire shape (the boundary arm's event with `willRetry: false`).
+/// The successful manual `compaction_end` event: the TS `CompactionResult` wire shape.
 fn manual_compaction_end_success(
     execution: &SessionCommandExecution,
     custom_instructions: Option<&str>,
@@ -73,10 +55,8 @@ fn manual_compaction_end_success(
     event
 }
 
-/// The unsuccessful manual `compaction_end` event: a skip carries its
-/// message with `warning` severity, a failure carries the
-/// `Compaction failed: <message>` text with `error` severity (TS
-/// `AgentSession.compact`'s catch arm).
+/// The unsuccessful manual `compaction_end` event: a skip carries its message at
+/// `warning` severity, a failure the `Compaction failed: <message>` text.
 fn manual_compaction_end_unsuccessful(
     message: &str,
     severity: &str,
@@ -96,11 +76,8 @@ fn manual_compaction_end_unsuccessful(
     event
 }
 
-/// Execute one session command and stream its surface. The driver owns
-/// the exit contract: the execution's `error` field carries the raw
-/// failure (TS `promptAndWait` rejects with it — the print run prints it
-/// to stderr, exits 1, and stops the prompt loop); the failure result row
-/// is already durable and on the stream.
+/// Execute one session command and stream its surface. The driver owns the exit
+/// contract: the execution's `error` field carries the raw failure (stderr, exit 1).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_prompt_session_command(
     engine: &Arc<SessionEngine>,
@@ -111,9 +88,8 @@ pub(crate) async fn execute_prompt_session_command(
     autonomous: &Arc<tokio::sync::Mutex<AutonomousRuntimeState>>,
     command: &SessionSlashCommand,
 ) -> SessionCommandExecution {
-    // TS `_executeSelectedSessionCommand`: the action's `preparing` and
-    // `running` phase frames bookend the durable echo row, and `/compact`'s
-    // `compaction_start` goes out before the summarizer runs.
+    // The `preparing`/`running` phase frames bookend the durable echo row, and
+    // `/compact`'s `compaction_start` goes out before the summarizer runs.
     goal.emit_command_phase("preparing", &command.text).await;
     goal.emit_command_phase("running", &command.text).await;
     goal.emit_row_pair(&session_command_echo_row(command));
@@ -126,8 +102,8 @@ pub(crate) async fn execute_prompt_session_command(
         }
         goal.emit_stream_event(&event);
     }
-    // The refinement rows the executor's refine run appends (streamed in
-    // TS emission order ahead of the `refine_complete` event).
+    // The refinement rows the executor's refine run appends (streamed in TS order
+    // ahead of `refine_complete`).
     let entries_before = engine.session.entries().await.len();
     let execution = {
         let mut autonomous = autonomous.lock().await;
@@ -139,9 +115,8 @@ pub(crate) async fn execute_prompt_session_command(
         };
         execute_session_command(engine, &mut params, command).await
     };
-    // `/compact`: the settled `compaction_end` precedes any failure result
-    // row; a skip stays silent beyond the event (TS `CompactionSkippedError`
-    // catch arm records nothing).
+    // `/compact`: the settled `compaction_end` precedes any failure result row; a skip stays silent
+    // beyond the event.
     if is_compact {
         if let Some(message) = execution
             .compaction
@@ -184,22 +159,19 @@ pub(crate) async fn execute_prompt_session_command(
             }));
         }
     }
-    // `/goal`: the state change publishes unconditionally (TS
-    // `_emitGoalUpdate` in the goal command arms), before the queue frame
-    // of a scheduled continuation.
+    // `/goal`: the state change publishes unconditionally, before the queue frame of a scheduled
+    // continuation.
     if command.name == "goal" {
         goal.publish_goal_update_forced(engine).await;
     }
-    // The queued continuation's preview frame rides while the command
-    // action is still the active one (TS `_runOrQueueGoalContext` ->
-    // `_emitQueueUpdate`).
+    // The queued continuation's preview frame rides while the command action is still the active
+    // one.
     if let Some(continuation) = &execution.continuation_message {
         goal.emit_command_queue_hold(&command.text, continuation)
             .await;
     }
-    // The executor's first row is the echo (already streamed); the rest —
-    // result rows, the `autonomous_status` row, the failure row — follow
-    // in order.
+    // The executor's first row is the echo (already streamed); the rest — result
+    // rows, the `autonomous_status` row, the failure row — follow in order.
     for row in execution.messages.iter().skip(1) {
         goal.emit_row_pair(row);
     }
@@ -219,8 +191,8 @@ mod tests {
     use pa_core::session_engine::slash_commands::{parse_session_command, SlashCommandRegistry};
     use serde_json::json;
 
-    /// One test at a time over the global faux registry (the same contract
-    /// `print_goal` and `print_boundary` tests hold).
+    /// One test at a time over the global faux registry (the same contract `print_goal` and
+    /// `print_boundary` tests hold).
     static FAUX_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     type Frames = std::sync::Arc<std::sync::Mutex<Vec<Value>>>;
@@ -236,9 +208,8 @@ mod tests {
         (frames, sink)
     }
 
-    /// The captured stream's compact event trace: one line per event with
-    /// the kind and the distinguishing fields (the frame phases, the row
-    /// types, the goal status, the compaction outcome).
+    /// The captured stream's compact event trace: one line per event with the
+    /// kind and the distinguishing fields (phases, row types, goal status).
     fn trace(frames: &Frames) -> Vec<String> {
         frames
             .lock()
@@ -315,15 +286,14 @@ mod tests {
         autonomous: Arc<tokio::sync::Mutex<AutonomousRuntimeState>>,
         frames: Frames,
         harness_dir: std::path::PathBuf,
-        /// Keeps the composed hook's autonomous arm alive for the bed's
-        /// lifetime (the hook holds it weakly).
+        /// Keeps the composed hook's autonomous arm alive for the bed's lifetime (the hook holds it
+        /// weakly).
         _run: Arc<crate::headless_autonomous::HeadlessAutonomous>,
         _dir: tempfile::TempDir,
     }
 
-    /// The faux engine bed (the `print_goal` test pattern): a persisted
-    /// session over its own tempdir, the wired goal surface with a capture
-    /// sink, and the default autonomous state.
+    /// The faux engine bed (the `print_goal` test pattern): a persisted session
+    /// over its own tempdir, the wired goal surface, the default autonomous state.
     async fn bed(script: Value) -> Bed {
         bed_with_settings(script, json!({})).await
     }
@@ -493,7 +463,6 @@ mod tests {
                 "sau:idle:0",
             ]
         );
-        // The durable rows: the echo, then the "No active goal." result.
         assert_eq!(
             custom_rows(&test.engine).await,
             vec![
@@ -507,8 +476,7 @@ mod tests {
                 ),
             ]
         );
-        // The live context carries the rows (TS pushes them onto the
-        // agent state): the headless terminal selection sees the result.
+        // The live context carries the rows: the headless terminal selection sees the result.
         let state = test.engine.session.agent().state().await;
         let messages: Vec<pa_types::session::AgentMessage> = state
             .messages
@@ -525,8 +493,8 @@ mod tests {
         let _guard = FAUX_TEST_LOCK.lock().await;
         let test = bed(script(&json!([{"text": "goal turn reply"}]))).await;
         assert_eq!(run_command(&test, "/goal ship it").await, None);
-        // The queued continuation ran to the faux queue's exhaustion and
-        // the terminal error failed the goal.
+        // The queued continuation ran to the faux queue's exhaustion and the terminal error failed
+        // the goal.
         assert_eq!(
             trace(&test.frames),
             vec![
@@ -542,9 +510,8 @@ mod tests {
                 "sau:turn:preparing",
                 "sau:turn:committing",
                 "sau:turn:running",
-                // The continuation turn's usage publish and the in-loop
-                // mint's continuation bump (both `goal_update:active`),
-                // then the terminal error fails the goal.
+                // The continuation turn's usage publish and the in-loop mint's bump (both
+                // `goal_update:active`), then the terminal error fails the goal.
                 "goal_update:active",
                 "goal_update:active",
                 "goal_update:error",
@@ -557,18 +524,14 @@ mod tests {
         assert!(rows.iter().any(|row| row.0 == "goal_context"));
     }
 
-    /// The clear's reply reflects the action it took (the operator's
-    /// 2026-09-25 bug report): clearing a goal record answers
-    /// "Goal cleared." — never the nothing-to-clear "No active goal."
-    /// the TS post-state read produces — and clearing with nothing to
-    /// clear keeps the plain status text.
+    /// The clear's reply reflects the action it took (the operator's 2026-09-25 bug
+    /// report): a held goal record answers "Goal cleared.", never "No active goal."; an
+    /// empty clear keeps the plain status.
     #[tokio::test]
     async fn goal_clear_answers_the_action_it_took() {
         let _guard = FAUX_TEST_LOCK.lock().await;
-        // One scripted reply: the start's continuation turn consumes it,
-        // the next mint hits the exhausted faux queue, and the goal fails
-        // — a goal record (objective held) is exactly what a clear
-        // removes.
+        // One scripted reply: the start's continuation turn consumes it, the next
+        // mint hits the exhausted faux queue — a goal record is what a clear removes.
         let test = bed(script(&json!([{"text": "goal turn reply"}]))).await;
         assert_eq!(run_command(&test, "/goal ship it").await, None);
         let rows = custom_rows(&test.engine).await;
@@ -582,23 +545,19 @@ mod tests {
                 .expect("a result row")
         };
 
-        // Clearing the held goal record answers the action.
         let trace_before_clear = trace(&test.frames).len();
         assert_eq!(run_command(&test, "/goal clear").await, None);
         assert_eq!(
             last_result(&custom_rows(&test.engine).await),
             "Goal cleared."
         );
-        // The clear's forced publish announced the empty state (TS
-        // `_emitGoalUpdate` inside the goal command arms).
+        // The clear's forced publish announced the empty state.
         assert!(
             trace(&test.frames)[trace_before_clear..].contains(&"goal_update:idle".to_string()),
             "the clear never published the empty state: {:?}",
             trace(&test.frames)
         );
 
-        // Clearing again (nothing to clear) and the plain status both
-        // answer the unchanged status text.
         assert_eq!(run_command(&test, "/goal clear").await, None);
         assert_eq!(
             last_result(&custom_rows(&test.engine).await),
@@ -616,8 +575,6 @@ mod tests {
         let _guard = FAUX_TEST_LOCK.lock().await;
         let test = bed(script(&json!([]))).await;
         assert_eq!(run_command(&test, "/compact").await, None);
-        // A skip records nothing beyond the echo (TS CompactionSkippedError
-        // catch arm) and the end event carries the warning.
         assert_eq!(
             trace(&test.frames),
             vec![
@@ -639,8 +596,8 @@ mod tests {
     #[tokio::test]
     async fn failed_command_carries_the_raw_error() {
         let _guard = FAUX_TEST_LOCK.lock().await;
-        // Two long seed turns consume the queue; the compactable session's
-        // /compact then fails its summarizer call.
+        // Two long seed turns consume the queue; the compactable session's /compact then fails its
+        // summarizer call.
         let settings = json!({
             "compaction": {"enabled": true, "reserveTokens": 1, "keepRecentTokens": 10}
         });
@@ -671,7 +628,6 @@ mod tests {
             error.as_deref(),
             Some("Summarization failed: No more faux responses queued")
         );
-        // The failure result row is durable ahead of the exit.
         let rows = custom_rows(&test.engine).await;
         assert_eq!(rows.last().unwrap().0, "session_slash_command_result");
         assert!(rows.last().unwrap().1.starts_with("Command failed:"));

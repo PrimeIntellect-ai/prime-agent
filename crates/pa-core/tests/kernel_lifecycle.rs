@@ -1,6 +1,4 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28) - this target's own
-// crate root: the same bounded-boundary disposition as src/lib.rs
-// (large_futures/too_many_lines/the cast family; details there).
+// Pedantic-gate dispositions as src/lib.rs (large_futures/too_many_lines/casts).
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -11,16 +9,9 @@
 )]
 
 //! Verifier integration tests: spawn a real `python -m rlm.repl` kernel
-//! (the same JSON-lines protocol v3 runtime the TS product ships) through
-//! `ReplKernelManager`, and check the persistence/revival semantics against
-//! the TS product's behavior contract:
-//!
-//! - state persists across cells and turns;
-//! - kill -9 the kernel, restart a fresh manager on the same snapshot, and
-//!   the namespace revives: serializable variables return, unserializable
-//!   objects are dropped and reported;
-//! - the RLM surface (rlm, bash, harness) injected by the bootstrap exists
-//!   and host requests round-trip to the registered handler.
+//! (the same JSON-lines protocol v3 runtime the TS product ships) and check
+//! state persistence, kill -9 revival (unserializable objects are dropped
+//! and reported), and the RLM bootstrap surface against the TS contract.
 #![cfg(unix)]
 
 use std::collections::HashMap;
@@ -35,15 +26,9 @@ use pa_core::kernel::shared::{
 };
 use pa_core::kernel::state_snapshot::{manifest_path_in, snapshot_path_in};
 
-/// The kernel Python with prime-agent-runtime installed. The TS product's
-/// auto-bootstrapped kernel venv is the ground-truth environment; this is
-/// exactly the interpreter `prime-agent` spawns.
-///
-/// The venv is ambient product state, not test input: it exists wherever a
-/// TS product instance bootstrapped a kernel. Tests that need it are skipped
-/// (with a note) rather than failing when it is absent, so the suite stays
-/// hermetic on machines without a live install; set `PA_CORE_KERNEL_PYTHON`
-/// to point at an explicit interpreter instead.
+/// The kernel Python with prime-agent-runtime installed (the TS product's auto-bootstrapped kernel
+/// venv). Ambient product state, not test input: skipped (with a note) when absent;
+/// `PA_CORE_KERNEL_PYTHON` points at an explicit interpreter instead.
 fn kernel_python() -> Option<PathBuf> {
     if let Some(explicit) = std::env::var_os("PA_CORE_KERNEL_PYTHON") {
         let explicit = PathBuf::from(explicit);
@@ -87,15 +72,14 @@ fn test_options(snapshot_dir: Option<&std::path::Path>) -> Option<KernelManagerO
             max_variable_bytes: None,
             debounce_ms: None,
         }),
-        // The TS provisioner (ipython.ts) always builds and executes the RLM
-        // bootstrap after start; tests match that contract.
+        // The TS provisioner always runs the RLM bootstrap after start; tests match that contract.
         bootstrap_code: Some(build_rlm_bootstrap_code(&[])),
         stderr_log_path: None,
     })
 }
 
-/// Start a manager and run the RLM bootstrap, mirroring the TS provisioner
-/// (ipython.ts: start, then `m.execute(bootstrapCode)` must be `ok`).
+/// Start a manager and run the RLM bootstrap, mirroring the TS provisioner:
+/// start, then `m.execute(bootstrapCode)` must be `ok`.
 async fn started_manager(options: KernelManagerOptions) -> ReplKernelManager {
     let bootstrap = options
         .bootstrap_code
@@ -137,7 +121,6 @@ async fn kernel_state_persists_across_cells_and_turns() {
     };
     let manager = started_manager(options).await;
 
-    // One turn defines; a separate call (a later "turn") uses.
     let first = execute(&manager, "x = 21\ny = 'hello'\nprint('defined')").await;
     assert_eq!(first.status, ExecuteStatus::Ok);
     assert_eq!(first.stdout.trim(), "defined");
@@ -313,8 +296,7 @@ async fn kill9_then_restart_revives_snapshot_and_reports_unserializable() {
     };
     let manager = started_manager(options).await;
 
-    // Serializable variables plus one unserializable object (an open socket)
-    // across separate turns.
+    // Serializable variables plus one unserializable object (an open socket) across separate turns.
     execute(
         &manager,
         "answer = 42\nitems = ['a', 'b']\nimport socket\nconn = socket.socket()",
@@ -343,7 +325,6 @@ async fn kill9_then_restart_revives_snapshot_and_reports_unserializable() {
     // kill -9 the kernel process, like a host OOM/infra kill.
     let _ =
         pa_core::platform::process::kill_pid(pid as i32, pa_core::platform::process::Signal::Kill);
-    // The manager observes the death and goes defunct.
     for _ in 0..100 {
         if manager.is_defunct() {
             break;
@@ -352,7 +333,6 @@ async fn kill9_then_restart_revives_snapshot_and_reports_unserializable() {
     }
     assert!(manager.is_defunct(), "killed kernel must settle defunct");
 
-    // Restart-and-revive: a fresh manager on the same snapshot directory.
     let Some(options) = test_options(Some(dir.path())) else {
         return;
     };
@@ -367,17 +347,14 @@ async fn kill9_then_restart_revives_snapshot_and_reports_unserializable() {
         "restored: {:?}",
         restore.restored
     );
-    // TS semantics (state-snapshot.ts): `failed` names are entries present in
-    // the snapshot that failed to revive. `conn` was skipped at snapshot time,
-    // so it is absent from the payload and cannot appear here; its
-    // drop-and-report already happened in `snapshot.skipped` above.
+    // TS semantics (state-snapshot.ts): `failed` names are entries present
+    // in the snapshot that failed to revive. `conn` was skipped at snapshot
+    // time, so it is absent from the payload and cannot appear here.
 
-    // The revived values match the pre-kill values.
     let check = execute(&revived, "answer").await;
     assert_eq!(check.result.as_deref(), Some("42"));
     let items = execute(&revived, "items").await;
     assert_eq!(items.result.as_deref(), Some("['a', 'b']"));
-    // The unserializable name is gone from the namespace.
     let missing = execute(&revived, "'conn' in dir()").await;
     assert_eq!(
         missing.result.as_deref(),
@@ -394,14 +371,9 @@ async fn kill9_then_restart_revives_snapshot_and_reports_unserializable() {
         .expect("shutdown");
 }
 
-/// Background `bash()` handles hold kernel residency (TS #2053), and a
-/// held goal/autonomous continuation waits for their settlement (TS #2465):
-/// the kernel's bash-activity track is the liveness surface, and the
-/// settlement callback is the wake-up. A live handle registers on the
-/// track; its completion settles the track exactly once (the completion
-/// notice request is admitted before the release event, the runtime's
-/// await-reply-then-release order); a graceful teardown over the already
-/// settled track fires nothing.
+/// Background `bash()` handles hold kernel residency, and a held
+/// continuation waits for their settlement: its completion settles the
+/// track exactly once; a graceful teardown over the settled track fires nothing.
 #[tokio::test]
 async fn background_bash_settlement_fires_the_callback_once() {
     let Some(mut options) = test_options(None) else {
@@ -409,10 +381,8 @@ async fn background_bash_settlement_fires_the_callback_once() {
     };
     let settled = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let counter = std::sync::Arc::clone(&settled);
-    // The callback itself is the observable event: the test awaits its
-    // notice (a stored permit wakes the wait even if the callback fired
-    // first, and the counter stays the witness for the exactly-once
-    // assertions).
+    // The callback itself is the observable event: the test awaits its notice (a stored permit
+    // wakes the wait even if the callback fired first; the counter is the exactly-once witness).
     let settled_notify = std::sync::Arc::new(tokio::sync::Notify::new());
     let notify = std::sync::Arc::clone(&settled_notify);
     options.on_background_work_settled = Some(std::sync::Arc::new(move || {
@@ -450,10 +420,9 @@ async fn background_bash_settlement_fires_the_callback_once() {
     assert_eq!(settled.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
-/// Teardown with live background handles fires the settlement exactly once
-/// (TS #2465's teardown row, over the #2053 concurrent-handles shape): the
-/// handles die with the kernel, so owed continuations waiting on them must
-/// hear the settlement before it is lost — once, not once per handle.
+/// Teardown with live background handles fires the settlement exactly
+/// once: the handles die with the kernel, so owed continuations waiting
+/// on them must hear it before it is lost — once, not once per handle.
 #[tokio::test]
 async fn kernel_teardown_with_live_handles_settles_the_callback_once() {
     let Some(mut options) = test_options(None) else {
@@ -472,9 +441,8 @@ async fn kernel_teardown_with_live_handles_settles_the_callback_once() {
     assert!(manager.has_background_work());
     assert_eq!(settled.load(std::sync::atomic::Ordering::SeqCst), 0);
 
-    // TS #2053's teardown shape: kill() tears the handles down with the
-    // kernel, and the settlement fires once for the whole track —
-    // synchronously with the teardown, so the state is assertable here.
+    // kill() tears the handles down with the kernel, and the settlement fires once for the whole
+    // track — synchronously, so the state is assertable here.
     manager.kill();
     assert!(!manager.has_background_work());
     assert_eq!(settled.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -522,8 +490,7 @@ async fn graceful_shutdown_flushes_the_final_snapshot() {
     let manager = started_manager(options).await;
     execute(&manager, "persisted = 'value'\n").await;
 
-    // shutdown({snapshot: true}) must flush the namespace without an
-    // explicit snapshot call.
+    // shutdown({snapshot: true}) must flush the namespace without an explicit snapshot call.
     let performed = tokio::time::timeout(
         Duration::from_secs(15),
         manager.shutdown(KernelShutdownOptions {

@@ -1,14 +1,13 @@
-//! The getter test battery (moved with its concern): the TS wire shapes of
-//! every `get_*` handler - the connection state, the rlm children sequence,
-//! the context tree folds, the session context, the model catalog, and the
-//! empty-loader shapes - over the shared `created_worker` fixtures.
+//! The getter test battery: the TS wire shapes of every `get_*` handler - the
+//! connection state, the rlm children sequence, the context tree folds, the
+//! session context, the model catalog, and the empty-loader shapes - over the
+//! shared `created_worker` fixtures.
 
 use super::*;
 use serde_json::json;
 use std::sync::Arc;
 
-/// A created worker backed by an existing session file (the store's
-/// path, so the artifact tree beside it resolves).
+/// A created worker backed by an existing session file (so the artifact tree beside it resolves).
 async fn created_worker_at(root: &std::path::Path, session_file: &std::path::Path) -> Arc<Worker> {
     std::fs::create_dir_all(root).unwrap();
     let config = crate::worker::WorkerConfig {
@@ -62,9 +61,7 @@ async fn created_worker() -> Arc<Worker> {
     worker
 }
 
-/// `get_connection_state` answers the TS `AgentConnectionState` block
-/// with the daemon overlay: `heartbeat` is present and null (no cron
-/// store on this worker).
+/// `heartbeat` is present and null (no cron store on this worker).
 #[tokio::test]
 async fn get_connection_state_matches_the_ts_shape() {
     let worker = created_worker().await;
@@ -101,8 +98,7 @@ async fn get_connection_state_matches_the_ts_shape() {
     ] {
         assert!(data.get(field).is_some(), "missing {field}: {data}");
     }
-    // A session that has not been created answers the TS
-    // initializing refusal.
+    // A session that has not been created answers the TS initializing refusal.
     let fresh = Arc::new(Worker::new(
         {
             let mut config = worker.config.clone();
@@ -124,8 +120,6 @@ async fn get_connection_state_matches_the_ts_shape() {
     );
 }
 
-/// `get_rlm_children`: the child roster plus the pre-walk event
-/// sequence; a worker without children answers the empty roster.
 #[tokio::test]
 async fn get_rlm_children_carries_the_sequence() {
     let worker = created_worker().await;
@@ -139,8 +133,8 @@ async fn get_rlm_children_carries_the_sequence() {
     let data = response.data.expect("data");
     assert_eq!(data["children"], json!([]));
     let sequence = data["eventSequence"].as_u64().expect("event sequence");
-    // A subsequent read captures the same sequence until an event
-    // bumps it (TS freshness contract).
+    // A subsequent read captures the same sequence until an event bumps it (TS
+    // freshness contract).
     let again = worker
         .dispatch(
             "get_rlm_children",
@@ -150,9 +144,7 @@ async fn get_rlm_children_carries_the_sequence() {
     assert_eq!(again.data.expect("data")["eventSequence"], json!(sequence));
 }
 
-/// `get_context_tree`: the root node with usage totals over the
-/// persisted branch; child attributions move the split between
-/// `ownUsage` and `totalUsage` (TS `computeOwnAndTotalUsage`).
+/// Child attributions move the split between `ownUsage` and `totalUsage`.
 #[tokio::test]
 async fn get_context_tree_matches_the_ts_root_node() {
     let worker = created_worker().await;
@@ -189,15 +181,10 @@ async fn get_context_tree_matches_the_ts_root_node() {
     assert_eq!(tree["totalUsage"]["cost"]["total"].as_f64(), Some(0.0));
 }
 
-/// The captured-attribution fixture over the full daemon path (create
-/// from a copy of the fixture file, so the repo fixture stays
-/// read-only): the load-time fold makes the root's own/total split
-/// TS-exact. `ownUsage` is the assistant's own row (input 2690, cost
-/// $0 — `totalTokens` clamps to zero because the six attributions'
-/// child `totalTokens` (54289) exceeds the aggregate's unchanged
-/// 23032, TS `subtractAssistantUsage`'s clamp); `totalUsage` carries
-/// the attributed child spend (input 52898, cost $0.0089957,
-/// `totalTokens` stays 23032).
+/// The captured-attribution fixture over the full daemon path (create from a
+/// copy, so the repo fixture stays read-only). `ownUsage` is the assistant's
+/// own row (input 2690, cost $0, `totalTokens` clamped to zero); `totalUsage`
+/// carries the attributed child spend (input 52898, cost $0.0089957).
 #[tokio::test]
 async fn get_context_tree_folds_the_captured_attributions() {
     let root = std::env::temp_dir().join(format!("pa-worker-af-{}", uuid::Uuid::new_v4()));
@@ -219,9 +206,8 @@ async fn get_context_tree_folds_the_captured_attributions() {
     assert_eq!(tree["ownUsage"]["output"], json!(2934));
     assert_eq!(tree["ownUsage"]["cacheRead"], json!(17408));
     assert_eq!(tree["ownUsage"]["totalTokens"], json!(0));
-    // The six sequential per-entry subtractions leave float-order noise
-    // in the last ulps (TS `subtractAssistantUsage` walks the same
-    // order), so own cost pins at ~0, not bit-exact zero.
+    // The six sequential subtractions leave float-order noise in the last
+    // ulps (TS walks the same order), so own cost pins at ~0, not bit-exact zero.
     assert!(
         tree["ownUsage"]["cost"]["total"].as_f64().unwrap().abs() < 1e-12,
         "own cost {} is not ~0",
@@ -235,8 +221,7 @@ async fn get_context_tree_folds_the_captured_attributions() {
         tree["totalUsage"]["cost"]["total"].as_f64(),
         Some(0.008_995_7)
     );
-    // `get_session_stats` reports the same folded totals over the
-    // gap-bridged branch.
+    // `get_session_stats` reports the same folded totals over the gap-bridged branch.
     let stats = worker
         .dispatch(
             "get_session_stats",
@@ -251,18 +236,9 @@ async fn get_context_tree_folds_the_captured_attributions() {
     assert_eq!(stats["cost"].as_f64(), Some(0.008_995_7));
 }
 
-/// The operator's cost question, proven over the real file path: a
-/// session that switches models mid-conversation accumulates the
-/// correct per-model costs INCLUDING the switch's cache-write burst.
-/// The synthetic file's cost blocks are the provider-computed records
-/// (`calculate_cost` against the catalog rates: gpt-5.6-sol $4/$20 per
-/// M; claude-opus-4-6 $5/$25/M, cacheRead $0.5/M, cacheWrite $6.25/M
-/// = the 1.25x write multiplier): the sol turn bills $0.44; the first
-/// opus request re-caches the whole history — 104k cache-write tokens
-/// at $6.25/M = $0.65 exactly — and bills $0.70; the next opus turn
-/// hits the cache ($0.0775). The per-model buckets carry each model's
-/// share with the fold's exact float sums, and the grand totals are
-/// per-model-summed across the switch.
+/// The operator's cost question over the real file path: a session that switches
+/// models mid-conversation accumulates the per-model costs INCLUDING the
+/// switch's cache-write burst (the cost blocks are `calculate_cost` records).
 #[tokio::test]
 async fn get_context_tree_breaks_own_usage_down_by_model() {
     let root = std::env::temp_dir().join(format!("pa-worker-bm-{}", uuid::Uuid::new_v4()));
@@ -307,8 +283,7 @@ async fn get_context_tree_breaks_own_usage_down_by_model() {
         .await;
     assert!(response.success, "failed: {response:?}");
     let tree = response.data.expect("data");
-    // The grand totals sum every record's stored cost — the honest
-    // per-model-summed total across the switch.
+    // The grand totals sum every record's stored cost — the honest per-model-summed total.
     assert_eq!(tree["ownUsage"]["input"], json!(105_500));
     assert_eq!(tree["ownUsage"]["output"], json!(3800));
     assert_eq!(tree["ownUsage"]["cacheRead"], json!(110_000));
@@ -318,8 +293,8 @@ async fn get_context_tree_breaks_own_usage_down_by_model() {
         tree["ownUsage"]["cost"]["total"].as_f64(),
         Some(0.4 + 0.04 + 0.7 + 0.0775)
     );
-    // The per-model breakdown: first-seen order, each bucket holding
-    // exactly the records that model served.
+    // The per-model breakdown: first-seen order, each bucket holding exactly the records
+    // that model served.
     let buckets = tree["ownUsageByModel"]
         .as_array()
         .expect("the by-model breakdown is present");
@@ -339,9 +314,8 @@ async fn get_context_tree_breaks_own_usage_down_by_model() {
     assert_eq!(buckets[1]["ownUsage"]["output"], json!(1800));
     assert_eq!(buckets[1]["ownUsage"]["cacheRead"], json!(110_000));
     assert_eq!(buckets[1]["ownUsage"]["cacheWrite"], json!(104_000));
-    // The switch's cache-write burst bills at the new model's write
-    // rate: 104k tokens x $6.25/M (1.25x the $5/M input rate) is
-    // exactly $0.65.
+    // The switch's cache-write burst bills at the new model's write rate: 104k
+    // tokens x $6.25/M (1.25x the $5/M input rate) is exactly $0.65.
     assert_eq!(
         buckets[1]["ownUsage"]["cost"]["cacheWrite"].as_f64(),
         Some(104_000.0 * 6.25 / 1_000_000.0)
@@ -352,15 +326,9 @@ async fn get_context_tree_breaks_own_usage_down_by_model() {
     );
 }
 
-/// The buckets reconcile or the breakdown is omitted: a child
-/// attribution whose `totalTokens` exceed its target row's bucket
-/// (the captured-fixture shape — the child's token deltas do not
-/// ride the row's aggregate) clamps inside that bucket, while the
-/// plain own-usage fold subtracts the same amount from the combined
-/// pool where the other model's spend absorbs it. The buckets would
-/// sum past `ownUsage`, so `ownUsageByModel` is omitted and the
-/// display degrades to the plain totals instead of overstating the
-/// node (the Macroscope attribution-clamp round).
+/// The buckets reconcile or the breakdown is omitted: a bucket that clamps
+/// makes the buckets sum past `ownUsage`, so `ownUsageByModel` is omitted
+/// and the display degrades to the plain totals instead of overstating the node.
 #[tokio::test]
 async fn get_context_tree_omits_the_breakdown_when_an_attribution_exceeds_its_bucket() {
     let root = std::env::temp_dir().join(format!("pa-worker-bmx-{}", uuid::Uuid::new_v4()));
@@ -403,16 +371,13 @@ async fn get_context_tree_omits_the_breakdown_when_an_attribution_exceeds_its_bu
         .await;
     assert!(response.success, "failed: {response:?}");
     let tree = response.data.expect("data");
-    // The plain fold subtracts the 9_000 tokens from the combined
-    // pool: 1_100 + 102_000 - 9_000. The input and output fields
-    // reconcile exactly (the attribution rides the aggregate), so a
-    // mismatch here would mean the reconciliation itself drifted.
+    // The plain fold subtracts the 9_000 tokens from the combined pool:
+    // 1_100 + 102_000 - 9_000; input and output reconcile exactly.
     assert_eq!(tree["ownUsage"]["input"], json!(101_000));
     assert_eq!(tree["ownUsage"]["output"], json!(2_100));
     assert_eq!(tree["ownUsage"]["totalTokens"], json!(94_100));
-    // The sol bucket clamps at zero while the opus bucket keeps its
-    // 102_000: the buckets would sum to 102_000 and overstate the
-    // node's 94_100, so the breakdown is omitted.
+    // The sol bucket clamps at zero while the opus bucket keeps its 102_000:
+    // the buckets would overstate the node's 94_100, so the breakdown is omitted.
     assert!(
         tree["ownUsageByModel"].is_null(),
         "the clamped breakdown must not be served: {}",
@@ -420,9 +385,8 @@ async fn get_context_tree_omits_the_breakdown_when_an_attribution_exceeds_its_bu
     );
 }
 
-/// The control for the omission rule: an attribution that fits its
-/// target row's bucket reconciles (the buckets sum to `ownUsage`
-/// exactly) and the breakdown stays served.
+/// The control for the omission rule: a fitting attribution reconciles and the breakdown
+/// stays served.
 #[tokio::test]
 async fn get_context_tree_keeps_the_breakdown_when_an_attribution_fits_its_bucket() {
     let root = std::env::temp_dir().join(format!("pa-worker-bmf-{}", uuid::Uuid::new_v4()));
@@ -475,13 +439,8 @@ async fn get_context_tree_keeps_the_breakdown_when_an_attribution_fits_its_bucke
     assert_eq!(buckets[1]["ownUsage"]["totalTokens"], json!(102_000));
 }
 
-/// `get_context_tree` surfaces the persisted child sessions under the
-/// session's artifact tree (idle, settled, and restart-orphaned
-/// subagents all appear, with their real usage and recursive
-/// grandchildren — TS `loadContextTreeChildrenFromDisk`). The artifact
-/// tree is keyed by the worker's agent dir and the durable session id,
-/// exactly where `child_session_dir` writes; a session file outside
-/// the agent dir must not change that.
+/// `get_context_tree` surfaces the persisted child sessions: idle, settled, and
+/// restart-orphaned subagents all appear, with real usage and grandchildren.
 #[tokio::test]
 async fn get_context_tree_lists_persisted_children() {
     let root = std::env::temp_dir().join(format!("pa-worker-ct-{}", uuid::Uuid::new_v4()));
@@ -506,8 +465,7 @@ async fn get_context_tree_lists_persisted_children() {
     .join("\n");
     std::fs::write(&session_file, content).unwrap();
     // The artifact tree lives under the worker's agent dir (the writer's
-    // addressing): one settled child with a grandchild in the child's own
-    // sibling tree.
+    // addressing): one settled child with a grandchild in a sibling tree.
     let artifacts = agent_dir.join("session-artifacts");
     let child_session = "01a0child-1111-2222-3333-4444444444";
     let grandchild_session = "01a0grand-1111-2222-3333-4444444444";
@@ -537,8 +495,7 @@ async fn get_context_tree_lists_persisted_children() {
     write_session(&child_dir, child_session, "stop");
     let grandchild_dir = artifacts.join(child_session).join("sub-00aa00aa");
     write_session(&grandchild_dir, grandchild_session, "stop");
-    // A second child the user deleted: the ledger tombstone must keep it
-    // out of the tree.
+    // A second child the user deleted: the ledger tombstone must keep it out of the tree.
     let deleted_dir = artifacts.join(session_id).join("sub-deadbeef");
     let deleted_session = "01a0dead-1111-2222-3333-4444444444";
     write_session(&deleted_dir, deleted_session, "stop");
@@ -561,9 +518,8 @@ async fn get_context_tree_lists_persisted_children() {
         .unwrap();
 
     let worker = created_worker_at(&root, &session_file).await;
-    // The children come from the background cache refresh (the create
-    // warm armed it): a cold read serves the root from memory
-    // instantly, and the persisted tree fills when the walk lands.
+    // The children come from the background cache refresh (the create warm armed
+    // it): the persisted tree fills when the walk lands.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let children = loop {
         let response = worker
@@ -602,8 +558,6 @@ async fn get_context_tree_lists_persisted_children() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// `get_commands` / `get_resource_snapshot` on the scripted engine:
-/// the TS loader shapes over empty lists.
 #[tokio::test]
 async fn commands_and_resources_match_the_empty_loader_shape() {
     let worker = created_worker().await;
@@ -628,8 +582,6 @@ async fn commands_and_resources_match_the_empty_loader_shape() {
     );
 }
 
-/// `get_session_context`: the resolved context at the leaf — messages,
-/// effective thinking level, service tier, and model selector.
 #[tokio::test]
 async fn get_session_context_matches_the_ts_context_shape() {
     let worker = created_worker().await;
@@ -646,10 +598,8 @@ async fn get_session_context_matches_the_ts_context_shape() {
     assert!(context.get("serviceTier").is_some());
     assert!(context.get("model").is_some());
 
-    // One turn lands its accepted user message on the resolved
-    // context. (The scripted harness's synthetic assistant row carries
-    // no stop reason, so it does not round-trip into the typed entry
-    // form the walk consumes; real engine rows do.)
+    // One turn lands its accepted user message on the resolved context. (The
+    // synthetic assistant row carries no stop reason, so the walk cannot consume it.)
     let _ = worker
         .dispatch(
             "prompt_and_wait",
@@ -678,9 +628,8 @@ async fn get_session_context_matches_the_ts_context_shape() {
     assert_eq!(context["messages"][0]["content"], json!("hello"));
 }
 
-/// `get_system_prompt` / `get_tool_definition`: the scripted engine
-/// has no prompt (empty string, the TS key present) and no tools (the
-/// `toolDefinition` key omitted, like the TS `undefined` field).
+/// No prompt (empty string, the TS key present) and no tools (the `toolDefinition`
+/// key omitted, like the TS `undefined` field).
 #[tokio::test]
 async fn system_prompt_and_tool_definition_match_the_ts_shapes() {
     let worker = created_worker().await;
@@ -715,9 +664,6 @@ async fn system_prompt_and_tool_definition_match_the_ts_shapes() {
     );
 }
 
-/// `get_rlm_max_depth_status`: the TS source vocabulary (the b6 wave
-/// replaced the provisional "settings" label; an unseeded scripted
-/// session reports the shared default).
 #[tokio::test]
 async fn rlm_max_depth_status_matches_the_ts_shape() {
     let worker = created_worker().await;
@@ -734,8 +680,6 @@ async fn rlm_max_depth_status_matches_the_ts_shape() {
     );
 }
 
-/// `get_model_catalog` / `get_available_models` against a fixture
-/// registry (TS `refreshModelCatalog` / `refreshAvailableModels`).
 #[tokio::test]
 async fn model_catalog_and_available_models_match_the_ts_shapes() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -807,8 +751,8 @@ async fn model_catalog_and_available_models_match_the_ts_shapes() {
     assert!(response.success);
     let available = response.data.expect("data");
     let models = available["models"].as_array().expect("models");
-    // The registry also serves the built-in catalog when the box has
-    // configured auth for it; the fixture provider must be complete.
+    // The registry also serves the built-in catalog when the box has configured auth; the
+    // fixture provider must be complete.
     assert!(
         models
             .iter()

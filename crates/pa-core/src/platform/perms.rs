@@ -1,8 +1,6 @@
-//! File permission policy.
-//!
-//! Unix: owner-only mode bits (0o600 files, 0o700 dirs). Windows: NTFS ACLs
-//! govern access - new files inherit ACLs from their parent directory, so the
-//! restriction helpers are documented no-ops there.
+//! File permission policy. Unix: owner-only mode bits (0o600 files, 0o700
+//! dirs). Windows: NTFS ACLs govern access - new files inherit ACLs from
+//! their parent directory, so the restriction helpers are no-ops there.
 
 use std::fs::OpenOptions;
 use std::path::Path;
@@ -29,10 +27,9 @@ pub fn restrict_file(path: &Path) -> std::io::Result<()> {
 ///
 /// # Errors
 ///
-/// Does not error: inherited ACLs apply; see the ACL note above.
+/// Does not error.
 #[cfg(not(unix))]
 pub fn restrict_file(_path: &Path) -> std::io::Result<()> {
-    // Windows: inherited ACLs apply; see the ACL note above.
     Ok(())
 }
 
@@ -52,10 +49,9 @@ pub fn restrict_dir(path: &Path) -> std::io::Result<()> {
 ///
 /// # Errors
 ///
-/// Does not error: inherited ACLs apply; see the ACL note above.
+/// Does not error.
 #[cfg(not(unix))]
 pub fn restrict_dir(_path: &Path) -> std::io::Result<()> {
-    // Windows: inherited ACLs apply; see the ACL note above.
     Ok(())
 }
 
@@ -125,8 +121,7 @@ pub fn is_readable_writable(path: &Path) -> bool {
 ///
 /// # Errors
 ///
-/// Returns the metadata I/O error, or an EACCES error when the permission
-/// bits deny a read for the effective user.
+/// The metadata I/O error, or EACCES when the permission bits deny a read.
 #[cfg(unix)]
 pub fn is_readable(path: &Path) -> Result<(), std::io::Error> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -149,8 +144,7 @@ pub fn is_readable(path: &Path) -> Result<(), std::io::Error> {
 ///
 /// # Errors
 ///
-/// Returns the open error when the file cannot be opened for reading
-/// (permission denied or missing).
+/// Returns the open error when the file cannot be opened for reading.
 #[cfg(not(unix))]
 pub fn is_readable(path: &Path) -> Result<(), std::io::Error> {
     // Windows: a read open probe is the equivalent permission test.
@@ -158,12 +152,11 @@ pub fn is_readable(path: &Path) -> Result<(), std::io::Error> {
 }
 
 /// Set the private mode on an already-open file (`fchmod`): exact bits despite
-/// the umask, and tightens a pre-existing loose file. Callers decide whether a
-/// failure is fatal.
+/// the umask; tightens a pre-existing loose file.
 ///
 /// # Errors
 ///
-/// Returns the underlying I/O error when the permission bits cannot be set.
+/// The underlying I/O error when the permission bits cannot be set.
 #[cfg(unix)]
 pub fn restrict_open_file(file: &std::fs::File) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -175,10 +168,9 @@ pub fn restrict_open_file(file: &std::fs::File) -> std::io::Result<()> {
 ///
 /// # Errors
 ///
-/// Does not error: inherited ACLs apply; see the ACL note above.
+/// Does not error.
 #[cfg(not(unix))]
 pub fn restrict_open_file(_file: &std::fs::File) -> std::io::Result<()> {
-    // Windows: inherited ACLs apply; see the ACL note above.
     Ok(())
 }
 
@@ -213,9 +205,6 @@ pub fn create_dir_all_private(path: &Path) -> std::io::Result<()> {
 mod windows_tests {
     use super::*;
 
-    /// The probes a Windows runner must verify: the restriction helpers
-    /// are no-ops (inherited ACLs) that never break access, and the
-    /// readability checks are open probes.
     #[test]
     fn restriction_is_a_no_op_and_probes_match_open_semantics() {
         let dir = std::env::temp_dir().join(format!("pa-perms-{}", std::process::id()));

@@ -125,20 +125,18 @@ impl PackageManager {
     ///
     /// # Errors
     ///
-    /// Returns an error when a configured package source cannot be parsed,
-    /// installed, or refreshed (npm/git failures, missing local paths).
+    /// Error when a configured package source cannot be parsed, installed, or refreshed.
     pub fn resolve(&mut self) -> Result<ResolvedPaths> {
         self.resolve_with_on_missing(None)
     }
 
     /// [`PackageManager::resolve`] with a missing-source policy callback
-    /// (`None` installs missing sources directly, the resource-loader path).
+    /// (`None` installs missing sources directly).
     ///
     /// # Errors
     ///
-    /// Returns an error when a configured package source cannot be parsed,
-    /// installed, or refreshed (npm/git failures, missing local paths), or
-    /// when the missing-source policy chooses to error.
+    /// Error when a package source cannot be parsed, installed, or refreshed,
+    /// or the policy errors.
     pub fn resolve_with_on_missing(
         &mut self,
         on_missing: Option<&mut dyn FnMut(&str) -> MissingSourceAction>,
@@ -147,8 +145,6 @@ impl PackageManager {
         let project = self.settings().project_settings().clone();
         let mut accumulator = ResourceAccumulator::default();
 
-        // Project entries precede user entries; the dedupe keeps the project
-        // entry when the same package identity appears in both scopes.
         let mut all_packages: Vec<(serde_json::Value, SourceScope)> = Vec::new();
         for entry in project.packages.iter().flatten() {
             all_packages.push((entry.clone(), SourceScope::Project));

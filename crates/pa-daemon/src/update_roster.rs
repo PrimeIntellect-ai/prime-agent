@@ -1,23 +1,8 @@
-//! The update roster assembly: the durable snapshot of sessions,
-//! workers, subagents, and heartbeats written at `Snapshotted`, fsynced
-//! before the `Prepared` ack.
+//! The update roster assembly: the durable snapshot of sessions, workers,
+//! subagents, and heartbeats written at `Snapshotted`, fsynced before the
+//! `Prepared` ack.
 //!
-//! The roster is a *projection*: the durable truth stays where it lives
-//! (`sessions/*.jsonl`, the workers' recovery journals,
-//! `session-artifacts/<id>/scheduled-jobs.json`, the RLM ledger and its
-//! per-child display files). Nothing here writes, moves, or archives any of
-//! those - in particular heartbeat rows are read out of
-//! `scheduled-jobs.json` only, and deliberately carry just the re-arm fields
-//! (`status`, `next_run_at`): no archive flag exists anywhere in the update
-//! flow.
-//!
-//! Session rows mix three sources: the worker's live `update_snapshot`
-//! reply (queue, in-flight flags, durable session id), the supervisor's
-//! worker descriptor (active id, name, create payload, respawn env), and
-//! the ledger (the `rlm_children` flag). Where the Rust engine cannot see
-//! the TS-era granularity (streaming vs bash vs retry all live inside a
-//! busy turn), the row reports the honest superset - documented on the
-//! row, not guessed per flag.
+//! The roster is a *projection*: the durable truth stays where it lives.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -46,8 +31,7 @@ pub(crate) struct WorkerSnapshot {
 }
 
 /// The supervisor identity recorded into the roster and the prepared
-/// marker (pid + start id + generation, the TS `getProcessStartId`
-/// contract).
+/// marker (pid + start id + generation, the TS `getProcessStartId` contract).
 pub(crate) fn supervisor_identity(generation: String) -> UpdateSupervisorIdentity {
     let pid = std::process::id();
     UpdateSupervisorIdentity {
@@ -68,8 +52,7 @@ fn file_stem(path: &str) -> String {
         .unwrap_or_default()
 }
 
-/// One roster session row, assembled from the worker's snapshot and the
-/// descriptor.
+/// One roster session row, assembled from the worker's snapshot and the descriptor.
 fn session_row(
     snapshot: &WorkerSnapshot,
     child_parents: &HashSet<PathBuf>,
@@ -128,8 +111,7 @@ fn session_row(
             "create": serde_json::to_value(&descriptor.create_command)?,
         }),
         // The Rust engine has no separate next-turn custom-message lane:
-        // pending prompts ride the steering/follow-up lanes (persisted to
-        // the worker recovery journal and restored on respawn), so
+        // pending prompts ride the steering/follow-up lanes, so
         // `next_turn` is empty and `actions` carries the lane snapshot.
         queue: UpdateRosterQueue {
             next_turn: Vec::new(),
@@ -138,9 +120,8 @@ fn session_row(
         in_flight: UpdateRosterInFlight {
             streaming: busy,
             compacting,
-            // Tool work, retries, and provider streaming all live inside a
-            // busy turn on this build; `streaming` is the continuation
-            // signal.
+            // Tool work, retries, and streaming all live inside a busy
+            // turn on this build; `streaming` is the continuation signal.
             bash_running: false,
             rlm_children: has_running_children,
             retrying: false,
@@ -234,10 +215,7 @@ fn subagent_rows(
 }
 
 /// Heartbeat rows (spec §8): a read-only projection of every
-/// `scheduled-jobs.json` under the session-artifacts tree (per-session
-/// partitions and per-child RLM partitions, two levels). Only `active`
-/// and `paused` jobs project - completed/cancelled jobs are not re-armed -
-/// and the update flow never writes, moves, or archives the files.
+/// `scheduled-jobs.json`; only `active` and `paused` jobs project.
 fn heartbeat_rows(agent_dir: &Path) -> Vec<UpdateRosterHeartbeat> {
     let mut rows = Vec::new();
     for job in scan_scheduled_jobs(agent_dir) {
@@ -268,10 +246,8 @@ fn heartbeat_rows(agent_dir: &Path) -> Vec<UpdateRosterHeartbeat> {
     rows
 }
 
-/// Every scheduled job in the agent's session artifacts (spec §6 step 3's
-/// scan; spec §8: `scheduled-jobs.json` is the only write path and is never
-/// written, moved, or archived by the update flow). Shared by the roster
-/// projection (heartbeat rows) and the boot re-arm pass.
+/// Every scheduled job in the agent's session artifacts (spec §8: `scheduled-jobs.json` is the only
+/// write path). Shared by the roster projection and the boot re-arm pass.
 pub(crate) fn scan_scheduled_jobs(agent_dir: &Path) -> Vec<pa_core::cron::AgentCronJob> {
     let artifacts_root = agent_dir.join("session-artifacts");
     let Ok(entries) = std::fs::read_dir(&artifacts_root) else {
@@ -504,8 +480,8 @@ mod tests {
     fn setup(agent_dir: &Path) -> (RlmSpawnLedger, PathBuf) {
         let sessions_dir = agent_dir.join("sessions");
         std::fs::create_dir_all(&sessions_dir).unwrap();
-        // `live_edges` keeps only edges whose parent and child session files
-        // exist on disk, so the fixtures are real files in the tempdir.
+        // `live_edges` keeps only edges whose parent and child session
+        // files exist on disk, so the fixtures are real files.
         for session_id in ["p1", "c1"] {
             std::fs::write(sessions_dir.join(format!("{session_id}.jsonl")), "").unwrap();
         }
@@ -606,8 +582,7 @@ mod tests {
         );
         assert!(root.should_resume);
         assert!(root.queue.actions.get("steering").is_some());
-        // The Rust engine has no next-turn lane: pending prompts live in
-        // the lane snapshot, not next_turn.
+        // No next-turn lane: pending prompts live in the lane snapshot.
         assert!(root.queue.next_turn.is_empty());
         let child = &roster.sessions[1];
         assert_eq!(child.kind, UpdateRosterSessionKind::Subagent);
@@ -640,8 +615,7 @@ mod tests {
         assert_eq!(sub.depth, 1);
         assert!(sub.display_file.ends_with("rlm-subagent.json"));
 
-        // Heartbeats: the projection carries re-arm fields only; cancelled
-        // jobs never project.
+        // Heartbeats: re-arm fields only; cancelled jobs never project.
         assert_eq!(roster.heartbeats.len(), 1);
         let beat = &roster.heartbeats[0];
         assert_eq!(beat.job_id, "j1");

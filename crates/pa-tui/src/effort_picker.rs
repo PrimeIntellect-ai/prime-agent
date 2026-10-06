@@ -1,16 +1,13 @@
 //! The `/effort` inline picker: the session's thinking levels rendered
-//! through the inline-picker component (TS `ThinkingSelectorComponent`
-//! reduced to this seam — list, select, apply; Esc cancels). Enter applies
-//! the picked level through the caller; the picker itself owns only list
-//! state.
+//! through the inline-picker component. Enter applies the picked level
+//! through the caller; the picker itself owns only list state.
 
 use crate::config_selector::{ConfigSelector, SelectorAction, SelectorKind, SelectorRow};
 use crate::keybindings::KeybindingsManager;
 use crate::theme::Theme;
 use crate::Line;
 
-/// The reasoning-level descriptions the TS selector lists under each level
-/// (TS `LEVEL_DESCRIPTIONS`).
+/// The reasoning-level descriptions the TS selector lists under each level.
 #[must_use]
 pub fn level_description(level: &str) -> &'static str {
     match level {
@@ -36,7 +33,7 @@ pub enum EffortPickerAction {
     None,
 }
 
-/// The outcome of dispatching `/effort [level]` (TS `handleEffortCommand`).
+/// The outcome of dispatching `/effort [level]`.
 #[derive(Debug)]
 pub(crate) enum EffortCommandOutcome {
     /// Open the picker over the session's levels.
@@ -76,9 +73,8 @@ pub(crate) fn effort_command(
     EffortCommandOutcome::Apply { level: requested }
 }
 
-/// One picker over the session's thinking levels. Rows carry the level as
-/// the identity key; the selector owns filtering, navigation, and
-/// rendering.
+/// One picker over the session's thinking levels; the selector owns
+/// filtering, navigation, and rendering.
 #[derive(Debug)]
 pub struct EffortPicker {
     selector: ConfigSelector,
@@ -86,9 +82,8 @@ pub struct EffortPicker {
 }
 
 impl EffortPicker {
-    /// Build the picker: one item row per level (label = level,
-    /// description as the secondary filter field), the current level
-    /// checked.
+    /// Build the picker: one item row per level (label = level, description
+    /// as the secondary filter field), the current level checked.
     #[must_use]
     pub fn new(levels: &[String], current: Option<&str>) -> Self {
         let rows = levels
