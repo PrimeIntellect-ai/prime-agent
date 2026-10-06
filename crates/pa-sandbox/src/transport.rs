@@ -85,6 +85,7 @@ impl std::fmt::Debug for TransportRequest {
             .field("headers", &header_names)
             .field("body", &self.body.as_ref().map(|_| "[redacted]"))
             .field("timeout", &self.timeout)
+            .field("max_response_bytes", &self.max_response_bytes)
             .finish()
     }
 }
@@ -396,8 +397,9 @@ mod tests {
             method: Method::Post,
             url: "https://api.example.com/api/v1/sandbox".to_string(),
             headers: vec![("Authorization".to_string(), format!("Bearer {key}"))],
-            body: Some(format!(r#"{{"secrets":{{"PRIVATE":"{key}"}}}}"#)),
-            timeout: Duration::from_secs(5),
+            body: Some(format!(r#"{{"secrets":{{"PRIVATE":"{key}"}}}}"#).into_bytes()),
+            timeout: Some(Duration::from_secs(5)),
+            max_response_bytes: None,
         };
         let rendered = format!("{request:?}");
         assert!(!rendered.contains(key));

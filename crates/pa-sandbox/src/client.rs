@@ -73,6 +73,7 @@ impl<T: SandboxTransport + std::fmt::Debug> std::fmt::Debug for PrimeSandboxClie
             .field("base_url", &self.base_url)
             .field("team_id", &self.team_id)
             .field("request_timeout", &self.request_timeout)
+            .field("allow_insecure_localhost", &self.allow_insecure_localhost)
             .finish()
     }
 }
