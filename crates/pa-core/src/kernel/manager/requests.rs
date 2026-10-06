@@ -221,6 +221,9 @@ impl ReplKernelManager {
                 };
                 // A blocked request write holds the stdin mutex. Do not let an
                 // interrupt queued behind it postpone the force-abort forever.
+                // Dropping the interrupt at this deadline cannot tear its
+                // frame: the ~60-byte frame is one write on a non-blocking
+                // pipe, all-or-nothing below PIPE_BUF.
                 let deadline =
                     tokio::time::Instant::now() + Duration::from_millis(KERNEL_ABORT_GRACE_MS);
                 tokio::select! {
@@ -242,7 +245,7 @@ impl ReplKernelManager {
         let mut frame = request.to_json();
         frame["id"] = json!(request_id);
 
-        let mut send_task = {
+        let (mut send_task, stdin_retire) = {
             let writer = lock(&self.inner.child).as_ref().map(|c| c.stdin.clone());
             let Some(stdin) = writer else {
                 {
@@ -253,7 +256,11 @@ impl ReplKernelManager {
             };
             let mut line = frame.to_string();
             line.push('\n');
-            tokio::spawn(async move {
+            // The retire handle below must name this exact kernel's stream;
+            // re-deriving it from `child` later could reach a restarted
+            // kernel's stdin.
+            let stdin_retire = stdin.clone();
+            let send_task = tokio::spawn(async move {
                 let mut guard = stdin.lock().await;
                 let Some(stdin) = guard.as_mut() else {
                     return Err(anyhow!("Kernel stdin is not connected"));
@@ -261,7 +268,8 @@ impl ReplKernelManager {
                 stdin.write_all(line.as_bytes()).await?;
                 stdin.flush().await?;
                 Ok(())
-            })
+            });
+            (send_task, stdin_retire)
         };
 
         let mut settled_result: Option<anyhow::Result<InternalExecuteResult>> = None;
@@ -282,7 +290,16 @@ impl ReplKernelManager {
                         // A blocked request writer would otherwise retain stdin's
                         // mutex after the caller returned, wedging shutdown too.
                         send_task.abort();
-                        let _ = send_task.await;
+                        // A cancelled write leaves the request unsent or
+                        // torn: the runtime never sees it, its execution never
+                        // settles, and every later request fails as busy.
+                        // Retire stdin so the kernel is replaced.
+                        if matches!(send_task.await, Err(e) if e.is_cancelled()) {
+                            // Detached: a queued stdin writer must not park this request.
+                            tokio::spawn(async move {
+                                *stdin_retire.lock().await = None;
+                            });
+                        }
                         settled_result = Some(settled);
                     } else {
                         // Surfacing a failed write outranks the settled cell.
@@ -370,6 +387,77 @@ mod tests {
         assert!(
             stdin.try_lock().is_ok(),
             "the aborted request must release the stdin writer lock"
+        );
+        manager.kill();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelled_request_write_retires_the_kernel() {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+
+        // Protocol v3: ready, then idles without reading stdin until the
+        // sibling "go" file appears, then answers execute frames, ignores
+        // glued garbage (a torn prefix makes any next line invalid), and
+        // never answers interrupts (that would settle the aborted execution).
+        const TORN_FRAME_RUNTIME: &str = r#"#!/usr/bin/env python3
+import json
+import os
+import sys
+import time
+
+print(json.dumps({"event": "ready", "protocol": 3, "python": "3.13.0"}), flush=True)
+go = os.path.join(os.path.dirname(os.path.abspath(__file__)), "go")
+while not os.path.exists(go):
+    time.sleep(0.01)
+for line in sys.stdin:
+    try:
+        req = json.loads(line)
+    except Exception:
+        continue
+    if req.get("type") == "execute":
+        print(json.dumps({"event": "done", "id": req.get("id"), "status": "ok"}), flush=True)
+"#;
+
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let python = dir.path().join("torn-frame-kernel");
+        std::fs::write(&python, TORN_FRAME_RUNTIME).expect("write fake kernel");
+        std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod fake kernel");
+        let manager = ReplKernelManager::new(crate::kernel::shared::KernelManagerOptions {
+            python: Some(python),
+            ..Default::default()
+        });
+        manager
+            .start(KernelStartOptions::default())
+            .await
+            .expect("ready handshake");
+        // Larger than the stdin pipe, so the 100ms bound force-aborts while
+        // the request write is still mid-flight and tears the frame.
+        let code = "x".repeat(1024 * 1024);
+        let first = tokio::time::timeout(
+            Duration::from_secs(4),
+            manager.execute_bounded(&code, ExecuteOptions::default(), Some(100)),
+        )
+        .await
+        .expect("the bounded execute must settle")
+        .expect("bounded execute returns a result");
+        assert_eq!(first.status, ExecuteStatus::Aborted);
+        // Let the fake kernel read: EOF (retired stream) exits it, while
+        // glued garbage keeps the unfixed kernel Running. The request below
+        // observes the outcome: shutdown error or busy after the 5s window.
+        std::fs::write(dir.path().join("go"), b"").expect("write go file");
+        // Only the wait matters here; is_defunct() below discriminates.
+        let _ = tokio::time::timeout(
+            Duration::from_secs(10),
+            manager.execute_bounded("1+1", ExecuteOptions::default(), None),
+        )
+        .await
+        .expect("the next request must settle");
+        assert!(
+            manager.is_defunct(),
+            "a cancelled request write must retire the kernel"
         );
         manager.kill();
     }
