@@ -877,12 +877,15 @@ impl LockDir {
 
     /// Put a parked directory back at the lock path: `RENAME_NOREPLACE`
     /// on Linux (an atomic refusal when the path was re-created
-    /// meanwhile); elsewhere the path is stat'ed first and the
-    /// microseconds window is disclosed (a lock created between the stat
-    /// and the rename is replaced - non-Linux unix only). A restore that
-    /// cannot happen leaves the park behind - inert garbage the protocol
-    /// never reads - and the displaced occupant's own machinery detects
-    /// the foreign lock at its next identity check and fails closed.
+    /// meanwhile), degrading to the stat-then-rename protocol when the
+    /// filesystem under it rejects the flag; elsewhere the path is
+    /// stat'ed first and the microseconds window is disclosed (a lock
+    /// created between the stat and the rename is replaced - non-Linux
+    /// unix, and Linux mounts without `RENAME_NOREPLACE`). A restore
+    /// that cannot happen leaves the park behind - inert garbage the
+    /// protocol never reads - and the displaced occupant's own machinery
+    /// detects the foreign lock at its next identity check and fails
+    /// closed.
     fn restore_parked(parked: &Path, path: &Path) -> io::Result<()> {
         #[cfg(target_os = "linux")]
         {
@@ -942,19 +945,59 @@ impl LockDir {
                         );
                         Ok(())
                     }
+                    // Filesystems without `RENAME_NOREPLACE` (some FUSE,
+                    // NFS, overlay mounts answer EINVAL/ENOSYS/EOPNOTSUPP
+                    // to the flag): the atomic refusal is unavailable, so
+                    // the restore degrades to the disclosed stat-then-rename
+                    // protocol - the same bounded window the non-Linux unix
+                    // arm always runs - rather than failing the reclaim and
+                    // leaving the lock parked off the public path.
+                    _ if matches!(
+                        error.raw_os_error(),
+                        Some(libc::EINVAL | libc::ENOSYS | libc::EOPNOTSUPP | libc::ENOTTY)
+                    ) =>
+                    {
+                        tracing::warn!(
+                            "the filesystem under {} does not support RENAME_NOREPLACE (the parked-lock restore degrades to the stat-then-rename protocol)",
+                            path.display()
+                        );
+                        Self::restore_parked_plain_rename(parked, path)
+                    }
                     _ => Err(error),
                 };
             }
         }
         #[cfg(not(target_os = "linux"))]
         {
-            // The disclosed stat-then-rename window: a re-taken path is
-            // usually a hold in flight, so the restore retries for a short
-            // bounded window (the same budget as the linux arm) before
-            // the park is abandoned.
-            let mut attempts = 10;
-            loop {
-                if fs::symlink_metadata(path).is_ok() {
+            Self::restore_parked_plain_rename(parked, path)
+        }
+    }
+
+    /// The disclosed stat-then-rename restore (non-Linux unix, and the
+    /// Linux degrade for filesystems without `RENAME_NOREPLACE`): a
+    /// re-taken path is usually a hold in flight, so the restore retries
+    /// for a short bounded window before the park is abandoned.
+    fn restore_parked_plain_rename(parked: &Path, path: &Path) -> io::Result<()> {
+        let mut attempts = 10;
+        loop {
+            if fs::symlink_metadata(path).is_ok() {
+                if attempts == 0 {
+                    tracing::warn!(
+                        "abandoned a parked lock directory beside {} (the path stayed re-taken)",
+                        path.display()
+                    );
+                    return Ok(());
+                }
+                attempts -= 1;
+                std::thread::sleep(Duration::from_millis(20));
+                continue;
+            }
+            match fs::rename(parked, path) {
+                Ok(()) => return Ok(()),
+                // The park vanished (a concurrent cleanup): done.
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+                // The path was taken in the stat-rename window: retry.
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                     if attempts == 0 {
                         tracing::warn!(
                             "abandoned a parked lock directory beside {} (the path stayed re-taken)",
@@ -964,24 +1007,8 @@ impl LockDir {
                     }
                     attempts -= 1;
                     std::thread::sleep(Duration::from_millis(20));
-                    continue;
                 }
-                match fs::rename(parked, path) {
-                    Ok(()) => return Ok(()),
-                    // The path was taken in the stat-rename window: retry.
-                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                        if attempts == 0 {
-                            tracing::warn!(
-                                "abandoned a parked lock directory beside {} (the path stayed re-taken)",
-                                path.display()
-                            );
-                            return Ok(());
-                        }
-                        attempts -= 1;
-                        std::thread::sleep(Duration::from_millis(20));
-                    }
-                    Err(error) => return Err(error),
-                }
+                Err(error) => return Err(error),
             }
         }
     }
@@ -1004,6 +1031,13 @@ impl LockDir {
     fn claim_occupant(path: &Path, stale_after: Duration) -> io::Result<std::os::fd::OwnedFd> {
         use std::os::fd::AsRawFd;
         use std::os::unix::fs::MetadataExt;
+        // The claim is bounded: a mismatched occupant restarts the loop
+        // on the new one, but a path that persistently fails its
+        // fd-vs-path identity check (a degraded stat, a churning
+        // occupant) must not spin the acquire forever - after the cap
+        // the claim reports contention, the caller's honest conservative
+        // answer.
+        let mut attempts = 8u32;
         loop {
             // The open resolves the path's CURRENT occupant atomically.
             let dir = match fs::File::open(path) {
@@ -1067,8 +1101,20 @@ impl LockDir {
                 }
                 // The occupant changed under the claim (or vanished, or
                 // the stat failed): the fd's flock released with this
-                // iteration's drop - loop to claim the NEW occupant.
-                _ => {}
+                // iteration's drop - loop to claim the NEW occupant,
+                // within the attempt cap above.
+                _ => {
+                    attempts = attempts.saturating_sub(1);
+                    if attempts == 0 {
+                        return Err(io::Error::new(
+                            io::ErrorKind::WouldBlock,
+                            format!(
+                                "the occupant at {} did not stabilize for the claim",
+                                path.display()
+                            ),
+                        ));
+                    }
+                }
             }
         }
     }
@@ -1715,5 +1761,28 @@ mod tests {
             lock_of(&file).is_dir(),
             "a foreign mtime is never ours to remove"
         );
+    }
+
+    /// The plain-rename restore (the non-Linux arm, and the Linux
+    /// degrade for filesystems without `RENAME_NOREPLACE` - cursor's
+    /// missing-degraded-fallback finding): a free path takes the park
+    /// back atomically enough for the protocol, and a park that
+    /// vanished to a concurrent cleanup is a success, never an error.
+    #[test]
+    #[cfg(unix)]
+    fn the_plain_rename_restore_takes_a_free_path_and_tolerates_a_vanished_park() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json.lock");
+        let parked = LockDir::park_name_of(&path);
+        // The displaced park: an empty directory beside the path.
+        std::fs::create_dir(&parked).unwrap();
+        LockDir::restore_parked_plain_rename(&parked, &path).unwrap();
+        assert!(path.is_dir(), "the park returned to the public path");
+        assert!(!parked.exists(), "the park name is spent");
+        std::fs::remove_dir(&path).unwrap();
+        // The vanished park: a concurrent cleanup already removed it.
+        LockDir::restore_parked_plain_rename(&parked, &path)
+            .unwrap_or_else(|error| panic!("a vanished park is done, not an error: {error}"));
+        assert!(!path.exists(), "a vanished park restores nothing");
     }
 }
