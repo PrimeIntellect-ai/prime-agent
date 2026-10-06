@@ -117,11 +117,20 @@ impl Client {
                     return serde_json::from_str(line.trim())
                         .map_err(|error| format!("invalid supervisor line: {error}"));
                 }
-                Err(error) => {
+                // Only the poll timeout (WouldBlock on Unix, TimedOut on
+                // Windows) means "no line yet". Any other read error — a
+                // reset or broken socket, invalid UTF-8 — is persistent,
+                // so retrying would busy-loop the rest of the command
+                // budget instead of failing the trial fast.
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        || error.kind() == std::io::ErrorKind::TimedOut =>
+                {
                     if Instant::now() >= deadline {
                         return Err(format!("timed out reading from the supervisor: {error}"));
                     }
                 }
+                Err(error) => return Err(format!("supervisor socket error: {error}")),
             }
         }
     }
@@ -828,6 +837,7 @@ fn run(_config: &FactoryEvalConfig) -> Result<(), String> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use std::os::unix::net::UnixStream;
 
     /// The expired socket wait must kill and reap the child instead of
     /// panicking: a panic leaves the spawned supervisor alive (std's
@@ -861,6 +871,67 @@ mod tests {
         assert!(
             gone.success(),
             "the child was killed and reaped (pid {pid} still lives)"
+        );
+    }
+
+    /// A read error that is not the poll timeout is persistent — an
+    /// undecodable frame keeps failing — so `read_line` must fail fast
+    /// instead of retrying it like a poll timeout: the pre-fix arm masked
+    /// a protocol violation behind the command deadline (which for a trial
+    /// turn is the whole trial timeout), polling the rest of the budget
+    /// away while the trial still read as live.
+    #[test]
+    fn a_persistent_read_error_fails_fast_instead_of_spinning() {
+        let (driver, mut peer) = UnixStream::pair().expect("create the socket pair");
+        let writer = driver.try_clone().expect("clone the driver side");
+        peer.write_all(&[0xff, b'\n'])
+            .expect("script the undecodable frame");
+        let mut client = Client {
+            reader: BufReader::new(driver),
+            writer,
+            request_id: 0,
+        };
+        let started = Instant::now();
+        let error = client
+            .read_line(Duration::from_secs(2))
+            .expect_err("an undecodable frame must fail the read");
+        assert!(
+            error.contains("supervisor socket error") && error.contains("valid UTF-8"),
+            "{error}"
+        );
+        // The error surfaced on the first read, long before the budget.
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "the read failed fast, waited {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// The poll timeout itself stays retryable: a frame that arrives after
+    /// the 100ms read window times out with `WouldBlock`, and the client
+    /// must keep polling until the line completes — the fragmented-frame
+    /// retry the hello read depends on.
+    #[test]
+    fn a_poll_timeout_is_retried_until_the_line_arrives() {
+        let (driver, mut peer) = UnixStream::pair().expect("create the socket pair");
+        let writer = driver.try_clone().expect("clone the driver side");
+        let mut client = Client {
+            reader: BufReader::new(driver),
+            writer,
+            request_id: 0,
+        };
+        let sender = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            peer.write_all(b"{\"type\":\"daemon_hello\"}\n")
+                .expect("send the delayed frame");
+        });
+        let line = client
+            .read_line(Duration::from_secs(2))
+            .expect("the delayed frame must arrive");
+        sender.join().expect("the sender finished");
+        assert_eq!(
+            line.get("type").and_then(Value::as_str),
+            Some("daemon_hello")
         );
     }
 }
