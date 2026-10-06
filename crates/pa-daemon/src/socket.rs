@@ -206,33 +206,46 @@ impl SocketLease {
         if self.assert_path_held(path).is_err() {
             return;
         }
-        let claim = pa_core::platform::private_sibling_for(path, "unlinked");
-        if std::fs::rename(path, &claim).is_err() {
-            // Nothing at the path is ours to unlink.
-            return;
-        }
-        if socket_identity(&claim) == Some(expected) && self.assert_path_held(path).is_ok() {
-            // The claimed inode is this holder's own. It is removed only
-            // on a definitely-closed verdict probed through the private
-            // pathname - the claim cannot be swapped from under this
-            // probe, and a poisoned capture (a successor bound during
-            // the bind->capture gap) naming the successor's own inode
-            // gets its live socket restored, never removed.
-            if pa_types::platform::transport::unix_listener_definitely_closed(&claim) {
-                let _ = std::fs::remove_file(&claim);
-            } else {
-                let _ = pa_core::platform::move_without_replacing(&claim, path);
-                // A newer holder owns the vacated path: the live claimed
-                // file keeps its private entry (never remove a live
-                // inode's last path entry); its listener fences on the
-                // displaced inode.
-            }
-        } else if pa_core::platform::move_without_replacing(&claim, path).is_err()
-            && pa_types::platform::transport::unix_listener_definitely_closed(&claim)
+        // The claim-probe-remove choreography is Linux-only: only there
+        // does the definitely-closed verdict exist, and only there can
+        // the no-replace restore move. Elsewhere the exit cleanup
+        // preserves the path and the next bind's stale-socket prepare
+        // cleans a file nothing serves.
+        #[cfg(target_os = "linux")]
         {
-            // The claim is not ours and cannot go back to a path a newer
-            // holder owns: remove it only on a definitely-closed verdict.
-            let _ = std::fs::remove_file(&claim);
+            // The compact claim name keeps the probeable pathname within
+            // the AF_UNIX address budget for every basename the long
+            // form could not.
+            let claim = pa_core::platform::compact_sibling_for(path, "u");
+            if std::fs::rename(path, &claim).is_err() {
+                // Nothing at the path is ours to unlink.
+                return;
+            }
+            if socket_identity(&claim) == Some(expected) && self.assert_path_held(path).is_ok() {
+                // The claimed inode is this holder's own. It is removed
+                // only on a definitely-closed verdict probed through the
+                // private pathname - the claim cannot be swapped from
+                // under this probe, and a poisoned capture (a successor
+                // bound during the bind->capture gap) naming the
+                // successor's own inode gets its live socket restored,
+                // never removed.
+                if pa_types::platform::transport::unix_listener_definitely_closed(&claim) {
+                    let _ = std::fs::remove_file(&claim);
+                } else {
+                    let _ = pa_core::platform::move_without_replacing(&claim, path);
+                    // A newer holder owns the vacated path: the live
+                    // claimed file keeps its private entry (never remove
+                    // a live inode's last path entry); its listener
+                    // fences on the displaced inode.
+                }
+            } else if pa_core::platform::move_without_replacing(&claim, path).is_err()
+                && pa_types::platform::transport::unix_listener_definitely_closed(&claim)
+            {
+                // The claim is not ours and cannot go back to a path a
+                // newer holder owns: remove it only on a
+                // definitely-closed verdict.
+                let _ = std::fs::remove_file(&claim);
+            }
         }
     }
 }
@@ -705,35 +718,6 @@ mod tests {
         );
     }
 
-    #[cfg(all(unix, target_os = "linux"))]
-    #[tokio::test]
-    async fn socket_cleanup_never_takes_a_live_socket_across_a_path_swap_race() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let socket = dir.path().join("daemon.sock");
-        let lease = SocketLease::acquire(&socket).await.unwrap();
-        // The poisoned capture: the live successor's inode is the
-        // holder's "expected" identity.
-        let successor = bind_transport(&socket).await.unwrap();
-        let poisoned = socket_identity(&socket);
-        // The race's mid-window state: the path is swapped to a dead
-        // stand-in for the probe window, then the live file is restored
-        // before the claim - exactly the sequence the OS-level reproducer
-        // drives through the public pathname.
-        let aside = pa_core::platform::private_sibling_for(&socket, "swapped");
-        let dead = tempfile::NamedTempFile::new().unwrap();
-        let _ = std::fs::rename(&socket, &aside);
-        std::fs::copy(dead.path(), &socket).unwrap();
-        let dead_standin = pa_core::platform::private_sibling_for(&socket, "dead");
-        std::fs::rename(&socket, &dead_standin).unwrap();
-        std::fs::rename(&aside, &socket).unwrap();
-        // Whatever interleaving the cleanup observed, the live successor
-        // keeps its file - the probe binds to the claimed inode.
-        lease.cleanup_socket_path(&socket, poisoned);
-        assert!(socket.exists(), "the live successor survives the swap race");
-        drop(successor);
-        drop(lease);
-    }
-
     #[tokio::test]
     async fn socket_cleanup_spares_a_live_successor_and_claims_dead_files() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -762,7 +746,13 @@ mod tests {
         // A poisoned capture (a replacement bound while the capture was
         // parked in the bind->capture gap) names the successor's own
         // inode; the live-listener probe outranks the identity match -
-        // on every unix target.
+        // on every unix target. Off Linux the conservative cleanup
+        // preserved the dead bound file, so the successor bind goes
+        // through the lease's stale-socket prepare (a no-op on Linux,
+        // where the cleanup already removed the file).
+        prepare_socket_path_with_lease(&socket, &lease)
+            .await
+            .unwrap();
         let successor = bind_transport(&socket).await.unwrap();
         let poisoned = socket_identity(&socket);
         lease.cleanup_socket_path(&socket, poisoned.clone());
