@@ -1475,15 +1475,21 @@ mod tests {
         std::fs::write(&file, "{}").unwrap();
         let guard = LockDir::acquire(&file, MIN_STALE).unwrap();
         let path = lock_of(&file);
-        // The thief's rmdir+mkdir re-creates the lock directory; a fresh
-        // mkdir in between pins the recreator to a different inode, the
-        // way a real successor's mkdir is one allocation among others.
-        std::fs::remove_dir(&path).unwrap();
-        std::fs::create_dir(dir.path().join("thief-bumper")).unwrap();
+        // The thief's rmdir+mkdir re-creates the lock directory. A plain
+        // immediate steal can land the recreated directory back on the
+        // just-freed inode number on this filesystem (the identity-pair
+        // collision class), so the steal pins the acquired inode out of
+        // the allocator first: the acquired directory is renamed to a
+        // parking name (its inode stays ALLOCATED, so the recreation
+        // cannot reuse it), then the thief's mkdir takes the path - the
+        // deterministic form of a real successor's steal, with the
+        // evidence preserved.
+        let parked = dir.path().join("acquired-parked");
+        std::fs::rename(&path, &parked).unwrap();
         std::fs::create_dir(&path).unwrap();
         assert!(
             guard.is_stolen(),
-            "the recreated lock is not the acquired one"
+            "the recreated lock is not the acquired one (the acquired inode is pinned under the park)"
         );
         let error = guard
             .refresh()
@@ -1503,11 +1509,12 @@ mod tests {
             .unwrap()
             .release_when_owned();
         assert!(!path.exists(), "an owned guard releases normally");
-        // After the steal (rmdir+mkdir, a fresh allocation in between),
-        // the successor's lock directory survives.
+        // After the steal (the acquired directory parked out of the
+        // allocator first so the recreation cannot reuse its inode), the
+        // successor's lock directory survives.
         let guard = LockDir::acquire(&file, MIN_STALE).unwrap();
-        std::fs::remove_dir(&path).unwrap();
-        std::fs::create_dir(dir.path().join("thief-bumper")).unwrap();
+        let parked = dir.path().join("thief-parked");
+        std::fs::rename(&path, &parked).unwrap();
         std::fs::create_dir(&path).unwrap();
         guard.release_when_owned();
         assert!(
@@ -1606,20 +1613,34 @@ mod tests {
             .unwrap()
             .expect("the unix probe");
         *guard.owned_mtime.lock().unwrap() = Some(probe);
-        // The takeover between the tick's write and its re-stat:
-        // rmdir+mkdir (the bumper pins the thief to a fresh inode).
-        std::fs::remove_dir(&path).unwrap();
-        std::fs::create_dir(dir.path().join("thief-bumper")).unwrap();
+        // The takeover between the tick's write and its re-stat: the
+        // acquired directory is renamed to a parking name first (its
+        // inode stays allocated, so the recreation at the path cannot
+        // reuse it), then the thief's mkdir takes the path - the
+        // deterministic form of the successor's takeover.
+        let parked = dir.path().join("thief-parked");
+        std::fs::rename(&path, &parked).unwrap();
         std::fs::create_dir(&path).unwrap();
         let error = guard
             .assert_probe_landed(Some(probe))
             .expect_err("the re-stat catches the successor's directory");
-        assert_eq!(error.to_string(), "the lock directory changed hands");
+        // Either half of the identity pair is a compromise report: the
+        // recreated directory's inode when it differs, the mtime that is
+        // not the recorded probe when the allocator reused the inode.
+        assert!(
+            error.to_string() == "the lock directory changed hands"
+                || error.to_string() == "the lock's mtime is not the one this guard wrote",
+            "an unexpected error for a compromised hold: {error}"
+        );
         // End to end: once stolen, no tick ever reports a fresh hold.
         let error = guard
             .refresh()
             .expect_err("a stolen lock is never refreshed");
-        assert_eq!(error.to_string(), "the lock directory changed hands");
+        assert!(
+            error.to_string() == "the lock directory changed hands"
+                || error.to_string() == "the lock's mtime is not the one this guard wrote",
+            "an unexpected error for a compromised hold: {error}"
+        );
     }
 
     /// The unwinding acquisition's cleanup: the just-created artifact is

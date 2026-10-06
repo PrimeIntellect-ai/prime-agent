@@ -293,23 +293,23 @@ pub async fn wait_for_hello(
 }
 
 /// Wait for a process identity to leave the process table (spec §9
-/// `Stopped`: the fence-free pid + start-id poll).
+/// `Stopped`: the fence-free pid + start-id poll) - consulting the SAME
+/// liveness predicate the stop window's fence uses
+/// ([`pa_daemon::supervisor_ownership::is_process_identity_alive`]), so
+/// the two waits can never disagree: an unanswerable liveness probe or
+/// an unreadable start id counts as ALIVE here exactly as it does at the
+/// fence's pin check, and a genuinely dead identity (a definitive
+/// `Ok(false)` or a start-id mismatch against a readable value) is dead
+/// in both. The old inline poll treated a probe error or an unreadable
+/// start id as EXITED, so the coordinator could proceed past the exit
+/// wait and then wedge on a fence pin the same process "lived" under.
 pub async fn wait_for_exit(identity: &UpdateProcessIdentity, budget_ms: u64) -> bool {
     let deadline = Instant::now() + Duration::from_millis(budget_ms.max(1));
     loop {
-        let Ok(alive) = pa_daemon::lease::is_process_alive(identity.pid as u32) else {
-            return true;
-        };
-        let start_id_matches = match &identity.process_start_id {
-            None => true,
-            Some(expected) => {
-                matches!(
-                    pa_daemon::lease::get_process_start_id(identity.pid as u32),
-                    Some(observed) if &observed == expected
-                )
-            }
-        };
-        if !alive || !start_id_matches {
+        if !pa_daemon::supervisor_ownership::is_process_identity_alive(
+            identity.pid as u32,
+            identity.process_start_id.as_deref(),
+        ) {
             return true;
         }
         if Instant::now() + BOOT_POLL >= deadline {

@@ -110,7 +110,7 @@ const STARTUP_FENCES_DIR_NAME: &str = "startup-fences";
 /// Returns an error when the override path is not valid Unicode and the
 /// fallback needs the home directory but [`crate::paths::home_dir`]
 /// cannot resolve it.
-pub fn registry_dir() -> Result<PathBuf> {
+fn registry_dir() -> Result<PathBuf> {
     match std::env::var_os(REGISTRY_DIR_ENV) {
         Some(dir) if !dir.is_empty() => Ok(PathBuf::from(dir)),
         _ => Ok(crate::paths::home_dir()?
@@ -347,7 +347,15 @@ struct StartupFenceRecord {
 /// platform does not expose keeps the pin alive, and an unanswerable
 /// liveness probe counts as alive (the lease API's rule - a live owner
 /// is never reclaimed on a probe failure; TS's kill(0) EPERM -> alive).
-fn is_process_identity_alive(pid: u32, process_start_id: Option<&str>) -> bool {
+///
+/// THE ONE liveness predicate for the stop window (shared with the
+/// coordinator's exit wait, pa-cli `wait_for_exit`): both the fence's
+/// pin check and the predecessor exit wait consult the same semantics,
+/// so no probe error or unreadable start id can make one path declare
+/// the process gone while the other keeps it alive - a split that would
+/// wedge the update between the two waits.
+#[must_use]
+pub fn is_process_identity_alive(pid: u32, process_start_id: Option<&str>) -> bool {
     if !crate::lease::is_process_alive(pid).unwrap_or(true) {
         return false;
     }
