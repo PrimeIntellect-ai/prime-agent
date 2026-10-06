@@ -507,12 +507,14 @@ impl Supervisor {
             // self-registrations immediately, not behind the whole
             // descriptor scan. The fan-out is capped (recovery_pacing) so
             // a large sessions dir cannot starve the control plane. The
-            // restore pass awaits this task (spec §6 step 2's
-            // create-or-adopt order: kept workers relaunch from their
-            // descriptors first, the roster covers the rest).
+            // restore pass waits on the adopt pass's completion signal
+            // (spec §6 step 2's create-or-adopt order: kept workers
+            // relaunch from their descriptors first, the roster covers
+            // the rest); the adopt task's own handle stays abortable for
+            // the lease-compromise fence below.
             // The adopt pass's completion signal: the passive-catalog
-            // warmup waits on it (see below) while the restore pass keeps
-            // awaiting the task handle itself.
+            // warmup waits on it (see below), and so does the restore
+            // pass (both waiters observe the same signal).
             let (adoption_tx, adoption_signal) = tokio::sync::watch::channel(false);
             // The spawned passes stay detached (they run concurrently with
             // serving by design), but their handles are returned to the
@@ -616,7 +618,17 @@ impl Supervisor {
         let _boot_tasks = boot_ownership.await;
 
         #[cfg(unix)]
-        socket_lease.assert_held()?;
+        if let Err(error) = socket_lease.assert_held() {
+            // The same fence the serving loop's compromise arm runs: the
+            // spawned ownership passes must not outlive a lost lease on
+            // this exit path either - aborting them (not dropping the
+            // handles, which detaches) keeps none adopting or sweeping
+            // against a successor.
+            for task in &boot_tasks {
+                task.abort();
+            }
+            return Err(error);
+        }
         #[cfg(unix)]
         let serving = tokio::select! {
             result = accept_loop::serve(&self, &*listener) => result,
