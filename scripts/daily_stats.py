@@ -118,16 +118,16 @@ def change(current, previous, *, percentage_points=False):
 def render_report(points, day):
     yesterday, last_week, last_month = (day - timedelta(days=n) for n in (1, 7, 30))
     title_date = f"{day:%b} {day.day}, {day.year}"
-    lines = [f"*Prime Agent Daily Stats ({title_date})*", "",
-             " · ".join(f"*{name}: {points[name][day]:,.0f}*" for name in ("DAU", "WAU", "MAU"))]
+    lines = [f"*Prime Agent Daily Stats ({title_date})*", ""]
     values = points["DAU"]
-    lines.append(f"DAU: {change(values[day], values[yesterday])} vs yesterday · "
+    lines.append(f"• *DAU: {values[day]:,.0f}* · "
+                 f"{change(values[day], values[yesterday])} vs yesterday · "
                  f"{change(values[day], values[last_week])} vs last week")
     for name, previous, period in (("WAU", last_week, "previous 7 days"),
                                     ("MAU", last_month, "previous 30 days")):
         values = points[name]
-        lines.append(f"{name}: {change(values[day], values[previous])} vs {period}")
-    lines.append("")
+        lines.append(f"• *{name}: {values[day]:,.0f}* · "
+                     f"{change(values[day], values[previous])} vs {period}")
     for name, display_name in (("Tokens", "Token usage"), ("Runs", "Completed runs")):
         values = points[name]
         value = f"{values[day]:,.0f}"
