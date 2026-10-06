@@ -766,10 +766,7 @@ mod tests {
             metadata.authorization_servers,
             vec!["https://vercel.example".to_string()]
         );
-        assert_eq!(
-            metadata.scopes_supported,
-            Some(vec!["openid".to_string()])
-        );
+        assert_eq!(metadata.scopes_supported, Some(vec!["openid".to_string()]));
         assert_eq!(
             resource_audience_mode(&root, "https://mcp.example/").unwrap(),
             AudienceMode::Exact

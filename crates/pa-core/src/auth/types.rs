@@ -117,7 +117,11 @@ pub enum AuthCredential {
         /// (component-equal to the endpoint) or "origin" (the endpoint's bare
         /// origin). `None` on legacy credentials that predate audience
         /// modes (they were only ever issued under exact matching).
-        #[serde(rename = "audienceMode", default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            rename = "audienceMode",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
         audience_mode: Option<String>,
     },
 }

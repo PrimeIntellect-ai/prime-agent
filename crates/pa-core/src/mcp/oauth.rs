@@ -295,9 +295,7 @@ pub async fn mcp_login(
         Some(&config.url),
         discovery.resource.as_deref(),
         discovery.issuer.as_deref(),
-        discovery
-            .audience_mode
-            .map(|mode| mode.as_str()),
+        discovery.audience_mode.map(|mode| mode.as_str()),
         None,
     ))
 }
@@ -740,10 +738,8 @@ mod tests {
             .find(|(url, _)| url == PLANE_REGISTER)
             .cloned()
             .unwrap();
-        let registration_body = serde_json::from_str::<serde_json::Value>(
-            &registration_request.1.unwrap(),
-        )
-        .unwrap();
+        let registration_body =
+            serde_json::from_str::<serde_json::Value>(&registration_request.1.unwrap()).unwrap();
         assert_eq!(
             registration_body.get("scope").and_then(|v| v.as_str()),
             Some("read write")
@@ -1390,10 +1386,7 @@ mod tests {
                 .find(|(key, _)| key == name)
                 .map(|(_, value)| value.to_string())
         };
-        assert_eq!(
-            param("resource").as_deref(),
-            Some("https://root.example/")
-        );
+        assert_eq!(param("resource").as_deref(), Some("https://root.example/"));
         assert_eq!(param("scope").as_deref(), Some("openid"));
         // The token request carried the declared resource.
         let token_request = http
@@ -1489,8 +1482,8 @@ mod tests {
         const DECLARED: &str = "https://srv.test";
         // A credential factory: the enum is not a struct, so variant
         // rebuilds spell every field.
-        let reissued_oauth = |resource: Option<&str>, audience_mode: Option<&str>| {
-            AuthCredential::Oauth {
+        let reissued_oauth =
+            |resource: Option<&str>, audience_mode: Option<&str>| AuthCredential::Oauth {
                 access: "origin-access".to_string(),
                 refresh: Some("origin-refresh".to_string()),
                 expires: 0,
@@ -1502,8 +1495,7 @@ mod tests {
                 issuer: Some("https://srv.test/tenant".to_string()),
                 audience_mode: audience_mode.map(str::to_string),
                 enterprise_url: None,
-            }
-        };
+            };
         let credentials = reissued_oauth(Some(DECLARED), Some("origin"));
         let http = ScriptedHttp::new(vec![
             (ORIGIN_URL, 401, None, ""),
@@ -1541,7 +1533,12 @@ mod tests {
             .await
             .unwrap();
         match &refreshed {
-            AuthCredential::Oauth { access, resource, audience_mode, .. } => {
+            AuthCredential::Oauth {
+                access,
+                resource,
+                audience_mode,
+                ..
+            } => {
                 assert_eq!(access, "origin-access-2");
                 assert_eq!(resource.as_deref(), Some(DECLARED));
                 assert_eq!(audience_mode.as_deref(), Some("origin"));
@@ -1557,7 +1554,10 @@ mod tests {
             .find(|(url, _)| url == ORIGIN_TOKEN)
             .cloned()
             .unwrap();
-        assert!(token_request.1.unwrap().contains("resource=https%3A%2F%2Fsrv.test"));
+        assert!(token_request
+            .1
+            .unwrap()
+            .contains("resource=https%3A%2F%2Fsrv.test"));
 
         // A discovery that re-classifies the audience requires re-login.
         let exact_mode = reissued_oauth(Some(DECLARED), Some("exact"));
@@ -1618,7 +1618,11 @@ mod tests {
             .await
             .unwrap();
         match &refreshed {
-            AuthCredential::Oauth { access, audience_mode, .. } => {
+            AuthCredential::Oauth {
+                access,
+                audience_mode,
+                ..
+            } => {
                 assert_eq!(access, "exact-access");
                 assert!(audience_mode.is_none());
             }
