@@ -115,12 +115,13 @@ fn log_contains(socket: &Path, agent_dir: &Path, needle: &str) -> bool {
     std::fs::read_to_string(daemon_log(socket, agent_dir)).is_ok_and(|log| log.contains(needle))
 }
 
+#[track_caller]
 fn await_log_line(socket: &Path, agent_dir: &Path, needle: &str, budget: Duration) {
     let deadline = Instant::now() + budget;
     while !log_contains(socket, agent_dir, needle) {
         assert!(
             Instant::now() < deadline,
-            "the daemon log never said \"{needle}\""
+            "the daemon log never said the awaited line"
         );
         std::thread::sleep(Duration::from_millis(50));
     }

@@ -130,7 +130,7 @@ fn the_custom_row_carries_the_ts_agent_message_shape() {
         message: "finished the research",
         from: &from,
         from_relationship: Some(AgentFamilyRelationship::Child),
-        target: &target,
+        target: Some(&target),
         timestamp: 123,
     });
     // TS `createAgentSessionMessage`: custom role, agent_message type, prompt as content, and the
@@ -153,10 +153,13 @@ fn the_custom_row_carries_the_ts_agent_message_shape() {
         message: "finished the research",
         from: &Value::Null,
         from_relationship: None,
-        target: &target,
+        // An absent target omits the key too (TS `spawnMessage` carries
+        // none), not a null.
+        target: None,
         timestamp: 124,
     });
     assert!(plain["details"].get("fromRelationship").is_none());
+    assert!(plain["details"].get("target").is_none());
     assert_eq!(plain["details"]["from"], Value::Null);
 }
 
