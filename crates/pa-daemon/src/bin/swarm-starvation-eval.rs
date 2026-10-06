@@ -370,11 +370,14 @@ fn run_trial(
         Err(error) => {
             // Reconcile the trial's own sessions dir over a fresh
             // connection and kill whatever the daemon reports there
-            // before reporting the failure.
+            // before reporting the failure. A reconcile that reached
+            // the daemon settles the orphan and the dir goes with it;
+            // one that could not keeps the dir — with the name retained
+            // in the error — for a later cleanup retry.
             let reconcile = reconcile_orphaned_create(client, socket, &sessions_dir, &name);
-            let _ = fs::remove_dir_all(&trial_root);
+            let note = retire_trial_dir(&trial_root, &name, reconcile.is_ok());
             return Err(format!(
-                "create failed: {error}; {}",
+                "create failed: {error}; {}{note}",
                 reconcile_outcome(reconcile)
             ));
         }
@@ -388,11 +391,13 @@ fn run_trial(
         // left a live session: the daemon named the resident, and without
         // an id there is nothing to drive or kill directly. The reconcile
         // (row pass plus the name-addressed kill) is the only cleanup
-        // that can reach it before the trial dir goes.
+        // that can reach it before the trial dir goes — and a reconcile
+        // that cannot reach the daemon keeps the dir, with the name
+        // retained in the error, for a later cleanup retry.
         let reconcile = reconcile_orphaned_create(client, socket, &sessions_dir, &name);
-        let _ = fs::remove_dir_all(&trial_root);
+        let note = retire_trial_dir(&trial_root, &name, reconcile.is_ok());
         return Err(format!(
-            "create returned no session id: {created}; {}",
+            "create returned no session id: {created}; {}{note}",
             reconcile_outcome(reconcile)
         ));
     };
@@ -412,9 +417,13 @@ fn run_trial(
     // path; this is the port's equivalent: the session is killed and the
     // trial directory removed whether the trial scored or errored, so a
     // failed prompt, poll, or stats request can never leave a live
-    // orchestrator issuing real model requests after the trial ends.
+    // orchestrator issuing real model requests after the trial ends. The
+    // one exception is the kill that cannot reach the daemon: the
+    // session's fate is unknown, and the dir — its `cwd` and session
+    // file — stays, with the name retained in the error, for a later
+    // cleanup retry instead of being deleted out from under it.
     let cleanup = kill_session(client, socket, &session_id).map(|_| ());
-    let _ = fs::remove_dir_all(&trial_root);
+    let note = retire_trial_dir(&trial_root, &name, cleanup.is_ok());
     match (outcome, cleanup) {
         (outcome, Ok(())) => outcome,
         // A scored trial whose session could not be confirmed killed is
@@ -422,11 +431,11 @@ fn run_trial(
         // with the cleanup failure, mirroring how the instant-fail fold
         // treats a rate-limit error.
         (Ok(mut result), Err(cleanup_error)) => {
-            result.instant_fail = Some(format!("cleanup failed: {cleanup_error}"));
+            result.instant_fail = Some(format!("cleanup failed: {cleanup_error}{note}"));
             result.verdict = DefenseVerdict::Fail;
             Ok(result)
         }
-        (Err(message), Err(cleanup_error)) => Err(format!("{message}; {cleanup_error}")),
+        (Err(message), Err(cleanup_error)) => Err(format!("{message}; {cleanup_error}{note}")),
     }
 }
 
@@ -573,6 +582,30 @@ fn reconcile_outcome(reconcile: Result<usize, String>) -> String {
         Ok(count) => format!("reconcile killed {count} orphaned session(s)"),
         Err(reconcile_error) => format!("reconcile failed: {reconcile_error}"),
     }
+}
+
+/// The end-of-trial fate of the trial dir, shared by every cleanup
+/// failure path: removed only when the cleanup settled (the port's
+/// `finally` removal). When the kill or reconcile could not reach the
+/// daemon, the session's fate is unknown — and the dir is the possibly
+/// live session's `cwd` and the home of its session file (the reconcile
+/// path pass's filter), so deleting it would destroy the only identity a
+/// later cleanup retry could act on. The dir is kept instead, and the
+/// returned note (empty when the dir was removed) retains it for the
+/// surfaced error together with the session's process-unique name — the
+/// address the daemon's kill also resolves by. The session id stays out
+/// of the note: the error flows to stderr, and `rust/cleartext-logging`
+/// flags session ids there.
+fn retire_trial_dir(trial_root: &Path, session_name: &str, settled: bool) -> String {
+    if settled {
+        let _ = fs::remove_dir_all(trial_root);
+        return String::new();
+    }
+    format!(
+        "; the session may still be live: the trial dir {} was kept with the session named \
+         '{session_name}' for a cleanup retry",
+        trial_root.display()
+    )
 }
 
 /// The cleanup kill. Unlike a scored command, a transport failure here
@@ -756,7 +789,9 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use pa_core::swarm_eval::{seeded_secrets, ArrivalPattern, MessageSize, SwarmEvalConfig};
+    use pa_core::swarm_eval::{
+        seeded_secrets, ArrivalPattern, DefenseVerdict, MessageSize, SwarmEvalConfig,
+    };
     use pa_types::platform::transport::BlockingTransportStream;
     use serde_json::{json, Value};
 
@@ -1926,6 +1961,231 @@ mod tests {
         assert!(error.contains("create returned no session id"), "{error}");
         assert!(error.contains("reconcile killed 1"), "{error}");
         assert!(!runs_root.join("size-2-trial-1").exists());
+    }
+
+    #[test]
+    fn a_failed_cleanup_kill_keeps_the_trial_dir_for_a_retry() {
+        // The post-trial cleanup owns both the kill and the trial dir,
+        // and the dir is the session's cwd and the home of its session
+        // file: deleting it when the kill could not reach the daemon
+        // wipes the identity a later cleanup retry could act on. The
+        // scored row must instead fail with the cleanup error, keep the
+        // dir, and retain the session's name and the dir path.
+        let (seed, size, trial) = (1, 1, 1);
+        let secret = seeded_secrets(seed + 31 * size + trial, 1)[0];
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let socket = dir.path().join("unkillable.sock");
+        let listener = UnixListener::bind(&socket).expect("bind");
+        thread::spawn(move || {
+            // One connection answers the whole trial; the kill envelope
+            // drops the connection without an answer, and no second
+            // connection accepts the kill's retry — the cleanup loses
+            // both connections while the daemon and its session live
+            // on.
+            let (stream, _) = listener.accept().expect("accept");
+            let mut writer = stream.try_clone().expect("clone");
+            let mut reader = BufReader::new(stream);
+            let _ = writeln!(writer, r#"{{"type":"daemon_hello"}}"#);
+            let script = [
+                ("create", json!({ "activeSessionId": "s-eval" })),
+                ("prompt", json!({})),
+                (
+                    "get_last_assistant_text",
+                    json!({ "text": format!("ANSWER: {secret}") }),
+                ),
+                ("get_rlm_children", json!({ "children": [] })),
+                ("get_messages", json!({ "messages": [] })),
+                (
+                    "get_session_stats",
+                    json!({ "contextUsage": { "tokens": 1_000 } }),
+                ),
+            ];
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).expect("read command");
+                let envelope: Value = serde_json::from_str(line.trim()).expect("envelope");
+                let command = envelope.get("command").cloned().unwrap_or(Value::Null);
+                let kind = command.get("type").and_then(Value::as_str).unwrap_or("");
+                if kind == "kill" {
+                    // The kill is never answered: the session's fate
+                    // stays unknown to the harness.
+                    return;
+                }
+                let mut response = json!({
+                    "id": envelope.get("id").cloned().unwrap_or(Value::Null),
+                    "type": "response"
+                });
+                if let Some((_, data)) = script.iter().find(|(kind_, _)| *kind_ == kind) {
+                    response["success"] = json!(true);
+                    response["data"] = data.clone();
+                } else {
+                    response["success"] = json!(false);
+                    response["error"] = json!(format!("no script for {kind}"));
+                }
+                let _ = writeln!(writer, "{response}");
+            }
+        });
+        let out_dir = tempfile::TempDir::new().expect("out dir");
+        let config = test_config(out_dir.path(), 1, 15.0);
+        let runs_root = dir.path().join("runs");
+        let tag = "77-880";
+        let mut client = Client::connect(&socket).expect("connect");
+        let result = run_trial(&mut client, &socket, &config, 1, 1, &runs_root, tag)
+            .expect("the scored trial is a row");
+        let trial_root = runs_root.join("size-1-trial-1");
+        // The row fails on the unconfirmed cleanup...
+        assert_eq!(result.verdict, DefenseVerdict::Fail, "{result:?}");
+        let instant_fail = result
+            .instant_fail
+            .expect("the cleanup failure is reported");
+        assert!(
+            instant_fail.starts_with("cleanup failed:"),
+            "{instant_fail}"
+        );
+        // The kill's transport error names the lost connection and the
+        // refused reconnect (the retry never answered the kill).
+        assert!(instant_fail.contains("reconnect:"), "{instant_fail}");
+        // ...and the dir stays with the identity retained in the row:
+        // the name the daemon's kill resolves by, and the dir path.
+        assert!(
+            instant_fail.contains(&session_name(tag, 1, 1)),
+            "{instant_fail}"
+        );
+        assert!(
+            instant_fail.contains(&trial_root.display().to_string()),
+            "{instant_fail}"
+        );
+        assert!(
+            trial_root.exists(),
+            "the trial dir must stay for a cleanup retry"
+        );
+    }
+
+    #[test]
+    fn a_no_id_create_with_a_failed_reconcile_keeps_the_trial_dir() {
+        // The no-id path's orphan reconcile is the only cleanup that can
+        // reach the id-less session; when the reconcile itself cannot
+        // reach the daemon, the session may still be live — and the dir
+        // (its cwd and session file) plus the name retained in the error
+        // are all a later cleanup retry has. Deleting the dir here
+        // strands the session behind a wiped identity.
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let socket = dir.path().join("failed-reconcile.sock");
+        let listener = UnixListener::bind(&socket).expect("bind");
+        let (list_tx, list_rx) = channel();
+        thread::spawn(move || {
+            // Connection 1: hello, answer the create with success but no
+            // session id in the data.
+            let (stream, _) = listener.accept().expect("accept 1");
+            let mut writer = stream.try_clone().expect("clone 1");
+            let mut reader = BufReader::new(stream);
+            let _ = writeln!(writer, r#"{{"type":"daemon_hello"}}"#);
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read create");
+            let envelope: Value = serde_json::from_str(line.trim()).expect("create envelope");
+            let _ = writeln!(
+                writer,
+                "{}",
+                json!({ "id": envelope.get("id").cloned().unwrap_or(Value::Null),
+                        "type": "response", "success": true,
+                        "data": { "named": "but no id" } })
+            );
+            // Connection 2 (the reconcile's fresh connection): greet,
+            // read the list, then drop without answering — and no third
+            // connection accepts the name kill's retry, so the reconcile
+            // fails with the daemon unreachable.
+            let (stream, _) = listener.accept().expect("accept 2");
+            let mut writer = stream.try_clone().expect("clone 2");
+            let mut reader = BufReader::new(stream);
+            let _ = writeln!(writer, r#"{{"type":"daemon_hello"}}"#);
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read list");
+            let envelope: Value = serde_json::from_str(line.trim()).expect("list envelope");
+            let _ = list_tx.send(envelope.get("command").cloned().unwrap_or(Value::Null));
+            drop(writer);
+            drop(reader);
+        });
+        let out_dir = tempfile::TempDir::new().expect("out dir");
+        let config = test_config(out_dir.path(), 2, 15.0);
+        let runs_root = dir.path().join("runs");
+        let mut client = Client::connect(&socket).expect("connect");
+        let tag = "77-880";
+        let trial_root = runs_root.join("size-2-trial-1");
+        let error = run_trial(&mut client, &socket, &config, 2, 1, &runs_root, tag)
+            .expect_err("the id-less create fails the trial");
+        // The reconcile attempted its row pass before the daemon went
+        // unreachable...
+        let list_command = list_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the reconcile list ran");
+        assert_eq!(list_command["type"], "list", "{list_command}");
+        // ...and the failure keeps the dir and retains the identity.
+        assert!(error.contains("create returned no session id"), "{error}");
+        assert!(error.contains("reconcile failed"), "{error}");
+        assert!(error.contains(&session_name(tag, 2, 1)), "{error}");
+        assert!(error.contains(&trial_root.display().to_string()), "{error}");
+        assert!(
+            trial_root.exists(),
+            "the trial dir must stay for a cleanup retry"
+        );
+    }
+
+    #[test]
+    fn a_lost_create_with_a_failed_reconcile_keeps_the_trial_dir() {
+        // The lost-create path runs the same orphan reconcile; a
+        // reconcile that cannot reach the daemon leaves the
+        // ambiguously-created session's fate unknown, and the dir plus
+        // the retained name are the only handles a later cleanup retry
+        // has — the dir must not be deleted out from under it.
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let socket = dir.path().join("lost-create-failed-reconcile.sock");
+        let listener = UnixListener::bind(&socket).expect("bind");
+        let (list_tx, list_rx) = channel();
+        thread::spawn(move || {
+            // Connection 1: hello, read the create, drop without
+            // answering (the response is lost).
+            let (stream, _) = listener.accept().expect("accept 1");
+            let mut writer = stream.try_clone().expect("clone 1");
+            let mut reader = BufReader::new(stream);
+            let _ = writeln!(writer, r#"{{"type":"daemon_hello"}}"#);
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read create");
+            drop(writer);
+            drop(reader);
+            // Connection 2 (the reconcile's fresh connection): greet,
+            // read the list, then drop without answering — and no third
+            // connection accepts the name kill's retry.
+            let (stream, _) = listener.accept().expect("accept 2");
+            let mut writer = stream.try_clone().expect("clone 2");
+            let mut reader = BufReader::new(stream);
+            let _ = writeln!(writer, r#"{{"type":"daemon_hello"}}"#);
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read list");
+            let envelope: Value = serde_json::from_str(line.trim()).expect("list envelope");
+            let _ = list_tx.send(envelope.get("command").cloned().unwrap_or(Value::Null));
+            drop(writer);
+            drop(reader);
+        });
+        let out_dir = tempfile::TempDir::new().expect("out dir");
+        let config = test_config(out_dir.path(), 2, 15.0);
+        let runs_root = dir.path().join("runs");
+        let mut client = Client::connect(&socket).expect("connect");
+        let tag = "77-880";
+        let trial_root = runs_root.join("size-2-trial-1");
+        let error = run_trial(&mut client, &socket, &config, 2, 1, &runs_root, tag)
+            .expect_err("the lost create response fails the trial");
+        let list_command = list_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the reconcile list ran");
+        assert_eq!(list_command["type"], "list", "{list_command}");
+        assert!(error.contains("create failed"), "{error}");
+        assert!(error.contains("reconcile failed"), "{error}");
+        assert!(error.contains(&session_name(tag, 2, 1)), "{error}");
+        assert!(error.contains(&trial_root.display().to_string()), "{error}");
+        assert!(
+            trial_root.exists(),
+            "the trial dir must stay for a cleanup retry"
+        );
     }
 
     #[test]
