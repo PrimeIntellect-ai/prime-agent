@@ -366,31 +366,40 @@ impl LockDir {
     /// run. The mkdir is already no-replace (EEXIST is a plain
     /// collision), so a taken name regenerates the suffix instead.
     #[cfg(target_os = "linux")]
-    fn claim_candidate_name(path: &Path) -> Option<PathBuf> {
+    fn claim_candidate_name(path: &Path) -> io::Result<PathBuf> {
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |age| age.as_nanos());
         let pid = std::process::id();
+        // The mkdir is the no-replace claim: EEXIST is the only
+        // collision, so a taken name regenerates the suffix. Every other
+        // error is the real acquisition failure and propagates as-is -
+        // a missing parent or a permissions denial must not masquerade
+        // as contention (the old sibling form's ENAMETOOLONG bug this
+        // helper fixes was exactly such a masquerade).
+        let mut collision: Option<io::Error> = None;
         for attempt in 0..8 {
             let candidate = parent.join(format!(".c{pid:x}{nanos:x}{attempt:x}"));
             match fs::create_dir(&candidate) {
-                Ok(()) => return Some(candidate),
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-                Err(_) => return None,
+                Ok(()) => return Ok(candidate),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    collision = collision.or(Some(error));
+                }
+                Err(error) => return Err(error),
             }
         }
-        None
+        Err(collision.unwrap_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "all lock candidate names are taken",
+            )
+        }))
     }
 
     #[cfg(target_os = "linux")]
     fn create(path: &Path) -> io::Result<Created> {
-        let Some(candidate) = Self::claim_candidate_name(path) else {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "no free lock candidate name",
-            ));
-        };
+        let candidate = Self::claim_candidate_name(path)?;
         let dir = match fs::File::open(&candidate) {
             Ok(dir) => dir,
             Err(error) => {
@@ -614,6 +623,41 @@ mod tests {
 
     fn lock_of(file: &Path) -> PathBuf {
         LockDir::path_for(file)
+    }
+
+    /// A missing parent must fail as the real error, not as contention:
+    /// the short candidate name made `ENAMETOOLONG` unreachable, so the
+    /// only remaining acquisition failures are genuine I/O errors, and
+    /// acquire must surface them instead of retrying a phantom lock.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn missing_parent_is_a_real_error_not_contention() {
+        let missing = Path::new("/nonexistent-pa-lock-parent-probe/foo");
+        let error = LockDir::acquire(missing, MIN_STALE).unwrap_err();
+        assert!(
+            error.kind() == io::ErrorKind::NotFound,
+            "the real missing-parent error must surface: {error}"
+        );
+    }
+
+    /// A lock path whose component is near the filesystem limit still
+    /// acquires: the candidate is a short, basename-independent name, so
+    /// the old suffix-driven ENAMETOOLONG cannot recur.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn long_component_lock_path_still_acquires() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("l".repeat(240));
+        std::fs::write(&file, "{}").unwrap();
+        {
+            let guard = LockDir::acquire(&file, MIN_STALE);
+            assert!(
+                guard.is_ok(),
+                "a near-limit component must acquire: {:?}",
+                guard.err()
+            );
+        }
+        assert!(!lock_of(&file).exists());
     }
 
     #[test]

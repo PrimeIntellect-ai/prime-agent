@@ -731,7 +731,6 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    #[cfg(target_os = "linux")]
     #[test]
     fn restore_claim_returns_the_successor_when_the_path_is_vacant() {
         let dir = tempfile::TempDir::new().unwrap();
