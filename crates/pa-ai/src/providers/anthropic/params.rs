@@ -1,5 +1,4 @@
 //! Anthropic Messages request params assembly.
-//! Section of the port of `packages/ai/src/providers/anthropic.ts`.
 
 use serde_json::{json, Map, Value};
 
@@ -11,7 +10,7 @@ use crate::providers::anthropic::{
 use crate::types::{Context, Model};
 use crate::utils_inner::sanitize_unicode::sanitize_surrogates;
 
-// Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+// Long by design: mirrors the provider's stream shape.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn build_params(
     model: &Model,
@@ -80,8 +79,8 @@ pub(crate) fn build_params(
         params.insert("system".into(), json!([entry]));
     }
 
-    // Temperature is incompatible with extended thinking (adaptive or
-    // budget-based), and always-on models reject sampling params outright.
+    // Temperature is incompatible with extended thinking (adaptive or budget-based), and always-on
+    // models reject sampling params outright.
     if let Some(temperature) = base.temperature {
         if options.map(|options| options.thinking_enabled) != Some(Some(true))
             && !is_always_on_adaptive_thinking_model(&model.id)

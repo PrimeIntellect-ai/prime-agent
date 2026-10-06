@@ -1,37 +1,22 @@
-//! Headless e2e for the in-app mouse selection surface: a mock supervisor
-//! serves one attached session with a long snapshot transcript, and the
-//! headless harness feeds byte-identical SGR mouse reports (press, drag,
-//! release) through the same decode-and-dispatch path a terminal's mouse
-//! takes.
-//!
-//! Verifies the TS parity contract of `tui.ts`'s `handleFullscreenInput`
-//! selection branches: a press-drag-release over transcript rows copies the
-//! spanned text (the run's recorded `copies` stand in for the OSC 52
-//! write a terminal receives), a dock press starts a frame selection, and
-//! a plain click without a drag copies nothing.
+//! Headless e2e for the in-app mouse selection surface (TS
+//! `handleFullscreenInput`): a press-drag-release over transcript rows
+//! copies the spanned text (recorded `copies` stand in for the OSC 52
+//! write); a dock press starts a frame selection; a plain click copies nothing.
 #![cfg(unix)]
-// Pedantic-gate exceptions (every other pedantic warning in this crate is
-// fixed in place; each exception carries its one-line justification):
-// - the casts: terminal-layout arithmetic narrows structurally bounded
-//   values (screen coordinates, byte counts, timestamps); guarded
-//   conversions would add panic paths the bounds guarantee away.
+// Casts: structurally bounded terminal-layout arithmetic; guarded conversions add panic paths.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// - the render routes are flat tables (one arm per route); splitting them
-//   would add indirection without changing the flow.
+// Render routes are flat tables (one arm per route); splitting adds indirection.
 #![allow(clippy::too_many_lines)]
-// - widget state structs carry independent flag bits; a nested struct
-//   would add indirection without changing the shape.
+// Widget state structs carry independent flag bits.
 #![allow(clippy::struct_excessive_bools, clippy::fn_params_excessive_bools)]
-// - the futures are bounded by the surface's lifetime; boxing them would
-//   add an allocation to the steady-state loop.
+// Futures are bounded by the surface's lifetime; boxing adds a steady-state allocation.
 #![allow(clippy::large_futures)]
-// - the wrappers preserve a uniform Result-returning API surface; unwrap
-//   removals would ripple through the callers without changing behavior.
+// The wrappers preserve a uniform Result-returning API surface.
 #![allow(clippy::unnecessary_wraps)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -39,8 +24,8 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 
-/// Mouse tracking is process-global state, so the headless runs serialize
-/// (each asserts on the tracking-active branch it drives).
+/// Mouse tracking is process-global state, so the headless runs serialize (each asserts on the
+/// tracking-active branch it drives).
 static RUN_LOCK: Mutex<()> = Mutex::new(());
 
 fn run_lock() -> MutexGuard<'static, ()> {
@@ -56,8 +41,8 @@ use pa_tui::interactive::{
 };
 use serde_json::{json, Value};
 
-/// The SGR reports a real terminal sends with ?1002+?1006 tracking active:
-/// a left press, a left drag (button 0 + the motion bit 32), and a release.
+/// The SGR reports a real terminal sends with ?1002+?1006 tracking active: a left press, a left
+/// drag (button 0 + the motion bit 32), and a release.
 fn press(col: usize, row: usize) -> String {
     format!("\x1b[<0;{col};{row}M")
 }
@@ -81,8 +66,6 @@ impl MockSupervisor {
         }
     }
 
-    /// Serve one connection: attach a session whose snapshot holds a long
-    /// transcript, then answer the loop's requests.
     fn serve(self) {
         let (stream, _) = self.listener.accept().expect("accept");
         let write_stream = stream.try_clone().expect("clone mock socket");
@@ -196,9 +179,8 @@ fn write_json(writer: &mut UnixStream, value: &Value) {
     writer.flush().expect("flush mock frame");
 }
 
-/// The slim attach result with a 40-message transcript: alternating user
-/// and assistant messages, each one short row, so the transcript is far
-/// taller than the 30-row frame.
+/// The slim attach result: 40 alternating one-row messages — the transcript is far taller than the
+/// 30-row frame.
 fn attach_data(id: &str) -> Value {
     let messages: Vec<Value> = (0..40)
         .map(|index| {
@@ -282,9 +264,8 @@ fn options(socket: PathBuf, fullscreen_mouse: bool) -> InteractiveOptions {
     }
 }
 
-/// Run the headless plan against a fresh mock supervisor and return the
-/// captured frames and selection copies. Holds the run lock: mouse
-/// tracking is process-global.
+/// Run the headless plan and return the captured frames and selection copies. Holds the run lock:
+/// mouse tracking is process-global.
 fn run_plan(steps: Vec<HeadlessStep>, fullscreen_mouse: bool) -> (Vec<String>, Vec<String>) {
     let _guard = run_lock();
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -311,8 +292,7 @@ fn run_plan(steps: Vec<HeadlessStep>, fullscreen_mouse: bool) -> (Vec<String>, V
     (outcome.frames, outcome.copies)
 }
 
-/// The last frame holding a needle and the needle's (row, column) within
-/// it — the rendered coordinates a mouse press targets.
+/// The last frame holding a needle and its (row, column) — the coordinates a press targets.
 fn locate<'a>(frames: &'a [String], needle: &str) -> Option<(usize, usize, usize, &'a str)> {
     frames
         .iter()
@@ -326,13 +306,9 @@ fn locate<'a>(frames: &'a [String], needle: &str) -> Option<(usize, usize, usize
         .next_back()
 }
 
-/// The transcript window at the top after `ScrollTop`: the chat opened
-/// directly into content, so the brand splash is suppressed (the
-/// operator's 2026-09-26 zero-shift directive) — the first user
-/// message's text sits at row 2 (`  row 0`), its spacer rows at 3-4,
-/// and the first assistant answer at row 5 — the layout the selection
-/// coordinates below target (the geometry is asserted, not assumed,
-/// before each drag).
+/// The transcript window at the top after `ScrollTop`: the first user message's text sits at
+/// row 2, its spacer rows at 3-4, the first assistant answer at row 5 (the geometry is asserted,
+/// not assumed, before each drag).
 fn top_layout() -> (usize, usize, usize, usize, usize, usize) {
     let probe = run_plan(vec![HeadlessStep::ScrollTop], true).0;
     let (_, row0, col0, _) = locate(&probe, "row 0").expect("row 0 rendered at the top");
@@ -351,11 +327,8 @@ fn press_drag_release_copies_the_spanned_transcript_text() {
         (2, 2),
         "the first user message renders at 2:2"
     );
-    // Drag across the first user message's text: press at its first text
-    // column, drag to its end, release — the copy is the text slice.
     let steps = vec![
-        // Mount the window at the transcript top: the probe layout is the
-        // press target only while the view sits there.
+        // The located press targets are valid only while the view sits at the transcript top.
         HeadlessStep::ScrollTop,
         HeadlessStep::Mouse(press(col0 + 1, row0 + 1)),
         HeadlessStep::Mouse(drag(col0 + 6, row0 + 1)),
@@ -365,9 +338,8 @@ fn press_drag_release_copies_the_spanned_transcript_text() {
     assert_eq!(copies, vec!["row 0".to_string()], "the dragged text copied");
 }
 
-/// A drag spanning several rows copies each row's slice — the anchor's row
-/// from the anchor column, the spacer rows as empty lines, the head's row
-/// up to the head column (TS `extractSelectionText`).
+/// A drag spanning rows copies each row's slice — the anchor's row from the anchor column, the
+/// spacer rows as empty lines, the head's row up to the head column (TS `extractSelectionText`).
 #[test]
 fn multi_row_drag_copies_each_line() {
     let (row0, col0, answer_row, answer_col, ..) = top_layout();
@@ -377,17 +349,15 @@ fn multi_row_drag_copies_each_line() {
         "two spacer rows sit between the messages"
     );
     let steps = vec![
-        // Mount the window at the transcript top: the probe layout is the
-        // press target only while the view sits there.
+        // The located press targets are valid only while the view sits at the transcript top.
         HeadlessStep::ScrollTop,
         HeadlessStep::Mouse(press(col0 + 1, row0 + 1)),
         HeadlessStep::Mouse(drag(answer_col + 8, answer_row + 1)),
         HeadlessStep::Mouse(release(answer_col + 8, answer_row + 1)),
     ];
     let (_, copies) = run_plan(steps, true);
-    // `  row 0` from column 2; two blank spacer rows; ` answer 1` up to
-    // column 8 — ` answer` after the trailing trim (the leading pad is
-    // TS-faithful: only the trailing side trims).
+    // `  row 0` from column 2; two blank spacer rows; ` answer 1` up to column 8 — the leading pad
+    // is TS-faithful (only the trailing side trims).
     assert_eq!(
         copies,
         vec!["row 0\n\n\n answer".to_string()],
@@ -395,14 +365,12 @@ fn multi_row_drag_copies_each_line() {
     );
 }
 
-/// A press-release without any drag copies nothing (TS: the anchor and head
-/// coincide, so the release takes the clear branch).
+/// TS: the anchor and head coincide, so the release takes the clear branch.
 #[test]
 fn click_without_drag_copies_nothing() {
     let (row0, col0, ..) = top_layout();
     let steps = vec![
-        // Mount the window at the transcript top: the probe layout is the
-        // press target only while the view sits there.
+        // The located press targets are valid only while the view sits at the transcript top.
         HeadlessStep::ScrollTop,
         HeadlessStep::Mouse(press(col0 + 1, row0 + 1)),
         HeadlessStep::Mouse(release(col0 + 1, row0 + 1)),
@@ -411,24 +379,20 @@ fn click_without_drag_copies_nothing() {
     assert!(copies.is_empty(), "a click never copies: {copies:?}");
 }
 
-/// A press on the dock (outside the transcript window) starts a frame
-/// selection over the row's visible span (TS `beginFrameSelection`): the
-/// drag's columns copy from the rendered row.
+/// A press on the dock starts a frame selection over the row's visible span (TS
+/// `beginFrameSelection`).
 #[test]
 fn dock_press_drag_copies_the_frame_region() {
     let (_, _, _, _, ctx_row, ctx_col) = top_layout();
-    // The right-aligned detail label (the collapsed startup level,
-    // operator directive 2026-09-28: "Collapsed mode (Ctrl+O to
-    // expand)", 2 columns longer than the details label) renders at
-    // 23:66 (the activity dock's rule and row sit below it).
+    // The right-aligned detail label (operator directive 2026-09-28: "Collapsed mode (Ctrl+O to
+    // expand)", 2 columns longer than the details label) renders at 23:66.
     assert_eq!(
         (ctx_row, ctx_col),
         (23, 66),
         "the context row renders at 23:66"
     );
     let steps = vec![
-        // Mount the window at the transcript top: the probe layout is the
-        // press target only while the view sits there.
+        // The located press targets are valid only while the view sits at the transcript top.
         HeadlessStep::ScrollTop,
         HeadlessStep::Mouse(press(ctx_col + 1, ctx_row + 1)),
         HeadlessStep::Mouse(drag(ctx_col + 7, ctx_row + 1)),
@@ -438,14 +402,11 @@ fn dock_press_drag_copies_the_frame_region() {
     assert_eq!(copies, vec!["Collap".to_string()], "the dock span copied");
 }
 
-/// With the `terminal.fullscreenMouse` setting off, tracking never enables
-/// and the press-drag-release reports are consumed without a selection.
 #[test]
 fn selection_reports_are_consumed_when_tracking_is_disabled() {
     let (row0, col0, ..) = top_layout();
     let steps = vec![
-        // Mount the window at the transcript top: the probe layout is the
-        // press target only while the view sits there.
+        // The located press targets are valid only while the view sits at the transcript top.
         HeadlessStep::ScrollTop,
         HeadlessStep::Mouse(press(col0 + 1, row0 + 1)),
         HeadlessStep::Mouse(drag(col0 + 6, row0 + 1)),

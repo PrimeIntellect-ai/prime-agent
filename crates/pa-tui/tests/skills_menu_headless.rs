@@ -1,31 +1,21 @@
-//! Headless e2e for skills-as-slash-commands (TS `interactive-mode.ts`
+//! Headless e2e for skills-as-slash-commands (TS
 //! `createBaseAutocompleteProvider`): the session's `get_commands`
-//! response enumerates the installed skills into the slash menu — the
-//! name, the description, and the source label (`#user`, `#project`, …)
-//! — so typing `/` surfaces them exactly like the TS product.
+//! response enumerates the installed skills into the slash menu.
 #![cfg(unix)]
-// Pedantic-gate exceptions (every other pedantic warning in this crate is
-// fixed in place; each exception carries its one-line justification):
-// - the casts: terminal-layout arithmetic narrows structurally bounded
-//   values (screen coordinates, byte counts, timestamps); guarded
-//   conversions would add panic paths the bounds guarantee away.
+// Casts: structurally bounded terminal-layout arithmetic; guarded conversions add panic paths.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// - the render routes are flat tables (one arm per route); splitting them
-//   would add indirection without changing the flow.
+// Render routes are flat tables (one arm per route); splitting adds indirection.
 #![allow(clippy::too_many_lines)]
-// - widget state structs carry independent flag bits; a nested struct
-//   would add indirection without changing the shape.
+// Widget state structs carry independent flag bits.
 #![allow(clippy::struct_excessive_bools, clippy::fn_params_excessive_bools)]
-// - the futures are bounded by the surface's lifetime; boxing them would
-//   add an allocation to the steady-state loop.
+// Futures are bounded by the surface's lifetime; boxing adds a steady-state allocation.
 #![allow(clippy::large_futures)]
-// - the wrappers preserve a uniform Result-returning API surface; unwrap
-//   removals would ripple through the callers without changing behavior.
+// The wrappers preserve a uniform Result-returning API surface.
 #![allow(clippy::unnecessary_wraps)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -41,8 +31,8 @@ use serde_json::{json, Value};
 
 struct MockSupervisor {
     listener: UnixListener,
-    /// Every recorded `prompt` request payload (the bare-skill guard
-    /// proof: a blocked submission never reaches the wire).
+    /// Every recorded `prompt` request payload (the bare-skill guard proof: a blocked submission
+    /// never reaches the wire).
     prompt_requests: std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
 }
 
@@ -54,8 +44,6 @@ impl MockSupervisor {
         }
     }
 
-    /// Serve one connection: attach an empty session, then answer the
-    /// loop's requests.
     fn serve(self) {
         let (stream, _) = self.listener.accept().expect("accept");
         let write_stream = stream.try_clone().expect("clone mock socket");
@@ -106,9 +94,8 @@ impl MockSupervisor {
                     );
                 }
                 "get_commands" => {
-                    // TS `createAgentConnectionCommands`: the skills ride
-                    // the command catalog as `skill:<name>` entries with
-                    // their description and source info.
+                    // TS `createAgentConnectionCommands`: the skills ride the command catalog as
+                    // `skill:<name>` entries with their description and source info.
                     write_json(
                         &mut writer,
                         &json!({
@@ -178,9 +165,8 @@ impl MockSupervisor {
                             "success": true,
                         }),
                     );
-                    // A minimal streamed turn: a wrongly-sent prompt
-                    // still settles (a regression fails on the
-                    // recorder, not on a wedged settle gate).
+                    // A minimal streamed turn: a wrongly-sent prompt still settles (a regression
+                    // fails on the recorder, not on a wedged settle gate).
                     write_session_event(&mut writer, &json!({ "type": "turn_start" }));
                     write_session_event(
                         &mut writer,
@@ -271,9 +257,8 @@ fn attach_data(id: &str) -> Value {
     })
 }
 
-/// A minimal settings seam for the harness: every getter returns its TS
-/// default, writes succeed without persistence. The skill-commands flag
-/// starts at the TS default (true), not `bool::default`.
+/// A minimal settings seam: every getter returns its TS default, writes succeed without
+/// persistence. The skill-commands flag starts at the TS default (true), not `bool::default`.
 struct StubSettings {
     enable_skill_commands: std::sync::Mutex<bool>,
 }
@@ -493,9 +478,8 @@ fn run_plan(steps: Vec<HeadlessStep>) -> Vec<String> {
     outcome.frames
 }
 
-/// The same plan run with the mock's prompt recorder: the frames plus
-/// every `prompt` request that reached the daemon (the guard's wire
-/// proof — a blocked submission stays off the wire).
+/// The same plan run with the mock's prompt recorder: the frames plus every `prompt` request that
+/// reached the daemon (the guard's wire proof — a blocked submission stays off the wire).
 fn run_plan_with_prompts(steps: Vec<HeadlessStep>) -> (Vec<String>, Vec<Value>) {
     std::env::remove_var("TMUX");
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -524,15 +508,11 @@ fn run_plan_with_prompts(steps: Vec<HeadlessStep>) -> (Vec<String>, Vec<Value>) 
     (outcome.frames, prompts)
 }
 
-/// Typing `/skill:<prefix>` surfaces the installed skill as a slash
-/// command: the menu row names it (`skill:web-search`), carries its
-/// description, and shows the source label from the source info
-/// (`#user`).
 #[test]
 fn skill_commands_surface_in_the_slash_menu() {
     let steps = vec![
-        // The command-catalog fetch lands in the background (the attach
-        // spawns it); give the fold a beat before typing.
+        // The command-catalog fetch lands in the background (the attach spawns it); give the fold a
+        // beat before typing.
         HeadlessStep::WaitMs(300),
         HeadlessStep::Type("/skill:web".to_string()),
         HeadlessStep::SettleIdle,
@@ -552,9 +532,8 @@ fn skill_commands_surface_in_the_slash_menu() {
     assert!(all.contains("#user"), "the source label renders: {all}");
 }
 
-/// The TS default (`enableSkillCommands: true`) applies when the
-/// composition root supplies no settings seam at all — an embedded run
-/// without `/settings` still lists the skills.
+/// The TS default (`enableSkillCommands: true`) applies with no settings
+/// seam at all.
 #[test]
 fn skills_surface_without_a_settings_seam() {
     std::env::remove_var("TMUX");
@@ -590,8 +569,6 @@ fn skills_surface_without_a_settings_seam() {
     );
 }
 
-/// The `enableSkillCommands` setting gates the skill list (TS default
-/// true; off hides them from the autocomplete).
 #[test]
 fn disabled_skill_commands_stay_out_of_the_menu() {
     use pa_tui::client_settings::ClientSettings;
@@ -640,19 +617,14 @@ fn enter() -> crossterm::event::KeyEvent {
     )
 }
 
-/// A bare `/skill:<name>` submission (the Tab-Enter completion flow)
-/// never reaches the daemon: the guard restores the draft into the
-/// editor, the notice names the fix, and the prompt recorder stays
-/// empty (the incident class — a bare invocation expanding into the
-/// skill's protocol with no task — is blocked at the client).
+/// A bare `/skill:<name>` submission never reaches the daemon: the guard restores the draft and
+/// the notice names the fix.
 #[test]
 fn a_bare_skill_submit_shows_the_notice_and_never_sends() {
     let (frames, prompts) = run_plan_with_prompts(vec![
         HeadlessStep::WaitMs(300),
         HeadlessStep::Type("/skill:web".to_string()),
         HeadlessStep::SettleIdle,
-        // Enter applies the completion (into the argument position), the
-        // second Enter submits the bare command — the incident flow.
         HeadlessStep::Key(enter()),
         HeadlessStep::Key(enter()),
         HeadlessStep::WaitMs(200),
@@ -677,11 +649,8 @@ fn a_bare_skill_submit_shows_the_notice_and_never_sends() {
     );
 }
 
-/// The recovery is ONE step (the restored draft keeps the argument
-/// position): after the guard's notice, typing the request and
-/// submitting sends the command WITH the request — the trailing space
-/// survives, so the keystrokes become args instead of gluing onto the
-/// command name.
+/// The restored draft keeps the argument position: the trailing space survives, so typed keystrokes
+/// become args instead of gluing onto the command name.
 #[test]
 fn the_bare_skill_guard_restores_into_the_argument_position() {
     let (frames, prompts) = run_plan_with_prompts(vec![
@@ -691,8 +660,6 @@ fn the_bare_skill_guard_restores_into_the_argument_position() {
         HeadlessStep::Key(enter()),
         HeadlessStep::Key(enter()),
         HeadlessStep::WaitMs(150),
-        // The notice showed; the user types the request straight into the
-        // restored draft and submits.
         HeadlessStep::Type("find rust tuis".to_string()),
         HeadlessStep::Key(enter()),
         HeadlessStep::WaitMs(300),
@@ -710,10 +677,6 @@ fn the_bare_skill_guard_restores_into_the_argument_position() {
     );
 }
 
-/// A completed skill invocation with the request typed after it sends
-/// normally: the completion lands in the argument position (the
-/// trailing space), the typed request follows, and the daemon receives
-/// the command with its args — the with-args path is unchanged.
 #[test]
 fn a_completed_skill_with_args_sends_the_command_and_request() {
     let (frames, prompts) = run_plan_with_prompts(vec![

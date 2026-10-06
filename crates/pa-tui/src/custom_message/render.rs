@@ -1,10 +1,6 @@
 //! Custom-message row rendering: each component's row geometry and theme
-//! colors, ported from the TS interactive components (`agent-message.ts`,
-//! `injected-prompt-message.ts`, `shell-completion.ts`, `custom-message.ts`,
-//! `skill-invocation-message.ts`;
-//! `expandable-event-message.ts` + `refinement-outcome-message.ts` live in
-//! the sibling `refinement` module, `compaction-outcome-message.ts` renders
-//! through the chat status rows).
+//! colors. The refinement components live in the sibling `refinement`
+//! module; compaction outcomes render through the chat status rows.
 
 use super::{
     AgentMessageDirection, AgentMessageRow, CustomPanelRow, ShellCompletionRow, AGENT_MESSAGE_LABEL,
@@ -15,14 +11,12 @@ use crate::width::{pad_line, str_width, truncate_line, wrap_line, wrap_text};
 use crate::{Line, Span};
 use ratatui::style::Style;
 
-/// One blank row (`Spacer(1)`).
 pub(crate) fn spacer() -> Line {
     Vec::new()
 }
 
-/// TS `customMessageLabel`: the bold `[<name>]` label in
-/// `customMessageLabel` — the shared header label of the skill card and
-/// the generic custom panel.
+/// The bold `[<name>]` label shared by the skill card and the generic
+/// custom panel.
 pub(crate) fn custom_message_label(name: &str, theme: &Theme) -> Span {
     Span::styled(
         format!("[{name}]"),
@@ -50,21 +44,10 @@ pub(crate) fn text_rows(spans: &Line, width: usize) -> Vec<Line> {
         .collect()
 }
 
-/// TS `agentMessageSummaryLine` (`◆ <label> · <participant>`) with the
-/// operator's sanctioned divergences: the row's icon is the `✉` mail
-/// envelope (Kevin directive 2026-09-24 — the a2a rows read as agent
-/// mail; the TS side is expected to adopt the same glyph) rendered green
-/// (the operator's 2026-09-24 directive: "mail envelope glyph GREEN not
-/// purple") — the Success color, the palette's green. The label is the
-/// shared `Agent message` and the participant renders the viewer-relative
-/// arrow plus the counterpart agent's name (the operator's 2026-09-25
-/// arrow directive: "↓ for received and ↑ for sent/queued ... Display
-/// only `Agent message` + arrow + counterpart agent name"): the arrow
-/// comes from the row's actual direction — `↑` on sent and queued rows
-/// (this chat's outgoing mail), `↓` on received ones (incoming) — never
-/// parsed out of a participant or body string, and the direction word,
-/// the relationship word, and the body preview never render (the TS
-/// header carries no preview either).
+/// The `✉ <label> · <participant>` summary line, with sanctioned divergences from TS:
+/// the `✉` mail envelope (Kevin directive 2026-09-24) renders green (operator directive
+/// 2026-09-24), and the participant is the viewer-relative arrow plus the counterpart's
+/// name (operator directive 2026-09-25).
 pub(crate) fn agent_message_summary_line(
     direction: AgentMessageDirection,
     counterpart: &str,
@@ -89,10 +72,8 @@ pub(crate) fn agent_message_summary_line(
     ]
 }
 
-/// The received agent-message rows (TS `AgentMessageComponent`): a leading
-/// blank (spacing-driven), the summary header (no body preview — the
-/// collapsed row is the summary alone), and the `╰─`-guttered body when
-/// expanded.
+/// The received agent-message rows: a leading blank (spacing-driven), the summary header
+/// (no body preview), and the `╰─`-guttered body when expanded.
 pub(crate) fn render_agent_message(
     row: &AgentMessageRow,
     detail: Detail,
@@ -112,9 +93,8 @@ pub(crate) fn render_agent_message(
     out
 }
 
-/// TS `agentMessageBodyLines`: each source line wraps at `width - 4`, the
-/// first rendered line carries the `╰─ ` gutter, the rest three spaces, all
-/// in `customMessageText`, truncated to the width.
+/// Each source line wraps at `width - 4`: the first rendered line carries
+/// the `╰─ ` gutter, the rest three spaces, all in `customMessageText`.
 pub(crate) fn agent_message_body(message: &str, theme: &Theme, width: usize) -> Vec<Line> {
     let safe_width = width.max(1);
     let text_width = super::geometry::agent_body_width(width);
@@ -134,7 +114,7 @@ pub(crate) fn agent_message_body(message: &str, theme: &Theme, width: usize) -> 
         .into_iter()
         .enumerate()
         .map(|(index, line)| {
-            // TS: the first rendered line carries the dim `╰─ ` gutter,
+            // The first rendered line carries the dim `╰─ ` gutter,
             // continuation lines three unstyled spaces.
             let mut row: Line = vec![Span::raw(" ")];
             if index == 0 {
@@ -150,8 +130,7 @@ pub(crate) fn agent_message_body(message: &str, theme: &Theme, width: usize) -> 
         .collect()
 }
 
-/// Plain-text truncate (`truncateToWidth` over unstyled text) with an
-/// explicit ellipsis.
+/// Plain-text truncate with an explicit ellipsis.
 pub(crate) fn truncate_text(text: &str, width: usize, ellipsis: &str) -> String {
     let line: Line = vec![Span::raw(text.to_string())];
     let truncated = truncate_line(&line, width, ellipsis);
@@ -161,9 +140,8 @@ pub(crate) fn truncate_text(text: &str, width: usize, ellipsis: &str) -> String 
         .collect::<String>()
 }
 
-/// One shell-completion row (TS `ShellCompletionComponent`, standalone
-/// form): the header mark, then the raw content under the branch gutter
-/// when expanded (TS #2779 `guttered(width, Text(raw, 0, 0))`).
+/// One shell-completion row, standalone form: the header mark, then the
+/// raw content under the branch gutter when expanded.
 pub(crate) fn render_shell_completion(
     row: &ShellCompletionRow,
     detail: Detail,
@@ -203,8 +181,7 @@ pub(crate) fn render_shell_completion(
     out
 }
 
-/// Pad a rendered line to the full width with a base style (TS
-/// `theme.bg` over `padToWidth`).
+/// Pad a rendered line to the full width with a base style.
 pub(crate) fn pad_with(mut line: Line, width: usize, base: Style) -> Line {
     let used: usize = line.iter().map(|s| str_width(&s.content)).sum();
     if used < width {
@@ -213,10 +190,8 @@ pub(crate) fn pad_with(mut line: Line, width: usize, base: Style) -> Line {
     line
 }
 
-/// One generic custom row (TS `CustomMessageComponent`, after #2779's one
-/// shared layout): a leading blank, the bold `[<customType>]` label in
-/// `customMessageLabel`, then the always-shown markdown body in
-/// `customMessageText` under the branch gutter.
+/// One generic custom row: a leading blank, the bold `[<customType>]` label, then the
+/// always-shown markdown body in `customMessageText` under the branch gutter.
 pub(crate) fn render_custom_panel(row: &CustomPanelRow, theme: &Theme, width: usize) -> Vec<Line> {
     let md = super::geometry::markdown_style(ThemeColor::CustomMessageText, theme);
     let mut out = vec![spacer()];
@@ -256,7 +231,6 @@ mod tests {
             message: "ready".to_string(),
         };
         let rows = render_agent_message(&row, Detail::Overview, &theme(), 60, true);
-        // Leading blank + the envelope summary line, no body preview.
         assert_eq!(rows.len(), 2, "{rows:?}");
         assert!(rows[0].is_empty());
         let header = flat(&rows[1]);
@@ -264,11 +238,9 @@ mod tests {
             header.trim_end(),
             " \u{2709} Agent message \u{b7} \u{2193} model-probe"
         );
-        // The collapsed row never carries the body text.
         assert!(!header.contains("ready"), "no preview: {header:?}");
-        // Colors: green envelope (the operator's 2026-09-24 directive),
-        // muted label, dim viewer-relative arrow plus name, and the
-        // separator.
+        // Colors: green envelope, muted label, dim viewer-relative arrow
+        // plus name.
         let green = theme().fg_style(ThemeColor::Success);
         let muted = theme().fg_style(ThemeColor::Muted);
         let dim = theme().fg_style(ThemeColor::Dim);
@@ -284,8 +256,7 @@ mod tests {
 
     #[test]
     fn agent_message_header_never_carries_the_body() {
-        // An empty body and a long body render the SAME collapsed header:
-        // no preview, no ellipsis (the operator's 2026-09-25 directive).
+        // An empty body and a long body render the SAME collapsed header.
         for message in ["  \n  ".to_string(), format!("{} end", "word ".repeat(20))] {
             let row = AgentMessageRow {
                 direction: AgentMessageDirection::Received,
@@ -301,11 +272,7 @@ mod tests {
         }
     }
 
-    /// The arrow is viewer-relative (the operator's 2026-09-25 directive):
-    /// `↑` on sent and queued rows (this chat's outgoing mail), `↓` on
-    /// received ones (incoming). The arrow comes from the row's actual
-    /// direction and the collapsed row carries the shared `Agent message`
-    /// label plus the arrow and counterpart name only.
+    /// The arrow comes from the row's actual direction, never parsed out of a string.
     #[test]
     fn agent_message_arrows_follow_the_row_direction() {
         for (direction, arrow) in [
@@ -339,14 +306,13 @@ mod tests {
             message: "line one\nline two".to_string(),
         };
         let rows = render_agent_message(&row, Detail::All, &theme(), 60, false);
-        // No leading blank (spacing decided otherwise), header, two body rows.
         assert_eq!(rows.len(), 3, "{rows:?}");
         assert_eq!(flat(&rows[1]), " \u{2570}\u{2500} line one");
         assert_eq!(flat(&rows[2]), "    line two");
         let dim = theme().fg_style(ThemeColor::Dim);
         let body = theme().fg_style(ThemeColor::CustomMessageText);
-        // The first rendered line carries the dim gutter, continuation rows
-        // three unstyled spaces, both bodies in `customMessageText`.
+        // The first rendered line carries the dim gutter, continuation
+        // rows three unstyled spaces.
         assert_eq!(
             rows[1][1],
             Span::styled("\u{2570}\u{2500} ".to_string(), dim)
@@ -391,10 +357,8 @@ mod tests {
             theme().fg_style(ThemeColor::Error),
             "error when failed"
         );
-        // The expanded body is the raw content under the branch gutter
-        // (TS #2193's expectation, the same layout #2779 mandates): the
-        // gutter on the first content row, the four-column continuation
-        // on the blank source line.
+        // The expanded body is the raw content under the branch gutter: the gutter on
+        // the first content row, the four-column continuation on the blank source line.
         let row = ShellCompletionRow {
             pid: Some(99),
             exit_code: Some(0),
@@ -418,8 +382,7 @@ mod tests {
         );
     }
 
-    /// The un-boxed panel's label is the shared `customMessageLabel`
-    /// span with no box background; the body carries `customMessageText`.
+    /// The un-boxed panel's label and body carry their shared spans with no box background.
     #[test]
     fn custom_panel_guttered_shape() {
         let row = CustomPanelRow {
@@ -427,14 +390,12 @@ mod tests {
             content: "[autonomous-status: on]".to_string(),
         };
         let rows = render_custom_panel(&row, &theme(), 40);
-        // The label is the shared `customMessageLabel` span, whole (bold
-        // on the label fg) — no box background anywhere on the row.
+        // No box background anywhere on the row.
         assert_eq!(
             rows[1][1],
             custom_message_label("autonomous_status", &theme())
         );
         assert!(rows[1].iter().all(|span| span.style.bg.is_none()));
-        // The body span carries the `customMessageText` foreground.
         let body = rows[2]
             .iter()
             .find(|span| span.content.contains("[autonomous-status: on]"))

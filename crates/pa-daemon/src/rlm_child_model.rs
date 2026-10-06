@@ -1,7 +1,5 @@
-//! RLM child model resolution and roster text helpers: the pa-daemon side of
-//! the TS `_resolveRlmSubagentModel` (reference resolution against the
-//! credential-backed catalog, with the TS unavailable-model error) and the
-//! spawn-time thinking-support check, plus the roster text caps.
+//! RLM child model resolution and roster text helpers: reference resolution against the
+//! credential-backed catalog, the spawn-time thinking-support check, plus the roster text caps.
 
 use std::path::Path;
 
@@ -9,18 +7,16 @@ use anyhow::{anyhow, bail, Result};
 use pa_ai::models::{get_supported_thinking_levels, thinking_level_from_str};
 use pa_core::kernel::rlm_runtime::{find_rlm_model_matches, RlmModelInfo};
 
-/// Close matches listed in model-resolution errors (TS suggestion limit).
+/// Close matches listed in model-resolution errors.
 const MODEL_ERROR_SUGGESTION_LIMIT: usize = 3;
-/// Cap on the answer preview handed to the parent model (TS `compactRlmText`).
+/// Cap on the answer preview handed to the parent model.
 pub const ANSWER_PREVIEW_MAX_CHARS: usize = 160;
 /// Cap on the one-line task label shown in kernel rosters.
 pub const LABEL_MAX_CHARS: usize = 200;
 const ELLIPSIS: &str = "...";
 
 /// The model catalog the RLM surface resolves against: the same
-/// credential-backed list `rlm.find_models` searches (the worker-style
-/// registry construction: the private-authorization disk cache is adopted,
-/// so entitled `internal/*` models resolve for spawned children).
+/// credential-backed list `rlm.find_models` searches (entitled `internal/*` models resolve).
 #[must_use]
 pub fn catalog_models(agent_dir: &Path) -> Vec<RlmModelInfo> {
     let registry = crate::state_getters::worker_model_registry(agent_dir);
@@ -40,18 +36,11 @@ pub fn catalog_models(agent_dir: &Path) -> Vec<RlmModelInfo> {
 }
 
 /// Resolve the child model reference, then enforce the daemon
-/// `allowedModels` allowlist on the resolved selector (an inherited parent
-/// model included): a model outside the allowlist fails loudly with the
-/// typed refusal — never a fallback — so both `rlm.spawn` and
-/// `rlm.create_session` refuse instead of landing a child on a model the
-/// daemon may not resolve to.
+/// `allowedModels` allowlist on the resolved selector (inherited parent
+/// model included): outside the allowlist fails loudly, never a fallback.
 ///
 /// # Errors
-///
-/// Returns an error when the child model reference cannot be resolved
-/// (no model selected, or the reference matches no catalog model —
-/// the TS unavailable-model error), or when the resolved selector is
-/// outside the allowlist (the typed refusal).
+/// Returns an error when the reference cannot be resolved or the selector is outside the allowlist.
 pub fn resolve_child_model(
     agent_dir: &Path,
     reference: Option<&str>,
@@ -64,10 +53,8 @@ pub fn resolve_child_model(
     Ok(model)
 }
 
-/// The TS `_resolveRlmSubagentModel` resolution before the allowlist gate.
-/// `None` inherits the parent model; a reference resolves exactly like
-/// the TS: parent equality first, then an exact catalog selector, then a
-/// unique short-form match, else the TS unavailable-model error.
+/// The resolution before the allowlist gate: `None` inherits the parent model; a reference resolves
+/// parent equality first, then an exact catalog selector, then a unique short-form match.
 fn resolve_child_model_unchecked(
     agent_dir: &Path,
     reference: Option<&str>,
@@ -117,16 +104,12 @@ fn resolve_child_model_unchecked(
     Err(model_unavailable_error(reference, target, &candidates))
 }
 
-/// A requested thinking level must be supported by the resolved model (the
-/// TS spawn-time check). A model outside the local catalog (a scripted
-/// verification model) cannot be checked and passes.
+/// A requested thinking level must be supported by the resolved model;
+/// an out-of-catalog model (a scripted verification model) passes unchecked.
 ///
 /// # Errors
-///
-/// Returns an error when the resolved model's supported levels do not
-/// include the requested level (the message lists the supported levels);
-/// the unchecked cases — no level, an unsplit selector, an unknown level
-/// name, an out-of-catalog model — pass.
+/// Returns an error when the supported levels exclude the requested one (the message lists them);
+/// the unchecked cases pass.
 pub fn assert_thinking_supported(
     agent_dir: &Path,
     level: Option<&str>,
@@ -163,9 +146,8 @@ pub fn assert_thinking_supported(
     );
 }
 
-/// Rejection message for an unresolved model reference (TS
-/// `formatRlmModelUnavailableError`): the unavailability, the selector form,
-/// and close matches so the caller can retry with a full selector.
+/// Rejection message for an unresolved model reference: the
+/// unavailability, the selector form, and close matches for retry.
 fn model_unavailable_error(
     reference: &str,
     target: &str,
@@ -189,7 +171,7 @@ fn model_unavailable_error(
     }
 }
 
-/// Collapse whitespace and cap at the roster limit (TS `compactRlmText`).
+/// Collapse whitespace and cap at the roster limit.
 #[must_use]
 pub fn compact_rlm_text(text: &str) -> String {
     let compact: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -250,7 +232,6 @@ mod tests {
     fn resolves_parent_exact_and_short_form_references() {
         let dir = tempfile::TempDir::new().unwrap();
         write_catalog(dir.path());
-        // No reference inherits the parent model.
         let resolved = resolve_child_model(
             dir.path(),
             None,
@@ -270,7 +251,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(resolved, "test-provider/glm-5.3");
-        // Exact catalog selector.
         let resolved = resolve_child_model(
             dir.path(),
             Some("test-provider/glm-5.3-turbo"),
@@ -280,7 +260,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(resolved, "test-provider/glm-5.3-turbo");
-        // Unique short form.
         let resolved = resolve_child_model(
             dir.path(),
             Some("glm-5.3-turbo"),
@@ -290,7 +269,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(resolved, "test-provider/glm-5.3-turbo");
-        // No reference and no parent model: the TS no-model error.
         let error = resolve_child_model(
             dir.path(),
             None,
@@ -311,8 +289,7 @@ mod tests {
         write_catalog(dir.path());
         let allow =
             crate::model_allowlist::DaemonAllowlist::Allowed(vec!["prime-inference/*".to_string()]);
-        // An explicit reference that resolves but sits outside the
-        // allowlist fails with the typed refusal, never a fallback.
+        // An explicit reference outside the allowlist fails with the typed refusal.
         let error = resolve_child_model(
             dir.path(),
             Some("test-provider/glm-5.3"),
@@ -347,7 +324,6 @@ mod tests {
                 .is_some(),
             "{error}"
         );
-        // A reference matching the allowlist passes the gate.
         let resolved = resolve_child_model(
             dir.path(),
             Some("test-provider/glm-5.3"),
@@ -357,7 +333,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(resolved, "test-provider/glm-5.3");
-        // No allowlist configured keeps the TS behavior.
         let resolved = resolve_child_model(
             dir.path(),
             Some("test-provider/glm-5.3"),
@@ -373,10 +348,9 @@ mod tests {
     fn unmatched_references_carry_the_ts_error_with_close_matches() {
         let dir = tempfile::TempDir::new().unwrap();
         write_catalog(dir.path());
-        // TS parity (4649 regression suite): a prefix reference lists close
-        // matches, a reference matching nothing at all does not. The
-        // reference prefixes the test catalog's provider, so it can never
-        // resolve against real default-catalog models.
+        // TS parity (4649 regression suite): a prefix reference lists
+        // close matches, a matching-nothing reference does not (the
+        // reference prefixes the test provider, never real defaults).
         let error = resolve_child_model(
             dir.path(),
             Some("test-provi"),
@@ -397,7 +371,6 @@ mod tests {
             message.contains("close matches: \"test-provider/glm-5.3\""),
             "{message}"
         );
-        // A reference matching nothing at all omits the close-match list.
         let error = resolve_child_model(
             dir.path(),
             Some("zzz"),
@@ -425,12 +398,8 @@ mod tests {
         assert_thinking_supported(dir.path(), Some("high"), "scripted/faux-1").unwrap();
     }
 
-    /// Piece 5 (c) — the child-propagation regression: a spawned child
-    /// resolves an entitled private `internal/*` model through the same
-    /// disk caches the worker serves (auth.json + the private-authorization
-    /// cache). Before the fix, `catalog_models` built a bare registry that
-    /// never adopted the private cache, so `internal/*` was invisible to
-    /// `rlm.spawn` model resolution and `rlm.find_models`.
+    /// The child-propagation regression: a spawned child resolves an
+    /// entitled private `internal/*` model through the worker's same disk caches.
     #[test]
     fn a_spawned_child_resolves_an_entitled_private_model() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -452,11 +421,9 @@ mod tests {
         // fingerprint-scoped disk cache carries it.
         let mut auth = pa_core::auth::AuthStorage::create(dir.path());
         let api_key = auth.get_api_key("prime-inference").expect("api key");
-        // The stored team selection (team-7 in the fixture auth.json)
-        // survives ambient env credentials — a dogfood box's ambient
-        // `PRIME_API_KEY` (or a `PRIME_TEAM_ID` pin) changes the resolved
-        // key/team pair, and the cache below is written for whatever pair
-        // resolves, so the verifier runs the same on every box.
+        // The stored team selection survives ambient env credentials (a
+        // dogfood box's ambient `PRIME_API_KEY` changes the pair); the
+        // cache below is written for whatever pair resolves.
         let team_id = auth
             .get_provider_headers("prime-inference")
             .and_then(|headers| headers.get("X-Prime-Team-ID").cloned())
@@ -480,11 +447,9 @@ mod tests {
             },
         );
 
-        // The catalog the RLM surface searches carries the private model.
         assert!(catalog_models(dir.path())
             .iter()
             .any(|model| model.id == "internal/glm-5.3-fast"));
-        // A spawned child resolves it by full selector and by short form.
         let resolved = resolve_child_model(
             dir.path(),
             Some("prime-inference/internal/glm-5.3-fast"),
@@ -518,16 +483,8 @@ mod tests {
         .unwrap();
     }
 
-    /// The catalog-repo (layer A) child-resolution regression: a fetched
-    /// entry the compiled fallback lacks resolves for a spawned child
-    /// through the on-disk provider catalog the daemon's startup refresh
-    /// writes, once the entry's provider is auth-configured in models.json
-    /// (the same availability gate the picker's configuredProviders filter
-    /// applies — the production openai-codex picker gap was missing auth,
-    /// not missing wiring). Before the live-catalog wiring, the resolution
-    /// list was the compiled table plus a flat Prime Inference merge, so
-    /// catalog-repo entries could never resolve for `rlm.spawn` or list
-    /// in `rlm.find_models`.
+    /// The catalog-repo child-resolution regression: a fetched entry the compiled fallback lacks
+    /// resolves through the on-disk provider catalog, once its provider is auth-configured.
     #[test]
     fn a_spawned_child_resolves_a_catalog_repo_entry_the_compiled_fallback_lacks() {
         const PROBE_ID: &str = "gpt-6-probe";
@@ -583,14 +540,12 @@ mod tests {
         )
         .unwrap();
         let selector = format!("openai-codex/{PROBE_ID}");
-        // The rlm search surface (find_models) lists the fetched entry.
         let catalog = catalog_models(dir.path());
         let probe = catalog
             .iter()
             .find(|model| model.selector() == selector)
             .expect("the fetched entry lists for find_models");
         assert_eq!(probe.name, "GPT-6 Probe");
-        // A spawned child resolves it by full selector and by short form.
         let resolved = resolve_child_model(
             dir.path(),
             Some(&selector),

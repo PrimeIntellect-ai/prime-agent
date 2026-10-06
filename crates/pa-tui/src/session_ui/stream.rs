@@ -1,52 +1,42 @@
-//! The stream concern: the working loader's activity and token accounting
-//! over provider stream events, plus the `/speed` readout and the
-//! streaming/running/resume hint helpers.
+//! The working loader's activity and token accounting over provider stream
+//! events, plus the `/speed` readout and the streaming/running/resume hint
+//! helpers.
 use super::{AgentView, SessionUi, Value, WorkingState};
 
-/// The loader's token accounting (TS `AgentActivityTracker`): the live
-/// count is completed-message output tokens plus max(reported usage, the
-/// content estimate at 4 chars per token), reported monotonically within a
-/// run. The live count derives from the streamed message itself — never
-/// from per-delta sums — because the worker coalesces provider deltas into
-/// latest-snapshot frames and a delta sum would undercount.
+/// The loader's token accounting: the live count is completed-message output tokens plus
+/// max(reported usage, the chars/4 estimate), derived from the streamed message itself — never from
+/// per-delta sums — because the worker coalesces deltas into latest-snapshot frames.
 #[derive(Debug, Default)]
 pub(super) struct LoaderTokenTracker {
-    /// Settled-message output tokens, banked at `message_end` (TS
-    /// `completedTokens`).
+    /// Settled-message output tokens, banked at `message_end`.
     completed_tokens: u64,
-    /// The streaming message's reported `usage.output` (TS
-    /// `streamingUsageTokens`).
+    /// The streaming message's reported `usage.output`.
     streaming_usage: u64,
-    /// The streaming message's content size in chars (TS accumulates the
-    /// same value as a delta sum; the snapshot message carries it directly).
+    /// The streaming message's content size in chars.
     streaming_chars: u64,
 }
 
 impl LoaderTokenTracker {
-    /// TS `agent_start`/`reset`: a fresh run counts from zero.
+    /// A fresh run counts from zero.
     fn reset(&mut self) {
         self.completed_tokens = 0;
         self.start_message();
     }
 
-    /// TS `message_start` (assistant): the new message's live state starts
-    /// empty — its reported usage only counts from the first update.
+    /// The new message's live state starts empty.
     pub(super) fn start_message(&mut self) {
         self.streaming_usage = 0;
         self.streaming_chars = 0;
     }
 
-    /// TS `message_update`: adopt the message's reported usage and size,
-    /// returning the live count.
     pub(super) fn apply_streaming(&mut self, usage_output: u64, content_chars: u64) -> u64 {
         self.streaming_usage = usage_output;
         self.streaming_chars = content_chars;
         self.current()
     }
 
-    /// TS `message_end`: bank the message's tokens into the completed
-    /// count (authoritative usage when reported, else the live estimate)
-    /// and clear the live state.
+    /// Bank the message's tokens into the completed count (authoritative usage
+    /// when reported, else the live estimate).
     pub(super) fn settle(&mut self, usage_output: u64) {
         let estimate = (self.streaming_chars as f64 / 4.0).round() as u64;
         self.completed_tokens += if usage_output > 0 {
@@ -57,17 +47,14 @@ impl LoaderTokenTracker {
         self.start_message();
     }
 
-    /// TS `currentTokens`: completed tokens plus max(reported usage, the
-    /// chars/4 estimate).
     fn current(&self) -> u64 {
         let estimate = (self.streaming_chars as f64 / 4.0).round() as u64;
         self.completed_tokens + self.streaming_usage.max(estimate)
     }
 }
 
-/// Per-session output tok/sec accumulation for `/speed` (TS `speedStats`):
-/// output tokens and wall-clock spans summed over the session's completed
-/// responses.
+/// Per-session output tok/sec accumulation for `/speed`: tokens and spans
+/// summed over the session's completed responses.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub(super) struct SpeedStats {
     tokens: u64,
@@ -76,8 +63,7 @@ pub(super) struct SpeedStats {
 }
 
 impl SpeedStats {
-    /// The session-average rate in tok/s over the accumulated span (TS
-    /// `speedStats.tokens / (speedStats.durationMs / 1000)`).
+    /// The session-average rate in tok/s over the accumulated span.
     fn average_rate(&self) -> f64 {
         self.tokens as f64 / (self.duration_ms as f64 / 1000.0)
     }
@@ -94,20 +80,13 @@ fn format_rate(tokens_per_second: f64) -> String {
 }
 
 impl SessionUi {
-    /// The working loader starts with a `Waiting` activity and a zero
-    /// token count (TS `agent_start` resets the tracker), anchored at
-    /// this instant.
     pub(crate) fn start_loader(&mut self, view: &mut AgentView) {
         self.start_loader_at(view, std::time::Instant::now());
     }
 
-    /// [`Self::start_loader`] with an explicit anchor: the live paths
-    /// pass now (the submit, the engine start); the rebuild path
-    /// passes the LAST HUMAN PROMPT's instant (the operator's
-    /// 2026-09-28 rule: the timer never resets on a view
-    /// transition — an agents-view round trip re-attaches mid-turn
-    /// and the clock keeps counting from the prompt that started the
-    /// turn).
+    /// [`Self::start_loader`] with an explicit anchor: the live paths pass
+    /// now; the rebuild path passes the LAST HUMAN PROMPT's instant (the
+    /// operator's 2026-09-28 rule: the timer never resets on a view transition).
     pub(crate) fn start_loader_at(&mut self, view: &mut AgentView, since: std::time::Instant) {
         view.working = Some(WorkingState {
             activity: "Waiting",
@@ -120,12 +99,8 @@ impl SessionUi {
         self.working_tokens.reset();
     }
 
-    /// Update the loader's activity label from one provider stream event
-    /// (TS `AgentActivityTracker`: thinking/text/toolcall events switch the
-    /// label and direction). Token counting lives in
-    /// [`Self::track_stream_tokens`]: the event's own delta is only the
-    /// last of possibly many coalesced provider deltas, so the message —
-    /// not the delta — carries the token truth.
+    /// Update the loader's activity label from one provider stream event (thinking/text/toolcall
+    /// events switch the label and direction): the message, not the delta, carries the token truth.
     pub(crate) fn track_stream_activity(event: &Value, view: &mut AgentView) {
         let (activity, download) = match event.get("type").and_then(Value::as_str) {
             Some("thinking_start" | "thinking_delta") => ("Thinking", true),
@@ -139,10 +114,8 @@ impl SessionUi {
         }
     }
 
-    /// `/speed on/off`: toggles the footer tok/sec readout for this
-    /// session (TS `setSpeedDisplay`): the flag lives on the client;
-    /// disabling clears the stats and the row (TS `resetSpeedStats`), and
-    /// the status row reports the TS wording either way.
+    /// `/speed on/off`: toggles the footer tok/sec readout; disabling clears the
+    /// stats and the row.
     pub(crate) fn set_speed_display(&mut self, enabled: bool, view: &mut AgentView) {
         self.speed_display_enabled = enabled;
         if !enabled {
@@ -157,14 +130,10 @@ impl SessionUi {
         self.note(status, view);
     }
 
-    /// Updates the footer tok/sec readout from a completed assistant
-    /// message (TS `recordSpeedSample`): output tokens over the
-    /// wall-clock span from the message timestamp (set at provider stream
-    /// start) to this `message_end` arrival. Timestamps keep the span true
-    /// even when buffered session events replay back-to-back on attach.
-    /// Aborted/failed responses and samples without a finite positive
-    /// span or token count are skipped: some providers only fill usage at
-    /// stream end, so they never produce a bogus rate.
+    /// Update the footer tok/sec readout from a completed assistant message: output tokens over the
+    /// span from the message timestamp to this `message_end` (timestamps keep the span true when
+    /// buffered events replay back-to-back on attach). Samples without a finite positive span or
+    /// token count are skipped.
     pub(crate) fn record_speed_sample(&mut self, message: &Value, view: &mut AgentView) {
         if !self.speed_display_enabled {
             return;
@@ -176,9 +145,8 @@ impl SessionUi {
         if stop_reason == "aborted" || stop_reason == "error" {
             return;
         }
-        // TS reads `Number(message.timestamp)`: a frame without one is NaN
-        // in TS and fails its `> 0` guard, so it is skipped here too — a
-        // zero-default would span the epoch and poison the average.
+        // A frame without a timestamp is skipped too — a zero-default would span
+        // the epoch and poison the average.
         let Some(timestamp) = message.get("timestamp").and_then(Value::as_i64) else {
             return;
         };
@@ -205,11 +173,9 @@ impl SessionUi {
     }
 }
 
-/// The streaming follow-up hint (TS `getTrayOverrideLabel`'s streaming
-/// arm): `<followUp> to queue message` — the tray override while the agent
-/// streams and a draft sits in the editor (an empty draft or an idle
-/// session shows nothing; the Ctrl+C exit hint outranks it at the call
-/// site, TS `isCtrlCExitHintVisible()`'s early return).
+/// The streaming follow-up hint: `<followUp> to queue message` — the tray override while the agent
+/// streams and a draft sits in the editor (an empty draft or an idle session shows nothing; the
+/// exit hint outranks it at the call site).
 pub(super) fn streaming_tray_hint(
     keybindings: &crate::keybindings::KeybindingsManager,
     turn_active: bool,
@@ -225,8 +191,8 @@ pub(super) fn streaming_tray_hint(
     Some(format!("{follow_up} to queue message"))
 }
 
-/// TS `isBashRunning` guard's warning: the clear key (app.clear) cancels
-/// the running user command, spelled through the effective keybindings.
+/// The running-command guard's warning: the clear key cancels it, spelled
+/// through the effective keybindings.
 pub(super) fn already_running_warning(
     keybindings: &crate::keybindings::KeybindingsManager,
 ) -> String {
@@ -234,15 +200,13 @@ pub(super) fn already_running_warning(
         || "Ctrl+C".to_string(),
         |key| crate::keybindings::format_key_text(&key),
     );
-    // TS `showWarning` renders `⚠ ${message}`: the prefix travels with the
-    // row text (the StatusKind tier is color only).
+    // The ⚠ prefix travels with the row text (the StatusKind tier is color
+    // only).
     format!("\u{26a0} A bash command is already running. Press {key} to cancel it first.")
 }
 
-/// TS `formatResumeHint` (resume-hint.ts): the post-exit hint names how to
-/// resume the session just left. Ephemeral (no session file) and unflushed
-/// empty sessions are omitted — neither can be resumed. Persistence is
-/// lazy: a file that does not exist on disk cannot be resumed either.
+/// The post-exit hint names how to resume the session just left; ephemeral and unflushed-empty
+/// sessions are omitted, and a missing file cannot be resumed either.
 pub(crate) fn resume_hint_from_stats(stats: &Value) -> Option<String> {
     let session_id = stats.get("sessionId").and_then(Value::as_str)?;
     let session_file = stats.get("sessionFile").and_then(Value::as_str)?;
@@ -264,9 +228,6 @@ mod streaming_tray_hint_tests {
     use super::streaming_tray_hint;
     use crate::keybindings::{KeybindingsConfig, KeybindingsManager};
 
-    /// TS `getTrayOverrideLabel`'s streaming arm: the follow-up hint names
-    /// the effective `app.message.followUp` key (the default is
-    /// alt+enter).
     #[test]
     fn the_hint_names_the_follow_up_key_over_a_draft() {
         let kb = KeybindingsManager::new();
@@ -277,8 +238,6 @@ mod streaming_tray_hint_tests {
         );
     }
 
-    /// TS `!this.isAgentStreaming() || !text.trim()` — an idle session or
-    /// an empty (whitespace-only) draft shows no hint.
     #[test]
     fn idle_or_empty_draft_shows_no_hint() {
         let kb = KeybindingsManager::new();
@@ -287,8 +246,6 @@ mod streaming_tray_hint_tests {
         assert_eq!(streaming_tray_hint(&kb, true, "   "), None);
     }
 
-    /// A user-rebound follow-up key spells through the effective binding
-    /// (TS `keyText("app.message.followUp")`).
     #[test]
     fn the_hint_spells_a_rebound_follow_up_key() {
         let mut config = KeybindingsConfig::new();
@@ -309,9 +266,6 @@ mod streaming_tray_hint_tests {
 mod loader_token_tests {
     use super::{format_rate, LoaderTokenTracker, SpeedStats};
 
-    /// The live count derives from the streamed message, so coalesced
-    /// frames (one latest-snapshot wire frame per flush tick) count the
-    /// full streamed size — a per-delta sum would undercount them ~20x.
     #[test]
     fn coalesced_frames_count_from_the_message_not_deltas() {
         let mut tracker = LoaderTokenTracker::default();
@@ -326,8 +280,6 @@ mod loader_token_tests {
         assert_eq!(tracker.current(), 600);
     }
 
-    /// Settling without reported usage banks the live estimate (TS
-    /// `usage.output > 0 ? usage.output : estimatedStreamingTokens()`).
     #[test]
     fn settle_without_usage_banks_the_estimate() {
         let mut tracker = LoaderTokenTracker::default();
@@ -337,8 +289,6 @@ mod loader_token_tests {
         assert_eq!(tracker.current(), 101);
     }
 
-    /// A new message resets the live state but keeps the run's completed
-    /// count; `agent_start` resets the whole tracker (TS `reset`).
     #[test]
     fn message_start_resets_the_live_state_and_agent_start_the_run() {
         let mut tracker = LoaderTokenTracker::default();
@@ -355,8 +305,6 @@ mod loader_token_tests {
         assert_eq!(tracker.current(), 0);
     }
 
-    /// TS `formatRate`: whole numbers at 100 tok/s and above, one decimal
-    /// below.
     #[test]
     fn format_rate_matches_the_ts_boundaries() {
         assert_eq!(format_rate(150.0), "150");
@@ -366,8 +314,6 @@ mod loader_token_tests {
         assert_eq!(format_rate(0.5), "0.5");
     }
 
-    /// The session average sums tokens over the summed wall-clock span (TS
-    /// `speedStats`); it only reads once a positive-span sample exists.
     #[test]
     fn speed_stats_average_rate_sums_tokens_over_spans() {
         let mut stats = SpeedStats {

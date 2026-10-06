@@ -1,31 +1,19 @@
-//! Worker-side roster activity feed: keeps the supervisor's roster
-//! fresh mid-turn. Every roster consumer renders from it (the TUI
-//! agents view's rows, the session
-//! view's subagents box, the daemon CLI lists), so the worker must publish
-//! its summary whenever the state those consumers render changes mid-turn: busy
-//! flips, tool calls starting and ending, compaction, user bash, and
-//! queue changes. TS observes the worker's
-//! outbound event stream (`observeRosterEvent` over
-//! `ROSTER_SESSION_EVENT_TRIGGERS` + `scheduleRosterFlush`, daemon-mode.ts);
-//! the port watches the worker's event pump — the one stream every
-//! session-event frame flows through (turns, compaction, bash, queue
-//! updates, worker-level notifications) — and feeds a coalescing push
-//! queue whose single consumer composes the summary fresh at flush time
-//! and ships one `worker_roster_delta` per burst.
+//! Worker-side roster activity feed: keeps the supervisor's roster fresh
+//! mid-turn. The port watches the worker's event pump and feeds a
+//! coalescing push queue whose single consumer composes the summary
+//! fresh at flush time and ships one `worker_roster_delta` per burst.
 
 use std::sync::Arc;
 
 use crate::worker::{EventPump, OutboundFrame};
 
-/// Disables the worker's roster pushes (tests and local harness runs that
-/// spin workers without a supervisor).
+/// Disables the worker's roster pushes (tests and local harness runs
+/// that spin workers without a supervisor).
 pub(crate) const ROSTER_PUSH_DISABLE_ENV: &str = "PA_WORKER_DISABLE_ROSTER_PUSH";
 
-/// The session event types that trigger a roster flush (TS
-/// `ROSTER_SESSION_EVENT_TRIGGERS`, daemon-mode.ts): each edge moves a
-/// summary field the roster consumers render. `thinking_level_changed` has
-/// no Rust frame yet; it stays listed so the feed wires the moment the
-/// frame exists.
+/// The session event types that trigger a roster flush: each edge moves
+/// a summary field the roster consumers render (`thinking_level_changed`
+/// has no Rust frame yet; it stays listed for when it does).
 pub(crate) const ROSTER_SESSION_EVENT_TRIGGERS: &[&str] = &[
     "turn_start",
     "turn_end",
@@ -43,10 +31,8 @@ pub(crate) const ROSTER_SESSION_EVENT_TRIGGERS: &[&str] = &[
     "thinking_level_changed",
 ];
 
-/// Whether one broadcast frame triggers a roster flush (TS
-/// `observeRosterEvent`: session events by event type, plus the
-/// `session_closed`/`session_replaced` payload tags, which the worker
-/// frames as session events).
+/// Whether one broadcast frame triggers a roster flush: session events by event type, plus the
+/// `session_closed`/`session_replaced` payload tags, which the worker frames as session events.
 pub(crate) fn frame_triggers_roster_flush(frame: &OutboundFrame) -> bool {
     #[derive(serde::Deserialize)]
     struct Envelope<'a> {
@@ -76,16 +62,9 @@ pub(crate) fn frame_triggers_roster_flush(frame: &OutboundFrame) -> bool {
     }
 }
 
-/// The coalescing roster push queue (TS `scheduleRosterFlush`): every
-/// producer — the turn runner's busy flips and the pump watcher — sets one
-/// pending flag, and the single consumer composes the summary fresh at
-/// flush time, so one `worker_roster_delta` ships the latest state no
-/// matter how the requests interleaved. The summary composes fresh at
-/// flush time, never at enqueue time: a late flush reads the worker's
-/// current flags instead of replaying a stale snapshot. The pending flag
-/// bounds the backlog at one request by construction — a stalled
-/// supervisor (each request carries its own deadline) delays pushes but
-/// never lets them accumulate.
+/// The coalescing roster push queue: producers set one pending flag; the
+/// single consumer composes the summary fresh at flush time — one
+/// `worker_roster_delta` per burst, the backlog bounded at one request.
 pub(crate) struct RosterPushQueue {
     inner: Option<Arc<PushState>>,
 }
@@ -112,9 +91,8 @@ impl RosterPushQueue {
         Self { inner: None }
     }
 
-    /// Enqueue one flush request (the TS `scheduleRosterFlush` arm of
-    /// every trigger): the first request of a burst wakes the consumer,
-    /// every later one only keeps the flag set.
+    /// Enqueue one flush request: the first request of a burst wakes
+    /// the consumer, every later one only keeps the flag set.
     pub(crate) fn push(&self) {
         let Some(state) = &self.inner else {
             return;
@@ -127,10 +105,8 @@ impl RosterPushQueue {
         }
     }
 
-    /// Spawn the flush consumer: the one task that composes summaries and
-    /// ships them as `worker_roster_delta` commands over the supervisor
-    /// link. Flushes serialize here, so a wedged supervisor delays pushes
-    /// but never reorders them.
+    /// Spawn the flush consumer: flushes serialize here, so a wedged
+    /// supervisor delays pushes but never reorders them.
     pub(crate) fn spawn(context: crate::worker::RosterPushContext) -> Self {
         if std::env::var_os(ROSTER_PUSH_DISABLE_ENV).is_some()
             || context.worker_token.is_empty()
@@ -146,10 +122,8 @@ impl RosterPushQueue {
         tokio::spawn(async move {
             loop {
                 consumer.notify.notified().await;
-                // One flush per burst (TS `setImmediate` coalescing): a
-                // request that lands mid-flush re-arms the flag and stores
-                // a notify permit, so this loop wakes for it instead of
-                // batching the whole backlog into unbounded memory.
+                // One flush per burst: a request that lands mid-flush
+                // re-arms the flag and stores a notify permit.
                 consumer
                     .pending
                     .store(false, std::sync::atomic::Ordering::SeqCst);
@@ -190,11 +164,9 @@ pub(crate) fn spawn_roster_activity_watch(events: &Arc<EventPump>, queue: Roster
     let mut frames = events.subscribe();
     tokio::spawn(async move {
         loop {
-            // `Lagged` only means frames were skipped under a burst: the
-            // missed frames may include triggers, so one catch-up flush
-            // request keeps the feed converging on the fresh state the
-            // consumer composes anyway; only a closed pump ends the
-            // watcher (a worker serves one session for its lifetime).
+            // `Lagged` only means frames were skipped under a burst: one
+            // catch-up flush request keeps the feed converging; only a
+            // closed pump ends the watcher.
             match frames.recv().await {
                 Ok(frame) => {
                     if frame_triggers_roster_flush(&frame) {
@@ -272,9 +244,8 @@ mod tests {
         assert!(!frame_triggers_roster_flush(
             &OutboundFrame::side_question_event(side_question_payload)
         ));
-        // The worker frames `session_closed` payloads as session events:
-        // the payload tag flushes (TS `observeRosterEvent`'s
-        // `message.type === "session_closed"` arm).
+        // The worker frames `session_closed` payloads as session
+        // events: the payload tag flushes.
         let closed_payload = serde_json::to_vec(&json!({
             "type": "session_closed",
             "activeSessionId": "s",
@@ -300,9 +271,8 @@ mod tests {
         queue.push();
     }
 
-    /// One pending flag bounds the backlog: a burst of requests behind a
-    /// slow supervisor collapses into a couple of flushes with the latest
-    /// state — an unbounded queue would drain every request one by one.
+    /// One pending flag bounds the backlog: a burst behind a slow
+    /// supervisor collapses into a couple of flushes with the latest state.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_burst_collapses_behind_a_slow_supervisor() {

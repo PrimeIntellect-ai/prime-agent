@@ -1,37 +1,7 @@
-//! One crossterm input reader per process at a time.
-//!
-//! TUI surfaces hand the terminal to each other inside one process: the
-//! agents-view loop opens chat sessions and reopens the view, and `/resume`
-//! chains open one session after another. crossterm events are process
-//! global, so two concurrent reader threads race for the same bytes; the
-//! losing (older) thread can read a keypress after its channel is gone and
-//! drop it — the user's key vanishes. The reader joins the still-running
-//! reader from the previous surface before starting the next one, so
-//! exactly one reader is alive at any time.
-//!
-//! [`spawn_paste_aware_reader`] runs the TS `StdinBuffer` raw-paste
-//! heuristic for the editor-bearing surfaces (the session surface and the
-//! agents view's composers): a keystroke burst that arrives in one chunk
-//! shaped like multi-line text (text, newline, text — tmux 3.2 and older
-//! forward pastes without bracketed markers) is coalesced into one paste
-//! instead of submitting line by line. A zero-timeout poll after each
-//! read marks the chunk boundary: crossterm serves the rest of the same
-//! OS read without blocking, so a burst is exactly the events one
-//! terminal write carried.
-//!
-//! Both readers also run the [`SequenceGuard`] (TS `StdinBuffer`'s
-//! partial-sequence hold, ported in [`crate::sequence_guard`]):
-//! crossterm's parser commits a lone trailing `ESC` at every partial-read
-//! boundary, and the sequence it opened then arrives as plain `Char`
-//! presses — a mouse drag types SGR report bodies into the editor. The
-//! guard holds that `ESC`, reassembles the sequence, and hands the reader
-//! decoded mouse reports and consumed escape forms instead.
-//!
-//! Every chunk then flows through the TS enhanced-key dispatch filters
-//! (see [`filter_enhanced_key_events`]): key releases are dropped (TS
-//! tui.ts dispatch filter) and a duplicate-reporting kitty terminal's
-//! raw-text twin of a plain CSI-u character is deduplicated (TS
-//! `StdinBuffer` `pendingKittyPrintableCodepoint`, stdin-buffer.ts:307).
+//! One crossterm input reader per process: surfaces hand the terminal to each other
+//! inside one process, so [`spawn_terminal_reader`] joins the previous surface's
+//! reader before starting the next one. Readers run the TS paste heuristic,
+//! [`SequenceGuard`], and the enhanced-key dispatch filters.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -44,32 +14,22 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 struct Reader {
     handle: std::thread::JoinHandle<()>,
     stop: Arc<AtomicBool>,
-    /// The event source's wake handle: `None` only when the source failed
-    /// to initialize (no controlling tty) — the reader keeps a bounded
-    /// poll then, because nothing can break its park.
+    /// The event source's wake handle: `None` only when the source failed to initialize (no
+    /// controlling tty) — the reader keeps a bounded poll then.
     waker: Option<crossterm::event::Waker>,
 }
 
-/// The reader of the previous TUI surface in this process, if any.
 static PREVIOUS_READER: Mutex<Option<Reader>> = Mutex::new(None);
 
-/// The bounded-poll cadence for the windows where the reader must share
-/// crossterm's process-global event-reader lock with another bounded
-/// poller: the kitty probe's 250ms answer window slices its polls at
-/// this tick (the vendored crossterm patch), so the reader keeps the
-/// same slice while that window is open — an indefinite park would hold
-/// the lock and starve the probe's slices. Also the fallback cadence
-/// when no wake handle exists (a source that failed to open the tty).
+/// The bounded-poll cadence for the windows where the reader must share crossterm's
+/// process-global event-reader lock with another bounded poller (the kitty probe's answer window
+/// — an indefinite park would starve its slices), and the fallback when no wake handle exists.
 const POLL_TIMEOUT_MS: u64 = 10;
 
-/// Stop the running reader and join it (the external-editor handoff):
-/// unlike a surface switch, the reader must be GONE before the child
-/// editor runs — it keeps polling the tty and would steal the editor's
-/// keystrokes and terminal query replies. The stop goes through
-/// [`request_reader_stop`]: the #3126 reader parks edge-driven (its
-/// waker breaks an indefinite park), so the flag's release store plus
-/// the wake is the one stop sequence — the flag alone would never wake
-/// a parked poll — and the entry is then taken and joined.
+/// Stop the running reader and join it (the external-editor handoff): the reader must be GONE
+/// before the child editor runs — it keeps polling the tty and would steal the editor's
+/// keystrokes. The stop goes through [`request_reader_stop`] (the #3126 reader parks edge-driven,
+/// so the flag's release store plus the wake is the one stop sequence).
 pub(crate) fn stop_reader() {
     request_reader_stop();
     let reader = PREVIOUS_READER
@@ -81,25 +41,17 @@ pub(crate) fn stop_reader() {
     }
 }
 
-/// Flag the previous surface's reader for stop and break its park: the
-/// flagged reader observes the flag at its loop top, so the wake is what
-/// turns a parked (indefinite) poll into a prompt exit. The teardown
-/// paths call this BEFORE any drain that polls crossterm directly (the
-/// drain must own the reader lock), and the next surface's reader spawn
-/// joins the already-exited thread, so a surface switch never waits on a
-/// poll tick and a dying reader cannot steal a keypress aimed at the new
-/// surface.
+/// Flag the previous surface's reader for stop and break its park: the wake turns a
+/// parked poll into a prompt exit (the reader observes the flag at its loop top).
+/// Teardown calls this BEFORE any drain that polls crossterm directly (the drain
+/// must own the reader lock).
 pub(crate) fn request_reader_stop() {
     let guard = PREVIOUS_READER
         .lock()
         .expect("the input-reader registry lock is poisoned");
     if let Some(reader) = guard.as_ref() {
-        // The flag is released before the wake: the reader's drain of
-        // the wake pipe is a kernel round-trip whose completion
-        // orders the reader's subsequent (acquire) flag load after
-        // this store — the loop-top check right after the drain
-        // observes the stop even though the wake itself carried no
-        // payload, so the park that follows can never miss it.
+        // The flag is released before the wake: the reader's drain of the wake pipe is a kernel
+        // round-trip whose completion orders the reader's (acquire) flag load after this store.
         reader.stop.store(true, Ordering::Release);
         if let Some(waker) = reader.waker.as_ref() {
             let _ = waker.wake();
@@ -107,10 +59,8 @@ pub(crate) fn request_reader_stop() {
     }
 }
 
-/// One input unit for the paste-aware reader: a parsed terminal event, a
-/// mouse report decoded from a reassembled escape sequence, or a
-/// coalesced marker-less keystroke burst (the TS raw multiline-paste
-/// heuristic; the payload keeps the burst's Enter keys as `\n`).
+/// One input unit for the paste-aware reader: a parsed terminal event, a mouse report decoded from
+/// a reassembled escape sequence, or a coalesced marker-less keystroke burst.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ReaderInput {
     Event(Event),
@@ -119,12 +69,9 @@ pub(crate) enum ReaderInput {
 }
 
 /// Start the terminal input reader: whole terminal writes that look like
-/// multi-line pastes (a marker-less burst with text on both sides of a
-/// newline) are delivered as one [`ReaderInput::BurstPaste`]; everything
-/// else arrives event by event. `on_input` returning `false` stops the
-/// reader (the caller stops it when its channel dies). The reader from the
-/// previous surface is stopped and joined first so it cannot steal events
-/// from the new one.
+/// multi-line pastes (a marker-less burst with text on both sides of a newline)
+/// arrive as one [`ReaderInput::BurstPaste`]; everything else arrives event by
+/// event. `on_input` returning `false` stops the reader.
 pub(crate) fn spawn_paste_aware_reader<F>(on_input: F)
 where
     F: FnMut(ReaderInput) -> bool + Send + 'static,
@@ -132,14 +79,10 @@ where
     spawn_reader(on_input);
 }
 
-/// The shared reader body: one reader per process, joined across surfaces.
-/// Each chunk — one terminal write — is repaired and classified before
-/// any of it reaches the surface: the macOS-Terminal meta repair
-/// ([`merge_legacy_meta_escapes`]) rewrites the wrapped double-ESC
-/// shapes first (the [`SequenceGuard`] would otherwise hold their `Esc`
-/// head), the guard reassembles partial sequences into mouse reports
-/// and key events, and [`forward`] passes the TS dispatch filters
-/// ([`filter_enhanced_key_events`]) when it delivers.
+/// The shared reader body: one reader per process, joined across surfaces. Each
+/// chunk — one terminal write — is repaired ([`merge_legacy_meta_escapes`], then
+/// the [`SequenceGuard`]) and classified ([`filter_enhanced_key_events`]) before
+/// any of it reaches the surface.
 fn spawn_reader<F>(mut on_input: F)
 where
     F: FnMut(ReaderInput) -> bool + Send + 'static,
@@ -148,9 +91,8 @@ where
         .lock()
         .expect("the input-reader registry lock is poisoned");
     if let Some(reader) = previous.take() {
-        // The same release-before-wake protocol as
-        // [`request_reader_stop`]: the join below returns within one
-        // loop-top check of the drained wake.
+        // The same release-before-wake protocol as [`request_reader_stop`]: the join below returns
+        // within one loop-top check of the drained wake.
         reader.stop.store(true, Ordering::Release);
         if let Some(waker) = reader.waker.as_ref() {
             let _ = waker.wake();
@@ -167,19 +109,11 @@ where
             if thread_stop.load(Ordering::Acquire) {
                 break;
             }
-            // The wait never runs past a held escape sequence's deadline:
-            // the guard flushes on the next wake. Otherwise the reader
-            // parks edge-driven on real input — TS's stdin is a `data`
-            // event stream with no idle tick, and with a wake handle the
-            // stop flag needs no poll tick to be observed either (the
-            // teardown wakes the park), so an idle surface costs no
-            // wakeups at all. Two bounded exceptions: a held sequence's
-            // own flush deadline, and the kitty probe's answer window
-            // (`query_in_flight`), whose slices must interleave with this
-            // reader through crossterm's process-global event-reader lock —
-            // a park would hold it and starve the probe. Without a wake
-            // handle (a source that failed to open the tty) the tick
-            // bounds the stop latency instead.
+            // The wait never runs past a held escape sequence's deadline (the guard flushes on the
+            // next wake); otherwise the reader parks edge-driven on real input, so an idle surface
+            // costs no wakeups. Two bounded exceptions: a held sequence's flush deadline, and the
+            // kitty probe's answer window (`query_in_flight`), whose slices must interleave through
+            // crossterm's process-global event-reader lock.
             let timeout = guard.poll_deadline(Instant::now()).or_else(|| {
                 if thread_waker.is_none() || crate::enhanced_keys::query_in_flight() {
                     Some(Duration::from_millis(POLL_TIMEOUT_MS))
@@ -194,14 +128,11 @@ where
                     }
                 }
                 Ok(true) => {
-                    // Drain every event of this terminal write: a
-                    // zero-timeout poll serves the rest of the same OS read
-                    // without blocking, so the drain stops exactly at the
-                    // chunk boundary. The drain must also observe the stop
-                    // flag on every iteration: a continuously readable
-                    // stream keeps the zero-timeout poll `true` forever,
-                    // and a surface handoff would block forever in
-                    // `join()` waiting for this loop to end.
+                    // Drain every event of this terminal write: a zero-timeout poll serves the rest
+                    // of the same OS read without blocking, so the drain stops at the chunk
+                    // boundary. The drain must also observe the stop flag on every iteration: a
+                    // readable stream keeps the poll `true` forever, and a handoff would block
+                    // forever in `join()`.
                     let mut events = Vec::new();
                     loop {
                         if thread_stop.load(Ordering::Acquire) {
@@ -218,17 +149,10 @@ where
                             Err(_) => return,
                         }
                     }
-                    // The meta repair runs on the raw chunk, BEFORE the
-                    // guard: a wrapped `ESC ESC [ A` folds to `Esc` +
-                    // `[` + SHIFT-ed letter, and the guard would hold the
-                    // wrapper's `Esc` head and reassemble the inner
-                    // `ESC [ A` as plain Up — the option identity TS's
-                    // double-ESC branch (keys.ts:788) rebuilds would be
-                    // lost. The repaired Alt+key is never a bare Esc
-                    // press, so the guard never holds it, and the partial
-                    // sequences the guard exists for end their write on
-                    // the lone `Esc` with no decodable body beside it,
-                    // so the repair never steals one either.
+                    // The meta repair runs on the raw chunk, BEFORE the guard: a wrapped `ESC ESC [
+                    // A` folds to `Esc` + `[` + SHIFT-ed letter, and the guard would hold the
+                    // wrapper's `Esc` head and reassemble the inner `ESC [ A` as plain Up, losing
+                    // the option identity.
                     let events = merge_legacy_meta_escapes(events);
                     let mut outputs = Vec::new();
                     for event in events {
@@ -249,12 +173,10 @@ where
     });
 }
 
-/// Deliver one drained round to the surface: a whole-write burst that
-/// reconstructs to marker-less multi-line text coalesces into one
-/// [`ReaderInput::BurstPaste`] (the TS raw-paste heuristic); everything
-/// else — plain events and reassembled mouse reports alike — passes the
-/// TS dispatch filters ([`filter_enhanced_key_events`]) and forwards
-/// input by input. Returns `false` when the surface stopped the reader.
+/// Deliver one drained round to the surface: a whole-write burst that reconstructs to marker-less
+/// multi-line text coalesces into one [`ReaderInput::BurstPaste`]; everything else passes the TS
+/// dispatch filters and forwards input by input. Returns `false` when the surface stopped the
+/// reader.
 fn forward(outputs: Vec<GuardOutput>, on_input: &mut dyn FnMut(ReaderInput) -> bool) -> bool {
     if !outputs.is_empty() {
         let mut text = String::new();
@@ -265,8 +187,7 @@ fn forward(outputs: Vec<GuardOutput>, on_input: &mut dyn FnMut(ReaderInput) -> b
                     Some(chunk) => text.push_str(&chunk),
                     None => burst_is_plain_text = false,
                 },
-                // A reassembled report breaks the burst like the mouse
-                // events crossterm parses itself do.
+                // A reassembled report breaks the burst like a parsed mouse event.
                 GuardOutput::Mouse(_) => burst_is_plain_text = false,
             }
         }
@@ -274,11 +195,9 @@ fn forward(outputs: Vec<GuardOutput>, on_input: &mut dyn FnMut(ReaderInput) -> b
             return on_input(ReaderInput::BurstPaste(text));
         }
     }
-    // The dispatch filters run after the guard — a reassembled sequence
-    // can complete mid-round, and its synthesized form must pass them
-    // like an event crossterm parsed itself would (a split kitty release
-    // form is dropped here too). Mouse reports keep their stream slots
-    // between the filtered key runs.
+    // The dispatch filters run after the guard — a reassembled sequence can complete mid-round, and
+    // its synthesized form must pass them like a parsed event. Mouse reports keep their stream
+    // slots.
     let mut inputs = Vec::with_capacity(outputs.len());
     let mut key_run: Vec<Event> = Vec::new();
     for output in outputs {
@@ -309,25 +228,15 @@ fn forward(outputs: Vec<GuardOutput>, on_input: &mut dyn FnMut(ReaderInput) -> b
 
 /// The TS enhanced-key dispatch filters, applied to one terminal write:
 ///
-/// - Key releases are dropped before any surface sees them (TS tui.ts:
-///   `isKeyRelease(data) && !focusedComponent.wantsKeyRelease` — no TS
-///   surface opts in, and this port ships none either).
-/// - The kitty-printable dedup (TS `StdinBuffer`
-///   `pendingKittyPrintableCodepoint`, stdin-buffer.ts:307): a
-///   duplicate-reporting kitty terminal sends BOTH the plain CSI-u form
-///   and the raw character for one keypress (Italian-style layouts, TS
-///   #3780). crossterm folds both encodings into the same unmodified
-///   `Char` key event, so the raw-text duplicate cannot be told from a
-///   typed duplicate at the event layer; the port therefore drops an
-///   identical back-to-back plain-character pair — but only within one
-///   terminal write (a real keypress report never spans writes) and only
-///   while the kitty protocol is active (a plain-typed pair in legacy
-///   terminals never carries the CSI-u form, so TS never dedups it).
+/// - Key releases are dropped before any surface sees them (no surface opts in).
+/// - The kitty-printable dedup (TS `StdinBuffer` `pendingKittyPrintableCodepoint`): a
+///   duplicate-reporting kitty terminal sends BOTH the plain CSI-u form and the raw character for
+///   one keypress (TS #3780). crossterm folds both into the same unmodified `Char` key event, so
+///   the port drops an identical back-to-back plain-character pair — only within one terminal
+///   write, and only while the kitty protocol is active.
 ///
-/// The pending state is chunk-local where TS keeps it across `process`
-/// calls: TS sets it only from actual CSI-u forms, which this layer
-/// cannot observe, so a cross-chunk pending would eat a fast-typed
-/// double character instead.
+/// The pending state is chunk-local where TS keeps it across `process` calls: a cross-chunk pending
+/// would eat a fast-typed double character.
 fn filter_enhanced_key_events(events: Vec<Event>) -> Vec<Event> {
     if !crate::enhanced_keys::kitty_active() {
         return events
@@ -339,11 +248,7 @@ fn filter_enhanced_key_events(events: Vec<Event>) -> Vec<Event> {
     let mut pending: Option<char> = None;
     for event in events {
         if is_key_release(&event) {
-            // Dropped at dispatch (TS tui.ts), and it also clears the
-            // pending: TS's emitDataSequence overwrites the pending with
-            // undefined for every emitted non-matching sequence, so the
-            // release form (`CSI 97;1:3u` — modifier section present)
-            // never keeps a dedup alive.
+            // The release also clears the pending: it never keeps a dedup alive.
             pending = None;
             continue;
         }
@@ -359,24 +264,13 @@ fn filter_enhanced_key_events(events: Vec<Event>) -> Vec<Event> {
     out
 }
 
-/// macOS-Terminal legacy-meta repair (TS `matchesKey`'s double-ESC branch,
-/// keys.ts:788): with "use option as meta key" the terminal wraps the whole
-/// sequence in an extra ESC — Option+Up arrives as `ESC ESC [ A`. crossterm
-/// folds that byte stream into `Esc` + literal `[` + a SHIFT-ed letter (its
-/// ESC branch consumes the second ESC and re-parses the rest byte by byte),
-/// so the option identity is lost: the escape fires the interrupt ladder and
-/// `[A` types into the editor. TS matches the wrapped form byte-wise (strip
-/// "alt" from the key id, match the rest), so Option+Up browses the queue.
-///
-/// This pass rebuilds the wrapped identity from one terminal write's events:
-/// an `Esc` press followed by `Char('[')`/`Char('O')` and a body that
-/// reassembles into a known legacy CSI/SS3 sequence decodes back to the
-/// inner key with ALT added. The shape cannot come from typed input (a
-/// keypress never spans writes; ESC `[` letter as one write is exactly the
-/// wrapped encoding), so the repair never steals a real escape press.
-/// Inactive while the kitty protocol is active: those terminals report
-/// option-modified keys natively and never send the double-ESC form. A tail
-/// that does not decode stays untouched.
+/// macOS-Terminal legacy-meta repair (TS `matchesKey`'s double-ESC branch): with "use option as
+/// meta key" Option+Up arrives wrapped as `ESC ESC [ A`, which crossterm folds into `Esc` + `[` + a
+/// SHIFT-ed letter, losing the option identity. Rebuild it from one write's events: `Esc` +
+/// `Char('[')`/`Char('O')` + a body that reassembles into a known legacy CSI/SS3 sequence decodes
+/// back to the inner key with ALT added. The shape cannot come from typed input (a keypress never
+/// spans writes), so the repair never steals a real escape press; inactive while the kitty protocol
+/// is active.
 fn merge_legacy_meta_escapes(events: Vec<Event>) -> Vec<Event> {
     if crate::enhanced_keys::kitty_active() {
         return events;
@@ -403,19 +297,16 @@ fn merge_legacy_meta_escapes(events: Vec<Event>) -> Vec<Event> {
     out
 }
 
-/// The repair's head: a bare `Esc` press (the meta wrapper ESC; the inner
-/// sequence's own bytes follow as folded `Char` events).
+/// The repair's head: a bare `Esc` press (the meta wrapper ESC).
 fn is_meta_escape_head(event: &Event) -> bool {
     matches!(event, Event::Key(key) if key.code == KeyCode::Esc
         && key.kind == KeyEventKind::Press
         && key.modifiers.is_empty())
 }
 
-/// Decode the wrapped body — the sequence's remaining bytes, which crossterm
-/// folded into plain (symbols, digits) and SHIFT-synthesized (uppercase
-/// letters) `Char` presses. Returns the consumed event count and the inner
-/// key WITHOUT the meta ALT (the caller adds it); `None` when the tail is
-/// not a known legacy sequence.
+/// Decode the wrapped body — the remaining bytes crossterm folded into plain and SHIFT-synthesized
+/// `Char` presses. Returns the consumed event count and the inner key WITHOUT the meta ALT; `None`
+/// when the tail is not a known legacy sequence.
 fn decode_meta_escape_body(rest: &[Event]) -> (usize, Option<KeyEvent>) {
     let mut body: Vec<char> = Vec::new();
     let mut consumed = 0;
@@ -430,8 +321,7 @@ fn decode_meta_escape_body(rest: &[Event]) -> (usize, Option<KeyEvent>) {
         }
         body.push(c);
         consumed += 1;
-        // SS3 closes on its one designator; CSI closes on a letter, `~`,
-        // or the rxvt `$`/`^` modifier-designator final byte.
+        // SS3 closes on its designator; CSI on a letter, `~`, or the rxvt `$`/`^` final byte.
         if body[0] == 'O' && body.len() == 2 {
             break;
         }
@@ -448,9 +338,7 @@ fn decode_meta_escape_body(rest: &[Event]) -> (usize, Option<KeyEvent>) {
     (consumed, decode_legacy_meta_sequence(&body))
 }
 
-/// The inner legacy sequence (`ESC` + the body): the same forms crossterm
-/// parses natively without the wrapper, so the decoded identity matches the
-/// unwrapped byte stream (TS strips the meta ESC and matches the rest).
+/// The inner legacy sequence (`ESC` + the body): the same forms crossterm parses natively.
 fn decode_legacy_meta_sequence(body: &[char]) -> Option<KeyEvent> {
     let inner: String = std::iter::once('\x1b')
         .chain(body.iter().copied())
@@ -462,7 +350,7 @@ fn decode_legacy_meta_sequence(body: &[char]) -> Option<KeyEvent> {
         "\x1bOD" | "\x1b[D" => (KeyCode::Left, KeyModifiers::NONE),
         "\x1bOH" | "\x1b[H" | "\x1b[7~" => (KeyCode::Home, KeyModifiers::NONE),
         "\x1bOF" | "\x1b[F" | "\x1b[8~" => (KeyCode::End, KeyModifiers::NONE),
-        // rxvt-style ctrl arrows over SS3 (TS keys.ts keys.ctrl map).
+        // rxvt-style ctrl arrows over SS3 (TS `keys.ctrl` map).
         "\x1bOa" => (KeyCode::Up, KeyModifiers::CONTROL),
         "\x1bOb" => (KeyCode::Down, KeyModifiers::CONTROL),
         "\x1bOc" => (KeyCode::Right, KeyModifiers::CONTROL),
@@ -476,9 +364,7 @@ fn decode_legacy_meta_sequence(body: &[char]) -> Option<KeyEvent> {
         "\x1b[3~" => (KeyCode::Delete, KeyModifiers::NONE),
         "\x1b[5~" => (KeyCode::PageUp, KeyModifiers::NONE),
         "\x1b[6~" => (KeyCode::PageDown, KeyModifiers::NONE),
-        // rxvt-style shift+arrows over SS3-lite CSI (TS keys.ts
-        // LEGACY_SHIFT_SEQUENCES) — Option+Shift+Up arrives meta-wrapped on
-        // those terminals.
+        // rxvt-style shift+arrows over SS3-lite CSI — Option+Shift+Up arrives meta-wrapped.
         "\x1b[a" => (KeyCode::Up, KeyModifiers::SHIFT),
         "\x1b[b" => (KeyCode::Down, KeyModifiers::SHIFT),
         "\x1b[c" => (KeyCode::Right, KeyModifiers::SHIFT),
@@ -489,8 +375,8 @@ fn decode_legacy_meta_sequence(body: &[char]) -> Option<KeyEvent> {
         "\x1b[6$" => (KeyCode::PageDown, KeyModifiers::SHIFT),
         "\x1b[7$" => (KeyCode::Home, KeyModifiers::SHIFT),
         "\x1b[8$" => (KeyCode::End, KeyModifiers::SHIFT),
-        // rxvt-style ctrl-modified tilde finals (TS keys.ts
-        // LEGACY_CTRL_SEQUENCES, the `$`/`^` complement rows).
+        // rxvt-style ctrl-modified tilde finals (TS LEGACY_CTRL_SEQUENCES, the `$`/`^`
+        // complements).
         "\x1b[2^" => (KeyCode::Insert, KeyModifiers::CONTROL),
         "\x1b[3^" => (KeyCode::Delete, KeyModifiers::CONTROL),
         "\x1b[5^" => (KeyCode::PageUp, KeyModifiers::CONTROL),
@@ -506,11 +392,9 @@ fn decode_legacy_meta_sequence(body: &[char]) -> Option<KeyEvent> {
     ))
 }
 
-/// `ESC [ 1;<m><final>` and `ESC [ <n>;<m>~` (the xterm modifier parameter,
-/// m-1 a bitfield: 1 shift, 2 alt, 4 ctrl). The alt bit is the meta wrapper
-/// itself, so only modifier values without it decode (1 plain, 2 shift,
-/// 5 ctrl, 6 shift+ctrl) — with alt in the parameter TS's strip-and-match
-/// never finds a key either. Kept to the finals the product binds.
+/// `ESC [ 1;<m><final>` and `ESC [ <n>;<m>~` (the xterm modifier parameter, m-1 a bitfield: 1
+/// shift, 2 alt, 4 ctrl). The alt bit is the meta wrapper itself, so only values without it decode
+/// (1, 2, 5, 6). Kept to the finals the product binds.
 fn decode_csi_with_modifier(rest: &str) -> Option<(KeyCode, KeyModifiers)> {
     let (params, last) = rest.split_once(';')?;
     let (final_index, _) = last.char_indices().next_back()?;
@@ -541,8 +425,7 @@ fn decode_csi_with_modifier(rest: &str) -> Option<(KeyCode, KeyModifiers)> {
     Some((code, modifiers))
 }
 
-/// A key release event (kitty event type 3; TS tui.ts drops them at
-/// dispatch unless the focused component opts in).
+/// A key release event (kitty event type 3; dropped at dispatch unless the component opts in).
 fn is_key_release(event: &Event) -> bool {
     matches!(
         event,
@@ -550,11 +433,9 @@ fn is_key_release(event: &Event) -> bool {
     )
 }
 
-/// The event shape the kitty CSI-u plain-printable form and its raw-text
-/// duplicate both parse to: an unmodified character press (the TS
-/// `parseUnmodifiedKittyPrintableCodepoint` regex admits only
-/// modifier-free, event-type-free sequences, so lock states — which ride
-/// the modifier mask — never join the dedup).
+/// The event shape the kitty CSI-u plain-printable form and its raw-text duplicate both parse
+/// to: an unmodified character press (the TS regex admits only modifier-free, event-type-free
+/// sequences, so lock states never join the dedup).
 fn plain_press_char(event: &Event) -> Option<char> {
     let Event::Key(key) = event else {
         return None;
@@ -568,14 +449,10 @@ fn plain_press_char(event: &Event) -> Option<char> {
     }
 }
 
-/// The plain-text contribution of one event for a marker-less burst: the
-/// bytes a paste carries, reconstructed for the editor's paste filter.
-/// Enter is `\r` and Ctrl+letters are their control bytes, so the payload
-/// byte-matches the terminal stream and `normalize_text` folds CRLF/CR the
-/// same way the TS editor does. Anything else — mouse reports, resize,
-/// escape sequences, alt/shift-modified keys, key releases — marks the
-/// burst as not a raw paste (TS `isRawMultilinePaste` bails on any escape
-/// byte).
+/// The plain-text contribution of one event for a marker-less burst: the bytes a paste carries.
+/// Enter is `\r` and Ctrl+letters are their control bytes, so the payload byte-matches the
+/// terminal stream. Anything else — mouse reports, resize, escape sequences, modified keys, key
+/// releases — marks the burst as not a raw paste (TS bails on any escape byte).
 fn printable_text(event: &Event) -> Option<String> {
     let Event::Key(key) = event else {
         return None;
@@ -594,9 +471,8 @@ fn printable_text(event: &Event) -> Option<String> {
     match key.code {
         KeyCode::Char(c) => {
             if ctrl {
-                // The Ctrl+letter key IS the control byte a pasted stream
-                // carries (LF is Ctrl+J); the editor's paste filter drops
-                // the non-newline ones, TS parity.
+                // The Ctrl+letter key IS the control byte a pasted stream carries (LF is Ctrl+J);
+                // the paste filter drops the non-newline ones, TS parity.
                 if c.is_ascii_lowercase() {
                     char::from_u32(u32::from(c) - 96).map(String::from)
                 } else if c.is_ascii_uppercase() {
@@ -616,9 +492,8 @@ fn printable_text(event: &Event) -> Option<String> {
     }
 }
 
-/// TS `isRawMultilinePaste`: the chunk must carry text on both sides of a
-/// newline run — a leading or trailing Enter alone is ordinary key input,
-/// not evidence of a multi-line paste.
+/// TS `isRawMultilinePaste`: the chunk must carry text on both sides of a newline run — a leading
+/// or trailing Enter alone is ordinary key input.
 fn is_raw_multiline_paste(text: &str) -> bool {
     let is_newline = |c: char| c == '\n' || c == '\r';
     let chars: Vec<char> = text.chars().collect();
@@ -629,8 +504,7 @@ fn is_raw_multiline_paste(text: &str) -> bool {
                 newline_run_start = Some(index);
             }
         } else {
-            // A non-newline after a run that follows a non-newline closes
-            // the match.
+            // A non-newline after a run that follows a non-newline closes the match.
             if let Some(run) = newline_run_start {
                 if run > 0 {
                     return true;
@@ -654,7 +528,6 @@ mod tests {
     #[test]
     fn printable_text_reconstructs_the_pasted_bytes() {
         use KeyModifiers as M;
-        // Plain characters (typed and pasted).
         assert_eq!(
             printable_text(&key(KeyCode::Char('a'), M::NONE)),
             Some("a".into())
@@ -672,8 +545,6 @@ mod tests {
             printable_text(&key(KeyCode::Tab, M::NONE)),
             Some("\t".into())
         );
-        // Ctrl+letters are the control bytes of the stream (LF is Ctrl+J);
-        // handle_paste drops the non-newline ones, TS parity.
         assert_eq!(
             printable_text(&key(KeyCode::Char('j'), M::CONTROL)),
             Some("\n".into())
@@ -687,7 +558,6 @@ mod tests {
     #[test]
     fn printable_text_rejects_non_paste_keys() {
         use KeyModifiers as M;
-        // Modified and special keys never join a paste burst.
         assert_eq!(printable_text(&key(KeyCode::Enter, M::SHIFT)), None);
         assert_eq!(printable_text(&key(KeyCode::Char('a'), M::ALT)), None);
         assert_eq!(printable_text(&key(KeyCode::Char('a'), M::SHIFT)), None);
@@ -705,8 +575,7 @@ mod tests {
         Event::Key(KeyEvent::new_with_kind(code, modifiers, kind))
     }
 
-    /// Key releases never reach a surface (TS tui.ts: the focused
-    /// component must opt in with wantsKeyRelease; no surface does).
+    /// Key releases never reach a surface (the focused component must opt in; none does).
     #[test]
     fn key_releases_are_dropped_in_both_kitty_modes() {
         let release = key_with_kind(
@@ -734,12 +603,9 @@ mod tests {
         assert_eq!(ids, vec!["a", "b"]);
     }
 
-    /// The kitty-printable dedup (TS #3780): a duplicate-reporting kitty
-    /// terminal sends `CSI 97u` followed by the raw character for ONE
-    /// keypress; crossterm parses both to the same unmodified Char
-    /// press, so the pair collapses to one. Identical back-to-back
-    /// pairs keep TS's pending semantics: after a drop the pending
-    /// clears, so a triple renders as two (never one, never three).
+    /// The kitty-printable dedup (TS #3780): a duplicate-reporting kitty terminal sends the
+    /// CSI-u form and the raw character for one keypress, so the pair collapses. After a drop
+    /// the pending clears (a triple renders as two, never one).
     #[test]
     fn kitty_printable_duplicates_collapse_within_a_chunk() {
         let _guard = crate::enhanced_keys::TEST_STATE_LOCK
@@ -749,16 +615,14 @@ mod tests {
         // `CSI 64u` + `@` (the TS regression case): one press.
         let filtered = filter_enhanced_key_events(vec![press('@'), press('@')]);
         assert_eq!(filtered.len(), 1);
-        // A triple (`CSI 97u a a`): pending clears after the drop, so
-        // two presses survive.
+        // A triple (`CSI 97u a a`): pending clears after the drop, so two presses survive.
         let triple = filter_enhanced_key_events(vec![press('a'), press('a'), press('a')]);
         assert_eq!(triple.len(), 2);
-        // A non-matching char after the CSI-u form is kept (TS: the
-        // pending only matches the same codepoint).
+        // A non-matching char after the CSI-u form is kept.
         let mixed = filter_enhanced_key_events(vec![press('a'), press('b')]);
         assert_eq!(mixed.len(), 2);
-        // A modified press never joins the dedup (TS: the regex admits
-        // only modifier-free sequences — `CSI 97;5u` is ctrl+a).
+        // A modified press never joins the dedup (the TS regex admits only modifier-free
+        // sequences — `CSI 97;5u` is ctrl+a).
         let modified_then_plain = filter_enhanced_key_events(vec![
             key_with_kind(
                 KeyCode::Char('a'),
@@ -768,14 +632,11 @@ mod tests {
             press('a'),
         ]);
         assert_eq!(modified_then_plain.len(), 2);
-        // A repeat event (`CSI 97;1:2u`) overwrites the pending (TS: the
-        // regex has no modifier/event-type section), so the raw char
-        // after it is kept.
+        // A repeat event (`CSI 97;1:2u`) overwrites the pending, so the raw char after it is kept.
         let repeat = key_with_kind(KeyCode::Char('a'), KeyModifiers::NONE, KeyEventKind::Repeat);
         let after_repeat = filter_enhanced_key_events(vec![press('a'), repeat, press('a')]);
         assert_eq!(after_repeat.len(), 3);
-        // A release between the pair breaks it (releases are dropped,
-        // the pending never spans them).
+        // A release between the pair breaks it (the pending never spans them).
         let release = key_with_kind(
             KeyCode::Char('a'),
             KeyModifiers::NONE,
@@ -783,8 +644,7 @@ mod tests {
         );
         let spanned = filter_enhanced_key_events(vec![press('a'), release, press('a')]);
         assert_eq!(spanned.len(), 2);
-        // Lock states ride the modifier mask in CSI-u (`CSI 97;65u`):
-        // TS never dedups them.
+        // Lock states ride the modifier mask in CSI-u (`CSI 97;65u`): TS never dedups them.
         let caps_lock = Event::Key(KeyEvent {
             code: KeyCode::Char('a'),
             modifiers: KeyModifiers::NONE,
@@ -796,9 +656,8 @@ mod tests {
         crate::enhanced_keys::set_kitty_active_for_tests(false);
     }
 
-    /// Without the kitty protocol the dedup is off: a plain terminal's
-    /// identical pair is real input (TS never sees a CSI-u form to set
-    /// the pending in legacy mode).
+    /// Without the kitty protocol the dedup is off: a plain terminal's identical pair is real
+    /// input (TS never sees a CSI-u form in legacy mode).
     #[test]
     fn plain_terminals_keep_identical_pairs() {
         let _guard = crate::enhanced_keys::TEST_STATE_LOCK
@@ -811,8 +670,7 @@ mod tests {
 
     #[test]
     fn a_reassembled_report_breaks_the_burst_like_a_parsed_mouse_event() {
-        // The guard's decoded reports are terminal noise, never paste
-        // evidence: the chars around them forward one by one.
+        // The guard's decoded reports are terminal noise, never paste evidence.
         let report = crate::mouse::parse_sgr_mouse_event("\x1b[<32;14;2M").expect("valid report");
         let outputs = vec![
             GuardOutput::Event(key(KeyCode::Char('a'), KeyModifiers::NONE)),
@@ -872,8 +730,6 @@ mod tests {
         assert!(!is_raw_multiline_paste(""));
     }
 
-    // --- legacy meta-escape repair (TS matchesKey's double-ESC branch) ---
-
     fn shift_press(c: char) -> Event {
         Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::SHIFT))
     }
@@ -890,11 +746,8 @@ mod tests {
             .collect()
     }
 
-    /// macOS Terminal with "use option as meta key": Option+Up arrives as
-    /// `ESC ESC [ A` - crossterm folds it into Esc + `[` + SHIFT-ed `A` in
-    /// one write, and the repair rebuilds the Alt+Up identity (the TS
-    /// strip-alt match), so the queue browse opens instead of the escape
-    /// firing the interrupt ladder.
+    /// macOS Terminal with "use option as meta key": Option+Up arrives as `ESC ESC [ A`, and the
+    /// repair rebuilds the Alt+Up identity.
     #[test]
     fn wrapped_meta_escape_rebuilds_alt_arrows() {
         let _guard = crate::enhanced_keys::TEST_STATE_LOCK
@@ -916,10 +769,9 @@ mod tests {
         assert_eq!(ids_of(&merged), vec!["alt+down".to_string()]);
     }
 
-    /// The xterm modifier parameter inside the wrapper: 1 plain, 2 shift,
-    /// 5 ctrl, 6 shift+ctrl decode (TS's strip-alt match accepts exactly
-    /// these); 3/4/7/8 carry the alt bit IN the parameter, which TS's
-    /// stripped key id can never match, so the chunk stays untouched.
+    /// The xterm modifier parameter inside the wrapper: 1 plain, 2 shift, 5 ctrl, 6 shift+ctrl
+    /// decode; 3/4/7/8 carry the alt bit IN the parameter, which TS's stripped key id can never
+    /// match.
     #[test]
     fn wrapped_modifier_parameters_decode_like_ts() {
         let _guard = crate::enhanced_keys::TEST_STATE_LOCK
@@ -951,17 +803,15 @@ mod tests {
             ids_of(&wrapped(&['[', '1', ';', '6', 'A']))[0],
             "shift+ctrl+alt+up"
         );
-        // Alt-bit parameter values: TS matches nothing either - the escape
-        // and the folded characters survive as-is.
+        // Alt-bit parameter values: TS matches nothing either - the escape and the folded
+        // characters survive.
         let untouched = wrapped(&['[', '1', ';', '3', 'A']);
         assert_eq!(untouched.len(), 6);
         assert!(matches!(untouched[0], Event::Key(ref k) if k.code == KeyCode::Esc));
     }
 
-    /// rxvt-family rows inside the wrapper: shift+arrows (`\x1b[a`),
-    /// ctrl+arrows over SS3 (`\x1bOa`), the `$`/`^` tilde complements, and
-    /// the home/end alternates - the TS `LEGACY_SHIFT/CTRL/KEY` rows its
-    /// strip-and-match still reaches through the wrapper.
+    /// rxvt-family rows inside the wrapper: shift+arrows (`\x1b[a`), ctrl+arrows over SS3
+    /// (`\x1bOa`), the `$`/`^` tilde complements, and the home/end alternates.
     #[test]
     fn wrapped_rxvt_modifier_rows_decode() {
         let _guard = crate::enhanced_keys::TEST_STATE_LOCK
@@ -988,10 +838,7 @@ mod tests {
         assert_eq!(ids_of(&wrapped(&['[', '7', '~']))[0], "alt+home");
     }
 
-    /// A real escape press is never stolen: a bare Esc, an Esc followed by
-    /// typed text, and an incomplete tail all pass through unchanged (the
-    /// wrapped shape - ESC `[` letter as ONE write - never comes from
-    /// typing).
+    /// A real escape press is never stolen (the wrapped shape never comes from typing).
     #[test]
     fn typed_escapes_survive_the_repair() {
         let _guard = crate::enhanced_keys::TEST_STATE_LOCK
@@ -1042,13 +889,8 @@ mod tests {
         crate::enhanced_keys::set_kitty_active_for_tests(false);
     }
 
-    // --- the merged seam: the meta repair runs before the sequence guard ---
-
-    /// The wrapped Option+Up chunk is repaired BEFORE the guard sees it:
-    /// the guard would otherwise hold the wrapper's `Esc` head, reassemble
-    /// the inner `ESC [ A`, and synthesize plain Up — the option identity
-    /// TS's double-ESC branch (keys.ts:788) rebuilds would be lost, and
-    /// the queue browse would move the cursor instead.
+    /// The wrapped Option+Up chunk is repaired BEFORE the guard sees it, keeping the option
+    /// identity.
     #[test]
     fn the_wrapped_meta_form_passes_the_guard_with_alt_kept() {
         let _state = crate::enhanced_keys::TEST_STATE_LOCK
@@ -1078,11 +920,9 @@ mod tests {
             .is_empty());
     }
 
-    /// The repair never steals the guard's held sequence: a real partial
-    /// read ends its write on the lone `Esc` (no decodable body beside
-    /// it), so the repair passes it through and the next write's
-    /// continuation reassembles through the guard exactly as before —
-    /// a split `ESC [ A` is the Up key, never `[A` typed.
+    /// The repair never steals the guard's held sequence: a real partial read ends its write on
+    /// the lone `Esc`, so the repair passes it through and the next write's continuation
+    /// reassembles through the guard — a split `ESC [ A` is the Up key, never `[A` typed.
     #[test]
     fn a_split_sequence_survives_the_repair_for_the_guard() {
         let _state = crate::enhanced_keys::TEST_STATE_LOCK

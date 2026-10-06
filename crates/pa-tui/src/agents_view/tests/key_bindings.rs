@@ -10,12 +10,9 @@ fn open_key_override_fires_and_the_default_is_inert() {
     let mut mode = mode_with_user_bindings(&[("app.agents.open", "ctrl+g")]);
     mode.handle_key("down");
     assert_eq!(mode.rows[mode.selected].kind, RowKind::SubagentSummary);
-    // The override fires: the summary row toggles its list.
     mode.handle_key("ctrl+g");
     assert_eq!(mode.rows.len(), 3);
     assert!(mode.rows[1].expanded);
-    // The default key no longer opens (a rebound binding replaces the
-    // default keys outright).
     mode.handle_key("right");
     assert_eq!(mode.rows.len(), 3, "right is inert after the override");
     assert!(mode.rows[1].expanded);
@@ -24,8 +21,6 @@ fn open_key_override_fires_and_the_default_is_inert() {
 #[test]
 fn page_keys_step_by_visible_list_rows() {
     let (mut mode, _) = mode_with_row("paged", "mock-1");
-    // 40 extra selectable rows: every step below lands inside the
-    // list instead of clamping at an edge.
     let template = mode.rows[0].clone();
     for i in 0..40 {
         let mut row = template.clone();
@@ -34,10 +29,8 @@ fn page_keys_step_by_visible_list_rows() {
         row.summary = serde_json::json!({ "sessionName": row.identity.clone() });
         mode.rows.push(row);
     }
-    // TS `visibleListRows()` is `max(4, terminal rows - 9)` and the
-    // page keys move by `max(1, visibleListRows())`: the terminal
-    // height of the last frame sets the step, with the 4-row floor
-    // covering short terminals and the pre-render height 0.
+    // The terminal height of the last frame sets the page step (`max(1, max(4, rows - 9))`),
+    // with the 4-row floor covering short terminals and the pre-render height 0.
     for (height, step) in [(40usize, 31usize), (24, 15), (12, 4), (5, 4), (0, 4)] {
         mode.render_frame(120, height);
         assert_eq!(mode.page_step(), step, "step at terminal height {height}");
@@ -57,8 +50,6 @@ fn expand_and_new_key_overrides_fire_and_defaults_are_inert() {
     assert_eq!(mode.rows.len(), 3, "the expand override fires");
     mode.handle_key("alt+right");
     assert_eq!(mode.rows.len(), 3, "the default expand key is inert");
-    // The new-session override ends the run for a fresh session; the
-    // default ctrl+n no longer does.
     mode.handle_key("alt+n");
     assert!(!mode.running);
     assert_eq!(
@@ -108,25 +99,18 @@ fn new_key_in_a_scoped_view_creates_under_the_scope_root() {
     );
 }
 
-/// TS `cycleProgramForSelected` (the `app.agents.program` key, default
-/// ctrl+o): the parent with a code-carrying child expands its list with
-/// the program's rows above the child — the code block capped and
-/// padded — and a second press hides them while the list stays open;
-/// the code rows never take the selection; a parent whose children
-/// carry no code reports instead.
+/// The `app.agents.program` key (default ctrl+o): the parent expands its list with the
+/// program's capped, padded rows; the code rows never take the selection.
 #[test]
 fn program_key_shows_and_hides_the_spawn_program() {
     let mut mode = mode_with_parent_and_child();
-    // The child spawned from a 12-line cell: the program block caps at
-    // 10 lines and counts the remainder (the trailing newline strips).
+    // The child spawned from a 12-line cell: the program block caps at 10 lines and counts the
+    // remainder (the trailing newline strips).
     mode.roster[1]["summary"]["spawnCode"] = serde_json::json!(
         "line0\nline1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\nline11\n"
     );
     mode.rebuild_rows();
     mode.handle_key("ctrl+o");
-    // Parent, summary line, pad-top + 10 code lines + the remainder row
-    // + pad-bottom, then the child (the whole-vec equality below pins
-    // the row set).
     let after_summary: Vec<(RowKind, String)> = mode.rows[2..]
         .iter()
         .map(|row| (row.kind, row.title.clone()))
@@ -142,8 +126,6 @@ fn program_key_shows_and_hides_the_spawn_program() {
         after_summary, expected,
         "the program rows precede the child"
     );
-    // The selection walks over the program: down from the parent is the
-    // summary line, the next down skips every code row.
     mode.handle_key("down");
     assert_eq!(mode.rows[mode.selected].kind, RowKind::SubagentSummary);
     mode.handle_key("down");
@@ -151,12 +133,10 @@ fn program_key_shows_and_hides_the_spawn_program() {
         mode.rows[mode.selected].title, "worker one",
         "the code rows are not selectable"
     );
-    // A second ctrl+o hides the program, the list stays expanded.
     mode.handle_key("ctrl+o");
     assert_eq!(mode.rows.len(), 3);
     assert!(mode.rows[1].expanded);
     assert!(mode.rows.iter().all(|row| row.kind != RowKind::Code));
-    // A parent whose children carry no code reports TS's status.
     let mut mode = mode_with_parent_and_child();
     mode.selected = 0;
     mode.handle_key("ctrl+o");
@@ -185,9 +165,8 @@ fn rename_key_composes_edits_and_dispatches() {
         "p name",
         "the prefill is the session name"
     );
-    // The rendered frame: the real editor box (TS SF1 closes: the
-    // warning header rides INSIDE the box, top and bottom bg rows
-    // included); the hint: save/cancel.
+    // The rendered frame: the warning header rides INSIDE the box; the hint:
+    // save/cancel.
     let (frame, _) = mode.render_frame(120, 20);
     let rendered: Vec<String> = frame.iter().map(flat).collect();
     let header_row = rendered
@@ -207,9 +186,6 @@ fn rename_key_composes_edits_and_dispatches() {
         flat(&mode.render_hints(120, None)),
         "Enter save   Esc/Ctrl+C cancel"
     );
-    // The editing grammar (the editor's own, TS's `editor.handleInput`):
-    // ctrl+u clears to the dim placeholder, the typed characters land,
-    // Enter submits the trimmed name with the live target.
     mode.handle_key("ctrl+u");
     let (frame, _) = mode.render_frame(120, 20);
     assert!(
@@ -235,12 +211,10 @@ fn rename_key_composes_edits_and_dispatches() {
         "the confirmed rename dispatches"
     );
     assert_eq!(mode.status_text(), Some("Renaming agent..."));
-    // The landed outcome reports TS's row (the dispatched request itself).
     mode.rename_result(rename.expect("the dispatched rename"), Ok(()));
     assert_eq!(mode.status_text(), Some("Renamed to new"));
-    // Esc exits back to search; the query stays untouched. Ctrl+C
-    // cancels too (TS :1120 — the default cancel binding includes it;
-    // the force-quit guard's handled note rides the routing).
+    // Esc exits back to search; the query stays untouched. Ctrl+C cancels too (the default
+    // cancel binding includes it; the force-quit guard's handled note rides the routing).
     mode.handle_key("ctrl+r");
     mode.handle_key("escape");
     assert!(matches!(mode.composer, Composer::Search));
@@ -250,8 +224,7 @@ fn rename_key_composes_edits_and_dispatches() {
         matches!(mode.composer, Composer::Search),
         "ctrl+c cancels rename mode (TS :1120)"
     );
-    // A large paste shows as a marker; the save expands it (TS
-    // `submitValue`).
+    // A large paste shows as a marker; the save expands it.
     mode.handle_key("ctrl+r");
     mode.handle_key("ctrl+u");
     let pasted = "x".repeat(1200);
@@ -285,14 +258,11 @@ fn rename_key_composes_edits_and_dispatches() {
 #[test]
 fn second_ctrl_c_exits_and_other_keys_clear_the_hint() {
     let mut mode = mode_with_parent_and_child();
-    // The first press arms the exit hint (TS `showCtrlCExitHint`).
     mode.handle_key("ctrl+c");
     assert!(mode.exit_armed);
     assert!(mode.running);
-    // A second press exits (TS `handleCtrlC`'s visible-hint arm).
     mode.handle_key("ctrl+c");
     assert!(!mode.running);
-    // Any other key clears the hint, so the next press re-arms it.
     let mut mode = mode_with_parent_and_child();
     mode.handle_key("ctrl+c");
     mode.handle_key("down");
@@ -303,11 +273,8 @@ fn second_ctrl_c_exits_and_other_keys_clear_the_hint() {
     assert!(mode.running);
 }
 
-/// Kitty-protocol key releases map to no key id: the reader filters
-/// them the way every session handler does, so a release never runs
-/// `handle_key`'s "any other key" arm — which would clear the armed
-/// exit hint between the presses of a double Ctrl+C, and the second
-/// press would re-arm the hint instead of exiting.
+/// Kitty-protocol key releases map to no key id: a release never runs `handle_key`'s "any
+/// other key" arm — which would clear the armed exit hint mid double-Ctrl+C.
 #[test]
 fn kitty_releases_map_to_no_key_id() {
     let mut release = crossterm::event::KeyEvent::new(
@@ -321,20 +288,17 @@ fn kitty_releases_map_to_no_key_id() {
 #[test]
 fn exit_hint_renders_the_effective_app_clear_key() {
     let mut mode = mode_with_user_bindings(&[("app.clear", "ctrl+q")]);
-    // The rebound key arms the hint, rendered with the override (TS
-    // `renderHints`: `Press ${keyText("app.clear")} again to exit`).
+    // The rebound key arms the hint, rendered with the override.
     mode.handle_key("ctrl+q");
     assert!(mode.exit_armed);
     assert_eq!(
         flat(&mode.render_hints(120, None)),
         "Press Ctrl+Q again to exit"
     );
-    // The default ctrl+c no longer arms the exit flow.
     mode.exit_armed = false;
     mode.handle_key("ctrl+c");
     assert!(!mode.exit_armed);
     assert!(mode.running);
-    // Two presses of the override exit (the first re-arms the hint).
     mode.handle_key("ctrl+q");
     assert!(mode.exit_armed);
     mode.handle_key("ctrl+q");

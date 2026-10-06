@@ -1,32 +1,7 @@
-//! The stop/delete lifecycle cleanup (the zombie-resurrection fix):
-//! stopping or deleting a session must cancel its scheduled jobs so no
-//! schedule fire, wake pass, or goal continuation can revive it.
-//!
-//! The TS surfaces this ports (daemon-supervisor.ts + daemon-mode.ts):
-//!
-//! - `finalizeArchivedWorkerStop` — the root-kill stop's durable half:
-//!   the supervisor cancels the session tree's scheduled jobs (the
-//!   belt behind the worker's own close-time cancel) and marks the
-//!   session file `archived` (the catalog `archive` belt when the
-//!   worker died before its own close wrote the state).
-//! - `cancelScheduledJobsForSessionTree` — the tree walk a cancel
-//!   covers: children-by-parent from the spawn ledger, a live worker
-//!   covering any tree member owns its stores again (the cancel must
-//!   not kill new schedules), partitions register only when their
-//!   `scheduled-jobs.json` exists.
-//! - `cancelEphemeralWorkerScheduledJobs` — a client-owned (ephemeral)
-//!   worker's schedules die with the registration.
-//! - `wakeDueScheduledSessions` / `collectPassiveScheduledJobs` — the
-//!   TS wake scan only wakes jobs whose session file still exists, is
-//!   still `active`, and whose tree no live worker covers: a killed
-//!   session (state `archived`) or a deleted file is never revived.
-//!   (The Rust port no longer wakes at all — the takeover field fix's
-//!   no-auto-resume contract: a schedule fires only while its session
-//!   is live, and the boot reports due jobs on not-running sessions as
-//!   dormant instead of creating workers for them.)
-//! - `deleteRlmSubagentArtifacts` — a deleted RLM subagent's artifact
-//!   partition goes with the tombstone (best-effort, never fails the
-//!   deletion).
+//! The stop/delete lifecycle cleanup: stopping or deleting a session must cancel its
+//! scheduled jobs so no schedule fire, wake pass, or goal continuation can revive it.
+//! Deliberate divergence from TS: the Rust port never wakes at all — a schedule fires
+//! only while its session is live; due jobs on not-running sessions report dormant.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -43,17 +18,13 @@ use crate::scheduled_jobs::session_artifact_dir;
 use crate::session_store::{read_session_info, SessionFile};
 use crate::supervisor::Supervisor;
 
-/// One tree member of a stopped root: its durable session id and file
-/// (TS `cancelScheduledJobsForSessionTree`'s `{ sessionId, sessionFile }`
-/// rows).
+/// One tree member of a stopped root: its durable session id and file.
 struct TreeMember {
     session_id: String,
     session_file: PathBuf,
 }
 
-/// The ledger's parent→child map (TS `rlmSpawnLedger().family()`'s
-/// `parentSessionPath` walk): every non-deleted edge keyed by its
-/// canonical parent path.
+/// The ledger's parent→child map: non-deleted edges keyed by canonical parent path.
 fn children_by_parent(
     agent_dir: &Path,
     sessions_dir: &Path,
@@ -73,10 +44,8 @@ fn children_by_parent(
     map
 }
 
-/// The stopped root's session tree (TS `cancelScheduledJobsForSessionTree`'s
-/// BFS): the root file plus every descendant the ledger reaches from it.
-/// A child whose own parent edge is missing from the ledger stays out (the
-/// same reachability TS has — the ledger is the only topology store).
+/// The stopped root's session tree: the root file plus every descendant the ledger
+/// reaches from it (the ledger is the only topology store).
 fn session_tree(
     agent_dir: &Path,
     sessions_dir: &Path,
@@ -123,15 +92,9 @@ fn session_tree(
     members
 }
 
-/// Cancel the stopped session tree's scheduled jobs (TS
-/// `cancelScheduledJobsForSessionTree`): every member whose artifact
-/// partition still holds a `scheduled-jobs.json` registers on a fresh
-/// session-artifacts store and cancels by session file. A live worker
-/// covering any tree member owns its stores again — the stale stop must
-/// not kill new schedules — so the whole walk aborts on a coverage hit
-/// (`live_files` holds the canonical paths of every resident worker's
-/// session file, collected before the synchronous walk). Returns how
-/// many jobs the store cancelled.
+/// Cancel the stopped session tree's scheduled jobs: a member cancels by session file.
+/// A live worker covering any tree member owns its stores again, so the walk aborts on
+/// a coverage hit (`live_files`, collected before the walk).
 pub(crate) fn cancel_scheduled_jobs_for_tree(
     agent_dir: &Path,
     sessions_dir: &Path,
@@ -139,7 +102,6 @@ pub(crate) fn cancel_scheduled_jobs_for_tree(
     live_files: &HashSet<String>,
 ) -> usize {
     let members = session_tree(agent_dir, sessions_dir, root_session_file);
-    // A worker covering any tree member owns its stores again.
     if members.iter().any(|member| {
         live_files.contains(
             &canonical_session_path(&member.session_file)
@@ -184,11 +146,8 @@ pub(crate) fn cancel_scheduled_jobs_for_tree(
     cancelled
 }
 
-/// The killed session's `archived` state belt (TS `finalizeArchivedWorkerStop`
-/// -> `catalog.archive`): the worker's own close appends the state; when it
-/// died before its close wrote it, the supervisor appends it here so the
-/// wake scans and saved-catalog folds treat the file as archived. A file
-/// already archived (or unreadable) is a no-op.
+/// The killed session's `archived` state belt: when the worker died before its close
+/// wrote the state, the supervisor appends it here.
 pub(crate) fn ensure_archived_state(root_session_file: &Path) -> Result<()> {
     let path = canonical_session_path(root_session_file);
     if !path.is_file() {
@@ -206,10 +165,9 @@ pub(crate) fn ensure_archived_state(root_session_file: &Path) -> Result<()> {
     session.rewrite()
 }
 
-/// The finalize of a root-kill stop (TS `finalizeArchivedWorkerStop`): the
-/// tree's scheduled jobs cancel durably and the root file carries the
-/// `archived` state. `live_files` is the registry's live coverage set,
-/// collected after the stopped worker left it.
+/// The finalize of a root-kill stop: the tree's scheduled jobs cancel durably
+/// and the root file carries the `archived` state. `live_files` is collected
+/// after the stopped worker left the registry.
 pub(crate) fn finalize_archived_stop(
     agent_dir: &Path,
     sessions_dir: &Path,
@@ -218,10 +176,8 @@ pub(crate) fn finalize_archived_stop(
 ) -> (usize, Option<anyhow::Error>) {
     let cancelled =
         cancel_scheduled_jobs_for_tree(agent_dir, sessions_dir, root_session_file, live_files);
-    // A live worker covering the tree owns its stores again — including
-    // the session file's state (a replacement worker over the same file
-    // must keep its session live): the archived-state belt skips covered
-    // trees exactly like the cancel does.
+    // A live worker covering the tree owns its stores again — including the session
+    // file's state — so the belt skips covered trees like the cancel does.
     let covered = session_tree(agent_dir, sessions_dir, root_session_file)
         .iter()
         .any(|member| {
@@ -239,22 +195,15 @@ pub(crate) fn finalize_archived_stop(
 }
 
 /// The kill route's deleted-child finalize (the `rlmLedgerDelete` marker):
-/// the `rlmChildId` whose ledger tombstone was persisted before the kill.
-/// The usage capture is keyed by the child's session path - the tombstoned
-/// edges there carry the delete reason - and the child id narrows a raced
-/// path to the exact edge the tombstone recorded.
+/// the `rlmChildId` whose ledger tombstone was persisted before the kill —
+/// it narrows a raced path to the exact edge the tombstone recorded.
 pub(crate) struct DeletedChild {
     pub child_id: String,
 }
 
-/// The capture core: every tombstoned edge at the child's session path
-/// (all of them, or only the delete marker's `rlmChildId`) receives the
-/// amendment delete record carrying the transcript's own-usage snapshot.
-/// The transcript is read post-settlement (the kill reply is the flush
-/// barrier) and the sweep never runs before this returns, so the frozen
-/// file is the source. Returns the amended edge count; `None` when the
-/// path is not a deleted child (a live child, a plain kill, an unnamed
-/// raced path) - the caller keeps the transcript and the retryability.
+/// The capture core: every tombstoned edge at the child's session path receives the
+/// amendment delete record carrying the transcript's own-usage snapshot (read
+/// post-settlement — the kill reply is the flush barrier). `None` when not a deleted child.
 pub(crate) fn append_deleted_child_usage_amendments(
     ledger: &RlmSpawnLedger,
     session_file: &str,
@@ -299,8 +248,7 @@ pub(crate) fn append_deleted_child_usage_amendments(
 }
 
 impl Supervisor {
-    /// The registry's live coverage set (TS `findWorkerBySessionFile`'s
-    /// scan equivalent): every resident worker's session file,
+    /// The registry's live coverage set: every resident worker's session file,
     /// canonical, collected after the stopped worker left the registry.
     pub(crate) async fn live_session_files(self: &Arc<Self>) -> HashSet<String> {
         let mut live: HashSet<String> = HashSet::new();
@@ -324,13 +272,9 @@ impl Supervisor {
         live
     }
 
-    /// TS `persistWorkerStopTombstone(worker, true)`: the root-kill stop's
-    /// durable intent, persisted BEFORE the worker is told — a supervisor
-    /// that dies mid-stop adopts the tombstone (finishing the stop) instead
-    /// of relaunching the killed worker. A persist failure fails the stop
-    /// before the kill is forwarded, exactly like TS; the worker's
-    /// intentional-stop flag flips only once the tombstone is durable, so
-    /// a rejected kill leaves the worker's crash-recovery contract intact.
+    /// TS `persistWorkerStopTombstone(worker, true)`: the root-kill stop's durable intent,
+    /// persisted BEFORE the worker is told — a mid-stop death adopts the tombstone
+    /// instead of relaunching the killed worker.
     pub(crate) async fn persist_stop_tombstone(
         self: &Arc<Self>,
         resident: &Arc<ResidentWorker>,
@@ -348,22 +292,11 @@ impl Supervisor {
         Ok(())
     }
 
-    /// TS `persistWorkerStopTombstone(worker, false)`: the per-session
-    /// stop's durable intent (TS `completeOwnedSession` ->
-    /// `stopWorker(worker, true)` with the archive default off — the
-    /// stopped session stays resumable). The stop variant is explicit on
-    /// the tombstone (`archive_on_stop = false`): boot adoption routes
-    /// the graceful shutdown + schedule-cancel half, never the kill's
-    /// cascade + archive belt. Idempotent on an existing tombstone: the
-    /// plain kill's earlier persist keeps its archive intent
-    /// (`stopRequestedAt ??=` / `archiveOnStop ||=` in TS), and a persist
-    /// failure fails the stop before the shutdown is forwarded (the
-    /// worker's intentional-stop flag flips only once the tombstone is
-    /// durable) — EXCEPT when the durable intent already exists: a plain
-    /// kill reaches here holding the route-side persist's tombstone, so
-    /// its re-write is a no-op whose failure must not abort the stop
-    /// (aborting leaves the killed worker running on its session lease
-    /// until the next boot — the exact symptom this lane exists to end).
+    /// TS `persistWorkerStopTombstone(worker, false)`: the per-session stop's durable
+    /// intent (the stopped session stays resumable); `archive_on_stop = false` routes boot
+    /// adoption to the graceful shutdown + schedule-cancel half, never the kill's cascade.
+    /// EXCEPT when the durable intent already exists: a re-write failure must not abort
+    /// the stop (the worker would run on its lease until the next boot).
     pub(crate) async fn persist_stop_tombstone_stop(
         self: &Arc<Self>,
         resident: &Arc<ResidentWorker>,
@@ -381,22 +314,13 @@ impl Supervisor {
             crate::descriptor::persist_worker(&resident.descriptor_path, &descriptor)
         {
             if old_stop_requested_at.is_none() {
-                // No durable intent anywhere: roll the in-memory mutation
-                // back (a later descriptor write must not carry a
-                // tombstone the rejected stop never durably set —
-                // adoption would finish a stop nobody requested) and
-                // fail the stop.
+                // No durable intent anywhere: roll the in-memory mutation back (a later
+                // descriptor write must not carry a tombstone the rejected stop never
+                // durably set) and fail the stop.
                 descriptor.stop_requested_at = old_stop_requested_at;
                 descriptor.archive_on_stop = old_archive_on_stop;
                 return Err(error);
             }
-            // The durable intent already exists — the plain kill's
-            // route-side persist put it on disk before the forward — so
-            // this re-write's failure must not abort the stop: the
-            // mutation touched only what the existing tombstone already
-            // carried, and the stop proceeds to its escalation instead of
-            // leaving the killed worker running on its session lease
-            // until the next boot.
         }
         drop(descriptor);
         resident
@@ -404,20 +328,6 @@ impl Supervisor {
             .store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
-
-    /// The durable half of a kill stop (TS `finalizeArchivedWorkerStop` +
-    /// `deleteRlmSubagentArtifacts`), run after the stopped worker left
-    /// the registry: the session tree's scheduled jobs cancel (the belt
-    /// behind the worker's own close-time cancel) and the root file
-    /// carries the `archived` state. `deleted_child` carries the
-    /// `rlmChildId` of a ledger-tombstoned delete, whose artifact
-    /// partition goes with the tombstone (best-effort, never fails the
-    /// deletion).
-    /// Returns whether the archived-state belt settled (`true` when the
-    /// root file already carries or now carries the `archived` state; the
-    /// belt is a no-op for a live-covered tree, which counts as settled).
-    /// The adoption scan keeps the stop tombstone when it did not, so a
-    /// later boot retries the belt.
     pub(crate) async fn finalize_worker_stop(
         self: &Arc<Self>,
         resident: &Arc<ResidentWorker>,
@@ -465,17 +375,9 @@ impl Supervisor {
         };
         match deleted_child {
             Some(deleted) => {
-                // TS `deleteRlmSubagentArtifacts` + the durable usage
-                // capture (TS has none: its bucket re-reads the
-                // transcript a normal delete removes - the Macroscope
-                // race): the kill reply was the flush barrier (the
-                // worker's close settled the aborted row with any
-                // mid-turn partial usage), so the frozen transcript
-                // holds the child's final own spend. Capture it into
-                // the ledger amendment BEFORE the sweep; a failed
-                // capture never fails the stop (the transcript
-                // survives the sweep, so the bucket's lazy fallback
-                // still reads it).
+                // The durable usage capture: the kill reply was the flush barrier, so the
+                // frozen transcript holds the child's final own spend. Capture it BEFORE
+                // the sweep; a failed capture never fails the stop.
                 self.capture_deleted_child_usage(
                     &root_session_file,
                     &deleted.child_id,
@@ -487,12 +389,9 @@ impl Supervisor {
                 ));
             }
             None => {
-                // The adoption finalize (an interrupted stop re-runs
-                // here): a supervisor crash between the ledger tombstone
-                // and this sweep leaves the capture undone. The durable
-                // tombstone reconstructs the delete - the capture and
-                // the sweep finish from the ledger alone (restart
-                // coverage).
+                // The adoption finalize (an interrupted stop re-runs here): a crash
+                // between the ledger tombstone and this sweep leaves the capture undone;
+                // the durable tombstone reconstructs the delete — the capture and sweep finish.
                 if let Some(child_id) = self.tombstoned_child_at(&root_session_file).await {
                     self.capture_deleted_child_usage(&root_session_file, &child_id, "adoption")
                         .await;
@@ -521,12 +420,9 @@ impl Supervisor {
             .map(|edge| edge.child_id.clone())
     }
 
-    /// The deleted child's durable usage capture: read the frozen
-    /// transcript's own usage and append the amendment delete record
-    /// carrying the snapshot (the spend survives the transcript's later
-    /// removal, a saved-session delete, and daemon restarts). Best effort
-    /// by contract - a capture failure logs and leaves the lazy file
-    /// fallback in force.
+    /// The deleted child's durable usage capture: read the frozen transcript's own usage
+    /// and append the amendment delete record carrying the snapshot (the spend survives
+    /// the transcript's removal). Best effort — a failure logs and leaves the lazy fallback.
     pub(crate) async fn capture_deleted_child_usage(
         self: &Arc<Self>,
         session_file: &str,
@@ -537,10 +433,8 @@ impl Supervisor {
             self.log_line("deleted-child capture: could not resolve the spawn ledger");
             return;
         };
-        // The capture reads and JSON-parses the whole frozen transcript
-        // and appends ledger records - blocking work that must not stall
-        // an async runtime worker (a large child would delay unrelated
-        // daemon tasks), so it runs on the blocking executor.
+        // The capture reads and JSON-parses the whole frozen transcript — blocking work
+        // that must not stall an async runtime worker, so it runs on the blocking executor.
         let session_file = session_file.to_string();
         let child_id = child_id.to_string();
         let captured = tokio::task::spawn_blocking(move || {
@@ -551,14 +445,9 @@ impl Supervisor {
         self.note_deleted_child_usage_captured(source, captured.unwrap_or(0));
     }
 
-    /// The ephemeral stop's schedule cancel (TS
-    /// `cancelEphemeralWorkerScheduledJobs`): a client-owned worker's
-    /// schedules die with the registration (the owned tree cancels, no
-    /// archived-state belt — the owned stop is not a kill). The stopping
-    /// worker's own file is excluded from the live coverage set (TS's
-    /// `exclude` argument to `cancelScheduledJobsForSessionTree`): the
-    /// worker is still in the registry at this point of the stop, and its
-    /// own file must not cover the tree the stop is cancelling.
+    /// The ephemeral stop's schedule cancel: a client-owned worker's schedules die with
+    /// the registration. The stopping worker's own file is excluded from the live
+    /// coverage set (it is still in the registry at this point of the stop).
     pub(crate) async fn finalize_owned_stop(self: &Arc<Self>, resident: &Arc<ResidentWorker>) {
         let root_session_file = resident
             .descriptor
@@ -659,9 +548,6 @@ mod tests {
         serde_json::from_value(raw["jobs"][0].clone()).unwrap()
     }
 
-    /// A killed tree: the root and its ledger child both hold active
-    /// heartbeat jobs; the finalize cancels every member's jobs and marks
-    /// the root file archived.
     #[test]
     fn finalize_cancels_the_tree_and_archives_the_root() {
         let root = temp_dir();
@@ -699,13 +585,11 @@ mod tests {
             read_job(&child_file, &child_id).status,
             pa_core::cron::JobStatus::Cancelled
         );
-        // The archived-state belt landed on the root file.
+
         let info = read_session_info(&root_file).unwrap();
         assert_eq!(info.state.as_deref(), Some("archived"));
     }
 
-    /// A live worker covering any tree member owns its stores again: the
-    /// stale stop must not kill its schedules.
     #[test]
     fn finalize_skips_a_tree_a_live_worker_covers() {
         let root = temp_dir();
@@ -730,9 +614,6 @@ mod tests {
         );
     }
 
-    /// A tombstoned child with a frozen transcript: the capture appends the
-    /// usage amendment and the transcript survives (the sweep is the
-    /// caller's, and it never runs before the capture).
     #[test]
     fn capture_reads_the_frozen_transcript_before_any_sweep() {
         let root = temp_dir();
@@ -811,11 +692,8 @@ mod tests {
         assert!((bucket[&parent_key].cost - 0.06).abs() < 1e-9);
     }
 
-    /// Invariant A: the snapshot is OWN usage, never the attribution
-    /// aggregate. A child whose file folds a deleted grandchild's spend
-    /// (own 0.40 + attributed 0.10 = total 0.50) must capture 0.40: the
-    /// bucket's post-order fold re-adds the grandchild's own snapshot, and
-    /// an aggregate snapshot would double count it.
+    /// The snapshot is OWN usage: the bucket's post-order fold re-adds the grandchild's
+    /// own snapshot, and an aggregate would double count it.
     #[test]
     fn capture_is_own_only_never_the_attribution_aggregate() {
         let root = temp_dir();
@@ -891,8 +769,6 @@ mod tests {
         );
     }
 
-    /// A live child, a plain kill, an unknown path: no tombstone, no
-    /// capture — the deletion stays retryable and nothing is swept.
     #[test]
     fn capture_skips_live_children_and_plain_kills() {
         let root = temp_dir();
@@ -924,9 +800,6 @@ mod tests {
         );
     }
 
-    /// The adoption finalize's consult passes no child id: every tombstoned
-    /// edge at the path receives the amendment (a raced path has more than
-    /// one; both carry the same transcript's snapshot).
     #[test]
     fn capture_with_no_child_id_amends_every_tombstoned_edge() {
         let root = temp_dir();

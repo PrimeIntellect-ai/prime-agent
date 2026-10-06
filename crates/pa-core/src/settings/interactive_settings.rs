@@ -1,16 +1,12 @@
-//! The interactive settings-menu accessors (TS settings-manager getters and
-//! setters behind the `/settings` rows). Every
-//! setter writes the global scope like the TS `markModified` + `save` pair;
-//! every getter reads the merged effective settings with the TS defaults.
+//! The interactive settings-menu accessors (TS settings-manager getters and setters behind the
+//! `/settings` rows). Every setter writes the global scope like the TS `markModified` + `save`
+//! pair; every getter reads the merged effective settings with the TS defaults.
 
 use anyhow::{anyhow, Result};
 
 use super::manager::SettingsManager;
 
 impl SettingsManager {
-    /// `terminal.showImages` setter (the getter lives with the manager's
-    /// startup accessors).
-    ///
     /// # Errors
     ///
     /// Returns an error when the global settings scope cannot be saved.
@@ -33,8 +29,6 @@ impl SettingsManager {
             .unwrap_or(false)
     }
 
-    /// `terminal.clearOnShrink` setter.
-    ///
     /// # Errors
     ///
     /// Returns an error when the global settings scope cannot be saved.
@@ -46,7 +40,6 @@ impl SettingsManager {
         self.save_global_scope()
     }
 
-    /// `terminal.showTerminalProgress` (TS default false).
     #[must_use]
     pub fn get_show_terminal_progress(&self) -> bool {
         self.settings()
@@ -56,8 +49,6 @@ impl SettingsManager {
             .unwrap_or(false)
     }
 
-    /// `terminal.showTerminalProgress` setter.
-    ///
     /// # Errors
     ///
     /// Returns an error when the global settings scope cannot be saved.
@@ -69,9 +60,6 @@ impl SettingsManager {
         self.save_global_scope()
     }
 
-    /// `terminal.fullscreenMouse` setter (the getter lives with the mouse
-    /// surface).
-    ///
     /// # Errors
     ///
     /// Returns an error when the global settings scope cannot be saved.
@@ -83,7 +71,6 @@ impl SettingsManager {
         self.save_global_scope()
     }
 
-    /// `images.autoResize` (TS default true).
     #[must_use]
     pub fn get_image_auto_resize(&self) -> bool {
         self.settings()
@@ -93,8 +80,6 @@ impl SettingsManager {
             .unwrap_or(true)
     }
 
-    /// `images.autoResize` setter.
-    ///
     /// # Errors
     ///
     /// Returns an error when the global settings scope cannot be saved.
@@ -106,7 +91,6 @@ impl SettingsManager {
         self.save_global_scope()
     }
 
-    /// `images.blockImages` (TS default false).
     #[must_use]
     pub fn get_block_images(&self) -> bool {
         self.settings()
@@ -116,8 +100,6 @@ impl SettingsManager {
             .unwrap_or(false)
     }
 
-    /// `images.blockImages` setter.
-    ///
     /// # Errors
     ///
     /// Returns an error when the global settings scope cannot be saved.
@@ -129,14 +111,11 @@ impl SettingsManager {
         self.save_global_scope()
     }
 
-    /// `enableSkillCommands` (TS default true).
     #[must_use]
     pub fn get_enable_skill_commands(&self) -> bool {
         self.settings().enable_skill_commands.unwrap_or(true)
     }
 
-    /// `enableSkillCommands` setter.
-    ///
     /// # Errors
     ///
     /// Returns an error when the global settings scope cannot be saved.
@@ -145,14 +124,11 @@ impl SettingsManager {
         self.save_global_scope()
     }
 
-    /// `enableBuiltinSkills` (TS default true).
     #[must_use]
     pub fn get_enable_builtin_skills(&self) -> bool {
         self.settings().enable_builtin_skills.unwrap_or(true)
     }
 
-    /// `enableBuiltinSkills` setter.
-    ///
     /// # Errors
     ///
     /// Returns an error when the global settings scope cannot be saved.
@@ -168,8 +144,6 @@ impl SettingsManager {
         self.settings().show_hardware_cursor.unwrap_or(false)
     }
 
-    /// `showHardwareCursor` setter.
-    ///
     /// # Errors
     ///
     /// Returns an error when the global settings scope cannot be saved.
@@ -178,14 +152,11 @@ impl SettingsManager {
         self.save_global_scope()
     }
 
-    /// `editorPaddingX` (TS default 0, clamped 0-3).
     #[must_use]
     pub fn get_editor_padding_x(&self) -> u64 {
         self.settings().editor_padding_x.unwrap_or(0)
     }
 
-    /// `editorPaddingX` setter (clamped 0-3).
-    ///
     /// # Errors
     ///
     /// Returns an error when the global settings scope cannot be saved.
@@ -194,14 +165,11 @@ impl SettingsManager {
         self.save_global_scope()
     }
 
-    /// `autocompleteMaxVisible` (TS default 5, clamped 3-20).
     #[must_use]
     pub fn get_autocomplete_max_visible(&self) -> u64 {
         self.settings().autocomplete_max_visible.unwrap_or(5)
     }
 
-    /// `autocompleteMaxVisible` setter (clamped 3-20).
-    ///
     /// # Errors
     ///
     /// Returns an error when the global settings scope cannot be saved.
@@ -210,14 +178,11 @@ impl SettingsManager {
         self.save_global_scope()
     }
 
-    /// `quietStartup` (TS default false).
     #[must_use]
     pub fn get_quiet_startup(&self) -> bool {
         self.settings().quiet_startup.unwrap_or(false)
     }
 
-    /// `quietStartup` setter.
-    ///
     /// # Errors
     ///
     /// Returns an error when the global settings scope cannot be saved.
@@ -249,8 +214,6 @@ impl SettingsManager {
         }
     }
 
-    /// TS `setIdleEvictionMinutes`: a positive number or `"off"`.
-    ///
     /// # Errors
     ///
     /// Returns an error when the value is neither `"off"` nor a positive
@@ -272,8 +235,7 @@ impl SettingsManager {
         self.save_global_scope()
     }
 
-    /// `markdown.mermaid` (TS default `streaming`; only `off` and `final`
-    /// are recognized).
+    /// `markdown.mermaid` (TS default `streaming`; only `off` and `final` are recognized).
     #[must_use]
     pub fn get_mermaid_rendering_mode(&self) -> &'static str {
         match self
@@ -308,8 +270,6 @@ impl SettingsManager {
         self.save_global_scope()
     }
 
-    /// `warnings` (TS `WarningSettings`; a missing document is all-default,
-    /// and `anthropicExtraUsage` defaults true).
     #[must_use]
     pub fn get_warnings_anthropic_extra_usage(&self) -> bool {
         self.settings()
@@ -319,8 +279,6 @@ impl SettingsManager {
             .unwrap_or(true)
     }
 
-    /// `warnings.anthropicExtraUsage` setter.
-    ///
     /// # Errors
     ///
     /// Returns an error when the global settings scope cannot be saved.
@@ -332,9 +290,6 @@ impl SettingsManager {
         self.save_global_scope()
     }
 
-    /// `treeFilterMode` setter (the getter lives with the manager's
-    /// startup accessors); TS `setTreeFilterMode` writes the global scope.
-    ///
     /// # Errors
     ///
     /// Returns an error when the global settings scope cannot be saved.
@@ -343,9 +298,6 @@ impl SettingsManager {
         self.save_global_scope()
     }
 
-    /// `chatDetail` setter (TS #2709 `setChatDetail`: the Ctrl+O cycle
-    /// saves the level); TS writes the global scope.
-    ///
     /// # Errors
     ///
     /// Returns an error when the global settings scope cannot be saved.
@@ -393,8 +345,6 @@ impl SettingsManager {
         self.settings().enabled_models.clone()
     }
 
-    /// `enabledModels` setter (`None` is no filter).
-    ///
     /// # Errors
     ///
     /// Returns an error when the global settings scope cannot be saved.

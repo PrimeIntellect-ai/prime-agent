@@ -45,7 +45,6 @@ use super::wire_events::{self, WireMappingState};
 /// Response timeout for session-scoped commands.
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// One inbound supervisor frame, classified by the reader.
 enum LinkFrame {
     Event(Value),
     Response(DaemonResponse),
@@ -69,7 +68,6 @@ pub(crate) struct DaemonLink {
 }
 
 impl DaemonLink {
-    /// Connect and complete the `daemon_hello` handshake.
     async fn connect(socket_path: &Path) -> anyhow::Result<Self> {
         let stream = tokio::time::timeout(
             std::time::Duration::from_secs(3),
@@ -98,9 +96,8 @@ impl DaemonLink {
             let _ = writer.shutdown().await;
         });
         // The reader only classifies frames; the consumer loop below owns
-        // the ordering: every session event observed before a response on
-        // the wire is published before that response resolves its caller,
-        // so a turn's chunks always precede its boundary frames.
+        // the ordering, so a turn's chunks always precede its boundary
+        // frames.
         tokio::spawn(async move {
             let mut reader = BufReader::new(reader_half);
             let mut line = String::new();
@@ -240,7 +237,6 @@ impl DaemonLink {
     }
 }
 
-/// Everything the daemon-attached mode needs from the composition.
 #[derive(Clone)]
 pub struct DaemonAcpOptions {
     pub socket_path: PathBuf,
@@ -267,8 +263,6 @@ pub(crate) struct HostedSession {
     pub(crate) acp_session_id: String,
     pub(crate) daemon_active_session_id: String,
     pub(crate) producer: Arc<UpdateProducer>,
-    /// The picker state (TS `AcpSessionEntry`'s configOptions/models) and
-    /// the serialized config queue (`configTask`).
     pub(crate) config: Arc<HostedConfig>,
     cancelling: bool,
     stop_failure: Option<String>,
@@ -339,10 +333,6 @@ pub async fn run_daemon_attached_acp_mode(options: DaemonAcpOptions) -> anyhow::
     let link = Arc::new(DaemonLink::connect(&options.socket_path).await?);
     let state = Arc::new(Mutex::new(DaemonAcpState::default()));
 
-    // Session events and responses share one socket, so one consumer owns
-    // the ordering: events publish at the active turn before the response
-    // resolves the waiting request (a turn's chunks can never trail its
-    // boundary frames).
     {
         let link = Arc::clone(&link);
         let state = Arc::clone(&state);
@@ -352,11 +342,9 @@ pub async fn run_daemon_attached_acp_mode(options: DaemonAcpOptions) -> anyhow::
                 match frame {
                     LinkFrame::Event(frame) => {
                         let event = frame.get("event").cloned().unwrap_or(Value::Null);
-                        // The picker refresh triggers (TS refreshes on
-                        // `agent_end`, `auto_retry_start`, and
-                        // `auto_retry_end` — the runs that can restore a
-                        // failover model or clamp a level): captured under
-                        // the guard, spawned once it is released.
+                        // The refresh triggers: runs that can restore a
+                        // failover model or clamp a level. Captured under
+                        // the guard, spawned once released.
                         let mut refresh: Option<(Arc<HostedConfig>, Arc<UpdateProducer>, String)> =
                             None;
                         {
@@ -398,12 +386,9 @@ pub async fn run_daemon_attached_acp_mode(options: DaemonAcpOptions) -> anyhow::
                         if let Some((config, producer, daemon_session_id)) = refresh {
                             let link = Arc::clone(&link);
                             tokio::spawn(async move {
-                                // Serialized like every config operation
-                                // (TS `enqueueConfig`).
                                 let _guard = config.queue.lock().await;
                                 // The background trigger drops refresh
-                                // failures (TS's `.catch(() => undefined)`
-                                // on the enqueue site).
+                                // failures (TS `.catch(() => undefined)`).
                                 let _ = refresh_wire_config(
                                     &link,
                                     &daemon_session_id,
@@ -1107,8 +1092,6 @@ async fn handle_session_new(
         }
         guard.session_new_in_flight = true;
     }
-    // Failures below clear the in-flight flag on the way out; on success
-    // the hosted session takes the slot.
     let params = types::NewSessionParams::parse(&params);
     if !state.lock().await.mcp_server_names.is_empty() {
         if let Err(error) = clear_connection_servers(
@@ -1148,9 +1131,9 @@ async fn handle_session_new(
 
     let acp_session_id = uuid::Uuid::new_v4().to_string();
     let producer = UpdateProducer::new(acp_session_id.clone(), tx.clone());
-    // The pickers ride the worker's own state and discovery seams: neither
-    // fetch may fail the admission (TS catches discovery failures to an
-    // empty list, and a state fetch failure degrades to no options).
+    // Neither picker fetch may fail the admission: discovery failures
+    // catch to an empty list, a state fetch failure degrades to no
+    // options.
     let (state_value, models) = (
         fetch_connection_state(link, &binding.active_session_id).await,
         fetch_available_models(link, &binding.active_session_id)
@@ -1217,8 +1200,6 @@ async fn handle_session_new(
         }
     }
 
-    // The admission response is queued below, after the session takes its
-    // slot and before the producer gate opens.
     let mut result = json!({
         "sessionId": acp_session_id,
         "configOptions": *hosted.config.published.lock().await,
@@ -1235,12 +1216,10 @@ async fn handle_session_new(
             });
         }
     }
-    // Install the hosted session before the admission response leaves: a
-    // client that immediately sends `session/set_config_option` resolves
-    // against the installed session, not "Unknown ACP session" (TS
-    // assigns `session = entry` before returning the response). The
-    // producer gate opens only after the response is queued on the
-    // sink, so no held update can precede the admission response.
+    // Install the hosted session before the admission response leaves
+    // (an immediate `session/set_config_option` must resolve against
+    // it). The producer gate opens only after the response is queued,
+    // so no held update can precede it.
     let producer = Arc::clone(&hosted.producer);
     let inherited_pause = {
         let mut guard = state.lock().await;

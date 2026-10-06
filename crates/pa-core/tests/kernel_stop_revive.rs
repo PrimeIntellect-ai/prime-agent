@@ -1,6 +1,4 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28) - this target's own
-// crate root: the same bounded-boundary disposition as src/lib.rs
-// (large_futures/too_many_lines/the cast family; details there).
+// Pedantic-gate dispositions as src/lib.rs (large_futures/too_many_lines/casts).
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -14,17 +12,9 @@
 // gate the sibling kernel targets carry).
 #![cfg(unix)]
 
-//! Verifier integration tests for the revivable kernel stop (TS #2483's
-//! `stopKernel`): a snapshot-flushing stop that keeps the provisioner
-//! usable, so a settled child's kernel releases without ending the
-//! session — the next `ensure()` boots a fresh kernel that serves the
-//! flushed namespace (the port's `stop_kernel`, the TS inline arm).
-//!
-//! The kernel Python is ambient product state (the auto-bootstrapped
-//! kernel venv); like `kernel_snapshot_resume.rs`, these tests skip
-//! (with a note) on machines without a live install so the suite stays
-//! hermetic elsewhere. `PA_CORE_KERNEL_PYTHON` points at an explicit
-//! interpreter.
+//! Verifier integration tests for the revivable kernel stop: a snapshot-flushing stop that keeps
+//! the provisioner usable, so a settled child's kernel releases without ending the session. The
+//! kernel Python is ambient product state; skipped when absent.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
@@ -62,10 +52,9 @@ fn kernel_python() -> Option<PathBuf> {
     None
 }
 
-/// `stop_kernel` stays revivable (TS `stopKernel()` stays revivable): the
-/// stop flushes the snapshot and releases the kernel, the next `ensure()`
-/// boots a fresh kernel, and the revived namespace still serves the
-/// variables the flush carried — while `dispose` was never called.
+/// `stop_kernel` stays revivable (TS `stopKernel()` stays revivable): the stop flushes the snapshot
+/// and releases the kernel, and the revived namespace still serves the variables the flush carried
+/// — while `dispose` was never called.
 #[tokio::test]
 async fn stop_kernel_flushes_the_snapshot_and_the_next_ensure_revives_it() {
     let Some(python) = kernel_python() else {
@@ -104,7 +93,6 @@ async fn stop_kernel_flushes_the_snapshot_and_the_next_ensure_revives_it() {
         artifacts.join("kernel-state.dill").exists(),
         "the stop flushed the namespace snapshot"
     );
-    // The revival: a fresh kernel boots and serves the flushed namespace.
     let revived = provisioner.ensure(None, None).await.unwrap();
     let check = revived
         .execute("marker", ExecuteOptions::default())
@@ -115,8 +103,7 @@ async fn stop_kernel_flushes_the_snapshot_and_the_next_ensure_revives_it() {
 }
 
 /// An idle stop is a no-op (no kernel, no snapshot churn) and a second
-/// stop supersedes the first (TS `pendingStop` last-writer-wins): the
-/// provisioner stays revivable either way.
+/// stop supersedes the first (TS `pendingStop` last-writer-wins).
 #[tokio::test]
 async fn stop_kernel_without_a_kernel_is_a_no_op_and_stays_revivable() {
     let Some(python) = kernel_python() else {
@@ -133,7 +120,6 @@ async fn stop_kernel_without_a_kernel_is_a_no_op_and_stays_revivable() {
             ..Default::default()
         },
     );
-    // No kernel ever booted: the stop releases nothing and errors nothing.
     provisioner
         .stop_kernel(Some(KernelShutdownOptions {
             snapshot: true,
@@ -141,7 +127,6 @@ async fn stop_kernel_without_a_kernel_is_a_no_op_and_stays_revivable() {
         }))
         .await;
     assert!(provisioner.manager().is_none());
-    // The provisioner still boots and serves.
     let manager = provisioner.ensure(None, None).await.unwrap();
     let result = manager
         .execute("1 + 1", ExecuteOptions::default())

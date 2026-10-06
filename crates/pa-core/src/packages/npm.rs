@@ -1,10 +1,8 @@
 //! npm package operations: install/uninstall/version probes through the
 //! configured npm command (`settings.npmCommand`, default `npm`), install
-//! root/path layout per scope, and the project-root bootstrap files.
-//!
-//! npm user-scope packages install through `npm install -g` and resolve
-//! against `npm root -g`; project-scope packages install into
-//! `<cwd>/.prime/agent/npm/node_modules` via `--prefix`.
+//! root/path layout per scope, and the project-root bootstrap files:
+//! user-scope installs go through `npm install -g` and `npm root -g`,
+//! project-scope into `<cwd>/.prime/agent/npm/node_modules` via `--prefix`.
 
 use std::path::{Path, PathBuf};
 
@@ -103,7 +101,6 @@ pub fn installed_npm_version(installed_path: &Path) -> Option<String> {
 /// The 10s timeout used for npm/git network probes.
 pub const NETWORK_TIMEOUT_MS: u64 = 10_000;
 
-/// Directory the project-scope npm packages install into.
 pub fn project_npm_root(cwd: &Path) -> PathBuf {
     cwd.join(super::CONFIG_DIR_NAME).join("npm")
 }
@@ -118,7 +115,6 @@ pub fn npm_install_root(scope: SourceScope, cwd: &Path, global_root: &Path) -> P
     }
 }
 
-/// Where an npm package is installed for a scope.
 pub fn npm_install_path(
     source: &NpmSource,
     scope: SourceScope,

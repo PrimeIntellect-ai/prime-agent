@@ -1,7 +1,5 @@
-//! `prime-agent prompt`: dump the fully-assembled effective system prompt
-//! with its per-layer breakdown. Assembles the prompt exactly the way a
-//! fresh root session would (same resource loading, MCP gating, and tool
-//! surface), without starting a session or a provider.
+//! `prime-agent prompt`: dump the fully-assembled effective system prompt with
+//! its per-layer breakdown, without starting a session or a provider.
 
 use pa_core::resources::{load_resources, ResourceLoaderOptions};
 use pa_core::settings::SettingsManager;
@@ -81,8 +79,8 @@ fn assemble_breakdown(
 ) -> anyhow::Result<pa_core::prompts::SystemPromptBreakdown> {
     let agent_dir = get_agent_dir();
     let settings = SettingsManager::create(cwd, &agent_dir);
-    // MCP gating: auth-gated built-in integrations drop their skills;
-    // enabled persistent generic servers add the prompt MCP guidance.
+    // MCP gating: auth-gated built-in integrations drop their skills; enabled persistent generic
+    // servers add the prompt MCP guidance.
     let user_servers = settings
         .settings()
         .mcp_servers
@@ -115,8 +113,8 @@ fn assemble_breakdown(
                 .map(|file| (file.path.display().to_string(), file.content.clone()))
                 .collect(),
             skills: resources.skills.clone(),
-            // The shipped model-tool surface: `ipython` only; bash/edit
-            // are kernel-resident programmatic tools.
+            // The shipped model-tool surface: `ipython` only; bash/edit are kernel-resident
+            // programmatic tools.
             selected_tools: Some(vec!["ipython"]),
             allow_recursion: Some(true),
             generic_mcp_servers: generic_servers,

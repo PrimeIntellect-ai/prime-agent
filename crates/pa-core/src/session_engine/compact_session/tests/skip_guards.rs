@@ -1,11 +1,10 @@
-//! Compact-session tests, the skip-and-abort guard family (moved
-//! with their concerns): the pre-aborted and in-flight aborts, the
-//! too-short skip, and the already-compacted skip.
+//! Compact-session tests, the skip-and-abort guard family: the
+//! pre-aborted and in-flight aborts, the too-short skip, and the
+//! already-compacted skip.
 use super::*;
 
 /// An already-aborted signal cancels the run before any summarizer
-/// request (TS `throwIfAborted` at the top of the provider call):
-/// the abort marker error surfaces and nothing commits.
+/// request: the abort marker error surfaces and nothing commits.
 #[tokio::test]
 async fn execute_compaction_with_pre_aborted_signal_never_runs_the_summarizer() {
     let registration = faux_registration();
@@ -42,11 +41,8 @@ async fn execute_compaction_with_pre_aborted_signal_never_runs_the_summarizer() 
     registration.unregister();
 }
 
-/// A signal that aborts while the summarizer is in flight cancels the
-/// run before it commits (TS `_performCompaction`'s
-/// `if (signal.aborted) throw` between the summary and the ledger):
-/// the summarizer's resolved summary never lands as a compaction
-/// entry.
+/// A signal that aborts while the summarizer is in flight cancels the run
+/// before it commits: the resolved summary never lands as an entry.
 #[tokio::test]
 async fn execute_compaction_with_late_abort_cancels_before_the_commit() {
     let registration = faux_registration();
@@ -107,8 +103,6 @@ async fn execute_compaction_skips_short_sessions() {
     let registration = faux_registration();
     let model = registration.get_model();
     let tmp = tempfile::tempdir().unwrap();
-    // Three small turns fit inside the keep-recent budget: nothing to
-    // summarize, so compaction skips (TS prepareCompaction).
     let mut session = session_with_turns(tmp.path(), 3);
     let outcome = execute_compaction(
         &mut session,

@@ -1,6 +1,6 @@
-//! Round-trip and cross-check tests for the update-flow artifact schemas:
-//! the golden roster example, the intent/status/marker artifacts, and the
-//! watchdog/transition tables.
+//! Round-trip and cross-check tests for the update-flow artifact schemas: the golden roster
+//! example,
+//! the intent/status/marker artifacts, and the watchdog/transition tables.
 
 use std::path::Path;
 
@@ -15,7 +15,7 @@ use pa_types::daemon::update_flow::{
 };
 use pa_types::JsonMap;
 
-/// Lossless round-trip contract (crate-wide): parse, serialize, re-parse, and
+/// Lossless round-trip contract (crate-wide): parse, serialize, re-parse,
 /// require equality with the original JSON value.
 fn rt<T: serde::de::DeserializeOwned + serde::Serialize>(json: &str) {
     let original: serde_json::Value = serde_json::from_str(json).unwrap();
@@ -25,10 +25,8 @@ fn rt<T: serde::de::DeserializeOwned + serde::Serialize>(json: &str) {
     assert_eq!(original, reparsed, "round trip changed the value: {out}");
 }
 
-/// The spec §8 example roster, verbatim in field names and values (the JSONC
-/// comments removed, and `parent_session_id: null` written absent, which is
-/// the same value in the schema). This is the golden artifact corpus entry:
-/// any schema change must keep this file round-tripping.
+/// The spec §8 example roster, verbatim (JSONC comments removed, `parent_session_id: null` written
+/// absent - the same value in the schema). Any schema change must keep it round-tripping.
 const SPEC_ROSTER: &str = r#"{
     "format_version": 1,
     "update_id": "018f-uuidv7",
@@ -150,9 +148,8 @@ fn prepared_artifact_paths_lay_out_under_the_socket_dir() {
     );
 }
 
-/// The watchdog table (spec §9) and the transition table (spec §4) must stay
-/// mutually consistent: every watchdog outcome names a transition that the
-/// coordinator table allows from the state it guards.
+/// Every watchdog outcome (spec §9) must name a transition the coordinator
+/// table (spec §4) allows from the state it guards.
 #[test]
 fn watchdog_outcomes_are_legal_transitions() {
     let legal = [
@@ -175,9 +172,8 @@ fn watchdog_outcomes_are_legal_transitions() {
     }
 }
 
-/// The `Prepared` self-expiry verdict (spec §5, §7) and the default expiry
-/// window (spec §9) must line up: the marker timestamp the supervisor writes
-/// with the budgeted window expires exactly when the watchdog says so.
+/// The marker timestamp written with the budgeted window must expire
+/// exactly when the watchdog says so (spec §5, §7, §9).
 #[test]
 fn prepared_expiry_window_and_marker_verdict_agree() {
     let budget = UpdateTimeoutBudget::default();
@@ -204,9 +200,8 @@ fn prepared_expiry_window_and_marker_verdict_agree() {
     assert_eq!(budget.prepared_expiry_ms, 45_000);
 }
 
-/// The status file keeps the TS schema shape (spec §7: "TS status-file
-/// schema"): the version constant and the counts field names match the TS
-/// writer's, so a differential test can compare artifacts directly.
+/// The status file keeps the TS schema shape: the version constant and the counts field names match
+/// the TS writer's, so differential tests compare artifacts directly.
 #[test]
 fn status_schema_is_ts_shaped() {
     assert_eq!(UPDATE_STATUS_FORMAT_VERSION, 1);

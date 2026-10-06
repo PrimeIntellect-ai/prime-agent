@@ -1,6 +1,5 @@
 //! `AuthStorage`: credential resolution with runtime overrides, environment
-//! keys, stored credentials, fallback resolvers, and stale-marking. Port of
-//! the `AuthStorage` class.
+//! keys, stored credentials, fallback resolvers, and stale-marking.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -13,37 +12,13 @@ use super::types::{
     PrimeTeamCredential, StoredPrimeTeam, PRIME_INFERENCE_PROVIDER_ID,
 };
 
-// The inline unit battery moved to the child module at the same tree
-// position (auth::manager::tests); its use-super glob keeps resolving
-// through the facade bindings and re-exports (the manager stage-1
-// precedent, #3039).
 #[cfg(test)]
 mod tests;
 
-// The API-key lookup + OAuth refresh arm (get_api_key_with_source_token,
-// get_api_key, refresh_oauth) moved to the child module at the same tree
-// position (auth::manager::lookup) as its own impl AuthStorage block -
-// inherent impls split freely; the pub methods stay on the facade-
-// resident type (external callers resolve through the type; the
-// agent_traces engine's get_api_key_with_source_token call checked);
-// refresh_oauth keeps its private level (the lookup child is its only
-// caller - zero pub(super) bumps, verified by the caller map); the
-// child's bare calls into the facade's candidate/staleness machinery
-// resolve through the use-super glob (the descendant visibility rule).
 mod lookup;
 
-// The Prime Inference credential writes (update_prime_inference_credential,
-// set_prime_inference_api_key, set_prime_inference_team_selection,
-// get_prime_inference_team_selection) moved to the child module at the
-// same tree position (auth::manager::prime_inference) as its own impl
-// AuthStorage block; the pub methods stay on the facade-resident type and
-// update_prime_inference_credential keeps its private level (the child is
-// its only caller - ZERO pub(super) bumps, verified by the caller map);
-// the child wraps the facade's private lock + reload machinery through the
-// use-super glob.
 mod prime_inference;
 
-/// SHA-256 fingerprint of an auth-source material, `source:hex` form.
 fn fingerprint(source: AuthSource, material: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
@@ -60,19 +35,14 @@ fn hex(bytes: &[u8]) -> String {
     })
 }
 
-/// Wall-clock milliseconds since the epoch (auth expiry comparison).
 fn now_epoch_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(i64::MAX, |d| d.as_millis() as i64)
 }
 
-/// One OAuth refresh in flight per provider: the token fetch in
-/// [`AuthStorage::refresh_oauth`] runs outside every lock, so the
-/// in-process single-flight that TS gets from its single-threaded runtime
-/// needs its own gate. The registry mirrors the storage backend's
-/// process-lock registry (created once, lives for the process, recovered
-/// on poisoning).
+/// One OAuth refresh in flight per provider: the token fetch runs outside every
+/// lock, so TS's single-threaded single-flight needs its own gate.
 fn refresh_flight(provider: &str) -> std::sync::MutexGuard<'static, ()> {
     static FLIGHTS: std::sync::OnceLock<
         std::sync::Mutex<std::collections::HashMap<String, &'static std::sync::Mutex<()>>>,
@@ -88,7 +58,6 @@ fn refresh_flight(provider: &str) -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// One candidate credential source.
 #[derive(Clone)]
 struct AuthSourceCandidate {
     source: AuthSource,
@@ -108,7 +77,6 @@ impl AuthSourceCandidate {
     }
 }
 
-/// The result of an API-key lookup.
 #[derive(Debug, Default, Clone)]
 pub struct AuthApiKeyResult {
     pub api_key: Option<String>,
@@ -116,9 +84,8 @@ pub struct AuthApiKeyResult {
     pub credential_type: Option<&'static str>,
 }
 
-/// OAuth integration seam: the pa-ai oauth provider registry implements this
-/// (login flow + token refresh). Kept as a trait so auth storage stays
-/// testable without network flows.
+/// OAuth integration seam, implemented by the pa-ai oauth registry; a
+/// trait so auth storage stays testable without network flows.
 pub trait OAuthIntegration: Send + Sync {
     /// The resolved API key for stored OAuth credentials (bearer/token form).
     fn api_key_for(&self, provider_id: &str, credential: &AuthCredential) -> Option<String>;
@@ -144,18 +111,12 @@ impl OAuthIntegration for NoOAuth {
     }
 }
 
-/// Environment credential source: the seam through which auth resolution
-/// reads ambient credentials (provider API-key variables, the prime team
-/// variable, and multi-variable ambient identity material such as AWS
-/// profiles). The production implementation reads the real process
-/// environment via the shared env-var table in `pa-ai`; tests inject a fixed
-/// mapping so resolution order is deterministic and hermetic against
-/// ambient variables and parallel-test env mutation.
+/// The seam through which auth resolution reads ambient credentials.
+/// Production reads the real environment; tests inject a fixed mapping.
 pub(crate) trait EnvCredentialSource: Send + Sync {
     /// Env var names (priority order) currently set to non-empty values that
     /// would supply the provider's API key, if any.
     fn key_names(&self, provider: &str) -> Option<Vec<String>>;
-    /// The provider's API key from the environment, if any.
     fn api_key(&self, provider: &str) -> Option<String>;
     /// Raw `PRIME_TEAM_ID` value if set; the caller trims and rejects empty.
     fn prime_team_id(&self) -> Option<String>;
@@ -164,12 +125,10 @@ pub(crate) trait EnvCredentialSource: Send + Sync {
     fn ambient_identity_material(&self, provider: &str) -> String;
 }
 
-/// Process-environment credential source (production).
 struct ProcessEnvCredentials;
 
-/// No-op environment credential source: no ambient variable can supply a
-/// provider key or team id. The hermetic seam behind
-/// [`AuthStorage::in_memory_without_env`].
+/// No-op environment source: no ambient variable supplies a key or team
+/// id; the hermetic seam behind [`AuthStorage::in_memory_without_env`].
 struct NoEnvCredentials;
 
 impl EnvCredentialSource for NoEnvCredentials {
@@ -267,12 +226,8 @@ pub struct AuthStorage {
     fallback_resolver: Option<FallbackResolver>,
     load_error: Option<String>,
     errors: Vec<String>,
-    /// Memoized auth-source candidates (TS #2479's `authCandidateMemos`),
-    /// keyed by `source:provider`, superseded exactly when the candidate's
-    /// hashed material changes. Reuse skips only the SHA-256 work: the
-    /// material itself (env reads, stored-value resolution, the fallback
-    /// resolver) is recomputed on every call, and stale checks run against
-    /// the memoized candidate — candidates are immutable.
+    /// Memoized candidates (TS `authCandidateMemos`), keyed by `source:provider`,
+    /// superseded when the hashed material changes.
     candidate_memos: std::sync::Mutex<HashMap<String, (String, AuthSourceCandidate)>>,
 }
 
@@ -299,10 +254,8 @@ impl AuthStorage {
 
     /// File-backed storage at `agentDir/auth.json`.
     pub fn create(agent_dir: impl AsRef<std::path::Path>) -> Self {
-        // The built-in subscription providers' integration (the codex
-        // refresh): the TS storage delegates to the AI library's oauth
-        // registry on every instance, and `api_key_for` matches `NoOAuth`
-        // (the access token passthrough), so only token refresh gains.
+        // Matches TS delegating to the oauth registry on every instance;
+        // only token refresh gains (api_key_for is the passthrough).
         Self::create_with_oauth(
             agent_dir,
             Arc::new(super::provider_oauth::ProviderOAuth::new()),
@@ -325,17 +278,13 @@ impl AuthStorage {
         Self::in_memory_with_env_source(data, oauth, Arc::new(ProcessEnvCredentials))
     }
 
-    /// In-memory storage with no ambient environment source: hermetic
-    /// resolution for embedded hosts and test harnesses that must pin the
-    /// model catalog scope (an ambient provider credential variable such
-    /// as `PRIME_API_KEY` cannot make models available through this
-    /// storage). Otherwise behaves like [`AuthStorage::in_memory`].
+    /// In-memory storage with no ambient environment source: hermetic for hosts
+    /// and harnesses that must pin the model catalog scope.
     pub fn in_memory_without_env(data: &AuthStorageData, oauth: Arc<dyn OAuthIntegration>) -> Self {
         Self::in_memory_with_env_source(data, oauth, Arc::new(NoEnvCredentials))
     }
 
-    /// In-memory storage with an injected environment source: hermetic
-    /// resolution for tests and embedded hosts (no ambient env reads).
+    /// In-memory storage with an injected environment source (hermetic tests).
     #[cfg(test)]
     pub(crate) fn in_memory_with_env(
         data: &AuthStorageData,
@@ -383,10 +332,9 @@ impl AuthStorage {
         std::mem::take(&mut self.errors)
     }
 
-    /// Reload credentials from storage.
     pub fn reload(&mut self) {
-        // The pure-read arm: a locked protocol read on any cache miss, the
-        // process-cached copy on a hit (see `AuthStorageBackend::read`).
+        // A locked protocol read on any cache miss; the process-cached
+        // copy on a hit.
         let result = self.storage.read();
         match result.and_then(|content| parse_storage_data(content.as_deref())) {
             Ok(data) => {
@@ -415,8 +363,6 @@ impl AuthStorage {
     pub fn set_fallback_resolver(&mut self, resolver: FallbackResolver) {
         self.fallback_resolver = Some(resolver);
     }
-
-    // -- candidates ----------------------------------------------------------
 
     fn stored_value_material(&self, credential: &AuthCredential) -> Option<String> {
         match credential {
@@ -452,16 +398,14 @@ impl AuthStorage {
         }
     }
 
-    /// Memo marker for candidates whose value material could not be
-    /// resolved into a key (TS #2479's `AUTH_SOURCE_LAZY_VALUE_KEY`): the
-    /// entry is keyed by everything else the candidate hashes.
+    /// Memo marker for candidates whose value material could not be resolved into a
+    /// key: the entry is keyed by everything else the candidate hashes.
     fn auth_source_lazy_value_key() -> &'static str {
         "value-lazy"
     }
 
-    /// The memo reuse arm (TS #2479's `reuseAuthSourceCandidate`): the key
-    /// is the hashed material itself, so the memo is superseded exactly
-    /// when the material is.
+    /// The memo key is the hashed material itself, so the memo is
+    /// superseded exactly when the material is.
     fn reuse_auth_source_candidate(
         &self,
         source: AuthSource,
@@ -507,9 +451,6 @@ impl AuthStorage {
     fn stored_candidate(&self, provider: &str) -> Option<AuthSourceCandidate> {
         let credential = self.data.credential(provider)?;
         let value_material = self.stored_value_material(&credential);
-        // The key is the hashed material itself (TS #2479: keyed by
-        // credential fields, never object identity, so the key
-        // changes exactly when the hashed material does).
         let key = format!(
             "identity:auth.json {}",
             value_material
@@ -542,9 +483,8 @@ impl AuthStorage {
         let identity_material = env_keys
             .and_then(|keys| keys.first().cloned())
             .unwrap_or_else(|| self.env_credentials.ambient_identity_material(provider));
-        // Env values are deliberately re-read on every call (TS
-        // #2479); the memo only skips re-fingerprinting unchanged
-        // material.
+        // Env values are deliberately re-read on every call; the memo
+        // only skips re-fingerprinting unchanged material.
         let key = format!("{identity_material} {api_key}");
         Some(
             self.reuse_auth_source_candidate(AuthSource::Environment, provider, key, || {
@@ -590,9 +530,6 @@ impl AuthStorage {
         ))
     }
 
-    /// Candidate priority: runtime first; prime-inference prefers environment
-    /// over stored; everyone else prefers stored over environment; fallback
-    /// last.
     fn auth_source_candidates(
         &self,
         provider: &str,
@@ -671,8 +608,6 @@ impl AuthStorage {
         })
     }
 
-    // -- public surface ------------------------------------------------------
-
     pub fn list(&self) -> Vec<String> {
         self.data.keys()
     }
@@ -741,7 +676,6 @@ impl AuthStorage {
         true
     }
 
-    /// Forget every stale marking for a provider.
     pub fn clear_auth_stale(&mut self, provider: &str) {
         self.stale_auth_sources.remove(provider);
     }
@@ -755,12 +689,10 @@ impl AuthStorage {
         }
     }
 
-    /// Store a credential for a provider.
     pub fn set(&mut self, provider: &str, credential: AuthCredential) {
         self.persist_provider_change(provider, Some(credential));
     }
 
-    /// Remove a provider's stored credential.
     pub fn remove(&mut self, provider: &str) {
         self.persist_provider_change(provider, None);
     }
@@ -791,9 +723,6 @@ impl AuthStorage {
         self.reload();
     }
 
-    /// API-key resolution: runtime > (prime-inference: env) > stored (`api_key`
-    /// resolved, oauth refreshed on expiry) > env > fallback. Stale sources
-    /// are skipped.
     /// Provider-scoped request headers (prime-inference team header only).
     pub fn get_provider_headers(
         &self,
@@ -810,10 +739,8 @@ impl AuthStorage {
                 (!trimmed.is_empty()).then_some(trimmed)
             })
             .or_else(|| {
-                // Stored team selection: the stored primeTeam survives runtime
-                // and environment API-key overrides (fleet P5) — an ambient
-                // `PRIME_API_KEY` supplies the key, never the team, so the
-                // stored login's team still scopes the header.
+                // The stored primeTeam survives runtime and environment API-key
+                // overrides: an ambient `PRIME_API_KEY` supplies the key, never the team.
                 match self.data.credential(provider_id) {
                     Some(AuthCredential::ApiKey { prime_team, .. }) => {
                         prime_team.as_ref().map(|team| team.team_id.clone())

@@ -1,14 +1,7 @@
 //! The coordinator FSM driver (spec §4): the detached pa-cli process that
-//! owns the update from the adopted status (the invoking CLI staged through
-//! `Staged`) to a terminal state. Every state is written to the status file
-//! before acting (spec §4); `Rollback` is a first-class path, not an error.
-//!
-//! The activation boundary (spec §7): the coordinator swaps the launcher
-//! symlinks, records `.activation-state`, and deletes it on `Complete`. The
-//! `Restoring` phase reports the successor's boot restore pass (spec §6,
-//! slice 5): the supervisor restores the roster rows (create-or-adopt,
-//! bottom-up) and the coordinator polls the `update_restore_status` RPC
-//! for the real per-session counts and failure records.
+//! owns the update from the adopted status to a terminal state; every state
+//! is written to the status file before acting, and `Rollback` is a
+//! first-class path, not an error.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -26,8 +19,7 @@ use super::status::{StatusHeartbeat, StatusWriter};
 use super::successor::{identity_from_hello, spawn_supervisor, wait_for_exit, wait_for_hello};
 use super::swap;
 
-/// The staged release directory, passed by the invoking CLI through the
-/// coordinator's environment.
+/// The staged release directory, passed by the invoking CLI through the coordinator's environment.
 pub const UPDATE_CANDIDATE_DIR_ENV: &str = "PRIME_AGENT_UPDATE_CANDIDATE_DIR";
 
 /// One coordinator run's fixed inputs.
@@ -39,9 +31,7 @@ pub struct CoordinatorOptions {
 }
 
 /// Why the driver left the success path. Before the stop the terminal is
-/// `Aborted` (the daemon never stopped); after the stop it is a first-class
-/// `Rollback` attempt (spec §9) - the workers are gone and the previous
-/// binary must take over.
+/// `Aborted`; after it, `Rollback` (spec §9) — the previous binary takes over.
 struct PhaseFailure {
     message: String,
     after_stop: bool,
@@ -67,9 +57,8 @@ impl PhaseFailure {
 /// status is the terminal record (the caller prints the report).
 ///
 /// # Errors
-/// Returns an error when no status record exists at `status_path`, when the
-/// recorded state is not `Staged` (only a staged update is adoptable), or
-/// when a status-record write fails.
+/// Returns an error when no status record exists at `status_path`, the state
+/// is not `Staged`, or a status write fails.
 pub async fn run(options: &CoordinatorOptions) -> Result<UpdateStatus> {
     let Some(existing) = super::status::read_status(&options.status_path) else {
         anyhow::bail!(
@@ -105,8 +94,7 @@ pub async fn run(options: &CoordinatorOptions) -> Result<UpdateStatus> {
         }
     }
     heartbeat.stop();
-    // The terminal state owns the lock cleanup; the boot sweep is the last
-    // resort (spec §7).
+    // The terminal state owns the lock cleanup; the boot sweep is the last resort (spec §7).
     let _ = super::intent::release(&options.agent_dir, &socket_lossy);
     let final_status = writer.lock().await.current().clone();
     Ok(final_status)
@@ -119,9 +107,8 @@ async fn drive(
     socket_dir: &Path,
 ) -> std::result::Result<(), PhaseFailure> {
     let budget = &options.budget;
-    // `Preparing`: connect the old supervisor. An unreachable daemon is a
-    // daemon-less update: an empty prepare is trivially durable and the
-    // successor boots without a roster (the workers are already gone).
+    // `Preparing`: connect the old supervisor. An unreachable daemon means a
+    // daemon-less update: the successor boots without a roster.
     let daemon = match pa_tui::daemon_client::DaemonClient::connect(&options.socket_path).await {
         Ok((client, _events)) => Some(client),
         Err(_) => None,
@@ -154,8 +141,8 @@ async fn drive(
             .await
             .set_state(UpdateState::Prepared)
             .map_err(PhaseFailure::before_stop)?;
-        // `Stopping`: the only consumption of the prepared artifact (spec
-        // §5) - the slice-3 dispatch stops the workers in budget.
+        // `Stopping`: the only consumption of the prepared artifact (spec §5) — the dispatch stops
+        // the workers in budget.
         writer
             .lock()
             .await
@@ -190,10 +177,8 @@ async fn drive(
         .await
         .set_state(UpdateState::Stopped)
         .map_err(PhaseFailure::after_stop)?;
-    // `Activating`: validate the staged candidate BEFORE the swap (a bad
-    // candidate never becomes the launcher), then record
-    // `.activation-state`, move the old target to `bin/previous`, and
-    // atomically repoint `bin/prime-agent` (spec §7).
+    // `Activating`: validate the staged candidate BEFORE the swap, then record
+    // `.activation-state` and repoint `bin/prime-agent` (spec §7).
     writer
         .lock()
         .await
@@ -214,8 +199,8 @@ async fn drive(
         update_id.as_ref(),
     )
     .map_err(PhaseFailure::after_stop)?;
-    // `Booting`: spawn the successor from the candidate release dir, roster
-    // via env (spec §6), hello within `T_boot`.
+    // `Booting`: spawn the successor from the candidate release dir, roster via env (spec §6),
+    // hello within `T_boot`.
     writer
         .lock()
         .await
@@ -241,8 +226,8 @@ async fn drive(
         .await
         .set_successor(successor)
         .map_err(PhaseFailure::after_stop)?;
-    // `Restoring`: the successor's restore pass reports real counts
-    // (the `update_restore_status` poll; spec §9).
+    // `Restoring`: the successor's restore pass reports real counts (the `update_restore_status`
+    // poll; spec §9).
     writer
         .lock()
         .await
@@ -291,10 +276,9 @@ async fn drive(
     Ok(())
 }
 
-/// The after-stop failure terminal (spec §9): `Rollback` is first-class -
-/// the previous binary takes over and still serves the sessions. A rollback
-/// boot that also fails is `Failed` (sessions persist on disk; `attach`
-/// recovers them).
+/// The after-stop failure terminal (spec §9): `Rollback` is first-class — the
+/// previous binary takes over and still serves; a failed rollback boot is
+/// `Failed` (sessions persist on disk; `attach` recovers).
 async fn finish_failure(
     writer: &Arc<Mutex<StatusWriter>>,
     options: &CoordinatorOptions,
@@ -302,9 +286,8 @@ async fn finish_failure(
 ) -> Result<()> {
     let reason = failure.message.trim_end_matches('.');
     writer.lock().await.set_state(UpdateState::Rollback)?;
-    // Every rollback-unavailable path records `Failed` - the status must
-    // reach a terminal state, and the failure message is the diagnostic
-    // channel (the coordinator's stdio is detached).
+    // Every rollback-unavailable path records `Failed` — the status must reach a
+    // terminal state; the message is the diagnostic channel (stdio is detached).
     let fail_hard = |message: String| async {
         let mut writer = writer.lock().await;
         let _ = writer.set_state(UpdateState::Failed);
@@ -383,8 +366,8 @@ async fn finish_failure(
     }
 }
 
-/// The candidate activation plan: the staged release directory and the
-/// launcher targets the swap writes.
+/// The candidate activation plan: the staged release directory and the launcher targets the swap
+/// writes.
 struct ActivationPlan {
     root: PathBuf,
     executable: PathBuf,

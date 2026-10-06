@@ -10,10 +10,6 @@ use super::{
 };
 use std::fmt::Write as _;
 
-// ---------------------------------------------------------------------------
-// Event dispatch
-// ---------------------------------------------------------------------------
-
 impl Inner {
     pub(crate) fn handle_event(self: &Arc<Self>, event: Event) {
         match event {
@@ -41,10 +37,8 @@ impl Inner {
                                 == Some(&(pid as i32))
                             {
                                 g.background_bash_handles.remove(activity_id);
-                                // The last live handle settled: the completion
-                                // notice for it is already admitted, so owed
-                                // continuations may resume. The settlement is
-                                // recorded on the map before the callback runs.
+                                // The last live handle settled: the completion notice for it is
+                                // already admitted, so owed continuations may resume.
                                 settled = g.background_bash_handles.is_empty();
                             }
                         }
@@ -374,10 +368,8 @@ mod tests {
         deliver_activity(&manager, activity);
         assert!(manager.has_background_work());
         assert_eq!(fired.load(Ordering::SeqCst), 0);
-        // Malformed or mismatched releases never settle the track (the
-        // TS validation rows): a zero/negative pid, a missing active flag,
-        // an unknown id, and an unrelated display payload all leave the
-        // handle live.
+        // Malformed or mismatched releases never settle the track: a zero/negative pid, a missing
+        // active flag, and an unknown id all leave the handle live.
         for release in [
             json!({ "id": "a".repeat(32), "pid": 0, "active": false }),
             json!({ "id": "a".repeat(32), "pid": -1, "active": false }),
@@ -445,9 +437,8 @@ mod tests {
             json!({ "id": "a".repeat(32), "pid": 42, "active": true }),
         );
         assert!(manager.has_background_work());
-        // The settlement is recorded on the map either way; the callback's
-        // panic lands in the diagnostics tail instead of unwinding through
-        // the event path or the teardown.
+        // The settlement is recorded on the map either way; the callback's panic lands in the
+        // diagnostics tail instead of unwinding.
         deliver_activity(
             &manager,
             json!({ "id": "a".repeat(32), "pid": 42, "active": false }),

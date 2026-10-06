@@ -1,8 +1,6 @@
 //! The frame compose: the fullscreen frame (top bar, padded transcript
 //! window, dock at the bottom), the inline exit layout, the hardware-
-//! cursor query, and the compose free helpers — the hover-affordance
-//! restyle, the scroll-indicator row, the width pad, the follow-hint
-//! composite.
+//! cursor query, and the compose free helpers.
 
 use super::click::{
     self, PickerClickSurface, PickerKind, EFFORT_PICKER_CHROME_ROWS, MODEL_PICKER_CHROME_ROWS,
@@ -15,34 +13,25 @@ use crate::{Line, Span};
 use ratatui::style::{Modifier, Style};
 
 impl AgentView {
-    /// Compose the fullscreen frame: top bar, transcript window (padded),
-    /// dock at the bottom — exactly `height` rows.
+    /// Compose the fullscreen frame: top bar, transcript window, dock —
+    /// exactly `height` rows.
     pub fn render_frame(&mut self, width: usize, height: usize) -> Vec<Line> {
-        // The fullscreen compose forces image components to their textual
-        // fallback (TS `withFullscreenImageFallback` around the fullscreen
-        // render): the frame repaints on every tick, and re-emitting an
-        // image placement each paint would corrupt the display. Graphics
-        // placements belong to the inline paint path only.
+        // The fullscreen compose forces image components to their textual fallback: re-emitting
+        // an image placement each repaint would corrupt the display.
         let frame = crate::image_component::with_fullscreen_image_fallback(|| {
             self.render_frame_inner(width, height)
         });
-        // The composed frame is the click surface (TS `hyperlinkAt` reads
-        // the last painted frame's OSC 8 sequences): one scan serves every
-        // pane — the transcript window, the dock, and the onboarding splash
-        // all carry their links in span content.
+        // The composed frame is the click surface (TS `hyperlinkAt` reads the last painted
+        // frame's OSC 8 sequences): one scan serves every pane.
         self.frame_links = crate::hyperlinks::frame_link_ranges(&frame);
         frame
     }
 
     fn render_frame_inner(&mut self, width: usize, height: usize) -> Vec<Line> {
-        // The click surface records this frame's clickable geometry as
-        // the compose computes it (the onboarding pane that returns early
-        // leaves none of it).
+        // The click surface records this frame's geometry as the compose
+        // computes it.
         self.click.clear();
-        // The onboarding splash covers the pane (TS `showOverlay` 100%):
-        // no top bar, transcript, or prompt dock behind it. The pane is a
-        // frame surface like the TS overlay (its rows select; TS's
-        // `beginFrameSelection` falls through to the overlay's rows), so
+        // The onboarding splash covers the pane (TS `showOverlay` 100%); its rows select, so
         // the frame-selection regions span the whole frame.
         if let Some(screen) = self.onboarding.as_mut() {
             let kb = self.editor.keybindings();
@@ -51,21 +40,18 @@ impl AgentView {
             self.apply_frame_selection(&mut frame, 0, width);
             return frame;
         }
-        // The `/model` and `/effort` pickers mount in the editor dock (TS
-        // `showConfigurationMenu` replaces the editor container), like the
-        // tree and fork selectors: the prompt context (the detail hint)
-        // stays above the pane and the transcript stays mounted above it.
+        // The `/model` and `/effort` pickers mount in the editor dock
+        // (TS `showConfigurationMenu`); the prompt context stays above.
         let prompt_context = render_prompt_context(&self.detail_label(), &self.theme, width);
-        // The read-only info panel's CURRENT row budget (a terminal resize
-        // re-budgets an open panel every frame, never a stale open-time
-        // value): read before the panel borrow below.
+        // The info panel's CURRENT row budget (a resize re-budgets every
+        // frame): read before the borrow.
         let info_viewport_rows = crate::session_ui::picker_viewport_rows(self.terminal_rows());
         let pane_row = prompt_context.len();
         let picker_dock: Option<Vec<Line>> = if let Some(picker) = self.model_picker.as_mut() {
             let mut dock = prompt_context;
             dock.extend(picker.render(&self.theme, width, self.editor.keybindings()));
-            // The pane's item rows are clickable (view/click.rs): the
-            // recorded span covers the filtered window the render drew.
+            // The pane's item rows are clickable: the recorded span
+            // covers the filtered window the render drew.
             self.click.record_picker(PickerClickSurface {
                 dock_row: pane_row,
                 chrome_rows: MODEL_PICKER_CHROME_ROWS,
@@ -121,9 +107,8 @@ impl AgentView {
         } else {
             None
         };
-        // The tree and fork selectors mount in the editor container (TS
-        // `showSelector`): an auto-height pane over the dock's rows with the
-        // transcript above it.
+        // The tree and fork selectors mount in the editor container
+        // (TS `showSelector`): an auto-height pane over the dock's rows.
         let selector_dock: Option<Vec<Line>> = if self.tree_selector.is_some()
             || self.fork_selector.is_some()
             || self.share_loader.is_some()
@@ -133,9 +118,8 @@ impl AgentView {
             || self.reload_box.is_some()
             || self.settings_menu.is_some()
         {
-            // TS's editor container holds the prompt context (the detail
-            // hint) and the editor; `showSelector` replaces only the editor
-            // part, so the hint stays above the pane.
+            // TS's editor container holds the prompt context and the
+            // editor; `showSelector` replaces the editor part.
             let mut dock = render_prompt_context(&self.detail_label(), &self.theme, width);
             if let Some(selector) = self.tree_selector.as_ref() {
                 dock.extend(selector.render(&self.theme, width, self.editor.keybindings()));
@@ -160,16 +144,12 @@ impl AgentView {
             picker_dock
         };
         // The top bar always renders: the surface is fullscreen-only
-        // (the operator's 2026-09-28 retirement ruling — the
-        // non-fullscreen render path never existed, so the preference
-        // and its toggle are gone and the bar has no gate left).
+        // (operator ruling 2026-09-28 — the bar has no gate left).
         let top = render_top_bar(&self.chrome, &self.theme, width);
         let top_rows = 1;
         let dock = match selector_dock {
-            // The replacement surfaces swap only the editor part of the
-            // dock; the `/speed` footer stays the dock's last row under
-            // them (TS `footerSlot` renders while `showSelector`/the
-            // pickers own the frame).
+            // The replacement surfaces swap only the editor part; the `/speed` footer stays
+            // the dock's last row (TS `footerSlot`).
             Some(mut dock) => {
                 if let Some(speed) = &self.chrome.speed_text {
                     dock.push(crate::chrome::render_speed_footer(
@@ -187,9 +167,8 @@ impl AgentView {
             .min(height.saturating_sub(FULLSCREEN_MIN_TRANSCRIPT_ROWS));
         let cropped = dock.len().saturating_sub(dock_height);
         // The hardware cursor rides the dock's rows: a front crop removes
-        // the first `cropped` rows, so the editor's cursor sits that many
-        // rows closer to the displayed dock's start — subtract, or the
-        // reported cursor lands below the editor at every cropped height.
+        // the first `cropped` rows, so subtract — or the reported cursor
+        // lands below the editor.
         self.dock_cursor = self
             .dock_cursor
             .map(|(row, col)| (row.saturating_sub(cropped), col));
@@ -204,7 +183,7 @@ impl AgentView {
         let (window_rows, start) = self.visible_transcript_window(width, window_height);
         self.window_rows = window_height;
         // The selection restyle diff: only the rows the selection change
-        // touched re-style; the rest reuse the cached styled rows.
+        // touched re-style.
         let window_rows = self.selection_styled_window(window_rows, start);
         let mut frame: Vec<Line> = Vec::with_capacity(height);
         frame.push(pad_row(top, width));
@@ -214,22 +193,14 @@ impl AgentView {
         while frame.len() < height.saturating_sub(dock.len()) {
             frame.push(vec![Span::raw(" ".repeat(width))]);
         }
-        // The click surface's frame scalars: the window starts at the
-        // top bar's rows, the dock starts at the frame's next row, and a
-        // click's dock row indexes the un-cropped dock.
+        // The click surface's frame scalars: a click's dock row indexes
+        // the un-cropped dock.
         self.click.note_frame(top_rows, frame.len(), cropped);
         for line in dock {
             frame.push(pad_row(line, width));
         }
-        // The hover affordance (operator directive 2026-09-26): the
-        // hovered clickable card row brightens — Muted text to the
-        // theme's foreground, Dim to Muted, the "opacity shift" that
-        // signals the row is clickable. One row, only while hovered —
-        // and revalidated against THIS frame's just-recorded click
-        // surface, so a scroll, a resize, or streaming that moves other
-        // content onto the hovered row clears the affordance instead of
-        // brightening whatever landed there (the review bots' finding:
-        // the state is a screen coordinate, the layout moves).
+        // The hover affordance (operator directive 2026-09-26): the hovered card row brightens,
+        // revalidated against THIS frame's click surface.
         if let Some((row, col)) = self.hover_pos {
             match self.click_target_at(row, col) {
                 Some(click::ClickAction::ToggleCardExpansion(_)) => {
@@ -237,15 +208,9 @@ impl AgentView {
                         apply_hover_affordance(line, &self.theme);
                     }
                 }
-                // The dock's hover affordance (operator directive
-                // 2026-09-29): the hovered group segment or tray hint
-                // carries the ONE light hover band — exactly the
-                // region's own cells, never the row around them — and
-                // the focused group's selection band stays under it
-                // (the paint skips cells that already carry a
-                // background, and the selection paints the same one
-                // color, so the states read as one band where they
-                // overlap).
+                // The dock's hover affordance (operator directive 2026-09-29): the hovered
+                // segment or tray hint carries the ONE light band; the focused group's
+                // selection band stays.
                 Some(click::ClickAction::OpenDockGroup(_) | click::ClickAction::OpenAgentsView) => {
                     if let Some(region) = self.dock_region_at(row, col) {
                         if let Some(line) = frame.get_mut(row) {
@@ -256,11 +221,8 @@ impl AgentView {
                 _ => self.hover_pos = None,
             }
         }
-        // A paused viewport carries the follow hint over the last transcript
-        // window row (TS composites it above the dock, below overlays) —
-        // but only when following would actually scroll: a window that
-        // already shows the transcript tail is at the bottom, not paused
-        // above new content (operator directive 2026-09-26).
+        // A paused viewport carries the follow hint over the last window row — only when
+        // following would actually scroll (operator directive 2026-09-26).
         if !self.following && !self.window_shows_tail {
             if let Some(row) = frame.get_mut(window_height) {
                 let key = self
@@ -280,14 +242,9 @@ impl AgentView {
             crate::selection::HEADER_ROWS + self.window_rows,
             width,
         );
-        // The action toasts overlay the transcript window's top rows
-        // (newest at the bottom of the stack), above the selection restyle
-        // so the transient text stays legible. The overlay never runs
-        // past the window's last row (a short transcript keeps the dock
-        // untouched) and sits out an in-progress selection drag: the
-        // transient overlay must never hide rows a drag is selecting —
-        // releasing over covered text could copy content that was not
-        // visible.
+        // The action toasts overlay the transcript window's top rows. The overlay sits out an
+        // in-progress selection drag: releasing over covered text could copy content that was
+        // not visible.
         let now = std::time::Instant::now();
         let toasts: Vec<String> = if self.selection.is_dragging() {
             Vec::new()
@@ -296,11 +253,8 @@ impl AgentView {
         };
         if !toasts.is_empty() {
             // The action ack renders as the brand-purple pill (the
-            // operator directive): the theme's Accent token — the same
-            // purple the brand visuals carry — flipped onto the pill's
-            // background by REVERSED (the follow-hint overlay's badge
-            // grammar), so the toast reads as a compact highlighted
-            // chip, not a bare line.
+            // operator directive): the theme's Accent token flipped onto
+            // the pill's background by REVERSED.
             let style = self
                 .theme
                 .fg_style(crate::theme::ThemeColor::Accent)
@@ -313,17 +267,16 @@ impl AgentView {
                 width,
                 style,
             );
-            // The covered rows no longer read as the transcript content
-            // beneath them: a click on the transient pill must not fire
-            // the hidden row's target.
+            // A click on the transient pill must not fire the hidden
+            // row's target.
             let covered = toasts.len().min(window_height);
             self.click.mask_rows(top_rows, top_rows + covered);
         }
         frame
     }
 
-    /// Hardware cursor position within the last composed frame (0-based row,
-    /// 0-based column), when the editor surface drew the cursor.
+    /// Hardware cursor position within the last composed frame, when the
+    /// editor surface drew the cursor.
     pub fn frame_cursor(&self) -> Option<(usize, usize)> {
         if self.onboarding.is_some()
             || self.model_picker.is_some()
@@ -348,12 +301,9 @@ impl AgentView {
             .map(|(row, col)| (row + 1 + self.window_rows, col))
     }
 
-    /// The inline layout the exit flush paints onto the main screen (TS
-    /// `exitFullscreen`'s synchronous inline repaint): the full transcript
-    /// plus the dock, without the fullscreen window, top-bar pin, or height
-    /// padding. Unlike an alt-screen frame, these rows persist in the
-    /// terminal's native scrollback, which is what keeps the exit frame
-    /// (and the resume hint printed below it) visible after the app exits.
+    /// The inline layout the exit flush paints onto the main screen: the full transcript plus
+    /// the dock, without the fullscreen window. These rows persist in the terminal's native
+    /// scrollback.
     pub fn render_inline_frame(&mut self, width: usize) -> Vec<Line> {
         let mut rows = self.render_transcript(width);
         rows.extend(self.render_dock(width));
@@ -364,12 +314,8 @@ impl AgentView {
     }
 }
 
-/// One scroll-indicator surface row (`↑ N more` on the editor background).
-/// The hover affordance's row restyle (operator directive 2026-09-26):
-/// Muted spans brighten to the theme's foreground and Dim spans to
-/// Muted — the "text opacity changes a little bit" the operator asked
-/// for. Accent paint (the status glyphs, errors, links) keeps its own
-/// color, so the row stays legible and only its dim text brightens.
+/// The hover affordance's row restyle (operator directive 2026-09-26): Muted spans brighten to
+/// the theme's foreground, Dim to Muted.
 fn apply_hover_affordance(row: &mut Line, theme: &crate::theme::Theme) {
     let muted = theme.fg_style(crate::theme::ThemeColor::Muted).fg;
     let dim = theme.fg_style(crate::theme::ThemeColor::Dim).fg;
@@ -385,10 +331,8 @@ fn apply_hover_affordance(row: &mut Line, theme: &crate::theme::Theme) {
 }
 
 pub(super) fn indicator_row(indicator: &str, bg: Style, border: Style, width: usize) -> Line {
-    // The indicator text paints on the editor surface's background too
-    // (operator directive 2026-09-26): the bar's `↑/↓ N more` rows read
-    // as part of the prompt bar, not as text floating on the terminal's
-    // bare background.
+    // The indicator text paints on the editor surface's background too (operator directive
+    // 2026-09-26): the `↑/↓ N more` rows read as part of the prompt bar.
     let mut row: Line = vec![Span::styled(indicator.to_string(), border.patch(bg))];
     let used = str_width(indicator);
     row.push(Span::styled(" ".repeat(width.saturating_sub(used)), bg));
@@ -405,10 +349,8 @@ pub(super) fn pad_row(line: Line, width: usize) -> Line {
     out
 }
 
-/// Composite the follow hint over one frame row (TS `renderFullscreen`:
-/// `ctrl+shift+down to follow` reversed, centered, over the last transcript
-/// window row). Leading OSC-133 zone markers stay at the row head so the
-/// marker plan keeps flagging the row.
+/// Composite the follow hint over one frame row (TS `renderFullscreen`: reversed, centered).
+/// Leading OSC-133 zone markers stay at the row head so the marker plan keeps flagging.
 pub(super) fn composite_follow_hint(row: &Line, label: &str, width: usize) -> Line {
     let label_width = str_width(label);
     let (markers, rest) = crate::osc133::split_leading_markers(row);

@@ -113,8 +113,6 @@ fn resolution_order_builtins_local_remote() {
     ]);
     let manager = manager_with_remote(agent_dir.path().to_path_buf(), remote);
     let descriptors = manager.service_descriptors();
-    // Builtins always present; the remote linear entry could not shadow
-    // or rebind the compiled builtin.
     let linear = descriptors
         .iter()
         .find(|service| service.service_id == "linear")
@@ -125,8 +123,6 @@ fn resolution_order_builtins_local_remote() {
         Some("https://mcp.linear.app/mcp"),
         "the compiled builtin wins over the remote entry"
     );
-    // Local source wins per id over the remote catalog; the shadowed
-    // remote entry surfaces as a diagnostic (never silently rebinds).
     let my_local = descriptors
         .iter()
         .find(|service| service.service_id == "my-local")
@@ -148,14 +144,11 @@ fn resolution_order_builtins_local_remote() {
         "the id collision is visible: {:?}",
         manager.service_catalog_diagnostics()
     );
-    // Remote entries resolve as discovery-only.
     assert!(descriptors
         .iter()
         .any(|service| service.service_id == "remote-only"));
     // The remote-only entry is never connectable through a user server
-    // shadow until the user owns the id (dead shadows are dropped in
-    // views) — and fresh login only runs on ready, oauth, concrete
-    // entries.
+    // shadow until the user owns the id.
     let remote_only = descriptors
         .iter()
         .find(|service| service.service_id == "remote-only")
@@ -207,15 +200,13 @@ fn local_sources_cannot_shadow_builtins() {
     );
 }
 
-/// ENDPOINT PINNING: an installed connection keeps its approved record
-/// endpoint even when the catalog URL changes afterwards — for config
-/// serving (dispatch), for views, and for management.
+/// ENDPOINT PINNING: an installed connection keeps its approved record endpoint
+/// even when the catalog URL changes afterwards.
 #[test]
 fn installed_connections_are_endpoint_pinned_across_catalog_url_changes() {
     let agent_dir = tempfile::tempdir().expect("tempdir");
     let endpoint_a = "https://service-a.example/mcp";
     let endpoint_b = "https://service-b.example/mcp";
-    // Install a connected record at endpoint A.
     let mut manager = manager_with_remote(
         agent_dir.path().to_path_buf(),
         catalog_from_entries(&[entry_json("pinned-service", endpoint_a)]),
@@ -230,8 +221,7 @@ fn installed_connections_are_endpoint_pinned_across_catalog_url_changes() {
         ))
         .map_err(|_| ())
         .unwrap();
-    // Make the record connected (a verified handshake in the past) and
-    // store the OAuth grant the handshake proved, bound to endpoint A.
+    // A verified past handshake: store the OAuth grant bound to endpoint A.
     {
         let mut record = store.get("pinned-service").cloned().unwrap();
         record.status = RecordStatus::Connected;
@@ -258,14 +248,12 @@ fn installed_connections_are_endpoint_pinned_across_catalog_url_changes() {
             },
         );
     }
-    // Re-resolve at endpoint A: the integration serves A.
     manager.refresh();
     assert_eq!(
         manager.integration_endpoint("pinned-service").as_deref(),
         Some(endpoint_a),
         "dispatch config serves the installed endpoint"
     );
-    // The catalog moves to endpoint B.
     let manager = {
         std::mem::drop(manager);
         manager_with_remote(
@@ -273,14 +261,11 @@ fn installed_connections_are_endpoint_pinned_across_catalog_url_changes() {
             catalog_from_entries(&[entry_json("pinned-service", endpoint_b)]),
         )
     };
-    // The connection keeps its approved endpoint for BOTH dispatch and
-    // management — even though the catalog URL changed.
     assert_eq!(
         manager.integration_endpoint("pinned-service").as_deref(),
         Some(endpoint_a),
         "the pin survives the catalog URL change"
     );
-    // And the record remains manageable: the roster still lists it.
     let roster = manager.connection_roster();
     let pinned = roster
         .iter()
@@ -310,14 +295,12 @@ fn vanished_sources_pin_from_the_record_and_stay_manageable() {
         .map_err(|_| ())
         .unwrap();
     drop(store);
-    // The catalog source vanishes entirely.
     let manager = manager_with_remote(agent_dir.path().to_path_buf(), Vec::new());
     let pinned = manager
         .service_descriptor("vanished-service")
         .expect("pinned from the record");
     assert!(pinned.pinned_from_record);
     assert_eq!(pinned.transport.endpoint(), Some(endpoint));
-    // Never one-click connectable, but still manageable (roster row).
     assert!(!fresh_mcp_login_allowed(pinned));
     let roster = manager.connection_roster();
     assert!(
@@ -326,14 +309,11 @@ fn vanished_sources_pin_from_the_record_and_stay_manageable() {
             .any(|entry| entry.server == "vanished-service"),
         "the pinned connection stays manageable (verify/disconnect)"
     );
-    // The pinned service is NOT offered as pasteable (it is ready-shaped).
     assert!(!is_pasteable_token_service(pinned));
 }
 
-/// The pinned-definition hint needs PROOF: a record whose service is
-/// missing from a VALIDATED remote snapshot is genuinely gone (TS's
-/// always-in-hand catalog proves the same absence), so the card shows
-/// the byte-exact TS hint.
+/// The pinned-definition hint needs PROOF: a record whose service is missing from a VALIDATED
+/// remote snapshot is genuinely gone,.
 #[test]
 fn pinned_hint_shows_when_a_snapshot_proves_the_service_gone() {
     let agent_dir = tempfile::tempdir().expect("tempdir");
@@ -369,11 +349,8 @@ fn pinned_hint_shows_when_a_snapshot_proves_the_service_gone() {
     );
 }
 
-/// Without a validated snapshot (the fetch never ran, failed, or the
-/// bundle is missing) a pinned record CANNOT prove its source is
-/// unavailable — TS always has its catalog in hand and never claims
-/// absence it cannot prove, so the card stays silent while the pin
-/// keeps the connection manageable and never one-click connectable.
+/// Without a validated snapshot a pinned record CANNOT prove its source is unavailable — TS never
+/// claims absence it cannot prove — so the card stays silent.
 #[test]
 fn pinned_hint_stays_silent_without_a_snapshot() {
     let agent_dir = tempfile::tempdir().expect("tempdir");
@@ -471,9 +448,6 @@ impl McpEndpointProbeImpl for FakeProbe {
     }
 }
 
-/// The paste flow e2e (manager level): a bearer-token service installs
-/// end-to-end — credential stored bound to the endpoint, real handshake
-/// run, record persisted connected, and the views reflect it.
 #[tokio::test]
 async fn paste_flow_installs_a_bearer_token_service_end_to_end() {
     let agent_dir = tempfile::tempdir().expect("tempdir");
@@ -504,7 +478,6 @@ async fn paste_flow_installs_a_bearer_token_service_end_to_end() {
         })),
         probe_override: Some(probe_for_inputs),
     })));
-    // The pre-install view: setup_required with the paste marker.
     let views = {
         let manager = std::sync::Arc::clone(&manager);
         tokio::task::spawn_blocking(move || manager.lock().unwrap().service_catalog_views())
@@ -524,7 +497,6 @@ async fn paste_flow_installs_a_bearer_token_service_end_to_end() {
         .setup_hint
         .as_deref()
         .is_some_and(|hint| hint.contains("paste")));
-    // Install: paste a token for the service.
     let inputs = manager
         .lock()
         .unwrap()
@@ -540,15 +512,13 @@ async fn paste_flow_installs_a_bearer_token_service_end_to_end() {
         "the token is pinned to the endpoint"
     );
     assert_eq!(install.tool_count, Some(3));
-    // The probe verified exactly the service endpoint with the token.
     let probed = log.lock().unwrap().clone();
     assert_eq!(
         probed,
         vec![(endpoint.to_string(), "ghp_pasted-token-value".to_string())]
     );
-    // The post-install view: connected, with the record's verification.
-    // The view reads snapshot the auth store (blocking) — the daemon
-    // wraps them in spawn_blocking; the test does the same.
+    // The post-install view reads the auth store (blocking): the daemon
+    // wraps the read in spawn_blocking; the test does the same.
     let (views, roster, credential) = {
         let manager = std::sync::Arc::clone(&manager);
         tokio::task::spawn_blocking(move || {
@@ -573,7 +543,6 @@ async fn paste_flow_installs_a_bearer_token_service_end_to_end() {
     assert_eq!(after.connection_status.as_str(), "connected");
     assert_eq!(after.connection_ids, vec!["paste-service".to_string()]);
     assert_eq!(after.tool_count, Some(3));
-    // The roster shows the connection connected and generic.
     let entry = roster
         .iter()
         .find(|entry| entry.server == "paste-service")
@@ -583,7 +552,6 @@ async fn paste_flow_installs_a_bearer_token_service_end_to_end() {
         entry.generic,
         "the kernel dispatches it through the generic API"
     );
-    // The credential: typed, bound to the endpoint.
     let credential = credential.expect("credential stored");
     match credential {
         AuthCredential::McpStaticToken {
@@ -595,7 +563,6 @@ async fn paste_flow_installs_a_bearer_token_service_end_to_end() {
         }
         other => panic!("wrong credential type: {other:?}"),
     }
-    // A multi-credential service is NOT pasteable (fail closed).
     let two_cred = serde_json::json!({
         "server": "two-cred", "service": "two-cred", "label": "Two",
         "url": "https://two.example/mcp", "aliases": [],
@@ -624,9 +591,8 @@ async fn paste_flow_installs_a_bearer_token_service_end_to_end() {
     }
 }
 
-/// The GitHub alias pair from the REAL payload resolves to exactly ONE
-/// credential (credentialSet aliasing), and the derived prompt label
-/// reads "GitHub personal access token".
+/// The GitHub alias pair from the REAL payload resolves to exactly ONE credential, and the derived
+/// prompt label reads "GitHub personal access token".
 #[test]
 fn real_github_entry_is_pasteable_with_one_aliased_credential() {
     let catalog = real_catalog();
@@ -660,11 +626,9 @@ fn the_real_catalog_resolves_through_the_manager() {
     let agent_dir = tempfile::tempdir().expect("tempdir");
     let manager = manager_with_remote(agent_dir.path().to_path_buf(), real_catalog().entries);
     assert_eq!(manager.service_descriptors().len(), 68);
-    // Both legacy builtins present and reserved.
     assert!(manager.is_reserved_server_name("linear"));
     assert!(manager.is_reserved_server_name("notion"));
     assert!(!manager.is_reserved_server_name("github"));
-    // All 68 http services resolve integrations with configs.
     assert_eq!(
         manager
             .connection_roster()

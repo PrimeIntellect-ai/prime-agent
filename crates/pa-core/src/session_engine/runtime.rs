@@ -1,7 +1,7 @@
 //! The session runtime: shared goal-driver + cron-store state with kernel
-//! host-handler registration. This is the wiring layer that binds the
-//! goal/rlm-heartbeat host requests (kernel bridge) to a live session, the
-//! Rust equivalent of the `AgentSession` host-request controllers.
+//! host-handler registration — the wiring layer binding the
+//! goal/rlm-heartbeat host requests to a live session (the Rust
+//! equivalent of the `AgentSession` host-request controllers).
 
 use std::sync::Arc;
 
@@ -19,11 +19,9 @@ use super::host_requests::{
     SessionBinding,
 };
 
-/// The host-side purge of queued goal-context turns (TS
-/// `_clearQueuedGoalContexts` at the `_completeGoalFromHost` site): the
-/// queue lanes live in the daemon worker, so the completing kernel host
-/// request invokes this seam instead — dropping a continuation queued
-/// while the goal was completing.
+/// The host-side purge of queued goal-context turns: the queue lanes live in the daemon
+/// worker, so the completing kernel host request invokes this seam — dropping a
+/// continuation queued while the goal was completing.
 pub type QueuedGoalContextPurge = Arc<dyn Fn() + Send + Sync>;
 
 /// Session-scoped runtime state the kernel bridge reaches.
@@ -32,14 +30,11 @@ pub struct SessionRuntime {
     cron_store: Arc<AgentCronJobStore>,
     active_session_id: String,
     binding: SessionBinding,
-    /// Invoked after a kernel `goal.complete` settles the goal (TS
-    /// `_completeGoalFromHost` -> `_clearQueuedGoalContexts`); `None` when
-    /// the embedding owns no queued goal contexts.
+    /// Invoked after a kernel `goal.complete` settles the goal; `None`
+    /// when the embedding owns no queued goal contexts.
     goal_complete_purge: Option<QueuedGoalContextPurge>,
-    /// Invoked after a kernel `rlm_heartbeat.*` mutation (TS daemon-mode's
-    /// `removeQueuedHeartbeatFollowUp` + `cronScheduler.wake()` inside its
-    /// rlm heartbeat controllers); `None` when the embedding owns no
-    /// scheduler to re-arm.
+    /// Invoked after a kernel `rlm_heartbeat.*` mutation; `None` when
+    /// the embedding owns no scheduler to re-arm.
     cron_mutation_hook: Option<RlmHeartbeatMutationHook>,
 }
 
@@ -61,14 +56,13 @@ impl SessionRuntime {
         }
     }
 
-    /// Set the post-completion purge seam (the daemon worker's queue
-    /// purge).
+    /// Set the post-completion purge seam (the daemon worker's queue purge).
     pub fn set_goal_complete_purge(&mut self, purge: QueuedGoalContextPurge) {
         self.goal_complete_purge = Some(purge);
     }
 
-    /// Set the rlm heartbeat mutation hook (the daemon worker's queued-fire
-    /// withdrawal + scheduler re-arm).
+    /// Set the rlm heartbeat mutation hook (queued-fire withdrawal +
+    /// scheduler re-arm).
     pub fn set_cron_mutation_hook(&mut self, hook: RlmHeartbeatMutationHook) {
         self.cron_mutation_hook = Some(hook);
     }
@@ -135,9 +129,8 @@ impl SessionRuntime {
         );
         let driver = self.goal_driver.clone();
         let goal_session = session;
-        // TS `_completeGoalFromHost` clears the queued goal contexts: a
-        // continuation queued behind the completing turn (e.g. an owed
-        // continuation delivered mid-turn) never runs post-completion.
+        // TS `_completeGoalFromHost` clears the queued goal contexts: a continuation
+        // queued behind the completing turn never runs post-completion.
         let goal_complete_purge = self.goal_complete_purge.clone();
         handlers.register(
             "goal.complete",
@@ -204,9 +197,8 @@ impl SessionRuntime {
                             &active_session_id,
                             &binding,
                         )?;
-                        // The embedding's post-mutation work (TS daemon-mode
-                        // withdraws the queued fire and re-arms its cron
-                        // scheduler inside the controller methods).
+                        // The embedding's post-mutation work: withdraw the
+                        // queued fire and re-arm the cron scheduler.
                         if let Some(mutation) = outcome.mutation {
                             if let Some(hook) = &mutation_hook {
                                 hook(mutation).await;
@@ -262,7 +254,6 @@ mod tests {
         let mut handlers = HostRequestHandlers::default();
         runtime.register_host_handlers(session.clone(), &mut handlers);
 
-        // goal.create via the registry.
         let create = handlers.get("goal.create").unwrap().clone();
         let response = create(payload(serde_json::json!({
             "type": "goal.create",
@@ -273,7 +264,6 @@ mod tests {
         .unwrap();
         assert_eq!(response["goal"]["status"], "active");
         assert_eq!(response["goal"]["objective"], "finish the port");
-        // The goal state persisted to the session.
         let persisted = session.lock().await;
         let goal_entries: Vec<&pa_types::session::FileEntry> = persisted
             .get_all_entries()
@@ -286,7 +276,6 @@ mod tests {
         assert_eq!(goal_entries.len(), 1);
         drop(persisted);
 
-        // goal.get sees the same driver state.
         let get = handlers.get("goal.get").unwrap().clone();
         let response = get(payload(serde_json::json!({ "type": "goal.get" })))
             .await
@@ -294,7 +283,6 @@ mod tests {
         assert_eq!(response["goal"]["objective"], "finish the port");
         assert_eq!(response["remaining_tokens"], 1000);
 
-        // goal.complete carries the budget report.
         let complete = handlers.get("goal.complete").unwrap().clone();
         let response = complete(payload(serde_json::json!({ "type": "goal.complete" })))
             .await
@@ -332,7 +320,6 @@ mod tests {
         assert_eq!(response["heartbeat"]["instruction"], "watch the mission");
         let id = response["heartbeat"]["id"].as_str().unwrap().to_string();
 
-        // update pauses it.
         let update = handlers.get("rlm_heartbeat.update").unwrap().clone();
         let response = update(payload(serde_json::json!({
             "type": "rlm_heartbeat.update",
@@ -342,15 +329,11 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(response["heartbeat"]["status"], "paused");
-        // The heartbeat file holds the job.
         let jobs = runtime.cron_store().list_rlm_heartbeats("live-1", true);
         assert_eq!(jobs.len(), 1);
     }
 
-    /// The kernel `rlm_heartbeat.*` handlers invoke the mutation hook with
-    /// the changed job (the daemon worker's queued-fire withdrawal +
-    /// scheduler re-arm, TS daemon-mode's controller call sites); catalog
-    /// reads announce nothing.
+    /// Catalog reads announce nothing.
     #[tokio::test]
     async fn rlm_heartbeat_mutations_invoke_the_cron_mutation_hook() {
         let session = Arc::new(Mutex::new(persisted_session()));

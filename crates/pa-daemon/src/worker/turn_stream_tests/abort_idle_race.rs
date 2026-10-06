@@ -1,48 +1,20 @@
-//! The abort-and-send idle-race rate harness (the gate-pool lane's honest
-//! disposition): `abort_and_send_queued`'s settle path left the session
-//! busy forever on an intermittent solo-reproducing interleaving
-//! (`abort_and_send_queued_delivers_the_steering_batch_then_the_follow_ups`
-//! hung to the harness wall and panicked at `queue.rs:545` — "the session
-//! never went idle after the abort" — on 1/3 quiet-VM solo runs). This
-//! harness reproduces that interleaving AT RATE: the held turn's delay
-//! and the idle window shrink so a miss costs a second instead of a
-//! hang, every miss dumps the settle-path state (the worker core, the
-//! engine's turn agent, the agent run's abort signal), and the run ends
-//! with a one-line verdict the rate driver classifies.
+//! The abort-and-send idle-race rate harness: `abort_and_send_queued`'s settle
+//! path once left the session busy forever on an intermittent interleaving, so
+//! this harness reproduces it AT RATE — a miss costs a second and dumps the
+//! settle-path state, ending with a one-line verdict the rate driver classifies.
 //!
-//! Knobs (all default to the single-rep shape):
-//! - `PA_RACE_REPS`: repetitions in one process (default 50; a
-//!   long battery should chunk processes — the workers accumulate
-//!   engines and runtimes in-process past ~130 reps).
-//! - `PA_RACE_DELAY_MS`: the held turn's faux delay (default 3000; the
-//!   product-family test uses `600_000` — the delay's magnitude does not
-//!   change the abort-vs-admission interleaving, only the miss cost).
-//! - `PA_RACE_IDLE_WINDOW_MS`: the wait-for-idle window the settle
-//!   latency report uses (default 300; an honored abort settles the
-//!   held turn in single-digit ms).
-//! - `PA_RACE_EVENT_LOG`: path the per-rep event frames append to
-//!   (forwarded to the worker's `PA_DAEMON_EVENT_LOG` seam).
+//! Knobs: `PA_RACE_REPS` (default 50; chunk processes past ~130 reps),
+//! `PA_RACE_DELAY_MS` (default 3000), `PA_RACE_IDLE_WINDOW_MS` (default
+//! 300), and `PA_RACE_EVENT_LOG`.
 //!
-//! THE VERDICT CLASSES (the harness deliberately fires the abort without
-//! a positive-signal sync, so the abort can land anywhere in the
-//! delivery — the admission prefix included, exactly the product race):
-//! - `lost_aborts` — the PRODUCT race this harness exists for: the abort
-//!   never reached the run, the held turn serves "held reply" as its OWN
-//!   reply (the first assistant row behind ONE user row), the pre-fix
-//!   dump shape (busy=true `abort_requested=true` `steering_len=2`
-//!   `run_signal=live`). ANY occurrence fails the harness.
-//! - `fixture_leaks` — the expected post-fix artifact of the same
-//!   interleaving: the consult aborts the turn BEFORE its provider call,
-//!   so the faux step the held turn never consumed (the delayed one)
-//!   leaks to the batch turn, whose co-delivered reply serves "held
-//!   reply" behind the batch's user rows (the pop-at-call contract: no
-//!   call, no consumption). With a real provider the batch turn serves
-//!   promptly; the class is REPORTED, never asserted.
-//! - `green` — the abort landed on the registered run (the normal
-//!   abort path) and the whole queue settled inside the window.
+//! VERDICT CLASSES (the abort fires without a positive-signal sync, so it
+//! can land anywhere in the delivery):
+//! - `lost_aborts` — the PRODUCT race: the held turn serves "held reply"
+//!   as its OWN reply. ANY occurrence fails.
+//! - `fixture_leaks` — the expected post-fix artifact: reported, never asserted.
+//! - `green` — the abort landed and the queue settled inside the window.
 //!
-//! `#[ignore]`d: the rate driver invokes it explicitly; it never runs in
-//! the normal test battery.
+//! `#[ignore]`d: the rate driver invokes it explicitly.
 use super::*;
 
 /// Read one numeric knob with a default.
@@ -53,9 +25,8 @@ fn race_knob(name: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
-/// The state at the miss: everything the settle path owns, one dump line
-/// each, so the interleaving that left the session never-idle reads off
-/// the transcript directly.
+/// The state at the miss: everything the settle path owns, one dump
+/// line each.
 fn dump_hang_state(worker: &Worker) -> String {
     use std::fmt::Write as _;
     let core = worker.core.lock().unwrap();
@@ -76,12 +47,10 @@ fn dump_hang_state(worker: &Worker) -> String {
         core.running_tool_calls.len(),
     );
     drop(core);
-    // The engine's abort target: present? and does the agent's ACTIVE
-    // run carry an aborted signal? A miss with `run_signal=aborted`
-    // means the abort landed but the turn never settled; a miss with
-    // `run_signal=live` means the abort never reached the run (a lost
-    // abort at a registration boundary); `no-run` means no active run
-    // at all (the settle raced the next admission).
+    // `run_signal=aborted`: the abort landed but the turn never settled;
+    // `run_signal=live`: the abort never reached the run (a lost abort at a
+    // registration boundary); `no-run`: no active run (the settle raced the
+    // next admission).
     match worker.agent_engine.as_ref().map(|engine| {
         engine
             .turn_agent
@@ -193,9 +162,8 @@ async fn abort_and_send_idle_race_rate_harness() {
             );
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
-        // The product-family test's exact pacing: the hold has the turn
-        // when this sleep ends, the steers queue behind it, and the abort
-        // fires against the in-flight run.
+        // The product-family test's exact pacing: the hold has the turn when this
+        // sleep ends, the steers queue behind it, the abort fires in-flight.
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
         for message in ["steering one", "steering two"] {
             let steered = worker
@@ -215,28 +183,18 @@ async fn abort_and_send_idle_race_rate_harness() {
             sent,
             "rep {rep}: the armed steering batch sent with the abort"
         );
-        // THE SETTLE-LATENCY WINDOW first (the original symptom's
-        // observable): an honored abort settles the whole queue in
-        // single-digit ms when the abort lands on the registered run; the
-        // consult's leaked-step class inherits the delay for the batch
-        // turn (the fixture artifact); a lost abort inherits it for the
-        // held turn (the product race).
+        // THE SETTLE-LATENCY WINDOW first: an honored abort settles the
+        // whole queue in single-digit ms; a fixture leak or a lost
+        // abort inherits the delay.
         let idle = tokio::time::timeout(
             std::time::Duration::from_millis(window_ms),
             worker.dispatch("wait_for_idle", &json!({})),
         )
         .await;
         let idle_ok = matches!(&idle, Ok(response) if response.success);
-        // THE PRODUCT ASSERTION (the race this harness exists for): the
-        // abort is honored — the held turn NEVER serves its scripted
-        // reply. Classified by the settled transcript, never by wall
-        // latency: the first assistant row names the turn that won the
-        // race for the held step. The aborted row is the registered-run
-        // abort; "held reply" behind ONE user row is the held turn's own
-        // reply (the LOST abort — the run served its hold); "held reply"
-        // behind the batch's co-delivered user rows is the consult's
-        // honored abort leaking the unconsumed step to the batch turn
-        // (the fixture artifact).
+        // THE PRODUCT ASSERTION: the abort is honored — the held turn NEVER
+        // serves its scripted reply. Classified by the settled transcript,
+        // never by wall latency (see the module doc's verdict classes).
         let first_row =
             tokio::time::timeout(std::time::Duration::from_millis(delay_ms + 10_000), async {
                 loop {
@@ -276,11 +234,9 @@ async fn abort_and_send_idle_race_rate_harness() {
                         "RATE_HARNESS LOST_ABORT rep {rep} of {reps}: the held turn served \"held reply\" as its own reply (users_before={users_before}) - the abort never reached the run: {}",
                         dump_hang_state(&worker)
                     );
-                    // Wait out the busy session (the batch and the
-                    // follow-up lanes still hold work) so the next rep
-                    // starts on an idle queue, exactly like the leak
-                    // branch - the lost abort's worker otherwise keeps
-                    // delivering behind the harness's back.
+                    // Wait out the busy session so the next rep starts on an idle
+                    // queue — the lost abort's worker otherwise keeps delivering
+                    // behind the harness's back.
                     let _ = tokio::time::timeout(
                         std::time::Duration::from_millis(delay_ms + 10_000),
                         worker.dispatch("wait_for_idle", &json!({})),
@@ -303,9 +259,8 @@ async fn abort_and_send_idle_race_rate_harness() {
                         .await;
                         let settle_ok = matches!(&settle, Ok(response) if response.success);
                         if !settle_ok {
-                            // The inherited hold outlived its whole
-                            // window: the session never settled - count
-                            // it, never exit green on a busy session.
+                            // The inherited hold outlived its whole window: the session
+                            // never settled - count it, never exit green on a busy session.
                             lost_aborts += 1;
                         }
                         eprintln!(

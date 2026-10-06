@@ -1,13 +1,5 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
-// by design on hot paths (boxing 130 fns is allocation-churn with zero
-// correctness gain); the fn-length threshold is a style gate, not
-// correctness (the harness fns are intentionally linear); 64-bit targets -
-// the narrowing sits at OS/protocol boundaries where the values are
-// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
-// guarded parses), and checked conversions would add panic paths where
-// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
-// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
-// dossier for the conductor).
+// large_futures: stack futures on hot paths by design. too_many_lines: style gate
+// only. Casts: 64-bit targets; narrowing sits at bounded OS/protocol boundaries.
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -17,15 +9,11 @@
     clippy::cast_precision_loss
 )]
 
-//! End-to-end verifier for the dock's Subagents panel exit (the
-//! operator's 2026-09-26 ruling): entering the scoped agents view from
-//! the dock and leaving it with ESC/left reopens the scope root's chat
-//! with the dock focused on the SUBAGENTS item — the panel's own dock
-//! icon — not the prompt bar. Proven behaviorally: in the reopened chat
-//! a bare Enter re-opens the scoped view (an Enter on the empty prompt
-//! bar submits nothing), and the scoped view's outcome carries
-//! `scope_back` (the flag the agents-view flow wires into the reopened
-//! run's options).
+//! End-to-end verifier for the dock's Subagents panel exit (the operator's
+//! 2026-09-26 ruling): leaving the scoped agents view reopens the scope
+//! root's chat with the dock focused on the SUBAGENTS item — the panel's own
+//! dock icon — not the prompt bar. Proven behaviorally: a bare Enter re-opens
+//! the scoped view, and the scoped view's outcome carries `scope_back`.
 #![cfg(unix)]
 
 use std::fmt::Write as _;
@@ -88,8 +76,7 @@ fn graceful_shutdown(socket: &Path) {
 }
 
 // The Supervisor holds the Child so its Drop owns the protocol shutdown,
-// the kill, and the wait (teardown runs even on panic); the lint wants the
-// reap inline instead.
+// the kill, and the wait; the lint wants the reap inline instead.
 #[allow(clippy::zombie_processes)]
 fn spawn_supervisor(dir: &Path) -> Supervisor {
     let socket = dir.join("daemon.sock");
@@ -217,11 +204,9 @@ fn session_options(
 }
 
 /// One full scope-back cycle: the parent's chat opens with the dock's
-/// Subagents group selectable (one ledger-seeded child), the scoped
-/// agents view is entered from the dock and left with `exit_key`, and
-/// the reopened chat proves its dock holds the focus — the next bare
-/// Enter re-opens the scoped view (an Enter on the empty prompt bar
-/// submits nothing).
+/// Subagents group selectable, the scoped agents view is entered from the
+/// dock and left with `exit_key`, and the reopened chat's bare Enter re-opens
+/// the scoped view.
 async fn scope_exit_keeps_the_subagents_item(exit_key: &'static str) {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
@@ -303,9 +288,8 @@ async fn scope_exit_keeps_the_subagents_item(exit_key: &'static str) {
         .expect("the scope names the parent's live session");
 
     // Run 2 — the scoped agents view (the Subagents panel): the exit key
-    // hands the pane back to the scope root's chat, and the outcome
-    // carries `scope_back` (the flag the flow wires into the reopened
-    // run's options).
+    // hands the pane back to the scope root's chat, and the outcome carries
+    // `scope_back`.
     let view_options = AgentsViewOptions {
         socket_path: supervisor.socket.clone(),
         cwd: PathBuf::from("/tmp"),

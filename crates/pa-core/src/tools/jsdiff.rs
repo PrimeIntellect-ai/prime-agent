@@ -1,13 +1,9 @@
-//! Faithful port of jsdiff v9 `diffLines` (Myers O(ND) with the
-//! diagonal-bounds optimization), as vendored by
-//! `packages/coding-agent/src/core/tools/edit-diff.ts` (`Diff.diffLines`).
-//! Split from the edit-diff module for module-size hygiene. Diffs generated
-//! here must match the TypeScript product byte for byte; the golden corpus
-//! pins them.
+//! Faithful port of jsdiff v9 `diffLines` (Myers O(ND) with the diagonal-bounds
+//! optimization) as the TS product vendors it (`Diff.diffLines`): diffs here must
+//! match the TypeScript product byte for byte; the golden corpus pins them.
 
-/// Tokenize a string the way jsdiff's `diffLines` does: split keeping `\n` /
-/// `\r\n` separators, drop a trailing empty element, and merge each newline
-/// into the preceding line token.
+/// Tokenize a string the way jsdiff's `diffLines` does: split keeping `\n` / `\r\n` separators,
+/// drop a trailing empty element, and merge each newline into the preceding line token.
 fn jsdiff_line_tokenize(value: &str) -> Vec<String> {
     let mut parts: Vec<String> = Vec::new();
     let mut current = String::new();
@@ -275,9 +271,8 @@ impl DiffEngine<'_> {
             edit_length += 1;
         }
 
-        // The loop always terminates via the done path for well-formed input
-        // (maxEditLength = newLen + oldLen bounds the Myers search), but the
-        // seed is kept as a safe terminal answer.
+        // The loop always terminates via the done path for well-formed input (maxEditLength =
+        // newLen + oldLen bounds the Myers search), but the seed is kept as a safe terminal answer.
         self.build_values(
             best_path
                 .get(&(-max_edit_length))
@@ -303,6 +298,4 @@ pub(crate) fn diff_lines(old_str: &str, new_str: &str) -> Vec<DiffPart> {
     engine.run()
 }
 
-// ---------------------------------------------------------------------------
 // Diff string generation
-// ---------------------------------------------------------------------------
