@@ -503,7 +503,7 @@ impl LockDir {
                     // verifiably ours - park-capture first, re-verify on the
                     // parked name (the same discipline as the guarded
                     // release), never the successor's.
-                    let _ = Self::remove_owned_artifact(&path, owned, probe);
+                    Self::remove_owned_artifact(&path, owned, probe);
                     return Err(error);
                 }
             }
@@ -837,37 +837,26 @@ impl LockDir {
 
     /// The unwinding acquisition's cleanup (unix): remove the just-created
     /// lock directory on the witness-failure path - but only when it is
-    /// still verifiably ours. The park discipline again: capture the
-    /// occupant to a unique park name first (so the removal target is
-    /// immune to a swap between the check and the rmdir), then re-verify
-    /// on the parked name that the capture took OUR directory (the
-    /// recorded probe and identity), and only then remove. A successor's
-    /// replacement is restored untouched.
+    /// still verifiably ours, verified ON THE ORIGINAL PATH before the
+    /// artifact is ever touched: a rename-first cleanup would park a
+    /// live successor's replacement off the public path (its refresher
+    /// would abort and a third party could take the vacated path), the
+    /// exact displacement the takeover paths refuse. The removal window
+    /// is legal-actor-free: our artifact is fresh (no TS takeover can
+    /// judge it stale), unwitnessed (this is the witness-failure unwind),
+    /// and a rust successor's claim gates on the flock it holds - not
+    /// ours to conflict. A foreign occupant is left entirely alone.
     #[cfg(unix)]
-    fn remove_owned_artifact(
-        path: &Path,
-        owned: Option<u64>,
-        probe: Option<(i64, i64)>,
-    ) -> io::Result<()> {
-        let parked = Self::park_name_of(path);
-        match fs::rename(path, &parked) {
-            // Nothing at the path: already gone - nothing to clean.
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(error),
-            Ok(()) => {}
-        }
+    fn remove_owned_artifact(path: &Path, owned: Option<u64>, probe: Option<(i64, i64)>) {
         let still_ours = probe.is_some_and(|probe| {
-            Self::observed_mtime(&parked) == Some(probe)
-                && owned.is_some_and(|owned| Self::ownership_id(&parked) == Some(owned))
+            Self::observed_mtime(path) == Some(probe)
+                && owned.is_some_and(|owned| Self::ownership_id(path) == Some(owned))
         });
         if still_ours {
-            let _ = fs::remove_dir(&parked);
-        } else {
-            // The parked directory is a successor's: put it back, never
-            // removed (the path is free - our rename just vacated it).
-            let _ = Self::restore_parked(&parked, path);
+            let _ = fs::remove_dir(path);
         }
-        Ok(())
+        // Not ours at the path: the successor's lock is never touched -
+        // no rename, no park, no displacement.
     }
 
     /// Put a parked directory back at the lock path: `RENAME_NOREPLACE`
@@ -1611,17 +1600,15 @@ mod tests {
         // OUR artifact: create's probe, still at the path -> removed.
         let probe = LockDir::create(&path).unwrap().expect("the unix probe");
         let owned = LockDir::ownership_id(&path);
-        LockDir::remove_owned_artifact(&path, owned, Some(probe))
-            .expect("the owned artifact is removed");
+        LockDir::remove_owned_artifact(&path, owned, Some(probe));
         assert!(!path.exists(), "the unwitnessed artifact never orphans");
         // The successor's replacement: its own probe at the path ->
-        // restored, never removed.
+        // never touched (no rename, no park), never removed.
         let probe = LockDir::create(&path).unwrap().expect("the unix probe");
         let owned = LockDir::ownership_id(&path);
         set_mtime(&path, 123, 456).unwrap();
-        LockDir::remove_owned_artifact(&path, owned, Some(probe))
-            .expect("the cleanup run completes");
-        assert!(path.is_dir(), "the successor's replacement is restored");
+        LockDir::remove_owned_artifact(&path, owned, Some(probe));
+        assert!(path.is_dir(), "the successor's replacement is untouched");
         std::fs::remove_dir(&path).unwrap();
     }
 
