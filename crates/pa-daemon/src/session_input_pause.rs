@@ -154,6 +154,7 @@ impl Worker {
         let pause_id = self
             .input_pauses
             .acquire(&active_session_id, &owner_client_id, lease_key);
+        self.idle_notify.notify_waiters();
         response_success(
             None,
             "acquire_session_input_pause",
@@ -246,6 +247,51 @@ mod tests {
             .await;
         assert!(created.success, "create failed: {created:?}");
         worker
+    }
+
+    #[tokio::test]
+    async fn a_pause_wakes_idle_wait_holding_queued_input() {
+        let worker = created_worker().await;
+        {
+            let mut core = worker.core.lock().unwrap();
+            core.queued_input_suspended = true;
+            core.follow_up.push_back(crate::worker::QueuedItem {
+                priority: crate::worker::QueuePriority::Human,
+                preview: None,
+                message: "held follow-up".to_string(),
+                custom_message: None,
+                agent_message: None,
+                queue_key: None,
+                admission_id: None,
+                images: Vec::new(),
+                done: None,
+                queue_visible: true,
+                policy: crate::worker::TurnPolicy::Queued,
+                forced_batch: false,
+            });
+        }
+        // Clear a create-time permit so acquisition must wake this waiter.
+        worker.idle_notify.notify_one();
+        worker.idle_notify.notified().await;
+        let waiting = tokio::spawn({
+            let worker = Arc::clone(&worker);
+            async move { worker.wait_until_idle().await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished(), "queued input holds the idle wait");
+        let pause = worker
+            .dispatch(
+                "acquire_session_input_pause",
+                &json!({
+                    "activeSessionId": "pause-session", "leaseKey": "idle-wake", "clientId": "test"
+                }),
+            )
+            .await;
+        assert!(pause.success, "pause failed: {pause:?}");
+        tokio::time::timeout(std::time::Duration::from_secs(2), waiting)
+            .await
+            .expect("pause acquisition did not wake the idle waiter")
+            .expect("idle waiter panicked");
     }
 
     /// Wire shape: acquire answers `{ pauseId }`, the same lease

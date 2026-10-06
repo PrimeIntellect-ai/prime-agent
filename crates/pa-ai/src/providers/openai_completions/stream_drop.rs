@@ -210,3 +210,86 @@ async fn a_done_marker_without_finish_reason_completes() {
     assert_eq!(message.stop_reason, StopReason::Stop);
     assert_eq!(message.error_message, None);
 }
+
+/// Serve the SSE body and hold the connection open: no `Content-Length`,
+/// no terminator, no close — body EOF never arrives.
+async fn serve_sse_hold_open(body: String) -> SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut socket = socket;
+        let mut request = vec![0u8; 8192];
+        let _ = socket.read(&mut request).await.unwrap();
+        let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n{body}");
+        socket.write_all(response.as_bytes()).await.unwrap();
+        socket.flush().await.unwrap();
+        // The held-open tail: the body never EOFs while the stream reads.
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+    });
+    addr
+}
+
+/// A tool-call chunk (`finish_reason` still null — the stream is
+/// mid-block).
+const TOOLCALL_DELTA: &str = r#"data: {"id":"c1","object":"chat.completion.chunk","model":"glm-test","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"ipython","arguments":"{\"code\": \"print(17*23)\"}"}}]},"finish_reason":null}]}
+
+"#;
+
+/// The tool-calls stop signal: the final chunk carries
+/// `finish_reason: "tool_calls"`.
+const TOOLCALLS_FINISH: &str = "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"glm-test\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n";
+
+/// A full tool-call turn whose connection stays open after the `[DONE]`
+/// marker: the stream must complete at the marker, never wait for body
+/// EOF. The hang this pins leaves the turn silent mid-stream — the model
+/// already streamed its tool call, the worker never executes it, and the
+/// prompt waits forever.
+#[tokio::test]
+async fn the_done_marker_ends_a_stream_whose_body_stays_open() {
+    let body = format!("{TEXT_DELTA}{TOOLCALL_DELTA}{TOOLCALLS_FINISH}{DONE}");
+    let addr = serve_sse_hold_open(body).await;
+    let model: Model = serde_json::from_value(json!({
+        "id": "glm-test", "name": "GLM test", "api": "openai-completions",
+        "provider": "prime-inference", "baseUrl": format!("http://{addr}"),
+        "reasoning": true, "input": ["text"],
+        "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+        "contextWindow": 131_072, "maxTokens": 8192,
+    }))
+    .expect("test model");
+    let options = OpenAICompletionsOptions::from_base(crate::types::StreamOptions {
+        api_key: Some("test".into()),
+        ..Default::default()
+    });
+    let mut reader = stream_openai_completions(
+        &model,
+        &Context {
+            system_prompt: None,
+            messages: vec![],
+            tools: None,
+        },
+        Some(&options),
+    );
+    let terminal = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let event = reader
+                .next_event()
+                .await
+                .expect("stream events while the body is held open");
+            if event.is_terminal() {
+                return event;
+            }
+        }
+    })
+    .await
+    .expect("the [DONE] marker ends the stream; body EOF never arrives");
+    let AssistantMessageEvent::Done { message, .. } = terminal else {
+        panic!("a marker-terminated stream must complete, not error");
+    };
+    assert_eq!(message.stop_reason, StopReason::ToolUse);
+    assert_eq!(message.error_message, None);
+    assert!(message
+        .content
+        .iter()
+        .any(|block| matches!(block, AssistantContent::ToolCall(call) if call.name == "ipython")));
+}

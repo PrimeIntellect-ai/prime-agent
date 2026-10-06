@@ -633,10 +633,19 @@ impl Worker {
                                 self.emit_custom_row(&value);
                             }
                         }
+                        crate::user_bash::emit_session_event_frame(
+                            &self.core,
+                            &self.events,
+                            crate::worker::refine_complete_event(&result),
+                        );
                     }
                     Ok(None) => {}
                     Err(error) => {
                         eprintln!("pa-daemon: auto-refinement after compaction failed: {error:#}");
+                        self.emit_worker_event(json!({
+                            "type": "refine_failed",
+                            "error": format!("{error:#}"),
+                        }));
                     }
                 }
                 response_success(None, "compact", Some(run.result))
@@ -657,12 +666,17 @@ impl Worker {
     /// register the permit before the flag check, or a turn that settles
     /// between the check and the await loses its wake
     /// (`notify_waiters` only reaches registered futures).
-    async fn wait_until_idle(&self) {
+    pub(crate) async fn wait_until_idle(&self) {
         loop {
             let idle = self.idle_notify.notified();
+            tokio::pin!(idle);
+            idle.as_mut().enable();
             {
                 let core = self.core.lock().unwrap();
-                if !core.busy && core.steering.is_empty() && core.follow_up.is_empty() {
+                if !core.busy
+                    && (core.steering.is_empty() && core.follow_up.is_empty()
+                        || self.input_pauses.paused())
+                {
                     return;
                 }
             }
