@@ -169,7 +169,13 @@ pub async fn mcp_login(
             );
         };
         ui.on_progress("Registering OAuth client…");
-        register_client(http, registration_endpoint, &config.label, (!scope.is_empty()).then_some(scope.as_str())).await?
+        register_client(
+            http,
+            registration_endpoint,
+            &config.label,
+            (!scope.is_empty()).then_some(scope.as_str()),
+        )
+        .await?
     };
 
     let (verifier, challenge) = generate_pkce();
@@ -1481,19 +1487,24 @@ mod tests {
     async fn refresh_validates_audience_modes() {
         const NOTION_PRM: &str = "https://srv.test/.well-known/oauth-protected-resource/mcp";
         const DECLARED: &str = "https://srv.test";
-        let credentials = AuthCredential::Oauth {
-            access: "origin-access".to_string(),
-            refresh: Some("origin-refresh".to_string()),
-            expires: 0,
-            account_id: None,
-            endpoint: Some(ORIGIN_URL.to_string()),
-            token_endpoint: Some(ORIGIN_TOKEN.to_string()),
-            client_id: Some("origin-client".to_string()),
-            resource: Some(DECLARED.to_string()),
-            issuer: Some("https://srv.test/tenant".to_string()),
-            audience_mode: Some("origin".to_string()),
-            enterprise_url: None,
+        // A credential factory: the enum is not a struct, so variant
+        // rebuilds spell every field.
+        let reissued_oauth = |resource: Option<&str>, audience_mode: Option<&str>| {
+            AuthCredential::Oauth {
+                access: "origin-access".to_string(),
+                refresh: Some("origin-refresh".to_string()),
+                expires: 0,
+                account_id: None,
+                endpoint: Some(ORIGIN_URL.to_string()),
+                token_endpoint: Some(ORIGIN_TOKEN.to_string()),
+                client_id: Some("origin-client".to_string()),
+                resource: resource.map(str::to_string),
+                issuer: Some("https://srv.test/tenant".to_string()),
+                audience_mode: audience_mode.map(str::to_string),
+                enterprise_url: None,
+            }
         };
+        let credentials = reissued_oauth(Some(DECLARED), Some("origin"));
         let http = ScriptedHttp::new(vec![
             (ORIGIN_URL, 401, None, ""),
             (
@@ -1549,10 +1560,7 @@ mod tests {
         assert!(token_request.1.unwrap().contains("resource=https%3A%2F%2Fsrv.test"));
 
         // A discovery that re-classifies the audience requires re-login.
-        let exact_mode = AuthCredential::Oauth {
-            audience_mode: Some("exact".to_string()),
-            ..credentials.clone()
-        };
+        let exact_mode = reissued_oauth(Some(DECLARED), Some("exact"));
         let error = mcp_refresh_token(&http, &config("origin", ORIGIN_URL), &exact_mode)
             .await
             .unwrap_err()
@@ -1565,10 +1573,7 @@ mod tests {
         // Legacy credentials (no stored audience mode) pin to the canonical
         // endpoint: an origin-level stored resource is refused at the
         // binding check before any request leaves.
-        let legacy = AuthCredential::Oauth {
-            audience_mode: None,
-            ..credentials
-        };
+        let legacy = reissued_oauth(Some(DECLARED), None);
         let error = mcp_refresh_token(&http, &config("origin", ORIGIN_URL), &legacy)
             .await
             .unwrap_err()
@@ -1608,18 +1613,14 @@ mod tests {
                 &json_response(&serde_json::json!({ "access_token": "exact-access" })),
             ),
         ]);
-        let legacy_exact = AuthCredential::Oauth {
-            resource: Some(ORIGIN_URL.to_string()),
-            audience_mode: None,
-            ..legacy
-        };
+        let legacy_exact = reissued_oauth(Some(ORIGIN_URL), None);
         let refreshed = mcp_refresh_token(&http, &config("origin", ORIGIN_URL), &legacy_exact)
             .await
             .unwrap();
         match &refreshed {
             AuthCredential::Oauth { access, audience_mode, .. } => {
                 assert_eq!(access, "exact-access");
-                assert_eq!(audience_mode, None);
+                assert!(audience_mode.is_none());
             }
             other => panic!("oauth credential expected, got {other:?}"),
         }

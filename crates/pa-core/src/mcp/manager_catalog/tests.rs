@@ -254,6 +254,7 @@ fn installed_connections_are_endpoint_pinned_across_catalog_url_changes() {
                 client_id: None,
                 resource: None,
                 issuer: None,
+                audience_mode: None,
                 enterprise_url: None,
             },
         );
@@ -740,6 +741,7 @@ fn api_key_credential_views_read_the_shared_store() {
                 client_id: None,
                 resource: None,
                 issuer: None,
+                audience_mode: None,
                 enterprise_url: None,
             },
         );
