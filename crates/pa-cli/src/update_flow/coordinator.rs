@@ -397,6 +397,24 @@ async fn finish_failure(
         let _ = writer.set_state(UpdateState::Failed);
         let _ = writer.set_message(Some(message));
     };
+    // The rollback runs INSIDE the stop window (TS keeps its
+    // `shutdownAdmission` held through every failure unwind, releasing it
+    // only in the `finally`): drive's handle dropped at its return, so the
+    // window is re-opened here - without it the fence wait and the
+    // launcher restore run open, and a third-party daemon can bind the
+    // socket out from under the rollback child. A re-acquire failure is
+    // another window's socket: the rollback cannot run under it.
+    let mut rollback_admission = match pa_daemon::supervisor_ownership::ShutdownAdmission::acquire()
+    {
+        Ok(admission) => admission,
+        Err(error) => {
+            fail_hard(format!(
+                "The rollback could not hold the stop window ({error}); the update failed ({reason}). Sessions persist on disk - prime-agent attach recovers them."
+            ))
+            .await;
+            return Ok(());
+        }
+    };
     let root = match super::activation_root() {
         Ok(root) => root,
         Err(error) => {
@@ -457,6 +475,20 @@ async fn finish_failure(
         .await;
         return Ok(());
     }
+    // Close the stop window right before the rollback child spawns,
+    // exactly like the happy path's release-to-spawn choreography: the
+    // child's own boot refuses while an admission is active, and the
+    // residual release-to-hello race is adjudicated by the spawn pin
+    // below (a competing daemon that wins the socket is refused, never
+    // adopted).
+    if let Err(error) = rollback_admission.assert_or_renew() {
+        fail_hard(format!(
+            "The rollback lost the stop window ({error}); the update failed ({reason}). Sessions persist on disk - prime-agent attach recovers them."
+        ))
+        .await;
+        return Ok(());
+    }
+    rollback_admission.release();
     let spawn_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
     // The rollback spawn is pinned exactly like the main flow's: the
     // adopted hello must come from the rollback child this coordinator
