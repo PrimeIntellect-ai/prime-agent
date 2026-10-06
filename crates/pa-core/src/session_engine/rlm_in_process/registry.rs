@@ -56,7 +56,10 @@ pub(crate) struct ChildActivity {
 /// through it), and the mutable run state.
 pub struct InProcessChildRecord {
     pub(crate) rlm_child_id: String,
-    pub(crate) session_name: String,
+    /// The child's display name: the admission name until `rlm.rename`
+    /// updates it (the durable session_info row is the source of truth;
+    /// this copy feeds the roster rows).
+    pub(crate) session_name: std::sync::RwLock<String>,
     /// The child session's durable id: its roster identity and the
     /// agent-message selector family members address it by.
     pub(crate) session_id: String,
@@ -160,7 +163,7 @@ impl InProcessChildRecord {
         let (task_cancel_tx, _) = watch::channel(false);
         Self {
             rlm_child_id,
-            session_name,
+            session_name: std::sync::RwLock::new(session_name),
             session_id,
             session_dir,
             label,
@@ -197,6 +200,25 @@ impl InProcessChildRecord {
                 listener: None,
             }),
         }
+    }
+
+    /// The child's display name (the admission name until `rlm.rename`).
+    ///
+    /// # Panics
+    ///
+    /// Panics when the session-name lock is poisoned.
+    pub(crate) fn session_name(&self) -> String {
+        self.session_name.read().expect("session name lock").clone()
+    }
+
+    /// Apply a rename (TS `rlm.rename`): the roster rows read the new
+    /// name from the next read.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the session-name lock is poisoned.
+    pub(crate) fn set_session_name(&self, name: String) {
+        *self.session_name.write().expect("session name lock") = name;
     }
 
     /// The mutable run state (the record's identity half is immutable).
@@ -432,7 +454,7 @@ impl InProcessChildRecord {
             rlm_child_id: self.rlm_child_id.clone(),
             active_session_id: Some(self.session_id.clone()),
             session_id: Some(self.session_id.clone()),
-            session_name: self.session_name.clone(),
+            session_name: self.session_name(),
             session_dir: self.session_dir.clone(),
             status: Self::roster_status(&state),
             activity: running.then(|| RlmSubagentActivity {
@@ -461,7 +483,7 @@ impl InProcessChildRecord {
         let state = self.state().await;
         RlmChildResult {
             rlm_child_id: self.rlm_child_id.clone(),
-            session_name: Some(self.session_name.clone()),
+            session_name: Some(self.session_name()),
             session_dir: Some(self.session_dir.clone()),
             status: Self::status(&state),
             settled: state.settled_status.is_some(),
@@ -502,7 +524,7 @@ impl DeletedChild {
     pub(crate) fn collect_result(&self) -> RlmChildResult {
         RlmChildResult {
             rlm_child_id: self.rlm_child_id.clone(),
-            session_name: Some(self.session_name.clone()),
+            session_name: Some(self.session_name()),
             session_dir: Some(self.session_dir.clone()),
             status: "cancelled",
             settled: true,
@@ -518,7 +540,7 @@ impl DeletedChild {
 /// Whether a live record answers to `target`: child id, session id, or
 /// name (the TS selector set).
 pub(crate) fn record_matches(record: &InProcessChildRecord, target: &str) -> bool {
-    record.rlm_child_id == target || record.session_id == target || record.session_name == target
+    record.rlm_child_id == target || record.session_id == target || record.session_name() == target
 }
 
 /// Collapse whitespace and cap at the roster limit (TS `compactRlmText`).
@@ -565,7 +587,7 @@ impl super::InProcessRlmHost {
         let deleted = DeletedChild {
             rlm_child_id: record.rlm_child_id.clone(),
             session_id: record.session_id.clone(),
-            session_name: record.session_name.clone(),
+            session_name: record.session_name(),
             session_dir: record.session_dir.clone(),
             started_at_ms: record.started_at_ms,
             answer_preview,
@@ -633,7 +655,7 @@ impl super::InProcessRlmHost {
     pub(crate) async fn assert_name_available(&self, name: &str, depth: u32) -> anyhow::Result<()> {
         let children = self.children().await;
         for record in &children {
-            if record.session_name == name {
+            if record.session_name() == name {
                 anyhow::bail!(spawn_name_unavailable(name, depth));
             }
         }

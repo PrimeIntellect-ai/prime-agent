@@ -683,6 +683,86 @@ pub(super) fn collect(
     })
 }
 
+/// `rlm.rename` (TS `renameAgentFamilySession`): the absent session id
+/// renames the parent session itself (a durable session_info row, TS
+/// `setSessionName`); a present one renames one direct child by child id
+/// or durable session id ONLY — a child NAME never selects a rename
+/// target — appending the child's own durable session_info row and the
+/// parent-side roster copy, with the TS sibling-uniqueness refusal.
+pub(super) fn rename(
+    host: InProcessRlmHost,
+    name: String,
+    session_id: Option<String>,
+) -> RlmHostFuture<String> {
+    Box::pin(async move {
+        match session_id {
+            None => {
+                let parent = host.parent_engine().ok_or_else(|| {
+                    anyhow::anyhow!("rlm.rename requires the bound parent session")
+                })?;
+                parent
+                    .session
+                    .shared_persistence()
+                    .lock()
+                    .await
+                    .append_session_info(&name)
+                    .map_err(|error| anyhow::anyhow!("persist session name: {error}"))?;
+                Ok(name)
+            }
+            Some(target) => {
+                let children = host.children().await;
+                let mut by_ids = None;
+                let mut by_name = false;
+                for record in &children {
+                    if record.rlm_child_id == target || record.session_id == target {
+                        by_ids = Some(Arc::clone(record));
+                        break;
+                    }
+                    if record.session_name() == target {
+                        by_name = true;
+                    }
+                }
+                let record = by_ids.ok_or_else(|| {
+                    if by_name {
+                        anyhow::anyhow!(
+                            "rlm.rename session_id \"{target}\" must be the full session id or a child handle, not a session name or id suffix"
+                        )
+                    } else {
+                        anyhow::anyhow!(
+                            "rlm.rename can only rename the current session or one of its direct children"
+                        )
+                    }
+                })?;
+                if record.closed_by_parent {
+                    anyhow::bail!(
+                        "rlm.rename can only rename the current session or one of its direct children"
+                    );
+                }
+                for other in &children {
+                    if other.session_name() == name && !Arc::ptr_eq(other, &record) {
+                        anyhow::bail!(super::registry::spawn_name_unavailable(
+                            &name,
+                            host.rlm_depth()
+                        ));
+                    }
+                }
+                record
+                    .engine
+                    .session
+                    .shared_persistence()
+                    .lock()
+                    .await
+                    .append_session_info(&name)
+                    .map_err(|error| {
+                        anyhow::anyhow!("persist RLM child session name: {error}")
+                    })?;
+                record.set_session_name(name.clone());
+                Ok(name)
+            }
+        }
+    })
+}
+
 /// `rlm.delete_subagent`: cancel a running child (abort + cancelled
 /// verdict + the cancelled terminal notice), tear a settled one down, and
 /// leave the tombstone behind so a just-deleted selector still collects

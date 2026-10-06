@@ -19,21 +19,21 @@ pub(super) fn terminal_row(
         NoticeKind::Done => Some(create_rlm_child_terminal_notice(
             &RlmChildTerminalNotice::CompletedWithoutReply {
                 child_id: record.rlm_child_id.clone(),
-                session_name: record.session_name.clone(),
+                session_name: record.session_name(),
                 last_assistant_text_preview: preview,
             },
             now_ms(),
         )),
         NoticeKind::Error => Some(create_rlm_child_failure_message(
             &record.rlm_child_id,
-            &record.session_name,
+            &record.session_name(),
             error.unwrap_or("Child run failed"),
             now_ms(),
         )),
         NoticeKind::Cancelled => Some(create_rlm_child_terminal_notice(
             &RlmChildTerminalNotice::Cancelled {
                 child_id: record.rlm_child_id.clone(),
-                session_name: record.session_name.clone(),
+                session_name: record.session_name(),
                 reason: Some("Deleted by parent orchestrator".to_string()),
             },
             now_ms(),

@@ -216,7 +216,7 @@ impl InProcessFamilyController {
                 relationship: AgentFamilyRelationship::Child,
                 id: record.rlm_child_id.clone(),
                 session_id: record.session_id.clone(),
-                session_name: Some(record.session_name.clone()),
+                session_name: Some(record.session_name()),
                 engine: Arc::clone(&record.engine),
                 runtime_kind: "subagent".to_string(),
                 record: Some(record),

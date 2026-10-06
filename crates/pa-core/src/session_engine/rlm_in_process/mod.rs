@@ -412,7 +412,7 @@ impl InProcessRlmHost {
             identities.push(registry::ChildIdentity {
                 rlm_child_id: record.rlm_child_id.clone(),
                 session_id: record.session_id.clone(),
-                session_name: record.session_name.clone(),
+                session_name: record.session_name(),
             });
         }
         identities
@@ -550,5 +550,13 @@ impl RlmSubagentHost for InProcessRlmHost {
         timeout_ms: u64,
     ) -> super::rlm_host::RlmHostFuture<Vec<super::rlm_host::RlmChildResult>> {
         run::collect(self.clone(), targets, timeout_ms)
+    }
+
+    fn rename(
+        &self,
+        name: String,
+        session_id: Option<String>,
+    ) -> super::rlm_host::RlmHostFuture<String> {
+        run::rename(self.clone(), name, session_id)
     }
 }

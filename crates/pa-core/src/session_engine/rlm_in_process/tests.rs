@@ -210,6 +210,7 @@ fn spawn_request(name: Option<&str>, model: Option<&str>) -> RlmSpawnRequest {
         model: model.map(str::to_string),
         thinking: None,
         cell_source_code: None,
+        spawned_by_request_id: None,
     }
 }
 
@@ -2436,6 +2437,93 @@ async fn delete_racing_completion_agrees_on_one_verdict_one_row() {
         }
         other => panic!("unexpected delete receipt status: {other}"),
     }
+}
+
+#[tokio::test]
+async fn rename_updates_child_durable_row_roster_and_self() {
+    let rig = TestRig::new().await;
+    rig.catalog
+        .provider("glm-5.3-turbo")
+        .push_stalled_turn("child partial");
+    let handle = rig
+        .host
+        .spawn(spawn_request(
+            Some("original"),
+            Some("test-provider/glm-5.3-turbo"),
+        ))
+        .await
+        .unwrap();
+    let child = rig.first_child().await;
+
+    // A child NAME never selects a rename target (TS
+    // `renameAgentFamilySession`): the id-only resolution refuses it with
+    // the name-not-selectable error.
+    let by_name = rig
+        .host
+        .rename("renamed".to_string(), Some("original".to_string()))
+        .await;
+    let by_name = by_name.expect_err("a session name never selects a rename");
+    assert!(
+        by_name.to_string().contains("not a session name"),
+        "the name-only target refuses: {by_name}"
+    );
+
+    // The rename by child id lands three places: the child's durable
+    // session_info row, the roster copy, and the applied answer.
+    let applied = rig
+        .host
+        .rename("renamed".to_string(), Some(handle.rlm_child_id.clone()))
+        .await
+        .expect("rename by child id");
+    assert_eq!(applied, "renamed");
+    let child_file = child_file(&child);
+    assert!(
+        raw_lines(&child_file)
+            .iter()
+            .any(|line| line["type"] == "session_info" && line["name"] == "renamed"),
+        "the child's durable file carries the renamed session_info row"
+    );
+    let roster = rig.host.list_subagents().await.unwrap();
+    assert_eq!(roster[0].session_name, "renamed");
+
+    // The TS sibling-uniqueness refusal: no second live child of this
+    // parent may take a held name.
+    rig.catalog
+        .provider("glm-5.3-turbo")
+        .push_stalled_turn("second partial");
+    let second = rig
+        .host
+        .spawn(spawn_request(
+            Some("second"),
+            Some("test-provider/glm-5.3-turbo"),
+        ))
+        .await
+        .unwrap();
+    let collision = rig
+        .host
+        .rename("renamed".to_string(), Some(second.rlm_child_id.clone()))
+        .await;
+    let collision = collision.expect_err("a held name refuses");
+    assert!(
+        collision.to_string().contains("unavailable"),
+        "the sibling collision refuses: {collision}"
+    );
+
+    // The absent session id renames the parent session itself: one
+    // durable session_info row on the parent's own file.
+    let self_renamed = rig
+        .host
+        .rename("parent-name".to_string(), None)
+        .await
+        .expect("self rename");
+    assert_eq!(self_renamed, "parent-name");
+    let parent_file = session_file_of(&rig.engine).await;
+    assert!(
+        raw_lines(&parent_file)
+            .iter()
+            .any(|line| line["type"] == "session_info" && line["name"] == "parent-name"),
+        "the parent's durable file carries its own renamed session_info row"
+    );
 }
 
 #[tokio::test]
