@@ -585,13 +585,29 @@ impl LockDir {
             let held = unsafe { libc::flock(fd.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
             if held != 0 {
                 let error = io::Error::last_os_error();
-                return Err(match error.kind() {
-                    io::ErrorKind::WouldBlock => io::Error::new(
+                return match error.kind() {
+                    io::ErrorKind::WouldBlock => Err(io::Error::new(
                         io::ErrorKind::WouldBlock,
                         format!("Lock file is already being held: {}", path.display()),
-                    ),
-                    _ => error,
-                });
+                    )),
+                    // The NFS emulation signature: exclusive flock on
+                    // NFS is a client-side fcntl lock, and a fcntl write
+                    // lock needs a WRITABLE descriptor - a directory can
+                    // never be opened writable (EISDIR everywhere), so an
+                    // NFS-mounted registry cannot carry the witness at
+                    // all. Degrade to the witness-less protocol
+                    // (proper-lockfile's own: it never flocks, and its
+                    // mtime-only guard works on NFS) instead of failing
+                    // the whole acquisition.
+                    io::ErrorKind::PermissionDenied => {
+                        tracing::warn!(
+                            "the directory lock cannot take an exclusive flock at {} (an NFS-style filesystem: the witness degrades to the mtime-only protocol)",
+                            path.display()
+                        );
+                        Ok(None)
+                    }
+                    _ => Err(error),
+                };
             }
             Ok(Some(fd.into()))
         }
@@ -985,7 +1001,10 @@ impl LockDir {
     /// occupant's retry. The fd is the claim's lifetime: dropped when
     /// the reclaim returns.
     #[cfg(unix)]
-    fn claim_occupant(path: &Path, stale_after: Duration) -> io::Result<std::os::fd::OwnedFd> {
+    fn claim_occupant(
+        path: &Path,
+        stale_after: Duration,
+    ) -> io::Result<Option<std::os::fd::OwnedFd>> {
         use std::os::fd::AsRawFd;
         use std::os::unix::fs::MetadataExt;
         loop {
@@ -1003,13 +1022,26 @@ impl LockDir {
             let held = unsafe { libc::flock(dir.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
             if held != 0 {
                 let error = io::Error::last_os_error();
-                return Err(match error.kind() {
-                    io::ErrorKind::WouldBlock => io::Error::new(
+                return match error.kind() {
+                    io::ErrorKind::WouldBlock => Err(io::Error::new(
                         io::ErrorKind::WouldBlock,
                         format!("Lock file is already being held: {}", path.display()),
-                    ),
-                    _ => error,
-                });
+                    )),
+                    // The NFS emulation signature (an unwitnessable
+                    // filesystem - see [`LockDir::witness_fd`]): no claim
+                    // is possible and none is needed (nothing on this
+                    // filesystem carries a witness); the takeover runs
+                    // the flock-free path below on the same fd's
+                    // staleness re-judge.
+                    io::ErrorKind::PermissionDenied => {
+                        tracing::warn!(
+                            "the directory lock cannot take an exclusive flock at {} (an NFS-style filesystem: the takeover claim degrades to the mtime-only protocol)",
+                            path.display()
+                        );
+                        Ok(None)
+                    }
+                    _ => Err(error),
+                };
             }
             let claimed = fs::metadata(path).map(|metadata| metadata.ino());
             let fd_metadata = dir.metadata();
@@ -1029,7 +1061,7 @@ impl LockDir {
                             format!("Lock file is already being held: {}", path.display()),
                         ));
                     }
-                    return Ok(dir.into());
+                    return Ok(Some(dir.into()));
                 }
                 // The occupant changed under the claim (or vanished, or
                 // the stat failed): the fd's flock released with this
