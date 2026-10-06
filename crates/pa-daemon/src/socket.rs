@@ -304,9 +304,10 @@ impl Drop for SocketLease {
         // The pinned fd prevents inode reuse while this lease is alive.
         // A successor that reclaimed a stale lock must never be released
         // by us. Linux runs the claim-verify-release choreography;
-        // elsewhere the release leaves the lock directory to the stale
-        // threshold rather than risk removing a claimed successor.
-        #[cfg(target_os = "linux")]
+        // elsewhere the identity check below removes only this lease's
+        // own directory (proper-lockfile's residual rename window is the
+        // documented floor there - no no-replace rename exists to close
+        // it).
         if !self.compromised() {
             self.release_lock_dir();
         }
@@ -314,17 +315,29 @@ impl Drop for SocketLease {
     }
 }
 
-/// The lease release: Linux is the only platform with a no-replace
-/// rename, so the claim-verify-release choreography is Linux-only
-/// (`release_lock_dir_identity` below). Elsewhere the release leaves
-/// the lock directory in place: removing a claimed successor without a
-/// no-replace restore would strand its holder, and the stale threshold
-/// reclaims the abandoned directory at the next startup instead.
+/// The lease release: Linux runs the airtight claim-verify-release
+/// choreography (`release_lock_dir_identity` below). Other unix
+/// platforms have no no-replace rename, so the release removes the lock
+/// directory only after the identity check confirms the path still pins
+/// this lease's own inode - proper-lockfile's residual check-then-act
+/// rename window is the documented floor there, and a displaced
+/// successor's directory is never touched.
 #[cfg(unix)]
 impl SocketLease {
     #[cfg(target_os = "linux")]
     fn release_lock_dir(&self) {
         release_lock_dir_identity(&self.lock_path, &self.identity);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn release_lock_dir(&self) {
+        // The identity check is the whole guard: only a directory whose
+        // path still pins this lease's inode is removed, so a successor
+        // that displaced it keeps theirs. The residual window between
+        // the check and the remove is the platform floor.
+        if lock_identity_matches(&self.lock_path, &self.identity) {
+            let _ = std::fs::remove_dir(&self.lock_path);
+        }
     }
 }
 

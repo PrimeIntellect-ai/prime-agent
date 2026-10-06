@@ -47,21 +47,6 @@ fn path_pins(path: &Path, dir: &fs::File) -> bool {
     }
 }
 
-/// A private sibling name scoped to one lock path (the candidate
-/// directory on linux, the lease release's claim in the daemon): unique
-/// per process and nanosecond, in the lock's own directory so a rename
-/// across the two names stays same-filesystem. Unix only.
-#[must_use]
-#[cfg(unix)]
-pub fn private_sibling_for(path: &Path, tag: &str) -> PathBuf {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |age| age.as_nanos());
-    let mut name = path.as_os_str().to_os_string();
-    name.push(format!(".{tag}-{}-{nanos}", std::process::id()));
-    PathBuf::from(name)
-}
-
 /// The dev+ino identity at `path`, or `None` when it cannot be stat'ed.
 #[cfg(unix)]
 fn identity_at(path: &Path) -> Option<(u64, u64)> {

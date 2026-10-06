@@ -573,7 +573,25 @@ impl Supervisor {
         // lease-monitor select's compromise arm mirrors the boot fence.
         #[cfg(unix)]
         let serving = tokio::select! {
-            result = accept_loop::serve(&self, listener) => result,
+            result = accept_loop::serve(&self, listener) => {
+                // The serve return races the compromise monitor: a return
+                // landing while the lease is already lost must take the
+                // same abort-and-shutdown path the compromise arm runs,
+                // so the boot's ownership passes never keep running
+                // against the successor that took the socket over.
+                if socket_lease.assert_held().is_err() {
+                    for task in &boot_tasks {
+                        task.abort();
+                    }
+                    self.shutting_down.store(true, Ordering::SeqCst);
+                    self.accept_exit.store(true, Ordering::SeqCst);
+                    self.shutdown_notify.notify_waiters();
+                    self.log.append("daemon socket lease compromised; relinquishing supervisor ownership");
+                    Err(anyhow!("daemon socket lease compromised"))
+                } else {
+                    result
+                }
+            }
             () = socket_lease.wait_compromised() => {
                 // The boot's ownership passes die with the lease: none may
                 // adopt or restore against a successor that holds the
