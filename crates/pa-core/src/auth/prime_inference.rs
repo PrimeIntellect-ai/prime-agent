@@ -1,10 +1,6 @@
-//! Prime Inference login, API-key surface: the auth endpoints (the whoami
-//! access check, the team list), and the production prime-cli config
-//! reuse. Port of the API-key paths of prime-inference-auth.ts; the login
-//! orchestration (the prime-cli reuse, the browser challenge over the
-//! shared `auth_challenge` core, the access checks) is
-//! `prime_inference_login.rs`'s, and the interactive surface (the URL
-//! raced against the paste prompt) lives in the composition root.
+//! Prime Inference login, API-key surface: the auth endpoints and the production prime-cli config
+//! reuse. The login orchestration is `prime_inference_login.rs`'s; the interactive surface lives in
+//! the composition root.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -13,22 +9,17 @@ use std::time::Duration;
 
 use super::types::PrimeTeamCredential;
 
-/// TS `DEFAULT_PRIME_API_BASE_URL`: the Prime API the login talks to.
 pub const DEFAULT_PRIME_API_BASE_URL: &str = "https://api.primeintellect.ai";
-/// TS `DEFAULT_PRIME_FRONTEND_URL`: the browser challenge's URL host (the
-/// production guard consults it and the challenge URL rides it; the flow
-/// itself never opens a browser — the composition root does).
+/// The browser challenge's URL host; the flow itself never opens a
+/// browser — the composition root does.
 pub const DEFAULT_PRIME_FRONTEND_URL: &str = "https://app.primeintellect.ai";
-/// TS `DEFAULT_PRIME_INFERENCE_URL` (module-local there too): the value
-/// the prime-cli config's `inference_url` must carry to count as
-/// production.
+/// The value the prime-cli config's `inference_url` must carry to count
+/// as production.
 const DEFAULT_PRIME_INFERENCE_URL: &str = "https://api.pinference.ai/api/v1";
-/// TS `DEFAULT_REQUEST_TIMEOUT_MS`.
 pub const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 30_000;
 
-/// The login's challenge config (TS `PrimeChallengeConfig`): the API the
-/// access check and team list run against, and the frontend URL the
-/// production guard compares.
+/// The API the access check and team list run against, and the frontend
+/// URL the production guard compares.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrimeInferenceAuthConfig {
     pub base_url: String,
@@ -36,8 +27,8 @@ pub struct PrimeInferenceAuthConfig {
 }
 
 impl PrimeInferenceAuthConfig {
-    /// The production guard (TS `loginPrimeInference`'s candidate rule):
-    /// the prime-cli config is only reused when both URLs stay stock.
+    /// The production guard: the prime-cli config is only reused when
+    /// both URLs stay stock.
     #[must_use]
     pub fn is_production(&self) -> bool {
         self.base_url == DEFAULT_PRIME_API_BASE_URL
@@ -45,9 +36,6 @@ impl PrimeInferenceAuthConfig {
     }
 }
 
-/// TS `resolvePrimeInferenceAuthConfig`: the env overrides over the
-/// production URLs (`PRIME_AGENT_INFERENCE_API_BASE_URL`,
-/// `PRIME_AGENT_INFERENCE_FRONTEND_URL`).
 #[must_use]
 pub fn resolve_prime_inference_auth_config() -> PrimeInferenceAuthConfig {
     PrimeInferenceAuthConfig {
@@ -65,8 +53,8 @@ pub fn resolve_prime_inference_auth_config() -> PrimeInferenceAuthConfig {
     }
 }
 
-/// TS `normalizeBaseUrl`: trim, strip trailing slashes and the `/api/v1`
-/// suffix, defaulting to the production API.
+/// Trim, strip trailing slashes and the `/api/v1` suffix, defaulting to
+/// the production API.
 pub(super) fn normalize_base_url(value: Option<&str>) -> String {
     let fallback = match value.map(str::trim).filter(|value| !value.is_empty()) {
         Some(value) => value,
@@ -79,8 +67,7 @@ pub(super) fn normalize_base_url(value: Option<&str>) -> String {
         .to_string()
 }
 
-/// TS `normalizeUrl`: trim, strip trailing slashes, defaulting to the
-/// fallback when empty.
+/// Trim, strip trailing slashes, defaulting to the fallback when empty.
 fn normalize_url(value: Option<&str>, fallback: &str) -> String {
     match value.map(str::trim).filter(|value| !value.is_empty()) {
         Some(value) => value.trim_end_matches('/').to_string(),
@@ -88,16 +75,14 @@ fn normalize_url(value: Option<&str>, fallback: &str) -> String {
     }
 }
 
-/// One GET's answer over the Prime API: the HTTP status and the body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrimeHttpResponse {
     pub status: u16,
     pub body: String,
 }
 
-/// The login's HTTP transport (TS's injectable `fetchFn`; the production
-/// default is reqwest). The timeout surfaces as
-/// `Prime Inference request timed out`.
+/// The login's injectable HTTP transport (the production default is
+/// reqwest); the timeout surfaces as `Prime Inference request timed out`.
 pub trait PrimeHttp: Send + Sync {
     fn get(
         &self,
@@ -106,9 +91,8 @@ pub trait PrimeHttp: Send + Sync {
         timeout_ms: u64,
     ) -> Pin<Box<dyn Future<Output = Result<PrimeHttpResponse, String>> + Send>>;
 
-    /// One POST of a JSON body (TS the browser challenge's generate and
-    /// status requests over `fetchPrimeAuth`): the bearer carries the
-    /// challenge's status token or is absent for the generate request.
+    /// The bearer carries the challenge's status token, or is absent for
+    /// the generate request.
     fn post_json<'a>(
         &'a self,
         url: &'a str,
@@ -118,8 +102,7 @@ pub trait PrimeHttp: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<PrimeHttpResponse, String>> + Send + 'a>>;
 }
 
-/// The production transport (reqwest over rustls, the catalog fetch's
-/// shape).
+/// The production transport (reqwest, the catalog fetch's shape).
 pub struct ReqwestPrimeHttp;
 
 impl PrimeHttp for ReqwestPrimeHttp {
@@ -189,15 +172,15 @@ impl PrimeHttp for ReqwestPrimeHttp {
     }
 }
 
-/// The prime-cli credential reuse candidate (TS `PrimeCliConfig` +
-/// `importedPrimeTeam`): `team: None` is the personal account.
+/// The prime-cli credential reuse candidate: `team: None` is the
+/// personal account.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PrimeCliConfig {
     pub api_key: Option<String>,
     pub team: Option<PrimeTeamCredential>,
 }
 
-/// TS `getPrimeCliConfigPath`'s default: `~/.prime/config.json`.
+/// The default prime-cli config path: `~/.prime/config.json`.
 #[must_use]
 pub fn default_prime_cli_config_path() -> PathBuf {
     pa_types::platform::home_dir()
@@ -206,7 +189,7 @@ pub fn default_prime_cli_config_path() -> PathBuf {
         .join("config.json")
 }
 
-/// A trimmed, non-empty string field (TS `stringField`).
+/// A trimmed, non-empty string field.
 fn string_field(data: &serde_json::Value, key: &str) -> Option<String> {
     data.as_object()?
         .get(key)?
@@ -216,8 +199,8 @@ fn string_field(data: &serde_json::Value, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// TS `readResponseMessage`: the error body's `error.message`, `detail`,
-/// or `message`, the raw text, or the status phrase.
+/// The error body's `error.message`, `detail`, or `message`, the raw
+/// text, or the status phrase.
 pub(super) fn read_response_message(status: u16, body: &str) -> String {
     if body.trim().is_empty() {
         return reqwest::StatusCode::from_u16(status)
@@ -242,9 +225,8 @@ pub(super) fn read_response_message(status: u16, body: &str) -> String {
     body.trim().to_string()
 }
 
-/// One denial of Prime Inference access (TS `PrimeInferenceAccessResult`'s
-/// `ok: false` arm): the HTTP status when the API answered, and the
-/// response's message.
+/// One denial of access: the HTTP status when the API answered, and
+/// the response's message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrimeAccessFailure {
     pub status: Option<u16>,
@@ -252,8 +234,8 @@ pub struct PrimeAccessFailure {
 }
 
 impl PrimeAccessFailure {
-    /// TS `formatAccessFailure`: `HTTP {status}: {message}` (the status
-    /// prefix drops when the API never answered).
+    /// `HTTP {status}: {message}`; the status prefix drops when the API
+    /// never answered.
     #[must_use]
     pub fn format(&self) -> String {
         match self.status {
@@ -263,17 +245,15 @@ impl PrimeAccessFailure {
     }
 }
 
-/// The access check's error (TS: the `ok: false` result vs the thrown
-/// transport/parse errors).
+/// The access check's error: denial vs failure to run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PrimeAccessError {
-    /// The API denied the key (TS `{ ok: false, status?, message }`).
+    /// The API denied the key.
     Denied(PrimeAccessFailure),
-    /// The check could not run (TS's thrown errors).
+    /// The check could not run.
     Failed(String),
 }
 
-/// TS `parsePrimeTeam`: one team of the teams response.
 fn parse_prime_team(value: &serde_json::Value) -> Option<PrimeTeamCredential> {
     let team_id = string_field(value, "teamId")?;
     Some(PrimeTeamCredential {
@@ -285,8 +265,8 @@ fn parse_prime_team(value: &serde_json::Value) -> Option<PrimeTeamCredential> {
     })
 }
 
-/// TS `checkPrimeScopeAccess`: the stored or pasted key must carry the
-/// scope's write permission (the error text names the scope label).
+/// The stored or pasted key must carry the scope's write permission
+/// (the error text names the scope label).
 pub(super) async fn check_prime_scope_access(
     http: &dyn PrimeHttp,
     base_url: &str,
@@ -342,15 +322,11 @@ pub(super) async fn check_prime_scope_access(
     Ok(())
 }
 
-/// TS `checkPrimeInferenceAccess` (scope `inference`): the stored or pasted
-/// key must carry the inference write permission.
+/// The `inference`-scope access check.
 ///
 /// # Errors
 ///
-/// Returns [`PrimeAccessError::Failed`] when the `whoami` request fails or
-/// its response body is invalid, and [`PrimeAccessError::Denied`] when the
-/// request is rejected, the response is missing user or scope data, the
-/// token lacks the inference scope, or the scope lacks the write permission.
+/// Returns [`PrimeAccessError::Failed`] when the `whoami` request fails or its body is invalid.
 pub async fn check_prime_inference_access(
     http: &dyn PrimeHttp,
     base_url: &str,
@@ -368,13 +344,11 @@ pub async fn check_prime_inference_access(
     .await
 }
 
-/// TS `fetchPrimeTeams`: the key's teams, paginated at 100 a page.
+/// The key's teams, paginated at 100 a page.
 ///
 /// # Errors
 ///
-/// Returns a human-readable error string when a team-list request fails,
-/// the API responds with a non-2xx status, or the response body cannot be
-/// parsed as a team list.
+/// Returns a human-readable error when a team-list request fails.
 pub async fn fetch_prime_teams(
     http: &dyn PrimeHttp,
     base_url: &str,
@@ -419,9 +393,8 @@ pub async fn fetch_prime_teams(
     }
 }
 
-/// TS `loadProductionPrimeCliConfig`: the prime CLI's saved credential,
-/// but only when its URL overrides (if any) stay production. A missing or
-/// unparseable file is no candidate, not an error.
+/// The prime CLI's saved credential, but only when its URL overrides (if any)
+/// stay production. A missing or unparseable file is no candidate, not an error.
 pub fn read_prime_cli_config(path: &Path) -> Option<PrimeCliConfig> {
     let content = std::fs::read_to_string(path).ok()?;
     let parsed: serde_json::Value = serde_json::from_str(&content).ok()?;
@@ -572,8 +545,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_access_check_reports_each_denial_with_the_ts_message() {
-        // A denied HTTP answer carries the status prefix and the body's
-        // error message.
         let http = scripted(vec![(
             "https://api.example/api/v1/user/whoami",
             403,
@@ -586,7 +557,6 @@ mod tests {
                 message: "not allowed".to_string(),
             }))
         );
-        // A user without the scope object denies with the TS wording.
         let http = scripted(vec![(
             "https://api.example/api/v1/user/whoami",
             200,
@@ -599,7 +569,6 @@ mod tests {
                 message: "Prime token is missing permission scope data".to_string(),
             }))
         );
-        // A read-only token denies with the TS wording.
         let http = scripted(vec![(
             "https://api.example/api/v1/user/whoami",
             200,
@@ -612,7 +581,6 @@ mod tests {
                 message: "Prime token does not have inference write permission".to_string(),
             }))
         );
-        // A non-object body fails the parse with the TS wording.
         let http = scripted(vec![(
             "https://api.example/api/v1/user/whoami",
             200,
@@ -628,7 +596,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_team_list_paginates_the_ts_way() {
-        // Two pages: a 100-team batch then the tail.
         let page = (0..100)
             .map(|index| {
                 format!(
@@ -743,7 +710,6 @@ mod tests {
     fn the_prime_cli_config_reuse_only_accepts_production() {
         let dir = tempfile::tempdir().expect("temp dir");
         let config = dir.path().join("config.json");
-        // The production shape carries the key and the team.
         std::fs::write(
             &config,
             serde_json::json!({
@@ -768,14 +734,12 @@ mod tests {
                 }),
             })
         );
-        // A non-production URL override disqualifies the whole config.
         std::fs::write(
             &config,
             serde_json::json!({"api_key": "sk-cli", "base_url": "https://api.example"}).to_string(),
         )
         .expect("write config");
         assert_eq!(read_prime_cli_config(&config), None);
-        // Matching URL overrides stay eligible.
         std::fs::write(
             &config,
             serde_json::json!({
@@ -793,7 +757,6 @@ mod tests {
                 team: None,
             })
         );
-        // A missing file is no candidate.
         assert_eq!(read_prime_cli_config(&dir.path().join("missing")), None);
     }
 }

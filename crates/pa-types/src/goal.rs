@@ -1,9 +1,6 @@
-//! Thread-goal wire state. The `goal_update` session event and the attach
-//! snapshot's `state.goal` field carry this object to every attached
-//! surface (TUI, ACP, CLI), so the shared vocabulary lives in pa-types;
-//! the goal engine (validation, accounting, continuation prompts) lives in
-//! pa-core. Field shape is the TS `GoalState` (camelCase, optional keys
-//! omitted).
+//! Thread-goal wire state, carried to every attached surface by the `goal_update` session event and
+//! the attach snapshot's `state.goal` field; the goal engine lives in pa-core. Field shape is the
+//! TS `GoalState` (camelCase, optional keys omitted).
 
 use serde::{Deserialize, Serialize};
 
@@ -21,7 +18,7 @@ pub enum GoalStatus {
 
 impl GoalStatus {
     /// The wire/persisted slug (`"active"`, `"budget_limited"`, ...), the
-    /// same string the TS `GoalStatus` union uses in status lines.
+    /// TS `GoalStatus` union's string.
     #[must_use]
     pub fn slug(self) -> &'static str {
         match self {
@@ -53,17 +50,13 @@ pub struct GoalState {
     pub continuations_used: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<u64>,
-    /// The consecutive-no-output-turn streak at the continuation mint
-    /// (the hot-loop killer's cap counter, the 402 diagnosis's (b)):
-    /// durable so a worker restart cannot reset the streak and un-cap a
-    /// degenerate loop. A fresh goal starts at 0; a turn that produced
-    /// output resets it.
+    /// The consecutive-no-output-turn streak at the continuation mint (the hot-loop killer's cap
+    /// counter): durable so a worker restart cannot reset the streak and un-cap a degenerate loop;
+    /// a turn that produced output resets it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub no_progress_streak: Option<u32>,
-    /// The last turn the streak counted (its Unix-ms timestamp): the
-    /// re-consult dedup across a worker restart (the in-process key is
-    /// live-only, so the durable row carries it — the same corpse never
-    /// strikes twice, however often the session rebuilds).
+    /// The last turn the streak counted (Unix-ms): the re-consult dedup across a worker restart
+    /// (the in-process key is live-only, so the durable row carries it).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub no_progress_turn_ms: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -1,4 +1,5 @@
-//! The compaction tests (threshold/requested/manual compaction, telemetry, the durable outcome rows, the /compact command).
+//! The compaction tests (threshold/requested/manual compaction, telemetry, the
+//! durable outcome rows, the /compact command).
 use super::*;
 
 /// The faux model's per-request output budget (maxTokens `16_384` under the
@@ -6,24 +7,14 @@ use super::*;
 /// alongside the headroom (the combined input+output ceiling).
 const FAUX_REQUEST_BUDGET: u64 = 16_384;
 
-/// The automatic threshold compaction at the turn boundary (TS
-/// `_checkCompaction` threshold arm): a settled turn whose usage
-/// crosses the reserve headroom emits the `compaction_start` /
-/// `compaction_end` pair with the `threshold` reason, runs the
-/// summarizer, and rewrites the loop context.
-///
-/// The faux provider estimates usage from the serialized context (the
-/// f14 battery's mock-provider shape is not part of the faux script),
-/// so the probe engine first measures one baseline turn's usage and the
-/// threshold engine places the headroom halfway between that baseline
-/// and the baseline plus the big prompt (~12k tokens of `x`s) —
-/// environment-independent margins on both sides.
+/// The automatic threshold compaction at the turn boundary. The faux
+/// provider estimates usage from the serialized context, so the headroom
+/// sits halfway between a baseline turn and the baseline plus the big prompt.
 #[test]
 fn threshold_crossing_auto_compacts_with_the_event_pair() {
     let _faux = FAUX_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    // Probe: the baseline turn's total usage (system prompt included).
     let (probe, _probe_dir) = faux_engine_with_settings(
         &serde_json::json!({ "responses": [{"text": "seed reply"}] }),
         1,
@@ -63,7 +54,6 @@ fn threshold_crossing_auto_compacts_with_the_event_pair() {
     );
 
     let mut events: Vec<EngineEvent> = Vec::new();
-    // The seed turn stays below the headroom: no compaction events.
     admit(&engine, "seed turn".to_string(), &mut events);
     assert_eq!(
         assistant_texts(&events),
@@ -77,9 +67,6 @@ fn threshold_crossing_auto_compacts_with_the_event_pair() {
         )),
         "no compaction below the headroom"
     );
-    // The threshold-crossing turn: the settled usage fires the
-    // `compaction_start`/`compaction_end` pair with the `threshold`
-    // reason, after the assistant message (TS agent_end order).
     admit(&engine, big_prompt, &mut events);
     let assistant_index = events
         .iter()
@@ -102,9 +89,6 @@ fn threshold_crossing_auto_compacts_with_the_event_pair() {
         event,
         &serde_json::json!({ "type": "compaction_start", "reason": "threshold" })
     );
-    // The durable end event carries the entry and the client-facing
-    // result with the summarizer's text (the summarizer consumed the
-    // third scripted response).
     let compaction_index = events
         .iter()
         .position(|event| matches!(event, EngineEvent::Compaction { .. }))
@@ -115,16 +99,13 @@ fn threshold_crossing_auto_compacts_with_the_event_pair() {
     assert!(compaction_index > start_index);
     assert_eq!(event["reason"], "threshold");
     assert_eq!(event["result"]["summary"], "the summary");
-    // The threshold event's result carries the TS dataKeys too: the
-    // file-op `details` verbatim from the durable entry.
     assert_eq!(
         event["result"]["details"],
         serde_json::json!({ "readFiles": [], "modifiedFiles": [] })
     );
     assert!(entry["firstKeptEntryId"].is_string());
-    // Exactly one pair for the admission: the pre-turn check on the
-    // first iteration sees no built session (nothing to compact), and
-    // the post-turn check fires once — no double compaction.
+    // Exactly one pair: the pre-turn check sees no built session, the
+    // post-turn check fires once.
     let start_count = events
         .iter()
         .filter(|event| matches!(event, EngineEvent::CompactionStart { .. }))
@@ -137,18 +118,9 @@ fn threshold_crossing_auto_compacts_with_the_event_pair() {
 }
 
 /// The compaction summarizer stays on the session's provider when a
-/// fresh startup-chain resolution drifts mid-session (R8): the live
-/// report was a prime-inference session whose threshold
-/// auto-compaction re-resolved to `amazon-bedrock` and failed with
-/// "No AWS credentials available for Bedrock" while the session's
-/// turns kept streaming through the target's provider. The session
-/// builds on the models.json faux model; the settings default then
-/// changes under it (the drift a live catalog or settings edit
-/// produces), so [`AgentSessionEngine::resolve_model`] now lands on
-/// a dead provider — but the threshold arm follows the session's
-/// provider target ([`AgentSessionEngine::session_model`]): the
-/// summarizer request still hits the faux provider and the
-/// compaction succeeds instead of failing on the drift model.
+/// fresh resolution drifts mid-session (R8). The settings default changes
+/// under the built session, so `resolve_model` lands on a dead provider —
+/// but the threshold arm follows `session_model`.
 #[test]
 fn threshold_compaction_stays_on_the_session_provider_after_a_resolution_drift() {
     let _faux = FAUX_TEST_LOCK
@@ -157,8 +129,6 @@ fn threshold_compaction_stays_on_the_session_provider_after_a_resolution_drift()
     let dir = tempfile::TempDir::new().unwrap();
     let agent_dir = dir.path().join("agent");
     std::fs::create_dir_all(&agent_dir).unwrap();
-    // The session's provider: the process-global faux provider
-    // (api "faux"), serving the turn replies and the summarizer.
     let script = json!({
         "responses": [
             {"text": "seed reply"},
@@ -168,10 +138,8 @@ fn threshold_compaction_stays_on_the_session_provider_after_a_resolution_drift()
     });
     let parsed = pa_ai::faux::script::parse_faux_script(&script).expect("faux script parses");
     let registration = pa_ai::faux::script::register_faux_provider_from_script(&parsed);
-    // The registry catalog: the faux model the session builds on,
-    // and the drift model — an openai-completions endpoint nothing
-    // serves (the live R8 shape: Bedrock with no credentials), so a
-    // request against it fails.
+    // The registry catalog: the faux model, and the drift model — an
+    // openai-completions endpoint nothing serves, so a request fails.
     std::fs::write(
         agent_dir.join("models.json"),
         json!({
@@ -237,9 +205,6 @@ fn threshold_compaction_stays_on_the_session_provider_after_a_resolution_drift()
         })
         .unwrap()
     };
-    // Probe: the baseline turn's total usage (the faux provider
-    // estimates usage from the serialized context, system prompt
-    // included) with the threshold far away.
     write_settings("faux", "faux-1", 1);
     let probe = new_engine();
     let mut probe_events: Vec<EngineEvent> = Vec::new();
@@ -254,10 +219,8 @@ fn threshold_compaction_stays_on_the_session_provider_after_a_resolution_drift()
     assert!(baseline < 100_000, "implausible baseline: {baseline}");
     drop(probe);
 
-    // The threshold engine: the combined input+output ceiling sits
-    // between the seed turn's usage and the crossing turn's (the
-    // same probe margins the sibling threshold tests use; the
-    // 16_384 per-request output budget is part of the ceiling).
+    // The combined input+output ceiling sits between the two turns'
+    // usage (the 16_384 output budget is part of it).
     let big_prompt = format!("seed turn {} crossing", "x".repeat(48_000));
     let big_tokens = (48_000 + "seed turn  crossing".len() as u64).div_ceil(4);
     let headroom = baseline + big_tokens / 2;
@@ -278,10 +241,8 @@ fn threshold_compaction_stays_on_the_session_provider_after_a_resolution_drift()
         "no compaction below the threshold"
     );
 
-    // The mid-session resolution drift (the live R8 shape): the
-    // settings default changes under the built session, so a fresh
-    // startup-chain resolution lands on the dead provider while the
-    // session's live model stays the provider target.
+    // The mid-session resolution drift: the settings default changes
+    // under the built session; the live model stays.
     write_settings("drift", "drift-1", reserve);
     let drifted = engine.resolve_model().expect("the drift model resolves");
     assert_eq!(
@@ -295,9 +256,7 @@ fn threshold_compaction_stays_on_the_session_provider_after_a_resolution_drift()
     );
 
     // The threshold arm compacts on the session's provider: the
-    // crossing turn's boundary runs the summarizer through the faux
-    // provider (its queued reply is the compaction result), never
-    // the dead drift model.
+    // summarizer runs through the faux provider, never the drift model.
     let calls_before_crossing = registration.call_count();
     let mut crossing_events: Vec<EngineEvent> = Vec::new();
     admit(&engine, big_prompt, &mut crossing_events);
@@ -322,8 +281,6 @@ fn threshold_compaction_stays_on_the_session_provider_after_a_resolution_drift()
         })
         .expect("the compaction end carries the summarizer's text");
     assert_eq!(summary, "the drifted summary");
-    // The crossing turn and the summarizer both served through the
-    // session's provider — the drift model was never called.
     assert_eq!(
         registration.call_count(),
         calls_before_crossing + 2,
@@ -334,10 +291,7 @@ fn threshold_compaction_stays_on_the_session_provider_after_a_resolution_drift()
         vec!["crossing reply".to_string()]
     );
     // The summarizer followed the live target's key too (the R8
-    // seam's key arm): every request against the registration carried
-    // the models.json faux key — the engine's config key is `None`,
-    // so a summarizer reading the stale config key would surface as
-    // a `None` entry here.
+    // seam's key arm): every request carried the faux key.
     let keys = registration.received_api_keys();
     assert_eq!(keys.len() as u64, registration.call_count());
     assert!(
@@ -350,12 +304,6 @@ fn threshold_compaction_stays_on_the_session_provider_after_a_resolution_drift()
     ));
 }
 
-/// Retirement clears the provider target with the session (the TS
-/// replacement teardown): a demand seam before the replacement build
-/// (an immediate `/compact` after the teardown) resolves the CURRENT
-/// model through the pre-build `resolve_model` fallback, never the
-/// retired session's target — a cwd/settings model change lands with
-/// the replacement, not the stale target.
 #[test]
 fn retire_clears_the_provider_target_for_the_replacement_build() {
     let _faux = FAUX_TEST_LOCK
@@ -421,7 +369,6 @@ fn retire_clears_the_provider_target_for_the_replacement_build() {
     };
     write_settings("faux", "faux-1");
     let engine = new_engine();
-    // The turn builds the session and pins the provider target.
     let mut events: Vec<EngineEvent> = Vec::new();
     admit(&engine, "seed turn".to_string(), &mut events);
     let model = engine.session_model().expect("the session model resolves");
@@ -430,9 +377,6 @@ fn retire_clears_the_provider_target_for_the_replacement_build() {
         ("faux", "faux-1")
     );
 
-    // The replacement teardown retires the session while the settings
-    // default moves under it (the cwd/settings change the
-    // replacement carries).
     write_settings("drift", "drift-1");
     engine
         .runtime
@@ -441,9 +385,6 @@ fn retire_clears_the_provider_target_for_the_replacement_build() {
         .runtime
         .block_on(async { engine.session.lock().await.is_none() }));
 
-    // A demand seam before the replacement build (the prewarm has not
-    // rebuilt yet) resolves the CURRENT model, never the retired
-    // session's target.
     let model = engine
         .session_model()
         .expect("the replacement model resolves");
@@ -454,10 +395,8 @@ fn retire_clears_the_provider_target_for_the_replacement_build() {
     );
 }
 
-/// End the session telemetry (flushing every queued event through the
-/// local mirror sink) and read one named event's properties: the
-/// transparency mirror is the product's own observable surface for the
-/// run counters.
+/// End the session telemetry (flushing every queued event) and read
+/// one named event's properties from the transparency mirror.
 fn mirror_telemetry_properties(
     engine: &AgentSessionEngine,
     dir: &std::path::Path,
@@ -484,9 +423,6 @@ fn mirror_telemetry_properties(
         .collect()
 }
 
-/// The threshold arm feeds the compaction telemetry seam: the crossing
-/// turn's compaction counts into the open run's `compaction_count` and
-/// the session total (TS `compaction_end` handling).
 #[test]
 #[cfg_attr(
     not(debug_assertions),
@@ -497,7 +433,6 @@ fn threshold_compaction_counts_into_the_run_telemetry() {
     let _faux = FAUX_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    // Probe: the baseline turn's total usage (system prompt included).
     let (probe, _probe_dir) = faux_engine_with_settings(
         &serde_json::json!({ "responses": [{"text": "seed reply"}] }),
         1,
@@ -550,8 +485,6 @@ fn threshold_compaction_counts_into_the_run_telemetry() {
     assert_eq!(ended[0]["compaction_count"], serde_json::json!(1));
 }
 
-/// The requested arm feeds the same seam: the boundary compaction the
-/// kernel's `compact.run` scheduled counts into the open run.
 #[test]
 #[cfg_attr(
     not(debug_assertions),
@@ -614,9 +547,6 @@ fn requested_compaction_counts_into_the_run_telemetry() {
     assert_eq!(ended[0]["compaction_count"], serde_json::json!(1));
 }
 
-/// The manual wire `compact` command (TS daemon-mode `compact`) feeds
-/// the same seam: the compaction the `CompactionManager` runs counts
-/// into the still-open run it interrupts.
 #[test]
 #[cfg_attr(
     not(debug_assertions),
@@ -643,17 +573,11 @@ fn manual_wire_compaction_counts_into_the_run_telemetry() {
         format!("turn one {}", "x".repeat(48_000)),
         &mut events,
     );
-    // A second, small-but-not-tiny turn: the keep-recent cut keeps it
-    // (with turn one's tiny tail it would cut past everything and the
-    // compaction would skip as too short).
     admit(
         &engine,
         format!("turn two {}", "x".repeat(2_000)),
         &mut events,
     );
-    // The wire `compact` command: the CompactionManager's engine call
-    // (the run happens between turns, so it counts into the deferred
-    // run exactly like TS `compact()` between agent runs).
     let controller = std::sync::Arc::new(pa_agent::abort::AbortController::new());
     let signal = controller.signal();
     let outcome = engine.run_compaction(
@@ -680,8 +604,7 @@ fn manual_wire_compaction_counts_into_the_run_telemetry() {
 
 /// The `compaction_outcome` rows an unsuccessful auto-compaction
 /// records, with the indices of the disclosure pair and the end event
-/// within the event list (the disclosure goes out first, the end event
-/// second — TS `_endCompactionUnsuccessfully`).
+/// (TS `_endCompactionUnsuccessfully`).
 fn outcome_row_and_end_event(
     events: &[EngineEvent],
     expected_reason: &str,
@@ -733,17 +656,11 @@ fn outcome_row_and_end_event(
     (row_index, event)
 }
 
-/// The threshold call site (TS `_runAutoCompaction` -> the
-/// `CompactionSkippedError` arm): a threshold compaction that skips
-/// records the durable `compaction_outcome` row, broadcasts its
-/// message pair before the settled `compaction_end` warning, keeps it
-/// in the live context, and never persists a compaction entry.
 #[test]
 fn threshold_skip_records_the_durable_outcome_row() {
     let _faux = FAUX_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    // Probe: the baseline turn's total usage (system prompt included).
     let (probe, _probe_dir) = faux_engine_with_settings(
         &serde_json::json!({ "responses": [{"text": "seed reply"}] }),
         1,
@@ -791,8 +708,6 @@ fn threshold_skip_records_the_durable_outcome_row() {
         row_index > start_index,
         "the disclosure pair goes out after the start event"
     );
-    // The engine's durable entry chain and the live context both carry
-    // the row; no compaction entry was written for the skip.
     assert!(outcome_row_in_entries(&engine));
     assert!(outcome_row_in_live_context(&engine));
     let guard = engine.session.blocking_lock();
@@ -812,9 +727,6 @@ fn threshold_skip_records_the_durable_outcome_row() {
     );
 }
 
-/// The requested call site (the turn-boundary consumption): a scheduled
-/// `compact.run` request that skips at consumption records the same
-/// durable disclosure with the `requested` reason.
 #[test]
 fn requested_compaction_skip_records_the_durable_outcome_row() {
     let _faux = FAUX_TEST_LOCK
@@ -868,20 +780,11 @@ fn requested_compaction_skip_records_the_durable_outcome_row() {
     assert!(outcome_row_in_live_context(&engine));
 }
 
-/// TS `_runAutoCompaction`'s aborted arm at the threshold call site: a
-/// threshold compaction aborted while the summarizer is in flight
-/// records the durable cancelled outcome row (`Compaction cancelled`,
-/// `{threshold, cancelled}`), broadcasts the aborted `compaction_end`
-/// (no error message — the row owns the disclosure), and never commits
-/// a compaction entry; the turn still settles.
 #[test]
 fn threshold_compaction_aborted_mid_run_records_the_cancelled_outcome() {
     let _faux = FAUX_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    // Probe: the baseline turn's total usage (the same shape as the
-    // threshold crossing test; the headroom sits between the two
-    // turns' usage).
     let (probe, _probe_dir) = faux_engine_with_settings(
         &serde_json::json!({ "responses": [{"text": "seed reply"}] }),
         1,
@@ -955,27 +858,19 @@ fn threshold_compaction_aborted_mid_run_records_the_cancelled_outcome() {
     );
 }
 
-/// The aborted arm at the requested call site (the turn-boundary
-/// consumption): a `compact.run` request aborted mid-summarizer
-/// records the `Requested compaction cancelled` row with the
-/// `requested` reason, broadcasts the aborted `compaction_end`
-/// (`compaction_start` carries the run's reason), consumes the
-/// pending request, and never commits.
 #[test]
 fn requested_compaction_aborted_mid_run_records_the_cancelled_outcome() {
     let _faux = FAUX_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    // A tiny reserve keeps the threshold check silent (the headroom is
-    // the whole window) while the 10-token keep-recent budget leaves
-    // the turns summarizable for the requested run.
+    // A tiny reserve keeps the threshold check silent while the
+    // 10-token keep-recent budget leaves the turns summarizable.
     let (engine, _engine_dir) = faux_engine_with_settings(
         &serde_json::json!({
             "responses": [
                 {"text": "seed reply"},
                 {"text": "second reply"},
-                // The summarizer held in flight for the abort.
-                {"text": "the summary", "delayMs": 30_000},
+                            {"text": "the summary", "delayMs": 30_000},
             ],
         }),
         1_000,
@@ -983,8 +878,6 @@ fn requested_compaction_aborted_mid_run_records_the_cancelled_outcome() {
     let engine = std::sync::Arc::new(engine);
     let mut seed_events: Vec<EngineEvent> = Vec::new();
     admit(&engine, "turn one".to_string(), &mut seed_events);
-    // Schedule a requested compaction (the `compact.run` write path):
-    // the boundary consumes it after the next turn settles.
     {
         let guard = engine.session.blocking_lock();
         let core = guard.as_deref().expect("session built");
@@ -995,9 +888,8 @@ fn requested_compaction_aborted_mid_run_records_the_cancelled_outcome() {
 
     let events: std::sync::Arc<std::sync::Mutex<Vec<EngineEvent>>> = Arc::default();
     let started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    // A padded second turn keeps the cut's kept tail over the 10-token
-    // keep-recent budget, leaving the first turn as summarizable
-    // history for the requested run.
+    // A padded second turn keeps the cut's kept tail over the
+    // 10-token keep-recent budget, leaving the first turn summarizable.
     let padded_turn_two = format!("turn two {}", "y".repeat(400));
     let admission = admit_parked(
         &engine,
@@ -1030,9 +922,6 @@ fn requested_compaction_aborted_mid_run_records_the_cancelled_outcome() {
         !compaction_entry_in_entries(&engine),
         "the aborted requested compaction never commits"
     );
-    // The pending request was consumed: no stale compaction runs at
-    // the next boundary (TS `_runAutoCompaction` takes it before the
-    // run).
     {
         let guard = engine.session.blocking_lock();
         let core = guard.as_deref().expect("session built");
@@ -1048,9 +937,6 @@ fn requested_compaction_aborted_mid_run_records_the_cancelled_outcome() {
     );
 }
 
-/// Below the headroom nothing fires: the threshold check stays silent
-/// for turns whose usage fits the default 16k reserve (a 111k headroom
-/// on the 128k window).
 #[test]
 fn threshold_below_the_headroom_stays_silent() {
     let _faux = FAUX_TEST_LOCK
@@ -1102,8 +988,7 @@ fn threshold_below_the_headroom_stays_silent() {
     );
 }
 
-/// The wire events one `/compact` produced, in order: the compaction
-/// event pair around the durable rows.
+/// The wire events one `/compact` produced, in order.
 #[cfg(test)]
 fn compaction_events(events: &[EngineEvent]) -> Vec<serde_json::Value> {
     events
@@ -1130,7 +1015,6 @@ fn compact_session_command_emits_the_ts_event_pair_on_a_skip() {
     assert_eq!(rows.len(), 1, "echo only, no result row: {rows:?}");
     assert_eq!(rows[0]["customType"], "session_slash_command");
     assert_eq!(rows[0]["content"], "/compact");
-    // The event pair: start, then the settled skip warning.
     let compaction = compaction_events(&events);
     assert_eq!(compaction.len(), 2, "start + end: {compaction:?}");
     assert_eq!(
@@ -1153,15 +1037,10 @@ fn compact_session_command_emits_the_ts_event_pair_on_a_skip() {
 
 #[test]
 fn compact_session_command_emits_the_result_on_success() {
-    // Two big turns (each ~12k tokens by the chars/4 estimate) push the
-    // history past the keep-recent budget: the cut keeps the last turn,
-    // the summarizer (the third queued faux response) covers the first.
-    // The second turn's user message carries the crossing: the
-    // keep-recent walk (the 20k default budget) must absorb its budget at
-    // the USER message of the last turn — a cut inside a turn (an
-    // assistant crossing) is a split-turn compaction that makes TWO
-    // summarizer wire calls (TS parity), which this single-summary script
-    // does not serve.
+    // Two big turns (~12k tokens each) push the history past the
+    // keep-recent budget. The crossing rides the second turn's USER
+    // message — a cut inside a turn would make TWO summarizer wire
+    // calls (TS parity), which this single-summary script does not serve.
     let filler = "history ".repeat(6_000); // ~48k chars = ~12k tokens each
     let big_second = format!("second {}", "padded ".repeat(6_000)); // ~10.5k tokens
     let (_engine, events) = run_prompts(
@@ -1209,10 +1088,9 @@ fn compact_session_command_emits_the_result_on_success() {
     );
     assert!(result.get("usage").is_none());
     // The durable rows stay minimal (TS's queued `/compact` catch arm
-    // records no result row): the echo row is the only custom row — except
-    // the `ipython_state` notice, which follows the compaction whenever the
-    // session's prewarmed kernel finished booting on this machine in time
-    // (kernel-dependent, so it is scoped out of this assertion).
+    // records no result row): the echo row is the only custom row —
+    // except the kernel-dependent `ipython_state` notice, scoped out of
+    // this assertion.
     let rows: Vec<_> = custom_rows(&events)
         .into_iter()
         .filter(|row| row["customType"] != "ipython_state")

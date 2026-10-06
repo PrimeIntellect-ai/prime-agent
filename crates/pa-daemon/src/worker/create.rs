@@ -14,11 +14,8 @@ use crate::protocol::DaemonResponse;
 
 impl Worker {
     pub(super) async fn handle_create(&self, payload: &Value) -> DaemonResponse {
-        // One create in flight at a time (TS `openingSessions`): the
-        // created check, the session-model restore's awaits, and the core
-        // initialization below are one serialized critical section, so a
-        // concurrent create joins this open and answers with the created
-        // summary below instead of racing a second initialization.
+        // One create in flight at a time: a concurrent create joins this open and
+        // answers with the created summary instead of racing a second init.
         let _create_gate = self.create_gate.lock().await;
         let existing_summary = {
             let core = self.core.lock().unwrap();
@@ -50,22 +47,9 @@ impl Worker {
             .unwrap_or(false);
         let name = payload.get("name").and_then(Value::as_str);
         let flagged_model = payload.get("model").and_then(Value::as_str).is_some();
-        // TS createAgentSession's restored-from-session step: a revived
-        // session (an existing session file — scheduled wake, update
-        // restore, worker relaunch) restores the model its file pins
-        // before the startup chain. The bounded readiness wait covers the
-        // daemon boot's catalog fetch, so the revived session keeps the
-        // model it was running on instead of silently landing on the
-        // featured default while the catalog settles. An explicit model
-        // flag on the create wins instead (TS `options.model` takes
-        // priority over the saved session model): the restore is skipped
-        // entirely, so a flagged create never eats the readiness window or
-        // records a fallback that would not be used.
-        // Explicit model flags from the create config are authoritative for
-        // this worker's session runtime config (TS runtime-config
-        // propagation): the engine rebinds its selection instead of
-        // falling back to a process-wide model, and the folded flags
-        // survive every session replacement (TS `sessionConfig`).
+        // A revived session restores the model its file pins before the startup
+        // chain; an explicit model flag wins. The flags are authoritative for
+        // this worker's runtime config and survive every session replacement.
         let requested_thinking = match payload.get("thinking") {
             None => None,
             Some(Value::String(level)) => {
@@ -197,33 +181,21 @@ impl Worker {
             .get("thinking")
             .and_then(Value::as_str)
             .map(str::to_string);
-        // Verification seam (the TS child runtime inherits the parent's
-        // `sessionConfig`): a scripted parent session passes its children's
-        // engine file down the recursion. Product creates carry `None`.
+        // Verification seam (TS children inherit the parent's `sessionConfig`): a
+        // scripted parent passes its children's engine file down; product creates carry `None`.
         let child_script = payload
             .get("childScript")
             .and_then(Value::as_str)
             .map(str::to_string);
 
-        // Set by the fresh-path arm when the name landed in its single
-        // rewrite: the shared post-match name persist must not append a
-        // second `session_info` line for that arm.
+        // Set by the fresh-path arm when the name landed in its single rewrite:
+        // the shared name persist must not append a second `session_info` line.
         let mut name_persisted_by_fresh_arm = false;
-        // Set by the continuing arm when it OPENED an existing session
-        // file: the startup scope's `is_continuing` reads this arm fact,
-        // never a post-create existence check — the fresh arms rewrite
-        // their file before any later `path.exists()` would run, so such
-        // a check would read the file the create just made and mark a
-        // brand-new session continuing (skipping the `--models` scope
-        // for its startup model and scoped `:thinking` suffix).
+        // Set by the continuing arm when it OPENED an existing session file:
+        // `is_continuing` reads this arm fact, never an existence check.
         let mut opened_existing_session = false;
-        // The fresh arms defer their creation prefix to after the startup
-        // scope registers (the block right after
-        // `configure_startup_scope`): the prefix's
-        // `model_change`/`thinking_level_change` entries must resolve
-        // through the scope, so a fresh `--models` session persists the
-        // scoped startup pick — not the pre-scope default that a resume,
-        // a worker respawn, and every file reader would then restore.
+        // The fresh arms defer their creation prefix to after the startup scope
+        // registers, so a fresh `--models` session persists the scoped startup pick.
         let mut fresh_prefix = FreshPrefixPlan::None;
         let mut store = match (&session_path, no_session) {
             (Some(path), false) if path.exists() => {
@@ -243,25 +215,12 @@ impl Worker {
                 match loaded {
                     Ok(mut opened) => {
                         opened_existing_session = true;
-                        // The engine owns the file from here on (the open
-                        // succeeded): the session-model restore binds the
-                        // engine and records its decision only for a path
-                        // this worker actually opened — a failed open (a
-                        // held lease, an unreadable file) never leaks the
-                        // binding into a later create's session. The
-                        // create's own flags were folded before this; a
-                        // flagged create still skips the restore (an
-                        // explicit model wins end-to-end, TS
-                        // `options.model`).
+                        // The session-model restore records its decision only for a path
+                        // this worker opened — a failed open never leaks the binding into a
+                        // later create.
                         self.engine.set_session_file(path.clone());
-                        // One fold serves both consumers (TS
-                        // `createAgentSession` reads the session's loaded
-                        // entries once): the model restore takes its
-                        // saved context off the store this create just
-                        // opened — the port's second windowed open of
-                        // the same file and its duplicate fold are gone
-                        // — and the create-config adoption below reuses
-                        // the same fold.
+                        // One fold serves both consumers: the model restore takes its saved
+                        // context off the store this create just opened.
                         let restored = opened.restored_settings();
                         let has_thinking_level = opened.has_thinking_level();
                         let saved = crate::agent_engine::saved_session_context_from_parts(
@@ -273,16 +232,9 @@ impl Worker {
                                 .restore_session_model(path, Some(saved.clone()))
                                 .await;
                         }
-                        // TS createAgentSession restores the session
-                        // file's saved thinking level when the create
-                        // carries no explicit flag (sdk.ts
-                        // `hasThinkingEntry ? existingSession.thinkingLevel`).
-                        // The saved MODEL restores through the engine's
-                        // session-model restore (the bounded readiness
-                        // window, the exact-match path, the published
-                        // fallback) — never this direct adoption, which
-                        // would bypass the window the fleet-kill
-                        // forensics pinned.
+                        // The saved thinking level restores here when the create carries no
+                        // explicit flag; the saved MODEL restores through the engine's
+                        // session-model restore.
                         self.engine.configure_model(EngineModelSelection {
                             provider: None,
                             model: None,
@@ -306,10 +258,9 @@ impl Worker {
                         if let Err(error) = persisted {
                             return response_failure(None, "create", &error.to_string(), None);
                         }
-                        // Prime the usage fold on the file's final identity
-                        // (the full-reader fallback's rewrite replaces the
-                        // inode), off the runtime and before the core lock:
-                        // summaries under the lock fold only the appended tail.
+                        // Prime the usage fold on the file's final identity (the full-reader
+                        // fallback's rewrite replaces the inode), off the runtime and before
+                        // the core lock: summaries under the lock fold only the appended tail.
                         let primed = path.clone();
                         let _ = tokio::task::spawn_blocking(move || {
                             crate::session_store::read_session_info(&primed)
@@ -379,19 +330,9 @@ impl Worker {
                     Ok(lease) => created.lease = Some(Arc::new(lease)),
                     Err(error) => return crate::hold_refusal::create_failure_response(&error),
                 }
-                // One durable write instead of three: the prefix, the
-                // `active` state, and the session name are appended in
-                // memory and land in a single rewrite (all of it after
-                // the startup scope registers below, so the prefix's
-                // model/thinking entries resolve through the scope). The
-                // dropped first rewrite persisted a header-only
-                // intermediate that no reader consumes — the durable
-                // create stays pathless until this create succeeds, so
-                // no replay, scan, or registration reads the file
-                // mid-create — and the final bytes are identical to the
-                // sequential writes (same entries, same order; the
-                // name's line is the exact `persist_entry` construction
-                // via `append_session_info`).
+                // One durable write instead of three: the prefix, the `active` state,
+                // and the session name land in a single rewrite; the create stays
+                // pathless until it succeeds, so no reader reads the file mid-create.
                 fresh_prefix = FreshPrefixPlan::PathBacked { fold_name: true };
                 created
             }
@@ -405,14 +346,9 @@ impl Worker {
             }
         };
 
-        // TS main.ts:838-851: the `models` patterns (else settings
-        // `enabledModels`) resolve once into the session's scoped list,
-        // which `cycle_model` reads. The resolution sits AFTER the store
-        // open — the continuing path's bounded catalog-readiness wait (the
-        // saved-model restore just awaited it) is the one wait the create
-        // already owns, so a cold boot's in-flight catalog fetch has had
-        // its window before the scope resolves: resolving before it could
-        // store an empty scope.
+        // The `models` patterns (else settings `enabledModels`) resolve once into
+        // the scoped list, AFTER the store open (the saved-model restore's wait
+        // already covered the catalog fetch): resolving earlier stores an empty scope.
         let model_patterns = match payload.get("models").and_then(Value::as_array) {
             Some(patterns) => patterns
                 .iter()
@@ -435,15 +371,8 @@ impl Worker {
         self.engine
             .configure_startup_scope(scoped_models.clone(), is_continuing);
         // The fresh arms' deferred creation prefix runs here, against the
-        // registered scope: the file's `model_change` and
-        // `thinking_level_change` carry the scoped startup model and the
-        // scoped `:thinking` level (an explicit `--thinking` still wins,
-        // and an explicit `--model` keeps its own resolution), so a
-        // resume, a worker respawn, and every session-file reader see
-        // the session's scoped start. The continuing arm wrote its own
-        // prefix above — a continuing file pins the model and thinking
-        // of the session it was already running on, and the scope
-        // deliberately does not change them.
+        // registered scope; the continuing arm wrote its own prefix above, so
+        // the scope never changes a continuing file's pinned model and thinking.
         match fresh_prefix {
             FreshPrefixPlan::None => {}
             FreshPrefixPlan::InMemory => {
@@ -481,9 +410,8 @@ impl Worker {
             .iter()
             .map(|scoped| {
                 let mut entry = json!({ "model": scoped.model });
-                // The pattern's `:thinking` suffix (TS `ScopedModel`
-                // `thinkingLevel`); the wire name is the serde-lowercase
-                // level the cycler and the state readers parse back.
+                // The pattern's `:thinking` suffix; the wire name is the level the
+                // cycler and the state readers parse back.
                 if let Some(level) = scoped.thinking_level {
                     entry["thinkingLevel"] = json!(level);
                 }
@@ -517,12 +445,8 @@ impl Worker {
         if !store.path.as_os_str().is_empty() {
             self.engine.set_session_file(store.path.clone());
         }
-        // The session's settings-seeded switches (TS createAgentSession:
-        // the service tier, the queue delivery modes, and the auto-compaction
-        // toggle come from the settings manager; the durable prefix records
-        // the same tier). The TS connection state reads the settings value,
-        // so a restarted session re-seeds its flag from the persisted
-        // `compaction.enabled`.
+        // The session's settings-seeded switches: a restarted session re-seeds
+        // its auto-compaction flag from the persisted `compaction.enabled`.
         let (service_tier, steering_mode, follow_up_mode, auto_compaction_enabled) = {
             let settings = pa_core::settings::SettingsManager::create(&cwd, &self.config.agent_dir);
             let queue_mode = |mode: pa_core::settings::QueueModeSetting| -> String {
@@ -538,47 +462,23 @@ impl Worker {
                 settings.get_compaction_enabled(),
             )
         };
-        // TS `createAgentSession` clamps the session's ACTIVE tier to the
-        // model's support (`clampServiceTier(model, preference)`); the
-        // stored preference below keeps the requested tier, so resuming on
-        // an ineligible model shows the degraded tier while the
-        // preference stays intact.
+        // The ACTIVE tier clamps to the model's support; the stored preference
+        // keeps the requested tier, so an ineligible model shows the degraded tier.
         let configured_tier = restored_tier.unwrap_or(Some(service_tier));
         let clamped_tier =
             crate::setting_switches::effective_service_tier(configured_tier, self.engine.as_ref());
         self.engine.configure_service_tier(clamped_tier);
-        // The abort supervision's terminal record (the supervisor declared
-        // a wedged run aborted and injected it into this create replay):
-        // the rebuilt transcript discloses the abort with the same
-        // `compaction_outcome` row the worker's own auto-abort arms
-        // persist. A manual run persists nothing — TS `compact()`'s abort
-        // arm writes no durable row. The row is identity-stamped with the
-        // declaration (`declaredAt`): a replacement that persisted it and
-        // died before the supervisor consumed the record replays the same
-        // declaration. The dedup matches the row's fields alone — a
-        // worker that persisted its own cancelled row for the same run
-        // (its abort arm ran, then the worker died before its
-        // `compaction_end` reached the supervisor) carries the persist-
-        // time stamp, not the declaration, and the replay must recognize
-        // it instead of appending a second row for the one abort.
+        // The abort supervision's terminal record: the rebuilt transcript discloses
+        // the abort with the same `compaction_outcome` row the auto-abort arms persist
+        // (a manual run persists nothing); the dedup matches the row's fields alone.
         let interrupted_compaction_requested = payload.get("interruptedCompaction").is_some();
         let interrupted_compaction = crate::compaction::interrupted_compaction_disclosure(payload);
-        // The disclosure row's landing state for this replay: `true` when
-        // the rebuilt transcript now holds the exact row (persisted here,
-        // or already present from an earlier crash-replay), `false` when
-        // the persist failed — the create reply carries it so the
-        // supervisor consumes the terminal record only once the
-        // disclosure is durable; a failed persist keeps it pending for
-        // the next replacement to retry. A requested record with no
-        // disclosure row (a manual run — TS `compact()`'s abort arm
-        // writes none) is vacuously durable and reports `true`, so the
-        // record is consumed instead of re-injecting forever. No
-        // requested record adds no key: client-facing create replies
-        // stay byte-identical to the TS shape.
+        // The disclosure row's landing state: the supervisor consumes the terminal
+        // record only once the disclosure is durable (a requested record with no
+        // disclosure row is vacuously durable; no requested record adds no key).
         let mut interrupted_compaction_persisted = interrupted_compaction_requested;
-        // The core lock stays inside this block: everything after it may
-        // await (the schedule-catalog bind), and a std MutexGuard must
-        // never ride an await point.
+        // The core lock stays inside this block: everything after it may await,
+        // and a std MutexGuard must never ride an await point.
         let (summary, rlm_depth) = {
             let mut core = self.core.lock().unwrap();
             core.cwd = cwd;
@@ -605,9 +505,8 @@ impl Worker {
             }
             core.created = true;
             core.abort_requested = false;
-            // A fresh (or replaced) session starts live: the previous
-            // close's `session_closed` marker clears with the new session
-            // (TS's fresh runtime starts un-disposed).
+            // A fresh session starts live: the previous close's
+            // `session_closed` marker clears with the new session.
             if let Some(agent_engine) = &self.agent_engine {
                 agent_engine.clear_session_closed();
             }
@@ -619,13 +518,9 @@ impl Worker {
             core.forced_all_steering = false;
             core.scoped_models.clone_from(&scoped_entries);
             core.retry_abort_requested = false;
-            // The session's depth falls back to the opened file's header (TS
-            // `config.rlmDepth ?? header.rlmDepth`): a resumed saved subagent
-            // session keeps its persisted depth. The runtime kind keeps the
-            // create's runtime identity (TS `metadata.kind`) — a resumed
-            // subagent file is a top-level runtime that merely carries its
-            // persisted depth, so the roster does not re-nest it under its
-            // original parent.
+            // The session's depth falls back to the opened file's header: a resumed
+            // subagent file carries its persisted depth, so the roster never re-nests
+            // it under its original parent.
             let rlm_depth = rlm_depth
                 .or_else(|| core.store.as_ref().and_then(SessionFile::rlm_depth))
                 .unwrap_or(0);
@@ -641,15 +536,12 @@ impl Worker {
             core.child_script.clone_from(&child_script);
             (self.summary_locked(&core), rlm_depth)
         };
-        // TS `sdk.ts` seeds the Agent's queue modes from the settings
-        // manager at session create (`steeringMode`/`followUpMode`): the
-        // engine's agent-level queues drain per the same modes the worker
-        // lane delivers by. Scripted harness engines keep the no-op.
+        // The engine's agent-level queues drain per the same modes the
+        // worker lane delivers by.
         self.engine
             .set_queue_modes(Some(&steering_mode), Some(&follow_up_mode));
-        // Seed the engine's RLM identity: recursion depth and bound, this
-        // session's persistence ids, the default thinking level its
-        // children inherit, and the harness's child engine file.
+        // Seed the engine's RLM identity: recursion depth and bound, the session's
+        // persistence ids, the children's default thinking level.
         if let Err(error) = self.engine.configure_rlm_identity(RlmSessionIdentity {
             rlm_depth,
             rlm_max_depth,
@@ -681,14 +573,8 @@ impl Worker {
         if let Ok(summary_value) = serde_json::to_value(&summary) {
             self.engine.set_session_summary(summary_value);
         }
-        // TS create builds the AgentSession eagerly
-        // (`createAgentSessionFromServices` inside the create handler —
-        // where the kernel prewarm fires). The Rust worker keeps the
-        // create response model-independent, so the build runs in the
-        // background instead: the prewarm starts at create, the build
-        // gate deduplicates it against any racing demand seam, and a
-        // build failure still surfaces on the first demand seam exactly
-        // as before. Scripted harness engines have no session to build.
+        // Deliberate divergence from TS's eager create build: the response stays
+        // model-independent; a build failure surfaces on the first demand seam.
         if let Some(agent_engine) = &self.agent_engine {
             let engine = std::sync::Arc::clone(agent_engine);
             tokio::spawn(async move {
@@ -708,11 +594,8 @@ impl Worker {
         if let Some(registration) = &self.registration {
             registration.notify_session_created(session_id);
         }
-        // TS session boot resolves the initial model through
-        // `refreshAvailableModels`, which also fetches the live Prime
-        // Inference catalog in the background and caches it on disk. Fire
-        // the same refresh here: the effect is the cache file (fresh
-        // registries read it), and failures fall back to the cached or
+        // Fire the same background `refreshAvailableModels` as TS session boot: the
+        // effect is the on-disk cache file; failures fall back to the cached or
         // bundled catalog without touching the session.
         let agent_dir = self.config.agent_dir.clone();
         tokio::spawn(async move {
@@ -722,13 +605,11 @@ impl Worker {
             let _ = registry.refresh_available_models().await;
         });
         self.work_notify.notify_one();
-        // Warm the context-tree cache at session open: the background walk
-        // fills the cache while the client settles, so an early `/context`
+        // Warm the context-tree cache at session open, so an early `/context`
         // answers from it instead of walking the artifact tree inline.
         self.poke_context_tree_refresh();
-        // The delete boundary invalidates the cache's rows for the deleted
-        // child immediately (the next background refresh would otherwise
-        // keep its last row through the settled-children backfill).
+        // The delete boundary invalidates the cache's rows for the deleted child
+        // immediately (the background refresh would otherwise keep its last row).
         if let Some(agent_engine) = &self.agent_engine {
             if let Some(children) = &agent_engine.children {
                 let cache = std::sync::Arc::clone(&self.context_tree);
@@ -754,10 +635,8 @@ impl Worker {
             data["interruptedCompactionPersisted"] =
                 serde_json::json!(interrupted_compaction_persisted);
         }
-        // A resumed create just rebuilt the store from the session file:
-        // its load copies (window walks, parsed entry trees) are dropped
-        // by now — return that freed heap to the OS so the load's peak
-        // does not stay resident.
+        // A resumed create just rebuilt the store from the session
+        // file: return the load's freed heap to the OS.
         pa_types::memory_release::trim_freed_heap();
         response_success(None, "create", Some(data))
     }
@@ -849,8 +728,7 @@ pub(super) fn worker_server_capabilities(agent_dir: &std::path::Path) -> Vec<Str
 }
 
 /// RLM depth fields of a create payload: `(depth, max_depth)`. Values must
-/// be non-negative integers that fit a u32; anything else fails the create
-/// instead of silently truncating.
+/// fit a u32; anything else fails the create instead of silently truncating.
 fn create_payload_rlm_depth(payload: &Value) -> Result<(Option<u32>, Option<u32>), String> {
     fn parse(payload: &Value, key: &str) -> Result<Option<u32>, String> {
         match payload.get(key) {
@@ -867,20 +745,12 @@ fn create_payload_rlm_depth(payload: &Value) -> Result<(Option<u32>, Option<u32>
     Ok((depth, max_depth))
 }
 
-/// Creation prefix for a daemon-hosted session file (TS `createAgentSession`
-/// in the worker process): fresh files record `model_change` (when the engine
-/// resolves a model), `thinking_level_change`, and `service_tier_change`; a
-/// reopened session records the thinking level and service tier only when no
-/// earlier entry set them. The recorded thinking level is the engine's
-/// effective one — the create-config flag (else settings default/medium)
-/// clamped to the model's supported levels; engines without a model
-/// resolution (the scripted harness) record "off".
-/// Which fresh create arm still owes its creation prefix: the prefix runs
-/// after the startup scope registers (see [`Worker::create`]), so the plan
-/// tells the post-scope block how the arm's writes land.
+/// Creation prefix for a daemon-hosted session file: fresh files record all three changes;
+/// a reopened session records them only when no earlier entry did. Which fresh create
+/// arm still owes its creation prefix (the prefix runs after the startup scope registers).
 enum FreshPrefixPlan {
     /// Nothing pending: the continuing arm wrote its own prefix before
-    /// the scope (its file pins the session it was already running on).
+    /// the scope.
     None,
     /// The in-memory `noSession` create: the prefix stays in memory, no
     /// rewrite.

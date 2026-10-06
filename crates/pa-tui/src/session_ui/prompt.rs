@@ -1,6 +1,5 @@
-//! The prompt submit pipeline and its satellites: the ordered submit
-//! channel (`PromptOrder` -> the worker -> `PromptSubmitNote`'s
-//! fold-back), the prompt stash's capture and restore, the side-question
+//! The prompt submit pipeline: the ordered submit channel (`PromptOrder` -> the worker ->
+//! `PromptSubmitNote`'s fold-back), the prompt stash's capture and restore, the side-question
 //! turns, and the pasted-image registry.
 
 use super::{
@@ -9,43 +8,28 @@ use super::{
     PromptStash, RebuildKind, Result, SessionUi, SlashCommandRegistry, StatusKind, Value,
     UI_REQUEST_TIMEOUT_MS,
 };
-/// How a submitted prompt travels to the session (TS `streamingBehavior`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SubmitBehavior {
-    /// Plain Enter: mid-turn input parks on the steering lane (TS "steer").
     Steer,
     /// The follow-up key (`alt+enter`): parks on the follow-up lane and
     /// delivers when the run goes idle.
     FollowUp,
 }
 
-/// One backgrounded prompt round trip's settled outcome (TS `onSubmit`
-/// awaits `agentConnection.prompt` off the render path —
-/// `interactive-mode.ts` clears the editor and lets Ink paint before the
-/// await, and the daemon answer folds back later): `Ok(())` is an
-/// admitted/queued prompt; the error is the daemon failure the inline
-/// await used to surface on the key path.
+/// One backgrounded prompt round trip's settled outcome: `Ok(())` is an
+/// admitted/queued prompt; the error is the daemon failure.
 pub(crate) struct PromptSubmitNote {
-    /// The submit-time active id: the outcome applies only while the
-    /// client still holds that session (a switch, a supersede rebind, or
-    /// a `/new` replaced it) — TS's staleness guard for a submit that
-    /// outlived its session.
+    /// The submit-time active id: the outcome applies only while the client
+    /// still holds that session.
     pub(crate) active_session_id: String,
-    /// The submit-time durable session id: a stale FAILURE retains its
-    /// rejected draft into THAT session's stash (TS `retainSubmittedDraft`
-    /// targets the submit-time `submissionStashState`), never the newly
-    /// mounted session's.
+    /// The submit-time durable session id: a stale failure retains its rejected draft into that
+    /// session's stash, never the newly mounted session's.
     pub(crate) session_id: String,
-    /// The submitted text (the draft restore and the rebind replay).
     pub(crate) text: String,
-    /// The submit lane (the queued-input telemetry and the rebind replay).
     pub(crate) behavior: SubmitBehavior,
-    /// The collected prompt images (the rebind replay sends the same set).
     pub(crate) images: Option<serde_json::Value>,
-    /// The submit-time image snapshot behind the submitted text's markers
-    /// (TS `snapshotPromptStash` at submit): the refusal's retention keeps
-    /// the attachments rehydratable even after the editor cleared and the
-    /// registry could evict them.
+    /// The submit-time image snapshot behind the text's markers: keeps the attachments rehydratable
+    /// after the editor cleared and the registry could evict them.
     pub(crate) stashed_images: Vec<(u64, LoadedImage)>,
     /// The stash head this submit captured (TS `promptStashToRestore`): its
     /// admitted outcome restores it if it is still the head.
@@ -57,34 +41,24 @@ pub(crate) struct PromptSubmitNote {
     pub(crate) turn_was_active: bool,
     /// The expected end of this admitted prompt in submit order.
     pub(crate) expected_turn_end: u64,
-    /// The submit's generation (TS `inputSubmissionGeneration`): a newer
-    /// submit supersedes an older one's draft-restore right.
+    /// A newer submit supersedes an older one's draft-restore right.
     pub(crate) generation: u64,
-    /// The submission's `input_id` (#2117 `agent input stage`).
+    /// The submission's `input_id` (`agent input stage`).
     pub(crate) input_id: String,
     /// When the submit was accepted (the stage durations measure from
     /// here).
     pub(crate) submitted_at: std::time::Instant,
-    /// Whether a failure may still rebind once (the replayed request is
-    /// the second and last attempt — the inline path's
-    /// `rebind_available`).
+    /// Whether a failure may still rebind once; the replayed request is the
+    /// second and last attempt.
     pub(crate) rebind_available: bool,
-    /// The settled request: admitted/queued on `Ok`; the daemon error
-    /// otherwise.
     pub(crate) result: Result<(), anyhow::Error>,
 }
 
-/// One queued prompt round trip for the submit worker (the ordered channel
-/// that replaces per-submit spawns): the worker drains its inbox one
-/// request at a time, so the wire write for submit N+1 only happens after
-/// submit N's round trip settles — cross-submit order is guaranteed on
-/// the terminal path exactly like the blocked loop and TS's single-threaded
-/// event loop guaranteed it (a per-submit `tokio::spawn` would schedule
-/// the writes independently and could reorder two rapid submits).
+/// One queued prompt round trip for the submit worker; `prompt_submit_worker` drains them one at a
+/// time, in submit order.
 pub(crate) struct PromptOrder {
-    /// The connection the request travels on (captured per submit: the
-    /// reconnect driver can replace the client between submits, and a
-    /// long-lived worker must never hold the superseded connection).
+    /// Captured per submit: the reconnect driver can replace the client between submits, and the
+    /// worker must never hold the superseded connection.
     pub(crate) client: DaemonClient,
     pub(crate) active_session_id: String,
     pub(crate) session_id: String,
@@ -97,24 +71,15 @@ pub(crate) struct PromptOrder {
     pub(crate) expected_turn_end: u64,
     pub(crate) generation: u64,
     pub(crate) rebind_available: bool,
-    /// The submission's `input_id` (#2117 `agent input stage`): a fresh
-    /// uuid per submitted prompt, pairing the stage observations.
+    /// A fresh uuid per submitted prompt (`agent input stage`), pairing the stage observations.
     pub(crate) input_id: String,
-    /// When the submit was accepted (the stage durations measure from
-    /// here).
     pub(crate) submitted_at: std::time::Instant,
 }
 
 impl SessionUi {
-    /// The retained-bytes budget for pasted images (TS
-    /// `MAX_PASTED_IMAGE_BYTES`): the registry evicts oldest entries once
-    /// the retained base64 payload exceeds it.
     const MAX_PASTED_IMAGE_BYTES: usize = 64 * 1024 * 1024;
 
-    /// Read the clipboard image and register it behind a new editor
-    /// marker (TS `handleClipboardImagePaste`). A clipboard without a
-    /// supported image is a no-op; clipboard errors are silently ignored
-    /// (the clipboard may lack permissions), matching the TS catch.
+    /// Read the clipboard image and register it behind a new editor marker.
     pub(super) async fn handle_clipboard_image_paste(&mut self, view: &mut AgentView) {
         let Some(attachment) = crate::clipboard_image::read_clipboard_image().await else {
             return;
@@ -131,12 +96,8 @@ impl SessionUi {
             });
         }
         if !self.model_supports_images(view) {
-            // The turn routes to `settings.imageModel` when one is
-            // configured (the images are sent to the routed model);
-            // without one the turn fails with the actionable refusal
-            // naming the setting - either way the attachment itself is
-            // never silently omitted. Images the host blocks surface the
-            // block instead of a routing note.
+            // The attachment is never silently omitted: the routed note or the refusal
+            // names the fix; host-blocked images surface the block.
             let settings = self.client_settings.as_ref();
             let blocked = settings.is_some_and(|settings| settings.block_images());
             let routed = settings.is_some_and(|settings| settings.image_model().is_some());
@@ -157,11 +118,8 @@ impl SessionUi {
         self.dirty = true;
     }
 
-    /// Record a pasted image, evicting the oldest entries once the
-    /// retained bytes exceed [`Self::MAX_PASTED_IMAGE_BYTES`] (TS
-    /// `rememberPastedImage`). The just-added image and every image whose
-    /// marker is still reachable are never evicted, so a live marker never
-    /// loses its image.
+    /// Record a pasted image, evicting the oldest entries once the retained bytes exceed
+    /// [`Self::MAX_PASTED_IMAGE_BYTES`]; reachable markers are never evicted.
     fn remember_pasted_image(&mut self, id: u64, image: LoadedImage, view: &AgentView) {
         self.pasted_images.insert(id, image);
         let mut keep = Self::live_image_marker_ids(&view.editor);
@@ -176,11 +134,8 @@ impl SessionUi {
         self.pasted_images = images;
     }
 
-    /// Marker ids still reachable - current editor text and prompt history
-    /// (recallable with the up arrow) - which are never evicted so a
-    /// recall never finds a marker with no image. The TS version also
-    /// scans the compaction/connection queues, which live daemon-side
-    /// here.
+    /// Marker ids still reachable — current editor text and prompt history — never evicted (the TS
+    /// version also scans the compaction/connection queues, daemon-side here).
     fn live_image_marker_ids(editor: &crate::editor::Editor) -> std::collections::BTreeSet<u64> {
         let mut ids = std::collections::BTreeSet::new();
         ids.extend(image_marker_ids(&editor.get_text()));
@@ -193,17 +148,10 @@ impl SessionUi {
         ids
     }
 
-    // ---- Prompt stash (TS `prompt-stash-state.ts` + the interactive-mode
-    // stash call sites). One client-owned store per TUI process holds every
-    // session's stashed draft; the draft follows the session across
-    // switches. ----
+    // Prompt stash: one client-owned store; the draft follows the session across switches.
 
-    /// TS `bindPromptStashSession`: the chat's stash state follows the
-    /// connected session's stable id. The previous binding releases when
-    /// it holds nothing, and the new binding's stashed images re-enter the
-    /// paste registry with their marker ids reserved (TS
-    /// `hydratePromptStash`), so a restore never mints colliding markers
-    /// and a submitted restored draft finds its image bytes.
+    /// The chat's stash state follows the connected session's stable id; the new binding's stashed
+    /// images re-enter the paste registry with their marker ids reserved.
     pub(super) fn bind_prompt_stash_session(&mut self, session_id: &str) {
         if self.stash_session_id == session_id {
             return;
@@ -228,9 +176,6 @@ impl SessionUi {
         self.stash_session_id = session_id.to_string();
     }
 
-    /// TS `teardownSessionUi` -> `releasePromptStashSession`: the run's
-    /// binding ends. An empty state drops from the store; a session
-    /// holding a draft keeps it for the next view that binds the session.
     pub(crate) fn release_prompt_stash_session(&mut self) {
         if self.stash_session_id.is_empty() {
             return;
@@ -242,12 +187,9 @@ impl SessionUi {
         store.release(&self.stash_session_id);
     }
 
-    /// TS `snapshotPromptStash`: the editor draft plus the pasted images
-    /// its markers still reference. `None` for a whitespace-only draft.
-    /// The two auto capture paths (the agents-view handoff, the in-place
-    /// switch) stash a restore-on-open head (TS `restoreOnOpen`); the
-    /// manual `app.prompt.stash` capture does not (TS `handlePromptStash`'s
-    /// plain assignment) — that draft returns only on its own key.
+    /// The editor draft plus the pasted images its markers still reference;
+    /// `None` for a whitespace-only draft. The auto capture paths stash a
+    /// restore-on-open head; the manual `app.prompt.stash` capture does not.
     fn snapshot_prompt_stash(
         &self,
         view: &AgentView,
@@ -261,10 +203,8 @@ impl SessionUi {
             .into_iter()
             .map(|(id, image)| (id, image.clone()))
             .collect();
-        // TS `snapshotPromptStashFrom`: a collapsed paste's content lives in
-        // the editor's registry, not in the text, so the registry must
-        // travel with the draft or the restored marker would stay literal
-        // instead of expanding on submit.
+        // A collapsed paste's content lives in the editor's registry, not the text, so the registry
+        // must travel with the draft or the restored marker stays literal.
         let snapshot = view.editor.get_paste_snapshot();
         let paste_snapshot = (!snapshot.pastes.is_empty()).then_some(snapshot);
         Some(PromptStash {
@@ -275,11 +215,8 @@ impl SessionUi {
         })
     }
 
-    /// TS `stashDraftForAgentsView`: on the way to the agents view, the
-    /// live draft becomes the session's restore-on-open head — an
-    /// existing unrestored stash queues behind it and keeps its own
-    /// restore semantics. The editor dies with this view, so the draft
-    /// lives on only in the store.
+    /// On the way to the agents view, the live draft becomes the session's restore-on-open head;
+    /// the editor dies with this view, so the draft lives on only in the store.
     pub(crate) fn stash_draft_for_agents_view(&mut self, view: &AgentView) {
         let Some(draft) = self.snapshot_prompt_stash(view, true) else {
             return;
@@ -299,10 +236,8 @@ impl SessionUi {
             .stash_draft_head(draft);
     }
 
-    /// The in-place `/switch` capture: the draft belongs to the session
-    /// being left, so it is stashed as that session's restore head and the
-    /// editor clears — the switched-to session starts from an empty prompt
-    /// and the draft returns on a switch back.
+    /// The in-place `/switch` capture: the draft is stashed as the left
+    /// session's restore head; it returns on a switch back.
     pub(super) fn stash_draft_for_switch(&mut self, view: &mut AgentView) {
         let Some(draft) = self.snapshot_prompt_stash(view, true) else {
             return;
@@ -324,11 +259,8 @@ impl SessionUi {
         self.dirty = true;
     }
 
-    /// TS `restorePromptStashOnOpen`: the opening restore of the session's
-    /// auto-stashed draft. The restore notice lands in its own status
-    /// block: init may have posted a notice (a tmux keyboard warning, a
-    /// compaction row) that the back-to-back status rewrite would
-    /// otherwise replace.
+    /// The opening restore of the session's auto-stashed draft. The notice lands in its own status
+    /// block: init may have posted a notice that a back-to-back status rewrite would replace.
     pub(crate) fn restore_prompt_stash_on_open(&mut self, view: &mut AgentView) {
         self.last_status_index = None;
         self.restore_prompt_stash_if_editor_empty(view, true);
@@ -374,9 +306,8 @@ impl SessionUi {
             self.next_image_marker_id = self.next_image_marker_id.max(id + 1);
         }
         view.editor.set_text(&stash.text);
-        // TS `restorePromptStash` -> `restorePasteSnapshot`: the collapsed
-        // pastes re-enter the editor's registry so the restored markers
-        // stay atomic and expand on submit.
+        // The collapsed pastes re-enter the editor's registry so the restored
+        // markers stay atomic and expand on submit.
         if let Some(snapshot) = &stash.paste_snapshot {
             view.editor.restore_paste_snapshot(snapshot.clone());
         }
@@ -390,16 +321,9 @@ impl SessionUi {
         true
     }
 
-    /// TS `handlePromptStash` — the `app.prompt.stash` action (default
-    /// ctrl+s, `interactive-mode.ts`): with a draft in the editor the key
-    /// stashes it — the whole draft (text, collapsed pastes, pasted
-    /// images) moves to the session's stash and the editor clears; with
-    /// an empty editor the key restores the session's stashed draft.
-    /// A session that already holds a draft keeps it: the fresh draft
-    /// stays in the editor and the status says so (TS's no-overwrite
-    /// guard), which is the difference from the auto capture paths —
-    /// they queue an old stash behind the new head, the manual key never
-    /// clobbers one.
+    /// The `app.prompt.stash` action (default ctrl+s): with a draft the key stashes it and clears
+    /// the editor; with an empty editor it restores the stashed draft. A session that already holds
+    /// a draft keeps it — the manual key never clobbers one.
     pub(super) fn handle_prompt_stash(&mut self, view: &mut AgentView) {
         if view.editor.get_text().trim().is_empty() {
             if !self.restore_prompt_stash_if_editor_empty(view, false) {
@@ -435,12 +359,9 @@ impl SessionUi {
         self.note("Stashed prompt", view);
     }
 
-    /// Whether the current model takes image input (TS
-    /// `model.input.includes("image")`), when the model is known from the
-    /// startup catalog; unknown models are assumed capable (the daemon
-    /// re-checks against the resolved model anyway). The catalog lookup
-    /// is the provider-aware current-model match: a same-id entry under
-    /// another provider is a different model.
+    /// Whether the current model takes image input; unknown models are assumed
+    /// capable (the daemon re-checks). The catalog lookup is provider-aware: a
+    /// same-id entry under another provider is a different model.
     pub(super) fn model_supports_images(&self, view: &AgentView) -> bool {
         let Some(model) = self.current_model_entry(view) else {
             return true;
@@ -448,11 +369,9 @@ impl SessionUi {
         model.input.contains(&pa_types::ai::ModelInput::Image)
     }
 
-    /// Submit a prompt (the Enter path). The user message arrives back as a
-    /// `message_start` session event (no local echo), and prompts sent while
-    /// a turn is active queue on the daemon side. `behavior` selects the
-    /// lane (TS `handleFollowUp` routes the follow-up key through this
-    /// same ladder with the `followUp` behavior).
+    /// Submit a prompt (the Enter path): the user message arrives back as a `message_start` event
+    /// (no local echo); prompts sent while a turn is active queue on the daemon side; `behavior`
+    /// selects the lane.
     pub(crate) async fn submit_prompt(
         &mut self,
         text: &str,
@@ -463,11 +382,8 @@ impl SessionUi {
         if text.is_empty() {
             return Ok(());
         }
-        // TS `!`/`!!` (interactive-mode onSubmit): the bash shortcut
-        // routes before the side-question capture and every prompt path.
-        // A bare `!`/`!!` is bash mode with nothing to run — it is never
-        // sent as a prompt; a command runs directly through the
-        // user-bash slot, no model turn involved.
+        // The `!`/`!!` bash shortcut routes before the side-question capture and
+        // every prompt path; a bare `!`/`!!` is never sent as a prompt.
         if let Some(bang) = crate::bash_bang::parse_bash_bang(text) {
             return match bang {
                 crate::bash_bang::BashBang::Bare => Ok(()),
@@ -476,11 +392,8 @@ impl SessionUi {
                 }
             };
         }
-        // An open side-question pane captures the submission (TS's ladder
-        // order): builtin slash commands get the in-pane notice, a reply
-        // with pasted images gets the image notice, and everything else
-        // becomes a follow-up side question. A reply that merely starts
-        // with "/" (an absolute path) is not a command.
+        // An open side-question pane captures the submission — commands get the in-pane notice,
+        // everything else a follow-up; a reply that merely starts with "/" is not a command.
         if view.side_pane.is_some() {
             let registry = SlashCommandRegistry::builtin();
             let is_command = pa_types::slash_commands::parse_slash_command(text)
@@ -494,8 +407,6 @@ impl SessionUi {
                 return Ok(());
             }
             if self.active_side_question_id.is_some() {
-                // TS keeps the draft and shows the wait warning through
-                // `handleSideQuestion`'s active-run guard.
                 view.editor.set_text(text);
                 self.start_side_question(text, view).await?;
                 return Ok(());
@@ -519,12 +430,9 @@ impl SessionUi {
         self.send_prompt(text, behavior, view)
     }
 
-    // ------------------------------------------------------------------
     // Side questions (/btw, /side)
-    // ------------------------------------------------------------------
 
-    /// One client-local notice turn (TS `sideQuestionComponent.addTurn`
-    /// with a `side-notice-*` id): rendered like a turn, never sent to the
+    /// One client-local notice turn: rendered like a turn, never sent to the
     /// daemon, never seeding a follow-up.
     fn add_side_notice(&mut self, question: &str, answer: &str, view: &mut AgentView) {
         self.side_question_counter += 1;
@@ -550,9 +458,7 @@ impl SessionUi {
         self.dirty = true;
     }
 
-    /// Start a side question (TS `handleSideQuestion`): the answered turns
-    /// seed the follow-up's context, the pane mounts the running turn, and
-    /// the daemon run streams `side_question_event` frames back.
+    /// Start a side question: the answered turns seed the follow-up's context.
     pub(super) async fn start_side_question(
         &mut self,
         question: &str,
@@ -600,8 +506,6 @@ impl SessionUi {
             .upsert(turn);
         self.active_side_question_id = Some(id.clone());
         self.dirty = true;
-        // TS sends `previousTurns` only when the pane already answered
-        // something (`previousTurns.length > 0 ? previousTurns : undefined`).
         let previous_turns =
             (!previous_turns.is_empty()).then_some(serde_json::Value::Array(previous_turns));
         let started = self
@@ -618,7 +522,6 @@ impl SessionUi {
             )
             .await;
         if let Err(error) = started {
-            // TS surfaces the failed start as the turn's error state.
             self.active_side_question_id = None;
             if let Some(pane) = view.side_pane.as_mut() {
                 pane.upsert(crate::side_question::SideQuestionTurn {
@@ -635,15 +538,12 @@ impl SessionUi {
         Ok(())
     }
 
-    /// Close the side-question pane (TS `clearSideQuestion`): the active
-    /// run aborts fire-and-forget (the daemon emits the cancelled event,
-    /// which finds the pane already gone).
+    /// Close the pane; the active run aborts fire-and-forget (the daemon's
+    /// cancelled event finds the pane already gone).
     pub(super) fn clear_side_question(&mut self, abort: bool, view: &mut AgentView) {
-        // A side-conversation bash run dies with its pane: its `bash_*`
-        // events may still be in flight (even bash_start), so they are
-        // swallowed until its bash_end, and a run we observed starting
-        // aborts (abort_bash is session-scoped, so only a run whose
-        // bash_start we saw is aborted).
+        // A side-conversation bash run dies with its pane: in-flight `bash_*`
+        // events are swallowed until its bash_end, and only a run whose bash_start
+        // we saw aborts (abort_bash is session-scoped).
         if let Some(run) = self.side_bash.take() {
             let started = view
                 .side_pane
@@ -675,9 +575,6 @@ impl SessionUi {
         self.dirty = true;
     }
 
-    /// One streamed `side_question_event` (TS `handleSideQuestionEvent`):
-    /// upsert the turn into the pane; a terminal event for the active run
-    /// releases the follow-up guard.
     pub(super) fn apply_side_question_event(&mut self, event: &Value, view: &mut AgentView) {
         let id = event
             .get("id")
@@ -695,12 +592,9 @@ impl SessionUi {
         let Some(pane) = view.side_pane.as_mut() else {
             return;
         };
-        // TS `handleSideQuestionEvent` gates the render update on the tracked
-        // turn (`event.id !== this.sideQuestionEvent?.id` returns early): the
-        // tracked turn is the latest one the daemon started (client-local
-        // notices never join it), so a late terminal event for a run whose
-        // turn was closed (esc mid-run) cannot ghost into a newer pane as a
-        // second turn.
+        // The render update is gated on the tracked turn (the latest one the
+        // daemon started; client-local notices never join it), so a late terminal
+        // event for a closed run cannot ghost into a newer pane as a second turn.
         let tracked = pane
             .turns
             .iter()
@@ -738,31 +632,17 @@ impl SessionUi {
         behavior: SubmitBehavior,
         view: &mut AgentView,
     ) -> Result<()> {
-        // A new prompt settles the held bash cards into the transcript
-        // first (TS `onSubmit` flushes `pendingBashComponents` before the
-        // prompt travels).
+        // A new prompt settles the held bash cards into the transcript first.
         Self::flush_pending_bash(view);
         if let Some(error) = self.reconnection_failed.clone() {
-            // The re-attach window expired (TS terminal close): the session
-            // connection is closed, so nothing dispatches. The error row
-            // surfaces the terminal cause and the draft returns to the
-            // editor (TS keeps the input buffer on a failed submit).
+            // The re-attach window expired: the connection is closed, nothing dispatches.
             self.error_row(&format!("Daemon reconnection failed: {error}"), view);
             view.editor.set_text(text);
             return Ok(());
         }
         let images = self.collect_images_for(text, view);
-        // TS `onSubmit` resolves the submit off the render path: the
-        // cleared editor paints THIS iteration's frame — the submit's
-        // daemon round trip never gates the first frame after Enter — and
-        // the request settles in the background, its outcome folding back
-        // through [`Self::apply_prompt_outcome`] with the same
-        // bookkeeping and error ladder the inline await ran on the key
-        // path.
-        // TS snapshots the submitted draft (with its image markers) at
-        // submit (`snapshotPromptStash`): the refusal's retention keeps
-        // the attachments rehydratable even after the editor cleared and
-        // a later paste-heavy submit could evict them from the registry.
+        // The submit resolves off the render path: the cleared editor paints THIS frame without the
+        // daemon round trip; the outcome folds back through [`Self::apply_prompt_outcome`].
         let stashed_images: Vec<(u64, LoadedImage)> =
             collect_marked_images(&self.pasted_images, text)
                 .into_iter()
@@ -811,11 +691,8 @@ impl SessionUi {
         rebind_available: bool,
         generation: u64,
     ) {
-        // The queued-input telemetry gates on the turn state at submit
-        // time (the inline path read the same flag right after its
-        // await, with the loop blocked so no event could move it); an
-        // earlier submit still in flight held `turn_active` true on the
-        // inline path too, so it counts here.
+        // The turn state at submit time gates the telemetry; an earlier submit
+        // still in flight counts as active here.
         let turn_was_active = self.turn_active || self.prompt_in_flight > 0;
         let expected_turn_end = self.last_prompt_turn_end.max(self.turn_ends_seen) + 1;
         self.last_prompt_turn_end = expected_turn_end;
@@ -838,15 +715,8 @@ impl SessionUi {
         });
     }
 
-    /// The single prompt-submit worker (the ordered channel's drain side):
-    /// one request in flight at a time, submit N+1's wire write only after
-    /// submit N's round trip settles. TS's single-threaded event loop
-    /// serializes its submit writes the same way — the async handler's
-    /// `await` never reorders two submissions (interactive-mode.ts's
-    /// `handleSubmit`), and the port's old blocked loop enforced the same
-    /// order by construction. The outcome folds back through the
-    /// prompt-submit channel; the worker exits when the orders channel
-    /// closes (the session dropped its sender).
+    /// The single prompt-submit worker: one request in flight at a time; submit N+1's
+    /// wire write waits for submit N's round trip. Exits when the orders channel closes.
     pub(super) async fn prompt_submit_worker(
         mut orders: mpsc::UnboundedReceiver<PromptOrder>,
         notes: mpsc::UnboundedSender<PromptSubmitNote>,
@@ -905,40 +775,24 @@ impl SessionUi {
         }
     }
 
-    /// Whether user work is in flight for the busy guards (TS's
-    /// `isStreaming`-gated commands — `/update`, `/nightly`, `/reload`):
-    /// a live turn OR a prompt round trip still traveling. The inline
-    /// submit held the guards by blocking until the ack set
-    /// `turn_active`; the backgrounded submit makes that pre-ack window
-    /// visible, and a package update or reload landing inside it would
-    /// interrupt work the user just submitted, so the guards wait it out
-    /// (the same class of busy the old blocked loop enforced).
+    /// Whether user work is in flight for the busy guards (`/update`, `/nightly`, `/reload`): a
+    /// live turn OR a prompt round trip still traveling — a package update landing in the pre-ack
+    /// window would interrupt work the user just submitted.
     pub(super) fn work_in_flight(&self) -> bool {
         self.prompt_in_flight > 0
     }
 
     /// Fold a backgrounded prompt outcome back into the session (the run
-    /// loop's channel arm): the admission bookkeeping and the error
-    /// ladder are the inline await's, moved off the key path — only the
-    /// timing changed.
+    /// loop's channel arm).
     pub(crate) async fn apply_prompt_outcome(
         &mut self,
         note: PromptSubmitNote,
         view: &mut AgentView,
     ) -> Result<()> {
         self.prompt_in_flight = self.prompt_in_flight.saturating_sub(1);
-        // The submit's session is no longer the mounted one (a switch, a
-        // supersede rebind, or a `/new` replaced it — TS's staleness
-        // guard for a submit that outlived its session): the outcome
-        // never applies bookkeeping to the new session, and never
-        // restores a draft into another session's editor. A FAILED
-        // outlived submit still shows its error row and retains its
-        // rejected draft into the session it was typed for — TS
-        // `handleSubmit`'s catch (interactive-mode.ts:5743 showError runs
-        // regardless of the generation guard, and 5741 retains into the
-        // submit-time stash state); a succeeded one stays silent (the
-        // admitted turn belongs to the detached session, which the
-        // daemon keeps serving).
+        // The submit's session is no longer the mounted one: the outcome never applies bookkeeping
+        // to the new session, but a FAILED outlived submit still shows its error row and retains
+        // its rejected draft into the session it was typed for; a succeeded one stays silent.
         if note.active_session_id != self.active_session_id {
             // Borrow the settled result here: the ladder below owns it.
             if let Some(error) = note.result.as_ref().err() {
@@ -956,11 +810,8 @@ impl SessionUi {
         }
         match note.result {
             Ok(()) => {
-                // `agent input stage` (v2, #2117): the submission's observed
-                // dispatch outcome at the submit seam - queued behind a
-                // running turn, or dispatched straight into an admitted
-                // turn. The turn's own terminal state rides the session
-                // telemetry's run events.
+                // `agent input stage`: the observed dispatch outcome at the submit seam; the turn's
+                // terminal state rides the session telemetry's run events.
                 if let Some(telemetry) = self.telemetry.clone() {
                     let (stage, outcome) = if note.turn_was_active {
                         ("queued", "started")
@@ -975,30 +826,25 @@ impl SessionUi {
                             .await;
                     });
                 }
-                // A submission while a turn runs parks in the queue behind
-                // it: the queue strip shows the message until the session
-                // delivers it (adoption telemetry for the follow-up queue).
+                // A submission while a turn runs parks in the queue behind it.
                 if note.turn_was_active {
                     if let Some(telemetry) = self.telemetry.clone() {
                         let lane = match note.behavior {
                             SubmitBehavior::Steer => "steering",
                             SubmitBehavior::FollowUp => "follow_up",
                         };
-                        // The queued-input adoption event carries the session's
-                        // queue delivery mode (`tui input queued`'s
-                        // `steering_mode`): exposure under batched delivery is
-                        // the multi-steer batch feature's adoption signal.
+                        // The adoption event carries the queue delivery mode (`steering_mode`):
+                        // batched-delivery exposure is the multi-steer batch adoption signal.
                         let steering_mode = self.steering_mode.clone();
                         tokio::spawn(async move {
                             telemetry.queued_input(lane, steering_mode).await;
                         });
                     }
                 }
-                // The daemon can stream the complete turn before the ACK
-                // reaches this channel. In that case turn_end already owns
-                // the idle state; re-arming it would strand WaitIdle until
-                // timeout. The per-submit end watermark also keeps a prior
-                // turn's end from settling a queued later prompt.
+                // The daemon can stream the complete turn before the ACK reaches this channel:
+                // turn_end already owns the idle state, and re-arming it would strand WaitIdle
+                // until timeout. The per-submit end watermark also keeps a prior turn's end from
+                // settling a queued later prompt.
                 if self.turn_ends_seen < note.expected_turn_end {
                     self.turn_active = true;
                     self.start_loader(view);
@@ -1024,9 +870,8 @@ impl SessionUi {
                 Ok(())
             }
             Err(error) => {
-                // `agent input stage` (v2): the submission was rejected at
-                // the dispatch boundary (the stage's `rejected` stage,
-                // outcome `error`).
+                // `agent input stage`: the submission was rejected at the dispatch
+                // boundary.
                 if let Some(telemetry) = self.telemetry.clone() {
                     let input_id = note.input_id.clone();
                     let duration_ms = note.submitted_at.elapsed().as_millis() as u64;
@@ -1037,14 +882,9 @@ impl SessionUi {
                     });
                 }
                 let rendered = format!("{error:#}");
-                // One rebind attempt per submit (never a loop): a prompt
-                // refused with the unknown-session error - the held active
-                // id was superseded by a worker replacement and the
-                // supervisor could not rebind it either - re-attaches by
-                // the DURABLE session id and replays the prompt ONCE.
-                // The failed attempt never reached a worker (the
-                // unknown-session refusal precedes any routing), so the
-                // replay is exactly-once by construction.
+                // One rebind attempt per submit: a prompt refused with the unknown-session error
+                // re-attaches by the DURABLE session id and replays ONCE; the failed attempt never
+                // reached a worker, so the replay is exactly-once by construction.
                 if note.rebind_available
                     && rendered.contains("Unknown active session")
                     && !self.session_id.is_empty()
@@ -1055,10 +895,7 @@ impl SessionUi {
                         .await
                         .is_ok()
                     {
-                        // The fresh attach snapshot owns the transcript;
-                        // the replayed prompt renders on top of it. The
-                        // replay keeps the submit's generation and spends
-                        // the rebind budget.
+                        // The replay keeps the submit's generation and spends the rebind budget.
                         self.rebuild_view(view, &RebuildKind::Rebind);
                         self.order_prompt_request(
                             note.text.clone(),
@@ -1073,12 +910,9 @@ impl SessionUi {
                     }
                 }
                 if crate::daemon_client::is_daemon_timeout(&error) {
-                    // Sent but unanswered: the submission was on the
-                    // wire, so the turn may already be admitted and
-                    // running — restoring the draft would invite a
-                    // duplicate submission. The error row names the
-                    // uncertainty; the transcript's live turn (or the
-                    // next daemon answer) settles the truth.
+                    // Sent but unanswered: the turn may already be admitted — restoring the
+                    // draft would invite a duplicate submission, so the error row names the
+                    // uncertainty.
                     self.error_row(
                         &format!(
                             "{rendered} — the request was sent; the turn may still be in flight"
@@ -1087,12 +921,8 @@ impl SessionUi {
                     );
                     return Ok(());
                 }
-                // A DIRECT-link transport failure happened after the
-                // frame was queued (`request_direct` sent it, the link
-                // died answering): the daemon may have admitted the
-                // turn — restoring the draft would invite a duplicate
-                // submission, so the draft stays consumed (the timeout
-                // arm's contract).
+                // A DIRECT-link transport failure after the frame was queued: the daemon may have
+                // admitted the turn, so the draft stays consumed like the timeout arm.
                 let direct_sent = crate::daemon_client::is_daemon_unreachable(&error)
                     && rendered
                         .to_lowercase()
@@ -1109,15 +939,9 @@ impl SessionUi {
                 if crate::daemon_client::is_daemon_rejection(&error)
                     || crate::daemon_client::is_daemon_unreachable(&error)
                 {
-                    // TS `onSubmit`'s prompt catch: the daemon answered
-                    // with a refusal for THIS request (admission, queue
-                    // capacity, a superseded session the rebind could
-                    // not recover), or the connection refused the send
-                    // (nothing reached the daemon) — the `⚠ Error` row
-                    // surfaces it and the draft returns to the editor
-                    // (the submission never landed); a failed prompt
-                    // never exits the UI (the reconnect driver owns
-                    // the connection's recovery).
+                    // The daemon answered with a refusal for THIS request, or the connection
+                    // refused the send (nothing reached the daemon): the error row surfaces it and
+                    // the draft returns to the editor; a failed prompt never exits the UI.
                     self.error_row(&rendered, view);
                     self.retain_rejected_draft(
                         &note.text,
@@ -1133,13 +957,9 @@ impl SessionUi {
         }
     }
 
-    /// Retain a refused prompt's draft (TS `onSubmit`'s catch ->
-    /// `retainSubmittedDraft`, interactive-mode.ts:5741): the empty editor
-    /// under the submit's own session and generation takes the text back
-    /// into the editor; anything else — the user typed a fresh draft, a
-    /// newer submit superseded this one, or the submit outlived its
-    /// session — keeps the fresh text by retaining the rejected prompt as
-    /// the session's restore-on-open head instead of clobbering it.
+    /// Retain a refused prompt's draft: the empty editor under the submit's own session and
+    /// generation takes the text back; anything else keeps the fresh text by retaining the rejected
+    /// prompt as the session's restore-on-open head.
     fn retain_rejected_draft(
         &mut self,
         text: &str,
@@ -1155,12 +975,8 @@ impl SessionUi {
             view.editor.set_text(text);
             return;
         }
-        // The retained-draft stash write: the rejected prompt becomes the
-        // session's restore-on-open head with its submit-time image
-        // snapshot (TS `snapshotPromptStash` at submit), so nothing the
-        // user typed is lost and the draft returns the next time the
-        // session opens with an empty editor (TS
-        // `restorePromptStashIfEditorEmpty`).
+        // The rejected prompt becomes the session's restore-on-open head with its submit-time image
+        // snapshot; the draft returns on the next empty-editor open.
         let stash = PromptStash {
             text: text.to_string(),
             paste_snapshot: None,

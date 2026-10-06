@@ -1,10 +1,7 @@
-//! The daemon's enforcement of the settings `allowedModels` allowlist: the
-//! worker-side model-resolution seams (`set_model`, the RLM child-model
-//! resolution, and the worker's startup model chain) refuse a model
-//! outside the allowlist loudly (a [`ModelAllowlistRefusal`] error
-//! surfaces to the caller; the daemon never falls back to a different
-//! model) and emit the adoption event (`model refused`, schema v1).
-
+//! The daemon's enforcement of the settings `allowedModels` allowlist:
+//! the worker-side model-resolution seams refuse a model outside the
+//! allowlist loudly (never a fallback) and emit the adoption event
+//! (`model refused`).
 use anyhow::Result;
 use std::path::Path;
 
@@ -40,13 +37,10 @@ pub(crate) fn load(cwd: &Path, agent_dir: &Path) -> DaemonAllowlist {
     if let Some(patterns) = settings.get_allowed_models() {
         DaemonAllowlist::Allowed(patterns)
     } else {
-        // A PRESENT-but-malformed `allowedModels` (the lenient load
-        // drops wrong-typed known fields to unset) fails closed: the
-        // restriction was requested, so an unreadable shape is never an
-        // unrestricted gate. Explicit `null` stays unset (TS parity).
-        // A syntactically valid NON-OBJECT root (`[]`, `"bad"`) is a
-        // corrupted document too: the guard fails closed rather than
-        // reading a policy out of a shapeless document.
+        // A PRESENT-but-malformed `allowedModels` (the lenient load drops
+        // wrong-typed known fields to unset) fails closed: the restriction
+        // was requested, so an unreadable shape is never an unrestricted
+        // gate; explicit `null` stays unset (TS parity).
         let unreadable = settings.global_raw().and_then(|raw| {
             if !raw.is_object() {
                 return Some("the global settings document is not a JSON object".to_string());
@@ -67,9 +61,9 @@ pub(crate) fn load(cwd: &Path, agent_dir: &Path) -> DaemonAllowlist {
 }
 
 /// Enforce the allowlist on a resolved selector: `Ok(())` when allowed
-/// (and when no allowlist is configured), the loud typed refusal for an
-/// off-allowlist model, and a fail-closed error when the configured
-/// policy could not be read.
+/// (and when no allowlist is configured), the typed refusal for an
+/// off-allowlist model, and a fail-closed error when the policy is
+/// unreadable.
 pub(crate) fn assert_allowed(allowlist: &DaemonAllowlist, selector: &str) -> Result<()> {
     match allowlist {
         DaemonAllowlist::Unrestricted => Ok(()),
@@ -94,8 +88,7 @@ pub(crate) fn assert_allowed(allowlist: &DaemonAllowlist, selector: &str) -> Res
 /// The worker's refusal telemetry: one lazily-built client shared by the
 /// worker's enforcement seams, kept for the worker lifetime (the sinks
 /// batch asynchronously, so a dropped client loses the event). `None`
-/// telemetry when the create command opted the session out — the same
-/// gate the worker's session telemetry honors.
+/// telemetry when the create command opted the session out.
 pub struct ModelRefusalTelemetry {
     agent_dir: std::path::PathBuf,
     enabled: bool,
@@ -125,10 +118,8 @@ impl ModelRefusalTelemetry {
     ///
     /// # Panics
     ///
-    /// Panics when an internal mutex is poisoned (the noted-refusals or
-    /// the client-slot lock, after a holder panicked while holding it).
-    /// The client-bound expect right after a fresh bind is an internal
-    /// invariant and cannot fire.
+    /// Panics when an internal mutex is poisoned; the client-bound expect
+    /// is an internal invariant and cannot fire.
     pub fn note_refused(&self, surface: &str, selector: &str, cwd: &Path) {
         if !self.enabled {
             return;
@@ -139,9 +130,7 @@ impl ModelRefusalTelemetry {
         if !pa_core::session_engine::telemetry::telemetry_switch(&settings).enabled() {
             return;
         }
-        // Once per distinct (surface, selector): repeated resolutions of the
-        // same refused model stay silent (the user-facing errors still fire
-        // every time; the adoption signal needs one data point).
+        // Once per distinct (surface, selector).
         {
             let mut noted = self.noted.lock().expect("refusal noted lock");
             if !noted.insert((surface.to_string(), selector.to_string())) {
@@ -175,12 +164,10 @@ mod tests {
     fn load_reads_the_global_scope_only() {
         let dir = tempfile::tempdir().expect("tempdir");
         let agent_dir = dir.path().join("agent");
-        // No settings: unrestricted.
         assert!(matches!(
             load(dir.path(), &agent_dir),
             DaemonAllowlist::Unrestricted
         ));
-        // The global scope carries the allowlist.
         write_settings(&agent_dir, r#"{"allowedModels": ["prime-inference/*"]}"#);
         assert_eq!(
             load(dir.path(), &agent_dir),
@@ -210,7 +197,6 @@ mod tests {
             load(dir.path(), &agent_dir),
             DaemonAllowlist::Allowed(vec!["prime-inference/internal/*".to_string()])
         );
-        // A list that trims to empty behaves as unset.
         write_settings(&agent_dir, r#"{"allowedModels": [" ", ""]}"#);
         assert!(matches!(
             load(dir.path(), &agent_dir),
@@ -220,12 +206,9 @@ mod tests {
 
     #[test]
     fn assert_allowed_passes_without_an_allowlist_and_types_the_refusal() {
-        // No allowlist: everything passes (TS parity).
         assert_allowed(&DaemonAllowlist::Unrestricted, "anything/model").unwrap();
-        // Allowed by the allowlist.
         let allow = DaemonAllowlist::Allowed(vec!["prime-inference/*".to_string()]);
         assert_allowed(&allow, "prime-inference/internal/glm-5.3-fast").unwrap();
-        // Refused: the typed error downcasts for the telemetry seam.
         let error = assert_allowed(&allow, "zai/glm-5.3").expect_err("refused");
         let refusal = error
             .downcast_ref::<ModelAllowlistRefusal>()
@@ -233,9 +216,6 @@ mod tests {
         assert_eq!(refusal.selector, "zai/glm-5.3");
     }
 
-    /// A settings document that cannot be loaded fails CLOSED: the
-    /// configured policy is unknown, so the gate refuses every resolution
-    /// with a loud error instead of bypassing the allowlist.
     #[test]
     fn an_unreadable_settings_document_fails_closed() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -244,7 +224,6 @@ mod tests {
         std::fs::write(agent_dir.join("settings.json"), "{ not json").unwrap();
         let state = load(dir.path(), &agent_dir);
         assert!(matches!(state, DaemonAllowlist::Unreadable(_)));
-        // The gate refuses a would-be-allowed model while unreadable...
         let error = assert_allowed(&state, "prime-inference/mock-1").expect_err("fail closed");
         let message = error.to_string();
         assert!(message.contains("could not be read"), "{message}");
@@ -253,15 +232,11 @@ mod tests {
             error.downcast_ref::<ModelAllowlistRefusal>().is_none(),
             "fail-closed is not a pattern refusal"
         );
-        // ...and passes nothing as Unrestricted when the document is gone.
         std::fs::remove_file(agent_dir.join("settings.json")).unwrap();
         let state = load(dir.path(), &agent_dir);
         assert!(matches!(state, DaemonAllowlist::Unrestricted));
     }
 
-    /// A PRESENT-but-malformed `allowedModels` (a wrong-typed known field,
-    /// which the lenient settings load drops to unset) fails closed instead
-    /// of silently unrestricted; an explicit `null` stays unset (TS parity).
     #[test]
     fn a_malformed_allowed_models_value_fails_closed() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -285,8 +260,6 @@ mod tests {
             load(dir.path(), &agent_dir),
             DaemonAllowlist::Unreadable(_)
         ));
-        // Explicit null behaves as unset, and a valid empty list stays
-        // unrestricted (the documented trim rule).
         std::fs::write(
             agent_dir.join("settings.json"),
             r#"{"allowedModels": null}"#,
@@ -303,10 +276,8 @@ mod tests {
         ));
     }
 
-    /// A syntactically valid NON-OBJECT global document (`[]`, `"bad"`)
-    /// is a corrupted settings document, not an absent key: the guard
-    /// fails closed (a shapeless document must never read as an
-    /// unrestricted policy).
+    /// A NON-OBJECT global document (`[]`, `"bad"`) is a corrupted
+    /// document, not an absent key: the guard fails closed.
     #[test]
     fn a_non_object_global_document_fails_closed() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -319,8 +290,6 @@ mod tests {
                 matches!(state, DaemonAllowlist::Unreadable(_)),
                 "{corrupted} must fail closed, got {state:?}"
             );
-            // The gate refuses every resolution while the document is
-            // shapeless — never the typed pattern refusal.
             let error = assert_allowed(&state, "prime-inference/mock-1").expect_err("closed");
             assert!(
                 error.downcast_ref::<ModelAllowlistRefusal>().is_none(),
@@ -337,14 +306,12 @@ mod tests {
     async fn refusal_telemetry_honors_both_opt_outs() {
         let _telemetry = crate::agent_engine::tests::telemetry_opt_in();
         let dir = tempfile::tempdir().expect("tempdir");
-        // The create-command opt-out: no client ever.
         let disabled = ModelRefusalTelemetry::new(dir.path().to_path_buf(), true);
         disabled.note_refused("set_model", "zai/glm-5.3", dir.path());
         assert!(
             disabled.client.lock().unwrap().is_none(),
             "no client when the create command opted out"
         );
-        // The settings opt-out (`telemetry.enabled: false`): no client.
         let agent_dir = dir.path().join("agent");
         let settings_gated = ModelRefusalTelemetry::new(agent_dir.clone(), false);
         write_settings(&agent_dir, r#"{"telemetry": {"enabled": false}}"#);
@@ -353,7 +320,6 @@ mod tests {
             settings_gated.client.lock().unwrap().is_none(),
             "no client when settings disable telemetry"
         );
-        // No settings: the client builds on the first note.
         let enabled = ModelRefusalTelemetry::new(dir.path().to_path_buf(), false);
         enabled.note_refused("set_model", "zai/glm-5.3", dir.path());
         assert!(
@@ -362,9 +328,6 @@ mod tests {
         );
     }
 
-    /// One `model refused` per distinct (surface, selector): a polling
-    /// getter re-resolving the same refused model stays silent after the
-    /// first event.
     #[tokio::test]
     #[cfg_attr(
         not(debug_assertions),
@@ -380,10 +343,8 @@ mod tests {
             1,
             "first refusal noted"
         );
-        // The same pair again: no new note, and no client churn.
         telemetry.note_refused("session_start", "zai/glm-5.3", dir.path());
         assert_eq!(telemetry.noted.lock().unwrap().len(), 1);
-        // A different selector (or surface) is a new data point.
         telemetry.note_refused("session_start", "zai/glm-5.3-flash", dir.path());
         telemetry.note_refused("spawn", "zai/glm-5.3", dir.path());
         assert_eq!(telemetry.noted.lock().unwrap().len(), 3);
@@ -406,7 +367,6 @@ mod tests {
             first,
             "client bound to the live cwd"
         );
-        // A moved session rebinds to the new project scope.
         let second = dir.path().join("project-b");
         std::fs::create_dir_all(&second).unwrap();
         telemetry.note_refused("spawn", "zai/glm-5.3", &second);

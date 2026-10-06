@@ -1,33 +1,16 @@
-//! End-to-end verifier for client-command dispatch during a live turn:
-//! the daemon-response timeout class from the 2026-09-22 dogfood
-//! (`/system-prompt` timing out at the client's 10s cap) — a client
-//! command (the TUI's `/system-prompt`, `/context`, `/usage`, `/session`
-//! family) must answer fast while a turn streams, not wait for the turn
-//! to settle (the TS bar: the TS daemon-mode `get_system_prompt` arm is
-//! a synchronous `session.systemPrompt` read on the same event loop that
-//! streams the turn; the provider awaits yield, so the read stays ms).
-//!
-//! The mock provider streams one chunk, then holds the turn open for
-//! `TURN_HOLD_MS` before the finish chunk: every measurement below runs
-//! while the turn is provably mid-flight (an assistant `message_start`
-//! streamed but the run not settled).
-// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
-// the full rationale).
-// Stack-resident futures by design on the daemon's hot paths; boxing the
-// call sites for a lint tick is a perf regression with zero correctness gain.
+//! Client-command dispatch during a live turn (the 2026-09-22 dogfood: `/system-prompt`
+//! timing out at the 10s client cap): a client command must answer fast while a turn
+//! streams (TS bar: a synchronous read on the event loop); the mock holds the turn
+//! open, so every measurement runs provably mid-flight.
 #![allow(clippy::large_futures)]
-// 64-bit-only targets; the narrowing casts sit at OS boundaries
-// (pid/fd/time/size) where the values are bounded by the kernel - the
-// dead-guard expect()s would add panic paths where silent wrap was
-// deliberate.
+// 64-bit-only targets; the narrowing casts sit at bounded OS boundaries.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// The fn-length threshold is a style gate, not correctness; the structure
-// campaign owns the god-fn splits as a follow-up.
+// Fn length is a style gate, not correctness.
 #![allow(clippy::too_many_lines)]
 // API-shape opinions, not defects; the surfaces are deliberate.
 #![allow(
@@ -48,13 +31,11 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-/// How long the mock provider holds the turn open between its first
-/// streamed chunk and the finish chunk. Must exceed the TUI's 10s
-/// `UI_REQUEST_TIMEOUT_MS` so a serialized dispatch reproduces the exact
-/// dogfood failure (a response that cannot arrive inside the client cap).
+/// How long the mock holds the turn between its first chunk and the finish chunk:
+/// must exceed the TUI's 10s `UI_REQUEST_TIMEOUT_MS` so a serialized dispatch
+/// reproduces the dogfood failure.
 const TURN_HOLD_MS: u64 = 12_000;
-/// The bar for "fast mid-turn" (the TS reference answers in single-digit
-/// ms; this leaves generous CI margin for a cold first read).
+/// The bar for "fast mid-turn" (the TS reference answers in single-digit ms; generous CI margin).
 const FAST_RESPONSE_MS: u64 = 2_000;
 
 struct Supervisor {
@@ -70,9 +51,8 @@ impl Drop for Supervisor {
     }
 }
 
-/// A mock OpenAI-completions provider that streams one content chunk,
-/// sleeps `TURN_HOLD_MS`, then finishes: the client session is provably
-/// mid-turn for the whole sleep window.
+/// A mock that streams one chunk, sleeps `TURN_HOLD_MS`, then finishes: the
+/// session is provably mid-turn for the whole sleep window.
 struct SlowMock {
     requests: Arc<Mutex<usize>>,
     port: u16,
@@ -144,8 +124,8 @@ fn serve(mut stream: TcpStream, requests: &Arc<Mutex<usize>>) -> std::io::Result
         let mut requests = requests.lock().expect("mock lock");
         *requests += 1;
     }
-    // First chunk goes out immediately so the assistant `message_start`
-    // streams; the sleep holds the turn open mid-stream.
+    // The first chunk goes out immediately so the `message_start` streams; the sleep
+    // holds the turn open mid-stream.
     let mut payload = String::new();
     write!(
         payload,
@@ -199,8 +179,8 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path) -> Supervisor {
     panic!("supervisor socket never appeared");
 }
 
-/// One client connection: request/response plus every session event that
-/// streamed while the response was outstanding.
+/// One client connection: request/response plus the session events that stream while a response is
+/// outstanding.
 struct Client {
     reader: BufReader<std::os::unix::net::UnixStream>,
     writer: std::os::unix::net::UnixStream,
@@ -257,9 +237,8 @@ impl Client {
             .unwrap_or_else(|error| panic!("write command {id}: {error}"));
     }
 
-    /// Send a command and measure the time until its response arrives;
-    /// session events observed along the way are collected like
-    /// [`Self::request`].
+    /// Send a command and measure the time until its response; session events
+    /// observed on the way are collected like [`Self::request`].
     fn timed_request(&mut self, id: &str, command: &Value) -> (Value, Duration) {
         let started = Instant::now();
         self.send_command(id, command);
@@ -285,9 +264,9 @@ impl Client {
         }
     }
 
-    /// Block until the live run settles (the `agent_end` frame), long
-    /// after the mid-turn measurements: the mock's hold window outlasts
-    /// them, so a quiet-drain would stop while the turn still streams.
+    /// Block until the run settles (`agent_end`), long after the mid-turn measurements:
+    /// the mock's hold window outlasts them, so a quiet-drain would stop while the
+    /// turn still streams.
     fn wait_for_settled(&mut self) {
         let deadline = Instant::now() + Duration::from_mins(1);
         loop {
@@ -302,8 +281,8 @@ impl Client {
         }
     }
 
-    /// Block until the stream shows the given event shape (a session event
-    /// whose `message.role` matches), collecting everything on the way.
+    /// Block until the stream shows the given event shape (a session event whose
+    /// `message.role` matches), collecting everything on the way.
     fn wait_for_event(&mut self, role: &str) {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
@@ -320,7 +299,6 @@ impl Client {
     }
 }
 
-/// One measured command: name, wire command, and the response time.
 struct Measurement {
     command: String,
     elapsed: Duration,
@@ -335,10 +313,7 @@ fn info_command(name: &str, session_id: &str) -> Value {
 }
 
 /// The client command family the TUI serves through its 10s
-/// `UI_REQUEST_TIMEOUT_MS` bound: `/system-prompt`, `/session`,
-/// `/context` (+ its `/usage` alias), plus the same-route getters the TUI
-/// refreshes (`get_session_context`, `get_tool_definition`,
-/// `get_resource_snapshot`).
+/// `UI_REQUEST_TIMEOUT_MS` bound, plus the same-route getters it refreshes.
 const MATRIX: &[(&str, &str)] = &[
     ("get_session_stats", "/session"),
     ("get_context_tree", "/context, /usage"),
@@ -442,7 +417,6 @@ fn client_commands_answer_fast_while_a_turn_streams() {
     let attached = client.request("a1");
     assert_eq!(attached["success"], true, "attach failed: {attached}");
 
-    // Phase 1: idle measurements (the baseline every command must beat).
     let idle = run_matrix(&mut client, &session_id, "idle");
     print_table("idle", &idle);
     for measurement in &idle {
@@ -455,8 +429,8 @@ fn client_commands_answer_fast_while_a_turn_streams() {
         );
     }
 
-    // Phase 2: a turn holds open mid-stream, then the same matrix runs
-    // while the assistant message is streaming (the dogfood window).
+    // Phase 2: a turn holds open mid-stream, then the same matrix runs while the
+    // assistant message is streaming (the dogfood window).
     client.send_command(
         "p1",
         &json!({ "type": "prompt", "activeSessionId": session_id, "message": "hello" }),
@@ -482,7 +456,6 @@ fn client_commands_answer_fast_while_a_turn_streams() {
         );
     }
 
-    // The turn settles normally after the hold window.
     client.wait_for_settled();
     let types = client
         .events

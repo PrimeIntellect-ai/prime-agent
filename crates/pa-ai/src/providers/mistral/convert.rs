@@ -1,6 +1,5 @@
 //! Mistral Conversations conversion: tools, chat messages, tool-result text,
 //! chat payload assembly, and tool-call-id derivation/normalization.
-//! Section of the port of `packages/ai/src/providers/mistral.ts`.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -14,8 +13,7 @@ use crate::utils_inner::sanitize_unicode::sanitize_surrogates;
 
 const MISTRAL_TOOL_CALL_ID_LENGTH: usize = 9;
 
-/// Stateful tool-call-id normalizer port
-/// (`createMistralToolCallIdNormalizer` in the TS reference).
+/// Stateful tool-call-id normalizer (TS `createMistralToolCallIdNormalizer`).
 #[derive(Default)]
 pub(crate) struct MistralToolCallIdNormalizer {
     id_map: RefCell<HashMap<String, String>>,
@@ -45,7 +43,6 @@ impl MistralToolCallIdNormalizer {
     }
 }
 
-/// Port of `deriveMistralToolCallId`.
 pub(crate) fn derive_mistral_tool_call_id(id: &str, attempt: u32) -> String {
     let normalized: String = id.chars().filter(char::is_ascii_alphanumeric).collect();
     if attempt == 0 && normalized.len() == MISTRAL_TOOL_CALL_ID_LENGTH {
@@ -115,7 +112,6 @@ pub(crate) fn build_chat_payload(
     Value::Object(payload)
 }
 
-/// Port of `toFunctionTools`.
 fn to_function_tools(tools: &[Tool]) -> Vec<Value> {
     tools
         .iter()
@@ -133,7 +129,7 @@ fn to_function_tools(tools: &[Tool]) -> Vec<Value> {
         .collect()
 }
 
-/// Port of `stripSymbolKeys`: rebuild the JSON tree as plain objects.
+/// Rebuild the JSON tree as plain objects (TS `stripSymbolKeys`).
 fn strip_symbol_keys(value: &Value) -> Value {
     match value {
         Value::Array(items) => Value::Array(items.iter().map(strip_symbol_keys).collect()),
@@ -148,8 +144,7 @@ fn strip_symbol_keys(value: &Value) -> Value {
     }
 }
 
-/// Port of `toChatMessages`.
-// Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+// Long by design: mirrors the provider's stream shape.
 #[allow(clippy::too_many_lines)]
 fn to_chat_messages(messages: &[Message], supports_images: bool) -> Vec<Value> {
     let mut result: Vec<Value> = Vec::new();
@@ -308,7 +303,6 @@ fn to_chat_messages(messages: &[Message], supports_images: bool) -> Vec<Value> {
     result
 }
 
-/// Port of `buildToolResultText`.
 fn build_tool_result_text(
     text: &str,
     has_images: bool,

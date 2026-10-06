@@ -1,6 +1,4 @@
-//! Converse Stream event handling: content-block slots, deltas, metadata, and
-//! exception mapping. Section of the port of
-//! `packages/ai/src/providers/amazon-bedrock.ts`.
+//! Converse Stream event handling: content-block slots, deltas, metadata, and exception mapping.
 
 use std::collections::HashMap;
 
@@ -41,8 +39,8 @@ impl BedrockStreamState {
         }
     }
 
-    /// Port of the TS catch settle: finalize tool-call blocks whose parsed
-    /// preview may lag the accumulated text under the growth throttle.
+    /// Port of the TS catch settle: finalize tool-call blocks whose parsed preview may lag the
+    /// accumulated text under the growth throttle.
     pub(crate) fn settle_partial_tool_calls(&mut self, output: &mut AssistantMessage) {
         for slot in self.slots.values_mut() {
             let BlockSlot::ToolUse {
@@ -73,9 +71,9 @@ pub(crate) fn handle_event(
     let payload = String::from_utf8_lossy(&message.payload);
     let parsed: Value = serde_json::from_str(payload.trim()).unwrap_or(Value::Null);
 
-    // Exception events carry :exception-type and a JSON payload with message.
-    // TS rethrows the modeled SDK exception, so `formatBedrockError` composes
-    // `{prefix}: {message}` and the diagnostic records the exception name.
+    // Exception events carry :exception-type and a JSON payload with message. TS rethrows the
+    // modeled SDK exception, so `formatBedrockError` composes `{prefix}: {message}` and the
+    // diagnostic records the exception name.
     if let Some(exception_type) = &message.exception_type {
         let detail = parsed
             .get("message")
@@ -84,8 +82,8 @@ pub(crate) fn handle_event(
         return Err(ProviderError::Http(
             crate::utils_inner::stream_failure::ProviderHttpError {
                 message: bedrock_exception_message(exception_type, detail),
-                // AWS SDK stream exceptions carry no HTTP status for the
-                // classifier; the exception name is the classification key.
+                // AWS SDK stream exceptions carry no HTTP status for the classifier; the exception
+                // name is the classification key.
                 status: None,
                 body: None,
                 headers: HashMap::default(),
@@ -188,7 +186,7 @@ fn handle_content_block_start(
     }
 }
 
-// Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+// Long by design: mirrors the provider's stream shape.
 #[allow(clippy::too_many_lines)]
 fn handle_content_block_delta(
     event: &Value,
@@ -213,8 +211,7 @@ fn handle_content_block_delta(
     let reasoning = delta.and_then(|delta| delta.get("reasoningContent"));
 
     if let Some(text) = text {
-        // If no text block exists yet, create one: contentBlockStart is not
-        // sent for text blocks.
+        // If no text block exists yet, create one: contentBlockStart is not sent for text blocks.
         let slot = if let Some(slot) = state.slots.get(&content_block_index) {
             slot
         } else {
@@ -407,10 +404,9 @@ fn handle_metadata(
             .get("cacheWriteInputTokens")
             .and_then(Value::as_u64)
             .unwrap_or(0);
-        // TS `totalTokens || input + output`: an explicitly reported zero is
-        // falsy, so only a positive reported total is kept. The sum
-        // saturates — TS doubles never wrap, and a Rust u64 must not
-        // panic (debug) or wrap to a wrong total (release).
+        // TS `totalTokens || input + output`: an explicitly reported zero is falsy, so only a
+        // positive reported total is kept. The sum saturates — TS doubles never wrap, and a Rust
+        // u64 must not panic (debug) or wrap to a wrong total (release).
         output.usage.total_tokens = usage
             .get("totalTokens")
             .and_then(Value::as_u64)
@@ -426,10 +422,8 @@ mod tests {
     use crate::types::{zero_model_cost, ModelInput, Usage};
     use serde_json::json;
 
-    /// TS `amazon-bedrock.ts` `handleMetadata` assigns
-    /// `usage.totalTokens = event.usage.totalTokens || input + output`, so an
-    /// explicitly reported zero total is falsy and falls back to the
-    /// input/output sum; a positive reported total is kept verbatim.
+    /// TS `handleMetadata` assigns `usage.totalTokens = event.usage.totalTokens || input + output`:
+    /// an explicitly reported zero total is falsy and falls back to the input/output sum.
     #[test]
     fn metadata_usage_total_tokens_explicit_zero_falls_back_to_sum() {
         let model = Model {

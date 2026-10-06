@@ -9,10 +9,6 @@ use super::{
     READY_TIMEOUT_MS, REPL_PROTOCOL_VERSION,
 };
 
-// ---------------------------------------------------------------------------
-// Startup and child wiring
-// ---------------------------------------------------------------------------
-
 impl Inner {
     /// True when a teardown (or newer start) superseded the start that
     /// captured `generation`.
@@ -49,9 +45,8 @@ impl Inner {
         self.append_kernel_stderr_text(&line);
     }
 
-    /// Open (and rotate when oversized) the kernel stderr log. The write budget
-    /// is the file's remaining capacity, so current and `.old` each stay near
-    /// the ceiling.
+    /// Open (and rotate when oversized) the kernel stderr log. The write budget is the file's
+    /// remaining capacity.
     fn open_stderr_log(&self) -> Option<Arc<Mutex<StderrLog>>> {
         let path = self.options.stderr_log_path.as_ref()?;
         match self.open_stderr_log_at(path) {
@@ -195,10 +190,9 @@ impl Inner {
         let child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
-                // Fail a pending start promptly instead of riding out the
-                // ready timeout. The interpreter itself failed to launch, so
-                // the memoized runtime-ready result is stale: drop it so a
-                // startup retry re-probes (and rebuilds when the probe fails).
+                // Fail a pending start promptly instead of riding out the ready timeout. The
+                // interpreter itself failed to launch, so the memoized runtime-ready result
+                // is stale.
                 crate::kernel::bootstrap::invalidate_runtime_probe_cache();
                 self.append_diagnostic(&format!("spawn error: {error}"));
                 {
@@ -233,9 +227,8 @@ impl Inner {
                     // Never tear down a newer start's kernel.
                     return Err(error);
                 }
-                // The child died or never reached ready, so the memoized
-                // runtime-ready result is stale: drop it and let a startup
-                // retry re-probe (and rebuild the venv when the probe fails).
+                // The child died or never reached ready, so the memoized runtime-ready
+                // result is stale: drop it and let a startup retry re-probe.
                 crate::kernel::bootstrap::invalidate_runtime_probe_cache();
                 let can_retry_startup = lock(&self.guarded).state != KernelState::Shutdown;
                 // Only the call that performed the cleanup may resurrect to
@@ -267,10 +260,8 @@ impl Inner {
         {
             let mut g = lock(&self.guarded);
             g.state = KernelState::Running;
-            // The freshness memo describes the namespace of the kernel
-            // that committed it: a freshly started kernel has no committed
-            // description yet (its restore/bootstrap settles clear it too,
-            // see resolve_execution — this is the boundary itself).
+            // The freshness memo describes the namespace of the kernel that committed it: a freshly
+            // started kernel has no committed description yet.
             g.capture_freshness = None;
             g.freshness_epoch += 1;
         }
@@ -297,19 +288,14 @@ impl Inner {
         });
 
         if let Some(stdout) = stdout {
-            // Weak, upgraded per event: the readers stay blocked on the
-            // child's pipes for the kernel's whole life, so a strong handle
-            // here would outlive every manager clone and the process would
-            // survive the drop that should have torn it down (#232 hygiene:
-            // a dropped session leaked its live kernel until the runtime's
-            // owner watchdog reaped it, if ever).
+            // Weak,: the readers stay blocked on the child's pipes, so a strong handle would
+            // outlive every manager clone (#232: a dropped session leaked its live kernel).
             let inner = Arc::downgrade(self);
             let stdin_for_error = stdin;
             tokio::spawn(async move {
                 let mut reader = BufReader::new(stdout);
-                // A poisoned child's residue must not grow the buffer again
-                // before the protocol repair kills it: keep draining the pipe
-                // (so a wedged child cannot block on backpressure) and discard.
+                // A poisoned child's residue must not grow the buffer again before the protocol
+                // repair kills it: keep draining the pipe and discard.
                 let mut poisoned = false;
                 let mut buffered: Vec<u8> = Vec::new();
                 let mut chunk = vec![0u8; 64 * 1024];
@@ -320,10 +306,8 @@ impl Inner {
                             if poisoned {
                                 continue;
                             }
-                            // `buffered` keeps only the newline-free tail of
-                            // earlier reads, so only the new bytes can hold a
-                            // newline: a multi-MiB line arriving in 64 KiB reads
-                            // is scanned once, not once per read.
+                            // `buffered` keeps only the newline-free tail of earlier reads, so only
+                            // the new bytes can hold a newline.
                             let mut scan_from = buffered.len();
                             buffered.extend_from_slice(&chunk[..n]);
                             if buffered.len() > MAX_PROTOCOL_LINE_BYTES {
@@ -340,10 +324,8 @@ impl Inner {
                                 );
                                 continue;
                             }
-                            // Consume by offset and drain the prefix once per
-                            // read: per-frame drains would shift the tail each
-                            // iteration (quadratic copying for many short
-                            // frames in one chunk).
+                            // Consume by offset and drain the prefix once per read: per-frame
+                            // drains would shift the tail each iteration (quadratic copying).
                             let mut consumed = 0;
                             while let Some(rel) =
                                 buffered[scan_from..].iter().position(|&b| b == b'\n')
@@ -437,11 +419,8 @@ impl Inner {
             });
         }
 
-        // Weak like the readers: the watcher stays blocked on the child's
-        // exit for the kernel's whole life, and owning the manager strongly
-        // would keep the kernel alive past the last manager's drop (the very
-        // retention the readers no longer hold). The child handle stays here
-        // so the exit is still reaped after a teardown kill.
+        // Weak like the readers: the watcher stays blocked on the child's exit for the kernel's
+        // whole life.
         let inner = Arc::downgrade(self);
         tokio::spawn(async move {
             let exit = match child.wait().await {
@@ -480,10 +459,10 @@ impl Inner {
                 ));
             }
             live_kernels::remove(&inner);
-            // This exit is part of an in-flight graceful shutdown(): that call
-            // owns the teardown and runs cleanup itself.
-            // Scoped reads: locking the same std Mutex twice in one
-            // expression self-deadlocks (non-reentrant).
+            // This exit is part of an in-flight graceful shutdown(): that call owns
+            // the teardown and runs cleanup itself.
+            // Scoped reads: locking the same std Mutex twice in one expression
+            // self-deadlocks (non-reentrant).
             let graceful_in_flight = {
                 let g = lock(&inner.guarded);
                 g.graceful_shutdown_generation == Some(g.start_generation)

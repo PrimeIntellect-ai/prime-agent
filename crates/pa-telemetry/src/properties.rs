@@ -1,20 +1,16 @@
 //! Property maps for telemetry events.
 //!
-//! Contract: telemetry properties are JSON primitives only (string, number,
-//! boolean, null). This is the privacy boundary - non-primitive values (objects,
-//! arrays, content blocks, tool payloads) are rejected at insertion with a
-//! warning instead of being emitted.
+//! Contract: JSON primitives only - the privacy boundary; non-primitive
+//! values are rejected at insertion with a warning instead of being emitted.
 
 use serde::Serialize;
 use serde_json::{Map, Value};
 
-/// A primitive-only property map. Enforces the JSON-primitives contract at
-/// every insertion point.
+/// A primitive-only property map.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Properties(Map<String, Value>);
 
 impl Properties {
-    /// An empty map.
     #[must_use]
     pub fn new() -> Self {
         Self(Map::new())
@@ -30,9 +26,9 @@ impl Properties {
         self.0.insert(key.to_string(), value);
     }
 
-    /// Insert an already-validated value (the catalog sanitize path for the
-    /// documented primitive-map exception). Not public: the public
-    /// insertion surface stays primitive-only.
+    /// Insert an already-validated value (catalog sanitize path, the
+    /// primitive-map exception). Not public: the public surface stays
+    /// primitive-only.
     pub(crate) fn insert_validated(&mut self, key: &str, value: Value) {
         self.0.insert(key.to_string(), value);
     }
@@ -44,8 +40,8 @@ impl Properties {
         }
     }
 
-    /// Insert a nested primitive map (all values already primitive by
-    /// construction). Used for aggregate fields like `phase_timings`.
+    /// Insert a nested primitive map (values already primitive by
+    /// construction), e.g. `phase_timings`.
     pub fn set_map(&mut self, key: &str, value: &Properties) {
         self.0
             .insert(key.to_string(), Value::Object(value.0.clone()));
@@ -57,7 +53,6 @@ impl Properties {
         self.0.get(key)
     }
 
-    /// Number of properties.
     #[must_use]
     pub fn len(&self) -> usize {
         self.0.len()

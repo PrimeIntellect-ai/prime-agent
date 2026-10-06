@@ -22,14 +22,9 @@ use pa_core::mcp::{
 use pa_tui::auth_panel::{PastePromptTone, PasteStyle};
 use pa_tui::client_auth::{AuthFuture, ClientAuthCommands};
 
-/// The CLI's live MCP manager: the shared auth store, settings-declared
-/// user servers (`mcpServers`), and local service-catalog sources
-/// (`mcpCatalogSources`) all re-read per resolve — the same closures TS
-/// `createAgentSessionServices` wires into every CLI session. No
-/// interactive login: hosts with a login UI call `set_begin_login`
-/// before the session registers host handlers; headless surfaces keep
-/// the host request absent (TS registers `mcp.begin_login` only when a
-/// login is wired).
+/// The CLI's live MCP manager: the shared auth store, `mcpServers`, and
+/// `mcpCatalogSources` all re-read per resolve. No interactive login: hosts with
+/// a login UI call `set_begin_login` before the session registers host handlers.
 pub(crate) fn cli_mcp_manager(cwd: &std::path::Path, agent_dir: &std::path::Path) -> McpManager {
     let user_cwd = cwd.to_path_buf();
     let user_agent_dir = agent_dir.to_path_buf();
@@ -73,7 +68,6 @@ pub(crate) fn cli_mcp_manager(cwd: &std::path::Path, agent_dir: &std::path::Path
     })
 }
 
-/// `/mcp login` / `/mcp logout` against one daemon's shared directories.
 #[derive(Clone)]
 pub struct TerminalMcpAuth {
     cwd: PathBuf,
@@ -88,15 +82,13 @@ impl TerminalMcpAuth {
         }
     }
 
-    /// The manager that resolves integrations the same way the session
-    /// engine's gating does (settings `mcpServers` + the builtin catalog):
-    /// the crate's one live-manager construction.
+    /// The manager that resolves integrations the same way the session engine's
+    /// gating does (settings `mcpServers` + the builtin catalog).
     fn manager(&self) -> McpManager {
         cli_mcp_manager(&self.cwd, &self.agent_dir)
     }
 
-    /// Run one login against an injectable UI/transport (the product uses
-    /// the inline auth panel and the reqwest transport; tests script the
+    /// Run one login against an injectable UI/transport (tests script the
     /// flow).
     async fn login_with(
         &self,
@@ -104,20 +96,16 @@ impl TerminalMcpAuth {
         ui: &dyn McpLoginUi,
         http: &dyn OAuthHttp,
     ) -> Result<String> {
-        // Unknown and non-OAuth servers fail with the TS wording
-        // (`runMcpLogin`'s provider lookup).
+        // Unknown and non-OAuth servers fail with the TS wording.
         let context = self.manager().login_context(server)?;
         context.run(ui, http).await?;
-        // TS: `Connected <name>.` after the post-login reload; the skill
-        // gating here resolves when the next session builds.
+        // `Connected <name>.` (the skill gating resolves at the next
+        // session build).
         Ok(format!(
             "Connected {server}. Its skill activates in new sessions (/new)."
         ))
     }
 
-    /// The login against the inline auth panel (TS `LoginDialogComponent`'s
-    /// surface): progress lines, the authorization URL block, and the
-    /// paste fallbacks render in the TUI; nothing touches the terminal.
     async fn login_inner(
         &self,
         server: &str,
@@ -127,10 +115,8 @@ impl TerminalMcpAuth {
         self.login_with(server, &ui, &ReqwestOAuthHttp::new()).await
     }
 
-    /// The inline paste panel's flow (TS `McpTokenPastePanelComponent`):
-    /// prompt for the ONE credential a pasteable service collects (the
-    /// masked field never renders the secret), store it bound to the
-    /// endpoint, verify.
+    /// The inline paste panel's flow: prompt for the ONE credential a pasteable
+    /// service collects (the masked field never renders the secret).
     async fn paste_inner(
         &self,
         server: &str,
@@ -213,8 +199,7 @@ impl TerminalMcpAuth {
     fn logout_inner(&self, server: &str) -> Result<String> {
         let provider = format!("mcp:{server}");
         let mut auth = AuthStorage::create(&self.agent_dir);
-        // TS: `isAuthed` reads the store; a missing credential is a no-op
-        // notice, not an error.
+        // A missing credential is a no-op notice, not an error.
         if auth.get_all().get(&provider).is_none() {
             return Ok(format!("{server} is not connected."));
         }
@@ -250,19 +235,17 @@ impl ClientAuthCommands for TerminalMcpAuth {
     }
 }
 
-/// The login's inline-panel surface (TS the OAuth login dialog renders in
-/// the TUI): progress lines, the authorization URL block (the browser
-/// launch rides the request; the panel only renders), and the paste
-/// fallbacks drive the auth panel through the request channel; the flow
-/// never touches the terminal.
+/// The login's inline-panel surface: progress lines, the authorization URL block,
+/// and the paste fallbacks drive the auth panel through the request channel; never
+/// touches the terminal.
 struct PanelMcpLoginUi {
     panel: pa_tui::auth_panel::AuthPanelHandle,
 }
 
 impl McpLoginUi for PanelMcpLoginUi {
     fn on_progress(&self, message: &str) {
-        // TS `showLoginDialog`'s `onProgress` arm is unguarded chatter —
-        // a direct `dialog.showProgress` line: renders on every surface.
+        // Unguarded chatter — a direct progress line: renders on every
+        // surface.
         self.panel.progress_line(message);
     }
 
@@ -309,8 +292,8 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    /// A scripted transport (exact URL -> response), mirroring the pa-core
-    /// login tests' fixture: a plain origin-level authorization server.
+    /// A scripted transport (exact URL -> response): a plain origin-level
+    /// authorization server.
     struct ScriptedHttp(HashMap<String, pa_core::mcp::OAuthHttpResponse>);
 
     impl ScriptedHttp {
@@ -368,8 +351,6 @@ mod tests {
         }
     }
 
-    /// A paste UI that derives the redirect from the authorization URL
-    /// (the pa-core login tests' `PasteUi` shape).
     struct PasteUi {
         auth_url: std::sync::Arc<std::sync::Mutex<String>>,
     }
@@ -455,8 +436,6 @@ mod tests {
         );
         assert_eq!(stored["mcp:fixture"]["clientId"], "fixture-client");
 
-        // A login through the hook path: unknown servers carry the TS
-        // error wording.
         let error = auth
             .login_with("nope", &ui, &http)
             .await
@@ -501,7 +480,6 @@ mod tests {
             stored.get("mcp:linear").is_none(),
             "the credential was removed"
         );
-        // A second logout reports the TS not-connected notice.
         let status = hook.logout_inner("linear")?;
         assert_eq!(status, "linear is not connected.");
         Ok(())

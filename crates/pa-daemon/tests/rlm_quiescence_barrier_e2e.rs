@@ -1,40 +1,9 @@
-//! The worker's RLM quiescence barrier e2e (`wait_for_headless_completion`
-//! with `waitForRlmQuiescence`, the `rlm_quiescence_barrier` capability the
-//! worker advertises).
-//!
-//! TS ground truth - `packages/coding-agent/src/modes/headless-completion.ts`
-//! settles `waitForHeadlessCompletion({ waitForRlmQuiescence: true })` through
-//! `core/agent-session.ts` `waitForRlmQuiescence()`, so the barrier owns the
-//! parent's own idle FIRST, then every admitted descendant run's settlement,
-//! and it loops back through the idle wait because work may start at the
-//! child-settlement boundary (a settled child's terminal notice queues a
-//! parent turn). A barrier without the flag - and the pre-fix worker, which
-//! ignored the flag - answers at the parent's idle while a child run is
-//! still in flight.
-//!
-//! Verified end to end against a real supervisor, a real parent worker
-//! session whose kernel cell spawns the child through the product
-//! `rlm.spawn` surface, and a scripted child worker held mid-run.
-//!
-//! 1. `wait_for_headless_completion` with `waitForRlmQuiescence: true`
-//!    answers only after the held child turn settles and the terminal
-//!    notice it queues on the parent drains: the parent's
-//!    `get_rlm_children` reports the child terminal and its messages
-//!    carry the notice turn at answer time. The pre-fix worker answered
-//!    at the parent's idle (elapsed milliseconds) with the child still
-//!    running.
-//! 2. The barrier reads the run's settlement, not the roster status:
-//!    the roster flips terminal inside the watcher's settle grace,
-//!    ~250ms before the run's settle funnel, so a barrier sent once the
-//!    roster says `done` still holds for the terminal notice's parent
-//!    turn. A status-reading barrier answers inside that window.
-//!
-//! The parent's kernel Python is ambient product state; like the other
-//! live-kernel verifiers these tests skip (with a note) on machines
-//! without a live install.
-// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
-// the full rationale): the timeout panic path cannot wait on the supervisor
-// child; the test process exits immediately afterwards, reaping it.
+//! The worker's RLM quiescence barrier e2e: `wait_for_headless_completion` with
+//! `waitForRlmQuiescence` owns the parent's idle, then every admitted descendant
+//! run's settlement, looping back through the idle wait (work may start at the
+//! child-settlement boundary). Skips on machines without a live install.
+// zombie_processes: the timeout panic path cannot wait on the child; the test
+// process exits immediately afterwards, reaping it.
 #![allow(clippy::zombie_processes)]
 #![cfg(unix)]
 
@@ -68,15 +37,14 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path, kernel_python: &Path) -> Da
         .arg("--agent-dir")
         .arg(agent_dir)
         .env("PRIME_AGENT_KERNEL_PYTHON", kernel_python)
-        // Hermetic agent dir: the ambient environment exports a real
-        // agent dir; point every fallback at the test sandbox instead.
+        // Hermetic agent dir: the ambient env exports a real one; point fallbacks at
+        // the sandbox.
         .env("PRIME_AGENT_CODING_AGENT_DIR", agent_dir)
         .env_remove("PRIME_API_KEY")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        // A supervisor killed at teardown must not leak its session workers
-        // into later test binaries: the worker's supervisor-lost exit (TS
-        // `exitIfSupervisorOrphanedForTooLong`) runs on this short window
+        // A supervisor killed at teardown must not leak its session workers into
+        // later test binaries: the supervisor-lost exit runs on this short window
         // instead of the 5-minute default.
         .env(
             pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
@@ -209,7 +177,6 @@ fn rlm_children_rows(client: &mut Client, id: &str, parent: &str) -> Vec<Value> 
         .expect("children array")
 }
 
-/// Run one turn (prompt + idle wait) on the session.
 fn run_turn(client: &mut Client, session_id: &str, message: &str, id: &str) {
     client.send_command(
         id,
@@ -226,8 +193,6 @@ fn run_turn(client: &mut Client, session_id: &str, message: &str, id: &str) {
     assert_eq!(idle["success"], true, "wait_for_idle failed: {idle}");
 }
 
-/// Poll until a kernel cell's receipt content appears (the cell writes its
-/// verdict).
 fn await_receipt(receipt: &Path) -> String {
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
@@ -243,8 +208,8 @@ fn await_receipt(receipt: &Path) -> String {
     }
 }
 
-/// The kernel cell of the spawn turn: spawn one RLM child through the
-/// product `rlm.spawn` surface and record its child id.
+/// The spawn turn's kernel cell: spawn one RLM child via the product `rlm.spawn` and
+/// record its child id.
 fn spawn_cell(receipt: &Path, error_receipt: &Path) -> String {
     format!(
         "import json, traceback\ntry:\n    handle = await rlm.spawn(\"run the lane task\", name=\"kid\")\n    open({receipt:?}, \"w\").write(json.dumps({{\"rlm_child_id\": handle.rlm_child_id}}))\n    print(handle.rlm_child_id)\nexcept Exception:\n    open({error_receipt:?}, \"w\").write(traceback.format_exc())\n    raise",
@@ -253,8 +218,8 @@ fn spawn_cell(receipt: &Path, error_receipt: &Path) -> String {
     )
 }
 
-/// The child's scripted engine: one held response keeps its task turn
-/// running past the parent's idle, so the barrier must own it.
+/// One held response keeps the child's turn past the parent's idle, so the barrier
+/// must own it.
 fn write_child_script(dir: &Path) -> PathBuf {
     let script = dir.join("child.json");
     std::fs::write(
@@ -265,9 +230,8 @@ fn write_child_script(dir: &Path) -> PathBuf {
     script
 }
 
-/// The parent's faux script whose turns run the spawn cell; the third
-/// response answers the settled child's terminal-notice turn (the no-reply
-/// notice the watcher queues on the parent).
+/// The parent's faux script whose turns run the spawn cell; the third response
+/// answers the settled child's terminal-notice turn (the watcher queues it).
 fn write_parent_script(dir: &Path, first_cell: &str) -> PathBuf {
     let script = dir.join("parent.json");
     std::fs::write(
@@ -289,9 +253,7 @@ fn write_parent_script(dir: &Path, first_cell: &str) -> PathBuf {
 }
 
 /// Create a scripted parent session through the supervisor. The create's
-/// `childScript` (the harness seam mirroring the TS child runtime's
-/// inherited `sessionConfig`) makes every `rlm.spawn` child a scripted
-/// worker.
+/// `childScript` (harness seam) makes every `rlm.spawn` child a scripted worker.
 fn create_parent(
     client: &mut Client,
     dir: &Path,
@@ -319,8 +281,7 @@ fn create_parent(
     created["data"].clone()
 }
 
-/// The parent's messages as one JSON string (the barrier's answer-time
-/// transcript read).
+/// The parent's messages as one JSON string (the barrier's answer-time read).
 fn messages_text(client: &mut Client, id: &str, parent_id: &str) -> String {
     client.send_command(
         id,
@@ -329,9 +290,8 @@ fn messages_text(client: &mut Client, id: &str, parent_id: &str) -> String {
     client.read_response(id)["data"].to_string()
 }
 
-/// One scripted lane with a held scripted child (the shared setup of the
-/// barrier tests): the parent went idle with the child's 5s held turn in
-/// flight, ready for the barrier.
+/// One scripted lane with a held scripted child: the parent went idle with the
+/// child's 5s held turn in flight, ready for the barrier.
 struct HeldChildLane {
     _daemon: Daemon,
     _dir: tempfile::TempDir,
@@ -362,8 +322,8 @@ fn spawn_held_child_lane(kernel_python: &Path) -> HeldChildLane {
         .expect("parent active session id")
         .to_string();
 
-    // Turn 1: the kernel cell spawns the child through the parent's own
-    // registry; the parent settles while the child's held turn runs on.
+    // Turn 1: the kernel cell spawns the child; the parent settles while the child's
+    // held turn runs on.
     run_turn(&mut client, &parent_id, "spawn the kid", "t1");
     let spawned: Value =
         serde_json::from_str(&await_receipt(&spawn_receipt)).expect("spawn receipt json");
@@ -385,14 +345,8 @@ fn spawn_held_child_lane(kernel_python: &Path) -> HeldChildLane {
     }
 }
 
-/// `wait_for_headless_completion` with `waitForRlmQuiescence: true` owns
-/// descendant work (TS `waitForRlmQuiescence`): the parent goes idle while
-/// the spawned child's 5s held turn still runs, and the barrier must
-/// answer only after that turn settles and the terminal notice it queues
-/// on the parent drains - the registry reports the child terminal, and
-/// the parent's messages carry the notice turn at answer time. The
-/// pre-fix worker ignored the flag and answered at the parent's idle,
-/// with the child still running.
+/// The barrier must answer only after the held child turn settles and the terminal
+/// notice it queues drains; the pre-fix worker answered at the parent's idle.
 #[test]
 fn headless_completion_waits_for_rlm_quiescence() {
     let Some(kernel_python) = kernel_python() else {
@@ -400,8 +354,6 @@ fn headless_completion_waits_for_rlm_quiescence() {
     };
     let mut lane = spawn_held_child_lane(&kernel_python);
 
-    // The barrier request on the idle parent: the child's 5s hold is
-    // unsettled descendant work, so the answer must hold past it.
     lane.client.send_command(
         "w1",
         &json!({
@@ -416,8 +368,6 @@ fn headless_completion_waits_for_rlm_quiescence() {
         "wait_for_headless_completion failed: {completion}"
     );
 
-    // The answer lands only after the child's held turn settled and the
-    // terminal notice's parent turn drained.
     let messages = messages_text(&mut lane.client, "m1", &lane.parent_id);
     assert!(
         messages.contains("notice seen"),
@@ -479,8 +429,8 @@ fn headless_completion_holds_through_the_settle_window() {
     };
     let mut lane = spawn_held_child_lane(&kernel_python);
 
-    // The roster's terminal status is the settle window's start: the
-    // roster says `done` here while the child's run has not settled yet.
+    // The roster says `done` here while the child's run has not settled yet: this is
+    // the settle window the barrier must hold through.
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let rows = rlm_children_rows(&mut lane.client, "g1", &lane.parent_id);

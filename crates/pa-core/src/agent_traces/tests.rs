@@ -1,7 +1,6 @@
-//! The `agent_traces` unit battery (moved with its concern): the header
-//! validation, the scripted upload's request + cursor + trace-log
-//! contract, the retry/rate gates, the parent-chain + git-context
-//! resolution, the preview, the find walk, and the outbox entry hash.
+//! The `agent_traces` unit battery: the header validation, the scripted upload's
+//! request + cursor + trace-log contract, the retry/rate gates, the parent-chain +
+//! git-context resolution, the preview, the find walk, and the outbox entry hash.
 
 use super::*;
 use std::collections::VecDeque;
@@ -140,8 +139,7 @@ fn the_header_validation_matches_ts() {
 }
 
 #[tokio::test]
-// The process env must stay stable across the engine's awaits:
-// the sync env lock is held for the whole test by design.
+// The env lock is held across awaits by design (env must stay stable).
 #[allow(clippy::await_holding_lock)]
 async fn the_upload_sends_the_ts_request_and_records_the_cursor() {
     let _env = env_lock();
@@ -183,11 +181,9 @@ async fn the_upload_sends_the_ts_request_and_records_the_cursor() {
     assert_eq!(header("X-Cwd"), "/w");
     assert!(header("X-Agent-Version").contains('.'));
     assert!(body.contains("\"role\":\"user\""));
-    // The outbox cursor recorded the upload.
     let signature = TraceUploadSignature::of(&session).expect("signature");
     let recorded = read_agent_trace_outbox_entry(&fixture.agent_dir, &session);
     assert!(signature_equals(recorded, signature));
-    // The trace log carries the TS line.
     let log = std::fs::read_to_string(agent_traces_log_path(&fixture.agent_dir)).expect("log");
     assert!(log.contains("uploaded session sid-1 (42 bytes)"), "{log}");
     std::env::remove_var("PRIME_AGENT_TRACES_API_KEY");
@@ -212,8 +208,7 @@ async fn the_disabled_requirement_gate_matches_ts() {
 }
 
 #[tokio::test]
-// The process env must stay stable across the engine's awaits:
-// the sync env lock is held for the whole test by design.
+// The env lock is held across awaits by design (env must stay stable).
 #[allow(clippy::await_holding_lock)]
 async fn a_missing_credential_short_circuits_the_request() {
     let _env = env_lock();
@@ -227,8 +222,7 @@ async fn a_missing_credential_short_circuits_the_request() {
 }
 
 #[tokio::test]
-// The process env must stay stable across the engine's awaits:
-// the sync env lock is held for the whole test by design.
+// The env lock is held across awaits by design (env must stay stable).
 #[allow(clippy::await_holding_lock)]
 async fn an_oversize_session_reports_the_limit() {
     let _env = env_lock();
@@ -261,8 +255,7 @@ async fn an_oversize_session_reports_the_limit() {
 }
 
 #[tokio::test]
-// The process env must stay stable across the engine's awaits:
-// the sync env lock is held for the whole test by design.
+// The env lock is held across awaits by design (env must stay stable).
 #[allow(clippy::await_holding_lock)]
 async fn an_error_response_carries_the_status_and_message() {
     let _env = env_lock();
@@ -283,8 +276,7 @@ async fn an_error_response_carries_the_status_and_message() {
 }
 
 #[tokio::test]
-// The process env must stay stable across the engine's awaits:
-// the sync env lock is held for the whole test by design.
+// The env lock is held across awaits by design (env must stay stable).
 #[allow(clippy::await_holding_lock)]
 async fn the_retriable_statuses_back_off_and_503_honors_retry_after() {
     let _env = env_lock();
@@ -318,8 +310,7 @@ async fn the_retriable_statuses_back_off_and_503_honors_retry_after() {
 }
 
 #[tokio::test]
-// The process env must stay stable across the engine's awaits:
-// the sync env lock is held for the whole test by design.
+// The env lock is held across awaits by design (env must stay stable).
 #[allow(clippy::await_holding_lock)]
 async fn the_outbox_cursor_makes_an_enabled_upload_unchanged() {
     let _env = env_lock();
@@ -453,7 +444,6 @@ fn the_retry_after_parsing_covers_seconds_and_dates() {
     assert_eq!(retry_after_delay(Some("2"), MAX_TIMER_DELAY_MS), Some(2000));
     assert_eq!(retry_after_delay(Some(""), MAX_TIMER_DELAY_MS), None);
     assert_eq!(retry_after_delay(None, MAX_TIMER_DELAY_MS), None);
-    // A past date clamps to zero.
     let past = format_http_date(1000);
     assert_eq!(retry_after_delay(Some(&past), MAX_TIMER_DELAY_MS), Some(0));
     let future_ms = now_ms() + 5000;
@@ -491,8 +481,7 @@ fn format_http_date(ms: u64) -> String {
 }
 
 #[tokio::test]
-// The process env must stay stable across the engine's awaits:
-// the sync env lock is held for the whole test by design.
+// The env lock is held across awaits by design (env must stay stable).
 #[allow(clippy::await_holding_lock)]
 async fn the_upload_all_sweeps_with_the_gate_and_tallies() {
     let _env = env_lock();
@@ -516,9 +505,7 @@ async fn the_upload_all_sweeps_with_the_gate_and_tallies() {
         request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
         cancel: None,
         on_upload_delay: None,
-        // One file keeps the platform rate gate out of the test's
-        // wall clock (the second request would wait the minimum
-        // interval by design).
+        // One file keeps the platform rate gate out of the test's wall clock.
         concurrency: Some(1),
         progress: Some(progress_tx),
     };
@@ -529,7 +516,6 @@ async fn the_upload_all_sweeps_with_the_gate_and_tallies() {
     assert_eq!(result.skipped, 0);
     assert_eq!(result.bytes_stored, 10);
     assert_eq!(result.results.len(), 1);
-    // The opening progress note plus one per file.
     let mut notes = Vec::new();
     while let Ok(note) = progress_rx.try_recv() {
         notes.push((note.completed, note.total));
@@ -543,8 +529,7 @@ async fn the_upload_all_sweeps_with_the_gate_and_tallies() {
 }
 
 #[tokio::test(start_paused = true)]
-// The process env must stay stable across the engine's awaits:
-// the sync env lock is held for the whole test by design.
+// The env lock is held across awaits by design (env must stay stable).
 #[allow(clippy::await_holding_lock)]
 async fn the_rate_gate_reports_the_wait_and_serializes() {
     let _env = env_lock();
@@ -582,8 +567,7 @@ async fn the_rate_gate_reports_the_wait_and_serializes() {
 }
 
 #[tokio::test]
-// The process env must stay stable across the engine's awaits:
-// the sync env lock is held for the whole test by design.
+// The env lock is held across awaits by design (env must stay stable).
 #[allow(clippy::await_holding_lock)]
 async fn the_cancel_stops_the_sweep_between_files() {
     let _env = env_lock();
@@ -630,8 +614,6 @@ fn the_outbox_entry_path_is_the_path_hash() {
     let path = agent_trace_outbox_entry_path(&fixture.agent_dir, &session);
     assert_eq!(path.extension().and_then(|ext| ext.to_str()), Some("json"));
     assert_eq!(path.file_stem().unwrap().len(), 32);
-    // The same session file maps to the same entry, a different one
-    // does not.
     assert_eq!(
         agent_trace_outbox_entry_path(&fixture.agent_dir, &session),
         path

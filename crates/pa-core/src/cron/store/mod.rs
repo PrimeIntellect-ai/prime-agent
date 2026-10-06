@@ -1,13 +1,7 @@
 //! The cron job store: file-backed job state with cross-process locking,
-//! claim-based dispatch, and heartbeat lifecycle management. Port of the
-//! `AgentCronJobStore` half of core/cron-jobs.ts.
-//!
-//! Split across submodules: construction, the public input types, and the
-//! heartbeat catalog signature live here; state save/load in [`state`],
-//! generic job and dispatch operations in [`jobs`], `/heartbeat` job
-//! management in [`heartbeat`], RLM heartbeat operations in
-//! [`rlm_heartbeat`], and per-session artifact partitioning in
-//! [`session_artifacts`].
+//! claim-based dispatch, and heartbeat lifecycle management. Submodules:
+//! state save/load, generic jobs and dispatches, `/heartbeat` jobs, RLM
+//! heartbeats, per-session artifacts.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -55,8 +49,7 @@ pub type CronJobRunResult = &'static str; // "ran" | "skipped"
 pub struct AgentCronJobStore {
     file_path: Option<PathBuf>,
     session_artifact_mode: bool,
-    /// Interior-mutex so a store shared behind `Arc` (the daemon worker
-    /// keeps one store for its whole process) can register a session's
+    /// Interior-mutex so an `Arc`-shared store can register a session's
     /// artifact partition as sessions bind.
     session_artifact_files: std::sync::Mutex<HashMap<String, PathBuf>>,
     heartbeat_change_listeners: Vec<Box<dyn Fn() + Send + Sync>>,

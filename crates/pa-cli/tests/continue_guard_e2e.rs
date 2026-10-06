@@ -1,13 +1,5 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
-// by design on hot paths (boxing 130 fns is allocation-churn with zero
-// correctness gain); the fn-length threshold is a style gate, not
-// correctness (the harness fns are intentionally linear); 64-bit targets -
-// the narrowing sits at OS/protocol boundaries where the values are
-// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
-// guarded parses), and checked conversions would add panic paths where
-// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
-// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
-// dossier for the conductor).
+// large_futures: stack futures on hot paths by design. too_many_lines: style gate
+// only. Casts: 64-bit targets; narrowing sits at bounded OS/protocol boundaries.
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -20,8 +12,7 @@
 //! End-to-end verifier for the print-mode active-session guard (B-11): a
 //! headless `-c`/`-r` must refuse to open a session file that a live daemon
 //! worker already hosts, with the exact TS `SessionAlreadyActiveError`
-//! message. The real binary, a real daemon, and the scripted faux provider
-//! drive the full path.
+//! message.
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -56,8 +47,7 @@ fn spawn_daemon(socket: &Path, agent_dir: &Path) -> Daemon {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     // The launcher strips inherited worker role env vars before spawning the
-    // supervisor; a CLI running inside a daemon worker must not leak them
-    // (this test process may itself be one).
+    // supervisor; a CLI running inside a daemon worker must not leak them.
     for var in [
         pa_daemon::worker::WORKER_ROLE_ENV,
         pa_daemon::worker::WORKER_TOKEN_ENV,
@@ -70,10 +60,9 @@ fn spawn_daemon(socket: &Path, agent_dir: &Path) -> Daemon {
     ] {
         command.env_remove(var);
     }
-    // A supervisor killed at teardown must not leak its session workers
-    // into later test binaries: the worker's supervisor-lost exit (TS
-    // `exitIfSupervisorOrphanedForTooLong`) runs on this short window
-    // instead of the 5-minute default.
+    // A supervisor killed at teardown must not leak its session workers into
+    // later test binaries: the worker's supervisor-lost exit runs on this
+    // short window instead of the 5-minute default.
     command.env(
         pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
         "15000",
@@ -159,7 +148,7 @@ fn run_print(args: &[&str], env: &[(String, String)]) -> (String, String, i32) {
 }
 
 /// `-c` refuses an active session with the exact TS error; a fresh daemon
-/// (no live worker) still continues the most recent session.
+/// still continues the most recent session.
 #[test]
 fn print_continue_refuses_an_active_daemon_session() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -277,13 +266,10 @@ fn print_continue_refuses_an_active_daemon_session() {
     );
 }
 
-/// A session file held by a live FOREIGN lease holder — this test process
-/// stands in for the other product's holder on the shared session store —
-/// refuses `--resume` with the session-hold refusal. No daemon runs: the
-/// roster probe has nothing to answer, and the guard's lease probe is what
-/// must catch a holder no roster of this product's daemon can see. The
-/// guard runs before the file is opened, so the file itself only has to
-/// exist (the resume selector names it directly).
+/// A session file held by a live FOREIGN lease holder (this test process
+/// stands in for the other product's holder) refuses `--resume`. No daemon
+/// runs: the guard's lease probe must catch a holder no roster of this
+/// product's daemon can see; the guard runs before the file is opened.
 #[test]
 fn print_resume_refuses_a_foreign_lease_holder() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -306,9 +292,9 @@ fn print_resume_refuses_a_foreign_lease_holder() {
     std::fs::write(&session_path, "{}\n").expect("session file");
 
     // The foreign holder: this test process takes the runtime lease, in
-    // exactly the role the other product's daemon worker plays on the
-    // shared session store. The lease-enable env is consumed at the
-    // acquire itself, so it leaves this test's window immediately.
+    // exactly the role the other product's daemon worker plays. The
+    // lease-enable env is consumed at the acquire itself, so it leaves this
+    // test's window immediately.
     std::env::set_var(pa_daemon::lease::SESSION_LEASES_ENABLED_ENV, "1");
     std::env::set_var(
         pa_daemon::lease::SESSION_LEASE_OWNER_ID_ENV,
@@ -320,16 +306,11 @@ fn print_resume_refuses_a_foreign_lease_holder() {
     std::env::remove_var(pa_daemon::lease::SESSION_LEASE_OWNER_ID_ENV);
     std::env::remove_var(pa_daemon::lease::SESSION_LEASES_ENABLED_ENV);
 
-    // The refusal: this test process runs a build of this product (the
-    // cargo test binary under /target/), so the holder classification
-    // reads as another Rust build, never the TypeScript product and never
-    // an unnamed process.
-    // The exact actionable refusal: the classified headline, the
-    // continue path with the `--daemon-socket` attach shape, the
-    // take-over `kill` of this test process's pid with the holder-image
-    // annotation (the pid-reuse guard: the refusal names what the kill
-    // would hit, here this test binary), and the session footer (the
-    // `{}\n` fixture file carries no name, so no paren).
+    // The refusal: this test process runs a build of this product, so the
+    // holder classification reads as another Rust build, never the TypeScript
+    // product and never an unnamed process. The refusal names what the kill
+    // would hit (here this test binary), and the session footer carries no
+    // paren (the `{}\n` fixture file has no name).
     let holder_image = std::env::current_exe()
         .expect("own exe")
         .file_name()

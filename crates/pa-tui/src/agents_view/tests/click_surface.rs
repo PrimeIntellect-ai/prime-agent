@@ -65,8 +65,6 @@ fn a_modified_press_never_opens_the_row() {
         .find(|(_, row_index)| *row_index == index)
         .copied()
         .expect("the row renders");
-    // A shift-press plus a plain release: the modifier press stays
-    // selection-only, so nothing opens.
     let mut shifted = mouse_report(row, true, false);
     shifted.shift = true;
     mode.handle_mouse(&shifted);
@@ -92,7 +90,6 @@ fn a_dragged_release_never_opens_the_row() {
         .copied()
         .expect("the row renders");
     mode.handle_mouse(&mouse_report(row, true, false));
-    // The drag report carries the motion bit.
     mode.handle_mouse(&mouse_report(row, true, true));
     mode.handle_mouse(&mouse_report(row, false, false));
     assert!(mode.opened.is_none(), "a dragged release never opens");
@@ -116,17 +113,13 @@ fn a_release_on_another_row_never_opens() {
         .copied()
         .expect("the row renders");
     mode.handle_mouse(&mouse_report(row, true, false));
-    // The release lands one row below the pressed one.
     mode.handle_mouse(&mouse_report(row + 1, false, false));
     assert!(mode.opened.is_none(), "the press row gates the open");
     crate::mouse_tracking::disable(&mut std::io::stdout()).expect("disable");
 }
 
-/// A fresh plain press always re-records its row (the session
-/// surface's `fullscreenPressedClick` always assigns): a release
-/// lost to a focus change or a touch cancel must never pin the next
-/// tap to the old row (Cursor Bugbot: a new press kept the stale
-/// row, so the next tap on a different row did nothing).
+/// A fresh plain press always re-records its row: a lost release must never pin the next tap
+/// to the old row (Cursor Bugbot: a new press kept the stale row).
 #[test]
 fn a_fresh_press_re_records_the_click_row_after_a_lost_release() {
     let _guard = match crate::mouse_tracking::STATE_TEST_LOCK.lock() {
@@ -149,8 +142,6 @@ fn a_fresh_press_re_records_the_click_row_after_a_lost_release() {
     };
     let other = row_of(&mode, 0);
     let clicked = row_of(&mode, index);
-    // Press the first row, "lose" the release, then tap the second:
-    // the new press owns the row, so the release on it opens it.
     mode.handle_mouse(&mouse_report(other, true, false));
     mode.handle_mouse(&mouse_report(clicked, true, false));
     mode.handle_mouse(&mouse_report(clicked, false, false));
@@ -163,10 +154,8 @@ fn a_fresh_press_re_records_the_click_row_after_a_lost_release() {
     crate::mouse_tracking::disable(&mut std::io::stdout()).expect("disable");
 }
 
-/// The click is an input like any key: a showing notice panel
-/// consumes it — the close is the click's whole action, exactly like
-/// the key that dismisses it (Cursor Bugbot: the click opened
-/// through the refusal notice that any key would only close).
+/// The click is an input like any key: a showing notice panel consumes it — the close is the
+/// click's whole action (Cursor Bugbot: the click opened through the refusal notice).
 #[test]
 fn a_click_consumes_the_notice_panel_like_any_key() {
     let _guard = match crate::mouse_tracking::STATE_TEST_LOCK.lock() {
@@ -198,10 +187,8 @@ fn a_click_consumes_the_notice_panel_like_any_key() {
     crate::mouse_tracking::disable(&mut std::io::stdout()).expect("disable");
 }
 
-/// The open's Enter preamble clears with the click: the exit hint
-/// drops and the armed stop-or-delete confirm is taken, so a later
-/// ctrl+x re-arms over the clicked row instead of executing a stale
-/// arm (Cursor Bugbot: the click leaked both).
+/// The open's Enter preamble clears with the click (the exit hint, the armed confirm), so a
+/// later ctrl+x re-arms over the clicked row (Cursor Bugbot: the click leaked both).
 #[test]
 fn a_click_clears_the_exit_hint_and_the_armed_delete_confirm() {
     let _guard = match crate::mouse_tracking::STATE_TEST_LOCK.lock() {
@@ -210,8 +197,6 @@ fn a_click_clears_the_exit_hint_and_the_armed_delete_confirm() {
     };
     crate::mouse_tracking::enable(&mut std::io::stdout()).expect("enable");
     let (mut mode, index) = mode_with_row("click clears arms", "mock-1");
-    // Both rows must be armable (a live session arms the stop word)
-    // and openable.
     mode.rows[0].summary = serde_json::json!({
         "sessionName": "holder",
         "activeSessionId": "s-holder",
@@ -241,7 +226,6 @@ fn a_click_clears_the_exit_hint_and_the_armed_delete_confirm() {
         mode.pending_delete.is_none(),
         "the click took the armed confirm"
     );
-    // The next ctrl+x re-arms instead of executing the stale one.
     mode.handle_key("ctrl+x");
     assert!(mode.pending_delete.is_some(), "the confirm re-arms");
     assert!(
@@ -262,15 +246,13 @@ fn a_click_clears_the_exit_hint_and_the_armed_delete_confirm() {
 fn long_session_names_clip_to_the_name_column() {
     let (mode, index) = mode_with_row(&"a".repeat(100), "mock-1");
     let layout = build_layout(&mode.rows, 120);
-    // TS `buildCompactAgentsViewLayout` at width 120 with these rows.
     assert_eq!(layout.name_width, 28);
     assert_eq!(layout.model_width, 12);
     let line = mode.render_row(&mode.rows[index], &layout, 120, false);
     let text = flat(&line);
-    // TS `formatTableCell` clips with an empty ellipsis marker: the
-    // name cell keeps the icon and space plus 26 name characters.
+    // The name cell clips with an empty ellipsis marker: it keeps the icon and space plus 26
+    // name characters.
     assert_eq!(text, expected_row(&"a".repeat(26), &layout));
-    // Every column still renders after the clipped name.
     let model_at = text.find("mock-1").expect("model column present");
     assert_eq!(str_width(&text[..model_at]), 28 + 2);
     assert!(text.ends_with("$0.00   1s"));

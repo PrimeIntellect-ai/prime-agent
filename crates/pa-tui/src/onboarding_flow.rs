@@ -1,11 +1,7 @@
-//! The full first-run flow's own surfaces (TS `runOnboardingFlow`'s
-//! not-model-ready branch): the welcome block's description paragraphs
-//! and single login action, the connect-more-providers picker (TS
-//! `OnboardingPickerComponent`), and the panel hosting that mounts each
-//! step's surface inside the splash (TS `setPanel` — the flow never
-//! nests its panels, so one slot covers it: the login dialog replaces
-//! the picker, the loop re-mounts a fresh picker, the question ends the
-//! flow).
+//! The full first-run flow's own surfaces: the welcome block's description
+//! paragraphs and single login action, the connect-more-providers picker,
+//! and the panel hosting that mounts each step's surface inside the splash
+//! (the flow never nests its panels, so one slot covers the sequence).
 
 use crate::auth_panel::PrimeTeamPick;
 use crate::keybindings::KeybindingsManager;
@@ -18,62 +14,40 @@ use crate::{Line, Span};
 use ratatui::style::Modifier;
 use tokio::sync::oneshot;
 
-/// TS `prompt` (the picker's question line).
 pub(crate) const PROVIDERS_PROMPT: &str = "Connect other providers, or continue.";
-/// TS `searchPlaceholder`.
 pub(crate) const PROVIDERS_SEARCH_PLACEHOLDER: &str = "Search providers";
-/// TS `note`.
 pub(crate) const PROVIDERS_NOTE: &str = "You can add providers anytime with /login.";
-/// TS `continueLabel`.
 pub(crate) const CONTINUE_LABEL: &str = "Continue";
-/// TS `LOGIN_ACTION_LABEL`: the welcome screen's single action.
 pub(crate) const LOGIN_ACTION_LABEL: &str = "Log in with Prime Intellect";
-/// The Prime Inference login's heading (TS `showAuthPanel(dialog, {
-/// heading })`): the panel that owns the block names itself in place of
-/// the brand line.
+/// The Prime Inference login's heading: the panel that owns the block names itself in place of the
+/// brand line.
 pub(crate) const PRIME_LOGIN_HEADING: &str = "Login with Prime Intellect";
-/// The API-key prompt's heading label (TS `showPrompt("Enter API key:")`).
 pub(crate) const API_KEY_PROMPT: &str = "Enter API key:";
 
-/// TS `DESCRIPTION_PARAGRAPHS`: what the agent is, wrapped under the
-/// welcome line.
 const WELCOME_DESCRIPTION_PARAGRAPHS: [&str; 2] = [
     "A self-improving RLM harness with persistent context, recursive subagents, and direct swarm communication.",
     "It learns from its history by refining its own memories, skills, prompts, and subagent specifications.",
 ];
-/// TS `DESCRIPTION_WIDTH`: the wrap width for the welcome paragraphs.
 const WELCOME_DESCRIPTION_WIDTH: usize = 56;
-/// TS `MIN_HIGHLIGHT_WIDTH`: the login action's band floor.
 const MIN_HIGHLIGHT_WIDTH: usize = 30;
-/// TS `HIGHLIGHT_TRAILING`: the login action's band trailing padding.
 const HIGHLIGHT_TRAILING: usize = 6;
 
-/// TS `MARKER_WIDTH`: the `> ` selection marker.
 const MARKER_WIDTH: usize = 2;
-/// TS `MIN_ROW_WIDTH`.
 const MIN_ROW_WIDTH: usize = 34;
-/// TS `ROW_TRAILING`.
 const ROW_TRAILING: usize = 6;
-/// TS `DEFAULT_VISIBLE_ROWS`.
 const VISIBLE_ROWS: usize = 6;
 
-/// One picker row (TS `OnboardingPickerItem`): a provider with its
-/// signed-in marking.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderPickerOption {
     pub id: String,
     pub name: String,
     /// Already signed in: the row is marked with a check rather than a note.
     pub connected: bool,
-    /// Whether this build carries the row's login flow (the /login menu
-    /// rule): an unavailable row renders dimmed with the "not available"
-    /// annotation and Enter is inert — the picker states the dead-end
-    /// before selection instead of error-walling after it.
+    /// Whether this build carries the row's login flow (the /login menu rule:
+    /// an unavailable row is dimmed, Enter inert).
     pub available: bool,
 }
 
-/// One picker row's presentation flags (the render and key paths share
-/// them; `available` carries the /login menu rule).
 #[derive(Debug, Clone, Copy)]
 struct RowMarks {
     connected: bool,
@@ -81,7 +55,6 @@ struct RowMarks {
     available: bool,
 }
 
-/// The picker's answer to one key (TS `onSelect`/`onContinue`/`onCancel`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderPick {
     /// The pinned continue row.
@@ -92,12 +65,8 @@ pub enum ProviderPick {
     Cancelled,
 }
 
-/// A searchable list in the onboarding block (TS
-/// `OnboardingPickerComponent`): the continue action pinned at index 0,
-/// the matching provider rows under it in a scrolling viewport, and the
-/// below/top hints. The field owns the keys between the navigation
-/// bindings; any key that reaches the field re-clamps the selection and
-/// resets the scroll (TS re-reads `getFiltered` after every input).
+/// A searchable list in the onboarding block: the continue action pinned at index 0, the matching
+/// provider rows under it in a scrolling viewport, and the below/top hints.
 #[derive(Debug)]
 pub struct ProviderPicker {
     options: Vec<ProviderPickerOption>,
@@ -118,8 +87,8 @@ impl ProviderPicker {
         }
     }
 
-    /// One key id (TS `handleInput`; the splash answers the exit keys
-    /// before the panel sees any key). `None` keeps the picker mounted.
+    /// One key id (the splash answers the exit keys first); `None` keeps the
+    /// picker mounted.
     pub fn handle_key(&mut self, key: &str, kb: &KeybindingsManager) -> Option<ProviderPick> {
         if kb.matches(key, "tui.select.up") {
             self.move_selection(-1);
@@ -135,9 +104,7 @@ impl ProviderPicker {
             }
             let filtered = self.filtered();
             let item = filtered.get(self.selected - 1)?;
-            // The /login menu rule: an unavailable row's Enter is inert —
-            // the missing flow is stated inline before selection, never
-            // answered with an after-selection error wall.
+            // The /login menu rule: an unavailable row's Enter is inert.
             if !item.available {
                 return None;
             }
@@ -152,20 +119,17 @@ impl ProviderPicker {
         None
     }
 
-    /// One paste payload (TS the field's paste): the paste lands in the
-    /// query, and the filter's re-clamp keeps the selection inside the
-    /// match list — a shrunk match list never strands the cursor on a
-    /// row that no longer exists.
+    /// One paste payload: the paste lands in the query, and the filter's
+    /// re-clamp keeps the selection inside the match list.
     pub fn handle_paste(&mut self, text: &str) {
-        // A paste is external bytes: the control-sequence scrub (OSC
-        // clipboard writes and friends) runs before the query renders.
+        // A paste is external bytes: the control-sequence scrub runs before
+        // the query renders.
         self.search.paste(&crate::menu_panel::scrub_controls(text));
         self.selected = self.selected.min(self.filtered().len());
         self.scroll_top = 0;
     }
 
-    /// The query's matches (TS `getFiltered`): the lowercased trimmed
-    /// query matches the label or the id.
+    /// The query's matches: the lowercased trimmed query matches the label or the id.
     fn filtered(&self) -> Vec<&ProviderPickerOption> {
         let query = self.search.value().trim().to_lowercase();
         if query.is_empty() {
@@ -180,8 +144,7 @@ impl ProviderPicker {
             .collect()
     }
 
-    /// TS `move`: the selection never leaves `0..=len`, and the viewport
-    /// follows it.
+    /// The selection never leaves `0..=len`; the viewport follows it.
     fn move_selection(&mut self, delta: i32) {
         let filtered = self.filtered().len();
         let next = self.selected as i64 + i64::from(delta);
@@ -199,9 +162,8 @@ impl ProviderPicker {
         }
     }
 
-    /// The picker's frame (TS `render`): the prompt, the search field, the
-    /// pinned continue row, the viewport's rows, the below/top hint, and
-    /// the trailing note.
+    /// The picker's frame: the prompt, the search field, the pinned continue row,
+    /// the viewport's rows, the below/top hint, and the trailing note.
     #[must_use]
     pub fn render(&self, theme: &Theme, width: usize) -> Vec<Line> {
         let width = width.max(1);
@@ -234,8 +196,7 @@ impl ProviderPicker {
         ));
         let end = (scroll_top + VISIBLE_ROWS).min(filtered.len());
         for (index, item) in filtered.iter().enumerate().take(end).skip(scroll_top) {
-            // The menu rule: an unavailable row states its dead-end
-            // inline — the dimmed label carries the annotation.
+            // The menu rule: an unavailable row's dimmed label carries the annotation.
             let label = if item.available {
                 item.name.clone()
             } else {
@@ -272,9 +233,8 @@ impl ProviderPicker {
         lines
     }
 
-    /// One row (TS `renderRow`): the marker, the label, the connected
-    /// check, and the row-width padding; the selected row carries the
-    /// highlight wash.
+    /// One row: the marker, the label, the connected check, and the row-width
+    /// padding; the selected row carries the highlight wash.
     fn row(theme: &Theme, width: usize, row_width: usize, label: &str, marks: RowMarks) -> Line {
         let RowMarks {
             connected,
@@ -289,16 +249,14 @@ impl ProviderPicker {
         );
         let wash = highlight_wash(theme);
         let mut line: Line = vec![Span::raw(" ")];
-        // The menu rule: an unavailable row's label stays dim even when
-        // selected (the missing flow is stated inline, not lifted).
+        // The menu rule: an unavailable row's label stays dim even when selected.
         let label_color = if available {
             ThemeColor::Text
         } else {
             ThemeColor::Muted
         };
         if selected {
-            // The selected row lifts off the canvas (TS
-            // `onboardingHighlightBackground`): a bold name, the success
+            // The selected row lifts off the canvas: a bold name, the success
             // check, and the padding all washed.
             let mut washed_name = Span::styled(
                 name,
@@ -321,15 +279,12 @@ impl ProviderPicker {
             }
             line.push(Span::styled(pad, theme.fg_style(ThemeColor::Dim)));
         }
-        // A label wider than the pane truncates to the pane width (TS
-        // `line()` runs every row through `truncateToWidth`), so the row
-        // never spills the frame.
+
         let line = crate::width::truncate_line(&line, width, "");
         pad_to(line, width)
     }
 
-    /// TS `getRowWidth`: the longest label (plus its check) under the
-    /// width budget, floored at the TS minimum.
+    /// The longest label (plus its check) under the width budget, floored at the minimum.
     fn row_width(&self, width: usize) -> usize {
         let longest = self
             .options
@@ -345,15 +300,10 @@ impl ProviderPicker {
     }
 }
 
-/// One mounted flow panel (TS `setPanel`'s stack top): the login dialog,
-/// the providers picker, or the trace question.
 #[derive(Debug)]
 pub enum OnboardingPanel {
-    /// A login flow's inline auth panel (TS the `LoginDialogComponent`
-    /// over the splash), with the heading line that replaces the brand
-    /// mark while it owns the block. The dialog is boxed: it dwarfs the
-    /// other variants (progress lines, the paste field), and the enum
-    /// rides every mount/unmount by value.
+    /// A login flow's inline auth panel with the heading line that replaces the brand mark while it
+    /// owns the block. The dialog is boxed: it dwarfs the other variants.
     Auth {
         panel: std::boxed::Box<crate::auth_panel::AuthPanel>,
         heading: Option<String>,
@@ -362,12 +312,8 @@ pub enum OnboardingPanel {
     Providers(ProviderPicker),
     /// The trace question (TS `askOnboardingTraceOptIn`'s choice).
     Question(OnboardingChoice),
-    /// The Prime team question (TS `showPrimeTeamSelector`'s onboarding
-    /// arm — `OnboardingChoiceComponent` with the personal account and
-    /// the teams' rows; no heading, so the brand line returns). The
-    /// pick answers the flow's `SelectTeam` request directly: the login
-    /// flow settles through its own future (the panel yields no
-    /// decision).
+    /// The Prime team question (no heading, so the brand line returns). The pick answers the flow's
+    /// `SelectTeam` request directly: the login flow settles through its own future.
     TeamQuestion {
         choice: OnboardingChoice,
         teams: Vec<crate::auth_panel::PrimeTeamOption>,
@@ -376,8 +322,7 @@ pub enum OnboardingPanel {
 }
 
 impl OnboardingPanel {
-    /// TS `renderHeadingLine`: the panel that owns the block names
-    /// itself; `None` keeps the brand line.
+    /// The panel that owns the block names itself; `None` keeps the brand line.
     #[must_use]
     pub fn heading(&self) -> Option<&str> {
         match self {
@@ -386,8 +331,7 @@ impl OnboardingPanel {
         }
     }
 
-    /// The panel's rows (TS `render`'s active-panel arm; the panel indents
-    /// its own content). The auth panel's hint row renders the
+    /// The panel's rows (the panel indents its own content); the auth panel's hint row renders the
     /// effective bindings, so the keybindings manager rides along.
     pub(crate) fn render(
         &mut self,
@@ -404,9 +348,8 @@ impl OnboardingPanel {
         }
     }
 
-    /// One key (TS the mounted panel's `handleInput`; the exit keys were
-    /// answered before the panel). `None` keeps the pane waiting.
-    /// `osc_sink` carries the login dialog's URL-copy OSC 52 fallback.
+    /// One key (`None` keeps the pane waiting); `osc_sink` carries the login
+    /// dialog's URL-copy OSC 52 fallback.
     pub(crate) fn handle_key(
         &mut self,
         key: &str,
@@ -414,9 +357,8 @@ impl OnboardingPanel {
         osc_sink: &mut crate::clipboard::OscSink,
     ) -> Option<OnboardingDecision> {
         match self {
-            // The dialog consumes every key itself: its mounted input
-            // answers through the request's oneshot, and the flow behind
-            // it settles through its own future.
+            // The dialog consumes every key itself; the flow behind it settles
+            // through its own future.
             OnboardingPanel::Auth { panel, .. } => {
                 panel.handle_key(key, kb, osc_sink);
                 None
@@ -441,11 +383,8 @@ impl OnboardingPanel {
                 }
                 None
             }
-            // TS `showPrimeTeamSelector`'s onboarding arm: the choice
-            // answers its own oneshot (index 0 the personal account,
-            // 1.. the teams; a cancel keeps the stored selection) — the
-            // login flow behind the question settles through its own
-            // future, so the panel yields no decision.
+            // The choice answers its own oneshot (index 0 the personal account, 1.. the teams; a
+            // cancel keeps the stored selection).
             OnboardingPanel::TeamQuestion {
                 choice,
                 teams,
@@ -475,9 +414,8 @@ impl OnboardingPanel {
         }
     }
 
-    /// One paste payload (TS the mounted input's paste): the login
-    /// dialog's field, or the picker's search — the questions have no
-    /// input.
+    /// One paste payload: the login dialog's field, or the picker's search —
+    /// the questions have no input.
     pub fn handle_paste(&mut self, text: &str) {
         match self {
             OnboardingPanel::Auth { panel, .. } => panel.handle_paste(text),
@@ -486,10 +424,8 @@ impl OnboardingPanel {
         }
     }
 
-    /// The team question's answer (TS `OnboardingChoiceComponent`'s
-    /// `onSelect`): index 0 the personal account, 1.. the team row — a
-    /// row past the list (a clamped seed cannot reach it) answers the
-    /// personal account.
+    /// The team question's answer: index 0 the personal account, 1.. the team
+    /// row — a row past the list answers the personal account.
     fn choice_pick(selected: usize, teams: &[crate::auth_panel::PrimeTeamOption]) -> PrimeTeamPick {
         if selected == 0 {
             return PrimeTeamPick::PersonalAccount;
@@ -501,9 +437,8 @@ impl OnboardingPanel {
     }
 }
 
-/// The welcome block under the brand line (TS `render`'s `!flowStarted`
-/// arm): the wrapped description paragraphs with a blank row between
-/// them, and the trailing blank that separates them from the action.
+/// The welcome block under the brand line: the wrapped description paragraphs with a blank row
+/// between them, and the trailing blank that separates them from the action.
 pub(crate) fn welcome_rows(theme: &Theme, width: usize) -> Vec<Line> {
     let wrap = WELCOME_DESCRIPTION_WIDTH
         .min(width.saturating_sub(1))
@@ -521,9 +456,8 @@ pub(crate) fn welcome_rows(theme: &Theme, width: usize) -> Vec<Line> {
     lines
 }
 
-/// The welcome screen's single action (TS `renderActions`): the bold
-/// `> Log in with Prime Intellect` row washed across its highlight band,
-/// one column in from the pane edge.
+/// The welcome screen's single action: the bold `> Log in with Prime Intellect` row washed across
+/// its highlight band.
 pub(crate) fn welcome_action_row(theme: &Theme, width: usize) -> Line {
     let band = MIN_HIGHLIGHT_WIDTH
         .max(MARKER_WIDTH + crate::width::str_width(LOGIN_ACTION_LABEL) + HIGHLIGHT_TRAILING)
@@ -537,14 +471,11 @@ pub(crate) fn welcome_action_row(theme: &Theme, width: usize) -> Line {
             .add_modifier(Modifier::BOLD),
     );
     washed.style = washed.style.bg(highlight_wash(theme));
-    // A pane narrower than the label truncates the row to the pane width
-    // (the picker rows run through the same `truncate_line`), so the
-    // action never spills the frame.
+
     let line = crate::width::truncate_line(&vec![Span::raw(" "), washed], width, "");
     pad_to(line, width)
 }
 
-/// TS `line`: the one-space-indented, width-padded row.
 fn indented(theme: &Theme, width: usize, text: &str, tone: ThemeColor) -> Line {
     pad_to(vec![Span::raw(" "), theme.fg_span(tone, text)], width)
 }
@@ -591,8 +522,8 @@ mod tests {
 
     #[test]
     fn the_welcome_action_row_matches_the_ts_band() {
-        // The band is the TS label width (26) + marker + trailing = 34,
-        // under the pane budget; the row pads the rest of the pane.
+        // The band is the TS label width (26) + marker + trailing = 34; the row pads the rest of
+        // the pane.
         let row = welcome_action_row(&theme(), 80);
         let text = row_text(&row);
         assert!(
@@ -605,8 +536,6 @@ mod tests {
     #[test]
     fn the_welcome_paragraphs_wrap_at_the_ts_width() {
         let rows = welcome_rows(&theme(), 80);
-        // The blank, the two wrapped paragraphs, the blank between them,
-        // and the trailing blank that separates them from the action.
         assert_eq!(rows.len(), 7);
         let text: Vec<String> = rows.iter().map(row_text).collect();
         assert!(
@@ -648,9 +577,8 @@ mod tests {
         );
     }
 
-    /// The /login menu rule in the picker: an unavailable row states its
-    /// dead-end inline (the dimmed "not available" annotation) and Enter
-    /// is inert — no after-selection error wall.
+    /// The /login menu rule in the picker: an unavailable row is dimmed and
+    /// Enter is inert — no after-selection error wall.
     #[test]
     fn the_picker_marks_unavailable_rows_inert() {
         let mut picker = ProviderPicker::new(vec![ProviderPickerOption {
@@ -700,8 +628,8 @@ mod tests {
     fn a_typed_query_filters_the_rows_and_resets_the_scroll() {
         let mut picker = ProviderPicker::new(options(10));
         let kb = kb();
-        // Scroll down past the viewport, then type a matching query: the
-        // filter re-clamps the selection and resets the scroll to the top.
+        // Scroll down past the viewport, then type a matching query: the filter
+        // re-clamps the selection and resets the scroll to the top.
         for _ in 0..9 {
             picker.handle_key("down", &kb);
         }

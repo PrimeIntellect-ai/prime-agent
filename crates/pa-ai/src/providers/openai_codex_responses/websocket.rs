@@ -1,13 +1,7 @@
 //! Codex WebSocket transport: connections and the per-request event loop.
-//! Section of the port of
-//! `packages/ai/src/providers/openai-codex-responses.ts`.
 //!
-//! Each connection owns a worker task that holds the socket; requests talk to
-//! it over a command channel and receive events over a fresh channel per
-//! request. The handshake sends the same beta header the codex-rs client
-//! sends (`OpenAI-Beta: responses_websockets=2026-02-06`) plus custom
-//! headers via an explicit `http::Request` (plain `connect_async` accepts
-//! `http::Request`, which carries headers).
+//! Each connection owns a worker task that holds the socket; requests talk to it over a command
+//! channel and receive events over a fresh channel per request.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -55,24 +49,20 @@ pub(crate) enum WorkerCommand {
 
 /// Events a worker forwards to the active request.
 pub enum WorkerEvent {
-    /// A parsed stream event.
     Event(Value),
     /// Terminal marker after the completion event (Ok) or an error (Err).
     Terminal(Result<(), CodexStreamError>),
 }
 
-/// Connection-scoped continuation state
-/// (`CachedWebSocketContinuationState` in the TS).
 pub struct ContinuationState {
     pub last_request_body: Value,
     pub last_response_id: String,
     pub last_response_items: Vec<Value>,
-    /// Id of the connection whose server-side response state this chain is
-    /// anchored to.
+    /// Id of the connection whose server-side response state this chain is anchored to.
     pub connection_id: u64,
 }
 
-/// Debug counters (`OpenAICodexWebSocketDebugStats` in the TS).
+/// Debug counters.
 #[derive(Debug, Clone, Default)]
 pub struct WebSocketDebugStats {
     pub requests: u64,
@@ -96,20 +86,15 @@ fn next_connection_id() -> u64 {
     NEXT.fetch_add(1, Ordering::SeqCst)
 }
 
-/// Port of the TS runtime's (bun) WebSocket connect-failure surface,
-/// probe-verified against the TS binary: every connect-phase failure is a
-/// plain `Error` whose message is `WebSocket connection to '<url>' failed:
-/// <cause>` with the runtime's own cause texts — `Failed to connect` for
-/// socket-level failures, `Expected 101 status code` for a non-101 answer,
-/// `Mismatch websocket accept header` for a bad accept key, and
-/// `TLS handshake failed` for TLS failures.
+/// Port of the TS runtime's (bun) WebSocket connect-failure surface, probe-verified against the TS
+/// binary: every connect-phase failure is a plain `Error` whose message is `WebSocket connection to
+/// '<url>' failed: <cause>` with the runtime's own cause texts.
 fn bun_connect_failure(url: &str, error: &WsError) -> WebSocketTransportError {
     let cause = match error {
         WsError::Io(io) => {
-            // tokio-tungstenite surfaces the rustls handshake failure as a
-            // plain io error, so on wss URLs any socket failure after the
-            // refused connect maps to the runtime's TLS-handshake text
-            // (probe-verified against a plain-speaking wss peer).
+            // tokio-tungstenite surfaces the rustls handshake failure as a plain io error, so on
+            // wss URLs any socket failure after the refused connect maps to the runtime's
+            // TLS-handshake text.
             if url.starts_with("wss://")
                 && !matches!(
                     io.kind(),
@@ -123,9 +108,8 @@ fn bun_connect_failure(url: &str, error: &WsError) -> WebSocketTransportError {
         }
         WsError::Tls(_) => "TLS handshake failed".to_string(),
         WsError::Http(_) => "Expected 101 status code".to_string(),
-        // The runtime checks the status code before the HTTP shape, so a
-        // response the transport rejects for its version or method carries
-        // the same non-101 text.
+        // The runtime checks the status code before the HTTP shape, so a response the transport
+        // rejects for its version or method carries the same non-101 text.
         WsError::Protocol(ProtocolError::WrongHttpVersion | ProtocolError::WrongHttpMethod) => {
             "Expected 101 status code".to_string()
         }
@@ -137,18 +121,14 @@ fn bun_connect_failure(url: &str, error: &WsError) -> WebSocketTransportError {
     WebSocketTransportError::runtime(format!("WebSocket connection to '{url}' failed: {cause}"))
 }
 
-/// Port of the TS runtime's (bun) WebSocket read-failure surface,
-/// probe-verified against the TS binary: every socket or frame failure
-/// surfaces as a close event composing `WebSocket closed {code} {reason}` —
-/// code 1006 (`Connection ended`) for socket death, per-case codes for frame
-/// violations (1002 `Protocol error - unsupported control frame` for
-/// reserved opcodes, 1011 `Compression not implemented yet` for reserved
-/// bits). Unprobed violations compose the runtime's protocol-error envelope
-/// with the transport's own detail text.
+/// Port of the TS runtime's (bun) WebSocket read-failure surface, probe-verified against the TS
+/// binary: every socket or frame failure surfaces as a close event composing `WebSocket closed
+/// {code} {reason}`. Unprobed violations compose the runtime's protocol-error envelope with the
+/// transport's own detail text.
 fn bun_read_failure(error: &WsError) -> WebSocketTransportError {
     match error {
-        // The transport's EOF-without-close-frame error is the same socket
-        // death the runtime reports as the 1006 close event.
+        // The transport's EOF-without-close-frame error is the same socket death the runtime
+        // reports as the 1006 close event.
         WsError::Protocol(ProtocolError::ResetWithoutClosingHandshake) => {
             WebSocketTransportError::close(
                 WEBSOCKET_CLOSE_CODE_ABNORMAL,
@@ -188,10 +168,6 @@ fn bun_read_failure(error: &WsError) -> WebSocketTransportError {
     }
 }
 
-/// Port of `connectWebSocket` + worker spawn: handshake with custom headers,
-/// then run the reader loop until the channel closes.
-/// Port of `connectWebSocket` + worker spawn: handshake with custom headers,
-/// then run the reader loop until the channel closes.
 async fn spawn_connection_worker(
     url: &str,
     headers: &[(String, String)],
@@ -241,12 +217,7 @@ async fn spawn_connection_worker(
     Ok((command_tx, connection_id))
 }
 
-/// Port of `parseWebSocket`: per-request event forwarding with completion
-/// tracking, error extraction, and close-code reporting. The worker parks
-/// between requests so a session can reuse one connection.
-/// Port of `parseWebSocket`: per-request event forwarding with completion
-/// tracking, error extraction, and close-code reporting. The worker parks
-/// between requests so a session can reuse one connection.
+/// The worker parks between requests so a session can reuse one connection.
 async fn connection_worker(
     stream: WsStream,
     mut commands: mpsc::Receiver<WorkerCommand>,
@@ -264,9 +235,8 @@ async fn connection_worker(
             }
             WorkerCommand::Send { body, events } => {
                 if sink.send(Message::Text(body.into())).await.is_err() {
-                    // A dead socket surfaces through its close event (the TS
-                    // runtime's send on a closed socket is a silent no-op; the
-                    // close event carries the failure).
+                    // A dead socket surfaces through its close event (the TS runtime's send on a
+                    // closed socket is a silent no-op; the close event carries the failure).
                     let _ = events
                         .send(WorkerEvent::Terminal(Err(CodexStreamError::Transport(
                             WebSocketTransportError::close(
@@ -312,8 +282,8 @@ async fn read_request_events(
             None => next.await,
         };
         match message {
-            // Peer EOF without a close frame: the runtime fires a close event
-            // with code 1006 ("Connection ended" in the TS runtime).
+            // Peer EOF without a close frame: the runtime fires a close event with code 1006
+            // ("Connection ended" in the TS runtime).
             None => {
                 return Err(CodexStreamError::Transport(WebSocketTransportError::close(
                     WEBSOCKET_CLOSE_CODE_ABNORMAL,
@@ -332,8 +302,8 @@ async fn read_request_events(
                             saw_completion = true;
                         }
                         if events.send(WorkerEvent::Event(event)).await.is_err() {
-                            // The request consumer is gone (its receiver was
-                            // dropped); nobody observes this text.
+                            // The request consumer is gone (its receiver was dropped); nobody
+                            // observes this text.
                             return Err(CodexStreamError::Transport(
                                 WebSocketTransportError::runtime("WebSocket request cancelled"),
                             ));
@@ -342,8 +312,8 @@ async fn read_request_events(
                             return Ok(());
                         }
                     }
-                    // Port of `parseWebSocket`'s JSON failure: a non-transport
-                    // protocol error, thrown without SSE fallback.
+                    // Port of `parseWebSocket`'s JSON failure: a non-transport protocol error,
+                    // thrown without SSE fallback.
                     Err(error) => {
                         return Err(CodexStreamError::Protocol(CodexProtocolError {
                             message: format!("Invalid Codex WebSocket JSON: {error}"),
@@ -375,8 +345,8 @@ async fn read_request_events(
                 if saw_completion {
                     return Ok(());
                 }
-                // A close frame without a status code surfaces as the
-                // runtime's 1005 close event (probe-verified).
+                // A close frame without a status code surfaces as the runtime's 1005 close event
+                // (probe-verified).
                 let error = match close {
                     Some(frame) => {
                         WebSocketTransportError::close(u16::from(frame.code), frame.reason.as_str())
@@ -393,7 +363,7 @@ async fn read_request_events(
     }
 }
 
-/// A session-acquired connection handle (`{ socket, entry, reused, release }`).
+/// A session-acquired connection handle.
 pub struct AcquiredConnection {
     worker: mpsc::Sender<WorkerCommand>,
     pub session_id: Option<String>,
@@ -426,8 +396,8 @@ impl AcquiredConnection {
             })
             .await
             .map_err(|_| {
-                // The worker (socket) is gone; in the TS the socket's close
-                // event would surface with the 1006 close text.
+                // The worker (socket) is gone; in the TS the socket's close event would surface
+                // with the 1006 close text.
                 CodexStreamError::Transport(WebSocketTransportError::close(
                     WEBSOCKET_CLOSE_CODE_ABNORMAL,
                     WEBSOCKET_CONNECTION_ENDED_REASON,
@@ -436,15 +406,14 @@ impl AcquiredConnection {
         Ok(event_rx)
     }
 
-    /// Port of `closeWebSocketSilently`: ask the worker to close the socket.
+    /// Ask the worker to close the socket.
     pub async fn close(&self) {
         let _ = self.worker.send(WorkerCommand::Close).await;
     }
 }
 
-/// Port of `isWebSocketSseFallbackActive`.
-/// Port of `acquireWebSocket`: reuse the session's idle connection when
-/// possible, otherwise open a fresh connection (cached per session).
+/// Reuse the session's idle connection when possible, otherwise open a fresh connection (cached per
+/// session).
 pub async fn acquire_websocket(
     url: &str,
     headers: &[(String, String)],
@@ -463,7 +432,6 @@ pub async fn acquire_websocket(
         });
     };
 
-    // Reuse the session's idle connection.
     let cached_worker = {
         let mut state = session_state().lock().ok();
         match state
@@ -531,10 +499,6 @@ pub async fn acquire_websocket(
     })
 }
 
-/// Port of `release`: return the connection to the cache with its new
-/// continuation state, or close it. `keep` mirrors the TS `{ keep }` option.
-/// Port of `release`: return the connection to the cache with its new
-/// continuation state, or close it. `keep` mirrors the TS `{ keep }` option.
 pub async fn release_connection(
     connection: AcquiredConnection,
     keep: bool,
@@ -568,11 +532,8 @@ pub async fn release_connection(
     }
 }
 
-/// Port of `scheduleSessionWebSocketExpiry`: close the cached connection
-/// after the TTL if it stayed idle.
-/// Port of `requestBodiesMatchExceptInput` + `getCachedWebSocketInputDelta`:
-/// compute the continuation delta (input items beyond the cached baseline)
-/// for an otherwise-identical request body.
+/// Compute the continuation delta (input items beyond the cached baseline) for an
+/// otherwise-identical request body.
 pub fn get_cached_websocket_input_delta(
     body: &Value,
     continuation: &ContinuationState,
@@ -607,7 +568,6 @@ pub fn get_cached_websocket_input_delta(
     Some(current_input[baseline.len()..].to_vec())
 }
 
-/// Port of `buildCachedWebSocketRequestBody`.
 pub fn build_cached_websocket_request_body(
     continuation: Option<&ContinuationState>,
     body: &Value,
@@ -616,8 +576,8 @@ pub fn build_cached_websocket_request_body(
     let Some(continuation) = continuation else {
         return body.clone();
     };
-    // Continuations are anchored to the connection that produced the
-    // response; a different socket cannot resolve their previous_response_id.
+    // Continuations are anchored to the connection that produced the response; a different socket
+    // cannot resolve their previous_response_id.
     if continuation.connection_id != connection_id {
         return body.clone();
     }
@@ -689,10 +649,8 @@ mod tests {
     }
 }
 
-/// Raw-socket WebSocket mocks for the transport tests: one connection, one
-/// scripted wire sequence per scenario (the `provider_error` probe drives the
-/// TS binary through the same sequences; these pin the texts and the
-/// diagnostic error surface in-crate).
+/// Raw-socket WebSocket mocks for the transport tests: one connection, one scripted wire sequence
+/// per scenario, pinning the TS-binary-verified texts and the diagnostic error surface in-crate.
 #[cfg(test)]
 mod ws_wire_tests {
     use super::*;
@@ -709,8 +667,7 @@ mod ws_wire_tests {
     const OP_TEXT: u8 = 0x1;
     const OP_CLOSE: u8 = 0x8;
 
-    /// The scripted wire sequence the mock serves after the handshake
-    /// request is read.
+    /// The scripted wire sequence the mock serves after the handshake request is read.
     enum MockAction {
         /// Answer the upgrade request with a plain HTTP error.
         RejectHttp(u16),
@@ -847,8 +804,8 @@ mod ws_wire_tests {
         format!("ws://127.0.0.1:{port}/codex/responses")
     }
 
-    /// Drive one acquire+send+read cycle and return the terminal transport
-    /// error (the read loop surfaces it after the scripted wire sequence).
+    /// Drive one acquire+send+read cycle and return the terminal transport error (the read loop
+    /// surfaces it after the scripted wire sequence).
     async fn request_terminal_error(action: MockAction) -> CodexStreamError {
         let url = spawn_ws_mock(action).await;
         let connection = acquire_websocket(&url, &[], None, None)
@@ -866,8 +823,8 @@ mod ws_wire_tests {
         }
     }
 
-    /// Drive one acquire against a mock that fails before the handshake
-    /// completes and return the connect-phase error.
+    /// Drive one acquire against a mock that fails before the handshake completes and return the
+    /// connect-phase error.
     async fn acquire_connect_error(action: MockAction) -> WebSocketTransportError {
         let url = spawn_ws_mock(action).await;
         match acquire_websocket(&url, &[], None, None).await {
@@ -877,9 +834,6 @@ mod ws_wire_tests {
         }
     }
 
-    /// A refused connect (the probe's dead port): the runtime's own
-    /// connect-failure envelope with the "Failed to connect" cause and a
-    /// plain `Error` name (TS-binary verified).
     #[tokio::test]
     async fn refused_connect_text() {
         let url = "ws://127.0.0.1:1/codex/responses".to_string();
@@ -896,8 +850,7 @@ mod ws_wire_tests {
         assert_eq!(error.close_code(), None);
     }
 
-    /// A non-101 upgrade answer: the "Expected 101 status code" cause
-    /// (TS-binary verified for 401 and 500).
+    /// A non-101 upgrade answer: the "Expected 101 status code" cause (probed for 401 and 500).
     #[tokio::test]
     async fn handshake_rejection_text() {
         for status in [401u16, 500u16] {
@@ -918,8 +871,6 @@ mod ws_wire_tests {
         }
     }
 
-    /// A wrong Sec-WebSocket-Accept: the "Mismatch websocket accept header"
-    /// cause (TS-binary verified).
     #[tokio::test]
     async fn bad_accept_key_text() {
         let error = acquire_connect_error(MockAction::BadAcceptKey).await;
@@ -929,9 +880,6 @@ mod ws_wire_tests {
         assert_eq!(error.error_name(), "Error");
     }
 
-    /// A close frame with code + reason: `WebSocket closed {code} {reason}`
-    /// with the `WebSocketCloseError` name and the numeric code the
-    /// diagnostic records (TS-binary verified).
     #[tokio::test]
     async fn close_frame_with_reason_text() {
         let error = request_terminal_error(MockAction::CloseCode {
@@ -950,8 +898,7 @@ mod ws_wire_tests {
         assert_eq!(transport.close_code(), Some(1011));
     }
 
-    /// The 1009 no-reason special case composes "message too big"
-    /// (TS-binary verified).
+    /// The 1009 no-reason special case composes "message too big".
     #[tokio::test]
     async fn close_1009_no_reason_text() {
         let error = request_terminal_error(MockAction::CloseCode {
@@ -969,8 +916,6 @@ mod ws_wire_tests {
         assert_eq!(transport.close_code(), Some(1009));
     }
 
-    /// A close frame without a status code surfaces as the runtime's 1005
-    /// close event (TS-binary verified).
     #[tokio::test]
     async fn close_no_code_text() {
         let error = request_terminal_error(MockAction::CloseNoCode).await;
@@ -981,8 +926,6 @@ mod ws_wire_tests {
         assert_eq!(transport.close_code(), Some(1005));
     }
 
-    /// A TCP close without a close frame: code 1006 "Connection ended"
-    /// (TS-binary verified for both FIN and RST).
     #[tokio::test]
     async fn fin_without_close_frame_text() {
         let error = request_terminal_error(MockAction::Fin).await;
@@ -997,8 +940,6 @@ mod ws_wire_tests {
         assert_eq!(transport.close_code(), Some(WEBSOCKET_CLOSE_CODE_ABNORMAL));
     }
 
-    /// Reserved opcodes (data or control): code 1002 with the runtime's
-    /// protocol-error reason (TS-binary verified).
     #[tokio::test]
     async fn reserved_opcode_text() {
         for action in [
@@ -1017,8 +958,6 @@ mod ws_wire_tests {
         }
     }
 
-    /// Reserved bits on a frame: the runtime's 1011 "Compression not
-    /// implemented yet" close (TS-binary verified).
     #[tokio::test]
     async fn rsv_bits_text() {
         let error = request_terminal_error(MockAction::RsvBits).await;
@@ -1032,16 +971,14 @@ mod ws_wire_tests {
         assert_eq!(transport.close_code(), Some(1011));
     }
 
-    /// A wss peer that speaks no TLS: the runtime's "TLS handshake failed"
-    /// cause (TS-binary verified).
     #[tokio::test]
     async fn wss_to_plain_tls_text() {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("mock bind");
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.expect("mock accept");
-            // Read the TLS ClientHello then answer plain HTTP: the handshake
-            // fails against a non-TLS peer.
+            // Read the TLS ClientHello then answer plain HTTP: the handshake fails against a
+            // non-TLS peer.
             let mut buf = [0u8; 512];
             let _ = socket.read(&mut buf).await;
             socket
@@ -1062,9 +999,7 @@ mod ws_wire_tests {
         assert_eq!(error.error_name(), "Error");
     }
 
-    /// An invalid JSON frame is a non-transport protocol error (`isCodexNonTransportError`
-    /// in the TS): it throws without the SSE fallback, surfacing the
-    /// `CodexProtocolError` name in the `provider_stream_failure` diagnostic.
+    /// An invalid JSON frame is a non-transport protocol error: thrown without the SSE fallback.
     #[tokio::test]
     async fn invalid_json_is_non_transport_error() {
         let error = request_terminal_error(MockAction::InvalidJson).await;

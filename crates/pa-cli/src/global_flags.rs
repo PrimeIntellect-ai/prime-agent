@@ -1,6 +1,5 @@
-//! Leading global-flag scanning, ported from `cli/global-flags.ts`. Both the
-//! public command router and the arg parser must agree on which token is the
-//! subcommand, so flag consumption mirrors `parse_args` exactly.
+//! Leading global-flag scanning. Both the public command router and the arg
+//! parser must agree on which token is the subcommand.
 
 use std::collections::HashSet;
 
@@ -30,9 +29,7 @@ pub const GLOBAL_VALUE_FLAGS: [&str; 22] = [
     "--autonomous-timeout-ms",
 ];
 
-/// Value flags that also appear in `GLOBAL_VALUE_FLAGS`.
 const FREEFORM_VALUE_FLAGS: [&str; 2] = ["--goal", "--autonomous-gate"];
-/// Prompt value flags whose text may look like a long option.
 const PROMPT_VALUE_FLAGS: [&str; 2] = ["--system-prompt", "--append-system-prompt"];
 
 /// Flags that mark a one-shot prompt run; their positional is a message.
@@ -54,8 +51,6 @@ const GLOBAL_BOOLEAN_FLAGS: [&str; 11] = [
     "--offline",
 ];
 
-/// True when parseArgs consumes the token after `args[index]` as part of the
-/// flag at `args[index]`, mirroring `consumesFollowingToken` in global-flags.ts.
 fn consumes_following_token(args: &[String], index: usize) -> bool {
     let Some(next) = args.get(index + 1) else {
         return false;
@@ -87,7 +82,6 @@ fn consumes_following_token(args: &[String], index: usize) -> bool {
         && !next.starts_with('@')
 }
 
-/// The first positional argument, skipping global flags the way parseArgs does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FirstPositionalArgument {
     pub index: usize,
@@ -96,7 +90,6 @@ pub struct FirstPositionalArgument {
     pub after_separator: bool,
 }
 
-/// Find the first positional argument, mirroring `findFirstPositionalArgument`.
 pub fn find_first_positional_argument(args: &[String]) -> Option<FirstPositionalArgument> {
     let mut index = 0;
     while index < args.len() {
@@ -140,10 +133,10 @@ pub fn is_command_positional(
     }
 }
 
-/// Move leading global flags behind the subcommand they were written in front
-/// of, mirroring `rotateGlobalFlagsBeforeCommand`. Arguments are returned
-/// unchanged when no known command is present, when `--` already escaped the
-/// token, and for one-shot prompt runs.
+/// Move leading global flags behind the subcommand they were written in
+/// front of. Arguments are returned unchanged when no known command is
+/// present, when `--` already escaped the token, and for one-shot prompt
+/// runs.
 pub fn rotate_global_flags_before_command(
     args: &[String],
     public_commands: &HashSet<&str>,
@@ -183,8 +176,7 @@ pub fn rotate_global_flags_before_command(
 }
 
 /// The command path a `help` request names, with global run flags (and their
-/// values) excluded, mirroring `extractHelpCommandPath`. Returns `None` when
-/// the tail contains `--` or a bare explicit `--help`/`-h`.
+/// values) excluded. Returns `None` on `--` or a bare `--help`/`-h`.
 pub fn extract_help_command_path(args: &[String], from: usize) -> Option<Vec<String>> {
     let mut path: Vec<String> = Vec::new();
     let mut index = from;

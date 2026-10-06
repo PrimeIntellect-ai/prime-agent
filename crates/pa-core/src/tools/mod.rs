@@ -1,14 +1,11 @@
-//! Tool implementations ported from `packages/coding-agent/src/core/tools/`.
-//!
 //! All modules are `pub(crate)` internals of the tools subsystem; the
 //! crate facade (crate root) re-exports only the public tool surface.
 
 pub(crate) mod bash;
 pub(crate) mod bash_guard;
 pub(crate) mod bash_local;
-// Rendering preview helpers (TS code-preview.ts). Unused by the engine's
-// headless core for now; pa-tui owns terminal rendering, but the behavior
-// lives here with the other tool modules for parity tests.
+// Rendering preview helpers: unused by the engine's headless core
+// (pa-tui owns terminal rendering); lives here for parity tests.
 #[allow(dead_code)]
 pub(crate) mod code_preview;
 pub(crate) mod code_preview_python;

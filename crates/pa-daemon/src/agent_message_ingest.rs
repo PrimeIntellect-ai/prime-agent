@@ -1,17 +1,7 @@
-//! The agent-message ingestion surface (protocol breadth wave b7): the
-//! worker arms for `agent_messages_status`, `agent_messages_pause`,
-//! `agent_messages_resume`, and `agent_messages_clear` (TS daemon-mode
-//! `case "agent_messages_status"` ... `case "agent_messages_clear"`, over
-//! `getAgentMessageSafetyStatus` / the `agentMessagesPaused` flag /
-//! `clearQueuedAgentMessages`), plus the paused gate the delivery path
-//! answers ("Agent messaging is paused", TS `sendAgentSessionMessage`).
-//!
-//! Porting note (rate limiter): the TS worker also paces deliveries through
-//! a per-sender token bucket (`AgentSessionMessageRateLimiter`, capacity 3
-//! / refill 1s). The status arm reports the TS constants verbatim; this
-//! port does not refuse deliveries on the bucket (the daemon's queue
-//! capacity bound is the enforced limit), a documented deviation from the
-//! TS ingestion behavior.
+//! The agent-message ingestion surface: the worker arms for
+//! `agent_messages_status`/`_pause`/`_resume`/`_clear`, plus the paused
+//! delivery gate. Deliberate deviation from TS: no per-sender rate bucket
+//! (the daemon's queue capacity bound is the enforced limit).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -25,8 +15,7 @@ use pa_core::session_engine::agent_messaging::{
 use crate::protocol::{response_failure, response_success, DaemonResponse};
 use crate::worker::Worker;
 
-/// The worker's agent-message ingestion state: the pause flag all four
-/// arms read and the delivery gate checks.
+/// The worker's agent-message ingestion state: the pause flag.
 pub(crate) struct AgentMessageIngest {
     paused: AtomicBool,
 }
@@ -54,9 +43,8 @@ impl Default for AgentMessageIngest {
 }
 
 impl Worker {
-    /// The TS `getAgentMessageSafetyStatus` wire object: the pause flag
-    /// plus the four ingestion limits (the TS constants; see the module
-    /// note for the rate-limiter deviation).
+    /// The safety-status wire object (see the module note for the rate-limiter
+    /// deviation).
     fn agent_message_safety_status(&self) -> Value {
         json!({
             "paused": self.agent_messages.paused(),
@@ -79,9 +67,8 @@ impl Worker {
         )
     }
 
-    /// `agent_messages_pause`: set the flag, then drop every queued
-    /// agent-message item (TS also clears the rate limiter - see the
-    /// module note) and answer the safety status.
+    /// `agent_messages_pause`: set the flag, drop every queued agent-message item, answer the
+    /// safety status.
     pub(crate) fn handle_agent_messages_pause(&self) -> DaemonResponse {
         if let Err(response) = self.require_created("agent_messages_pause") {
             return response;
@@ -96,8 +83,7 @@ impl Worker {
         )
     }
 
-    /// `agent_messages_resume`: clear the flag and answer the safety
-    /// status.
+    /// `agent_messages_resume`: clear the flag, answer the safety status.
     pub(crate) fn handle_agent_messages_resume(&self) -> DaemonResponse {
         if let Err(response) = self.require_created("agent_messages_resume") {
             return response;
@@ -110,9 +96,8 @@ impl Worker {
         )
     }
 
-    /// `agent_messages_clear`: drop this session's queued agent-message
-    /// items and answer the TS `clearQueuedAgentMessages` shape (the
-    /// removed prompts per lane).
+    /// `agent_messages_clear`: drop queued agent-message items, answer the TS shape (removed
+    /// prompts per lane).
     pub(crate) fn handle_agent_messages_clear(&self) -> DaemonResponse {
         if let Err(response) = self.require_created("agent_messages_clear") {
             return response;
@@ -121,10 +106,8 @@ impl Worker {
         response_success(None, "agent_messages_clear", Some(cleared))
     }
 
-    /// The delivery gate (TS `sendAgentSessionMessage`'s paused check):
-    /// the exact TS error string, surfaced through the worker's private
-    /// `worker_deliver_message` arm so a client's `send_message` fails
-    /// with it.
+    /// The delivery gate's paused check: the exact TS error string, surfaced
+    /// through `worker_deliver_message`.
     #[allow(clippy::result_large_err)]
     pub(crate) fn refuse_delivery_if_paused(&self) -> Result<(), DaemonResponse> {
         if self.agent_messages.paused() {
@@ -138,10 +121,8 @@ impl Worker {
         Ok(())
     }
 
-    /// Remove the queued agent-message items from both lanes (TS
-    /// `clearQueuedAgentMessages`: only `agent_message`-sourced turns,
-    /// never client-queued prompts) and answer the removed prompts per
-    /// lane, exactly the TS `{ steering, followUp }` shape.
+    /// Remove the queued agent-message items from both lanes (never
+    /// client-queued prompts), in the `{ steering, followUp }` shape.
     fn clear_queued_agent_messages(&self) -> Value {
         let mut core = self.core.lock().unwrap();
         let mut steering = Vec::new();
@@ -164,8 +145,7 @@ impl Worker {
         core.follow_up = retained_follow_up;
         let snapshot = Self::snapshot_locked(&core);
         drop(core);
-        // The sweep removed queued agent messages: the verdict follows the
-        // remaining lanes (a swept-out last item settles the session).
+        // The sweep may have settled the session: the verdict follows the remaining lanes.
         self.checkpoint_queue(crate::worker::QueueCheckpoint::Settle {
             operation: "queue_mutated",
         });
@@ -205,9 +185,7 @@ mod tests {
         worker
     }
 
-    /// The paused safety status answers the TS five-field shape with the
-    /// TS constants, and a pause clears queued agent messages but keeps
-    /// client-queued prompts.
+    /// A pause clears queued agent messages but keeps client prompts.
     #[tokio::test]
     async fn status_pause_resume_and_clear_match_ts_shapes() {
         let worker = created_worker().await;
@@ -225,8 +203,7 @@ mod tests {
             }))
         );
 
-        // One agent-message delivery and one client steer queue items on
-        // the steering lane.
+        // One agent-message delivery and one client steer, both on the steering lane.
         let delivered = worker
             .dispatch(
                 "worker_deliver_message",
@@ -245,8 +222,7 @@ mod tests {
             )
             .await;
 
-        // Pause: the flag flips and the queued agent message is dropped
-        // (the client prompt stays - TS clears only agent messages).
+        // Pause: the flag flips and the queued agent message is dropped; the client prompt stays.
         let paused = worker.dispatch("agent_messages_pause", &json!({})).await;
         assert!(paused.success);
         assert_eq!(paused.data.as_ref().unwrap()["paused"], json!(true));
@@ -278,10 +254,7 @@ mod tests {
         let resumed = worker.dispatch("agent_messages_resume", &json!({})).await;
         assert_eq!(resumed.data.as_ref().unwrap()["paused"], json!(false));
 
-        // Clear answers the TS removed-prompts shape - only agent
-        // messages go, so the lane is already empty of them after the
-        // pause and the client prompt stays queued (TS
-        // `clearQueuedAgentMessages` never removes client prompts).
+        // Clear answers the TS removed-prompts shape; the client prompt stays.
         let cleared = worker.dispatch("agent_messages_clear", &json!({})).await;
         assert!(cleared.success);
         assert_eq!(
@@ -299,8 +272,6 @@ mod tests {
         }
     }
 
-    /// A queue behind current work (`followUp` delivery mode) is cleared
-    /// from the follow-up lane with its own removed texts.
     #[tokio::test]
     async fn clear_reports_the_follow_up_lane() {
         let worker = created_worker().await;
@@ -317,8 +288,7 @@ mod tests {
             .await;
         assert!(delivered.success, "delivery failed: {delivered:?}");
         let cleared = worker.dispatch("agent_messages_clear", &json!({})).await;
-        // The removed text is the queued turn's prompt (TS reports
-        // `payload.text`, the created agent-message prompt).
+        // The removed text is the queued turn's prompt (TS `payload.text`).
         assert_eq!(
             cleared.data,
             Some(json!({

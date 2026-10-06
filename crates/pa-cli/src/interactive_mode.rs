@@ -1,8 +1,6 @@
 //! Interactive mode wiring: resolve the daemon socket, ensure a supervisor is
-//! listening (spawning one detached, TS `daemon-launch.ts` semantics), pick
-//! the session from the CLI session flags, and hand off to the pa-tui
-//! interactive loop. The session keeps running in the worker after the UI
-//! exits; reattaching later restores it from the same session file.
+//! listening, pick the session from the CLI session flags, and hand off to the
+//! pa-tui interactive loop; the session keeps running in the worker after exit.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -17,39 +15,20 @@ use crate::mode::RunOptions;
 use pa_core::session::discovery::{resolve_session_path, ResolvedSession};
 use pa_tui::interactive::{InteractiveOptions, ModelSelection, SessionSelection, UiMode};
 
-// The daemon-ensure concern (the socket probe, the stale-daemon shutdown,
-// the detached supervisor spawn, and the startup poll window with its
-// consts) moved to the child module at the same tree position
-// (interactive_mode::daemon); the pub re-exports keep the print
-// runtime's and the integration tests' paths stable.
 mod daemon;
 
 pub use daemon::{ensure_daemon_running, ensure_daemon_running_with};
 
-// The first-run onboarding concern (the startup-model probe, the
-// settings sink over the pa-tui trait, and the startup task assembly)
-// moved to the child module at the same tree position
-// (interactive_mode::onboarding); the task binding keeps the startup
-// assembly's bare call in scope, and the cfg(test) bindings keep the
-// unit battery's struct literals in scope.
 mod onboarding;
 
 use onboarding::onboarding_task;
 #[cfg(test)]
 use onboarding::{SettingsOnboardingSink, StartupModelProbe};
 
-// The interaction-telemetry concern (the one-shot client wrapper and
-// the adoption events the pa-tui interactive loop reports through the
-// InteractionTelemetry trait) moved to the child module at the same
-// tree position (interactive_mode::telemetry); the binding keeps the
-// startup assembly's bare construction in scope.
 mod telemetry;
 
 use telemetry::CliInteractionTelemetry;
 
-// The inline unit battery moved to the child module at the same tree
-// position (interactive_mode::tests); its use-super glob keeps resolving
-// through the facade's bindings and the pub contract.
 #[cfg(test)]
 mod tests;
 
@@ -76,14 +55,8 @@ pub fn run_interactive_mode(options: &RunOptions) -> Result<i32> {
         .context("build the interactive runtime")?;
     let startup_started = std::time::Instant::now();
     runtime.block_on(async {
-        // `agent startup stage` (v2, #2117): the configuration-load and
-        // session-attach stages measured on the same one-shot client as
-        // the `startup` event; the configuration stage covers the whole
-        // options resolution (`build_tui_options` above), the attach
-        // stage the daemon-socket resolution.
-        // The startup kind (#2117): a resume/continue launch is a `resumed`
-        // startup; every other selection is `cold` (the `warm_attach` value
-        // stays for the daemon-warmth seam, which does not exist yet).
+        // The `agent startup stage` telemetry: the configuration-load and
+        // session-attach stages measured on the same one-shot client as `startup`.
         let startup_kind: &'static str =
             if options.session.resume.is_some() || options.session.continue_recent {
                 "resumed"
@@ -96,11 +69,8 @@ pub fn run_interactive_mode(options: &RunOptions) -> Result<i32> {
                 pa_core::settings::SettingsManager::create(&options.config.cwd, &agent_dir);
             pa_core::session_engine::telemetry::build_client(&settings, &agent_dir)
         });
-        // The onboarding `entry`/`ready` stages (v2, #2117) defer to here:
-        // the task builds before the runtime exists (an inert client
-        // there would drop the events); inside the runtime they emit on
-        // a one-shot client - the stage facts carry no time data, so the
-        // deferral never distorts them.
+        // The onboarding `entry`/`ready` stages defer to here: an inert client
+        // before the runtime exists would drop the events.
         if !pending_onboarding_stages.is_empty() {
             let agent_dir = options.config.agent_dir.clone();
             let settings =
@@ -220,14 +190,8 @@ pub fn run_interactive_mode(options: &RunOptions) -> Result<i32> {
         }
         result
     })?;
-    // tmux (verified on 3.2a) can drop the pane's final output when the
-    // process dies immediately after writing it: the just-printed resume
-    // hint — and the tail of the exit flush — races the pane-death
-    // handling and the dead pane comes up blank. Holding the process
-    // briefly after the last write lets the terminal apply it first. The
-    // TS product wins this race only by exiting slower (its input drain
-    // plus node teardown); the bound stays far inside the exit-within-1s
-    // contract.
+    // tmux (verified on 3.2a) can drop the pane's final output when the process
+    // dies immediately after writing it; holding briefly lets the terminal apply it.
     std::thread::sleep(Duration::from_millis(300));
     Ok(0)
 }
@@ -269,33 +233,22 @@ fn print_resume_hint(hint: Option<&str>) {
 }
 
 /// The agents-view loop: open the view, run the session it opens, and return
-/// to the view when the session detaches through agents-back or bare
-/// `/resume` (TS `InteractiveMode.run` returning `agents_view`). Every other
-/// session exit — ctrl+c/ctrl+d, `/quit`, `/exit` — ends the whole app (TS
-/// `shutdown()` exits the process instead of reopening the view). A
-/// `/resume <selector>` chain runs its target before the loop decides again.
+/// to the view on agents-back or bare `/resume`; every other exit ends the app.
 async fn run_agents_view_flow(
     base: InteractiveOptions,
     anchor: Option<String>,
     notice: Option<String>,
 ) -> Result<()> {
     let mut anchor = anchor;
-    // The flow's roster connection (TS `AgentsViewPersistentState.rosterClient`):
-    // every view run in this loop reuses it, and a chat run hands it back,
-    // so a switch back from a chat skips the connect + hello handshake.
+    // Every view run reuses the roster connection (a chat run hands it
+    // back), so a switch back from a chat skips the handshake.
     let mut roster_link: Option<pa_tui::agents_view::AgentsViewLink> = None;
-    // The view/session loop's carried state (TS `AgentsViewPersistentState`):
-    // a stack of scope frames (the scope plus the return chat each was
-    // opened from), the typed query, the drilled-in row's ancestors to
-    // re-expand, and the selected row's identity and key.
     let mut frames: Vec<(
         pa_tui::agents_view::AgentsViewScope,
         Option<SessionSelection>,
     )> = Vec::new();
     let mut query: Option<String> = None;
-    // The view/session loop's carried incident notice state (TS
-    // `persistentState.incidentNoticeState`): a dismissal survives the
-    // next view run, and the 30s poll continues from the consumed offset.
+    // A dismissal survives the next view run.
     let mut incident_notice_state: Option<pa_tui::incident_notices::IncidentNoticeState> = None;
     let mut expanded_ancestors: Vec<String> = Vec::new();
     let mut selected_row_identity: Option<String> = None;
@@ -315,23 +268,13 @@ async fn run_agents_view_flow(
             selected_row_identity: selected_row_identity.clone(),
             selected_key: selected_key.clone(),
             status_message: status_message.take(),
-            // The view dispatches every action through the same effective
-            // bindings as the session it opened from (TS
-            // `AgentsViewMode.keybindings`).
             keybindings: base.keybindings.clone(),
-            // TS `AgentsViewMode` constructs its TUI with the live
-            // `settingsManager.getShowHardwareCursor()` (default false).
             show_hardware_cursor: base
                 .client_settings
                 .as_ref()
                 .is_some_and(|settings| settings.show_hardware_cursor()),
-            // TS `persistentState.incidentNoticeState`: the incident
-            // notice state survives leaving and re-entering the view (a
-            // dismissed incident never comes back, and the poll does not
-            // re-read consumed bytes).
             incident_notice_state: incident_notice_state.take(),
-            // TS `AgentsViewModeOptions.config`: the flow's own create
-            // config — the base a saved reply's resume derives from.
+            // The base a saved reply's resume derives from.
             create_config: base.create_config(),
         };
         let view_run = pa_tui::agents_view::run_agents_view(
@@ -341,8 +284,6 @@ async fn run_agents_view_flow(
         )
         .await?;
         let mut view = view_run.outcome;
-        // The view reports its actions when the run ends. On exit, await them
-        // under the shared exit bound so the runtime drop cannot lose them.
         let actions_report = {
             let telemetry = base.telemetry.clone();
             let actions = std::mem::take(&mut view.actions);
@@ -354,19 +295,14 @@ async fn run_agents_view_flow(
                 }
             }
         };
-        // A handoff to a chat parked the connection for this loop's next
-        // view run; a selection-less exit closed it already.
         roster_link = view_run.link;
-        // A dropped scope root or the view's parent key pops the frame (TS
-        // `resolveAgentsViewScopeFrames` / the `scope_back` arm), so a later
-        // agents-back lands in the parent scope; both clear the query.
+        // A dropped scope root or the view's parent key pops the frame;
+        // both clear the query.
         let scope_frame_popped = view.scope_dropped || view.scope_popped;
         if scope_frame_popped {
             frames.pop();
         }
         let Some(selection) = view.selection else {
-            // The exit path flushes the adoption events before the
-            // process ends (bounded by the shared exit bound).
             let _ = tokio::time::timeout(
                 Duration::from_millis(pa_tui::interactive::TELEMETRY_EXIT_TIMEOUT_MS),
                 actions_report,
@@ -381,28 +317,18 @@ async fn run_agents_view_flow(
         status_message = view.status_message.clone();
         incident_notice_state = Some(view.incident_notice_state);
         query = if scope_frame_popped { None } else { view.query };
-        // The opened row's depth metadata rides the session run (TS
-        // `sessionDepth`/`sessionHasChildren`): a drilled-in child renders
-        // its `depth N` tray label.
         let mut session_options = base.clone();
         session_options.session = selection;
         session_options.session_rlm_depth = view.opened_rlm_depth;
         session_options.session_has_children = view.opened_has_children;
-        // The scoped panel's own exit (the parent key or escape) reopened
-        // the scope root's chat: it starts with the dock focused on the
-        // panel's own group (the Subagents item), not the prompt bar —
-        // a plain row open keeps the editor's focus.
+        // A scoped panel's own exit reopens the chat with the dock focused
+        // on the Subagents item, not the prompt bar.
         session_options.restore_dock_focus = view.scope_back;
-        // The opened session's own directory rides the options: the
-        // session run anchors its cwd (and the file-completion base) on
-        // the attached session's directory, not the launch directory the
-        // view opened from (TS `getCurrentCwd`).
+        // The session run anchors its cwd (and the file-completion base)
+        // on the attached session's directory, not the launch directory.
         if let Some(cwd) = view.opened_cwd {
             session_options.cwd = cwd;
         }
-        // The agents-view open route (TS `runAgentsViewLoop` ->
-        // `openAgentsViewSession`, TS #2391): the open waits through a
-        // daemon update restart instead of failing hard.
         let outcome = pa_tui::interactive::run_interactive_agents_view_open(
             session_options,
             UiMode::Terminal,
@@ -422,11 +348,8 @@ async fn run_agents_view_flow(
             return Ok(());
         }
         if let Some(scope) = outcome.agents_view_scope {
-            // The session's subagent summary line opened the agents view
-            // scoped to its subtree: push a frame with the session as the
-            // return chat (TS `transitionAgentsViewScope` push arm) and
-            // clear the query — the scope already narrows the list, and a
-            // filter typed to find the session would hide the subtree.
+            // Push a frame with the session as the return chat and clear the
+            // query — a filter typed to find the session would hide the subtree.
             frames.retain(|(frame, _)| frame.session_id != scope.session_id);
             frames.push((
                 scope,
@@ -434,8 +357,6 @@ async fn run_agents_view_flow(
             ));
             query = None;
         }
-        // `/resume <selector>` routes straight to that session before the
-        // loop reopens the view.
         let mut pending = outcome.selection_request;
         while let Some(selection) = pending.take() {
             let mut next = base.clone();
@@ -485,46 +406,28 @@ fn build_tui_options(
         .session_dir
         .clone()
         .or_else(|| Some(config.agent_dir.join("sessions")));
-    // TS startup migrations rewrite legacy keybinding ids in
-    // `keybindings.json` before the manager loads them
-    // (`migrateKeybindingsConfigFile` in `runMigrations`).
     if let Err(error) = pa_tui::keybindings::migrate_keybindings_file(&config.agent_dir) {
         // A failed migration never blocks startup: the manager below
         // falls back to the previous file contents (or the defaults).
         eprintln!("Warning: could not migrate keybindings: {error:#}");
     }
-    // TS `KeybindingsManager.create(agentDir)`: the user's
-    // `keybindings.json` merged over the shipped defaults drives the TUI.
     let keybindings = pa_tui::keybindings::KeybindingsManager::create(&config.agent_dir);
-    // Test seam: a scripted faux daemon session (same contract as the print
-    // runtime). Verification harness only; never set by the product.
+    // Test seam: a scripted faux daemon session; never set by the product.
     let script_path = std::env::var_os("PRIME_AGENT_FAUX_SCRIPT").map(PathBuf::from);
-    // TS `createSessionManager`'s flag order (fork -> resume -> create):
-    // a fork copies its source into a fresh file client-side, and the
-    // daemon opens the fork — never the source — through the create
-    // `sessionPath` (TS `getInteractiveDaemonSessionPath`).
+    // Flag order (fork -> resume -> create): the daemon opens the fork —
+    // never the source — through the create `sessionPath`.
     let session = match &options.session.fork {
         Some(selector) => fork_startup_selection(selector, &config.cwd, session_dir.as_deref())?,
         None => session_selection(&options.session, session_dir.as_deref()),
     };
-    // The chat markdown code-block indent reads the effective settings on
-    // startup (TS `getCodeBlockIndent` -> `getMarkdownThemeWithSettings`).
     let settings = pa_core::settings::SettingsManager::create(&config.cwd, &config.agent_dir);
     let code_block_indent = settings.get_code_block_indent();
     let show_images = settings.get_show_images();
     let fullscreen_mouse = settings.get_fullscreen_mouse();
-    // The `/tree` selector's initial filter and the branch-summary prompt
-    // skip read the same settings the TS interactive mode reads at
-    // startup.
     let tree_filter_mode = settings.get_tree_filter_mode();
     let branch_summary_skip_prompt = settings.get_branch_summary_skip_prompt();
-    // The `/model` picker catalog: a startup snapshot of the available
-    // models (same registry and private-authorization cache adoption as
-    // the startup-model chain; entitlement refreshes run daemon-side, so
-    // the picker works off the snapshot until the daemon's
-    // `get_model_catalog` response lands). models.json entries are part of
-    // the available catalog, so configured custom models list in the
-    // picker; the picker itself owns the TS selector order.
+    // A startup snapshot of the available models drives the `/model` picker
+    // (entitlement refreshes run daemon-side); models.json custom models too.
     let auth = pa_core::auth::AuthStorage::create(&config.agent_dir);
     let mut registry =
         pa_core::models::ModelRegistry::create(auth, config.agent_dir.join("models.json"));
@@ -537,10 +440,6 @@ fn build_tui_options(
     let default_thinking_level = settings
         .get_default_thinking_level()
         .map(|level| level.model_level().wire_name().to_string());
-    // `/login` + `/logout`: the provider auth flows (the API-key store,
-    // the MCP device flow, the Prime Inference login, the provider
-    // catalog) — one handle serves the commands and the onboarding flow's
-    // sign-in steps.
     let provider_auth = pa_tui::provider_auth::ProviderAuthCommandsHandle(std::sync::Arc::new(
         crate::provider_login::ProviderAuth::new(config.cwd.clone(), config.agent_dir.clone()),
     ));
@@ -558,26 +457,23 @@ fn build_tui_options(
         cwd: config.cwd.clone(),
         session_dir,
         script_path,
-        // Explicit CLI model flags ride every create request (TS
-        // runtime-config propagation): the daemon worker must treat them as
-        // authoritative, not fall back to a process-wide model.
+        // Explicit CLI model flags ride every create request; the daemon
+        // worker must treat them as authoritative.
         model_selection: ModelSelection {
             provider: config.provider.clone(),
             model: config.model.clone(),
             api_key: config.api_key.clone(),
-            // The `--thinking` flag rides the same create-config path:
-            // the worker clamps it to the model's supported levels.
+            // The worker clamps `--thinking` to the model's levels.
             thinking: config.thinking,
         },
-        // The raw `--models` patterns ride the create config (TS
-        // `runtimeConfigFromArgs`); the daemon owns the resolution.
+        // The raw `--models` patterns ride the create config (the daemon
+        // owns the resolution).
         models: config.models.clone(),
         no_session: options.session.no_session,
         session,
         initial_message: options.initial_message.clone(),
         show_images,
         fullscreen_mouse,
-        // TS startup reads the settings theme (`getTheme() || "prime"`).
         theme: settings.get_theme().map(str::to_string).unwrap_or_default(),
         // The client-settings seam the interactive commands persist
         // through (`/settings`).
@@ -586,10 +482,6 @@ fn build_tui_options(
             config.agent_dir.clone(),
         )),
         version: crate::config::version().to_string(),
-        // TS `shouldRunOnboarding`: the settings flag alone mounts the
-        // task; the carried startup-model state decides the branch and
-        // gates the completion marker, and the auth handle serves the
-        // not-ready branch's sign-in steps.
         onboarding,
         telemetry_disabled: crate::mode::create_telemetry_disabled(config),
         // `/mcp login` / `/mcp logout`: the client-side auth flows run in
@@ -601,34 +493,25 @@ fn build_tui_options(
                 config.agent_dir.clone(),
             )),
         )),
-        // `/traces`: the settings flag and the resolved credential the
-        // status block shows; the upload subsystem itself stays unported.
         traces: Some(pa_tui::traces::TracesCommandsHandle(std::sync::Arc::new(
             crate::client_traces::ClientTraces::new(config.cwd.clone(), config.agent_dir.clone()),
         ))),
-        // `/update`: the out-of-band installer funnel (the same body
-        // `prime-agent update` runs, with the output captured — the TUI
-        // stays mounted and the outcome lands as rows).
+        // `/update`: the same body `prime-agent update` runs, output
+        // captured — the TUI stays mounted.
         update_commands: Some(pa_tui::update_command::UpdateCommandsHandle(
             std::sync::Arc::new(crate::client_update::ClientUpdate),
         )),
-        // `/login` + `/logout`: the provider auth flows (the API-key store,
-        // the MCP device flow, the provider catalog).
         provider_auth: Some(provider_auth),
         telemetry: Some(std::sync::Arc::new(CliInteractionTelemetry::new(
             config.cwd.clone(),
             config.agent_dir.clone(),
         ))),
         keybindings,
-        // The process-wide prompt stash store (TS `ClientPromptStashStore`
-        // lives in `main.ts`'s invocation scope): one store per process, so
-        // the agents-view loop (view -> chat -> view) keeps every stashed
-        // draft alive across its chat runs.
+        // One process-wide prompt stash store, so the agents-view loop
+        // keeps stashed drafts alive across its chat runs.
         prompt_stash,
-        // RLM depth metadata comes from the agents view when it opens a row
-        // (TS `sessionDepth`/`sessionHasChildren`); a direct CLI session is
-        // a root run. A direct launch never reopens from the scoped panel,
-        // so the dock's focus restore stays off (the editor owns it).
+        // A direct CLI session is a root run (RLM depth metadata comes
+        // from the agents view).
         session_rlm_depth: None,
         session_has_children: false,
         restore_dock_focus: false,
@@ -636,11 +519,8 @@ fn build_tui_options(
     Ok((tui_options_value, pending_onboarding_stages))
 }
 
-/// Map the CLI session flags onto the TUI session selection (the TS order:
-/// explicit `--resume` selector, then a fresh session). `--continue` never
-/// maps to a resume: it surfaces its candidate through the agents view
-/// ([`continue_recent_view`]) and falls through to the fresh-session run
-/// here.
+/// Map the CLI session flags onto the TUI session selection: explicit `--resume`
+/// selector, then a fresh session (`--continue` goes through the agents view).
 fn session_selection(
     session: &crate::mode::SessionOptions,
     session_dir: Option<&Path>,
@@ -653,23 +533,14 @@ fn session_selection(
     SessionSelection::New
 }
 
-/// TS `createSessionManager`'s fork arm for the interactive launch: resolve
-/// the selector, copy the source into a fresh session file client-side
-/// ([`pa_core::session::manager::SessionManager::fork_from`], the same
-/// copy print mode uses), and hand the daemon the fork — never the source —
-/// as the create `sessionPath` (TS `getInteractiveDaemonSessionPath`). Every
-/// resolution shape forks: a GLOBAL session is exactly what `--fork` is for
-/// (a different project's session copied into this cwd). No daemon-active
-/// guard applies: the copy reads the source and writes a brand-new file, so
-/// a session a live worker already hosts forks fine (TS parity).
+/// The interactive launch's fork arm: copy the source into a fresh session file
+/// client-side ([`pa_core::session::manager::SessionManager::fork_from`]) and
+/// hand the daemon the fork — never the source.
 ///
 /// # Errors
 ///
-/// Returns the TS startup failures: a selector that matches nothing (with
-/// the browse hint), and the `forkFrom` contract failures (an empty or
-/// headerless source file). A leading `~` in the selector expands against
-/// the home dir ([`crate::config::expand_tilde_path`]), the resume
-/// selector's convention.
+/// A selector that matches nothing, or the `forkFrom` failures (an empty or
+/// headerless source file).
 fn fork_startup_selection(
     selector: &str,
     cwd: &Path,
@@ -700,13 +571,8 @@ fn fork_startup_selection(
     Ok(SessionSelection::Resume(fork_file))
 }
 
-/// TS `shouldOpenAgentsViewForDaemonInteractive`: a selector, continuation,
-/// or fork opens its target session directly instead of the agents view.
-/// The selector (`--resume <id>`) and `--continue` launches never reach the
-/// view with `--fork` anyway (the shared flag validation refuses the
-/// combination at startup), so only the explicit `agents` request needs the
-/// guard; bare `--resume` still opens the view, as does a `--continue` with
-/// a saved candidate.
+/// A selector, continuation, or fork opens its target session directly; only the
+/// explicit `agents` request needs the onboarding guard.
 fn should_open_agents_view(
     options: &RunOptions,
     onboarding_pending: bool,
@@ -718,27 +584,15 @@ fn should_open_agents_view(
 }
 
 /// The `--continue` launch's agents-view target: the newest saved session
-/// for the cwd (the candidate TS `SessionManager.continueRecent` silently
-/// reopens) plus the status-line notice that names it.
+/// for the cwd, plus the status-line notice that names it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ContinueRecentView {
-    /// The candidate's session id: the view preselects (anchors on) its row.
     session_id: String,
     notice: String,
 }
 
-/// Resolve the `--continue` launch into an agents-view opening. The launch
-/// never blind-resumes the newest session: on a shared session dir that
-/// could be any session (an orchestrator's), and reopening it would revive
-/// its context and scheduled jobs without the user ever naming it. The view
-/// shows the candidate preselected and the user confirms what continues (a
-/// sanctioned divergence: TS `SessionManager.continueRecent` reopens the
-/// candidate silently). `None` falls through to the direct fresh-session
-/// run: not a bare `--continue` launch (an explicit `--resume` selector or
-/// `--no-session` owns the selection first, the TS flag order), a pending
-/// onboarding (the first-run notice owns the startup, like the explicit
-/// `agents` request), or no saved session for the cwd (the fresh-session
-/// fallback TS `continueRecent` itself takes).
+/// Resolve the `--continue` launch into an agents-view opening: never a blind
+/// newest-resume (a sanctioned divergence — TS reopens the candidate silently).
 fn continue_recent_view(
     options: &RunOptions,
     onboarding_pending: bool,

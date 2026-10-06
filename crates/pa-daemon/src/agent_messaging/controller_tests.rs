@@ -1,9 +1,5 @@
-//! The controller test battery (moved with its concern): family roster,
-//! direct peer delivery, fallback, and observe families.
-
-// ---------------------------------------------------------------------------
-// Controller tests: family roster, direct peer delivery, fallback
-// ---------------------------------------------------------------------------
+//! The controller test battery: family roster, direct peer delivery,
+//! fallback, and observe families.
 
 use super::observe::summaries_from_roster;
 use super::*;
@@ -110,9 +106,8 @@ fn controller(
     }
 }
 
-/// A controller whose children registry holds one resident child
-/// (`sub-kid1`, live id `ddd444`): the same registry shape
-/// `rlm.list_subagents` reads.
+/// A controller whose children registry holds one resident child: the same
+/// registry shape `rlm.list_subagents` reads.
 fn controller_with_children(
     socket: std::path::PathBuf,
     own_summary: Option<Value>,
@@ -195,12 +190,6 @@ async fn family_reads_siblings_from_the_supervisor_roster() {
     assert_eq!(family[1].name, None);
 }
 
-/// The family view labels this session's registry children as Child
-/// members (with the RLM child id and persisted session id as alias
-/// selectors) and its own parent as the Parent member; the child row
-/// is not also a sibling. Siblings are the rows sharing this
-/// session's durable parent edge — a top-level row from another
-/// family is NOT a sibling, even with a matching name.
 #[tokio::test]
 async fn family_labels_children_and_parent_from_the_registry() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -239,9 +228,7 @@ async fn family_labels_children_and_parent_from_the_registry() {
     )
     .await;
     let family = controller.family().await.unwrap();
-    // TS `selectAgentFamily` order: parent, siblings, children. The
-    // unrelated top-level row (xxx999) never enters the family, and
-    // the second "beta" name cannot cross families.
+    // TS `selectAgentFamily` order: parent, siblings, children.
     assert_eq!(family.len(), 3, "{family:?}");
     assert_eq!(family[0].relationship, AgentFamilyRelationship::Parent);
     assert_eq!(family[0].id, "ppp000");
@@ -256,8 +243,6 @@ async fn family_labels_children_and_parent_from_the_registry() {
     assert_eq!(family[2].id, "ddd444");
     assert_eq!(family[2].name.as_deref(), Some("worker-a"));
     assert_eq!(family[2].aliases, vec!["sub-kid1", "sess-d"]);
-    // No member duplicates the child as a sibling; no other family's
-    // session appears in any role.
     assert!(!family
         .iter()
         .any(|member| member.id == "ddd444"
@@ -265,8 +250,6 @@ async fn family_labels_children_and_parent_from_the_registry() {
     assert!(!family.iter().any(|member| member.id == "xxx999"));
 }
 
-/// A child resolves its parent by the persisted session id too (the
-/// live id can change across a parent worker restart).
 #[tokio::test]
 async fn family_resolves_the_parent_by_session_id() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -327,7 +310,6 @@ async fn family_keeps_off_roster_children_addressable() {
     assert_eq!(family[0].aliases, vec!["sub-kid2", "sess-e", "eee555"]);
 }
 
-/// A refused ticket falls back to the supervisor-routed `send_message`.
 #[tokio::test]
 async fn refused_ticket_falls_back_to_the_supervisor_route() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -349,8 +331,6 @@ async fn refused_ticket_falls_back_to_the_supervisor_route() {
     );
 }
 
-/// The self-target guard answers with the TS string before any wire
-/// traffic.
 #[tokio::test]
 async fn self_target_is_refused() {
     let controller = controller(std::path::PathBuf::from("/nonexistent.sock"), None);
@@ -502,10 +482,6 @@ async fn direct_ticket_delivers_to_the_target_worker_socket() {
     assert_eq!(delivery["sender"]["clientId"], "agent");
 }
 
-/// A session file recorded under a migrated storage root still names
-/// its session: the durable id (the file-name stem) resolves the
-/// alias when the canonical paths differ (the storage-root
-/// re-parenting fix).
 #[test]
 fn same_session_file_resolves_the_storage_root_alias() {
     assert!(same_session_file(
@@ -528,11 +504,6 @@ fn same_session_file_resolves_the_storage_root_alias() {
     ));
 }
 
-/// The observe roster is the caller's nuclear family with
-/// edge-derived labels: its own row carries `isCurrent`, its parent
-/// and true siblings label by their durable edges, and subagents
-/// spawned by OTHER parents never appear (the daemon-wide "every
-/// subagent is a child" mislabel regression).
 #[test]
 fn summaries_label_the_nuclear_family_by_durable_edges() {
     let identity = FamilyIdentity {
@@ -593,8 +564,6 @@ fn summaries_label_the_nuclear_family_by_durable_edges() {
         .find(|s| s.active_session_id.as_deref() == Some("own333"))
         .unwrap();
     assert_eq!(child.relationship, Some(AgentFamilyRelationship::Child));
-    // The other family's subagent and the other root session are
-    // outside the nuclear family: absent, never mislabeled.
     assert!(!summaries
         .iter()
         .any(|s| s.active_session_id.as_deref() == Some("foreign444")));
@@ -603,11 +572,6 @@ fn summaries_label_the_nuclear_family_by_durable_edges() {
         .any(|s| s.active_session_id.as_deref() == Some("root555")));
 }
 
-/// A file binding one level down is a Child (a session a user created
-/// under a parent, no spawn ids, exactly like a spawned one); a
-/// same-depth binding — a fork of a non-root session — is neither
-/// the source's child nor a sibling of its children (TS
-/// `selectAgentFamily`).
 #[test]
 fn summaries_bind_a_child_one_level_down_and_leave_a_same_depth_fork_out() {
     let parent = FamilyIdentity {
@@ -646,9 +610,8 @@ fn summaries_bind_a_child_one_level_down_and_leave_a_same_depth_fork_out() {
         ]
     );
 
-    // From the user child's own view: a binding-only subagent of the
-    // same parent at the same depth is a Sibling; the fork — the
-    // same parent file one level up — is outside the family.
+    // From the user child's own view: a same-depth subagent of the same
+    // parent is a Sibling; the fork one level up is outside the family.
     let user_child = FamilyIdentity {
         active_session_id: "usr111".to_string(),
         session_id: Some("sess-usr".to_string()),
@@ -686,12 +649,6 @@ fn summaries_bind_a_child_one_level_down_and_leave_a_same_depth_fork_out() {
     );
 }
 
-/// A depth-0 binding is no parent edge (TS `familyCatalogEntry`): a
-/// root fork names its source at depth 0 yet stays a root — its
-/// source's Sibling, never its Child, and from its own view (built
-/// through `from_summary`, the production path) its source and every
-/// other root are Siblings, never a Parent. A root's user-created
-/// child is still its Child.
 #[test]
 fn summaries_treat_a_root_fork_as_a_root() {
     let parent = FamilyIdentity {
@@ -733,8 +690,8 @@ fn summaries_treat_a_root_fork_as_a_root() {
         ]
     );
 
-    // From the root fork's own view: its source and every other root
-    // are Siblings, never a Parent.
+    // From the root fork's own view: its source and every other root are
+    // Siblings, never a Parent.
     let fork = FamilyIdentity::from_summary(
         Some(&json!({
             "sessionId": "sess-frk",
@@ -776,13 +733,8 @@ fn summaries_treat_a_root_fork_as_a_root() {
     );
 }
 
-/// A root caller's observe roster lists the other root sessions as
-/// siblings, never another family's subagents, and marks its own row.
-/// TS #2493: observe rows carry the typed family status (the busy
-/// verdict: `running` while work is in flight, `idle` for a
-/// resident-but-quiet session) plus the separate live activity axis —
-/// a quiet row is `idle`, never the pre-fix `inactive` the coarse
-/// activity mapping produced.
+/// TS #2493: observe rows carry the typed family status (the busy verdict) plus the
+/// separate live activity axis — a quiet row is `idle`, never the pre-fix `inactive`.
 #[test]
 fn summaries_carry_the_typed_status_and_activity() {
     let identity = FamilyIdentity {
@@ -821,10 +773,8 @@ fn summaries_carry_the_typed_status_and_activity() {
             "isSessionActive": false, "isRunningTools": false, "attachedClients": 0,
             "parentActiveSessionId": "me000", "parentSessionId": "sess-me",
         }),
-        // A passivated ledger child (the stop strips the live
-        // `activeSessionId` and keys the durable session under `id`):
-        // an INACTIVE family member, never a live quiet session, and
-        // no activity axis (TS `resident: !!summary.activeSessionId`).
+        // A passivated ledger child: an INACTIVE family member, never a
+        // live quiet session, and no activity axis.
         json!({
             "id": "ch333", "sessionId": "sess-ch3", "runtimeKind": "subagent",
             "activity": "idle", "isStreaming": false, "isCompacting": false,
@@ -851,8 +801,6 @@ fn summaries_carry_the_typed_status_and_activity() {
     );
     assert_eq!(row("ch222").status, AgentFamilyStatus::Idle);
     assert_eq!(row("ch222").activity, Some(AgentObserveActivity::Idle));
-    // The passivated child: inactive, with no activity axis at all
-    // (TS marks the field absent for members with no live session).
     let passivated = summaries
         .iter()
         .find(|s| s.session_id == "sess-ch3")
@@ -891,15 +839,11 @@ fn summaries_label_root_siblings_and_never_foreign_children() {
         .find(|s| s.active_session_id.as_deref() == Some("root222"))
         .unwrap();
     assert_eq!(sibling.relationship, Some(AgentFamilyRelationship::Sibling));
-    // Another root's subagent child is not this root's child.
     assert!(!summaries
         .iter()
         .any(|s| s.active_session_id.as_deref() == Some("child999")));
 }
 
-/// The peers roster (`list_agent_peers` -> `agent_peer_summary`) carries
-/// the session file under `sessionPath`, not `sessionFile`: a
-/// passivated parent resolves by the alias on the peers shape too.
 #[tokio::test]
 async fn family_resolves_a_moved_parent_by_the_peers_roster_alias() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -928,10 +872,6 @@ async fn family_resolves_a_moved_parent_by_the_peers_roster_alias() {
     assert_eq!(family[0].id, "rrr777");
 }
 
-/// A child worker replacement (a new live id, the same rlm child id and
-/// persisted session id) joins its registry record by the durable ids:
-/// the family lists the child ONCE, never the roster row plus the
-/// leftover registry entry.
 #[tokio::test]
 async fn family_joins_a_replaced_child_by_its_durable_ids() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -968,11 +908,6 @@ async fn family_joins_a_replaced_child_by_its_durable_ids() {
     assert!(children[0].aliases.contains(&"sub-kid1".to_string()));
 }
 
-/// The family roster resolves a parent whose worker was replaced (the
-/// live id went stale) through the durable persisted id, and a
-/// parent whose recorded path moved (the storage-root migration)
-/// through the session-file alias: the pre-restart child's
-/// parent-reply reaches its true parent, never a name-holder.
 #[tokio::test]
 async fn family_resolves_a_moved_parent_by_the_session_file_alias() {
     let dir = tempfile::TempDir::new().unwrap();
