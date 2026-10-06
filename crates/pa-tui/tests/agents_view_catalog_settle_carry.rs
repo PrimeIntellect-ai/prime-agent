@@ -1,34 +1,22 @@
-//! The saved-catalog lifecycle against a mock supervisor: a SUCCESSFUL
-//! load that still does not carry the entry anchor's row settles the
-//! wait (TS `resolveMissingSelectionAnchor`'s finally arm — the hint must
-//! never re-arm on every open behind a catalog that already settled), and
-//! the flow's carried catalog paints the next view run's first frame with
-//! no re-fetch (TS `AgentsViewPersistentState.savedSessions` +
-//! `armSavedSearchFetch`'s early return — the Inactive section never
-//! rebuilds from empty on a chat handoff).
+//! The saved-catalog lifecycle: a successful load that still does not
+//! carry the entry anchor's row settles the wait (TS
+//! `resolveMissingSelectionAnchor`), and the carried catalog paints the
+//! next view run's first frame with no re-fetch.
 #![cfg(unix)]
-// Pedantic-gate exceptions (every other pedantic warning in this crate is
-// fixed in place; each exception carries its one-line justification):
-// - the casts: terminal-layout arithmetic narrows structurally bounded
-//   values (screen coordinates, byte counts, timestamps); guarded
-//   conversions would add panic paths the bounds guarantee away.
+// Casts: structurally bounded terminal-layout arithmetic; guarded conversions add panic paths.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// - the render routes are flat tables (one arm per route); splitting them
-//   would add indirection without changing the flow.
+// Render routes are flat tables (one arm per route); splitting adds indirection.
 #![allow(clippy::too_many_lines)]
-// - widget state structs carry independent flag bits; a nested struct
-//   would add indirection without changing the shape.
+// Widget state structs carry independent flag bits.
 #![allow(clippy::struct_excessive_bools, clippy::fn_params_excessive_bools)]
-// - the futures are bounded by the surface's lifetime; boxing them would
-//   add an allocation to the steady-state loop.
+// Futures are bounded by the surface's lifetime; boxing adds a steady-state allocation.
 #![allow(clippy::large_futures)]
-// - the wrappers preserve a uniform Result-returning API surface; unwrap
-//   removals would ripple through the callers without changing behavior.
+// The wrappers preserve a uniform Result-returning API surface.
 #![allow(clippy::unnecessary_wraps)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -41,20 +29,17 @@ use pa_tui::agents_view::{AgentsHeadlessPlan, AgentsStep, AgentsViewOptions, Age
 use pa_tui::interactive::SessionSelection;
 use serde_json::{json, Value};
 
-/// The mock's answer lag: the catalog request is held long enough that a
-/// keyed step lands while the load is still in flight (the pre-load Enter
-/// that arms the loading hint).
+/// The catalog request is held long enough that a keyed step lands while the load is still in
+/// flight (the pre-load Enter that arms the hint).
 const CATALOG_ANSWER_DELAY_MS: u64 = 400;
 
 struct MockSupervisor {
     listener: UnixListener,
-    /// Every recorded `list_saved_sessions` request (the carry test's
-    /// no-refetch assertion reads it across BOTH view runs).
+    /// Every recorded `list_saved_sessions` request (the carry test's no-refetch assertion reads it
+    /// across BOTH view runs).
     saved_requests: Arc<Mutex<Vec<Value>>>,
-    /// A wire-order edge the late-frame test arms: one extra
-    /// `session_list_item` delivered AFTER the terminal response (a
-    /// frame that raced the reader's event delivery behind the
-    /// response's input).
+    /// One extra `session_list_item` delivered AFTER the terminal response (a frame that raced the
+    /// reader's event delivery).
     late_frame: bool,
 }
 
@@ -71,11 +56,8 @@ impl MockSupervisor {
         }
     }
 
-    /// Serve the agents-view connections (the carry test hands the SAME
-    /// connection back, so one serve loop answers both view runs): hello,
-    /// then the command loop until EOF. `roster_unsubscribe` only answers
-    /// — the handoff's fire-and-forget unsubscribe must not end the
-    /// connection the link keeps for the flow's next view run.
+    /// Serve the agents-view connections (the carry test hands the SAME connection back, so one
+    /// serve loop answers both runs): `roster_unsubscribe` only answers, never ending the link.
     fn serve(self) {
         let (stream, _) = self.listener.accept().expect("accept view connection");
         stream
@@ -132,9 +114,8 @@ impl MockSupervisor {
                 "list_saved_sessions" => {
                     self.saved_requests.lock().unwrap().push(command.clone());
                     std::thread::sleep(Duration::from_millis(CATALOG_ANSWER_DELAY_MS));
-                    // The streamed rows (newest first, the anchor's row
-                    // first at the daemon's real scan), then the terminal
-                    // response — the same wire the daemon sends.
+                    // The streamed rows (newest first), then the terminal response — the same wire
+                    // the daemon sends.
                     for row in saved_catalog() {
                         write_line(
                             &mut writer,
@@ -153,8 +134,7 @@ impl MockSupervisor {
                         &json!({ "sessions": saved_catalog() }),
                     );
                     if self.late_frame {
-                        // The late frame: the same session's path and id
-                        // under a stale name, delivered after the
+                        // The late frame: the same session under a stale name, delivered after the
                         // terminal response named the authoritative row.
                         let mut stale =
                             saved_catalog_row("/tmp/sessions/s2.jsonl", "s2", "stale clobber");
@@ -181,9 +161,8 @@ impl MockSupervisor {
     }
 }
 
-/// The mock's saved catalog (TS `serializeSavedSessionInfo`'s shape): two
-/// rows the roster does not carry, so the Inactive section is entirely
-/// catalog-fed.
+/// The mock's saved catalog (TS `serializeSavedSessionInfo`'s shape): two rows the roster does not
+/// carry, so the Inactive section is catalog-fed.
 fn saved_catalog() -> Vec<Value> {
     vec![
         saved_catalog_row("/tmp/sessions/s2.jsonl", "s2", "carried alpha"),
@@ -237,9 +216,8 @@ fn respond_failure(writer: &mut UnixStream, id: &str, command: &str, error: &str
     );
 }
 
-/// One line with a bounded quiet window (the view connection sits quiet
-/// between its inputs, so timeouts keep the loop alive for a bounded
-/// span); `None` ends the serve loop on EOF or the quiet cap.
+/// One line with a bounded quiet window (the view connection sits quiet between its inputs); `None`
+/// ends the serve loop on EOF or the quiet cap.
 fn read_line(reader: &mut BufReader<UnixStream>) -> Option<String> {
     const QUIET_WINDOW_MS: u32 = 90;
     let mut quiet_windows: u32 = 0;
@@ -269,8 +247,8 @@ fn read_line(reader: &mut BufReader<UnixStream>) -> Option<String> {
     }
 }
 
-/// One view options set: `anchor` seeds the entry anchor (a session whose
-/// row can only come from the saved catalog).
+/// One view options set: `anchor` seeds the entry anchor (a session whose row can only come from
+/// the saved catalog).
 fn view_options(socket: &std::path::Path, anchor: Option<&str>) -> AgentsViewOptions {
     AgentsViewOptions {
         socket_path: socket.to_path_buf(),
@@ -292,12 +270,9 @@ fn view_options(socket: &std::path::Path, anchor: Option<&str>) -> AgentsViewOpt
     }
 }
 
-/// A SUCCESSFUL catalog load that still does not carry the anchor's row
-/// settles the entry anchor's wait (TS `resolveMissingSelectionAnchor`'s
-/// finally arm): the Enter DURING the wait arms the loading hint, the load
-/// lands without the row, the settle retires the hint, and the Enter after
-/// the load opens the default row instead of re-arming "Still loading
-/// sessions" forever behind a catalog that already settled.
+/// A SUCCESSFUL catalog load that still does not carry the anchor's row settles the entry anchor's
+/// wait (TS `resolveMissingSelectionAnchor`'s finally arm): the Enter after the load opens the
+/// default row instead of re-arming "Still loading sessions" behind a catalog that already settled.
 #[tokio::test]
 async fn a_successful_load_settles_the_anchor_wait_when_the_row_is_missing() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -308,14 +283,11 @@ async fn a_successful_load_settles_the_anchor_wait_when_the_row_is_missing() {
 
     let plan = AgentsHeadlessPlan {
         steps: vec![
-            // Enter while the catalog is still loading (the mock holds its
-            // answer for CATALOG_ANSWER_DELAY_MS): the wait arms the hint.
+            // Enter while the catalog is still loading: the wait arms the hint.
             AgentsStep::Key("enter".to_string()),
-            // The load lands inside this window without the anchor's row;
-            // the settle retires the hint with it.
+            // The load lands without the anchor's row; the settle retires the hint with it.
             AgentsStep::WaitSettle { timeout_ms: 2500 },
-            // Enter after the settled load: the default row opens —
-            // pre-fix this Enter re-armed the loading hint instead.
+            // Enter after the settled load: the default row opens.
             AgentsStep::Key("enter".to_string()),
         ],
         width: 120,
@@ -360,11 +332,8 @@ async fn a_successful_load_settles_the_anchor_wait_when_the_row_is_missing() {
     let _ = server.join();
 }
 
-/// The flow's carried catalog (TS `persistentState.savedSessions` +
-/// `savedCatalogLoaded`): a view run that hands its link back loads the
-/// catalog once, and the flow's NEXT view run paints the Inactive rows on
-/// its FIRST frame with no second fetch — the handoff never rebuilds the
-/// section from empty behind a re-scan.
+/// The flow's carried catalog (TS `persistentState.savedSessions`): the flow's NEXT view run
+/// paints the Inactive rows on its FIRST frame with no second fetch.
 #[tokio::test]
 async fn the_carried_catalog_paints_the_first_frame_and_skips_the_refetch() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -373,8 +342,8 @@ async fn the_carried_catalog_paints_the_first_frame_and_skips_the_refetch() {
     let saved_requests = Arc::clone(&mock.saved_requests);
     let server = std::thread::spawn(move || mock.serve());
 
-    // Run 1: the catalog loads and the anchor (a saved row) opens — the
-    // run ends with a selection, so the link hands back to the flow.
+    // Run 1: the catalog loads and the anchor (a saved row) opens — the run ends with a selection,
+    // so the link hands back to the flow.
     let plan = AgentsHeadlessPlan {
         steps: vec![
             AgentsStep::WaitSettle { timeout_ms: 2500 },
@@ -402,8 +371,8 @@ async fn the_carried_catalog_paints_the_first_frame_and_skips_the_refetch() {
         .link
         .expect("the opening run hands its roster link back to the flow");
 
-    // Run 2 (the chat handoff's re-entry): the SAME link, and the carried
-    // catalog paints on the first frame with no second fetch.
+    // Run 2 (the chat handoff's re-entry): the SAME link; the carried catalog paints on the first
+    // frame with no second fetch.
     let plan = AgentsHeadlessPlan {
         steps: vec![AgentsStep::WaitSettle { timeout_ms: 600 }],
         width: 120,
@@ -438,11 +407,8 @@ async fn the_carried_catalog_paints_the_first_frame_and_skips_the_refetch() {
     let _ = server.join();
 }
 
-/// A carried catalog settles the entry anchor AT OPEN (TS `start()`'s
-/// `armSavedSearchFetch` followed by `resolveMissingSelectionAnchor`): the
-/// next view run arms no fetch, so no terminal load ever arrives to settle
-/// the wait - an anchor whose row is absent from the carry (and the
-/// roster) would otherwise park Enter behind the loading hint forever.
+/// A carried catalog settles the entry anchor AT OPEN (TS `start()`'s `armSavedSearchFetch` +
+/// `resolveMissingSelectionAnchor`): the next view run arms no fetch.
 #[tokio::test]
 async fn a_carried_catalog_settles_the_entry_anchor_at_open() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -470,10 +436,8 @@ async fn a_carried_catalog_settles_the_entry_anchor_at_open() {
     assert!(run.outcome.selection.is_some(), "run one opened a row");
     let link = run.link.expect("the opening run hands its link back");
 
-    // Run two: anchored on a session the carried catalog does NOT carry
-    // (and the roster never did). The open-time settle ends the wait, so
-    // Enter opens the default row instead of arming the hint - and the
-    // loaded catalog never re-fetches behind it.
+    // Run two: anchored on a session the carried catalog does NOT carry. The open-time settle ends
+    // the wait, so Enter opens the default row — and the catalog never re-fetches.
     let plan = AgentsHeadlessPlan {
         steps: vec![
             AgentsStep::Key("enter".to_string()),
@@ -512,12 +476,8 @@ async fn a_carried_catalog_settles_the_entry_anchor_at_open() {
     let _ = server.join();
 }
 
-/// A late `session_list_item` frame delivered after the terminal response
-/// never clobbers the settled catalog: the response is the authoritative
-/// array (the ledger enrichment rides it alone), so the fetch's request
-/// gate closes with the settle - a late frame the wire still delivers
-/// must not upsert its un-enriched row over the catalog the flow carries
-/// into its next view run.
+/// A late `session_list_item` frame delivered after the terminal response never clobbers
+/// the settled catalog: the response is the authoritative array, so a late frame cannot upsert.
 #[tokio::test]
 async fn a_late_stream_frame_never_clobbers_the_settled_catalog() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -526,9 +486,8 @@ async fn a_late_stream_frame_never_clobbers_the_settled_catalog() {
     let _saved_requests = Arc::clone(&mock.saved_requests);
     let server = std::thread::spawn(move || mock.serve());
 
-    // Run one: the catalog loads, the late frame arrives behind the
-    // response, and the anchor opens - the handoff link carries whatever
-    // the run settled.
+    // Run one: the catalog loads, the late frame arrives behind the response, and the anchor opens
+    // — the handoff link carries what the run settled.
     let plan = AgentsHeadlessPlan {
         steps: vec![
             AgentsStep::WaitSettle { timeout_ms: 2500 },
@@ -551,8 +510,8 @@ async fn a_late_stream_frame_never_clobbers_the_settled_catalog() {
     );
     let link = run.link.expect("the opening run hands its link back");
 
-    // Run two: the carried Inactive section carries the SETTLED row - the
-    // response's name - never the late frame's stale one.
+    // Run two: the carried Inactive section carries the SETTLED row — the response's name, never
+    // the late frame's stale one.
     let plan = AgentsHeadlessPlan {
         steps: vec![AgentsStep::WaitSettle { timeout_ms: 600 }],
         width: 120,

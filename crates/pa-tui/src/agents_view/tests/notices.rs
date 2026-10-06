@@ -27,10 +27,8 @@ fn mode_with_notice(notice: &str) -> AgentsViewMode {
     mode
 }
 
-/// A multi-line notice — the cross-product lease refusal with its two
-/// ways out — renders as the panel: the full text stays visible and
-/// wrapped, never truncated to the single hint line, and any key
-/// dismisses it.
+/// A multi-line notice — the cross-product lease refusal with its two ways out — renders as
+/// the panel: the full text stays visible, and any key dismisses it.
 #[test]
 fn a_multiline_refusal_notice_renders_as_a_dismissible_panel() {
     let refusal = "This session is currently open in another Rust build of Prime Agent \
@@ -65,7 +63,6 @@ the holder exits.";
             "the panel shows {way_out:?} in full:\n{shown}"
         );
     }
-    // Any key dismisses the panel; the hint line returns.
     mode.handle_key("down");
     let dismissed = render(&mut mode);
     assert!(
@@ -74,8 +71,8 @@ the holder exits.";
     );
 }
 
-/// A single-line notice keeps the hint-line status: the panel arms only
-/// for notices with lines to show.
+/// A single-line notice keeps the hint-line status: the panel arms only for notices with
+/// lines to show.
 #[test]
 fn a_single_line_notice_keeps_the_status_line() {
     let mode = mode_with_notice("Saved sessions unavailable: no such directory");
@@ -86,10 +83,9 @@ fn a_single_line_notice_keeps_the_status_line() {
     );
 }
 
-/// TS `setStatusMessage`'s tone rule: the explicit tone wins, the
-/// `Failed` prefix reads error, everything else reads muted — and the
-/// rendered hint row carries the tone's color (the #3117 SF6
-/// divergence: every status used to render as an error).
+/// The tone rule: the explicit tone wins, the `Failed` prefix reads error,
+/// everything else reads muted; the rendered row carries the tone's color
+/// (deliberate divergence).
 #[test]
 fn the_status_line_carries_its_tone() {
     let mut mode = mode_with_parent_and_child();
@@ -98,22 +94,18 @@ fn the_status_line_carries_its_tone() {
         mode.status.as_ref().map(Status::tone),
         Some(StatusTone::Muted)
     );
-    // The Failed prefix is an error without an explicit tone.
     mode.set_status("Failed to rename agent: nope");
     assert_eq!(
         mode.status.as_ref().map(Status::tone),
         Some(StatusTone::Error)
     );
-    // An explicit tone wins over the prefix rule, and the text
-    // collapses to one line (TS `formatAgentsViewStatusLine`).
     mode.set_status_tone("Saved sessions\n   unavailable", StatusTone::Error);
     assert_eq!(mode.status_text(), Some("Saved sessions unavailable"));
     assert_eq!(
         mode.status.as_ref().map(Status::tone),
         Some(StatusTone::Error)
     );
-    // The rendered row paints in the tone's color, not the fixed
-    // error color: a muted report renders muted.
+    // The rendered row paints in the tone's color, not a fixed error color.
     mode.set_status("Renaming agent...");
     let span = mode
         .render_hints(120, None)
@@ -122,7 +114,6 @@ fn the_status_line_carries_its_tone() {
         .clone();
     assert_eq!(span.content, "Renaming agent...");
     assert_eq!(span.style, mode.theme.fg_style(StatusTone::Muted.color()));
-    // An explicit error renders error.
     mode.set_status_tone("Saved sessions unavailable: gone", StatusTone::Error);
     let span = mode
         .render_hints(120, None)
@@ -132,10 +123,9 @@ fn the_status_line_carries_its_tone() {
     assert_eq!(span.style, mode.theme.fg_style(StatusTone::Error.color()));
 }
 
-/// TS's 4.5s status timer, through the accessors the loop drives: the
-/// line arms its expiry, holds before the deadline, clears after it —
-/// and a line that REPLACED an expired one keeps its own new window
-/// (TS's unchanged-line guard).
+/// The 4.5s status timer through the loop's accessors: arms its expiry, holds
+/// before the deadline, clears after it; a line that REPLACED an expired one
+/// keeps a fresh window.
 #[test]
 fn the_status_expires_through_the_loop_deadline() {
     let mut mode = mode_with_parent_and_child();
@@ -150,8 +140,6 @@ fn the_status_expires_through_the_loop_deadline() {
         "before the deadline the line holds"
     );
     assert_eq!(mode.status_text(), Some("Reply sent"));
-    // The deadline passed (the loop's wake arm fires at the expiry):
-    // the line clears and repaints.
     let after = now + std::time::Duration::from_millis(4500);
     assert!(mode.status_expiry(after).is_none(), "the deadline passed");
     assert!(mode.expire_status(after), "the expired line clears");

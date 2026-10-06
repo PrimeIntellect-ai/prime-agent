@@ -1,26 +1,16 @@
-//! End-to-end verifier for interactive provider-failure handling: a daemon
-//! worker session against a failing (then healing) OpenAI-compatible mock
-//! must retry the turn per the shared retry policy, surface each retry
-//! (`auto_retry_start`), close the loop (`auto_retry_end`), render the
-//! failed assistant message, and end the turn with the error. The
-//! success-after-retry path must settle the same loop with `success: true`.
-// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
-// the full rationale).
-// Stack-resident futures by design on the daemon's hot paths; boxing the
-// call sites for a lint tick is a perf regression with zero correctness gain.
+//! Interactive provider-failure e2e: a daemon worker session against a
+//! failing (then healing) OpenAI-compatible mock must retry per the shared
+//! policy, surface each retry (`auto_retry_start`/`auto_retry_end`), render
+//! the failed assistant message, and end the turn with the error.
 #![allow(clippy::large_futures)]
-// 64-bit-only targets; the narrowing casts sit at OS boundaries
-// (pid/fd/time/size) where the values are bounded by the kernel - the
-// dead-guard expect()s would add panic paths where silent wrap was
-// deliberate.
+// 64-bit-only targets; the narrowing casts sit at bounded OS boundaries.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// The fn-length threshold is a style gate, not correctness; the structure
-// campaign owns the god-fn splits as a follow-up.
+// Fn length is a style gate, not correctness.
 #![allow(clippy::too_many_lines)]
 // API-shape opinions, not defects; the surfaces are deliberate.
 #![allow(
@@ -54,14 +44,12 @@ impl Drop for Supervisor {
     }
 }
 
-/// A mock OpenAI-completions provider: the first `failures` requests get a
-/// 500 with an OpenAI-style error body; the rest get one fixed SSE answer.
+/// A mock OpenAI-completions provider: the first `failures` requests 500; the rest fixed SSE.
 struct FailingMock {
     requests: Arc<Mutex<usize>>,
     port: u16,
 }
 
-/// How the mock rejects its first `failures` requests.
 #[derive(Clone, Copy)]
 enum MockRejection {
     /// A plain 500 with an OpenAI-style server-error body.
@@ -69,11 +57,8 @@ enum MockRejection {
     /// The prime-inference storm shape: 429 with `Retry-After` and the
     /// "Too many concurrent requests" body.
     RateLimit { retry_after_secs: u64 },
-    /// THE 402 REGRESSION (the diagnosis's variant B): a wallet-drain
-    /// 402 whose body carries the prime-inference `invalid_request_error`
-    /// type text — the shape that classified permanent on the first
-    /// attempt and settled SILENTLY (no retry episode, so no outcome
-    /// row) before the failure-scoped disclosure.
+    /// THE 402 REGRESSION (the diagnosis's variant B): a wallet-drain 402 carrying
+    /// the prime-inference `invalid_request_error` type text (the shape that settled silently).
     PaymentRequired,
 }
 
@@ -228,10 +213,8 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path) -> Supervisor {
         .stderr(Stdio::null())
         .env_remove("PRIME_API_KEY")
         .env_remove("PRIME_AGENT_CODING_AGENT_DIR")
-        // A supervisor killed at teardown must not leak its session workers
-        // into later test binaries: the worker's supervisor-lost exit (TS
-        // `exitIfSupervisorOrphanedForTooLong`) runs on this short window
-        // instead of the 5-minute default.
+        // A supervisor killed at teardown must not leak session workers: the supervisor-lost
+        // exit runs here.
         .env(
             pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
             "15000",
@@ -251,8 +234,8 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path) -> Supervisor {
     panic!("supervisor socket never appeared");
 }
 
-/// One client connection: request/response plus every session event that
-/// streamed while the response was outstanding.
+/// One client connection: request/response plus the session events that stream while a response is
+/// outstanding.
 struct Client {
     reader: BufReader<std::os::unix::net::UnixStream>,
     writer: std::os::unix::net::UnixStream,
@@ -309,7 +292,6 @@ impl Client {
             .unwrap_or_else(|error| panic!("write command {id}: {error}"));
     }
 
-    /// The response for `id`, with every session event observed on the way.
     fn request(&mut self, id: &str) -> Value {
         let deadline = Instant::now() + Duration::from_mins(2);
         loop {
@@ -328,11 +310,8 @@ impl Client {
         }
     }
 
-    /// Drain pending session events until the socket stays quiet for
-    /// `quiet_ms`. The supervisor buffers a client's session events while a
-    /// routed command (`prompt_and_wait`) is in flight and writes them after
-    /// its response, so a caller that stops at the response would miss the
-    /// whole turn.
+    /// Drain pending session events until the socket stays quiet for `quiet_ms`: the supervisor
+    /// buffers a client's events while a routed command is in flight and writes them after.
     fn drain_events(&mut self, quiet_ms: Duration) {
         let deadline = Instant::now() + Duration::from_secs(30);
         let mut last_line = Instant::now();
@@ -361,10 +340,8 @@ impl Client {
     }
 }
 
-/// Shared harness: supervisor + models.json + fast retry settings + a
-/// created, attached session. The supervisor handle must outlive the test
-/// body: dropping it kills the supervisor process and closes the client
-/// socket mid-turn.
+/// Shared harness: supervisor + models.json + fast retry settings + a created, attached
+/// session. The handle must outlive the test body: dropping it kills the supervisor mid-turn.
 fn setup(
     name: &str,
     failures: usize,
@@ -465,12 +442,10 @@ fn provider_failure_is_retried_then_surfaced_to_attached_clients() {
     assert_eq!(done["success"], false, "prompt must fail: {done}");
     client.drain_events(Duration::from_secs(1));
 
-    // The retry policy applied: one initial request plus two retries.
     assert_eq!(mock.count(), 3, "requests: initial + 2 retries");
 
-    // The accepted user message is a message_start + message_end pair
-    // (TS wire), and an unchanged queue projection stays silent (TS
-    // `_emitQueueUpdate` dedup): no session_action_update frames here.
+    // The accepted user message is a message_start + message_end pair (TS wire),
+    // and an unchanged queue projection stays silent (TS `_emitQueueUpdate` dedup).
     let types = event_types(&client.events);
     assert!(
         !types.iter().any(|t| t == "session_action_update"),
@@ -499,7 +474,6 @@ fn provider_failure_is_retried_then_surfaced_to_attached_clients() {
         types.iter().filter(|t| *t == "auto_retry_start").count() == 2,
         "two retry starts expected, events: {types:?}"
     );
-    // Each retry start carries the attempt and delay (50ms then 100ms).
     let starts: Vec<&Value> = client
         .events
         .iter()
@@ -512,8 +486,8 @@ fn provider_failure_is_retried_then_surfaced_to_attached_clients() {
         .expect("error message")
         .contains("mock provider overloaded"));
     assert_eq!(starts[1]["attempt"], 2);
-    // Each retry start's delay sits in the ±20% jitter band around its
-    // ladder step (50ms then 100ms: [40, 70] and [80, 140]).
+    // Each retry start's delay sits in the ±20% jitter band around its ladder step (50ms then
+    // 100ms).
     let jitter_band = |base: u64| (base * 4 / 5, base * 7 / 5);
     for (start, base) in starts.iter().zip([50u64, 100u64]) {
         let delay = start["delayMs"].as_u64().expect("delayMs");
@@ -524,7 +498,6 @@ fn provider_failure_is_retried_then_surfaced_to_attached_clients() {
         );
     }
 
-    // The loop closes with the final failure surfaced.
     let end = client
         .events
         .iter()
@@ -538,8 +511,6 @@ fn provider_failure_is_retried_then_surfaced_to_attached_clients() {
         .expect("final error")
         .contains("mock provider overloaded"));
 
-    // The failed assistant message reached the transcript: message_end with
-    // stopReason error and the provider message.
     let failure = client
         .events
         .iter()
@@ -553,9 +524,8 @@ fn provider_failure_is_retried_then_surfaced_to_attached_clients() {
         .expect("error message")
         .contains("mock provider overloaded"));
 
-    // The turn ends with the TS `turn_end` shape: the terminal frame
-    // carries the failed assistant message as its payload (no separate
-    // error field on the frame — TS `turn_end` never carries one).
+    // The turn ends with the TS `turn_end` shape: the terminal frame carries the failed assistant
+    // message as its payload (no separate error field).
     let turn_end = client
         .events
         .iter()
@@ -575,10 +545,8 @@ fn provider_failure_is_retried_then_surfaced_to_attached_clients() {
         "the failed turn ran no tools"
     );
 
-    // The single-line retry UX (SANCTIONED DIVERGENCE, operator ruling
-    // 2026-09-23): the episode leaves ONE durable outcome row — the
-    // terminal line, broadcast after `auto_retry_end` as a custom-row
-    // message pair — instead of only the per-attempt error rows TS keeps.
+    // Deliberate TS divergence (operator ruling 2026-09-23): the retry episode leaves
+    // ONE durable outcome row after `auto_retry_end`.
     let outcome_pair: Vec<&Value> = client
         .events
         .iter()
@@ -607,13 +575,9 @@ fn provider_failure_is_retried_then_surfaced_to_attached_clients() {
         .contains("mock provider overloaded"));
 }
 
-/// The 429-storm simulation (operator ruling 2026-09-23): a provider that
-/// rate-limits with `Retry-After` gets retried with bounded exponential
-/// backoff — requests cap at initial + maxRetries (never spam), the
-/// server-requested wait is honored (jittered band), the Retry-After
-/// wait wins over the tiny base delay, and the episode leaves exactly ONE
-/// durable outcome row while the per-attempt failures still persist and
-/// stream (full transcript fidelity; the TUI collapses the rows).
+/// The 429-storm simulation (operator ruling 2026-09-23): a rate-limiting provider gets
+/// bounded exponential backoff; Retry-After wins over the tiny base delay, and the episode
+/// leaves exactly ONE durable outcome row.
 #[test]
 fn storm_429_caps_requests_honors_retry_after_and_leaves_one_outcome_row() {
     let (_dir, mock, _supervisor, mut client, session_id) = setup_with_rejection(
@@ -632,13 +596,10 @@ fn storm_429_caps_requests_honors_retry_after_and_leaves_one_outcome_row() {
     assert_eq!(done["success"], true, "prompt must recover: {done}");
     client.drain_events(Duration::from_secs(1));
 
-    // The request cap: one initial request + maxRetries (2) retries. A
-    // storm can never spam the endpoint past the policy budget.
+    // The request cap: a storm can never spam the endpoint past the policy budget.
     assert_eq!(mock.count(), 3, "requests: initial + 2 retries");
 
     let types = event_types(&client.events);
-    // Both 429 attempts stream their failures (wire parity with TS), two
-    // retry starts pace the waits, and the loop closes recovered.
     let failed_attempts = client
         .events
         .iter()
@@ -669,8 +630,7 @@ fn storm_429_caps_requests_honors_retry_after_and_leaves_one_outcome_row() {
                 .contains("Too many concurrent requests"),
             "the 429 text: {start}"
         );
-        // The server-requested wait (Retry-After: 1s) wins over the 50ms
-        // base delay; the jittered wait stays in [800, 1400]ms.
+        // The server-requested wait (Retry-After: 1s) wins over the 50ms base delay.
         let delay = start["delayMs"].as_u64().expect("delayMs");
         assert!(
             (800..=1400).contains(&delay),
@@ -685,8 +645,6 @@ fn storm_429_caps_requests_honors_retry_after_and_leaves_one_outcome_row() {
         .expect("auto_retry_end");
     assert_eq!(end["success"], true);
 
-    // ONE durable outcome row: broadcast as the custom pair right after
-    // the auto_retry_end frame, naming the recovered error.
     let outcome = client
         .events
         .iter()
@@ -704,8 +662,8 @@ fn storm_429_caps_requests_honors_retry_after_and_leaves_one_outcome_row() {
     assert_eq!(outcome["message"]["details"]["success"], true);
     assert_eq!(outcome["message"]["details"]["attempts"], 2);
 
-    // The transcript holds the per-attempt failures (full fidelity — the
-    // collapse is a TUI presentation rule) plus exactly ONE outcome row.
+    // The transcript holds the per-attempt failures (the collapse is a TUI presentation rule) plus
+    // exactly ONE outcome row.
     client.send_command(
         "g1",
         &json!({ "type": "get_messages", "activeSessionId": session_id }),
@@ -726,13 +684,8 @@ fn storm_429_caps_requests_honors_retry_after_and_leaves_one_outcome_row() {
     assert_eq!(outcomes, 1, "exactly one outcome row: {list:?}");
 }
 
-/// THE 402 REGRESSION (the diagnosis's variant B — the Mac's per-turn
-/// shape): a wallet-drain 402 whose body carries the
-/// `invalid_request_error` type text must (1) classify by STATUS — the
-/// deterministic `payment_required` kind — so it settles on the FIRST
-/// attempt with no retry ladder burning 13-15s on a dead wallet, and
-/// (2) still emit the failure-scoped disclosure row: the turn never
-/// settles as a silent empty message.
+/// THE 402 REGRESSION: a wallet-drain 402 must classify by STATUS (the `payment_required`
+/// kind, first attempt, no ladder) and still emit the disclosure row.
 #[test]
 fn payment_402_settles_once_with_the_disclosure() {
     let (_dir, mock, _supervisor, mut client, session_id) =
@@ -745,12 +698,8 @@ fn payment_402_settles_once_with_the_disclosure() {
     assert_eq!(done["success"], false, "prompt must fail: {done}");
     client.drain_events(Duration::from_secs(1));
 
-    // The 402 is permanent on the first attempt: exactly ONE provider
-    // request, no retry ladder on the dead wallet.
     assert_eq!(mock.count(), 1, "requests: the 402 settles once");
 
-    // The failure-scoped disclosure row fired with attempt 0 (the
-    // pre-fix silent arm: no episode, no row).
     let outcome_pair: Vec<&Value> = client
         .events
         .iter()
@@ -782,13 +731,9 @@ fn payment_402_settles_once_with_the_disclosure() {
     );
 }
 
-/// THE GOAL-SIDE 402 REGRESSION (the diagnosis's repro contract): a goal
-/// whose continuation turn dies on the wallet-drain 402 refuses the NEXT
-/// continuation and finishes the goal — the pre-fix behavior minted a
-/// fresh continuation into the dead provider every boundary (the
-/// operator's 64-cycle hot loop). The turn's disclosure row still fires
-/// (BUG 1), and exactly ONE provider request runs: the loop is dead at
-/// the first failed boundary.
+/// THE GOAL-SIDE 402 REGRESSION: a goal whose continuation turn dies on the wallet-drain
+/// 402 refuses the NEXT continuation and finishes the goal. The disclosure row still
+/// fires (BUG 1).
 #[test]
 fn goal_continuation_refuses_after_the_402_corpse() {
     let (dir, mock, _supervisor, mut client, session_id) = setup_with_rejection(
@@ -797,9 +742,7 @@ fn goal_continuation_refuses_after_the_402_corpse() {
         "never reached",
         MockRejection::PaymentRequired,
     );
-    // Arm the goal through the session command path (no model call),
-    // like the operator's live session: the initial continuation row
-    // queues and drives the first turn.
+    // Arm the goal through the session command path (no model call), like the operator's session.
     client.send_command(
         "g1",
         &json!({
@@ -809,8 +752,6 @@ fn goal_continuation_refuses_after_the_402_corpse() {
         }),
     );
     let done = client.request("g1");
-    // The goal command arms the goal and its initial continuation row
-    // runs inside the same prompt: the run settles with the 402 error.
     assert_eq!(done["success"], false, "the goal turn fails: {done}");
     assert!(
         done["error"]
@@ -821,11 +762,8 @@ fn goal_continuation_refuses_after_the_402_corpse() {
     );
     client.drain_events(Duration::from_secs(1));
 
-    // The single failed continuation turn: ONE provider request (the
-    // 402 is permanent), NO re-minted continuation after it.
     assert_eq!(mock.count(), 1, "no continuation loop: one request total");
 
-    // The durable goal state: the errored turn finished the goal.
     let session_dir = dir.path().join("agent").join("sessions");
     let session_file = std::fs::read_dir(&session_dir)
         .expect("session dir readable")
@@ -857,7 +795,6 @@ fn goal_continuation_refuses_after_the_402_corpse() {
         "the goal's error is the turn's 402: {latest}"
     );
 
-    // The failure-scoped disclosure row still fired (BUG 1).
     let outcome_rows = client
         .events
         .iter()
@@ -872,18 +809,12 @@ fn goal_continuation_refuses_after_the_402_corpse() {
         "one disclosure row: the silent arm is gone"
     );
 
-    // The failed continuation pair left the live loop context (BUG 2
-    // (c)): the transcript keeps the rows, the loop context does not.
-    // Re-read the session messages: the goal_context row and the corpse
-    // remain durable (the transcript's full fidelity) — the CONTEXT
-    // effect is asserted by the one-request count above (a re-minted
-    // continuation would have re-prompted).
+    // The failed continuation pair left the live loop context (BUG 2 (c)): the
+    // transcript keeps the rows, the loop context does not.
 }
 
-/// A direct-transport client (thin-supervisor stage 2): ticket from the: ticket from the
-/// supervisor, `peer_auth` + `attach` on the worker's own socket. The turn
-/// events must stream live on this path (the per-connection fan-out writes
-/// while the routed command is still in flight).
+/// A direct-transport client: ticket from the supervisor, `peer_auth` + `attach` on the
+/// worker's own socket; turn events must stream live on this path.
 struct DirectClient {
     stream: std::os::unix::net::UnixStream,
 }
@@ -980,8 +911,7 @@ impl DirectClient {
     }
 }
 
-/// One frame read with a soft deadline: `None` when no complete
-/// frame arrives in time (a worker close still panics mid-frame).
+/// One frame read with a soft deadline: `None` if no complete frame arrives in time.
 fn read_exact_soft(
     stream: &mut std::os::unix::net::UnixStream,
     buffer: &mut [u8],
@@ -1008,7 +938,6 @@ fn read_exact_soft(
 fn provider_failure_surfaces_on_the_direct_transport_path() {
     let (_dir, mock, _supervisor, mut client, session_id) = setup("direct", 5, "never reached");
 
-    // Ticket -> peer_auth -> attach on the worker's own socket.
     client.send_command(
         "ticket",
         &json!({ "type": "get_direct_worker_transport", "activeSessionId": session_id }),
@@ -1021,8 +950,6 @@ fn provider_failure_surfaces_on_the_direct_transport_path() {
         &session_id,
     );
 
-    // The prompt rides the direct connection; the session events stream
-    // live on the same socket while the command is in flight.
     direct.send_frame(
         "prompt_and_wait",
         "p-direct",
@@ -1050,11 +977,8 @@ fn provider_failure_surfaces_on_the_direct_transport_path() {
             _ => {}
         }
     }
-    // The response and the per-connection event fan-out are separate writer
-    // tasks, so under load the trailing event frames can land just after the
-    // response. Drain with a bounded wait until the retry loop settled; the
-    // events themselves still prove live streaming (the worker has no
-    // post-response replay mechanism).
+    // The response and the per-connection fan-out are separate writer tasks, so trailing
+    // event frames can land just after the response (no post-response replay exists).
     let settle = Instant::now() + Duration::from_secs(10);
     loop {
         let mut retry_starts = 0;
@@ -1109,7 +1033,6 @@ fn provider_failure_surfaces_on_the_direct_transport_path() {
         .expect("error message")
         .contains("mock provider overloaded"));
 
-    // The retry policy applied on this path too: initial + two retries.
     assert_eq!(mock.count(), 3, "requests: initial + 2 retries");
 }
 
@@ -1124,7 +1047,6 @@ fn provider_failure_recovered_by_retry_settles_the_turn() {
     assert_eq!(done["success"], true, "prompt must succeed: {done}");
     client.drain_events(Duration::from_secs(1));
 
-    // Two failures then the third attempt succeeds.
     assert_eq!(mock.count(), 3);
 
     let types = event_types(&client.events);
@@ -1142,7 +1064,6 @@ fn provider_failure_recovered_by_retry_settles_the_turn() {
     assert_eq!(end["attempt"], 2);
     assert!(end.get("finalError").is_none(), "no final error: {end}");
 
-    // The recovered reply is the turn's final message.
     let last_message = client
         .events
         .iter()
@@ -1156,12 +1077,9 @@ fn provider_failure_recovered_by_retry_settles_the_turn() {
         "recovered reply"
     );
 
-    // One `agent_end` per agent run (TS parity: the `messages` payload
-    // carries the run's whole message set, and a retried turn restarts its
-    // runs on the wire with their own `agent_start`/`turn_start` frames).
-    // The initial run carries the accepted rows plus its failed assistant
-    // row; each retry run carries only its own messages (the failed row
-    // left the loop context first, TS `messages.slice(0, -1)`).
+    // One `agent_end` per agent run (TS parity: the `messages` payload carries the run's whole
+    // message set; each retry run carries only its own messages — the failed row left the loop
+    // context first, TS `messages.slice(0, -1)`).
     let agent_ends: Vec<&Value> = client
         .events
         .iter()
@@ -1214,10 +1132,6 @@ fn provider_failure_recovered_by_retry_settles_the_turn() {
         json!("recovered reply"),
         "the recovered run's settled row"
     );
-    // The two retry runs re-opened on the wire: three `agent_start` frames
-    // (the worker's run-opening frame plus the two forwarded run starts)
-    // and three `turn_start` frames, each retry pair after the prior run's
-    // `agent_end`.
     assert_eq!(
         types.iter().filter(|t| *t == "agent_start").count(),
         3,
@@ -1228,8 +1142,6 @@ fn provider_failure_recovered_by_retry_settles_the_turn() {
         3,
         "the run-opening turn_start plus the two retry runs': {types:?}"
     );
-    // No bare synthesized frame trails the runs: every `agent_end` on the
-    // wire carries the messages payload.
     assert!(
         agent_ends
             .iter()

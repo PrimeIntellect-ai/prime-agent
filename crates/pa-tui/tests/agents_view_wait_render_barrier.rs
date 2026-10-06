@@ -1,36 +1,22 @@
-//! The headless plan's render barrier (`AgentsStep::WaitRender`),
-//! headless against a mock supervisor: the barrier holds the queued
-//! plan batch until a frame rendered after arming carries the
-//! daemon-driven row (the saved catalog's landing), and its deadline
-//! pops the hold so a needle that never lands still ends the plan
-//! honestly — the registered render/data-arrival race
-//! (red-agentsview-search-ranked-hits-20260926-1) closes by
-//! construction: the plan cannot reach `Done` before the data rendered,
-//! where the retired wall-clock settle only won on an idle machine (the
-//! mock's 2s answer lag outlives any 300ms budget deterministically).
+//! The headless plan's render barrier (`AgentsStep::WaitRender`): holds
+//! the queued batch until a frame rendered after arming carries the
+//! daemon-driven row, so the plan cannot reach `Done` before the data
+//! rendered; the deadline still pops on a needle that never lands.
 #![cfg(unix)]
-// Pedantic-gate exceptions (every other pedantic warning in this crate is
-// fixed in place; each exception carries its one-line justification):
-// - the casts: terminal-layout arithmetic narrows structurally bounded
-//   values (screen coordinates, byte counts, timestamps); guarded
-//   conversions would add panic paths the bounds guarantee away.
+// Casts: structurally bounded terminal-layout arithmetic; guarded conversions add panic paths.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// - the render routes are flat tables (one arm per route); splitting them
-//   would add indirection without changing the flow.
+// Render routes are flat tables (one arm per route); splitting adds indirection.
 #![allow(clippy::too_many_lines)]
-// - widget state structs carry independent flag bits; a nested struct
-//   would add indirection without changing the shape.
+// Widget state structs carry independent flag bits.
 #![allow(clippy::struct_excessive_bools, clippy::fn_params_excessive_bools)]
-// - the futures are bounded by the surface's lifetime; boxing them would
-//   add an allocation to the steady-state loop.
+// Futures are bounded by the surface's lifetime; boxing adds a steady-state allocation.
 #![allow(clippy::large_futures)]
-// - the wrappers preserve a uniform Result-returning API surface; unwrap
-//   removals would ripple through the callers without changing behavior.
+// The wrappers preserve a uniform Result-returning API surface.
 #![allow(clippy::unnecessary_wraps)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -42,22 +28,17 @@ use pa_tui::agents_view::{AgentsHeadlessPlan, AgentsStep, AgentsViewOptions, Age
 use pa_tui::interactive::SessionSelection;
 use serde_json::{json, Value};
 
-/// The mock's answer lag: longer than the retired budget-settle
-/// ordering's whole window, so a plan gated on the old 300ms settle
-/// deterministically ends before the catalog lands (the red the barrier
-/// removes: `Done` fires while the frame is still the pre-arrival
-/// "No sessions match" state).
+/// Longer than the retired budget-settle ordering's whole window, so a plan gated on the old
+/// 300ms settle deterministically ends before the catalog lands (the red the barrier removes).
 const CATALOG_ANSWER_DELAY_MS: u64 = 2000;
 
 /// How the mock answers `list_saved_sessions`.
 enum CatalogAnswer {
-    /// Hold the answer for `CATALOG_ANSWER_DELAY_MS`, then land the two
-    /// catalog rows as the terminal response (no streamed frames: the
-    /// response alone drives the row model — the wire shape a fast scan
-    /// takes, and the exact path that queues behind an armed barrier).
+    /// Hold the answer for `CATALOG_ANSWER_DELAY_MS`, then land the two catalog rows as the
+    /// terminal response (the exact path that queues behind an armed barrier).
     Lagged,
-    /// Record the request and never answer: the needle that never lands
-    /// (the deadline test's honest stall).
+    /// Record the request and never answer: the needle that never lands (the deadline test's honest
+    /// stall).
     Never,
 }
 
@@ -74,8 +55,7 @@ impl MockSupervisor {
         }
     }
 
-    /// Serve one agents-view connection: hello, then the command loop.
-    /// The roster answers one live idle session; the saved catalog
+    /// Serve one agents-view connection: the roster answers one live idle session; the catalog
     /// answers per `answer`.
     fn serve(self) {
         let (stream, _) = self.listener.accept().expect("accept view connection");
@@ -146,15 +126,11 @@ impl MockSupervisor {
                             return;
                         }
                     }
-                    // The never-answered catalog: the request was heard,
-                    // the needle never lands.
                     CatalogAnswer::Never => {}
                 },
                 "roster_unsubscribe" => {
-                    // The view's teardown fires the unsubscribe
-                    // fire-and-forget (selection handoff included); the
-                    // answer ends the mock's one connection so the test's
-                    // join never rides out the quiet cap.
+                    // The view's teardown fires the unsubscribe fire-and-forget; the answer ends
+                    // the mock's one connection so the join never rides out the quiet cap.
                     let _ = respond(&mut writer, id, "roster_unsubscribe", &Value::Null);
                     return;
                 }
@@ -168,8 +144,8 @@ impl MockSupervisor {
     }
 }
 
-/// The mock's saved catalog: two rows the roster does not carry, so the
-/// Inactive section is entirely catalog-fed.
+/// The mock's saved catalog: two rows the roster does not carry, so the Inactive section is
+/// entirely catalog-fed.
 fn saved_catalog() -> Vec<Value> {
     vec![
         saved_catalog_row("/tmp/sessions/s2.jsonl", "s2", "carried one"),
@@ -190,9 +166,8 @@ fn saved_catalog_row(path: &str, id: &str, name: &str) -> Value {
     })
 }
 
-/// One best-effort line write: `false` reports the view connection died
-/// (the run's teardown closes it under the mock's own answer lag), so
-/// the serve loop ends instead of panicking inside the test thread.
+/// One best-effort line write: `false` reports the view connection died (the run's teardown
+/// closes it under the mock's answer lag), so the serve loop ends instead of panicking.
 fn write_line(writer: &mut UnixStream, value: &Value) -> bool {
     let Ok(mut line) = serde_json::to_string(value) else {
         return false;
@@ -227,10 +202,8 @@ fn respond_failure(writer: &mut UnixStream, id: &str, command: &str, error: &str
     )
 }
 
-/// One line with a bounded quiet window: the view connection sits quiet
-/// between its inputs (settle waits), so timeouts keep the loop alive
-/// for a bounded span; `None` ends the serve loop on EOF or the quiet
-/// cap (a failing test's teardown never hangs the thread).
+/// One line with a bounded quiet window; `None` ends the serve loop on EOF or the quiet cap (a
+/// failing test's teardown never hangs the thread).
 fn read_line(reader: &mut BufReader<UnixStream>) -> Option<String> {
     const QUIET_WINDOW_MS: u32 = 90;
     let mut quiet_windows: u32 = 0;
@@ -260,7 +233,6 @@ fn read_line(reader: &mut BufReader<UnixStream>) -> Option<String> {
     }
 }
 
-/// One view options set.
 fn view_options(socket: &std::path::Path) -> AgentsViewOptions {
     AgentsViewOptions {
         socket_path: socket.to_path_buf(),
@@ -282,15 +254,9 @@ fn view_options(socket: &std::path::Path) -> AgentsViewOptions {
     }
 }
 
-/// The barrier holds the queued plan batch until a frame rendered after
-/// arming carries the daemon-driven row: the mock's 2s catalog answer
-/// lands long after the barrier armed, so the Enter queued behind it
-/// can only execute against the LOADED row model — the selection proves
-/// the hold ordered the plan after the data. The retired
-/// budget-settle ordering (a 300ms wall-clock window) reds here
-/// deterministically: `Done` ends the run before the 2s answer lands,
-/// the final frame is the pre-arrival "No sessions match" state, and
-/// the Enter opens nothing.
+/// The barrier holds the queued plan batch until a frame rendered after arming carries the
+/// daemon-driven row: the mock's 2s catalog answer lands long after the barrier armed. The retired
+/// 300ms budget-settle reds here deterministically: `Done` fires before the answer lands.
 #[tokio::test]
 async fn the_render_barrier_holds_until_the_catalog_row_renders() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -305,9 +271,8 @@ async fn the_render_barrier_holds_until_the_catalog_row_renders() {
                 needle: "carried one".to_string(),
                 timeout_ms: 10_000,
             },
-            // The Enter rides BEHIND the barrier: pre-arrival it opens
-            // nothing (the query hides the roster's live row), post-
-            // arrival it opens the catalog's ranked hit.
+            // The Enter rides BEHIND the barrier: pre-arrival it opens nothing (the query hides the
+            // roster's live row), post-arrival it opens the catalog's ranked hit.
             AgentsStep::Key("enter".to_string()),
         ],
         width: 120,
@@ -338,20 +303,14 @@ async fn the_render_barrier_holds_until_the_catalog_row_renders() {
         "the Enter behind the barrier opened the catalog's ranked hit"
     );
 
-    // Yield to the runtime so the teardown's fire-and-forget
-    // roster_unsubscribe runs (a current-thread test runtime never
-    // polls it while the join blocks): the mock answers it and ends,
-    // so the join never rides out its quiet cap.
+    // Yield to the runtime so the teardown's fire-and-forget roster_unsubscribe runs (a
+    // current-thread test runtime never polls it while the join blocks); the mock answers it.
     tokio::time::sleep(Duration::from_millis(250)).await;
     let _ = server.join();
 }
 
-/// The barrier's deadline pops the hold and the plan proceeds honestly:
-/// the needle the mock never renders ends the wait at its own bound
-/// (never a wedge waiting on events that do not come — the deadline's
-/// select arm wakes the loop without any), the status line reports the
-/// wait that never satisfied, and the steps behind the barrier still
-/// run.
+/// The barrier's deadline pops the hold and the plan proceeds honestly: the needle the mock
+/// never renders ends the wait at its own bound, the status line reports the unsatisfied wait.
 #[tokio::test]
 async fn the_barrier_deadline_pops_the_hold_and_the_plan_proceeds() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -365,8 +324,7 @@ async fn the_barrier_deadline_pops_the_hold_and_the_plan_proceeds() {
                 needle: "carried one".to_string(),
                 timeout_ms: 500,
             },
-            // The settle window paints the pop's status note before the
-            // Enter opens the row.
+            // The settle window paints the pop's status note before the Enter opens the row.
             AgentsStep::WaitSettle { timeout_ms: 300 },
             AgentsStep::Key("enter".to_string()),
         ],
@@ -383,10 +341,8 @@ async fn the_barrier_deadline_pops_the_hold_and_the_plan_proceeds() {
     .expect("the agents view run")
     .outcome;
 
-    // The hold popped at its deadline, not at the incident poll's 30s
-    // arm: the plan proceeds in bounded time (the deadline is the only
-    // wake that fires here — the catalog never answers, the roster
-    // already did, and no running row pulses).
+    // The hold popped at its deadline, not at the incident poll's 30s arm: the plan proceeds
+    // in bounded time (the deadline is the only wake that fires here).
     assert!(
         started.elapsed() < Duration::from_secs(10),
         "the deadline popped the hold in bounded time: {:?}",
@@ -407,8 +363,8 @@ async fn the_barrier_deadline_pops_the_hold_and_the_plan_proceeds() {
         "the plan proceeded past the popped hold: the Enter opened the roster's default row"
     );
 
-    // The join never rides the quiet cap (the teardown's fire-and-forget
-    // unsubscribe runs on this yield and ends the mock).
+    // The join never rides the quiet cap (the teardown's fire-and-forget unsubscribe runs on this
+    // yield and ends the mock).
     tokio::time::sleep(Duration::from_millis(250)).await;
     let _ = server.join();
 }

@@ -1,23 +1,12 @@
-//! The Python-skills-unavailable notice (`python_skills_unavailable`).
-//!
-//! The kernel bootstrap pre-imports every configured Python skill; a broken
-//! one (a missing dependency after a venv rebuild, a failed install, an
-//! import-time error) stays behind a callable-looking placeholder that only
-//! raises on first call. The bootstrap therefore reports failed imports
-//! through the marker line ([`parse_unavailable_python_skills`]), and the
-//! provisioner's `on_unavailable_skills` seam hands them here so the model
-//! is told BEFORE it spends turns reading the skill's SKILL.md and calling
-//! it — in every session shape, because the row rides the conversation.
-//!
-//! TS reference: PR #2381, `agent-session.ts` `_onPythonSkillsUnavailable`
-//! (the `onUnavailableSkills` callback of `IpythonKernelProvisioner`),
-//! delivered through `sendCustomMessage(..., { deliverAs: "nextTurn" })`.
+//! The Python-skills-unavailable notice (`python_skills_unavailable`): a broken pre-imported
+//! skill stays behind a placeholder that only raises on first call, so the bootstrap reports
+//! failed imports through the marker line and the provisioner's `on_unavailable_skills` seam
+//! hands them here — the model is told BEFORE it spends turns reading the skill's SKILL.md.
 
 use pa_types::session::CustomMessage;
 
 use crate::kernel::bootstrap::UnavailablePythonSkills;
 
-/// The notice's `customType` (TS `PYTHON_SKILLS_UNAVAILABLE_CUSTOM_TYPE`).
 pub const PYTHON_SKILLS_UNAVAILABLE_CUSTOM_TYPE: &str = "python_skills_unavailable";
 
 fn now_millis() -> u64 {
@@ -26,9 +15,8 @@ fn now_millis() -> u64 {
         .map_or(0, |duration| duration.as_millis() as u64)
 }
 
-/// The notice text (TS `_onPythonSkillsUnavailable`'s builder): the
-/// `[python-skills-unavailable]` header, the per-skill import errors, and
-/// the fix hint.
+/// The notice text: the `[python-skills-unavailable]` header, the
+/// per-skill import errors, and the fix hint.
 #[must_use]
 pub fn notice_content(errors: &UnavailablePythonSkills) -> String {
     let mut lines = vec!["[python-skills-unavailable]".to_string(), String::new()];
@@ -45,10 +33,8 @@ pub fn notice_content(errors: &UnavailablePythonSkills) -> String {
     lines.join("\n")
 }
 
-/// The next-turn notice row: display true, `details.skills` naming the
-/// failed import names (TS `sendCustomMessage` with `deliverAs:
-/// "nextTurn"` — the row rides the next admitted turn ahead of its
-/// prompt).
+/// The next-turn notice row: display true, `details.skills` naming the failed imports;
+/// the row rides the next admitted turn ahead of its prompt.
 #[must_use]
 pub fn notice_message(errors: &UnavailablePythonSkills) -> CustomMessage {
     CustomMessage {

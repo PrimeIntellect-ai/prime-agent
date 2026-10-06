@@ -5,10 +5,6 @@ use super::{
     RestoreResult, SnapshotResult,
 };
 
-// ---------------------------------------------------------------------------
-// ReplKernelManager delegations onto Inner
-// ---------------------------------------------------------------------------
-
 impl ReplKernelManager {
     pub(crate) async fn wait_for_protocol_repair(
         &self,
@@ -75,9 +71,8 @@ impl Inner {
         }
     }
 
-    /// Type-erased entry onto the shared request plumbing: the state-op /
-    /// repair paths recurse back through the queue (rebootstrap -> enqueue),
-    /// so the cycle is broken with `dyn` here, not just `Box::pin`.
+    /// Type-erased entry onto the shared request plumbing: the state-op / repair paths recurse back
+    /// through the queue (rebootstrap -> enqueue), so the cycle is broken with `dyn` here.
     pub(crate) fn enqueue_request(
         self: &Arc<Self>,
         request: Request,

@@ -1,30 +1,9 @@
-//! Headless e2e for the double-Escape repeat ladder's termination (the
-//! operator's 2026-09-29 Esc-overflow report): repeated Escape at the
-//! empty editor converges to the inert empty state instead of cycling the
-//! tree selector open again every second press.
-//!
-//! The pre-fix ladder: press one arms the repeat's "tree" action, press two
-//! opens the `/tree` selector, press three dismisses it — and press four
-//! armed the action again, so a held or repeated Escape reopened the
-//! selector forever (the "circular pop loop at the empty state" the report
-//! names; the operator's build aborted with a main-thread stack overflow
-//! under a long enough stream, and every handler in the cycle is a flat
-//! state transition at this tip — the ladder's non-convergence is the
-//! demonstrated defect either way). The fix: the repeat's tree action is
-//! one shot per input chain — the dismissal arms no reopen, and any
-//! non-Escape key re-arms the gesture.
-//!
-//! The pin drives 60 Escape presses through the headless key driver (the
-//! same dispatch a terminal's keys take) against a mock supervisor serving
-//! a two-entry session tree, and asserts the contract: the selector opens
-//! exactly once (press two), the final frame is the inert empty editor,
-//! and a non-Escape key re-arms the gesture for a fresh chain.
+//! Headless e2e for the double-Escape repeat ladder's termination
+//! (operator report 2026-09-29): repeated Escape at the empty editor
+//! converges to the inert empty state — the repeat's tree action is one
+//! shot per input chain, and any non-Escape key re-arms the gesture.
 #![cfg(unix)]
-// Pedantic-gate exceptions (every other pedantic warning in this crate is
-// fixed in place; each exception carries its one-line justification):
-// - the mock supervisor's request loop is one arm per wire command (the
-// same flat table the sibling headless e2es carry); splitting it would
-// add indirection without changing the flow.
+// The mock supervisor's request loop is one arm per wire command; splitting adds indirection.
 #![allow(clippy::too_many_lines)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -50,9 +29,8 @@ impl MockSupervisor {
         }
     }
 
-    /// Serve one connection: attach the session, then answer the loop's
-    /// requests. The tree answer carries two entries so the selector
-    /// actually mounts (the empty-tree arm only notes "No entries").
+    /// Serve one connection: the tree answer carries two entries so the selector actually mounts
+    /// (the empty-tree arm only notes "No entries").
     fn serve(self) {
         let (stream, _) = self.listener.accept().expect("accept");
         let write_stream = stream.try_clone().expect("clone mock socket");
@@ -245,8 +223,8 @@ fn write_json(writer: &mut UnixStream, value: &Value) {
     writer.flush().expect("flush mock frame");
 }
 
-/// A minimal settings seam for the harness: every getter returns its TS
-/// default, writes succeed without persistence.
+/// A minimal settings seam for the harness: every getter returns its TS default, writes succeed
+/// without persistence.
 struct StubSettings;
 
 impl pa_tui::client_settings::ClientSettings for StubSettings {
@@ -426,11 +404,9 @@ fn esc() -> HeadlessStep {
     HeadlessStep::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
 }
 
-/// Run one plan against a fresh mock supervisor and return the captured
-/// frames. The headless capture dedupes consecutive identical frames, so
-/// each tree-selector mount lands as its own frame: a ladder that cycles
-/// contributes one "Session Tree" frame per cycle, a terminated ladder
-/// exactly one for the whole run.
+/// Run one plan against a fresh mock supervisor and return the captured frames. The headless
+/// capture dedupes consecutive identical frames, so each tree-selector mount lands as its own
+/// frame.
 fn run_plan(steps: Vec<HeadlessStep>) -> Vec<String> {
     std::env::remove_var("TMUX");
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -457,11 +433,8 @@ fn run_plan(steps: Vec<HeadlessStep>) -> Vec<String> {
 /// The tree-selector pane's title row (the mount's needle).
 const TREE_PANE: &str = "Session Tree";
 
-/// Sixty Escape presses at the empty editor: the repeat's tree action
-/// fires exactly once (press two opens the selector, press three
-/// dismisses it), the press-after stream stays inert, and the run's
-/// final frame is the empty editor — the pop loop terminates at the
-/// empty state instead of cycling the selector every second press.
+/// Sixty Escape presses at the empty editor: the repeat's tree action fires exactly once and the
+/// ladder terminates instead of cycling the selector every second press.
 #[test]
 fn repeated_escape_converges_to_the_inert_empty_state() {
     let mut steps = vec![HeadlessStep::WaitMs(300)];
@@ -491,9 +464,8 @@ fn repeated_escape_converges_to_the_inert_empty_state() {
     );
 }
 
-/// A non-Escape key re-arms the gesture: after the converged inert tail,
-/// one arrow press starts a fresh input chain and the next double-Esc
-/// opens the selector again.
+/// A non-Escape key re-arms the gesture: after the converged inert tail, one arrow press starts a
+/// fresh input chain and the next double-Esc opens the selector again.
 #[test]
 fn a_non_escape_key_re_arms_the_double_escape_gesture() {
     let mut steps = vec![HeadlessStep::WaitMs(300)];
@@ -509,7 +481,6 @@ fn a_non_escape_key_re_arms_the_double_escape_gesture() {
     )));
     steps.push(esc());
     steps.push(esc());
-    // The dismissal press: the fresh chain's selector closes the same way.
     steps.push(esc());
     steps.push(HeadlessStep::WaitMs(200));
     let frames = run_plan(steps);

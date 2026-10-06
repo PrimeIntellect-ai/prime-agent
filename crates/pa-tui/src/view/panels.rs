@@ -1,7 +1,7 @@
 //! The panel assembly: the dock — prompt-context rows, the queued-input
 //! strip, the autocomplete overlay, the editor surface, the tray, the
 //! subagent summary box (TS `SubagentSummaryLine`) — plus the share
-//! loader and reload-box panels that replace the editor in flight.
+//! loader and reload-box panels.
 
 use super::click::{ClickAction, DockClickRegion, EditorClickSurface};
 use super::editor_surface;
@@ -12,9 +12,6 @@ use crate::{Line, Span};
 use ratatui::style::Style;
 
 impl AgentView {
-    /// Render the dock: prompt-context row(s), the autocomplete overlay
-    /// (when showing), the editor surface, the tray, and the subagent
-    /// summary box (TS `SubagentSummaryLine` under the tray).
     pub fn render_dock(&mut self, width: usize) -> Vec<Line> {
         // The queued-input strip sits directly above the prompt dock rows
         // (TS `queuedMessagesContainer` above the editor).
@@ -36,9 +33,8 @@ impl AgentView {
         let (editor_rows, cursor) = self.render_editor_surface(width, context_rows + overlay_count);
         self.dock_cursor = cursor.map(|(row, col)| (context_rows + overlay_count + row, col));
         lines.extend(editor_rows);
-        // The tray's `← manage` hint is a click region (operator
-        // directive 2026-09-29): its own cells — never the depth label
-        // beside them — perform the hinted agents-back handoff.
+        // The tray's `← manage` hint is a click region (operator directive 2026-09-29): its own
+        // cells, never the depth label, perform the handoff.
         let tray_row = lines.len();
         let (tray, tray_hint) = render_tray_with_hint(&self.chrome, &self.theme, width);
         lines.push(tray);
@@ -50,7 +46,7 @@ impl AgentView {
             });
         }
         // The activity dock's group segments are click regions too:
-        // the groups sit on the frame's second row, under the rule.
+        // the groups sit on the frame's second row.
         if let Some(dock) = &self.chrome.activity {
             let (frame, segments) =
                 crate::chrome::render_activity_dock_segments(dock, &self.theme, width);
@@ -63,8 +59,8 @@ impl AgentView {
             }
             lines.extend(frame);
         }
-        // The `/speed` footer (TS `footerSlot`, the main container's last
-        // child): a dim row only while the display is on with a sample.
+        // The `/speed` footer (TS `footerSlot`): a dim row only while
+        // the display is on with a sample.
         if let Some(speed) = &self.chrome.speed_text {
             lines.push(crate::chrome::render_speed_footer(
                 speed,
@@ -75,30 +71,23 @@ impl AgentView {
         lines
     }
 
-    /// The autocomplete dropdown, mounted just above the editor surface (TS
-    /// anchors the overlay immediately above the cursor row; the editor's
-    /// first content row carries the cursor in the common single-line
-    /// case). The panel opens with the one full-width muted rule every
-    /// inline menu panel opens with (the operator's 2026-09-26 top-border
-    /// directive), its rows pad to the input width and float on the popup
-    /// background between the editor's left padding and prompt prefix, and
-    /// the selected row's wash spans the panel's full width like the
-    /// `/model` picker's selected row.
+    /// The autocomplete dropdown, mounted just above the editor surface (TS anchors the overlay
+    /// above the cursor row). The panel opens with the full-width muted rule (the operator's
+    /// 2026-09-26 top-border directive).
     fn render_autocomplete_overlay(&mut self, width: usize) -> Vec<Line> {
         editor_surface::overlay(&self.editor, &self.theme, width)
     }
 
-    /// The editor surface (TS `Editor.render` with a background): a blank
-    /// bg row, content rows with the `> ` prompt and a reverse-video cursor,
-    /// and a trailing bg row. Scroll indicators replace the blank rows.
+    /// The editor surface (TS `Editor.render` with a background): a
+    /// blank bg row, content rows with the `> ` prompt and a reverse-video
+    /// cursor, and a trailing bg row.
     fn render_editor_surface(
         &mut self,
         width: usize,
         dock_row: usize,
     ) -> (Vec<Line>, Option<(usize, usize)>) {
-        // TS `getQueueSelectionHeader` (the editor's header line while a
-        // parked message is selected): the dim browse text on the editor
-        // background, rendered by the shared box's header block.
+        // The queue-browse header (while a parked message is selected): the dim
+        // browse text on the editor background, from the shared box's header block.
         let header = self.queue_selected.as_ref().map(|selected| {
             let keys = {
                 let kb = self.editor.keybindings();
@@ -127,9 +116,8 @@ impl AgentView {
             header,
             None,
         );
-        // The content rows' click surface (view/click.rs): the TS editor
-        // registers one region over its visible content rows, shifted by
-        // the header block's rows (TS `getContentLineOffset`).
+        // The content rows' click surface: one region over the visible content rows,
+        // shifted by the header block's rows.
         self.click.record_editor(EditorClickSurface {
             dock_row,
             rows: surface.visible_rows,
@@ -140,9 +128,9 @@ impl AgentView {
         (surface.rows, surface.cursor)
     }
 
-    /// The `/share` loader rows (TS `BorderedLoader` + `CancellableLoader`):
-    /// border, spinner + message, cancel hint, border — replacing the
-    /// editor in the dock while `gh gist create` runs.
+    /// The `/share` loader rows (TS `BorderedLoader`): border,
+    /// spinner + message, cancel hint, border — replacing the editor while
+    /// `gh gist create` runs.
     pub(super) fn render_share_loader(&self, loader: &ShareLoader, width: usize) -> Vec<Line> {
         let border = self.theme.fg_style(ThemeColor::Border);
         let muted = self.theme.fg_style(ThemeColor::Muted);
@@ -152,9 +140,8 @@ impl AgentView {
         let mut rows: Vec<Line> = Vec::with_capacity(7);
         rows.push(vec![Span::styled("─".repeat(width.max(1)), border)]);
         let mut row: Line = vec![Span::styled(" ".to_string(), Style::default())];
-        // TS `BorderedLoader` wraps a `Loader` with the muted spinner and
-        // muted message color fns; the gap between them is the unstyled
-        // plain space (the `Loader` pen reset — see `chat::render_loader`).
+        // TS `BorderedLoader` wraps a `Loader` with the muted spinner and message color fns;
+        // the gap between them is unstyled plain space (see `chat::render_loader`).
         row.push(Span::styled(spinner.to_string(), muted));
         row.push(Span::raw(" ".to_string()));
         row.push(Span::styled(loader.message.clone(), muted));
@@ -172,9 +159,8 @@ impl AgentView {
         rows
     }
 
-    /// The `/reload` box (TS `handleReloadCommand`): `DynamicBorder`, blank,
-    /// the muted message, blank, `DynamicBorder` — the editor container's
-    /// replacement while the reload runs.
+    /// The `/reload` box (TS `handleReloadCommand`): `DynamicBorder`, blank, the muted message,
+    /// blank, `DynamicBorder` — the editor replacement while the reload runs.
     pub(super) fn render_reload_box(&self, message: &str, width: usize) -> Vec<Line> {
         let border = self.theme.fg_style(ThemeColor::Border);
         let muted = self.theme.fg_style(ThemeColor::Muted);

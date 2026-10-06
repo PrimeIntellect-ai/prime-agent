@@ -1,32 +1,22 @@
-//! Headless e2e for the `/nightly` command (TS `interactive-mode.ts`
-//! 5455-5484): the status arm resolves the effective channel from the
-//! running version when no preferred channel is set, the usage error keeps
-//! the TS wording, and the off arm pins the channel through the settings
-//! seam (a stub seam: the write lands in memory; the persisted wire form is
-//! covered by the pa-cli seam round-trip test).
+//! Headless e2e for the `/nightly` command: the status arm resolves the
+//! effective channel from the running version when none is preferred, the
+//! usage error keeps the TS wording, and the off arm pins the channel
+//! through a stub settings seam (persisted form covered by the pa-cli test).
 #![cfg(unix)]
-// Pedantic-gate exceptions (every other pedantic warning in this crate is
-// fixed in place; each exception carries its one-line justification):
-// - the casts: terminal-layout arithmetic narrows structurally bounded
-//   values (screen coordinates, byte counts, timestamps); guarded
-//   conversions would add panic paths the bounds guarantee away.
+// Casts: structurally bounded terminal-layout arithmetic; guarded conversions add panic paths.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// - the render routes are flat tables (one arm per route); splitting them
-//   would add indirection without changing the flow.
+// Render routes are flat tables (one arm per route); splitting adds indirection.
 #![allow(clippy::too_many_lines)]
-// - widget state structs carry independent flag bits; a nested struct
-//   would add indirection without changing the shape.
+// Widget state structs carry independent flag bits.
 #![allow(clippy::struct_excessive_bools, clippy::fn_params_excessive_bools)]
-// - the futures are bounded by the surface's lifetime; boxing them would
-//   add an allocation to the steady-state loop.
+// Futures are bounded by the surface's lifetime; boxing adds a steady-state allocation.
 #![allow(clippy::large_futures)]
-// - the wrappers preserve a uniform Result-returning API surface; unwrap
-//   removals would ripple through the callers without changing behavior.
+// The wrappers preserve a uniform Result-returning API surface.
 #![allow(clippy::unnecessary_wraps)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -51,8 +41,6 @@ impl MockSupervisor {
         }
     }
 
-    /// Serve one connection: attach an empty session, then answer the
-    /// loop's requests.
     fn serve(self) {
         let (stream, _) = self.listener.accept().expect("accept");
         let write_stream = stream.try_clone().expect("clone mock socket");
@@ -189,9 +177,8 @@ fn attach_data(id: &str) -> Value {
     })
 }
 
-/// A minimal settings seam for the harness: every getter returns its TS
-/// default, writes succeed without persistence, and the channel pair
-/// resolves like the composition root (the version infers when unset).
+/// A minimal settings seam for the harness: every getter returns its TS default, writes succeed
+/// without persistence, and the channel pair resolves like the composition root.
 #[derive(Default)]
 struct StubSettings {
     update_channel: std::sync::Mutex<Option<String>>,
@@ -332,8 +319,8 @@ impl pa_tui::client_settings::ClientSettings for StubSettings {
         if let Some(channel) = self.update_channel() {
             return channel;
         }
-        // The inference TS resolveUpdateChannel applies: a -beta*
-        // prerelease reads nightly, anything else stable.
+        // The inference TS resolveUpdateChannel applies: a -beta* prerelease reads nightly,
+        // anything else stable.
         if version.contains("-beta") {
             "nightly".to_string()
         } else {
@@ -403,9 +390,8 @@ fn run_plan(steps: Vec<HeadlessStep>) -> Vec<String> {
     outcome.frames
 }
 
-/// `/nightly status` reports the inferred channel (the headless harness
-/// has no settings seam, so no preferred channel is set) and the running
-/// version; a bad argument gets the TS usage error.
+/// `/nightly status` reports the inferred channel (the harness has no settings seam, so no
+/// preferred channel is set) and the running version; a bad argument gets the TS usage error.
 #[test]
 fn nightly_status_and_usage_error_render_the_ts_wording() {
     let steps = vec![
@@ -449,8 +435,6 @@ fn nightly_on_saves_the_nightly_channel() {
     );
 }
 
-/// `/nightly off` pins the channel through the settings seam and renders
-/// the TS stable-pin note.
 #[test]
 fn nightly_off_renders_the_stable_pin_note() {
     let steps = vec![

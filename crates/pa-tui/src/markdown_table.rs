@@ -1,16 +1,14 @@
-//! GFM table rendering for the chat markdown (TS
-//! `markdown.ts renderTable`): pipe tables with a header row, an
-//! alignment/delimiter row, and data rows, sized so every column fits the
-//! available width, with cells wrapped and padded per column.
+//! GFM table rendering for the chat markdown (TS `markdown.ts renderTable`): pipe tables with a
+//! header row, an alignment/delimiter row, and data rows, sized so every column fits the available
+//! width.
 
 use crate::markdown::{render_inline, wrap_spans, wrapped_span_count, MarkdownStyle};
 use crate::width::str_width;
 use crate::{Line, Span};
 use ratatui::style::Style;
 
-/// A parsed pipe table: header cells, data rows (normalized to the header
-/// width like marked's `splitCells(row, header.length)`), and the raw
-/// source lines (the too-narrow fallback re-renders them as wrapped text).
+/// A parsed pipe table: header cells, data rows (normalized to the header width like marked's
+/// `splitCells`), and the raw source lines (the too-narrow fallback re-renders them).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Table {
     pub header: Vec<String>,
@@ -18,10 +16,9 @@ pub(crate) struct Table {
     pub raw: Vec<String>,
 }
 
-/// Split one table row into cells on unescaped pipes (marked `splitCells`):
-/// leading/trailing pipes drop their empty edge cell, cells are trimmed,
-/// and `\|` unescapes to `|`. With `expected`, rows are truncated or padded
-/// to the header column count.
+/// Split one table row into cells on unescaped pipes (marked `splitCells`): leading/trailing
+/// pipes drop their empty edge cell, cells are trimmed, `\|` unescapes. With `expected`,
+/// rows are truncated or padded to the header count.
 fn split_cells(row: &str, expected: Option<usize>) -> Vec<String> {
     let mut cells: Vec<String> = Vec::new();
     let mut cell = String::new();
@@ -42,8 +39,7 @@ fn split_cells(row: &str, expected: Option<usize>) -> Vec<String> {
         }
     }
     cells.push(cell);
-    // marked drops the first/last cell only when it trims to empty, i.e.
-    // a leading/trailing pipe.
+    // marked drops the first/last cell only when it trims to empty, i.e. a leading/trailing pipe.
     if cells.len() > 1 && cells[0].trim().is_empty() {
         cells.remove(0);
     }
@@ -65,11 +61,9 @@ fn split_cells(row: &str, expected: Option<usize>) -> Vec<String> {
     cells
 }
 
-/// The number of delimiter cells when the line is a table delimiter row:
-/// one or more `:?-+:?` cells separated by pipes (marked strips the row's
-/// leading/trailing pipe, then splits on `|`), and the row must carry a pipe
-/// or colon (marked's `tableDelimiter` test, which keeps plain `---` setext
-/// rules out of the table rule).
+/// The number of delimiter cells when the line is a table delimiter row: one or more `:?-+:?` cells
+/// separated by pipes, and the row must carry a pipe or colon (marked's `tableDelimiter` test keeps
+/// plain `---` setext rules out).
 fn delimiter_columns(line: &str) -> Option<usize> {
     let trimmed = line.trim();
     if trimmed.is_empty() || !(trimmed.contains('|') || trimmed.contains(':')) {
@@ -86,9 +80,8 @@ fn delimiter_columns(line: &str) -> Option<usize> {
     valid.then_some(cells.len())
 }
 
-/// True when `header_line` followed by `next_line` starts a table (marked's
-/// `table` rule): a non-blank header row whose cell count equals the
-/// delimiter row's.
+/// True when `header_line` followed by `next_line` starts a table (marked's `table` rule):
+/// a non-blank header row whose cell count equals the delimiter row's.
 pub(crate) fn is_table_start(header_line: &str, next_line: Option<&&str>) -> bool {
     let Some(next) = next_line else {
         return false;
@@ -116,9 +109,8 @@ fn ends_table(line: &str) -> bool {
         || crate::markdown::list_marker(trimmed).is_some()
 }
 
-/// Parse a table block starting at `lines[*index]` (already known to be a
-/// table start): consumes the header, delimiter, and body rows, and
-/// advances `index` past them.
+/// Parse a table block starting at `lines[*index]`: consumes the header, delimiter, and
+/// body rows, and advances `index` past them.
 pub(crate) fn parse_table_block(lines: &[&str], index: &mut usize) -> Table {
     let header = split_cells(lines[*index], None);
     let num_cols = header.len();
@@ -153,8 +145,7 @@ fn table_layout(
     }
     let max_unbroken_word_width = 30usize;
 
-    // Render each cell's inline content once; measure natural and
-    // minimum-word widths from it.
+    // Render each cell's inline content once; measure natural and minimum-word widths from it.
     let header_spans: Vec<Line> = header
         .iter()
         .map(|cell| render_inline(cell, style))
@@ -175,9 +166,8 @@ fn table_layout(
         }
     }
 
-    // Minimum column widths: the longest unbroken word per column, capped at
-    // 30. When the minimums overflow the space available, redistribute
-    // proportionally to the words' growth potential.
+    // Minimum column widths: the longest unbroken word per column, capped at 30. When the minimums
+    // overflow the space available, redistribute proportionally to the words' growth potential.
     let mut min_widths = min_word.clone();
     if min_widths.iter().sum::<usize>() > available_for_cells {
         min_widths = vec![1; num_cols];
@@ -285,11 +275,9 @@ pub(crate) fn count_table(
     content_rows + 3 + rows.len().saturating_sub(1)
 }
 
-/// Render the table (TS `renderTable`): compute per-column widths from the
-/// natural cell widths and the longest unbroken word (capped at 30), wrap
-/// cells that overflow their column, pad every cell to the column width,
-/// bold the header row, and draw the box borders. When the width is too
-/// small for a stable table, fall back to the raw markdown wrapped.
+/// Render the table (TS `renderTable`): compute per-column widths from the natural cell widths and
+/// the longest unbroken word (capped at 30), wrap cells that overflow their column, pad every cell
+/// to the column width. Too small for a stable table: fall back to the raw markdown.
 pub(crate) fn render_table(
     header: &[String],
     rows: &[Vec<String>],
@@ -321,15 +309,11 @@ pub(crate) fn render_table(
     };
     out.push(vec![Span::raw(join('┌', '┬', '┐'))]);
 
-    // The observed TS binary output (0.9.5, the parity ground truth) draws
-    // the header row exactly like the data rows: inline-rendered cell text
-    // in the body color, unstyled padding, plain borders. The TS source's
-    // `theme.bold(headerCell)` never reaches the wire, so the port must not
-    // emit the bold modifier either (a Rust-only bold would be a parity
-    // bug in every frame diff).
+    // The observed TS binary output (0.9.5, the parity ground truth) draws the header row exactly
+    // like the data rows. The TS source's `theme.bold(headerCell)` never reaches the wire, so the
+    // port must not emit the bold modifier.
 
-    // Header row: wrapped and padded like the data rows (see the note above:
-    // the TS binary output carries no header bold).
+    // Header row: wrapped and padded like the data rows (no header bold).
     let header_cells: Vec<Vec<Line>> = header_spans
         .iter()
         .zip(&column_widths)
@@ -403,9 +387,8 @@ fn spans_width(spans: &Line) -> usize {
     spans.iter().map(|s| str_width(&s.content)).sum()
 }
 
-/// The longest word width in rendered spans, capped (TS `getLongestWordWidth`:
-/// words split on whitespace across the whole cell text; escape sequences
-/// measure zero width).
+/// The longest word width in rendered spans, capped (TS `getLongestWordWidth`: words split
+/// on whitespace across the whole cell text; escape sequences measure zero width).
 fn longest_word_width(spans: &Line, max_width: usize) -> usize {
     let text: String = spans.iter().map(|s| s.content.as_str()).collect();
     let mut longest = 0usize;
@@ -460,8 +443,8 @@ mod tests {
 
     #[test]
     fn header_row_matches_the_observed_ts_binary_output() {
-        // The TS binary draws the header exactly like the data rows: cell
-        // text in the body color, unstyled padding, no bold anywhere.
+        // The TS binary draws the header exactly like the data rows: cell text in the body color,
+        // unstyled padding, no bold anywhere.
         let style = MarkdownStyle::default();
         let mut out = Vec::new();
         let header = vec!["a".to_string(), "b".to_string()];
@@ -515,9 +498,9 @@ mod tests {
 
     #[test]
     fn long_cells_wrap_inside_their_column() {
-        // Natural widths (11 and 3) exceed the 10 columns available after
-        // the 7-column border overhead, so the first column shrinks to 7
-        // and its cell wraps while every row stays box-aligned.
+        // Natural widths (11 and 3) exceed the 10 columns available after the 7-column
+        // border overhead, so the first column shrinks to 7 and its cell wraps while every
+        // row stays box-aligned.
         let out = plain("| a | b |\n| --- | --- |\n| aa bb cc dd | one |", 17);
         assert_eq!(
             out,
@@ -541,8 +524,8 @@ mod tests {
 
     #[test]
     fn narrow_width_falls_back_to_raw_markdown() {
-        // The 7-column border overhead leaves less than one column per
-        // cell, so the block renders as the wrapped raw source instead.
+        // The 7-column border overhead leaves less than one column per cell, so the block
+        // renders as the wrapped raw source instead.
         let raw = "| a | b |\n| --- | --- |\n| 1 | 2 |";
         let out = plain(raw, 6);
         let joined = out.join("\n");

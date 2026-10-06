@@ -1,5 +1,5 @@
-//! Tree-entry display text: one flat row's content (TS
-//! `TreeList.getEntryDisplayText` and the search text over the same data).
+//! Tree-entry display text: one flat row's content and the search text
+//! over the same data.
 
 use std::collections::HashMap;
 

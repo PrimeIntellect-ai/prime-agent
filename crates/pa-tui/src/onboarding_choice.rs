@@ -1,8 +1,6 @@
-//! The reusable question panel of the first-run flows (TS
-//! `OnboardingChoiceComponent`): the prompt, a list of options in the
-//! same selection language as the pickers, and an optional grey
-//! footnote. The onboarding splash mounts one per question and drives
-//! the cursor with the selection keys.
+//! The reusable question panel of the first-run flows: the prompt, a list of
+//! options in the same selection language as the pickers, and an optional
+//! grey footnote. The onboarding splash mounts one per question.
 
 use crate::onboarding::{highlight_wash, wrap_words};
 use crate::theme::{Theme, ThemeColor};
@@ -16,38 +14,30 @@ const CHOICE_MIN_ROW_WIDTH: usize = 30;
 const CHOICE_ROW_TRAILING: usize = 6;
 const CHOICE_DESCRIPTION_WIDTH: usize = 50;
 
-/// One choice row (TS `OnboardingChoiceOption`): a label with an optional
-/// identifier shown as its dim subtitle.
+/// One choice row: a label with an optional identifier shown as its dim subtitle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OnboardingChoiceOption {
-    /// The row label.
     pub label: String,
-    /// Identifier rendered as `  @detail` after the label — dimmer than the
-    /// label, and counted toward the label-width calc (TS `detail`).
+    /// Identifier rendered as ` @detail` after the label — dimmer, and counted toward the
+    /// label-width calc.
     pub detail: Option<String>,
 }
 
-/// The choice panel's copy and layout (TS `OnboardingChoiceOptions`): the
-/// question text around the rows and the row-width override.
+/// The choice panel's copy and layout: the question text around the rows and the row-width
+/// override.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OnboardingChoiceOptions {
-    /// The question line above the options (TS `prompt`).
     pub prompt: Option<String>,
-    /// Muted sentence under the prompt, before the options (TS
-    /// `description`), wrapped at 50 columns.
+    /// Muted sentence under the prompt, before the options, wrapped at 50 columns.
     pub description: Option<String>,
-    /// Grey footnote under the list, e.g. how to change the answer later
-    /// (TS `note`).
+    /// Grey footnote under the list (e.g. how to change the answer later).
     pub note: Option<String>,
-    /// Row-width override (TS `rowWidth`); absent sizes the rows from the
-    /// labels, always clamped to the panel width.
+    /// Row-width override; absent sizes the rows from the labels, clamped to the panel width.
     pub row_width: Option<usize>,
 }
 
-/// A question in the onboarding block (TS `OnboardingChoiceComponent`): the
-/// prompt, a list of options in the same selection language as the
-/// first-run actions, and an optional grey footnote. The host mounts one
-/// per question and drives the cursor with the selection keys.
+/// A question in the onboarding block: the host mounts one per question and drives the cursor with
+/// the selection keys.
 #[derive(Debug, Clone)]
 pub struct OnboardingChoice {
     options: Vec<OnboardingChoiceOption>,
@@ -56,8 +46,7 @@ pub struct OnboardingChoice {
 }
 
 impl OnboardingChoice {
-    /// TS constructor: the cursor seeds at `selected_index` (TS
-    /// `selectedIndex`), clamped into the option list.
+    /// The cursor seeds at `selected_index`, clamped into the option list.
     #[must_use]
     pub fn new(
         options: Vec<OnboardingChoiceOption>,
@@ -78,11 +67,10 @@ impl OnboardingChoice {
         self.selected
     }
 
-    /// Move the cursor `delta` rows (TS `move`): no wrap; `false` when the
-    /// move would leave the list, so the caller skips the re-render.
+    /// Move the cursor `delta` rows (no wrap); `false` when the move would leave
+    /// the list, so the caller skips the re-render.
     pub fn move_selection(&mut self, delta: isize) -> bool {
-        // The checked sum keeps a huge delta an out-of-range move (TS
-        // `next < 0 || next >= options.length`) instead of an overflow.
+        // The checked sum keeps a huge delta an out-of-range move instead of an overflow.
         let Some(next) = self.selected.checked_add_signed(delta) else {
             return false;
         };
@@ -93,9 +81,8 @@ impl OnboardingChoice {
         true
     }
 
-    /// The panel block (TS `OnboardingChoiceComponent.render`): the prompt,
-    /// the wrapped description, the option rows (the selected one washed),
-    /// and the change-anytime note, each indented one column.
+    /// The panel block: the prompt, the wrapped description, the option rows (the
+    /// selected one washed), and the change-anytime note, each indented one column.
     #[must_use]
     pub fn render(&self, theme: &Theme, width: usize) -> Vec<Line> {
         let safe_width = width.max(1);
@@ -130,23 +117,22 @@ impl OnboardingChoice {
         lines
     }
 
-    /// The option rows (TS `render`'s row loop): marker + label + the dim
-    /// `  @detail` subtitle, padded to the row width so the wash forms a
-    /// band; the selected row lifts off the canvas with a bold label.
+    /// The option rows: marker + label + the dim `  @detail` subtitle, padded to
+    /// the row width so the wash forms a band.
     fn option_rows(&self, theme: &Theme, safe_width: usize) -> Vec<Line> {
         let label_width = self
             .options
             .iter()
             .map(|option| match &option.detail {
-                // TS joins label and detail with two spaces for the width
-                // calc; the rendered subtitle adds the `@` on top.
+                // Label and detail join with two spaces for the width calc; the
+                // rendered subtitle adds the `@` on top.
                 Some(detail) => str_width(&option.label) + 2 + str_width(detail),
                 None => str_width(&option.label),
             })
             .max()
             .unwrap_or(0);
-        // TS clamps the row to the panel width: a narrow pane shortens the
-        // highlight instead of running past the edge.
+        // The row clamps to the panel width: a narrow pane shortens the highlight
+        // instead of running past the edge.
         let row_width = self
             .config
             .row_width
@@ -167,10 +153,8 @@ impl OnboardingChoice {
             let pad = " ".repeat(row_width.saturating_sub(str_width(&name) + str_width(&detail)));
             let mut row: Line = vec![Span::styled(" ".to_string(), Style::default())];
             if selected {
-                // The selected row lifts off the canvas (TS
-                // `onboardingHighlightBackground`): a bold name over the
-                // washed background, the dim detail and padding inside
-                // the wash.
+                // The selected row lifts off the canvas: a bold name over the washed
+                // background, the dim detail and padding inside the wash.
                 let mut washed_name = Span::styled(
                     name,
                     theme
@@ -233,8 +217,7 @@ mod tests {
         // blank, prompt, blank, then the two option rows.
         assert_eq!(lines.len(), 5);
         let unselected = &lines[3];
-        // Label width = max("Personal account" = 16, "Prime  prime-intellect"
-        // = 19) → row width max(30, 2 + 19 + 6) = 30.
+        // Label width = max(16, 19) → row width max(30, 2 + 19 + 6) = 30.
         assert_eq!(
             unselected[1],
             Span::styled("  Personal account", theme.fg_style(ThemeColor::Muted))
@@ -247,8 +230,7 @@ mod tests {
             )
         );
         let selected = &lines[4];
-        // The subtitle reads as a dimmer identifier after the name, and the
-        // wash covers the detail and the padding inside the band.
+
         assert_eq!(
             selected[1],
             Span::styled(
@@ -282,8 +264,7 @@ mod tests {
         let lines = choice.render(&theme, 50);
         assert_eq!(lines[3][2].content, " ".repeat(50 - "  Share".len()));
         // Without an override the labels size the band, still clamped:
-        // "Continue with the current setup" (31 columns) →
-        // max(30, 2 + 31 + 6) = 39.
+        // "Continue with the current setup" (31 columns) → max(30, 2 + 31 + 6) = 39.
         let choice = OnboardingChoice::new(
             vec![option("Continue with the current setup", None)],
             None,

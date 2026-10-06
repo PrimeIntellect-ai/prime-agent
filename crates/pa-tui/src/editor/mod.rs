@@ -1,14 +1,4 @@
 //! Line editor ported from `packages/tui/src/components/editor.ts`.
-//!
-//! Behavior parity points: multi-line state, grapheme-aware cursor movement,
-//! word wrap with atomic paste/image markers, prompt history, kill ring
-//! (ctrl+k / ctrl+u / ctrl+w / alt+d, yank ctrl+y / alt+y), undo with
-//! fish-style coalescing, jump mode, sticky vertical column, and bracketed
-//! paste with large-paste markers.
-//!
-//! The editor is split by concern: `wrap` (segmentation/word wrap), `kill_ring`,
-//! `text_ops` (deletion/yank), `motion` (cursor movement), `input` (key
-//! dispatch), `autocomplete`, and `layout` (rendering-facing layout).
 
 use crate::autocomplete::SlashCommandEntry;
 use crate::keybindings::KeybindingsManager;
@@ -37,7 +27,7 @@ pub use text_utils::normalize_text;
 pub use wrap::{is_atomic_marker, word_wrap_line, LayoutLine, Segment, TextChunk, VisualLine};
 
 pub const MAX_HISTORY: usize = 100;
-/// Large paste threshold from TS: >10 lines or >1000 chars becomes a marker.
+/// Large paste threshold: >10 lines or >1000 chars becomes a marker.
 const LARGE_PASTE_LINES: usize = 10;
 const LARGE_PASTE_CHARS: usize = 1000;
 
@@ -72,17 +62,15 @@ pub enum PasteDisposition {
     Marker { id: usize },
 }
 
-/// The collapsed-paste registry of an editor (TS `EditorPasteSnapshot`):
-/// the id/content map behind `[paste #N ...]` markers plus the id
-/// counter, so a draft moved to another editor still expands and keeps
-/// its markers atomic.
+/// The collapsed-paste registry: the id/content map behind `[paste #N ...]`
+/// markers plus the id counter, so a draft moved to another editor still
+/// expands.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EditorPasteSnapshot {
     pub pastes: Vec<(usize, String)>,
     pub paste_counter: usize,
 }
 
-/// Outcome of a submit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubmitOutcome {
     /// Expanded + trimmed text, as delivered to `on_submit`.
@@ -97,8 +85,7 @@ pub enum EditorEvent {
     /// Autocomplete overlay visibility changed.
     AutocompleteToggled(bool),
     /// A selection cut/copy asks the host to write `text` to the system
-    /// clipboard (the kill ring already holds it; the OSC 52/platform
-    /// copy chain lives with the host, which owns the terminal).
+    /// clipboard (the copy chain lives with the host, which owns the terminal).
     ClipboardWrite(String),
 }
 
@@ -115,9 +102,8 @@ pub struct Editor {
     kill_ring: KillRing,
     undo_stack: Vec<EditorSnapshot>,
     redo_stack: Vec<EditorSnapshot>,
-    /// The selection anchor (TS has no editor selection; this is the
-    /// prompt-editor-keybinds forward feature — the selection spans the
-    /// anchor to the cursor). `None` = no selection.
+    /// The selection anchor (TS has no editor selection; the selection spans
+    /// the anchor to the cursor). `None` = no selection.
     selection_anchor: Option<(usize, usize)>,
     last_action: Option<LastAction>,
     jump_mode: Option<JumpDirection>,
@@ -129,24 +115,18 @@ pub struct Editor {
     keybindings: KeybindingsManager,
     terminal_rows: u16,
 
-    // Autocomplete
     autocomplete_provider: Option<Box<dyn crate::autocomplete::AutocompleteProvider + Send>>,
     autocomplete: Option<crate::autocomplete::AutocompleteState>,
     /// A suggestion request waiting to materialize (TS `getSuggestions` is
-    /// async: the dropdown opens after the keystroke batch, so a typed
-    /// command plus Enter in one burst submits as typed instead of hitting
-    /// the dropdown's confirm arm). The host loop materializes it once the
-    /// input queue drains.
+    /// async: a typed command plus Enter in one burst submits as typed). The
+    /// host loop materializes it once the input queue drains.
     pending_autocomplete: Option<PendingAutocomplete>,
-    /// The in-flight `@` file search with the editor state it answers
-    /// (TS `isAutocompleteRequestCurrent`): a result that lands after the
-    /// lines or cursor moved is dropped, never applied.
+    /// The in-flight `@` file search with the editor state it answers: a
+    /// result that lands after the lines or cursor moved is dropped.
     autocomplete_search: Option<AutocompleteSearch>,
     events: Vec<EditorEvent>,
 }
 
-/// A background `@` file search (the provider's async lookup) plus the
-/// request and editor state it must still match to apply its result.
 #[derive(Debug)]
 struct AutocompleteSearch {
     search: crate::autocomplete::FileSearch,
@@ -156,8 +136,6 @@ struct AutocompleteSearch {
     cursor_col: usize,
 }
 
-/// A deferred suggestion request (TS `requestAutocomplete` -> async
-/// `getSuggestions` resolution).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PendingAutocomplete {
     pub force: bool,
@@ -228,9 +206,8 @@ impl Editor {
         self.autocomplete_provider = Some(provider);
     }
 
-    /// Drop the installed autocomplete provider (TS `setAutocompleteProvider(undefined)`):
-    /// an editor that must not complete (`Editor::new()` installs the
-    /// builtin registry by default) answers nothing.
+    /// Drop the installed autocomplete provider: an editor that must not complete
+    /// (`Editor::new()` installs the builtin registry by default) answers nothing.
     pub fn clear_autocomplete_provider(&mut self) {
         self.cancel_autocomplete();
         self.autocomplete_provider = None;
@@ -241,17 +218,15 @@ impl Editor {
         self.autocomplete.as_ref()
     }
 
-    /// Replace the autocomplete provider's hidden-command set (the
-    /// `/fast` model-eligibility filter; TS recomputes the command list
-    /// per render).
+    /// Replace the autocomplete provider's hidden-command set (the `/fast` model-eligibility
+    /// filter).
     pub fn set_autocomplete_hidden_commands(&mut self, hidden: std::collections::HashSet<String>) {
         if let Some(provider) = self.autocomplete_provider.as_mut() {
             provider.set_hidden_commands(hidden);
         }
     }
 
-    /// Replace one command's argument completions on the installed provider
-    /// (TS `command.getArgumentCompletions`, e.g. the `/tier` tier
+    /// Replace one command's argument completions on the installed provider (e.g. the `/tier` tier
     /// choices).
     pub fn set_autocomplete_argument_completions(
         &mut self,
@@ -263,15 +238,10 @@ impl Editor {
         }
     }
 
-    /// Replace the provider's `skill:` commands (TS
-    /// `setupAutocompleteProvider` rebuilds the command list with the
-    /// session's skills; this port swaps the list on the installed
-    /// provider). The open dropdown — if any — drops, because its rows
-    /// came from the old catalog (TS `setAutocompleteProvider` cancels
-    /// too), but a PARKED request stays: the host loop materializes it
-    /// against the new provider, so a `/` typed while the catalog
-    /// refresh was still in flight still opens its menu (Cursor thread:
-    /// the swap must not eat the parked request).
+    /// Replace the provider's `skill:` commands (this port swaps the list on
+    /// the installed provider; TS `setupAutocompleteProvider` rebuilds the
+    /// whole list). The open dropdown drops, but a PARKED request stays: the
+    /// host loop materializes it against the new provider.
     pub fn set_autocomplete_skill_commands(&mut self, skills: Vec<SlashCommandEntry>) {
         let was_showing = self.autocomplete.is_some();
         self.autocomplete = None;
@@ -288,9 +258,9 @@ impl Editor {
         self.autocomplete.is_some()
     }
 
-    /// Whether a completion request is parked or a background `@`
-    /// search is running: a menu may open, so the guards that close it
-    /// (Esc) treat this like an open menu.
+    /// Whether a completion request is parked or a background `@` search is
+    /// running: a menu may open, so the guards that close it treat this like
+    /// an open menu.
     #[must_use]
     pub fn has_pending_autocomplete(&self) -> bool {
         self.pending_autocomplete.is_some() || self.autocomplete_search.is_some()
@@ -304,8 +274,6 @@ impl Editor {
     fn emit(&mut self, ev: EditorEvent) {
         self.events.push(ev);
     }
-
-    // ---- state helpers -------------------------------------------------
 
     #[allow(dead_code)]
     fn valid_paste_id(&self, id: usize) -> bool {
@@ -330,8 +298,7 @@ impl Editor {
     fn expand_paste_markers(&self, text: &str) -> String {
         // One scan with the shared marker shape (TS builds one regex per
         // registered id): a marker expands only when its parsed id is
-        // registered, so a typed or edited look-alike stays literal, and
-        // `[paste #1` never swallows the head of `[paste #10]`.
+        // registered, so a typed look-alike stays literal.
         let mut result = String::with_capacity(text.len());
         let mut rest = text;
         while let Some(idx) = rest.find("[paste #") {
@@ -367,9 +334,8 @@ impl Editor {
         (self.cursor_line, self.cursor_col)
     }
 
-    /// Test-only direct cursor placement: the runtime paths position the
-    /// cursor only through the motions, but the model tests need to start
-    /// from an arbitrary position.
+    /// Test-only direct cursor placement (the runtime paths position the
+    /// cursor only through the motions).
     #[cfg(test)]
     pub(crate) fn set_cursor_for_tests(&mut self, line: usize, col: usize) {
         self.cursor_line = line;
@@ -377,8 +343,7 @@ impl Editor {
     }
 
     /// The prompt prefix the first line renders in place of its leading
-    /// `!`/`!!` (TS `CustomEditor.getPromptPrefix`): `! ` / `!! ` when the
-    /// first line opens a bang command, `None` for the default `> `.
+    /// `!`/`!!`: `! `/`!! ` for a bang command, `None` for the default `> `.
     #[must_use]
     pub fn bash_prompt_prefix(&self) -> Option<&'static str> {
         self.lines
@@ -387,9 +352,8 @@ impl Editor {
             .map(|(prefix, _)| prefix)
     }
 
-    /// The hidden text prefix length of one line (TS
-    /// `getHiddenTextPrefixLength`): the bang prefix the prompt renders
-    /// in place of on line 0, zero everywhere else. The cursor cannot
+    /// The hidden text prefix length of one line: the bang prefix the prompt
+    /// renders in place on line 0, zero everywhere else. The cursor cannot
     /// move into it and edits treat it as the line's start.
     #[must_use]
     pub fn line_start_col(&self, line_index: usize) -> usize {
@@ -402,10 +366,7 @@ impl Editor {
             .map_or(0, |(_, hidden)| hidden)
     }
 
-    /// The cursor sits at the end of the last logical line (TS
-    /// `CustomEditor.isCursorAtEnd`): the position from which the
-    /// move-below-prompt hook can hand the focus to the surface below the
-    /// editor (the subagent summary line).
+    /// The cursor sits at the end of the last logical line.
     #[must_use]
     pub fn is_cursor_at_end(&self) -> bool {
         let last = self.lines.len() - 1;
@@ -520,18 +481,16 @@ impl Editor {
         }
     }
 
-    /// History browsing holds the editor (TS `isHistoryNavigationActive`):
-    /// the state that parks the move-below-prompt hand-off.
+    /// History browsing holds the editor: the state that parks the
+    /// move-below-prompt hand-off.
     #[must_use]
     pub fn is_history_navigation_active(&self) -> bool {
         self.history_index > -1
     }
 
-    // ---- undo / kill ring -----------------------------------------------
-
     fn push_undo_snapshot(&mut self) {
-        // A new edit invalidates the redo history (standard editor
-        // semantics; the TS product has no redo at all).
+        // A new edit invalidates the redo history (standard editor semantics; the TS product has no
+        // redo).
         self.redo_stack.clear();
         self.undo_stack.push(self.current_snapshot());
     }
@@ -570,9 +529,8 @@ impl Editor {
         self.apply_snapshot(snapshot);
     }
 
-    /// Redo the last undone edit (standard editor semantics; no TS
-    /// counterpart — the TS editor has no redo). Each undone edit lands
-    /// on the redo stack, and any new edit clears it.
+    /// Redo the last undone edit (no TS counterpart — the TS editor has no
+    /// redo): each undone edit lands on the redo stack, and any new edit clears it.
     fn redo(&mut self) {
         self.history_index = -1;
         let Some(snapshot) = self.redo_stack.pop() else {
@@ -581,8 +539,6 @@ impl Editor {
         self.undo_stack.push(self.current_snapshot());
         self.apply_snapshot(snapshot);
     }
-
-    // ---- text mutation ---------------------------------------------------
 
     fn insert_character(&mut self, ch: &str) {
         self.insert_character_opts(ch, false);
@@ -685,10 +641,7 @@ impl Editor {
         self.emit(EditorEvent::Submitted(result));
     }
 
-    // ---- paste -----------------------------------------------------------
-
-    /// Handle a bracketed-paste payload (port of handlePaste, including the
-    /// large-paste marker logic).
+    /// Handle a bracketed-paste payload (including the large-paste marker logic).
     pub fn handle_paste(&mut self, pasted_text: &str) -> PasteDisposition {
         self.cancel_autocomplete();
         self.history_index = -1;
@@ -696,7 +649,7 @@ impl Editor {
 
         // A tmux popup can re-encode control bytes inside the paste as
         // CSI-u Ctrl+letter sequences; decode them before the per-char
-        // filter so newlines survive (TS handlePaste).
+        // filter so newlines survive.
         let clean = normalize_text(&text_utils::decode_paste_ctrl_sequences(pasted_text));
         let filtered_raw: String = clean
             .chars()
@@ -710,12 +663,10 @@ impl Editor {
             return PasteDisposition::Inline;
         }
         self.push_undo_snapshot();
-        // Pasting over a selection replaces it (one undo step; undo of a
-        // paste-then-selection-paste restores the whole original text).
-        // The removal runs BEFORE the path-space check below: the check
-        // inspects the character before the INSERTION point, which after
-        // a selection replace is the selection's start, not the live
-        // cursor a forward selection leaves behind.
+        // Pasting over a selection replaces it (one undo step). The removal runs
+        // BEFORE the path-space check below: the check inspects the character
+        // before the INSERTION point, which after a selection replace is the
+        // selection's start, not the live cursor a forward selection leaves.
         if self.has_selection() {
             self.remove_selection();
         }
@@ -765,7 +716,6 @@ mod tests {
         assert_eq!(e.get_text(), "h");
         e.handle_input("left");
         e.handle_input("backspace");
-        // At column 0 of the first line backspace is a no-op (TS parity).
         assert_eq!(e.get_text(), "h");
     }
 
@@ -792,8 +742,7 @@ mod tests {
     #[test]
     fn paste_decodes_reencoded_ctrl_bytes() {
         // A tmux csi-u paste re-encodes newlines as CSI-u Ctrl+J; the
-        // decode happens before the per-char filter, so the newline
-        // survives instead of leaking "[106;5u" into the editor.
+        // newline survives instead of leaking "[106;5u" into the editor.
         let mut e = ed();
         e.handle_paste("alpha\x1b[106;5ubeta");
         assert_eq!(e.get_text(), "alpha\nbeta");
@@ -813,7 +762,6 @@ mod tests {
     #[test]
     fn picker_argument_context_reports_command_and_partial() {
         let mut e = ed();
-        // The argument position at the prompt start: command + partial.
         e.set_text("/model gp");
         assert_eq!(
             e.picker_argument_context(),
@@ -824,14 +772,10 @@ mod tests {
             e.picker_argument_context(),
             Some(("mcp".to_string(), "lin ".to_string()))
         );
-        // The command-name position is not an argument context.
         e.set_text("/model");
         assert_eq!(e.picker_argument_context(), None);
-        // A plain token is no context at all.
         e.set_text("hello there");
         assert_eq!(e.picker_argument_context(), None);
-        // Other commands report their names; the caller picks the
-        // picker-backed ones.
         e.set_text("/export ht");
         assert_eq!(
             e.picker_argument_context(),
@@ -841,10 +785,6 @@ mod tests {
 
     #[test]
     fn deleting_to_an_empty_prompt_clears_the_parked_request() {
-        // `./` + Tab parks a forced completion request (no menu until the
-        // queue drains). Deleting back to the empty prompt must cancel the
-        // parked request too, not just the open menu: otherwise the parked
-        // request materializes the whole-cwd dropdown on an empty prompt.
         let mut e = ed();
         e.handle_input(".");
         e.handle_input("/");
@@ -864,11 +804,8 @@ mod tests {
         );
     }
 
-    /// The session's Esc guard treats the parked-request window (Tab
-    /// queued a request the host loop materializes at the next idle
-    /// tick) as an open menu: no dropdown is visible yet, so
-    /// `has_pending_autocomplete` is what the guard tests, and a cancel
-    /// there must stop the request from ever opening.
+    /// The session's Esc guard treats the parked-request window as an open
+    /// menu; a cancel there must stop the request from ever opening.
     #[test]
     fn cancel_clears_a_parked_request_before_it_opens() {
         let mut e = ed();
@@ -902,7 +839,6 @@ mod tests {
         );
         e.handle_input("left");
         assert_eq!(e.picker_argument_context(), None);
-        // Whitespace after the cursor still counts as the argument end.
         e.set_text("/mcp lin ");
         assert_eq!(
             e.picker_argument_context(),
@@ -910,10 +846,9 @@ mod tests {
         );
     }
 
-    /// Applying from the picker clears the editor (the command is
-    /// fulfilled), so draft text on a later line must stop the Tab
-    /// interception: opening the picker there would silently discard the
-    /// draft on apply. Whitespace-only later lines do not block it.
+    /// Applying from the picker clears the editor, so draft text on a later
+    /// line must stop the Tab interception: opening the picker there would
+    /// silently discard the draft on apply.
     #[test]
     fn picker_argument_context_rejects_later_draft_lines() {
         let mut e = ed();
@@ -938,20 +873,17 @@ mod tests {
 
     #[test]
     fn tab_on_an_empty_prompt_is_a_noop() {
-        // Tab on an empty prompt must not open a completion menu: the
-        // forced pass would list the whole cwd (junk entries like a
-        // `.claude` directory), with no anchor token to complete.
+        // Tab on an empty prompt must not open a completion menu: the forced
+        // pass would list the whole cwd, with no anchor token to complete.
         let mut e = ed();
         e.handle_input("tab");
         e.materialize_autocomplete();
         assert!(!e.is_showing_autocomplete(), "no dropdown on empty Tab");
-        // Whitespace-only prompts are the same empty prompt.
         e.handle_input(" ");
         e.handle_input(" ");
         e.handle_input("tab");
         e.materialize_autocomplete();
         assert!(!e.is_showing_autocomplete(), "no dropdown on blank Tab");
-        // A typed token still completes on Tab (the slash-name context).
         e.set_text("/mo");
         e.handle_input("tab");
         e.materialize_autocomplete();
@@ -978,23 +910,15 @@ mod tests {
         assert!(!e.is_history_navigation_active());
     }
 
-    /// TS `CustomEditor.isCursorAtEnd`: the move-below-prompt hook fires
-    /// only from the last logical line's end — the common just-typed
-    /// position (and the empty prompt), never mid-line or above the last
-    /// line.
     #[test]
     fn is_cursor_at_end_tracks_the_last_lines_end() {
-        // The empty prompt is at the end (col 0 of the empty last line).
         let mut e = ed();
         assert!(e.is_cursor_at_end());
-        // Mid-line on the only line: not at the end.
         e.set_text("hello");
         e.handle_input("left");
         assert!(!e.is_cursor_at_end());
-        // Back to the line end: at the end again.
         e.handle_input("right");
         assert!(e.is_cursor_at_end());
-        // The end of a non-last line: not at the end.
         e.set_text("a\nb");
         assert_eq!(e.get_cursor(), (1, 1));
         e.handle_input("up");
@@ -1006,7 +930,6 @@ mod tests {
         e.handle_input("end");
         assert_eq!(e.get_cursor(), (0, 1));
         assert!(!e.is_cursor_at_end());
-        // The last line's end: at the end.
         e.handle_input("down");
         assert_eq!(e.get_cursor(), (1, 1));
         assert!(e.is_cursor_at_end());
@@ -1032,9 +955,6 @@ mod tests {
         assert_eq!(e.get_text(), "one\ntwo");
     }
 
-    /// One paste is one undo unit (TS `handlePaste` pushes a single undo
-    /// snapshot before inserting): one undo removes the whole paste — the
-    /// collapsed marker AND the stored content — never a fragment.
     #[test]
     fn undo_removes_a_whole_paste_in_one_step() {
         let mut e = ed();
@@ -1050,7 +970,6 @@ mod tests {
         assert_eq!(e.get_text(), "x[paste #1 +15 lines]");
         e.handle_input("ctrl+-");
         assert_eq!(e.get_text(), "x", "one undo removed the whole paste");
-        // The same holds for a small inline paste: one undo, whole text.
         e.handle_paste("one\ntwo");
         assert_eq!(e.get_text(), "xone\ntwo");
         e.handle_input("ctrl+-");
@@ -1066,9 +985,6 @@ mod tests {
         assert_eq!(e.get_lines(), vec!["a", ""]);
     }
 
-    /// The hidden bang prefix (TS `getHiddenTextPrefixLength`): the prompt
-    /// renders it in place, Home lands after it, and the cursor cannot
-    /// step or word-skip into it.
     #[test]
     fn the_bang_prefix_is_hidden_and_protected() {
         let mut e = ed();
@@ -1091,9 +1007,6 @@ mod tests {
         );
     }
 
-    /// Backspacing the line down to its bare prefix clears the prompt (TS
-    /// `handleBackspace`'s `lineStartCol` branch): the bang prefix
-    /// included, so the editor returns to the plain `> ` prompt.
     #[test]
     fn backspacing_the_bare_prefix_clears_the_prompt() {
         let mut e = ed();
@@ -1106,8 +1019,6 @@ mod tests {
         assert_eq!(e.bash_prompt_prefix(), None);
     }
 
-    /// The `!!` prefix hides two characters and the prompt width grows to
-    /// three (the layout wraps the display line, not the raw one).
     #[test]
     fn the_double_bang_prefix_hides_two_characters() {
         let mut e = ed();
@@ -1119,9 +1030,6 @@ mod tests {
         assert_eq!(layout[0].source_start, 2);
     }
 
-    // ---- redo / doc motion / transpose (prompt-editor-keybinds) ---------
-
-    /// Undo then redo round-trips a typed word.
     #[test]
     fn redo_restores_an_undone_edit() {
         let mut e = ed();
@@ -1134,8 +1042,6 @@ mod tests {
         assert_eq!(e.get_text(), "hello");
     }
 
-    /// A paste undo then redo: undo removes the whole paste, redo restores
-    /// it (the operator's paste->undo->redo family).
     #[test]
     fn redo_restores_an_undone_paste() {
         let mut e = ed();
@@ -1146,14 +1052,12 @@ mod tests {
         assert_eq!(e.get_text(), "draft ");
         e.handle_input("ctrl+shift+z");
         assert_eq!(e.get_text(), "draft pasted");
-        // The mac Cmd keys arrive as the super modifier: the same family.
         e.handle_input("super+z");
         assert_eq!(e.get_text(), "draft ");
         e.handle_input("super+shift+z");
         assert_eq!(e.get_text(), "draft pasted");
     }
 
-    /// Any new edit clears the redo history.
     #[test]
     fn a_new_edit_clears_the_redo_stack() {
         let mut e = ed();
@@ -1164,12 +1068,9 @@ mod tests {
         assert_eq!(e.get_text(), "");
         e.handle_input("c");
         e.handle_input("ctrl+shift+z");
-        // The redo stack is empty: the redo press did nothing.
         assert_eq!(e.get_text(), "c");
     }
 
-    /// Ctrl+Home / Ctrl+End jump to the buffer edges; the mac
-    /// super+up/down aliases land the same way.
     #[test]
     fn doc_motions_reach_the_buffer_edges() {
         let mut e = ed();
@@ -1184,20 +1085,15 @@ mod tests {
         assert_eq!(e.get_cursor(), (0, 0));
     }
 
-    /// Ctrl+Up / Ctrl+Down move one blank-line-separated paragraph.
     #[test]
     fn paragraph_motions_skip_blank_lines() {
         let mut e = ed();
         e.set_text("p1 line one\np1 line two\n\np2 line one\np2 line two");
-        // From inside paragraph 1: up lands at its start, down at its end.
         e.set_cursor_for_tests(1, 11);
         e.handle_input("ctrl+up");
         assert_eq!(e.get_cursor(), (0, 0));
         e.handle_input("ctrl+down");
         assert_eq!(e.get_cursor(), (1, 11));
-        // Already at the paragraph's end: down goes to the next
-        // paragraph's end, up to the current paragraph's start, and a
-        // second up to the previous paragraph's start.
         e.handle_input("ctrl+down");
         assert_eq!(e.get_cursor(), (4, 11));
         e.handle_input("ctrl+up");
@@ -1206,21 +1102,17 @@ mod tests {
         assert_eq!(e.get_cursor(), (0, 0));
     }
 
-    /// Ctrl+T transposes the characters around the cursor, readline-style.
     #[test]
     fn transpose_swaps_around_the_cursor() {
         let mut e = ed();
         e.set_text("abdc");
-        // Cursor between the d/c typo: the pair swaps.
         e.set_cursor_for_tests(0, 3);
         e.handle_input("ctrl+t");
         assert_eq!(e.get_text(), "abcd");
         assert_eq!(e.get_cursor(), (0, 4));
-        // At the line end, the last two swap (readline's behavior).
         e.set_cursor_for_tests(0, 4);
         e.handle_input("ctrl+t");
         assert_eq!(e.get_text(), "abdc");
-        // Undo restores the previous state in one press.
         e.handle_input("ctrl+-");
         assert_eq!(e.get_text(), "abcd");
     }

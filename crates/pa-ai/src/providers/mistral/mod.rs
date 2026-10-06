@@ -1,14 +1,7 @@
-//! Mistral Conversations streaming provider.
-//! Port of `packages/ai/src/providers/mistral.ts`: `chat/completions` SSE
-//! streaming with camelCase-free `snake_case` wire keys (verified against the
-//! `@mistralai/mistralai` SDK outbound schemas), thinking text-block
-//! accumulation, tool-call argument streaming, `x-affinity` KV-cache header,
-//! and usage accounting.
-//!
-//! Split across submodules mirroring the `anthropic/openai_completions`
-//! layout: request options, headers, and the simple-stream entry live here,
-//! message/tool conversion and payload assembly in [`convert`], and the SSE
-//! streaming core in [`stream`].
+//! Mistral Conversations streaming provider: `chat/completions` SSE streaming with camelCase-free
+//! `snake_case` wire keys (verified against the `@mistralai/mistralai` SDK outbound schemas),
+//! thinking text-block accumulation, tool-call argument streaming, the `x-affinity` KV-cache
+//! header, and usage accounting. Conversion lives in [`convert`], the streaming core in [`stream`].
 
 use serde_json::Map;
 
@@ -33,7 +26,7 @@ pub use stream::stream_mistral;
 
 pub const API_MISTRAL_CONVERSATIONS: &str = "mistral-conversations";
 
-/// Mistral reasoning-effort values (`MistralReasoningEffort` in the TS).
+/// Mistral reasoning-effort values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MistralReasoningEffort {
     None,
@@ -63,7 +56,7 @@ impl MistralPromptMode {
     }
 }
 
-/// Tool selection (`toolChoice` in the TS reference).
+/// Tool selection.
 #[allow(dead_code)] // full TS option surface; variants set by callers
 #[derive(Clone, Debug, PartialEq)]
 pub enum MistralToolChoice {
@@ -88,7 +81,7 @@ impl MistralToolChoice {
     }
 }
 
-/// Provider-specific request options (`MistralOptions` in the TS reference).
+/// Provider-specific request options.
 #[derive(Clone, Default)]
 pub struct MistralOptions {
     pub base: StreamOptions,
@@ -123,8 +116,8 @@ pub(crate) fn build_request_headers(
             headers.push((name.clone(), value.clone()));
         }
     }
-    // Mistral infrastructure uses `x-affinity` for KV-cache reuse (prefix
-    // caching). Respect explicit caller-provided header values.
+    // Mistral infrastructure uses `x-affinity` for KV-cache reuse (prefix caching). Respect
+    // explicit caller-provided header values.
     if let Some(session_id) = &options.base.session_id {
         if !headers.iter().any(|(name, _)| name == "x-affinity") {
             headers.push(("x-affinity".into(), session_id.clone()));
@@ -156,7 +149,6 @@ fn map_reasoning_effort(model: &Model, level: ModelThinkingLevel) -> MistralReas
     }
 }
 
-/// Port of `streamSimpleMistral`.
 pub fn stream_simple_mistral(
     model: &Model,
     context: &Context,

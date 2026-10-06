@@ -1,6 +1,5 @@
 //! Mistral Conversations streaming core: the provider stream function, SSE
 //! iteration, chunk handling, and stream-state accumulation.
-//! Section of the port of `packages/ai/src/providers/mistral.ts`.
 
 use std::fmt::Write as _;
 
@@ -36,7 +35,6 @@ use crate::utils_inner::stream_failure::{
 
 const MAX_MISTRAL_ERROR_BODY_CHARS: usize = 4000;
 
-/// Port of `streamMistral`.
 pub fn stream_mistral(
     model: &Model,
     context: &Context,
@@ -79,8 +77,8 @@ pub fn stream_mistral(
                 } else {
                     StopReason::Error
                 };
-                // TS surfaces `formatMistralError(error)`: the SDK's
-                // statusCode/body composition, not the classified rewrite.
+                // TS surfaces `formatMistralError(error)`: the SDK's statusCode/body composition,
+                // not the classified rewrite.
                 output.error_message = Some(error.to_string());
                 record_stream_failure(
                     (&model.provider, &model.id, &model.api),
@@ -99,8 +97,8 @@ pub fn stream_mistral(
     reader
 }
 
-/// Coerce a parsed streaming JSON value into an object map (non-object
-/// partial parses decode to `{}`, matching `parseStreamingJson<Record<...>>`).
+/// Coerce a parsed streaming JSON value into an object map (non-object partial parses decode to
+/// `{}`, matching `parseStreamingJson<Record<...>>`).
 fn json_object(value: Value) -> Map<String, Value> {
     match value {
         Value::Object(map) => map,
@@ -108,7 +106,6 @@ fn json_object(value: Value) -> Map<String, Value> {
     }
 }
 
-/// Port of `mapChatStopReason`.
 fn map_chat_stop_reason(reason: Option<&str>) -> StopReason {
     match reason {
         Some("length" | "model_length") => StopReason::Length,
@@ -118,9 +115,8 @@ fn map_chat_stop_reason(reason: Option<&str>) -> StopReason {
     }
 }
 
-/// JS `String.prototype.length` semantics (UTF-16 code units) so the
-/// truncation limit and the reported remainder match the TS binary
-/// byte-for-byte on the body text.
+/// JS `String.prototype.length` semantics (UTF-16 code units) so the truncation limit and the
+/// reported remainder match the TS binary byte-for-byte.
 fn truncate_error_text(text: &str, max_chars: usize) -> String {
     let total: usize = text.chars().map(char::len_utf16).sum();
     if total <= max_chars {
@@ -146,17 +142,16 @@ fn truncate_error_text(text: &str, max_chars: usize) -> String {
     )
 }
 
-/// The `@mistralai/mistralai` SDK error class name for HTTP failures
-/// (`SDKError`, the fallback class the stream error matcher throws).
+/// The `@mistralai/mistralai` SDK error class name for HTTP failures (`SDKError`, the fallback
+/// class the stream error matcher throws).
 const MISTRAL_SDK_ERROR_NAME: &str = "SDKError";
 
-/// The `SDKError` message the mistral SDK composes
-/// (`"{prefix}: Status {N}[ Content-Type ...]. |\nBody: {body}"`), used both
-/// where TS surfaces it verbatim (empty-body error path) and in diagnostics.
+/// The `SDKError` message the mistral SDK composes (`"{prefix}: Status {N}[ Content-Type ...].
+/// |\nBody: {body}"`), used both where TS surfaces it verbatim (empty-body error path) and in
+/// diagnostics.
 fn mistral_sdk_error_message(status: u16, content_type: Option<&str>, body: &str) -> String {
     let mut message = format!("API error occurred: Status {status}");
-    // The SDK reads the raw content-type header; a missing one renders as
-    // the literal string `""`.
+    // The SDK reads the raw content-type header; a missing one renders as the literal string `""`.
     let content_type = content_type.unwrap_or(r#""""#);
     if content_type != "application/json" {
         let quoted = if content_type.contains(' ') {
@@ -168,8 +163,7 @@ fn mistral_sdk_error_message(status: u16, content_type: Option<&str>, body: &str
     }
     let body_utf16_len: usize = body.chars().map(char::len_utf16).sum();
     let body_display = if body_utf16_len > 10_000 {
-        // JS `substring(0, 10000)` cuts on UTF-16 code units; walk to the
-        // enclosing char boundary and report the remainder in code units.
+        // JS `substring(0, 10000)` cuts on UTF-16 code units; walk to the enclosing char boundary.
         let mut consumed = 0usize;
         let mut end = body.len();
         for (index, char) in body.char_indices() {
@@ -195,9 +189,8 @@ fn mistral_sdk_error_message(status: u16, content_type: Option<&str>, body: &str
     message.trim().to_string()
 }
 
-/// Port of the error the mistral SDK throws for a 4XX/5XX response
-/// (`SDKError` carrying `statusCode` and the raw body), with the
-/// user-facing message pre-composed through `formatMistralError`.
+/// The error the mistral SDK throws for a 4XX/5XX response (`SDKError` carrying `statusCode` and
+/// the raw body), with the user-facing message pre-composed through `formatMistralError`.
 fn mistral_http_error(status: u16, body: &str, headers: &HashMap<String, String>) -> ProviderError {
     let body_text = body.trim();
     let content_type = headers
@@ -228,7 +221,7 @@ fn mistral_http_error(status: u16, body: &str, headers: &HashMap<String, String>
     })
 }
 
-// Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+// Long by design: mirrors the provider's stream shape.
 #[allow(clippy::too_many_lines)]
 async fn run_stream(
     model: &Model,
@@ -270,8 +263,8 @@ async fn run_stream(
         }
     }
 
-    // The mistralai SDK defaults to https://api.mistral.ai and posts to
-    // /v1/chat/completions; a model baseUrl replaces the server URL only.
+    // The mistralai SDK defaults to https://api.mistral.ai and posts to /v1/chat/completions; a
+    // model baseUrl replaces the server URL only.
     let base_url = if model.base_url.is_empty() {
         "https://api.mistral.ai".to_string()
     } else {
@@ -299,9 +292,6 @@ async fn run_stream(
         on_response(
             crate::types::ProviderResponse {
                 status: response.status,
-                // Collected into the ordered map: the hook payload can
-                // serialize, and the HTTP header arrival order is not a
-                // stable serialization order.
                 headers: response.headers.clone().into_iter().collect(),
             },
             model,
@@ -322,9 +312,8 @@ async fn run_stream(
     });
 
     let mut state = MistralStreamState::new();
-    // The TS try/catch encloses this whole streaming section, including the
-    // abort and stop-reason checks; the catch settles partial tool calls
-    // before the error event carries the message (TS PR #2783).
+    // The TS try/catch encloses this whole streaming section, including the abort and stop-reason
+    // checks; the catch settles partial tool calls before the error event carries the message.
     let stream_result: Result<(), ProviderError> = async {
         let mut decoder = SseDecoder::new();
         loop {
@@ -399,8 +388,8 @@ impl MistralStreamState {
         }
     }
 
-    /// Port of the TS catch settle: finalize tool-call blocks whose parsed
-    /// preview may lag the accumulated text under the growth throttle.
+    /// The TS catch settle: finalize tool-call blocks whose parsed preview may lag the accumulated
+    /// text under the growth throttle.
     fn settle_partial_tool_calls(&mut self, output: &mut AssistantMessage) {
         for (block_index, accumulator) in &mut self.tool_partial_args {
             let Some(AssistantContent::ToolCall(block)) = output.content.get_mut(*block_index)
@@ -495,7 +484,7 @@ impl MistralStreamState {
     }
 
     /// Port of the `consumeChatStream` chunk loop body.
-    // Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+    // Long by design: mirrors the provider's stream shape.
     #[allow(clippy::too_many_lines)]
     fn handle_chunk(
         &mut self,
@@ -526,10 +515,9 @@ impl MistralStreamState {
             output.usage.output = completion;
             output.usage.cache_read = 0;
             output.usage.cache_write = 0;
-            // TS `totalTokens || input + output`: an explicitly reported zero
-            // is falsy, so only a positive reported total is kept. The sum
-            // saturates — TS doubles never wrap, and a Rust u64 must not
-            // panic (debug) or wrap to a wrong total (release).
+            // TS `totalTokens || input + output`: an explicitly reported zero is falsy, so only a
+            // positive reported total is kept. The sum saturates — TS doubles never wrap, and a
+            // Rust u64 must not panic (debug) or wrap to a wrong total (release).
             output.usage.total_tokens = usage
                 .get("total_tokens")
                 .and_then(Value::as_u64)
@@ -734,8 +722,8 @@ impl MistralStreamState {
 mod tests {
     use super::*;
 
-    /// The TS `formatMistralError` shape: "Mistral API error (N): <body>",
-    /// truncated at 4000 chars (UTF-16 units) with the JS remainder count.
+    /// The TS `formatMistralError` shape: "Mistral API error (N): <body>", truncated at 4000 chars
+    /// (UTF-16 units) with the JS remainder count.
     #[test]
     fn mistral_http_error_body_shape() {
         let headers = HashMap::new();
@@ -757,8 +745,8 @@ mod tests {
         );
     }
 
-    /// An empty error body falls back to the SDK's own composed message, per
-    /// `formatMistralError`'s statusCode-without-body branch.
+    /// An empty error body falls back to the SDK's own composed message, per `formatMistralError`'s
+    /// statusCode-without-body branch.
     #[test]
     fn mistral_http_error_empty_body_falls_back_to_sdk_message() {
         let mut headers = HashMap::new();
@@ -794,9 +782,9 @@ mod tests {
         );
     }
 
-    /// Connection-level failures carry the mistral SDK's wrapper shape: the
-    /// `UnexpectedClientError` fixed prefix over the runtime's refused-connect
-    /// text, and the `RequestTimeoutError` fixed prefix with the raw cause.
+    /// Connection-level failures carry the mistral SDK's wrapper shape: the `UnexpectedClientError`
+    /// fixed prefix over the runtime's refused-connect text, and the `RequestTimeoutError` fixed
+    /// prefix with the raw cause.
     #[test]
     fn mistral_connection_error_texts() {
         let connect = ProviderError::Connection(
@@ -840,10 +828,8 @@ mod tests {
         assert_eq!(map_chat_stop_reason(Some("whatever")), StopReason::Stop);
     }
 
-    /// TS `mistral.ts` assigns `usage.totalTokens = chunk.usage.totalTokens ||
-    /// input + output`, so an explicitly reported zero total is falsy and
-    /// falls back to the prompt/completion sum; a positive reported total is
-    /// kept verbatim.
+    /// TS assigns `usage.totalTokens = chunk.usage.totalTokens || input + output`, so an explicitly
+    /// reported zero total is falsy and falls back to the prompt/completion sum.
     #[test]
     fn usage_total_tokens_explicit_zero_falls_back_to_sum() {
         use serde_json::json;

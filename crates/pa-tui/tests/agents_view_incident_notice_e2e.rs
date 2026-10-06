@@ -1,31 +1,22 @@
-//! The agents-view incident notice against a mock supervisor (the TS
-//! `agents-view-incident-notice.test.ts` view-level suite): the collapsed
-//! warning line renders from the agent.jsonl tail, Esc dismisses it
-//! without touching the armed delete confirmation, and a dismissal is
-//! sticky across later polls and view re-entries (the carried state).
+//! The agents-view incident notice (TS
+//! `agents-view-incident-notice.test.ts` view-level suite): the
+//! collapsed warning line renders from the agent.jsonl tail, Esc
+//! dismisses it, and a dismissal is sticky across polls/re-entries.
 #![cfg(unix)]
-// Pedantic-gate exceptions (every other pedantic warning in this crate is
-// fixed in place; each exception carries its one-line justification):
-// - the casts: terminal-layout arithmetic narrows structurally bounded
-//   values (screen coordinates, byte counts, timestamps); guarded
-//   conversions would add panic paths the bounds guarantee away.
+// Casts: structurally bounded terminal-layout arithmetic; guarded conversions add panic paths.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// - the render routes are flat tables (one arm per route); splitting them
-//   would add indirection without changing the flow.
+// Render routes are flat tables (one arm per route); splitting adds indirection.
 #![allow(clippy::too_many_lines)]
-// - widget state structs carry independent flag bits; a nested struct
-//   would add indirection without changing the shape.
+// Widget state structs carry independent flag bits.
 #![allow(clippy::struct_excessive_bools, clippy::fn_params_excessive_bools)]
-// - the futures are bounded by the surface's lifetime; boxing them would
-//   add an allocation to the steady-state loop.
+// Futures are bounded by the surface's lifetime; boxing adds a steady-state allocation.
 #![allow(clippy::large_futures)]
-// - the wrappers preserve a uniform Result-returning API surface; unwrap
-//   removals would ripple through the callers without changing behavior.
+// The wrappers preserve a uniform Result-returning API surface.
 #![allow(clippy::unnecessary_wraps)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -36,10 +27,8 @@ use std::time::Duration;
 use pa_tui::agents_view::{AgentsHeadlessPlan, AgentsStep, AgentsViewOptions, AgentsViewUiMode};
 use serde_json::{json, Value};
 
-/// Environment mutations are process-global: the
-/// `PRIME_AGENT_CODING_AGENT_DIR` redirect serializes on one lock and
-/// restores on exit. A tokio mutex: each test holds the guard across its
-/// view-run awaits (a std guard across an await is a clippy error).
+/// Environment mutations are process-global: the `PRIME_AGENT_CODING_AGENT_DIR` redirect serializes
+/// on one lock and restores on exit. A tokio mutex (a std guard across an await is a clippy error).
 static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Take the env-serialization lock for the whole test body.
@@ -49,9 +38,8 @@ async fn env_lock() -> tokio::sync::MutexGuard<'static, ()> {
 
 struct MockSupervisor {
     listener: UnixListener,
-    /// How many view connections to serve before the serve thread ends
-    /// (a run that exits without a selection closes its connection, so a
-    /// multi-run test opens one connection per run).
+    /// How many view connections to serve (a run that exits without a selection closes its
+    /// connection, so a multi-run test opens one per run).
     connections: usize,
 }
 
@@ -63,8 +51,7 @@ impl MockSupervisor {
         }
     }
 
-    /// Serve the view connections: hello, then the command loop until EOF
-    /// (the roster snapshot and an empty saved catalog), once per
+    /// Serve the view connections (the roster snapshot and an empty saved catalog), once per
     /// connection.
     fn serve(self) {
         for _ in 0..self.connections {
@@ -180,8 +167,8 @@ fn read_line(reader: &mut impl BufRead) -> Option<String> {
     }
 }
 
-/// Milliseconds since the Unix epoch (the notice window rides the real
-/// clock; the fixture entries must be relative to it).
+/// Milliseconds since the Unix epoch (the notice window rides the real clock; the fixture entries
+/// must be relative to it).
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -212,8 +199,8 @@ fn iso_ago(ago_ms: i64) -> String {
     )
 }
 
-/// The supervisor's own listening line: a single start is routine and
-/// must NOT produce an update-restart notice.
+/// The supervisor's own listening line: a single start is routine and must NOT produce an
+/// update-restart notice.
 fn supervisor_start_line() -> String {
     json!({
         "ts": iso_ago(600_000),
@@ -258,9 +245,8 @@ fn view_options(socket: &std::path::Path) -> AgentsViewOptions {
     }
 }
 
-/// The collapsed worker-crash notice line renders from the log tail, with
-/// the pointer to the incident CLI (TS "renders the collapsed worker-crash
-/// notice line from the log tail").
+/// The collapsed worker-crash notice line renders from the log tail, with the pointer to the
+/// incident CLI (TS "renders the collapsed worker-crash notice line from the log tail").
 #[tokio::test]
 async fn renders_the_collapsed_worker_crash_notice_line() {
     let _env = env_lock().await;
@@ -321,11 +307,8 @@ async fn renders_the_collapsed_worker_crash_notice_line() {
     let _ = server.join();
 }
 
-/// Esc dismisses the notice with the status confirmation, and a dismissal
-/// survives a later poll and the next view run's carried state (TS
-/// "dismisses with Esc and never resurrects across later polls" — the
-/// re-entry half exercises the flow's state carry, which the TS suite
-/// asserts through `persistentState`).
+/// Esc dismisses the notice with the status confirmation, and a dismissal survives a later poll
+/// (TS "dismisses with Esc and never resurrects across later polls").
 #[tokio::test]
 async fn dismisses_with_esc_and_the_dismissal_survives_reentry() {
     let _env = env_lock().await;
@@ -376,9 +359,8 @@ async fn dismisses_with_esc_and_the_dismissal_survives_reentry() {
             && frame.contains("prime-agent incident for the timeline")
     }));
 
-    // Re-entry with the carried state: the dismissal horizon hides the
-    // same incident; no poll re-reads consumed bytes into a phantom
-    // restart.
+    // Re-entry with the carried state: the dismissal horizon hides the same incident; no poll
+    // re-reads consumed bytes into a phantom restart.
     let mut options = view_options(&socket);
     options.incident_notice_state = Some(outcome.incident_notice_state);
     let plan = AgentsHeadlessPlan {
@@ -409,9 +391,8 @@ async fn dismisses_with_esc_and_the_dismissal_survives_reentry() {
     let _ = server.join();
 }
 
-/// An armed delete confirmation wins the Esc: it cancels (the take at the
-/// top of `handle_key`) and the notice stays (TS "cancels an armed delete
-/// confirmation with Esc instead of dismissing the notice").
+/// An armed delete confirmation wins the Esc: it cancels and the notice stays (TS "cancels an
+/// armed delete confirmation with Esc instead of dismissing the notice").
 #[tokio::test]
 async fn esc_cancels_an_armed_delete_confirmation_and_keeps_the_notice() {
     let _env = env_lock().await;
@@ -431,9 +412,8 @@ async fn esc_cancels_an_armed_delete_confirmation_and_keeps_the_notice() {
     let previous = std::env::var_os("PRIME_AGENT_CODING_AGENT_DIR");
     std::env::set_var("PRIME_AGENT_CODING_AGENT_DIR", agent_dir.path());
 
-    // ctrl+x arms the stop-or-delete confirm over the selected row; Esc
-    // must cancel it and keep the notice, or the next ctrl+x would fire
-    // without a fresh confirmation.
+    // ctrl+x arms the stop-or-delete confirm over the selected row; Esc must cancel it and keep the
+    // notice, or the next ctrl+x would fire without a fresh confirmation.
     let plan = AgentsHeadlessPlan {
         steps: vec![
             AgentsStep::WaitSettle { timeout_ms: 2_500 },
@@ -457,8 +437,8 @@ async fn esc_cancels_an_armed_delete_confirmation_and_keeps_the_notice() {
         None => std::env::remove_var("PRIME_AGENT_CODING_AGENT_DIR"),
     }
 
-    // The run exited through the empty-editor Esc (the delete confirm
-    // consumed the dismissal), and the notice stayed visible to the end.
+    // The run exited through the empty-editor Esc (the delete confirm consumed the dismissal), and
+    // the notice stayed visible to the end.
     assert_eq!(outcome.selection, None);
     let last_frame = outcome.frames.last().expect("the final frame");
     assert!(
