@@ -1,7 +1,6 @@
-//! The upload-all concern (moved with its concern): the serialized
-//! request gate (the platform rate limit), the session-file find walk,
-//! and the concurrent sweep with its progress notes and cancel checks
-//! (TS uploadAllAgentTraces).
+//! The upload-all concern: the serialized request gate (the platform rate
+//! limit), the session-file find walk, and the concurrent sweep with its
+//! progress notes and cancel checks.
 
 use super::{
     delay, log_agent_trace_outcome, now_ms, perform_agent_trace_upload, read_trace_session_header,
@@ -13,9 +12,8 @@ use super::{
 use std::collections::HashSet;
 use std::sync::atomic::AtomicUsize;
 
-/// TS `createTraceUploadAllRequestGate`: one serialized slot per request
-/// that holds the platform's rate limit (5 requests a minute, spaced by
-/// the computed minimum interval).
+/// One serialized slot per request, holding the platform's rate limit
+/// (5 requests a minute, spaced by the computed minimum interval).
 #[derive(Default)]
 pub struct TraceRequestGate {
     next_request_at: tokio::sync::Mutex<u64>,
@@ -27,8 +25,8 @@ impl TraceRequestGate {
         Self::default()
     }
 
-    /// TS the gate closure: wait out the interval since the previous
-    /// request, then arm the next one. A cancel ends the queued slot.
+    /// Wait out the interval since the previous request, then arm the
+    /// next one; a cancel ends the queued slot.
     pub(super) async fn before_request(
         &self,
         cancel: Option<&TraceUploadCancel>,
@@ -50,9 +48,8 @@ impl TraceRequestGate {
     }
 }
 
-/// TS `AgentTraceUploadAllOptions` (the session-file-less arm): the
-/// session directory (the daemon state's `sessionDir`; None is TS's
-/// `getSessionsDir()` default), the concurrency, and the progress sink.
+/// The session directory (`None` is the `getSessionsDir()` default), the
+/// concurrency, and the progress sink.
 pub struct TraceUploadAllOptions<'a> {
     pub session_dir: Option<&'a Path>,
     pub cwd: &'a Path,
@@ -68,8 +65,8 @@ pub struct TraceUploadAllOptions<'a> {
     pub progress: Option<tokio::sync::mpsc::UnboundedSender<TraceUploadAllProgress>>,
 }
 
-/// TS `findSessionFilesUnder`: the recursive `.jsonl` walk that keeps
-/// files with a valid session header.
+/// The recursive `.jsonl` walk that keeps files with a valid session
+/// header.
 fn find_session_files_under(root: &Path, files: &mut HashSet<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(root) else {
         return;
@@ -92,7 +89,7 @@ fn find_session_files_under(root: &Path, files: &mut HashSet<PathBuf>) {
     }
 }
 
-/// TS `getSessionArtifactsRoot`: the sibling `session-artifacts` directory.
+/// The sibling `session-artifacts` directory.
 #[must_use]
 pub fn session_artifacts_root(session_dir: &Path) -> PathBuf {
     session_dir
@@ -101,7 +98,7 @@ pub fn session_artifacts_root(session_dir: &Path) -> PathBuf {
         .join("session-artifacts")
 }
 
-/// TS `findAgentTraceFiles`: both roots walked, deduplicated, sorted.
+/// Both roots walked, deduplicated, sorted.
 #[must_use]
 pub fn find_trace_files(session_dir: &Path) -> Vec<PathBuf> {
     let mut files: HashSet<PathBuf> = HashSet::new();
@@ -117,19 +114,17 @@ pub fn find_trace_files(session_dir: &Path) -> Vec<PathBuf> {
     sorted
 }
 
-/// TS `uploadAllAgentTraces`: the concurrent sweep (default 4 workers)
-/// through the shared request gate, with the per-file progress and the
-/// cancel checks at the worker boundaries.
+/// The concurrent sweep (default 4 workers) through the shared request gate, with the
+/// per-file progress and the cancel checks at the worker boundaries.
 ///
 /// # Panics
 ///
-/// Panics if a per-file result slot mutex is poisoned, i.e. if another
-/// worker panicked while holding that lock.
+/// Panics if a per-file result slot mutex is poisoned.
 pub async fn upload_all_traces(options: &TraceUploadAllOptions<'_>) -> TraceUploadAllResult {
     let session_dir = options.session_dir.map_or_else(
         || {
-            // TS `getSessionsDir()`: the env override expanded, else the
-            // agent dir's sessions directory.
+            // The env override expanded, else the agent dir's sessions
+            // directory.
             match std::env::var_os("PRIME_AGENT_SESSION_DIR") {
                 Some(dir) if !dir.is_empty() => resolve_path(Path::new(&dir)),
                 _ => options.agent_dir.join("sessions"),

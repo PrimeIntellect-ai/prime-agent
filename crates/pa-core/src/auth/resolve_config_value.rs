@@ -1,6 +1,5 @@
 //! Resolve config values: `!command` (successful results are cached),
 //! env var, or literal.
-//! Port of resolve-config-value.ts.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -9,9 +8,8 @@ use anyhow::Result;
 
 static COMMAND_RESULT_CACHE: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
 
-/// Resolve a config value: `!command` executes and caches successful
-/// results; otherwise the environment wins over the literal string
-/// (set-but-empty means missing).
+/// Resolve a config value: `!command` executes and caches successful results;
+/// otherwise the environment wins over the literal string (set-but-empty means missing).
 pub fn resolve_config_value(config: &str) -> Option<String> {
     if let Some(command) = config.strip_prefix('!') {
         return execute_command(config, command);
@@ -44,10 +42,8 @@ fn execute_command(cache_key: &str, command: &str) -> Option<String> {
         return Some(cached.clone());
     }
     let value = run_command(command).ok().flatten();
-    // A command that produced no value is not a resolution: a locked
-    // keychain, a missing network, or a rotated secret must be retried on
-    // the next lookup instead of pinning the failure for the lifetime of
-    // the process (TS #2497).
+    // A command that produced no value is not a resolution: a transient failure
+    // must be retried instead of pinning the failure for the process lifetime (TS #2497).
     if let Some(value) = &value {
         cache.insert(cache_key.to_string(), value.clone());
     }
@@ -55,7 +51,6 @@ fn execute_command(cache_key: &str, command: &str) -> Option<String> {
 }
 
 fn run_command(command: &str) -> Result<Option<String>> {
-    // Hidden spawn: stdin closed, stdout captured, stderr suppressed.
     let output = hidden_spawn(command)?;
     let Some(output) = output else {
         return Ok(None);
@@ -67,11 +62,8 @@ fn run_command(command: &str) -> Result<Option<String>> {
     Ok((!value.is_empty()).then_some(value))
 }
 
-/// Hidden command execution for `!command` config values.
-///
-/// TS `resolve-config-value`: Unix runs the default shell; Windows tries
-/// the configured shell first (`getShellConfig`) and falls back to
-/// `ComSpec` (Node `execSync`'s shell) when the configured shell is missing.
+/// Hidden command execution for `!command` config values: Unix runs the default
+/// shell; Windows tries the configured shell first and falls back to `ComSpec`.
 #[cfg(unix)]
 fn hidden_spawn(command: &str) -> Result<Option<std::process::Output>> {
     use std::process::{Command, Stdio};
@@ -98,8 +90,8 @@ fn hidden_spawn(command: &str) -> Result<Option<std::process::Output>> {
             .output()
         {
             Ok(output) => return Ok(Some(output)),
-            // ENOENT: the configured shell is missing; other spawn errors
-            // are `executed` with no value (TS `executeWithConfiguredShell`).
+            // ENOENT: the configured shell is missing; other spawn
+            // errors are `executed` with no value.
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(_) => return Ok(None),
         }
@@ -126,7 +118,6 @@ mod tests {
 
     #[test]
     fn env_or_literal_semantics() {
-        // Literal when the variable is unset.
         let key = "PA_TEST_DEFINITELY_UNSET_VAR";
         assert_eq!(resolve_env_or_literal(key), Some(key.to_string()));
     }
@@ -135,16 +126,13 @@ mod tests {
     fn command_resolution_and_cache() {
         let value = resolve_config_value("!echo resolved-value");
         assert_eq!(value.as_deref(), Some("resolved-value"));
-        // A successful command runs once per process (the cache holds it).
         assert_eq!(
             resolve_config_value("!echo resolved-value").as_deref(),
             Some("resolved-value")
         );
 
-        // A failing command resolves to None and is retried on every
-        // lookup (TS #2497: a locked keychain or a transient failure must
-        // not disable the credential for the process lifetime). The
-        // counter proves each lookup re-ran the command.
+        // A failing command is retried on every lookup (TS #2497: a transient failure must
+        // not disable the credential for the process lifetime).
         let counter = std::env::temp_dir().join(format!("pa-resolve-retry-{}", std::process::id()));
         let _ = std::fs::remove_file(&counter);
         let command = format!("echo x >> {} ; exit 1", counter.display());

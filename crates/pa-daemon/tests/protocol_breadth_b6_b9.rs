@@ -1,8 +1,6 @@
-//! Supervisor wire-shape tests for the protocol-breadth waves b6-b9
-//! (roadmap item 7): every new command
-//! rides the real supervisor + worker over the socket and answers the
-//! exact TS wire shape (success and error paths), the same harness the
-//! supervisor e2e suite uses.
+//! Supervisor wire-shape tests for the protocol-breadth waves b6-b9 (roadmap
+//! item 7): every new command rides the real supervisor + worker over the
+//! socket and answers the exact TS wire shape (success and error paths).
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -27,8 +25,7 @@ impl Drop for Daemon {
     }
 }
 
-// The timeout panic path cannot wait on the child; the test process exits
-// immediately afterwards, reaping it.
+// The timeout panic path cannot wait on the child; the test process exits and reaps it.
 #[allow(clippy::zombie_processes)]
 fn spawn_daemon(socket: &std::path::Path, agent_dir: &std::path::Path) -> Daemon {
     let binary = env!("CARGO_BIN_EXE_pa-daemon");
@@ -40,10 +37,9 @@ fn spawn_daemon(socket: &std::path::Path, agent_dir: &std::path::Path) -> Daemon
         .arg(agent_dir)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        // A supervisor killed at teardown must not leak its session workers
-        // into later test binaries: the worker's supervisor-lost exit (TS
-        // `exitIfSupervisorOrphanedForTooLong`) runs on this short window
-        // instead of the 5-minute default.
+        // A supervisor killed at teardown must not leak its session workers: the worker's
+        // supervisor-lost exit (TS `exitIfSupervisorOrphanedForTooLong`) runs on this short
+        // window, not the 5-minute default.
         .env(
             pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
             "15000",
@@ -133,7 +129,6 @@ impl Client {
         }
     }
 
-    /// Read lines until one answers the given command id.
     fn read_response(&mut self, id: &str) -> serde_json::Value {
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
@@ -145,9 +140,8 @@ impl Client {
         }
     }
 
-    /// Read until the response for `id`, buffering the outbound lines seen
-    /// first: the daemon emits events before the command reply (TS order),
-    /// so a bare `read_response` would discard them.
+    /// Read until the response for `id`, buffering the outbound lines seen first:
+    /// the daemon emits events before the command reply (TS order).
     fn read_response_and_lines(
         &mut self,
         id: &str,
@@ -167,9 +161,8 @@ impl Client {
         }
     }
 
-    /// The first buffered-or-live outbound line of `line_type`. Buffered
-    /// lines of other types stay buffered; live lines of other types are
-    /// skipped, like a filtering read loop.
+    /// The first buffered-or-live outbound line of `line_type`; other types stay buffered or are
+    /// skipped.
     fn next_line_of_type(
         &mut self,
         lines: &mut std::collections::VecDeque<serde_json::Value>,
@@ -188,7 +181,6 @@ impl Client {
         }
     }
 
-    /// The first buffered-or-live `session_event` of `event_type`.
     fn take_session_event(
         &mut self,
         lines: &mut std::collections::VecDeque<serde_json::Value>,
@@ -205,9 +197,8 @@ impl Client {
     }
 }
 
-/// The wave tests spawn real supervisor + worker process trees; the box
-/// is small, so one daemon tree runs at a time (a test binary's tests
-/// otherwise race each other's process startup windows).
+/// The wave tests spawn real process trees; one daemon tree runs at a time
+/// (a binary's tests otherwise race each other's startup windows).
 static SERIAL: Mutex<()> = Mutex::new(());
 
 fn serial_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -217,8 +208,7 @@ fn serial_lock() -> std::sync::MutexGuard<'static, ()> {
     }
 }
 
-/// Create one scripted session; returns (daemon, client, session id,
-/// socket path).
+/// Create one scripted session; returns (daemon, client, session id, socket path).
 fn scripted_session(
     dir: &std::path::Path,
     agent_dir: &std::path::Path,
@@ -253,8 +243,6 @@ fn scripted_session(
     (daemon, client, session_id, socket)
 }
 
-/// Wave b6: the three RLM commands ride the supervisor route and answer
-/// the TS wire shapes against a live scripted session.
 #[test]
 fn wave_b6_rlm_surface_wire_shapes() {
     let _serial = serial_lock();
@@ -263,8 +251,6 @@ fn wave_b6_rlm_surface_wire_shapes() {
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
     let (_daemon, mut client, session_id, _socket) = scripted_session(dir.path(), &agent_dir);
 
-    // cancel_rlm_child: an unknown child answers cancelled: false (TS
-    // cancelRlmChildRun on an unmatched id), never an error.
     client.send_command(
         "r1",
         &json!({ "type": "cancel_rlm_child", "activeSessionId": session_id, "childId": "ghost" }),
@@ -273,8 +259,6 @@ fn wave_b6_rlm_surface_wire_shapes() {
     assert_eq!(response["success"], true, "{response}");
     assert_eq!(response["data"], json!({ "cancelled": false }));
 
-    // delete_rlm_subagent: an unknown child answers deleted: false (TS
-    // "not_found" outcome).
     client.send_command(
         "r2",
         &json!({ "type": "delete_rlm_subagent", "activeSessionId": session_id, "childId": "ghost" }),
@@ -283,7 +267,6 @@ fn wave_b6_rlm_surface_wire_shapes() {
     assert_eq!(response["success"], true, "{response}");
     assert_eq!(response["data"], json!({ "deleted": false }));
 
-    // set_rlm_max_depth: the TS SetRlmMaxDepthResult shape.
     client.send_command(
         "r3",
         &json!({ "type": "set_rlm_max_depth", "activeSessionId": session_id, "maxDepth": 3 }),
@@ -296,9 +279,6 @@ fn wave_b6_rlm_surface_wire_shapes() {
     );
 }
 
-/// Wave b7: the selector-less agent-message forms answer the TS
-/// supervisor shapes - the empty-status object with no live worker, the
-/// broadcast through the live worker once a session exists.
 #[test]
 fn wave_b7_agent_messages_wire_shapes() {
     let _serial = serial_lock();
@@ -306,8 +286,6 @@ fn wave_b7_agent_messages_wire_shapes() {
     let agent_dir = dir.path().join("agent");
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
 
-    // No live worker: status answers the TS empty-status object and the
-    // broadcast pause/resume answer success with null data.
     {
         let socket = dir.path().join("daemon.sock");
         let _daemon = spawn_daemon(&socket, &agent_dir);
@@ -323,8 +301,6 @@ fn wave_b7_agent_messages_wire_shapes() {
         assert_eq!(response["data"], Value::Null);
     }
 
-    // A live worker: the same selector-less commands broadcast through
-    // it and answer the worker's safety status.
     {
         let (_daemon, mut client, session_id, _socket) = scripted_session(dir.path(), &agent_dir);
         client.send_command("s1", &json!({ "type": "agent_messages_status" }));
@@ -346,7 +322,6 @@ fn wave_b7_agent_messages_wire_shapes() {
         assert_eq!(response["success"], true, "{response}");
         assert_eq!(response["data"]["paused"], json!(true));
 
-        // A delivery while paused fails with the TS gate error.
         client.send_command(
             "m1",
             &json!({
@@ -364,7 +339,6 @@ fn wave_b7_agent_messages_wire_shapes() {
         assert_eq!(response["success"], true, "{response}");
         assert_eq!(response["data"]["paused"], json!(false));
 
-        // The per-session clear answers the TS removed-prompts shape.
         client.send_command(
             "m2",
             &json!({
@@ -381,15 +355,12 @@ fn wave_b7_agent_messages_wire_shapes() {
         );
         let response = client.read_response("c1");
         assert_eq!(response["success"], true, "{response}");
-        // The delivered message already started its turn (the session was
-        // idle), so nothing is queued to clear - TS clears queued agent
-        // messages only (the removal itself is covered by the worker
-        // unit test with a busy lane).
+        // The delivered message already started its turn (the session was idle), so
+        // nothing is queued to clear — TS clears queued agent messages only.
         assert_eq!(response["data"], json!({ "steering": [], "followUp": [] }));
     }
 }
 
-/// Wave b8: the session input-pause lease surface over the supervisor.
 #[test]
 fn wave_b8_session_input_pause_wire_shapes() {
     let _serial = serial_lock();
@@ -398,7 +369,6 @@ fn wave_b8_session_input_pause_wire_shapes() {
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
     let (_daemon, mut client, session_id, _socket) = scripted_session(dir.path(), &agent_dir);
 
-    // An unknown session answers the TS unknown-session error.
     client.send_command(
         "pa-0",
         &json!({ "type": "acquire_session_input_pause", "activeSessionId": "bogus-1", "leaseKey": "k" }),
@@ -407,8 +377,7 @@ fn wave_b8_session_input_pause_wire_shapes() {
     assert_eq!(response["success"], false, "{response}");
     assert_eq!(response["error"], "Unknown active session: bogus-1");
 
-    // Acquire answers `{ pauseId }`; the identical lease deduplicates to
-    // the same pause id (the supervisor's own dedupe record).
+    // Acquire answers `{ pauseId }`; the identical lease deduplicates to the same pause id.
     client.send_command(
         "pa-1",
         &json!({ "type": "acquire_session_input_pause", "activeSessionId": session_id, "leaseKey": "lease-a" }),
@@ -429,7 +398,6 @@ fn wave_b8_session_input_pause_wire_shapes() {
     assert_eq!(response["success"], true, "{response}");
     assert_eq!(response["data"]["pauseId"], json!(pause_id));
 
-    // A release naming another session answers the TS session error.
     client.send_command(
         "pa-3",
         &json!({ "type": "release_session_input_pause", "activeSessionId": "other-session", "pauseId": pause_id }),
@@ -441,8 +409,6 @@ fn wave_b8_session_input_pause_wire_shapes() {
         format!("Session input pause belongs to another session: {pause_id}")
     );
 
-    // The owner's release succeeds and drops the lease; a second release
-    // answers the plain TS success (unknown pause id).
     client.send_command(
         "pa-4",
         &json!({ "type": "release_session_input_pause", "activeSessionId": session_id, "pauseId": pause_id }),
@@ -458,8 +424,6 @@ fn wave_b8_session_input_pause_wire_shapes() {
     assert_eq!(response["data"], Value::Null);
 }
 
-/// Wave b8: the pause holds the session's queued input - a queued steer
-/// waits behind a held pause and admits after the release.
 #[test]
 fn wave_b8_held_pause_gates_queued_input() {
     let _serial = serial_lock();
@@ -467,8 +431,8 @@ fn wave_b8_held_pause_gates_queued_input() {
     let agent_dir = dir.path().join("agent");
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
 
-    // A scripted session with one slow reply: the first turn stays busy so
-    // a queued steer stays queued.
+    // A scripted session with one slow reply: the first turn stays busy so a queued steer stays
+    // queued.
     let socket = dir.path().join("daemon2.sock");
     let daemon = spawn_daemon(&socket, &agent_dir);
     let _ = &daemon;
@@ -502,7 +466,6 @@ fn wave_b8_held_pause_gates_queued_input() {
         .expect("session id")
         .to_string();
 
-    // Start a turn (busy) and queue a steer behind it.
     client.send_command(
         "p-1",
         &json!({ "type": "prompt", "activeSessionId": session_id, "message": "go" }),
@@ -515,8 +478,8 @@ fn wave_b8_held_pause_gates_queued_input() {
     let response = client.read_response("s-1");
     assert_eq!(response["success"], true, "{response}");
 
-    // Acquire the pause while the turn runs; the queued steer must not
-    // start: after the first turn settles, the queue keeps one item.
+    // Acquire the pause while the turn runs; the queued steer must not start:
+    // after the first turn settles, the queue keeps one item.
     client.send_command(
         "pa-1",
         &json!({ "type": "acquire_session_input_pause", "activeSessionId": session_id, "leaseKey": "gate" }),
@@ -528,9 +491,8 @@ fn wave_b8_held_pause_gates_queued_input() {
         .expect("pause id")
         .to_string();
 
-    // Wait out the first turn (a paused queue never drains, so
-    // `wait_for_idle` would block by design), then check the queue still
-    // holds the item (the pause gates the admission).
+    // Wait out the first turn (`wait_for_idle` would block by design on a
+    // paused queue), then check the queue still holds the item.
     std::thread::sleep(Duration::from_millis(700));
     client.send_command(
         "q-1",
@@ -544,7 +506,6 @@ fn wave_b8_held_pause_gates_queued_input() {
         "the queued steer stays held behind the pause: {response}"
     );
 
-    // The release lifts the gate; the queued item admits.
     client.send_command(
         "pa-2",
         &json!({ "type": "release_session_input_pause", "activeSessionId": session_id, "pauseId": pause_id }),
@@ -565,8 +526,6 @@ fn wave_b8_held_pause_gates_queued_input() {
     assert_eq!(response["data"]["steering"], json!([]), "{response}");
 }
 
-/// Wave b9: the session-navigation commands ride the supervisor route and
-/// answer the TS wire shapes.
 #[test]
 fn wave_b9_session_navigation_wire_shapes() {
     let _serial = serial_lock();
@@ -575,7 +534,6 @@ fn wave_b9_session_navigation_wire_shapes() {
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
     let (_daemon, mut client, session_id, _socket) = scripted_session(dir.path(), &agent_dir);
 
-    // new_session answers the TS `{ cancelled: false }`.
     client.send_command(
         "n-1",
         &json!({ "type": "new_session", "activeSessionId": session_id }),
@@ -584,7 +542,6 @@ fn wave_b9_session_navigation_wire_shapes() {
     assert_eq!(response["success"], true, "{response}");
     assert_eq!(response["data"], json!({ "cancelled": false }));
 
-    // import_jsonl answers the TS import error for a missing input.
     client.send_command(
         "i-0",
         &json!({ "type": "import_jsonl", "activeSessionId": session_id, "inputPath": "/tmp/no-such-import.jsonl" }),
@@ -596,8 +553,6 @@ fn wave_b9_session_navigation_wire_shapes() {
         "File not found: /tmp/no-such-import.jsonl"
     );
 
-    // A real import answers `{ cancelled: false }` and the session carries
-    // the imported transcript.
     let imported = dir.path().join("imported.jsonl");
     std::fs::write(
         &imported,
@@ -615,8 +570,6 @@ fn wave_b9_session_navigation_wire_shapes() {
     assert_eq!(response["success"], true, "{response}");
     assert_eq!(response["data"], json!({ "cancelled": false }));
 
-    // switch_session answers the TS `{ cancelled: false }` for an
-    // existing session file and the failure for a missing one.
     client.send_command(
         "s-1",
         &json!({ "type": "switch_session", "activeSessionId": session_id, "sessionPath": imported.to_string_lossy() }),
@@ -632,8 +585,6 @@ fn wave_b9_session_navigation_wire_shapes() {
     assert_eq!(response["success"], false, "{response}");
 }
 
-/// Wave b9: the prompt-admission surface - the parse-time registration
-/// errors, the cancel status ladder, and the cancelled queued prompt.
 #[test]
 fn wave_b9_prompt_admission_wire_shapes() {
     let _serial = serial_lock();
@@ -641,8 +592,8 @@ fn wave_b9_prompt_admission_wire_shapes() {
     let agent_dir = dir.path().join("agent");
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
 
-    // A slow scripted session: the first turn stays busy so an admitted
-    // prompt queues behind it (the deterministic cancel window).
+    // A slow scripted session: the first turn stays busy so an admitted prompt queues behind it
+    // (the deterministic cancel window).
     let socket = dir.path().join("adm.sock");
     let _daemon = spawn_daemon(&socket, &agent_dir);
     let (mut client, _hello) = Client::connect(&socket);
@@ -675,7 +626,6 @@ fn wave_b9_prompt_admission_wire_shapes() {
         .expect("session id")
         .to_string();
 
-    // An unregistered admission answers the TS `unknown` status.
     client.send_command(
         "c-0",
         &json!({ "type": "cancel_prompt_admission", "activeSessionId": session_id, "admissionId": "never-registered" }),
@@ -683,7 +633,6 @@ fn wave_b9_prompt_admission_wire_shapes() {
     let response = client.read_response("c-0");
     assert_eq!(response["data"], json!({ "status": "unknown" }));
 
-    // An empty admission id answers the TS parse error.
     client.send_command(
         "p-0",
         &json!({ "type": "prompt", "activeSessionId": session_id, "message": "x", "admissionId": "" }),
@@ -693,23 +642,19 @@ fn wave_b9_prompt_admission_wire_shapes() {
     assert_eq!(response["command"], "parse");
     assert_eq!(response["error"], "admissionId must not be empty");
 
-    // Start the slow turn, then queue an admitted prompt behind it.
     client.send_command(
         "p-1",
         &json!({ "type": "prompt", "activeSessionId": session_id, "message": "go" }),
     );
     let _ = client.read_response("p-1");
-    // prompt_and_wait keeps its admission open for the whole turn (the
-    // supervisor route deletes it when the route settles), so the queued
-    // admitted prompt is in its cancel window here.
+    // `prompt_and_wait` keeps its admission open for the whole turn (the route deletes
+    // it when the turn settles), so the queued admitted prompt is in its cancel window.
     client.send_command(
         "p-2",
         &json!({ "type": "prompt_and_wait", "activeSessionId": session_id, "message": "queued behind", "admissionId": "adm-1" }),
     );
-    // Give the admitted prompt's route its start (the TS single-loop
-    // daemon registers an admission synchronously at parse time; this
-    // port registers in the command's dispatch task, so the cancel must
-    // not race the registration).
+    // Give the admitted prompt's route its start: TS registers an admission at parse
+    // time; this port registers in the dispatch task, so the cancel must not race it.
     std::thread::sleep(Duration::from_millis(100));
 
     // The queued prompt committed at admission: cancelOwned withdraws
@@ -718,10 +663,8 @@ fn wave_b9_prompt_admission_wire_shapes() {
         "c-1",
         &json!({ "type": "cancel_prompt_admission", "activeSessionId": session_id, "admissionId": "adm-1", "cancelOwned": true }),
     );
-    // The cancelled wait's failure response may land before the cancel's
-    // own response (both frames traverse the same worker pipe, and the
-    // dropped queue item settles the wait the moment the cancel removes
-    // it), so the read buffers instead of dropping it.
+    // The cancelled wait's failure response may land before the cancel's own response
+    // (the dropped queue item settles the wait), so the read buffers instead of dropping.
     let (response, mut lines) = client.read_response_and_lines("c-1");
     assert_eq!(response["success"], true, "{response}");
     assert_eq!(response["data"], json!({ "status": "owned" }));
@@ -736,8 +679,6 @@ fn wave_b9_prompt_admission_wire_shapes() {
     };
     assert_eq!(response["success"], false, "{response}");
 
-    // The slow turn settles with no second turn: the cancelled prompt
-    // never ran.
     std::thread::sleep(Duration::from_millis(700));
     client.send_command(
         "q-1",
@@ -771,11 +712,6 @@ fn wave_b9_prompt_admission_wire_shapes() {
     assert_eq!(response["data"], json!({ "status": "unknown" }));
 }
 
-/// Wave b9: the owned-session lifecycle - promote clears the ownership
-/// (the session summary answers), complete stops the owned worker, and
-/// an owner mismatch answers the TS error. A plain create is unowned
-/// (TS: only a `client_owned`-lifecycle create marks ownership), so the
-/// owned lifecycle drives from the test's own `client_owned` create.
 #[test]
 fn wave_b9_owned_session_lifecycle_wire_shapes() {
     let _serial = serial_lock();
@@ -811,7 +747,6 @@ fn wave_b9_owned_session_lifecycle_wire_shapes() {
         .expect("session id")
         .to_string();
 
-    // Promote: the ownership clears and the summary answers.
     client.send_command(
         "pr-1",
         &json!({ "type": "promote_owned_session", "activeSessionId": session_id }),
@@ -820,8 +755,6 @@ fn wave_b9_owned_session_lifecycle_wire_shapes() {
     assert_eq!(response["success"], true, "{response}");
     assert!(response["data"]["id"].is_string(), "{response}");
 
-    // A second connection is a different client: it never owned the
-    // (now unowned) session, so its promote answers the TS error.
     let (mut foreign, _hello) = Client::connect(&socket);
     foreign.send_command(
         "pr-2",
@@ -831,7 +764,6 @@ fn wave_b9_owned_session_lifecycle_wire_shapes() {
     assert_eq!(response["success"], false, "{response}");
     assert_eq!(response["error"], "Session is not owned by this client");
 
-    // The promoting client's repeat promote stays the TS no-op success.
     client.send_command(
         "pr-3",
         &json!({ "type": "promote_owned_session", "activeSessionId": session_id }),
@@ -840,8 +772,8 @@ fn wave_b9_owned_session_lifecycle_wire_shapes() {
     assert_eq!(response["success"], true, "{response}");
     assert!(response["data"]["id"].is_string(), "{response}");
 
-    // retry_worker on the live session answers the summary (the audit's
-    // fix: the supervisor arm, not the worker route).
+    // retry_worker on the live session answers the summary (the audit's fix: the supervisor arm,
+    // not the worker route).
     client.send_command(
         "rt-1",
         &json!({ "type": "retry_worker", "activeSessionId": session_id }),
@@ -850,7 +782,6 @@ fn wave_b9_owned_session_lifecycle_wire_shapes() {
     assert_eq!(response["success"], true, "{response}");
     assert!(response["data"]["id"].is_string(), "{response}");
 
-    // complete_owned_session on an unowned session answers the TS error.
     client.send_command(
         "co-1",
         &json!({ "type": "complete_owned_session", "activeSessionId": session_id }),

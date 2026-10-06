@@ -18,9 +18,8 @@ pub const DEFAULT_MAX_BYTES: u64 = 5 * 1024 * 1024;
 const FILE_NAME: &str = "telemetry.jsonl";
 
 /// Appends each event as one JSONL line: `{"name", "timestamp",
-/// "distinct_id", "properties"}`. This is the transparency mirror: it shows
-/// exactly what telemetry would leave the machine, with no content beyond the
-/// primitive property schema.
+/// "distinct_id", "properties"}`. The transparency mirror: shows exactly
+/// what telemetry would leave the machine.
 #[derive(Debug, Clone)]
 pub struct FileSink {
     path: PathBuf,

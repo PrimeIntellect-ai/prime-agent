@@ -1,11 +1,6 @@
-//! Worker summary/wire unit tests (moved with their concerns).
+//! Worker summary/wire unit tests.
 use super::*;
 
-/// The delivery's relationship label is edge-derived: a subagent
-/// sender whose durable parent edge points at this session is a
-/// child; a subagent from another family never is, no matter its
-/// runtime kind (the mislabeled-ack regression — sibling lanes'
-/// messages must not render "from child:").
 #[test]
 fn sender_child_edge_decides_the_relationship_label() {
     let true_child = json!({
@@ -63,9 +58,6 @@ fn sender_child_edge_decides_the_relationship_label() {
     ));
 }
 
-/// A message-less top-level session is a draft (hidden from the agents
-/// view); a session with messages is live; a resident subagent is live
-/// before its first message (TS `activeLifecycleForSession`).
 #[test]
 fn summary_lifecycle_is_message_based() {
     let empty = SessionCore::test_core(None, "/tmp".to_string());
@@ -87,15 +79,13 @@ fn summary_lifecycle_is_message_based() {
         .lifecycle,
         "live"
     );
-    // The busy-flip roster delta fires before the store flushes the
-    // admitted prompt; a busy turn is live at that wire moment (TS
-    // reads the runtime's in-memory messages, which already hold it).
+    // The busy-flip roster delta fires before the store flushes the admitted
+    // prompt; a busy turn is live at that wire moment.
     let mut busy = SessionCore::test_core(None, "/tmp".to_string());
     busy.busy = true;
     busy.running_tool_calls.insert("call-1".to_string());
     // `isRunningTools` is the streaming gate over the in-flight tool
-    // set (TS `isStreaming && pendingToolCalls.size > 0`): tools in
-    // flight read true only while the turn streams.
+    // set.
     assert!(
         session_summary(
             &busy, "default", None, None, /*bash_running=*/ false,
@@ -120,8 +110,7 @@ fn summary_lifecycle_is_message_based() {
         )
         .is_running_tools
     );
-    // The user bash state rides the summary as its own flag (TS
-    // `session.isBashRunning`).
+    // The user bash state rides the summary as its own flag.
     assert_eq!(
         session_summary(
             &busy, "default", None, None, /*bash_running=*/ true,
@@ -274,9 +263,8 @@ fn live_summary_usage_is_the_catalog_fold() {
         json!(catalog),
         "live and catalog rows agree"
     );
-    // And that one number is the whole file's own spend: the pre-cut
-    // turn ($1.00) + the summarizer ($0.25) + the kept turn ($0.50) —
-    // with both turns' and the summarizer's tokens folded in.
+    // The whole file's own spend: the pre-cut turn + the summarizer
+    // + the kept turn, tokens folded in.
     assert_eq!(
         json!(summary.usage),
         json!({ "inputTokens": 220, "outputTokens": 22, "cost": 1.75 })
@@ -284,10 +272,7 @@ fn live_summary_usage_is_the_catalog_fold() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A pathless `--no-session` store has no file to scan, so the same
-/// own-usage fold runs over its in-memory entries (TS
-/// `getOwnUsageSummary` over `sessionManager.getEntries()`): the live
-/// row bills the turn's own spend instead of reporting nothing.
+/// The live row bills the turn's own spend instead of reporting nothing.
 #[test]
 fn pathless_summary_usage_folds_the_in_memory_entries() {
     let mut store = crate::session_store::SessionFile::create("/tmp", None, 0);

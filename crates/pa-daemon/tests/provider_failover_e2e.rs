@@ -1,10 +1,7 @@
-//! End-to-end verifier for provider failover: a daemon worker session whose
-//! model is served by two configured providers. When the primary provider
-//! exhausts its quick retries, the turn must re-route to the next configured
-//! provider serving the same model (the `reason: "backup"` retry event),
-//! succeed there, and restore the primary (`restoredModel`). With every
-//! provider failing, the chain walks all candidates and surfaces the final
-//! failure like the single-provider loop does.
+//! Provider failover e2e: a two-provider session re-routes to the next
+//! configured provider when the primary exhausts its quick retries (the
+//! `reason: "backup"` retry event), succeeds, and restores the primary;
+//! with every provider failing, the chain walks all candidates.
 #![cfg(unix)]
 
 use std::fmt::Write as _;
@@ -172,8 +169,8 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path) -> Supervisor {
     panic!("supervisor socket never appeared");
 }
 
-/// One client connection: request/response plus every session event that
-/// streamed while the response was outstanding.
+/// One client connection: request/response plus the session events that stream while a response is
+/// outstanding.
 struct Client {
     reader: BufReader<std::os::unix::net::UnixStream>,
     writer: std::os::unix::net::UnixStream,
@@ -248,8 +245,6 @@ impl Client {
         }
     }
 
-    /// Drain pending session events until the socket stays quiet for
-    /// `quiet_ms`.
     fn drain_events(&mut self, quiet_ms: Duration) {
         let deadline = Instant::now() + Duration::from_secs(30);
         let mut last_line = Instant::now();
@@ -279,8 +274,8 @@ impl Client {
 }
 
 /// Shared harness: supervisor + a two-provider models.json (both serving
-/// `mock-1`, the catalog order the failover chain walks) + fast retry and
-/// failover settings + a created, attached session.
+/// `mock-1`, the order the failover chain walks) + fast retry/failover
+/// settings + a created, attached session.
 fn setup(
     name: &str,
     primary: &FailingMock,
@@ -327,9 +322,8 @@ fn setup(
         .to_string(),
     )
     .expect("write models.json");
-    // A fast quick-retry policy (one retry on the primary) and a fast
-    // failover policy (one retry per provider) so the test asserts the
-    // chain, not the delays.
+    // Fast quick-retry (one on the primary) and failover (one per provider) so the
+    // test asserts the chain, not the delays.
     std::fs::write(
         agent_dir.join("settings.json"),
         json!({
@@ -391,7 +385,6 @@ fn retry_end(events: &[Value]) -> &Value {
 
 #[test]
 fn provider_failure_fails_over_to_the_next_provider_and_recovers() {
-    // The primary always fails; the backup answers on its first request.
     let primary = FailingMock::start(usize::MAX, "never reached");
     let backup = FailingMock::start(0, "recovered on the backup provider");
     let (_dir, _supervisor, mut client, session_id) = setup("failover", &primary, &backup);
@@ -403,20 +396,14 @@ fn provider_failure_fails_over_to_the_next_provider_and_recovers() {
     assert_eq!(done["success"], true, "prompt must succeed: {done}");
     client.drain_events(Duration::from_secs(1));
 
-    // The primary got the initial request plus one quick retry; the
-    // failover switch routed the re-issued turn to the backup, which
-    // answered it.
     assert_eq!(primary.count(), 2, "primary requests: initial + 1 retry");
     assert_eq!(backup.count(), 1, "backup served the switched turn");
 
-    // The retry progression: one quick retry on the primary, then the
-    // provider switch (reason "backup", the backup reference, no delay).
     let starts = retry_starts(&client.events);
     assert_eq!(starts.len(), 2, "events: {:?}", client.events);
     assert_eq!(starts[0]["attempt"], 1);
     assert_eq!(starts[0]["maxAttempts"], 1);
-    // The quick retry's wait sits in the ±20% jitter band around the
-    // 50ms base delay ([40, 70] with rounding headroom).
+    // The quick retry's wait sits in the ±20% jitter band around the 50ms base delay.
     let delay = starts[0]["delayMs"].as_u64().expect("delayMs");
     assert!(
         (40..=70).contains(&delay),
@@ -432,13 +419,11 @@ fn provider_failure_fails_over_to_the_next_provider_and_recovers() {
         .expect("error message")
         .contains("mock provider overloaded"));
 
-    // The loop settles with the primary restored.
     let end = retry_end(&client.events);
     assert_eq!(end["success"], true);
     assert_eq!(end["attempt"], 2);
     assert_eq!(end["restoredModel"], "prime-inference/mock-1");
 
-    // The switched turn's assistant message reached the transcript.
     let answer = client
         .events
         .iter()
@@ -457,9 +442,8 @@ fn provider_failure_fails_over_to_the_next_provider_and_recovers() {
         .expect("backup assistant message_end");
     assert_eq!(answer["message"]["provider"], "prime-backup");
 
-    // The turn ends clean with the TS `turn_end` payload: the terminal
-    // assistant message (the backup provider's answer) and the turn's
-    // empty tool-result list, no error anywhere.
+    // The turn ends clean with the TS `turn_end` payload: the terminal assistant
+    // message (the backup's answer) and the empty tool-result list, no error anywhere.
     let turn_end = client
         .events
         .iter()
@@ -500,11 +484,9 @@ fn every_provider_failing_surfaces_the_final_error() {
     assert_eq!(done["success"], false, "prompt must fail: {done}");
     client.drain_events(Duration::from_secs(1));
 
-    // Both providers got their budget: initial + one retry each.
     assert_eq!(primary.count(), 2);
     assert_eq!(backup.count(), 2);
 
-    // The chain walked the only candidate, then surfaced the failure.
     let starts = retry_starts(&client.events);
     assert_eq!(starts.len(), 3, "events: {:?}", client.events);
     assert_eq!(starts[0].get("reason"), None);
@@ -525,8 +507,6 @@ fn every_provider_failing_surfaces_the_final_error() {
         .contains("mock provider overloaded"));
     assert_eq!(end.get("restoredModel"), None);
 
-    // The final failed assistant message reached the transcript and the
-    // turn ends with the error for headless callers.
     let failure = client
         .events
         .iter()
@@ -545,8 +525,8 @@ fn every_provider_failing_surfaces_the_final_error() {
         .rev()
         .find(|event| event.get("type").and_then(Value::as_str) == Some("turn_end"))
         .expect("turn_end");
-    // The TS `turn_end` shape: the terminal frame carries the failed
-    // assistant message as its payload (no separate error field).
+    // The TS `turn_end` shape: the terminal frame carries the failed assistant
+    // message as its payload (no separate error field).
     assert_eq!(turn_end["message"]["stopReason"], "error");
     assert!(turn_end["message"]["errorMessage"]
         .as_str()

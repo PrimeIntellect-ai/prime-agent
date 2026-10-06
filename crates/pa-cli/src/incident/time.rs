@@ -1,20 +1,17 @@
-//! `--since`/`--until` time parsing and the timeline's UTC stamp (TS
-//! `parseIncidentTimeBound` / `formatIncidentTime`).
+//! `--since`/`--until` time parsing and the timeline's UTC stamp.
 
 use super::IncidentUsageError;
 
-/// Milliseconds since the Unix epoch (the TS `Date` time value).
+/// Milliseconds since the Unix epoch.
 pub(crate) type EpochMs = i64;
 
-/// Parse a `--since`/`--until` bound. Times without a timezone are read
-/// as UTC, matching the timestamps the daemon logs; "20:02" means today
-/// at 20:02 UTC (TS `parseIncidentTimeBound`).
+/// Parse a `--since`/`--until` bound. Times without a timezone read as UTC,
+/// matching the daemon logs; "20:02" means today at 20:02 UTC.
 ///
 /// # Errors
 ///
-/// Returns [`IncidentUsageError`] for a value that is not an ISO
-/// date-time, a date, or a bare `HH:MM` today, or for an impossible date
-/// or an invalid timezone offset.
+/// Returns [`IncidentUsageError`] for a value that is not an ISO date-time, a
+/// date, or a bare `HH:MM`, or for an impossible date or invalid offset.
 pub(crate) fn parse_incident_time_bound(
     value: &str,
     now_ms: EpochMs,
@@ -155,7 +152,6 @@ pub(crate) fn parse_incident_time_bound(
     Ok(base_ms - offset_minutes.unwrap_or(0) * 60_000)
 }
 
-/// Parse exactly `len` ASCII digits.
 fn digits(text: &str) -> Option<u32> {
     if text.len() != 2 || !text.bytes().all(|b| b.is_ascii_digit()) {
         return None;
@@ -163,7 +159,6 @@ fn digits(text: &str) -> Option<u32> {
     text.parse().ok()
 }
 
-/// Take exactly `len` ASCII digits off the front of `rest`.
 fn take_digits(rest: &mut &str, len: usize) -> Option<u32> {
     let bytes = rest.as_bytes();
     if bytes.len() < len || !bytes[..len].iter().all(u8::is_ascii_digit) {
@@ -190,7 +185,7 @@ fn utc_parts(ms: EpochMs) -> (i64, u32, u32, u32, u32, u32) {
     )
 }
 
-/// `MM-DD HH:MM:SS` of the instant, UTC (TS `formatIncidentTime`).
+/// `MM-DD HH:MM:SS` of the instant, UTC.
 pub(crate) fn format_incident_time(ms: EpochMs) -> String {
     let (_, month, day, hour, minute, second) = utc_parts(ms);
     format!("{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}")
@@ -233,7 +228,6 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 mod tests {
     use super::*;
 
-    /// `new Date("2026-09-16T22:30:00Z")`.
     const NOW: i64 = 1_789_597_800_000; // 2026-09-16T22:30:00Z
 
     fn date_ms(text: &str) -> i64 {
@@ -283,8 +277,6 @@ mod tests {
 
     #[test]
     fn rejects_invalid_offset_minutes() {
-        // RFC 3339 offsets allow minutes 00-59 only; +00:60 must not shift
-        // by an hour.
         for garbage in [
             "2026-09-16T20:02+00:60",
             "2026-09-16T20:02-05:90",

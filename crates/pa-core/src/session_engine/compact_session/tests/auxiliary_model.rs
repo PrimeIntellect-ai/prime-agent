@@ -1,7 +1,6 @@
-//! Compact-session tests, the auxiliary-model routing family
-//! (moved with their concerns): the equal-selector and
-//! unusable-selector arms, over an aux context that pins one
-//! `auxiliaryModel` selector.
+//! Compact-session tests, the auxiliary-model routing family: the
+//! equal-selector and unusable-selector arms, over an aux context that
+//! pins one `auxiliaryModel` selector.
 use super::*;
 
 /// An aux context whose settings pin one `auxiliaryModel` selector.
@@ -23,9 +22,8 @@ fn aux_context(
     }
 }
 
-/// The routing context present with a selector equal to the session
-/// model keeps the session model: the compaction's wire call serves
-/// on the session model (the faux factory records the model).
+/// A selector equal to the session model keeps the session model (the
+/// faux factory records the model).
 #[tokio::test]
 async fn compaction_auxiliary_selector_equal_to_the_session_model_runs_on_the_session_model() {
     let registration = faux_registration();

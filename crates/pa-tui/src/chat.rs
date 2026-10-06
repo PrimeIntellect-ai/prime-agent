@@ -1,9 +1,6 @@
 //! Transcript component rendering: status rows, the user-message block,
 //! assistant messages (text, thinking, and their error rows), and the
-//! working loader line. Ports the TS chat components' row geometry:
-//! `user-message.ts` (Box 2x1 on `userMessageBg`), `assistant-message.ts`
-//! block spacers, and `loader.ts` (`Loader` + `agent-activity.ts` labels).
-//! Tool-call cards live in `crate::tool_card`.
+//! working loader line. Tool-call cards live in `crate::tool_card`.
 
 mod geometry;
 pub(crate) use geometry::{assistant_row_count, user_block_row_count};
@@ -14,7 +11,7 @@ use crate::width::str_width;
 use crate::{Line, Span};
 use ratatui::style::{Modifier, Style};
 
-/// How much detail the conversation shows (TS `setChatDetail` levels).
+/// How much detail the conversation shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Detail {
     /// `overview`: thinking hidden, tool output and edit diffs collapsed.
@@ -26,8 +23,7 @@ pub enum Detail {
 }
 
 impl Detail {
-    /// The Ctrl+O cycle (TS `toggleToolOutputExpansion`): overview adds
-    /// details, details adds the expanded output, all wraps to overview.
+    /// The Ctrl+O cycle: overview -> details -> all -> overview.
     #[must_use]
     pub fn next(self) -> Self {
         match self {
@@ -37,26 +33,22 @@ impl Detail {
         }
     }
 
-    /// Thinking blocks render (TS `hideThinkingBlock = detail === "overview"`).
     #[must_use]
     pub fn show_thinking(self) -> bool {
         !matches!(self, Detail::Overview)
     }
 
-    /// Tool output expands (TS `toolOutputExpanded = detail === "all"`).
     #[must_use]
     pub fn tool_output_expanded(self) -> bool {
         matches!(self, Detail::All)
     }
 
-    /// Edit diffs expand (TS `editDiffsExpanded = detail !== "overview"`).
     #[must_use]
     pub fn edit_diffs_expanded(self) -> bool {
         !matches!(self, Detail::Overview)
     }
 
-    /// The stored wire name (TS `ChatDetail`): "overview" | "details" |
-    /// "all".
+    /// The stored wire name (TS `ChatDetail`): "overview" | "details" | "all".
     #[must_use]
     pub fn wire_name(self) -> &'static str {
         match self {
@@ -66,12 +58,8 @@ impl Detail {
         }
     }
 
-    /// The level for a stored wire name (TS #2709 `getChatDetail`):
-    /// an unset or unknown value reads as the `overview` startup level -
-    /// the collapse mode, which renders every activity item exactly as
-    /// `details` does with only the thinking blocks hidden (operator
-    /// directive 2026-09-28: "collapse mode should just be details
-    /// mode, but WITHOUT THINKING BLOCKS").
+    /// The level for a stored wire name: an unset or unknown value reads
+    /// as the `overview` startup level (operator ruling 2026-09-28).
     #[must_use]
     pub fn from_wire_name(name: &str) -> Self {
         match name {
@@ -84,20 +72,16 @@ impl Detail {
 
 /// One rendered chat component.
 #[derive(Debug, Clone, PartialEq)]
-/// The style tier of a status row (TS `showStatus`/`showWarning`/`showError`).
+/// The style tier of a status row.
 pub enum StatusKind {
-    /// Muted informational note.
     Info,
-    /// Warning highlight.
     Warning,
-    /// Error highlight.
     Error,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ChatEntry {
-    /// `showStatus` / `showWarning` / `showError` rows (startup notices,
-    /// client notes, turn errors).
+    /// Startup notices, client notes, turn errors.
     Status { text: String, kind: StatusKind },
     /// The user's submitted prompt.
     User { text: String },
@@ -107,7 +91,6 @@ pub enum ChatEntry {
     /// The compaction summary row (TS `CompactionSummaryMessageComponent`):
     /// `◆ Context compacted` with the summary below.
     CompactionSummary {
-        /// The summarizer's summary text.
         summary: String,
         /// The context size before the compaction (the expanded metadata).
         tokens_before: u64,
@@ -119,26 +102,21 @@ pub enum ChatEntry {
     /// One tool call and its execution state (rendered by
     /// [`crate::tool_card`]).
     Tool(Box<ToolCallCard>),
-    /// One agent-message summary row (TS `AgentMessageComponent`: the
-    /// received transcript rows).
+    /// One agent-message summary row: the received transcript rows.
     AgentMessage(Box<crate::custom_message::AgentMessageRow>),
-    /// One skill-invocation card (TS `SkillInvocationMessageComponent`):
-    /// the expandable `<skill>`-block card a user message carrying a
-    /// skill invocation parses into (the trailing arguments render as the
-    /// user block that follows it).
+    /// One skill-invocation card: the expandable `<skill>`-block card a
+    /// user message carrying a skill invocation parses into.
     SkillInvocation(Box<crate::custom_message::SkillInvocationRow>),
-    /// One injected prompt row (TS `InjectedPromptMessageComponent`).
+    /// One injected prompt row.
     InjectedPrompt(Box<crate::custom_message::InjectedPromptRow>),
-    /// One `!`/`!!` bash run (TS `BashExecutionComponent`): the bordered
-    /// card the live `bash_start`/`bash_output`/`bash_end` events, the
-    /// replayed `bashExecution` row, and the pending-while-streaming hold
-    /// all render through.
+    /// One `!`/`!!` bash run: the live `bash_start`/`bash_output`/`bash_end` events, the replayed
+    /// `bashExecution` row, and the pending-while-streaming hold all render through this card.
     BashExecution(Box<crate::bash_card::BashExecutionCard>),
-    /// One background-shell completion row (TS `ShellCompletionComponent`).
+    /// One background-shell completion row.
     ShellCompletion(Box<crate::custom_message::ShellCompletionRow>),
-    /// One refinement outcome row (TS `RefinementOutcomeMessageComponent`).
+    /// One refinement outcome row.
     RefinementOutcome(Box<crate::custom_message::RefinementOutcomeRow>),
-    /// One generic custom row (TS `CustomMessageComponent` box).
+    /// One generic custom row.
     CustomPanel(Box<crate::custom_message::CustomPanelRow>),
 }
 
@@ -159,19 +137,16 @@ pub struct AssistantMessage {
     pub has_tool_calls: bool,
     /// The message is still streaming (an update may replace its blocks).
     pub streaming: bool,
-    /// A failed assistant message's error row (TS renders abort and error
-    /// text inside the message component): `aborted` always renders,
-    /// `error` only without tool calls (their cards carry the failure).
+    /// A failed assistant message's error row: `aborted` always renders, `error` only
+    /// without tool calls (their cards carry the failure).
     pub error: Option<String>,
     /// `stopReason: "aborted"` (drives the tool-call trailing spacer).
     pub aborted: bool,
 }
 
 impl AssistantMessage {
-    /// TS `AssistantMessageComponent.hasTrailingSpace`: the tool-call
-    /// separator renders for visible bodies, aborted messages, and messages
-    /// not following tool activity (the same condition `render_assistant`
-    /// applies).
+    /// The tool-call separator renders for visible bodies, aborted
+    /// messages, and messages not following tool activity.
     #[must_use]
     pub fn has_trailing_space(&self, detail: Detail, preceded_by_tool_activity: bool) -> bool {
         let has_visible_content = self.blocks.iter().any(|block| match block {
@@ -193,9 +168,8 @@ pub enum MessageBlock {
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkingState {
     pub activity: &'static str,
-    /// A transient message owned by the running tool (TS
-    /// `workingMessage`, set by the python-kernel bootstrap): replaces the
-    /// activity label and the token count until the tool clears it.
+    /// A transient message owned by the running tool (set by the python-kernel
+    /// bootstrap): replaces the activity label and the token count until the tool clears it.
     pub message: Option<String>,
     /// Streaming direction: `true` while tokens flow down.
     pub download: bool,
@@ -204,7 +178,7 @@ pub struct WorkingState {
     pub elapsed_secs: u64,
 }
 
-/// TS `message_end`'s aborted arm: the live abort row's text — the retry
+/// The live abort row's text (TS `message_end`'s aborted arm): the retry
 /// count and the working-elapsed suffix ride the client, never the wire
 /// (the rebuild path keeps the stored "Operation aborted").
 #[must_use]
@@ -222,7 +196,6 @@ pub fn live_abort_text(retry_attempt: u32, elapsed_secs: Option<u64>) -> String 
     }
 }
 
-/// TS `formatWorkingElapsed`: "3s", "1m 05s", "1h 02m 03s", "1d 02h 03m 04s".
 #[must_use]
 pub fn format_working_elapsed(total_secs: u64) -> String {
     let secs = total_secs % 60;
@@ -267,16 +240,14 @@ impl WorkingState {
     }
 }
 
-/// Spinner frames (TS `Loader` `DEFAULT_FRAMES`).
+/// Spinner frames.
 pub(crate) const LOADER_FRAMES: [&str; 10] = [
     "\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283c}", "\u{2834}", "\u{2826}", "\u{2827}",
     "\u{2807}", "\u{280f}",
 ];
 
-/// The working pulse icon frames (TS `theme/working-icon.ts`
-/// `WORKING_ICON_FRAMES`, 250ms interval): the shared "still working"
-/// marker across the agents view, the subagent tray, and in-progress
-/// tool markers.
+/// The working pulse icon frames (250ms interval): the shared "still working"
+/// marker across the agents view, the subagent tray, and tool markers.
 pub const WORKING_ICON_FRAMES: [&str; 4] = ["\u{25c7}", "\u{25c8}", "\u{25c6}", "\u{25c8}"];
 
 #[must_use]
@@ -284,12 +255,10 @@ pub fn working_icon_frame(frame: usize) -> &'static str {
     WORKING_ICON_FRAMES[frame % WORKING_ICON_FRAMES.len()]
 }
 
-/// A blank line (`Spacer(1)`).
 fn spacer() -> Line {
     Vec::new()
 }
 
-/// Pad a rendered line to the full width with a base style.
 pub(crate) fn pad_to(line: Line, width: usize, base: Style) -> Line {
     let used: usize = line.iter().map(|s| str_width(&s.content)).sum();
     let mut out = line;
@@ -311,11 +280,8 @@ pub fn render_text_rows(text: &str, style: Style, width: usize) -> Vec<Line> {
     let row_count = wrapped.len();
     let mut out = Vec::new();
     for (index, line) in wrapped.into_iter().enumerate() {
-        // The TS Text component prepends the margin outside the styled
-        // content: the margin itself keeps the default foreground. Wrapped
-        // rows keep the ANSI state open through their trailing padding (the
-        // closing reset lands on the final wrapped row), so continuation
-        // rows pad with the row style.
+        // The margin keeps the default foreground. Wrapped rows keep the ANSI state open
+        // through their trailing padding, so continuation rows pad with the row style.
         let mut row: Line = vec![Span::raw(" ")];
         let styled: Line = line
             .into_iter()
@@ -335,13 +301,9 @@ pub fn render_text_rows(text: &str, style: Style, width: usize) -> Vec<Line> {
     out
 }
 
-/// The user-message block (TS `UserMessageComponent`: Box(2,1) on
-/// `userMessageBg`, markdown inside colored `userMessageText`). The
-/// prompt-highlight tokens (the accent command segment of a recognized
-/// leading slash command, the `@path`/`--flag` argument tokens) render in
-/// their own colors: TS masks them to same-width placeholders before the
-/// markdown layout and restores them after, so markdown cannot wrap,
-/// emphasize, or eat them (`HighlightedMarkdown` + `PromptTokenMask`).
+/// The user-message block (TS `UserMessageComponent`: Box(2,1) on `userMessageBg`,
+/// markdown inside colored `userMessageText`). Prompt-highlight tokens render
+/// in their own colors (TS masks them to same-width placeholders so markdown cannot eat them).
 #[must_use]
 pub fn render_user_block(
     text: &str,
@@ -368,12 +330,9 @@ pub fn render_user_block(
     }
     for line in rendered {
         let mut row: Line = vec![Span::styled("  ".to_string(), bg)];
-        // The user block colors everything `userMessageText` on the block
-        // background; markdown structure (wrapping) is kept, its own colors
-        // are not. The masked placeholders restore to their token colors
-        // over that base, and the link affordance survives the restyle:
-        // the underlined label keeps the underline, the URL bracket keeps
-        // the dim link slot.
+        // The user block colors everything `userMessageText` on the block background;
+        // markdown structure (wrapping) is kept, its own colors are not, and the link
+        // affordance survives the restyle.
         let restyled: Line = line
             .into_iter()
             .map(|span| {
@@ -402,9 +361,8 @@ pub fn render_user_block(
     rows
 }
 
-/// One assistant message (TS `AssistantMessageComponent`): a leading spacer
-/// when a visible body exists, markdown blocks separated by spacers (text in
-/// `mdBody`, thinking in `dim`), and a trailing spacer before its tool calls.
+/// One assistant message: a leading spacer when a visible body exists, markdown
+/// blocks separated by spacers, and a trailing spacer before its tool calls.
 pub fn render_assistant(
     message: &AssistantMessage,
     detail: Detail,
@@ -450,15 +408,11 @@ pub fn render_assistant(
             width,
         ));
     }
-    // TS `AssistantMessageComponent.hasTrailingSpace`: the tool-call
-    // separator renders for visible bodies, aborted messages, and messages
-    // not following tool activity.
     if geometry::trailing_space(message, has_visible_content, preceded_by_tool_activity) {
         out.push(spacer());
     }
-    // Zone markers on message bodies without tool calls (TS
-    // `AssistantMessageComponent.render`: tool-call messages return
-    // unmarked).
+    // Zone markers on message bodies without tool calls (TS `AssistantMessageComponent.render`:
+    // tool-call messages return unmarked).
     if !message.has_tool_calls {
         if let Some(first) = out.first_mut() {
             crate::osc133::mark_start(first);
@@ -485,11 +439,8 @@ pub(crate) fn render_markdown_block(
     for line in rendered {
         let mut row: Line = vec![Span::styled(" ".to_string(), Style::default())];
         row.extend(line);
-        // TS pads every markdown row with unstyled spaces after the row's
-        // closing 39m reset (tmux trims them); padding never carries the
-        // content style, or a dangling SGR prefix survives the trim on rows
-        // whose content style differs from the body color (code rows, blank
-        // space rows).
+        // Padding never carries the content style: a dangling SGR prefix survives tmux's
+        // trim on rows whose content style differs from the body color.
         out.push(pad_to(row, width, Style::default()));
     }
     out
@@ -539,11 +490,8 @@ pub fn render_loader(
     let mut row: Line = vec![Span::styled(" ".to_string(), Style::default())];
     row.push(Span::styled(spinner.to_string(), accent));
     if !message.is_empty() {
-        // The gap between the spinner and the label is unstyled (TS's
-        // `Loader` builds `${renderedFrame} ${messageColorFn(message)}`:
-        // the plain space sits between chalk's two colored runs, so the
-        // emitted row resets to default fg there instead of carrying the
-        // label color over the gap).
+        // The gap between the spinner and the label is unstyled: the plain space sits
+        // between the two colored runs, so the row resets to default fg there.
         row.push(Span::raw(" ".to_string()));
         row.push(Span::styled(message, muted));
     }
@@ -557,7 +505,7 @@ pub struct RetryState {
     pub attempt: u32,
     pub max_attempts: u32,
     pub ends_at: std::time::Instant,
-    /// The provider error that started this retry (TS `errorMessage`).
+    /// The provider error that started this retry.
     pub error_message: String,
     /// Why the retry started: a quick retry counts down; a provider
     /// failover switch names the backup the turn re-routes to.
@@ -573,12 +521,9 @@ impl RetryState {
             .as_secs()
     }
 
-    /// The loader message for this retry. (SANCTIONED DIVERGENCE from the
-    /// TS `auto_retry_start` rendering, operator ruling 2026-09-23: the
-    /// quick-retry line names the ERROR too, not just the attempt — this
-    /// one transient line is the only error the chat shows while the
-    /// episode runs, updated in place with the retry count and the
-    /// time-until-next-retry countdown.)
+    /// The loader message for this retry. SANCTIONED DIVERGENCE from the TS
+    /// `auto_retry_start` rendering (operator ruling 2026-09-23): the quick-retry line
+    /// names the ERROR too, not just the attempt.
     fn message(&self) -> String {
         match &self.reason {
             RetryStartReason::Quick => format!(
@@ -612,7 +557,5 @@ pub fn render_retry(retry: &RetryState, frame: usize, theme: &Theme, width: usiz
     vec![spacer(), pad_to(row, width, Style::default())]
 }
 
-// The unit battery lives in the child module (chat::tests); its use-super
-// glob resolves through this facade's bindings and re-exports.
 #[cfg(test)]
 mod tests;

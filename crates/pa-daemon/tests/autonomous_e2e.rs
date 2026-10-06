@@ -1,9 +1,7 @@
-//! End-to-end verifier for the autonomous continuation driver: a daemon
-//! worker session over the scripted faux engine must, after every settled
-//! turn, run the configured quality gates, inject the gate-failure
-//! continuation as a durable user row, and stop the run (durable
-//! `autonomous_status` stop row + wire events) when the gates pass or a
-//! configured limit is reached. Limits must stop the run the same way.
+//! Autonomous continuation driver e2e: a daemon worker session over the faux
+//! engine runs the quality gates after every settled turn, injects the
+//! gate-failure continuation as a durable user row, and stops the run when the
+//! gates pass or a limit is reached.
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -40,10 +38,9 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path) -> Supervisor {
         .stderr(Stdio::null())
         .env_remove("PRIME_API_KEY")
         .env_remove("PRIME_AGENT_CODING_AGENT_DIR")
-        // A supervisor killed at teardown must not leak its session workers
-        // into later test binaries: the worker's supervisor-lost exit (TS
-        // `exitIfSupervisorOrphanedForTooLong`) runs on this short window
-        // instead of the 5-minute default.
+        // A supervisor killed at teardown must not leak its session workers: the worker's
+        // supervisor-lost exit (TS `exitIfSupervisorOrphanedForTooLong`) runs on this short
+        // window, not the 5-minute default.
         .env(
             pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
             "15000",
@@ -63,8 +60,8 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path) -> Supervisor {
     panic!("supervisor socket never appeared");
 }
 
-/// One client connection: request/response plus every session event that
-/// streamed while the response was outstanding.
+/// One client connection: request/response plus the session events that stream while a response is
+/// outstanding.
 struct Client {
     reader: BufReader<std::os::unix::net::UnixStream>,
     writer: std::os::unix::net::UnixStream,
@@ -121,7 +118,6 @@ impl Client {
             .unwrap_or_else(|error| panic!("write command {id}: {error}"));
     }
 
-    /// The response for `id`, with every session event observed on the way.
     fn request(&mut self, id: &str) -> Value {
         let deadline = Instant::now() + Duration::from_mins(3);
         loop {
@@ -140,8 +136,8 @@ impl Client {
         }
     }
 
-    /// Drain pending session events until the socket stays quiet for
-    /// `quiet_ms` (the supervisor buffers a routed command's events).
+    /// Drain pending session events until the socket stays quiet for `quiet_ms`
+    /// (the supervisor buffers a routed command's events).
     fn drain_events(&mut self, quiet_ms: Duration) {
         let deadline = Instant::now() + Duration::from_secs(30);
         let mut last_line = Instant::now();
@@ -170,8 +166,8 @@ impl Client {
     }
 }
 
-/// The harness: a supervisor, a faux-scripted session over the real agent
-/// engine, and the counter file the quality gate advances.
+/// The harness: a supervisor, a faux-scripted session over the real agent engine, and the counter
+/// file.
 struct Harness {
     dir: tempfile::TempDir,
     _supervisor: Supervisor,
@@ -191,9 +187,9 @@ fn setup(name: &str, responses: &Value) -> Harness {
         json!({ "engine": "faux", "responses": responses }).to_string(),
     )
     .expect("write faux script");
-    // The gate consults a counter file in the temp dir (absolute paths: the
-    // engine's cwd is the worker process cwd, not the session cwd). It fails
-    // the first consult (0 >= 1 is false) and passes from the second on.
+    // The gate consults a counter file in the temp dir (absolute paths: the engine's
+    // cwd is the worker process cwd). It fails the first consult and passes from the
+    // second on.
     let counter = dir.path().join("gate-count");
     let gate = format!(
         "n=$(cat {0} 2>/dev/null || echo 0); echo $((n+1)) > {0}; [ $n -ge 1 ]",
@@ -236,7 +232,6 @@ fn setup(name: &str, responses: &Value) -> Harness {
 }
 
 impl Harness {
-    /// Run one prompt to completion and drain its events.
     fn prompt(&mut self, id: &str, message: &str) {
         self.client.send_command(
             id,
@@ -251,7 +246,6 @@ impl Harness {
         self.client.drain_events(Duration::from_secs(1));
     }
 
-    /// The session file's JSONL entries (the only session in the dir).
     fn session_entries(&self) -> Vec<Value> {
         let session_dir = self.dir.path().join("agent").join("sessions");
         let file = std::fs::read_dir(&session_dir)
@@ -268,7 +262,6 @@ impl Harness {
             .collect()
     }
 
-    /// The wire events of one kind: `message_end` frames carrying the role.
     fn message_ends(&self, role: &str) -> Vec<Value> {
         self.client
             .events
@@ -281,7 +274,6 @@ impl Harness {
             .collect()
     }
 
-    /// The durable `custom_message` entries of one `customType`.
     fn custom_entries(&self, custom_type: &str) -> Vec<Value> {
         self.session_entries()
             .into_iter()
@@ -290,8 +282,7 @@ impl Harness {
     }
 }
 
-/// The message's text: user/assistant rows carry content blocks, custom
-/// rows a plain string.
+/// The message's text: user/assistant rows carry content blocks, custom rows a plain string.
 fn text_of(message: &Value) -> String {
     match &message["content"] {
         Value::String(text) => text.clone(),
@@ -305,7 +296,6 @@ fn text_of(message: &Value) -> String {
     }
 }
 
-/// The durable `message` entries of one role, in order.
 fn durable_messages(harness: &Harness, role: &str) -> Vec<String> {
     harness
         .session_entries()
@@ -315,7 +305,6 @@ fn durable_messages(harness: &Harness, role: &str) -> Vec<String> {
         .collect()
 }
 
-/// The durable `custom_message` rows whose content starts with `prefix`.
 fn durable_autonomous_rows(harness: &Harness, prefix: &str) -> Vec<Value> {
     harness
         .custom_entries("autonomous_status")
@@ -342,8 +331,8 @@ fn autonomous_gate_failure_then_pass_stops_the_run_in_run() {
             harness.gate.clone()
         ),
     );
-    // The enable prompt is a session command: its durable rows are already
-    // emitted and no model turn ran yet.
+    // The enable prompt is a session command: its durable rows are already emitted
+    // and no model turn ran yet.
     assert_eq!(harness.message_ends("assistant"), Vec::<Value>::new());
     assert_eq!(
         durable_autonomous_rows(&harness, "[autonomous-status: on]").len(),
@@ -353,8 +342,8 @@ fn autonomous_gate_failure_then_pass_stops_the_run_in_run() {
 
     harness.prompt("go", "build the feature");
 
-    // Turn 1 fails the gate (counter at 0), so the driver injects the
-    // gate-failure continuation; turn 2 passes the gate and the run stops.
+    // Turn 1 fails the gate (counter at 0), so the driver injects the gate-failure
+    // continuation; turn 2 passes the gate and the run stops.
     let assistants: Vec<String> = harness
         .message_ends("assistant")
         .iter()
@@ -380,10 +369,9 @@ fn autonomous_gate_failure_then_pass_stops_the_run_in_run() {
         user_texts[1]
     );
 
-    // The continuation is a durable user row that reached the wire as its
-    // message pair, and the gate-passed stop writes no row (the TS shape,
-    // probed against the binary: the stop surfaces through the status
-    // request and the headless exit contract, never the stream).
+    // The continuation is a durable user row that reached the wire as its message pair,
+    // and the gate-passed stop writes no row (the TS shape: the stop surfaces through the
+    // status request and the headless exit contract, never the stream).
     let durable_users = durable_messages(&harness, "user");
     assert!(
         durable_users
@@ -391,9 +379,9 @@ fn autonomous_gate_failure_then_pass_stops_the_run_in_run() {
             .any(|text| text.starts_with("[autonomous-continuation: gate-failed]")),
         "durable user rows: {durable_users:?}"
     );
-    // The in-run ordering (the TS frame order): the continuation's user
-    // row pair is preceded by the continuation turn's `turn_start`, which
-    // follows the settled turn's `turn_end` with no run boundary between.
+    // The in-run ordering (the TS frame order): the continuation's user row pair is
+    // preceded by its `turn_start`, which follows the settled turn's `turn_end` with no
+    // run boundary between.
     let continuation_index = harness
         .client
         .events
@@ -445,8 +433,8 @@ fn autonomous_limit_reached_stops_the_run_without_a_row() {
     );
     harness.prompt("go", "build the feature");
 
-    // Turn 1 has no terminal evidence, so it consumes the only continuation;
-    // turn 2 hits the max-continuations cap and the run stops.
+    // Turn 1 has no terminal evidence, so it consumes the only continuation; turn 2
+    // hits the max-continuations cap and the run stops.
     let assistants: Vec<String> = harness
         .message_ends("assistant")
         .iter()
@@ -464,9 +452,8 @@ fn autonomous_limit_reached_stops_the_run_without_a_row() {
         "plain continuation: {}",
         user_texts[1]
     );
-    // The limit stop writes no row and no stream frame (the TS shape,
-    // probed against the binary): the durable autonomous_status rows are
-    // the command's alone.
+    // The limit stop writes no row and no stream frame (the TS shape, probed
+    // against the binary): the durable autonomous_status rows are the command's alone.
     assert!(
         durable_autonomous_rows(&harness, "[autonomous-stop:").is_empty(),
         "no durable stop row"

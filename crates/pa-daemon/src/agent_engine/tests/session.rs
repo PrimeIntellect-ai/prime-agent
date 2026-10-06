@@ -3,13 +3,9 @@ use super::*;
 use crate::engine::PromptBatchRow;
 
 /// `get_commands` enumerates the session's skills as `skill:<name>`
-/// commands (TS `createAgentConnectionCommands`) — including before the
-/// first prompt: the read seam demand-builds the core session (the TS
-/// session exists from create), so the client's slash menu sees the
-/// skill inventory right after attach. The faux provider registers under
-/// `FAUX_TEST_LOCK` on a blocking thread (the lock is std, so it never
-/// rides an await); the first model resolution there is the registration,
-/// and the demand-build's resolution reads the cached model.
+/// commands, including before the first prompt (the read seam demand-builds
+/// the core session). The faux provider registers under `FAUX_TEST_LOCK`
+/// on a blocking thread (the lock is std, so it never rides an await).
 #[tokio::test]
 async fn get_commands_enumerates_skills_before_the_first_prompt() {
     use crate::engine::SessionEngine as _;
@@ -46,9 +42,7 @@ async fn get_commands_enumerates_skills_before_the_first_prompt() {
         .unwrap();
         let engine = std::sync::Arc::new(engine);
         engine.register_arc();
-        // Register the faux provider under the lock (this resolution is
-        // the registration); the async section then resolves the cached
-        // model without re-registering.
+        // Register under the lock; the async section resolves the cached model.
         let model = engine.resolve_model().expect("faux model");
         drop(model);
         (engine, dir)
@@ -66,9 +60,8 @@ async fn get_commands_enumerates_skills_before_the_first_prompt() {
         .iter()
         .filter(|command| command.get("source").and_then(Value::as_str) == Some("skill"))
         .collect();
-    // The checkout's own bundled skills (the packaged `skills/` layout)
-    // enumerate too, so the assertion is on the test's own skill, not the
-    // count.
+    // The checkout's bundled skills enumerate too, so the assertion is
+    // on the test's own skill, not the count.
     let command = skill_commands
         .iter()
         .find(|command| command.get("name").and_then(Value::as_str) == Some("skill:demo-skill"))
@@ -84,8 +77,7 @@ async fn get_commands_enumerates_skills_before_the_first_prompt() {
             .and_then(Value::as_str),
         Some("user")
     );
-    // Every skill command carries the `skill:` name form and its source
-    // info (the menu row's source label reads them).
+    // Every skill command carries the `skill:` name form and source info.
     for command in &skill_commands {
         assert!(command
             .get("name")
@@ -95,13 +87,6 @@ async fn get_commands_enumerates_skills_before_the_first_prompt() {
     }
 }
 
-/// The TS replacement teardown (`teardownForReplacement` -> `teardownCurrent`
-/// -> `session.disposeAsync()`): retiring the built session drops it (the
-/// session's kernel disposes with it), and the replacement branch parked
-/// while the session was unbuilt is adopted by the async build funnel -
-/// the read-seam build, not just the turn-driven one, must consume the
-/// parked branch, or a read seam that rebuilt first would strand the
-/// replacement's context.
 #[tokio::test]
 async fn replacement_teardown_retires_the_session_and_the_funnel_adopts_the_branch() {
     let engine = {
@@ -115,12 +100,9 @@ async fn replacement_teardown_retires_the_session_and_the_funnel_adopts_the_bran
         .expect("prompt join");
         engine
     };
-    // The prompt built the session.
     assert!(engine.session.lock().await.is_some());
 
-    // Retire: the built session drops with its mirrored goal handles (the
-    // kernel dispose runs under the build gate; the harness session has
-    // no live kernel).
+    // Retire: the built session drops with its mirrored goal handles.
     engine.retire_session_runtime().await;
     assert!(engine.session.lock().await.is_none());
     assert!(engine
@@ -129,8 +111,7 @@ async fn replacement_teardown_retires_the_session_and_the_funnel_adopts_the_bran
         .expect("goal runtime lock")
         .is_none());
 
-    // The replacement tail parks the moved branch on the unbuilt engine
-    // (the worker parks it on a blocking thread; so does the test).
+    // Park the moved branch on the unbuilt engine (the worker parks it on a blocking thread).
     let mut store = crate::session_store::SessionFile::create("/tmp", None, 0);
     store.append_message(&json!({
         "role": "user",
@@ -157,9 +138,7 @@ async fn replacement_teardown_retires_the_session_and_the_funnel_adopts_the_bran
         .expect("pending branch lock")
         .is_some());
 
-    // The async funnel's build adopts the parked branch: the fresh
-    // session starts on the moved branch, not the retired session's
-    // context.
+    // The async funnel's build adopts the parked branch.
     let model = engine.resolve_model().expect("model");
     engine
         .ensure_core_session_async(&model)
@@ -196,19 +175,12 @@ async fn replacement_teardown_retires_the_session_and_the_funnel_adopts_the_bran
     drop(state);
     drop(session);
     // The engine owns a private runtime; dropping it from an async
-    // context panics, so the teardown rides a blocking thread.
+    // context panics — the teardown rides a blocking thread.
     tokio::task::spawn_blocking(move || drop(engine))
         .await
         .expect("engine drop join");
 }
 
-/// A live branch rebuild reloads the goal state from the moved branch (TS
-/// `_reloadGoalStateFromBranch` at the `_navigateTree` tail): a branch
-/// that predates the goal rows leaves the driver on the branch's own
-/// (empty) state, moving back onto the branch that owns the rows
-/// restores them, and each reload's change publishes as the
-/// `goal_update` payload exactly once (the on-change dedupe the turn
-/// emissions share).
 #[tokio::test]
 async fn live_branch_rebuild_reloads_the_goal_state_from_the_moved_branch() {
     let engine = {
@@ -225,18 +197,15 @@ async fn live_branch_rebuild_reloads_the_goal_state_from_the_moved_branch() {
         .expect("prompt join");
         std::sync::Arc::new(engine)
     };
-    // The prompt built the session and the goal commands left the paused
-    // goal's `thread_goal_state` rows on the live branch.
+    // The goal commands left the paused goal's rows on the live branch.
     assert!(engine.session.lock().await.is_some());
     let goal_before = engine.goal_state_value();
     assert_eq!(goal_before["status"], "paused", "state: {goal_before:?}");
     assert_eq!(goal_before["objective"], "ship it");
     let goal_id = goal_before["goalId"].as_str().expect("goal id").to_string();
 
-    // The live branch (the entries the driver's rows live on), captured
-    // for the move back. The engine owns a private runtime, so every
-    // engine call (the block_on the capture needs) rides a blocking
-    // thread.
+    // The live branch, captured for the move back. Every engine call
+    // (the block_on the capture needs) rides a blocking thread.
     let goal_branch = {
         let engine = std::sync::Arc::clone(&engine);
         tokio::task::spawn_blocking(move || {
@@ -251,8 +220,8 @@ async fn live_branch_rebuild_reloads_the_goal_state_from_the_moved_branch() {
                 .block_on(async { handles.session.lock().await })
                 .get_all_entries()
                 .to_vec();
-            // The moved branch is the post-header path (the store form the
-            // worker hands the engine carries no header row).
+            // The moved branch is the post-header path (the worker's
+            // store form carries no header row).
             entries
                 .iter()
                 .filter(|entry| !matches!(entry, pa_types::session::FileEntry::Header { .. }))
@@ -286,17 +255,14 @@ async fn live_branch_rebuild_reloads_the_goal_state_from_the_moved_branch() {
     }
     let reloaded = engine.goal_state_value();
     assert_eq!(reloaded["status"], "idle", "state: {reloaded:?}");
-    // The reload publishes its change once, then stays silent (TS
-    // `_emitGoalUpdate` at the reload; the dedupe keeps an unchanged
-    // state quiet).
+    // The reload publishes its change once, then stays silent (the dedupe).
     let update = engine
         .goal_update_after_rebuild()
         .expect("the reload announced the change");
     assert_eq!(update["status"], "idle");
     assert!(engine.goal_update_after_rebuild().is_none());
 
-    // Moving back onto the branch that owns the goal rows restores them
-    // (the same-goal id and objective, the durable counters).
+    // Moving back onto the branch that owns the goal rows restores them.
     {
         let engine = std::sync::Arc::clone(&engine);
         tokio::task::spawn_blocking(move || {
@@ -315,17 +281,13 @@ async fn live_branch_rebuild_reloads_the_goal_state_from_the_moved_branch() {
     assert_eq!(restored["objective"], "ship it");
     assert_eq!(restored["goalId"].as_str(), Some(goal_id.as_str()));
 
-    // The engine owns a private runtime; dropping it from an async
-    // context panics, so the teardown rides a blocking thread.
     tokio::task::spawn_blocking(move || drop(engine))
         .await
         .expect("engine drop join");
 }
 
-/// The model-side user rows of the built core session (the loop's
-/// `message_end` persistence): the texts the admitted turn actually
-/// carried, which is what the transcript rows and the provider request
-/// must agree on.
+/// The model-side user rows of the built core session: the texts the
+/// admitted turn actually carried.
 fn core_session_user_texts(engine: &AgentSessionEngine) -> Vec<String> {
     engine.runtime.block_on(async {
         let guard = engine.session.lock().await;
@@ -349,9 +311,8 @@ fn core_session_user_texts(engine: &AgentSessionEngine) -> Vec<String> {
 }
 
 /// One faux-driven engine with a demo skill installed on disk, running
-/// `prompt` (+ any `batch` rows) through the daemon's admission seam (the
-/// `/skill:` expansion site) and collecting the emitted events. The faux
-/// lock discipline is [`run_prompts`]'s: held across the whole run.
+/// `prompt` (+ any `batch` rows) through the admission seam (the
+/// `/skill:` expansion site).
 fn run_skill_prompt_body(
     skill_body: &str,
     prompt: &str,
@@ -412,19 +373,11 @@ fn run_skill_prompt_body(
     (engine, events)
 }
 
-/// The single-prompt form of [`run_skill_prompt_body`]: the demo skill's
-/// body is the plain protocol line.
+/// The single-prompt form of [`run_skill_prompt_body`].
 fn run_skill_prompt(prompt: &str) -> Vec<EngineEvent> {
     run_skill_prompt_body("Run the demo protocol.", prompt, &[]).1
 }
 
-/// A bare `/skill:<name>` submission (no task text) admits the turn with
-/// the harness-owned no-task instruction appended: the accepted row is
-/// the expanded skill block whose trailing user message is the
-/// instruction (the engine floor), never the bare protocol, and the
-/// model turn runs (the faux answer lands, no admission error). The
-/// driver is synchronous (the engine's own runtime drives the turn), so
-/// this is a plain test like [`run_prompts`]'s callers.
 #[test]
 fn a_bare_skill_invocation_admits_with_the_no_task_instruction() {
     let events = run_skill_prompt("/skill:demo-skill");
@@ -449,7 +402,6 @@ fn a_bare_skill_invocation_admits_with_the_no_task_instruction() {
         parsed.content.contains("Run the demo protocol."),
         "the block body carries the skill content: {parsed:?}"
     );
-    // The turn admits: the faux answer lands and no error ends the run.
     assert_eq!(assistant_texts(&events), vec!["ok"]);
     assert!(
         !events
@@ -459,9 +411,6 @@ fn a_bare_skill_invocation_admits_with_the_no_task_instruction() {
     );
 }
 
-/// A `/skill:<name> args` invocation stays unchanged by the floor: the
-/// accepted row persists the expanded block with the user's args as the
-/// trailing user message, and the appended instruction never appears.
 #[test]
 fn a_skill_invocation_with_args_persists_the_block_and_the_args() {
     let events = run_skill_prompt("/skill:demo-skill fix the flake");
@@ -485,13 +434,6 @@ fn a_skill_invocation_with_args_persists_the_block_and_the_args() {
     assert_eq!(assistant_texts(&events), vec!["ok"]);
 }
 
-/// A batched bare `/skill:<name>` row admits on the SAME text its
-/// accepted row persists (the seam rewrites the batch in place before the
-/// turn runs): the emitted transcript row AND the model-side admitted row
-/// both carry the block with the floor's instruction — the transcript and
-/// the provider request never disagree (the core's batch admission
-/// re-expands raw `/skill:` commands, which would drop the floor from the
-/// model's copy while the emitted row keeps it).
 #[test]
 fn a_batched_bare_skill_row_admits_on_the_floored_text() {
     let (engine, events) =
@@ -515,9 +457,8 @@ fn a_batched_bare_skill_row_admits_on_the_floored_text() {
         Some(crate::agent_engine::lifecycle::BARE_SKILL_INVOCATION_INSTRUCTION),
         "the floor rides the batched row too"
     );
-    // The model-side row (the core session's persisted user rows) is the
-    // SAME text: the turn ran on the floored block, not on a re-expanded
-    // bare command.
+    // The model-side row is the SAME text: the turn ran on the floored
+    // block, not a re-expanded bare command.
     let core_rows = core_session_user_texts(&engine);
     assert!(
         core_rows.iter().any(|text| text == row),
@@ -526,10 +467,6 @@ fn a_batched_bare_skill_row_admits_on_the_floored_text() {
     assert_eq!(assistant_texts(&events), vec!["ok"]);
 }
 
-/// A skill body that itself contains a close tag plus a `\n\n` tail
-/// (`parse_skill_block`'s non-greedy body scan misreads the remainder as
-/// a trailing user message) still floors a BARE invocation: the original
-/// command's empty args decide, not the post-expansion parse.
 #[test]
 fn a_bare_invocation_of_a_close_tagged_body_still_floors() {
     let (_engine, events) = run_skill_prompt_body(

@@ -1,40 +1,22 @@
-//! Headless perf verifier for mouse drag-selection on a large session:
-//! the per-frame render cost of a selection drag is independent of the
-//! session size (a drag frame restyles the visible cached rows' selection
-//! diff — it never resolves the transcript geometry, and neither does the
-//! release's copy or its status row).
-//!
-//! A mock supervisor serves one attached session; the plan drives
-//! byte-identical SGR mouse reports through the same decode-and-dispatch
-//! path a terminal's mouse takes. The wall-clock budget compares a
-//! 100-drag burst against a no-drag baseline of the same session (the
-//! parse/attach cost cancels), and against the same burst on a small
-//! session: the excess must stay within a small bound of the small
-//! session's — before the sparse-window fixes the large session's burst
-//! spent seconds resolving geometry per frame and per copy.
+//! Headless perf verifier for mouse drag-selection: the per-frame cost of a drag is independent of
+//! the session size (a drag frame restyles the visible cached rows' selection diff, never the
+//! transcript geometry). The budget compares a 100-drag burst vs. a no-drag baseline and a small
+//! session.
 #![cfg(unix)]
-// Pedantic-gate exceptions (every other pedantic warning in this crate is
-// fixed in place; each exception carries its one-line justification):
-// - the casts: terminal-layout arithmetic narrows structurally bounded
-//   values (screen coordinates, byte counts, timestamps); guarded
-//   conversions would add panic paths the bounds guarantee away.
+// Casts: structurally bounded terminal-layout arithmetic; guarded conversions add panic paths.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// - the render routes are flat tables (one arm per route); splitting them
-//   would add indirection without changing the flow.
+// Render routes are flat tables (one arm per route); splitting adds indirection.
 #![allow(clippy::too_many_lines)]
-// - widget state structs carry independent flag bits; a nested struct
-//   would add indirection without changing the shape.
+// Widget state structs carry independent flag bits.
 #![allow(clippy::struct_excessive_bools, clippy::fn_params_excessive_bools)]
-// - the futures are bounded by the surface's lifetime; boxing them would
-//   add an allocation to the steady-state loop.
+// Futures are bounded by the surface's lifetime; boxing adds a steady-state allocation.
 #![allow(clippy::large_futures)]
-// - the wrappers preserve a uniform Result-returning API surface; unwrap
-//   removals would ripple through the callers without changing behavior.
+// The wrappers preserve a uniform Result-returning API surface.
 #![allow(clippy::unnecessary_wraps)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -82,8 +64,6 @@ impl MockSupervisor {
         }
     }
 
-    /// Serve one connection: attach a session whose snapshot holds the
-    /// requested transcript, then answer the loop's requests.
     fn serve(self, messages: usize) {
         let (stream, _) = self.listener.accept().expect("accept");
         let write_stream = stream.try_clone().expect("clone mock socket");
@@ -160,9 +140,8 @@ fn write_json(writer: &mut UnixStream, value: &Value) {
     writer.flush().expect("flush mock frame");
 }
 
-/// The slim attach result: `messages` alternating user/assistant messages
-/// with ~9KB bodies each (`messages == 4000` approximates the 42MB
-/// dogfood session; the small control uses 40).
+/// The slim attach result: `messages` alternating user/assistant messages with ~9KB bodies each
+/// (`messages == 4000` approximates the 42MB dogfood session; the small control uses 40).
 fn attach_data(id: &str, messages: usize) -> Value {
     let body: Vec<Value> = (0..messages)
         .map(|index| {
@@ -271,12 +250,9 @@ fn run_plan(
     (outcome.frames, outcome.copies, elapsed)
 }
 
-/// The scroll-paused drag burst: mount the window at the transcript top,
-/// then press-drag-release across the first rows. The chat opens directly
-/// into content, so the brand splash is suppressed (the operator's
-/// 2026-09-26 zero-shift directive) and the first user message's text
-/// row is row 3 in SGR coordinates (0-based 2): the burst presses the
-/// message's first text row and drags through its opening lines.
+/// The scroll-paused drag burst: mount the window at the transcript top, then press-drag-release
+/// across the first rows. The chat opens directly into content (the operator's 2026-09-26
+/// zero-shift directive), so the first user message's text row is row 3 (SGR 0-based 2).
 fn drag_burst() -> Vec<HeadlessStep> {
     let mut steps = vec![HeadlessStep::ScrollTop];
     steps.push(HeadlessStep::Mouse(press(3, 3)));
@@ -287,8 +263,7 @@ fn drag_burst() -> Vec<HeadlessStep> {
     steps
 }
 
-/// One no-drag baseline of the same session shape (parse, attach, first
-/// frames, the top walk): the drag burst's excess over this is the
+/// One no-drag baseline of the same session shape: the drag burst's excess over this is the
 /// selection path's own cost.
 fn baseline() -> Vec<HeadlessStep> {
     vec![HeadlessStep::ScrollTop]
@@ -304,8 +279,8 @@ fn drag_select_frame_cost_is_independent_of_session_size() {
     let (_, _, large_baseline) = run_plan(large, baseline());
     let (frames_large_drag, copies_large, large_drag) = run_plan(large, drag_burst());
 
-    // The copies are the same text both sizes: the drag extracts the
-    // spanned rows through the same coordinates on either session.
+    // The copies are the same text both sizes: the drag extracts the spanned rows through the same
+    // coordinates on either session.
     assert_eq!(copies_small.len(), 1, "the small drag copies once");
     assert_eq!(
         copies_large, copies_small,
@@ -317,9 +292,8 @@ fn drag_select_frame_cost_is_independent_of_session_size() {
         &copies_large[0][..copies_large[0].len().min(40)]
     );
 
-    // The drag path's own cost (burst minus baseline) stays in the same
-    // band on either session: no per-frame geometry resolve scales it
-    // with the transcript.
+    // The drag path's own cost (burst minus baseline) stays in the same band on either session: no
+    // per-frame geometry resolve scales it with the transcript.
     let small_excess = small_drag.saturating_sub(small_baseline);
     let large_excess = large_drag.saturating_sub(large_baseline);
     assert!(

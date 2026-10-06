@@ -1,6 +1,5 @@
-//! The render sink concern (moved with its concern): the terminal/headless
-//! renderer, the startup chrome seeding, the tmux keyboard check, the
-//! suspend-cycle terminal handoff, and the exit flush rows.
+//! The render sink concern: the terminal/headless renderer, the startup chrome seeding, the tmux
+//! keyboard check, the suspend-cycle terminal handoff, and the exit flush rows.
 
 use super::{
     mpsc, terminal, AgentView, Duration, ExitGuard, HeadlessStep, InteractiveOptions, KeyEvent,
@@ -28,10 +27,8 @@ fn typed_keys(text: &str) -> Vec<KeyEvent> {
         .collect()
 }
 
-/// Seed the static chrome state for a fresh interactive run: splash
-/// version/cwd, top-bar name, the `manage` hint for persisted sessions,
-/// and the zero dock a fresh session mounts — the placeholder frame
-/// keeps the landed frame's geometry.
+/// Seed the static chrome state for a fresh interactive run: splash version/cwd, top-bar name,
+/// the `manage` hint for persisted sessions, and the zero dock a fresh session mounts.
 pub(super) fn apply_startup_chrome(view: &mut AgentView, options: &InteractiveOptions) {
     view.chrome.version.clone_from(&options.version);
     view.chrome.cwd = options.cwd.to_string_lossy().to_string();
@@ -41,9 +38,8 @@ pub(super) fn apply_startup_chrome(view: &mut AgentView, options: &InteractiveOp
     view.chrome.activity = Some(crate::chrome::ActivityDock::default());
 }
 
-/// The tmux keyboard notice (TS `checkTmuxKeyboardSetup`): warn once per
-/// start when tmux runs without `extended-keys`. Runs `tmux show` read-only
-/// against the ambient socket; a timeout or error suppresses the notice.
+/// The tmux keyboard notice (TS `checkTmuxKeyboardSetup`): warn once per start when tmux runs
+/// without `extended-keys`; a timeout or error suppresses the notice.
 pub(super) async fn check_tmux_keyboard_setup() -> Option<String> {
     if std::env::var("TMUX").is_err() {
         return None;
@@ -54,9 +50,8 @@ pub(super) async fn check_tmux_keyboard_setup() -> Option<String> {
             tokio::task::spawn_blocking(move || {
                 std::process::Command::new("tmux")
                     .args(["show", "-gv", option])
-                    // No inherited fds: a probe must never hold the
-                    // terminal the TUI owns (the fd-set audit's rule —
-                    // no TUI child ever holds /dev/tty).
+                    // No inherited fds: a probe must never hold the terminal the TUI owns —
+                    // no TUI child ever holds /dev/tty.
                     .stdin(std::process::Stdio::null())
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::null())
@@ -88,12 +83,10 @@ pub(super) async fn check_tmux_keyboard_setup() -> Option<String> {
 pub(super) enum Renderer {
     Terminal {
         term: Terminal<crate::hyperlinks::LinkBackend>,
-        /// The `terminal.fullscreenMouse` setting: mouse tracking
-        /// re-enables on resume after a suspended client command.
+        /// The `terminal.fullscreenMouse` setting: mouse tracking re-enables on resume.
         mouse: bool,
-        /// The reader's channel and force-quit guard: the external-editor
-        /// cycle stops and respawns the session reader around the child
-        /// run, and the terminal renderer owns the seeds for the respawn.
+        /// The reader's channel and force-quit guard: the external-editor cycle stops and
+        /// respawns the session reader around the child run.
         ui_tx: mpsc::UnboundedSender<UiInput>,
         exit_guard: ExitGuard,
     },
@@ -104,9 +97,8 @@ pub(super) enum Renderer {
     },
 }
 
-/// The renderer handoff of one suspend cycle (TS `handleCtrlZ`):
-/// `stop` hands the terminal to the shell (SGR mouse tracking off, alt
-/// screen left and flushed into native scrollback, raw mode off);
+/// The renderer handoff of one suspend cycle: `stop` hands the terminal to the shell (SGR
+/// mouse tracking off, alt screen left and flushed into native scrollback, raw mode off);
 /// `resume` takes it back after SIGCONT with every mode re-applied.
 pub(super) struct TerminalHandoff<'a> {
     pub(super) renderer: &'a mut Renderer,
@@ -123,23 +115,17 @@ impl crate::suspend::SuspendTerminal for TerminalHandoff<'_> {
     }
 }
 
-/// Start the session surface's terminal input reader (the setup mount and
-/// the external-editor cycle's respawn both call it). One reader thread
-/// feeds the loop; crossterm events are process-global, so the reader
-/// registry joins the previous surface's reader before this one starts
-/// polling. The reader also observes Ctrl+C pairs for the exit guard:
-/// this thread stays alive when the UI loop is wedged, so the force-quit
-/// contract holds regardless of loop state. The paste-aware variant
-/// coalesces a marker-less multi-line keystroke burst (tmux 3.2 and older
-/// forward pastes without bracketed markers) into one editor paste — TS
-/// `StdinBuffer`'s `isRawMultilinePaste`.
+/// Start the session surface's terminal input reader. One reader thread feeds the loop. The reader
+/// also observes Ctrl+C pairs for the exit guard: this thread stays alive when the UI loop is
+/// wedged, so the force-quit contract holds regardless of loop state. The paste-aware variant
+/// coalesces a marker-less multi-line keystroke burst into one editor paste (TS
+/// `isRawMultilinePaste`).
 pub(super) fn spawn_session_reader(ui_tx: mpsc::UnboundedSender<UiInput>, exit_guard: ExitGuard) {
     crate::input::spawn_paste_aware_reader(move |input| match input {
         crate::input::ReaderInput::BurstPaste(text) => ui_tx.send(UiInput::Paste(text)).is_ok(),
-        // A report the guard reassembled from a sequence crossterm's
-        // reader split at a committed-`ESC` read boundary: same contract
-        // as the terminal's own mouse events below — consumed unless
-        // tracking is active.
+        // A report the guard reassembled from a sequence crossterm's reader split at a
+        // committed-`ESC` read boundary: consumed unless tracking is active, like the terminal's
+        // mouse events.
         crate::input::ReaderInput::Mouse(report) => {
             if crate::mouse_tracking::active() {
                 ui_tx.send(UiInput::Mouse(report)).is_ok()
@@ -153,14 +139,11 @@ pub(super) fn spawn_session_reader(ui_tx: mpsc::UnboundedSender<UiInput>, exit_g
                 ui_tx.send(UiInput::Key(key)).is_ok()
             }
             crossterm::event::Event::Paste(text) => ui_tx.send(UiInput::Paste(text)).is_ok(),
-            // TS forces a full re-render on resize (tui.ts
-            // widthChanged/heightChanged); the loop repaints on the dirty
-            // flag this sets.
+            // A resize forces a full re-render (TS widthChanged/heightChanged).
             crossterm::event::Event::Resize(..) => ui_tx.send(UiInput::Resize).is_ok(),
-            // Mouse reports are always consumed (nothing downstream
-            // understands them): wheel turns reach the loop only while
-            // tracking is active (TS consumes reports even when tracking
-            // is disabled).
+            // Mouse reports are always consumed (nothing downstream understands them): wheel
+            // turns reach the loop only while tracking is active (TS consumes reports even when
+            // tracking is disabled).
             crossterm::event::Event::Mouse(mouse) => {
                 if !crate::mouse_tracking::active() {
                     true
@@ -185,55 +168,35 @@ impl Renderer {
     ) -> Result<Renderer> {
         match ui {
             UiMode::Terminal => {
-                // The raw-mode bracket's own `cfmakeraw` write clears IXON,
-                // which is the kernel's one trigger for lifting a pending
-                // Ctrl+S stop: a tty stopped at the shell prompt self-heals
-                // here (verified by the flow e2e's launch route).
+                // The raw-mode bracket's own `cfmakeraw` write clears IXON, which is the
+                // kernel's one trigger for lifting a pending Ctrl+S stop: a tty stopped at the
+                // shell prompt self-heals here (verified by the flow e2e's launch route).
                 terminal::enable_raw_mode()?;
-                // The terminal state changed: every later setup step is
-                // fallible (the alt-screen enter, the mode enables, the
-                // terminal construction) and an error from any of them
-                // still owns the release. The flag arms here, not at the
-                // end of setup.
+                // The terminal state changed: every later setup step is fallible (the alt-screen
+                // enter, the mode enables, the terminal construction) and an error from any of them
+                // still owns the release — the flag arms here, not at the end of setup.
                 surface_mounted.store(true, std::sync::atomic::Ordering::SeqCst);
-                // Adopt the alternate screen the previous surface left in
-                // place (TS `pendingAltScreenHandoff`); only the first
-                // surface of the process enters it, so a view switch never
-                // flashes the primary screen. The enter itself is ARMED,
-                // not written: it rides the first draw's flush (see
-                // `altscreen::arm_first_draw_mount`), so a direct open —
-                // which paints nothing until its first content frame —
-                // holds the shell (a fresh process) or the handed-off
-                // surface through the attach.
+                // Adopt the alternate screen the previous surface left in place: only the first
+                // surface of the process enters it, so a view switch never flashes the primary
+                // screen. The enter itself is ARMED, not written: it rides the first draw's
+                // flush (see `altscreen::arm_first_draw_mount`).
                 crate::altscreen::arm_first_draw_mount();
-                // SGR mouse tracking follows the fullscreen surface in and
-                // out (TS `enterFullscreen` enables it blind — probing is
-                // not viable under tmux and unsupporting terminals ignore
+                // SGR mouse tracking follows the fullscreen surface in and out (TS enables it
+                // blind — probing is not viable under tmux and unsupporting terminals ignore
                 // the mode-sets).
                 if mouse {
                     crate::mouse_tracking::enable(&mut std::io::stdout())?;
                 }
-                // Bracketed paste and the kitty keyboard protocol come up
-                // with the raw-mode bracket (TS `ProcessTerminal.start`):
-                // pastes arrive as one chunk instead of per-line Enter
-                // submissions, and the kitty probe (once per process —
-                // see `enhanced_keys`) runs before the reader thread
-                // starts polling.
+                // Bracketed paste and the kitty keyboard protocol come up with the raw-mode
+                // bracket: pastes arrive as one chunk, and the kitty probe (once per process —
+                // see `enhanced_keys`) runs before the reader thread starts polling.
                 crate::enhanced_keys::enable(&mut std::io::stdout())?;
                 spawn_session_reader(ui_tx.clone(), exit_guard.clone());
                 let terminal = Terminal::new(crate::hyperlinks::stdout_backend())?;
-                // The adopted buffer still holds the previous view's frame;
-                // the first draw repaints the same buffer (a fresh alt
-                // screen is already blank). TS paints the new frame
-                // straight over the old one, so the clear escape must
-                // never reach the pane on its own: the armed mount's
-                // clear and cursor hide ride the first draw's single
-                // flush (see `altscreen::take_first_draw_mount`) — a
-                // clear queued HERE would let any mid-gap flush (the
-                // kitty probe, a mode enable) carry it out early, wiping
-                // the shell or the held surface during a direct open's
-                // attach wait. The cursor hides with the mount (TS
-                // `TUI.start` writes hideCursor, never a show).
+                // The adopted buffer still holds the previous view's frame, so the clear escape
+                // must never reach the pane on its own: the armed mount's clear and cursor hide
+                // ride the first draw's single flush (see `altscreen::take_first_draw_mount`) —
+                // a clear queued HERE would let any mid-gap flush carry it out early.
                 Ok(Renderer::Terminal {
                     term: terminal,
                     mouse,
@@ -242,9 +205,8 @@ impl Renderer {
                 })
             }
             UiMode::Headless(plan) => {
-                // The headless harness drives the same dispatch, so the
-                // tracking state must read active; the sequence write is
-                // gated on a real stdout inside the enable.
+                // The headless harness drives the same dispatch, so the tracking state must
+                // read active; the sequence write is gated on a real stdout inside the enable.
                 if mouse {
                     crate::mouse_tracking::enable(&mut std::io::stdout())?;
                 }
@@ -312,10 +274,6 @@ impl Renderer {
                                 }
                             }
                             HeadlessStep::Mouse(sequence) => {
-                                // Mouse reports are always consumed, like
-                                // the terminal reader: a wheel turn
-                                // reaches the dispatch only while
-                                // tracking is active.
                                 if crate::mouse_tracking::active()
                                     && crate::mouse::is_mouse_sequence(&sequence)
                                 {
@@ -346,24 +304,15 @@ impl Renderer {
         }
     }
 
-    /// Hand the terminal back to the process (raw mode off, alternate
-    /// screen left and flushed, cursor visible) so an interactive client
-    /// command can prompt on it. Headless verification runs keep their
-    /// plain pipes. The shared exit tail ends the hand-back — the same
-    /// whole-terminal contract every exit guarantees, so a poisoned
-    /// start cannot leave the client command prompting on a raw tty
-    /// (the TS teardown contract: the shell prompt that follows must
-    /// not sit on a hidden cursor or a broken mode).
+    /// Hand the terminal back to the process (raw mode off, alternate screen left and flushed,
+    /// cursor visible) so an interactive client command can prompt on it. Headless verification
+    /// runs keep their plain pipes.
     fn suspend(&mut self, view: &mut AgentView) -> Result<()> {
         match self {
             Renderer::Terminal { .. } => {
-                // The surface releases mouse tracking while a client
-                // command prompts on the plain terminal (TS `exitFullscreen`
-                // on suspend).
                 let _ = crate::mouse_tracking::disable(&mut std::io::stdout());
-                // The raw-mode bracket takes the enhanced-key modes with
-                // it (TS `stop` on suspend: paste markers off, kitty
-                // flags popped); `resume` re-enables both.
+                // The raw-mode bracket takes the enhanced-key modes with it; `resume` re-enables
+                // both.
                 let _ = crate::enhanced_keys::disable(&mut std::io::stdout());
                 self.flush_to_main_screen(view)?;
                 crate::exit_restore::terminal_release_tail(&mut std::io::stdout());
@@ -377,37 +326,24 @@ impl Renderer {
     pub(super) fn resume(&mut self) -> Result<()> {
         match self {
             Renderer::Terminal { term, mouse, .. } => {
-                // The raw re-arm's `cfmakeraw` write clears IXON - the
-                // kernel's one trigger for lifting a pending Ctrl+S stop -
-                // so a stop armed at the shell while the process sat
-                // suspended never holds the resume's repaint (verified by
-                // the flow e2e's suspend route).
+                // The raw re-arm's `cfmakeraw` write clears IXON - the kernel's one trigger
+                // for lifting a pending Ctrl+S stop - so a stop armed at the shell never holds
+                // the resume's repaint.
                 terminal::enable_raw_mode()?;
-                // The suspension released the alternate screen (the client
-                // command prompted on the primary one); re-enter it.
                 crate::altscreen::enter()?;
-                // The suspend's release tail showed the cursor for the
-                // plain terminal (the client command's prompt needs it);
-                // taking the surface back hides it again (TS `ui.start()`
-                // on the SIGCONT resume) — otherwise the visible cursor
-                // sits at a stale position through the clear and the full
-                // repaint below, the exact window the glitch shows in.
+                // The suspend's release tail showed the cursor for the plain terminal; taking
+                // the surface back hides it again — otherwise the visible cursor sits at a
+                // stale position through the clear and the full repaint below.
                 let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Hide);
-                // The raw-mode bracket re-arms the enhanced-key modes (TS
-                // `start` on SIGCONT re-runs the paste enable and the kitty
-                // query; the port resolves the kitty capability once per
-                // process, so a resume re-applies the resolved state —
-                // crossterm's support check monopolizes the event-reader
-                // lock for its 2s budget and must not run on the resume
-                // path).
+                // The raw-mode bracket re-arms the enhanced-key modes (the port resolves the kitty
+                // capability once per process, so a resume re-applies the resolved state —
+                // crossterm's support check monopolizes the event-reader lock and must not run on
+                // the resume path).
                 crate::enhanced_keys::enable(&mut std::io::stdout())?;
-                // The fullscreen surface re-enables mouse tracking with the
-                // terminal (TS `applyFullscreen` on resume).
                 if *mouse {
                     crate::mouse_tracking::enable(&mut std::io::stdout())?;
                 }
-                // A fresh full redraw: the suspended command left arbitrary
-                // output behind.
+                // A fresh full redraw: the suspended command left arbitrary output behind.
                 term.clear()?;
                 Ok(())
             }
@@ -415,22 +351,16 @@ impl Renderer {
         }
     }
 
-    /// Leave the alternate screen and paint the accumulated inline layout
-    /// onto the main screen (TS `TUI.stop` -> `exitFullscreen`: leave the
-    /// alt screen first, then the inline repaint flushes the
-    /// fullscreen-era transcript into native scrollback). This is what
-    /// keeps the exit frame — and the resume hint the composition root
-    /// prints below it — visible after the process exits, instead of the
-    /// blank main screen an alt-screen exit alone leaves behind.
-    ///
-    /// The kill-switch `PRIME_AGENT_TUI_EXIT_FLUSH=0` skips the paint (the
-    /// alt screen is still left): the flush is the one new output path that
-    /// writes into the user's scrollback, so it can be disabled without a
+    /// Leave the alternate screen and paint the accumulated inline layout onto the main screen:
+    /// the inline repaint flushes the fullscreen-era transcript into native scrollback, keeping
+    /// the exit frame — and the resume hint printed below it — visible after the process exits.
+    /// The kill-switch `PRIME_AGENT_TUI_EXIT_FLUSH=0` skips the paint (the alt screen is still
+    /// left): the flush writes into the user's scrollback, so it can be disabled without a
     /// release if it misbehaves.
     fn flush_to_main_screen(&mut self, view: &mut AgentView) -> Result<()> {
         use std::io::Write;
-        // Only the terminal renderer owns a real screen to flush;
-        // headless verification keeps its plain pipes.
+        // Only the terminal renderer owns a real screen to flush; headless runs keep their plain
+        // pipes.
         if !matches!(self, Renderer::Terminal { .. }) {
             return Ok(());
         }
@@ -439,18 +369,16 @@ impl Renderer {
             return Ok(());
         }
         let (width, height) = terminal::size()?;
-        // The flush streams row-by-row in bounded chunks: a long transcript
-        // must reach the terminal without ever holding the whole frame (a
-        // +O(rows) peak right at exit) — the bytes are the materialized
-        // flush's bytes, the peak is one section plus one chunk.
+        // The flush streams row-by-row in bounded chunks: a long transcript must reach the terminal
+        // without ever holding the whole frame — the peak is one section plus one chunk.
         let mut out = std::io::stdout();
         view.stream_flush_to(&mut out, width as usize, height as usize)?;
         out.flush()?;
         Ok(())
     }
 
-    /// Whether this run owns a real terminal (the force-quit guard arms on
-    /// terminal runs; headless verification keeps deterministic teardown).
+    /// Whether this run owns a real terminal (the force-quit guard arms on terminal runs; headless
+    /// verification keeps deterministic teardown).
     pub(super) fn is_terminal(&self) -> bool {
         matches!(self, Renderer::Terminal { .. })
     }
@@ -464,11 +392,8 @@ impl Renderer {
         }
     }
 
-    /// Capture one onboarding-pane frame as plain text (headless
-    /// assertions): the onboarding pane replaces the whole session frame,
-    /// and no session exists yet, so the capture renders the view alone.
-    /// The loop's dedup rule matches `render_headless` — a pane that has
-    /// not changed does not add a duplicate frame.
+    /// Capture one onboarding-pane frame as plain text (headless assertions): the pane replaces the
+    /// whole session frame. A pane that has not changed does not add a duplicate frame.
     pub(super) fn render_headless_pane(&mut self, view: &mut AgentView) {
         let Renderer::Headless {
             width,
@@ -484,8 +409,7 @@ impl Renderer {
         }
     }
 
-    /// The headless capture's frames (None on a terminal renderer): the
-    /// render barriers wait on these.
+    /// The headless capture's frames (None on a terminal): the render barriers wait on these.
     pub(super) fn headless_frames(&self) -> Option<&[String]> {
         match self {
             Renderer::Headless { frames, .. } => Some(frames),
@@ -518,62 +442,44 @@ impl Renderer {
         session.dirty = false;
     }
 
-    /// Teardown. `preserve_alt_screen` mirrors TS `ui.stop({ preserveAltScreen })`:
-    /// an exit that hands the pane to the agents view (agents-back, `/resume`)
-    /// keeps the alternate screen for the adopting view, hides the cursor, and
-    /// skips the main-screen flush — raw mode also stays on, because the
-    /// in-process handoff gap would otherwise echo keypresses into the
-    /// preserved frame (TS `pendingInputHandoff`). Every other exit follows
-    /// TS `TUI.stop`: leave the alt screen, flush the inline frame onto the
-    /// main screen, show the cursor, restore cooked mode — the resume hint
-    /// the composition root prints next lands right below the flushed frame.
+    /// Teardown. `preserve_alt_screen`: an exit that hands the pane to the agents view keeps the
+    /// alternate screen for the adopting view, hides the cursor, and skips the main-screen flush —
+    /// raw mode also stays on, because the in-process handoff gap would otherwise echo keypresses
+    /// into the preserved frame (TS `pendingInputHandoff`).
     pub(super) fn finish(mut self, view: &mut AgentView, preserve_alt_screen: bool) -> Vec<String> {
-        // The exit that ends the process stands the kitty probe down
-        // FIRST: an answer landing after the pop below would re-arm
-        // CSI-u reporting on the parent shell (the "escape codes while
-        // typing" leak). A handoff (preserve) keeps the process alive
-        // and the next surface's probe — never released here.
+        // The exit that ends the process stands the kitty probe down FIRST: an answer landing
+        // after the pop below would re-arm CSI-u reporting on the parent shell (the "escape
+        // codes while typing" leak). A handoff (preserve) keeps the process alive and the
+        // next surface's probe — never released here.
         if !preserve_alt_screen && self.is_terminal() {
             crate::enhanced_keys::release_for_exit();
         }
-        // The surface's input reader stands down FIRST (TS tears its
-        // listener down with the chat): the drain below reads the tty
-        // through crossterm's global event-reader lock, and a parked
-        // reader would hold it — the wake makes the flagged reader exit
-        // now, the drain owns the reader, and the next surface's mount
-        // joins an already-exited thread instead of waiting out a poll.
+        // The surface's input reader stands down FIRST: the drain below reads the tty through
+        // crossterm's global event-reader lock, and a parked reader would hold it — the wake makes
+        // the flagged reader exit now, and the next surface's mount joins an already-exited thread.
         crate::input::request_reader_stop();
-        // In-flight kitty key releases are consumed before the terminal is
-        // restored (TS `drainInput` before `stop`): a release that lands
-        // after raw mode is off would leak its escape sequence into the
-        // parent shell over slow SSH. Runs on every exit — the agents-view
-        // handoff drains too (TS `teardownSessionUi`); headless runs hold
-        // plain pipes and skip it inside the drain. A handoff (preserve)
-        // keeps raw mode on — the adopting surface's dispatch drops
-        // releases (TS tui.ts), so the handoff drain consumes only what
-        // is already buffered instead of parking on the idle window.
+        // In-flight kitty key releases are consumed before the terminal is restored: a
+        // release that lands after raw mode is off would leak its escape sequence into the
+        // parent shell over slow SSH. Runs on every exit — the agents-view handoff drains
+        // too; headless runs skip it inside the drain. A handoff (preserve) keeps raw mode
+        // on — the adopting surface's dispatch drops releases, so the handoff drain consumes
+        // only what is already buffered.
         if preserve_alt_screen {
             crate::enhanced_keys::drain_for_handoff(&mut std::io::stdout());
         } else {
             crate::enhanced_keys::drain(&mut std::io::stdout());
         }
-        // Tracking releases with the surface (TS `TUI.stop` writes the
-        // disable before leaving the alt screen).
+        // Tracking releases with the surface (disable written before leaving the alt screen).
         let _ = crate::mouse_tracking::disable(&mut std::io::stdout());
-        // The enhanced-key modes release with the raw-mode bracket (TS
-        // `stop` writes the paste disable, the kitty pop, and the
-        // modifyOtherKeys reset for every exit, handoffs included).
+        // The enhanced-key modes release with the raw-mode bracket (the paste disable, the
+        // kitty pop, and the modifyOtherKeys reset run for every exit, handoffs included).
         let _ = crate::enhanced_keys::disable(&mut std::io::stdout());
         match self {
             Renderer::Terminal { .. } => {
                 if preserve_alt_screen {
-                    // ratatui's `Terminal` drop restores the cursor its
-                    // last frame hid (the `hidden_cursor` flag): run the
-                    // drop before the hide so the hide is the handoff's
-                    // final word — TS `stop(preserveAltScreen)` leaves the
-                    // cursor hidden for the surface taking the screen
-                    // over, and the adopting mount must not race a stale
-                    // show against its own hide.
+                    // ratatui's `Terminal` drop restores the cursor its last frame hid: run the
+                    // drop before the hide so the hide is the handoff's final word — the
+                    // adopting mount must not race a stale show against its own hide.
                     let Renderer::Terminal { term, .. } = self else {
                         unreachable!("the arm matched the terminal renderer")
                     };
@@ -581,10 +487,9 @@ impl Renderer {
                     let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Hide);
                 } else {
                     let _ = self.flush_to_main_screen(view);
-                    // The shared exit tail ends the parity teardown: the
-                    // synchronized-output release, the SGR reset, the
-                    // cursor show, and the cooked-tty verification end in
-                    // the same terminal state every exit path guarantees.
+                    // The shared exit tail ends the parity teardown: the synchronized-output
+                    // release, the SGR reset, the cursor show, and the cooked-tty verification
+                    // end in the same terminal state every exit path guarantees.
                     crate::exit_restore::terminal_release_tail(&mut std::io::stdout());
                 }
                 Vec::new()
@@ -594,17 +499,13 @@ impl Renderer {
     }
 }
 
-/// Encode the flushed rows into `buffer` as one write: each row starts at
-/// column 0 (`\r`, required because raw mode maps `\n` to a bare line
-/// feed), rows are joined with CRLF, and a trailing CRLF parks the cursor
-/// below the frame (TS `TUI.stop`'s closing newline) so whatever prints
-/// next — the shell prompt or the resume hint — starts on a fresh line.
+/// Encode the flushed rows into `buffer` as one write: each row starts at column 0 (`\r`, required
+/// because raw mode maps `\n` to a bare line feed), rows are joined with CRLF, and a trailing CRLF
+/// parks the cursor below the frame so whatever prints next starts on a fresh line.
 pub(crate) fn write_flush_rows(buffer: &mut String, rows: &[crate::Line]) {
     for row in rows {
         buffer.push('\r');
-        // An image-placement row is written raw (TS `applyLineResets` /
-        // `paint` skip image lines): styling or padding a protocol
-        // escape sequence would corrupt the placement.
+        // An image-placement row is written raw: styling or padding would corrupt the placement.
         let raw: String = row.iter().map(|span| span.content.as_str()).collect();
         if crate::terminal_image::is_image_line(&raw) {
             buffer.push_str(&raw);
@@ -615,8 +516,7 @@ pub(crate) fn write_flush_rows(buffer: &mut String, rows: &[crate::Line]) {
     }
 }
 
-/// Whether the main-screen exit flush is enabled: on unless
-/// `PRIME_AGENT_TUI_EXIT_FLUSH=0` opts out.
+/// The main-screen exit flush is on unless `PRIME_AGENT_TUI_EXIT_FLUSH=0` opts out.
 fn exit_flush_enabled() -> bool {
     std::env::var_os("PRIME_AGENT_TUI_EXIT_FLUSH").is_none_or(|value| value != "0")
 }

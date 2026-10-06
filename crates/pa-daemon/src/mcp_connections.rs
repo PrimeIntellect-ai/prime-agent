@@ -84,9 +84,8 @@ impl Worker {
         )
     }
 
-    /// `set_mcp_static_token`: the inline paste flow's install step. Stores
-    /// the credential bound to the service endpoint (the pin), verifies with
-    /// a real handshake, and persists the connection record.
+    /// `set_mcp_static_token`: the inline paste flow's install step — store
+    /// the endpoint-pinned credential, verify, persist the record.
     pub(crate) async fn handle_set_mcp_static_token(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("set_mcp_static_token") {
             return response;
@@ -145,9 +144,8 @@ impl Worker {
         }
     }
 
-    /// `remove_mcp_connection`: remove one connection's credential and its
-    /// connection record (the durable endpoint pin) in one step — the
-    /// view's remove-account action.
+    /// `remove_mcp_connection`: remove one connection's credential and
+    /// record (the durable endpoint pin) in one step.
     pub(crate) async fn handle_remove_mcp_connection(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("remove_mcp_connection") {
             return response;

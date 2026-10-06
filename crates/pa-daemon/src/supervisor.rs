@@ -1,11 +1,7 @@
-//! Supervisor runtime: one process spawning one worker per active session.
-//!
-//! Port of `modes/daemon/daemon-supervisor.ts`: the supervisor hosts no sessions
-//! itself. Clients connect over a JSONL Unix socket; the supervisor spawns a
-//! dedicated worker process per session, supervises it (restart with
-//! exponential backoff, bounded attempts), persists worker descriptors so a
-//! restarted supervisor can adopt or relaunch live sessions, and routes
-//! commands and events between clients and workers (private-framed channel).
+//! Supervisor runtime: one process spawning one worker per active session:
+//! clients connect over a JSONL Unix socket; the supervisor spawns a dedicated
+//! worker per session, supervises it (restart with backoff, bounded attempts),
+//! and persists worker descriptors so a restarted supervisor can adopt live sessions.
 
 mod accept_loop;
 mod adoption;
@@ -23,10 +19,7 @@ mod worker_lifecycle;
 
 use adoption::AdoptionBoot;
 use launch_budget::WORKER_AUTH_FLOOR_MS;
-// The daemon-closing shutdown event is called only by the clients sibling
-// module (through its `use super::*` glob) - the facade's own calls moved out
-// with the clients concern (SS2-R2) and the signals concern (SS6) - so the
-// lib-target import is flagged unused without the allow.
+// Called only by the clients sibling module (its `use super::*` glob); unused on the lib target.
 #[allow(unused_imports)]
 use signals_shutdown::daemon_closing_shutdown_event;
 mod supervision;
@@ -38,21 +31,18 @@ mod spawn_record_tests;
 #[cfg(test)]
 mod tests;
 
-// STABLE_LIFETIME_MS is read only by this facade's in-file test modules (via the module's
-// pub(super) const); the lib-target import is flagged unused since only tests use it.
+// Read only by this facade's in-file tests; the lib-target import is flagged unused.
 #[allow(unused_imports)]
 use supervision::{MAX_CONSECUTIVE_FAILURES, STABLE_LIFETIME_MS};
 
-// The saved-session row builders are read only by this facade's in-file test
-// modules (via the module's pub(super) fns); the lib-target import is flagged
-// unused since only tests use it.
+// Called only by this facade's in-file test modules; the lib-target import is unused.
 #[allow(unused_imports)]
 use sessions::{saved_session_row, saved_session_summary};
 
 pub(crate) use options::ClientRouting;
 pub use options::SupervisorOptions;
 
-// The salvage/streaming helpers are called only by the routing and clients sibling modules (through their `use super::*` globs); the facade's own dispatch arm moved with the clients concern (SS2-R2), so the lib-target import is flagged unused without the allow.
+// Called only by the routing and clients siblings (their `use super::*` globs); lib-unused.
 #[allow(unused_imports)]
 use update_restart::{salvage_command_type, salvage_id, streamed_attach_lines};
 
@@ -62,9 +52,7 @@ pub(crate) use clients::client_command_payload;
 // (external callers: supervisor_parent_death, create_reuse, prompt_admission, update_restore).
 pub(crate) use routing::{client_route_timeout, ROUTE_TIMEOUT_MS, WORKER_NOT_CONNECTED};
 
-// probe_worker_socket/worker_connect_deadline are called only by the supervision sibling
-// module and this facade's in-file tests (through the module's pub(super) fns); the
-// lib-target import is flagged unused otherwise.
+// Called only by the supervision sibling module and in-file tests; lib-target unused.
 #[allow(unused_imports)]
 use worker_lifecycle::{probe_worker_socket, worker_connect_deadline};
 
@@ -143,11 +131,8 @@ pub struct Supervisor {
     /// holding a superseded id resolves to the session's current
     /// resident instead of `Unknown active session`.
     pub(crate) session_bindings: crate::session_bindings::SessionBindingTable,
-    /// Per-session-file single-flight for opens (TS `openingWorkers`):
-    /// one open at a time per file, so a concurrent create reuses (or
-    /// waits out) the first one's worker instead of launching over it
-    /// and losing the runtime session lease. Owned by the create-reuse
-    /// seam (`create_reuse.rs`).
+    /// Per-session-file single-flight for opens (TS `openingWorkers`): a concurrent create
+    /// reuses the first one's worker instead of losing the runtime session lease.
     pub(crate) opening_files:
         std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Daemon-lifecycle telemetry (`daemon event` schema v1), resolved at
@@ -158,18 +143,13 @@ pub struct Supervisor {
     /// one `daemon event` summary per window instead of one event each.
     daemon_event_counts: std::sync::Mutex<notes::DaemonEventCounts>,
     pub(crate) registry: SessionRegistry,
-    /// Worker outbound frames, with their client routing. The payload is
-    /// shared (`Arc`): every connected client's event arm receives every
-    /// frame to decide delivery, and a per-receiver deep `Value` clone
-    /// would multiply the frame's heap by the connection count on every
-    /// event — the refcount bump is the whole cost for non-matching
-    /// connections.
+    /// Worker outbound frames, with their client routing. The payload is shared (`Arc`):
+    /// a per-receiver deep `Value` clone would multiply the heap by the connection
+    /// count on every event.
     pub(crate) events: broadcast::Sender<(ClientRouting, std::sync::Arc<Value>)>,
     /// Session-event subscribers: the send-time routing index (TS parity —
     /// `handleWorkerFrame` evaluates the attached set in the same pass that
-    /// writes the socket). Session events enqueue to the attached
-    /// connections' per-connection queues here instead of waking every
-    /// connection's ring arm; broadcast-class events keep the ring above.
+    /// writes the socket). Broadcast-class events keep the ring above.
     pub(crate) session_subscribers: subscribers::SessionSubscribers,
     /// Live client connections: connection id -> the connection's
     /// effective client id (TS `this.clients` + `protocolClientId`).
@@ -178,47 +158,31 @@ pub struct Supervisor {
     /// The supervisor's agent roster (classified entries; the roster arms
     /// live in `supervisor_roster.rs`).
     pub(crate) roster: std::sync::Mutex<crate::agent_roster::AgentRoster>,
-    /// The last `roster_update` content published per agent id (the
-    /// content-diff guard, TS #2481): an entry whose content equals its
-    /// last published form is dropped from the push (an identical
-    /// rewrite broadcasts nothing), so subscribers never re-apply (and
-    /// the wire never re-ships) a row that did not change.
+    /// The last `roster_update` content published per agent id (the content-diff
+    /// guard): an unchanged row is dropped from the push.
     pub(crate) last_published_roster:
         std::sync::Mutex<std::collections::HashMap<String, serde_json::Value>>,
-    /// In-flight registration-seed tasks (each `worker_register`'s
-    /// background family walk). A `roster_subscribe` drains and awaits
-    /// them before building its snapshot: a seeded row's push must
-    /// never overtake the snapshot answer (a client that applies the
-    /// push first and then the snapshot would lose the rows).
+    /// In-flight registration-seed tasks: a `roster_subscribe` drains and awaits
+    /// them before building its snapshot, so a seeded row's push never overtakes
+    /// the answer.
     pub(crate) pending_registration_seeds: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
-    /// In-flight name reservations (TS `pendingSessionNames`): one
-    /// reservation per `[depth, parent, name]` scope, shared by the
-    /// saved-session rename ladder and the subagent spawn admission (TS
-    /// #2396 `createRlmSubagentRuntime`), so a concurrent rename or spawn
-    /// of the same name in the same scope fails the second caller.
+    /// In-flight name reservations (TS `pendingSessionNames`): one per `[depth, parent, name]`
+    /// scope, shared by the rename ladder and the subagent spawn admission, so a concurrent
+    /// same-name rename or spawn fails the second caller.
     pub(crate) pending_session_names: std::sync::Mutex<std::collections::HashSet<String>>,
     pub(crate) shutting_down: AtomicBool,
-    /// Whether some path has taken ownership of the one terminal stop pass.
-    /// `shutting_down` flips synchronously when the shutdown command is
-    /// accepted; this flag ensures exactly one connection runs
-    /// `begin_shutdown`, even if several clients notice the shutdown.
+    /// Whether some path has taken ownership of the one terminal stop pass: exactly one
+    /// connection runs `begin_shutdown`, even if several clients notice the shutdown.
     shutdown_started: AtomicBool,
-    /// The connection that accepted the one terminal shutdown request. Only
-    /// this connection may run the stop pass from its response-write or
-    /// disconnect paths; another client disconnecting in the response window
-    /// cannot preempt the acknowledgement or turn an update restart into a
-    /// terminal worker-descriptor sweep.
+    /// The connection that accepted the one terminal shutdown request: only it may
+    /// run the stop pass from its response-write or disconnect paths.
     shutdown_owner: std::sync::Mutex<Option<String>>,
-    /// The accept loop's exit flag. `shutting_down` refuses new work the
-    /// moment a terminal stop begins, but the loop itself must stay up
-    /// until [`Supervisor::begin_shutdown`] has stopped every resident
-    /// worker: an inbound connection must not fall it out mid-stop and
-    /// orphan the workers that pass is still shutting down.
+    /// The accept loop's exit flag: the loop must stay up until
+    /// [`Supervisor::begin_shutdown`] has stopped every resident worker — an
+    /// inbound connection must not fall it out mid-stop.
     accept_exit: AtomicBool,
-    /// Wakes the accept loop when [`Supervisor::begin_shutdown`] sets
-    /// [`Self::accept_exit`]: a listening socket blocks in `accept` until
-    /// a client connects, so the completed shutdown must interrupt it for
-    /// the process to exit.
+    /// Wakes the accept loop when [`Supervisor::begin_shutdown`] sets [`Self::accept_exit`]:
+    /// a socket blocking in `accept` must be interrupted by the completed shutdown.
     shutdown_notify: tokio::sync::Notify,
     log: paths::RotatingLog,
     /// Memoized ledger over the default sessions dir (ledgers are per
@@ -227,62 +191,42 @@ pub struct Supervisor {
     /// The update-prepare transaction: at most one per supervisor;
     /// empty = `Serving`.
     update_prepare: PrepareCoordinator,
-    /// In-flight mutating-command counter feeding the prepare transaction's
-    /// `Draining` wait (TS `MutationDrainLatch`).
+    /// In-flight mutating-command counter feeding the prepare transaction's `Draining` wait.
     mutation_drain: MutationDrainLatch,
     /// Timeout budget of the update flow (`PRIME_AGENT_UPDATE_*_MS`
     /// overridable for CI).
     update_budget: UpdateTimeoutBudget,
-    /// The boot-time restore pass (spec §6, slice 5): sweep + roster
-    /// restore + scheduled-work re-arm. Read by the hello resume contract,
-    /// the `update_restore_status` RPC, and the queued-attach path.
+    /// The boot-time restore pass (spec §6): sweep + roster restore + scheduled-work
+    /// re-arm; read by the hello resume contract and the `update_restore_status` RPC.
     pub(crate) restore: crate::update_restore::RestoreProgress,
-    /// The session input-pause leases (wave b8): pause id -> lease, the
-    /// bookkeeping behind `acquire`/`release_session_input_pause`.
+    /// The session input-pause leases: pause id -> lease, the bookkeeping
+    /// behind `acquire`/`release_session_input_pause`.
     pub(crate) input_pauses: crate::input_pause_lease::SupervisorPauseTable,
-    /// The supervisor-side passive scheduled-jobs snapshot the catalog
-    /// READ paths serve (TS #2487 `passiveScheduledJobs`): the
-    /// session-artifacts tree scans once per generation instead of once
-    /// per request. Daemon-owned mutations (and the saved-session
-    /// delete/rename paths) drop it through
-    /// `invalidate_passive_catalog`; a served snapshot older than the
-    /// refresh window re-scans in the background
-    /// (stale-while-revalidate). The mutation arms keep the fresh scan
-    /// (TS `collectPassiveScheduledJobs` durable truth).
+    /// The passive scheduled-jobs snapshot the catalog READ paths serve: the
+    /// session-artifacts tree scans once per generation instead of once per request;
+    /// daemon-owned mutations drop it through `invalidate_passive_catalog`.
     pub(crate) passive_catalog:
         std::sync::Mutex<Option<crate::scheduling_catalog::PassiveCatalogSnapshot>>,
-    /// One passive-catalog scan at a time (TS
-    /// `passiveScheduledJobsScan ??=`): concurrent cold reads share one
-    /// in-flight scan instead of each enqueueing its own.
+    /// One passive-catalog scan at a time: concurrent cold reads share one in-flight scan.
     pub(crate) passive_scan_gate: tokio::sync::Mutex<()>,
-    /// A stale refresh is already queued (TS `??=`'s one in-flight scan):
-    /// readers that arrive while the background refresh runs share it
-    /// instead of each spawning another refresh task.
+    /// A stale refresh is already queued: readers that arrive while it runs share it.
     pub(crate) passive_scan_pending: std::sync::atomic::AtomicBool,
-    /// The passive snapshot's publish epoch (TS #2487
-    /// `passiveScheduledJobsEpoch`): an invalidation claims a newer epoch,
-    /// so a scan that raced the invalidation cannot republish its
-    /// pre-mutation rows as a fresh snapshot.
+    /// The passive snapshot's publish epoch: an invalidation claims a newer epoch, so a
+    /// scan that raced the invalidation cannot republish its pre-mutation rows as fresh.
     pub(crate) passive_catalog_epoch: std::sync::atomic::AtomicU64,
-    /// The terminal-compaction journal (the abort supervision): the
-    /// supervisor's own durable record of compactions it declared aborted
-    /// when the worker could not answer — feeds the replacement-worker
-    /// create replay, cleared by a `compaction_end` that did land.
+    /// The terminal-compaction journal: durable record of compactions declared aborted
+    /// when the worker could not answer; feeds the replacement-worker create replay,
+    /// cleared by a landed `compaction_end`.
     pub(crate) compaction_journal:
         std::sync::Mutex<crate::compaction_supervision::TerminalCompactionJournal>,
 }
 
 impl Supervisor {
-    /// Build the supervisor: the descriptor dir, the persisted config,
-    /// the event channel, the log, and the compaction-supervision
-    /// journal.
+    /// Build the supervisor: descriptor dir, persisted config, event channel, log, journal.
     ///
     /// # Errors
     ///
-    /// Returns an error when the descriptor directory cannot be created,
-    /// the sessions dir cannot be resolved, the supervisor config
-    /// cannot be persisted, or the compaction-supervision journal cannot
-    /// be opened.
+    /// Returns an error when the descriptor dir, sessions dir, config, or journal cannot be opened.
     pub fn new(options: SupervisorOptions) -> Result<Self> {
         let descriptor_dir =
             crate::descriptor::descriptor_dir(&options.agent_dir, &options.socket_path);
@@ -348,15 +292,12 @@ impl Supervisor {
     ///
     /// # Errors
     ///
-    /// Returns an error when the socket path cannot be prepared (already
-    /// in use), the supervisor socket cannot be bound, or the accept
-    /// loop exhausts its give-up budget on a permanently broken
-    /// listener (transient accept errors are retried; see `accept_loop`).
+    /// Returns an error when the socket path cannot be prepared (already in use), the
+    /// socket cannot be bound, or the accept loop exhausts its give-up budget.
     ///
     /// # Panics
     ///
-    /// Panics when the telemetry mutex is poisoned (a holder panicked
-    /// while holding the lock).
+    /// Panics when the telemetry mutex is poisoned (the holder panicked mid-lock).
     pub async fn run(self: Arc<Self>) -> Result<()> {
         // Before any socket or worker exists: workers and their kernels
         // inherit the raised limit.
@@ -379,27 +320,16 @@ impl Supervisor {
                 pa_core::session_engine::telemetry::build_client(&settings, &self.options.agent_dir)
             });
         }
-        // Live model catalog (both fetch layers): the supervisor process
-        // keeps the disk caches warm for every worker it spawns — a forced
-        // startup refresh (layer A provider catalog + the credentialed
-        // Prime Inference snapshot for the logged-in account) and then the
-        // hourly loop. Fire-and-forget: workers always have the
-        // last-good chain (disk snapshot | bundled | compiled) and the
-        // refresh only adds live pricing and catalog-repo/new entries.
+        // Live model catalog (both fetch layers): the supervisor keeps the disk caches warm
+        // for every worker it spawns — startup refresh plus the hourly loop, fire-and-forget.
         let _ = pa_core::models::startup_refresh(&self.options.agent_dir);
         pa_core::models::spawn_hourly_refresh(&self.options.agent_dir);
-        // The plugins service catalog's keep-warm (the `/mcp` view's remote
-        // catalog): the same supervisor-owned cadence — a forced startup
-        // refresh plus the hourly loop, fire-and-forget, failures keep the
-        // last-good disk cache (the packaged bundled snapshot serves
-        // until the first fetch lands).
+        // The plugins service catalog's keep-warm (the `/mcp` view's remote catalog): same
+        // cadence — startup refresh plus the hourly loop, failures keep the last-good cache.
         pa_core::mcp::startup_plugins_refresh(&self.options.agent_dir);
         pa_core::mcp::spawn_hourly_plugins_refresh(&self.options.agent_dir);
-        // Adoption telemetry for the wiring: one `daemon event` (kind
-        // `catalog_refresh`) when the startup refresh settles — the
-        // served model count, primitives only. The awaited refresh is
-        // gated, so it coalesces with the startup refresh's in-flight
-        // fetches instead of refetching.
+        // Adoption telemetry: one `daemon event` (kind `catalog_refresh`) when the startup
+        // refresh settles — the served model count, primitives only.
         {
             let supervisor = Arc::clone(&self);
             tokio::spawn(async move {
@@ -462,12 +392,9 @@ impl Supervisor {
                 .append(&format!("open file limit raise failed: {error}")),
         }
 
-        // The OS-signal drain (SIGTERM/SIGINT; the loop lives in
-        // `crate::signal_drain`): `install` registers the handlers
-        // synchronously here - before the boot passes below and their
-        // first await - so no signal can land with the default disposition
-        // still active. From here on, the first signal drains (new work
-        // refused, running turns settled) and a later signal force-exits.
+        // The OS-signal drain (the loop lives in `crate::signal_drain`): `install` registers
+        // the handlers synchronously here — before the boot passes and their first await —
+        // so no signal can land with the default disposition still active.
         tokio::spawn(crate::signal_drain::install(Arc::clone(&self)));
 
         // The boot's ownership actions - reaping this socket's predecessor
@@ -664,10 +591,8 @@ impl Supervisor {
     }
 }
 
-/// One outbound client-socket line: a JSON value the connection serializes,
-/// or the pre-serialized bytes of a relayed worker response (the zero-copy
-/// route hands the worker's own line through with the client's command id
-/// spliced in front).
+/// One outbound client-socket line: a JSON value the connection serializes, or the
+/// pre-serialized bytes of a relayed worker response.
 pub(crate) enum Outbound {
     Line(Value),
     Raw(Vec<u8>),
@@ -677,9 +602,7 @@ pub(crate) enum Outbound {
 ///
 /// # Errors
 ///
-/// Returns an error when the supervisor cannot start (see
-/// [`Supervisor::new`]) or its serve loop fails (see
-/// [`Supervisor::run`]).
+/// Returns an error when the supervisor cannot start or its serve loop fails.
 pub async fn run_supervisor(options: SupervisorOptions) -> Result<()> {
     let supervisor = Arc::new(Supervisor::new(options)?);
     supervisor.run().await

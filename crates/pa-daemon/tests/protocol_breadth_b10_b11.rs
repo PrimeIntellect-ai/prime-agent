@@ -1,25 +1,16 @@
-//! Supervisor wire-shape tests for the protocol-breadth waves b6-b9
-//! (roadmap item 7): every new command
-//! rides the real supervisor + worker over the socket and answers the
-//! exact TS wire shape (success and error paths), the same harness the
-//! supervisor e2e suite uses.
-// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
-// the full rationale).
-// Stack-resident futures by design on the daemon's hot paths; boxing the
-// call sites for a lint tick is a perf regression with zero correctness gain.
+//! Supervisor wire-shape tests for the protocol-breadth waves (roadmap item 7): every new
+//! command rides the real supervisor + worker over the socket and answers the exact TS
+//! wire shape (success and error paths), the same harness the supervisor e2e suite uses.
+// Stack-resident futures by design; boxing for a lint tick is a perf regression.
 #![allow(clippy::large_futures)]
-// 64-bit-only targets; the narrowing casts sit at OS boundaries
-// (pid/fd/time/size) where the values are bounded by the kernel - the
-// dead-guard expect()s would add panic paths where silent wrap was
-// deliberate.
+// 64-bit-only targets; narrowing casts sit at bounded OS/protocol boundaries.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// The fn-length threshold is a style gate, not correctness; the structure
-// campaign owns the god-fn splits as a follow-up.
+// Fn length is a style gate, not correctness.
 #![allow(clippy::too_many_lines)]
 // API-shape opinions, not defects; the surfaces are deliberate.
 #![allow(
@@ -52,8 +43,7 @@ impl Drop for Daemon {
     }
 }
 
-// The timeout panic path cannot wait on the child; the test process exits
-// immediately afterwards, reaping it.
+// The timeout panic path cannot wait on the child; the test exits and reaps it.
 #[allow(clippy::zombie_processes)]
 fn spawn_daemon(socket: &std::path::Path, agent_dir: &std::path::Path) -> Daemon {
     let binary = env!("CARGO_BIN_EXE_pa-daemon");
@@ -65,10 +55,8 @@ fn spawn_daemon(socket: &std::path::Path, agent_dir: &std::path::Path) -> Daemon
         .arg(agent_dir)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        // A supervisor killed at teardown must not leak its session workers
-        // into later test binaries: the worker's supervisor-lost exit (TS
-        // `exitIfSupervisorOrphanedForTooLong`) runs on this short window
-        // instead of the 5-minute default.
+        // A supervisor killed at teardown must not leak its session workers into later
+        // test binaries: the supervisor-lost exit runs here.
         .env(
             pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
             "15000",
@@ -170,9 +158,8 @@ impl Client {
         }
     }
 
-    /// Read until the response for `id`, buffering the outbound lines seen
-    /// first: the daemon emits events before the command reply (TS order),
-    /// so a bare `read_response` would discard them.
+    /// Read until the response for `id`, buffering the outbound lines first: the daemon
+    /// emits events before the command reply (TS order).
     fn read_response_and_lines(
         &mut self,
         id: &str,
@@ -192,9 +179,8 @@ impl Client {
         }
     }
 
-    /// The first buffered-or-live outbound line of `line_type`. Buffered
-    /// lines of other types stay buffered; live lines of other types are
-    /// skipped, like a filtering read loop.
+    /// The first buffered-or-live outbound line of `line_type`; other types stay
+    /// buffered or are skipped, like a filtering read loop.
     fn next_line_of_type(
         &mut self,
         lines: &mut std::collections::VecDeque<serde_json::Value>,
@@ -230,9 +216,8 @@ impl Client {
     }
 }
 
-/// The wave tests spawn real supervisor + worker process trees; the box
-/// is small, so one daemon tree runs at a time (a test binary's tests
-/// otherwise race each other's process startup windows).
+/// The wave tests spawn real supervisor + worker process trees; the box is small, so one
+/// daemon tree runs at a time (tests otherwise race each other's startup windows).
 static SERIAL: Mutex<()> = Mutex::new(());
 
 fn serial_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -242,8 +227,7 @@ fn serial_lock() -> std::sync::MutexGuard<'static, ()> {
     }
 }
 
-/// Create one scripted session; returns (daemon, client, session id,
-/// socket path).
+/// Create one scripted session; returns (daemon, client, session id, socket path).
 fn scripted_session(
     dir: &std::path::Path,
     agent_dir: &std::path::Path,
@@ -288,8 +272,6 @@ fn wave_b10_scheduling_wire_shapes() {
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
     let (_daemon, mut client, session_id, _socket) = scripted_session(dir.path(), &agent_dir);
 
-    // cron_add: the TS job wire object (source "cron", the live session
-    // identity, the parsed one-shot schedule, a next run).
     client.send_command(
         "c1",
         &json!({
@@ -309,7 +291,6 @@ fn wave_b10_scheduling_wire_shapes() {
     assert!(job["nextRunAt"].is_string(), "{job}");
     let job_id = job["id"].as_str().expect("job id").to_string();
 
-    // cron_list (selector form): the job.
     client.send_command(
         "c2",
         &json!({ "type": "cron_list", "activeSessionId": session_id }),
@@ -320,8 +301,6 @@ fn wave_b10_scheduling_wire_shapes() {
     assert_eq!(jobs.len(), 1, "{jobs:?}");
     assert_eq!(jobs[0]["id"], job_id.as_str());
 
-    // cron_list (selector-less): the supervisor merge over the live
-    // worker plus the passive catalog.
     client.send_command("c3", &json!({ "type": "cron_list" }));
     let response = client.read_response("c3");
     assert_eq!(response["success"], true, "{response}");
@@ -329,14 +308,11 @@ fn wave_b10_scheduling_wire_shapes() {
     assert_eq!(jobs.len(), 1, "{jobs:?}");
     assert_eq!(jobs[0]["id"], job_id.as_str());
 
-    // heartbeats_list before any heartbeat: the empty catalog.
     client.send_command("h0", &json!({ "type": "heartbeats_list" }));
     let response = client.read_response("h0");
     assert_eq!(response["success"], true, "{response}");
     assert_eq!(response["data"]["heartbeats"], json!([]));
 
-    // heartbeat_set: the TS heartbeat job (source "heartbeat", the
-    // requested delivery mode).
     client.send_command(
         "h1",
         &json!({
@@ -353,7 +329,6 @@ fn wave_b10_scheduling_wire_shapes() {
     assert_eq!(heartbeat["deliveryMode"], "follow_up");
     let heartbeat_id = heartbeat["id"].as_str().expect("heartbeat id").to_string();
 
-    // heartbeat_get: the session's heartbeat.
     client.send_command(
         "h2",
         &json!({ "type": "heartbeat_get", "activeSessionId": session_id }),
@@ -362,8 +337,6 @@ fn wave_b10_scheduling_wire_shapes() {
     assert_eq!(response["success"], true, "{response}");
     assert_eq!(response["data"]["heartbeat"]["id"], heartbeat_id.as_str());
 
-    // heartbeats_list: the merged catalog row ({ job, sessionName?,
-    // firstMessage? }).
     client.send_command("h3", &json!({ "type": "heartbeats_list" }));
     let response = client.read_response("h3");
     assert_eq!(response["success"], true, "{response}");
@@ -371,7 +344,6 @@ fn wave_b10_scheduling_wire_shapes() {
     assert_eq!(heartbeats.len(), 1, "{heartbeats:?}");
     assert_eq!(heartbeats[0]["job"]["id"], heartbeat_id.as_str());
 
-    // heartbeat_update (pause): the paused heartbeat.
     client.send_command(
         "h4",
         &json!({
@@ -383,7 +355,6 @@ fn wave_b10_scheduling_wire_shapes() {
     assert_eq!(response["success"], true, "{response}");
     assert_eq!(response["data"]["heartbeat"]["status"], "paused");
 
-    // heartbeat_manage (resume): the active heartbeat again.
     client.send_command(
         "h5",
         &json!({
@@ -395,7 +366,6 @@ fn wave_b10_scheduling_wire_shapes() {
     assert_eq!(response["success"], true, "{response}");
     assert_eq!(response["data"]["heartbeat"]["status"], "active");
 
-    // heartbeat_manage (stop): the cancelled heartbeat.
     client.send_command(
         "h6",
         &json!({
@@ -407,7 +377,6 @@ fn wave_b10_scheduling_wire_shapes() {
     assert_eq!(response["success"], true, "{response}");
     assert_eq!(response["data"]["heartbeat"]["status"], "cancelled");
 
-    // heartbeat_get with no live heartbeat: null (TS `?? null`).
     client.send_command(
         "h7",
         &json!({ "type": "heartbeat_get", "activeSessionId": session_id }),
@@ -416,14 +385,11 @@ fn wave_b10_scheduling_wire_shapes() {
     assert_eq!(response["success"], true, "{response}");
     assert_eq!(response["data"]["heartbeat"], Value::Null);
 
-    // cron_cancel (selector-less): the supervisor finds the owning
-    // worker and cancels through it.
     client.send_command("c4", &json!({ "type": "cron_cancel", "jobId": job_id }));
     let response = client.read_response("c4");
     assert_eq!(response["success"], true, "{response}");
     assert_eq!(response["data"]["job"]["status"], "cancelled");
 
-    // cron_cancel of an unknown job: the TS error.
     client.send_command(
         "c5",
         &json!({ "type": "cron_cancel", "jobId": "ghost-job" }),
@@ -432,7 +398,6 @@ fn wave_b10_scheduling_wire_shapes() {
     assert_eq!(response["success"], false, "{response}");
     assert_eq!(response["error"], "No cron job found: ghost-job");
 
-    // heartbeat_manage of an unknown job: the TS error.
     client.send_command(
         "h8",
         &json!({
@@ -445,9 +410,8 @@ fn wave_b10_scheduling_wire_shapes() {
     assert_eq!(response["error"], "No active heartbeat found: ghost-beat");
 }
 
-/// Wave b10: a scheduled once job actually fires into the session and the
-/// run bookkeeping lands in the catalog (the scheduler's
-/// claim-dispatch-record loop through the worker's queue).
+/// Wave b10: a scheduled once job actually fires into the session and the run bookkeeping
+/// lands in the catalog.
 #[test]
 fn wave_b10_scheduled_prompt_fires() {
     let _serial = serial_lock();
@@ -456,8 +420,7 @@ fn wave_b10_scheduled_prompt_fires() {
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
     let (_daemon, mut client, session_id, _socket) = scripted_session(dir.path(), &agent_dir);
 
-    // A one-shot `at` schedule a couple of seconds out (the `in` form
-    // takes no seconds unit).
+    // A one-shot `at` schedule a couple of seconds out (the `in` form takes no unit).
     let at = format!(
         "at {}",
         pa_daemon::util::iso_from_unix_ms(pa_daemon::util::now_ms() + 2500)
@@ -476,8 +439,7 @@ fn wave_b10_scheduled_prompt_fires() {
         .expect("id")
         .to_string();
 
-    // The once job fires, its turn settles, and the catalog records the
-    // run (completed, runCount 1, lastRunAt).
+    // The once job fires, its turn settles, and the catalog records the run.
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         assert!(
@@ -507,8 +469,7 @@ fn wave_b10_scheduled_prompt_fires() {
     }
 }
 
-/// Wave b10 selector-less catalog shapes on a fresh supervisor (no live
-/// workers): the TS empty-catalog objects and the routing refusals.
+/// Wave b10 selector-less catalog shapes on a fresh supervisor: the empty objects and refusals.
 #[test]
 fn wave_b10_fresh_supervisor_catalog() {
     let _serial = serial_lock();
@@ -560,9 +521,8 @@ fn wave_b10_fresh_supervisor_catalog() {
     assert_eq!(response["error"], "Unknown active session: bogus-1");
 }
 
-/// Wave b11: the saved-session catalog and peer-roster wire shapes -
-/// the fresh-supervisor error paths, the offline rename/delete, and the
-/// live-session rename.
+/// Wave b11: the saved-session catalog and peer-roster wire shapes — the fresh-supervisor
+/// error paths, the offline rename/delete, and the live rename.
 #[test]
 fn wave_b11_saved_sessions_wire_shapes() {
     let _serial = serial_lock();
@@ -599,8 +559,7 @@ fn wave_b11_saved_sessions_wire_shapes() {
             }),
         );
         let response = client.read_response("d0");
-        // The delete answers the TS DeleteSessionFileResult failure
-        // object (success with ok:false).
+        // The delete answers the TS DeleteSessionFileResult failure object (ok:false).
         assert_eq!(response["success"], true, "{response}");
         assert_eq!(response["data"]["ok"], false, "{response}");
 
@@ -610,8 +569,7 @@ fn wave_b11_saved_sessions_wire_shapes() {
         assert_eq!(response["error"], "Worker authentication failed");
     }
 
-    // A live session plus a saved one: the offline rename/delete and the
-    // live rename.
+    // A live session plus a saved one: the offline rename/delete and the live rename.
     let (_daemon, mut client, session_id, _socket) = scripted_session(dir.path(), &agent_dir);
     let live_file = {
         // The live session's file: read it off the worker's state.
@@ -673,8 +631,7 @@ fn wave_b11_saved_sessions_wire_shapes() {
     assert_eq!(response["data"]["ok"], true, "{response}");
     assert!(!saved_path.is_file(), "saved session deleted");
 
-    // The live rename: the owning worker's arm answers the TS no-data
-    // success and the live name follows.
+    // The live rename: the owning worker's arm answers the TS no-data success.
     client.send_command(
         "r2",
         &json!({
@@ -711,12 +668,9 @@ fn wave_b11_saved_sessions_wire_shapes() {
     );
 }
 
-/// The heartbeat-catalog snapshot fallback (TS `worker.heartbeatSnapshot`):
-/// a worker too busy to answer a fresh `heartbeats_list` serves its
-/// last-good rows, so a slow turn cannot empty the merged catalog while its
-/// scheduler keeps firing. A worker whose snapshot went stale (its own
-/// `heartbeats_changed` since the snapshot) fails the response instead (TS
-/// `failed`), which is the client's keep-the-last-catalog signal.
+/// The heartbeat-catalog snapshot fallback (TS `worker.heartbeatSnapshot`): a worker too
+/// busy to answer a fresh `heartbeats_list` serves its last-good rows; a worker whose snapshot
+/// went stale fails the response instead (TS `failed`).
 #[test]
 fn wave_b10_heartbeat_snapshot_fallback() {
     let _serial = serial_lock();
@@ -725,8 +679,7 @@ fn wave_b10_heartbeat_snapshot_fallback() {
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
     let (_daemon, mut client, session_id, _socket) = scripted_session(dir.path(), &agent_dir);
 
-    // One live heartbeat, then a good catalog read: the worker's snapshot
-    // holds the row.
+    // One live heartbeat, then a good catalog read: the worker's snapshot holds the row.
     client.send_command(
         "s1",
         &json!({
@@ -742,8 +695,8 @@ fn wave_b10_heartbeat_snapshot_fallback() {
     let heartbeats = response["data"]["heartbeats"].as_array().expect("rows");
     assert_eq!(heartbeats.len(), 1, "{heartbeats:?}");
 
-    // Freeze the worker: the supervisor's 5s forward cannot answer, and the
-    // last-good snapshot keeps the row in the merged catalog.
+    // Freeze the worker: the supervisor's 5s forward cannot answer, and the last-good
+    // snapshot keeps the row in the merged catalog.
     let pid = worker_pid(&agent_dir);
     stop(pid);
     client.send_command("s3", &json!({ "type": "heartbeats_list" }));
@@ -754,8 +707,8 @@ fn wave_b10_heartbeat_snapshot_fallback() {
     assert_eq!(heartbeats[0]["job"]["prompt"], "check in");
     cont(pid);
 
-    // A worker-side mutation marks the snapshot stale; a frozen worker then
-    // fails the response instead of serving the stale rows (TS `failed`).
+    // A worker-side mutation marks the snapshot stale; a frozen worker then fails the
+    // response instead of serving the stale rows (TS `failed`).
     client.send_command(
         "s4",
         &json!({
@@ -772,11 +725,8 @@ fn wave_b10_heartbeat_snapshot_fallback() {
     cont(pid);
 }
 
-/// TS #2487, the single-worker catalog: the served slice is the worker's
-/// own answer, so the merged `heartbeats_list`/`cron_list` responses are
-/// byte-identical to the fresh-forward catalog while a re-consult is
-/// unnecessary — a frozen worker between two lists still answers through
-/// its slice, and the two responses match row for row.
+/// TS #2487, the single-worker catalog: the served slice is the worker's own, so the merged
+/// responses are byte-identical to the fresh-forward ones.
 #[test]
 fn wave_b10_single_worker_slice_is_byte_identical() {
     let _serial = serial_lock();
@@ -810,8 +760,8 @@ fn wave_b10_single_worker_slice_is_byte_identical() {
     let first_cron = client.read_response("cron1");
     assert_eq!(first_cron["success"], true, "{first_cron}");
 
-    // Freeze the worker: the served slices answer both catalogs fast, and
-    // the responses are byte-identical to the fresh-forward ones.
+    // Freeze the worker: the served slices answer both catalogs fast, byte-identical
+    // to the fresh-forward responses.
     let pid = worker_pid(&agent_dir);
     stop(pid);
     let started = Instant::now();
@@ -834,17 +784,9 @@ fn wave_b10_single_worker_slice_is_byte_identical() {
     cont(pid);
 }
 
-/// TS #2487: the supervisor serves each worker's own catalog slice from its
-/// snapshot instead of forwarding every request to every worker — a
-/// `heartbeats_list` consults a worker at most once per generation. Two
-/// live workers each own a heartbeat; the merged catalog carries both
-/// slices; a second list serves both from the slices (the workers are not
-/// re-consulted — a frozen worker that cannot answer a fresh forward still
-/// appears through its slice, so the round answers fast instead of waiting
-/// out the 5s catalog-forward timeout); a worker-side mutation bumps that
-/// worker's generation, so the next list consults it again (a frozen
-/// worker with no fresh slice fails the response, TS `failed`, instead of
-/// serving the pre-mutation rows).
+/// TS #2487: the supervisor serves each worker's own catalog slice without reforwarding;
+/// a worker-side mutation bumps that worker's generation, so the next list consults it
+/// again (a frozen worker with no fresh slice fails the response, TS `failed`).
 #[test]
 fn wave_b10_catalog_slices_served_without_reforwarding() {
     let _serial = serial_lock();
@@ -887,9 +829,8 @@ fn wave_b10_catalog_slices_served_without_reforwarding() {
         "{prompts:?}"
     );
 
-    // Both slices serve without re-consulting: both workers frozen, the
-    // second list still answers fast (each frozen worker would hold the
-    // 5s catalog-forward timeout on a fresh forward).
+    // Both slices serve without re-consulting: both workers frozen, the second list still
+    // answers fast.
     let pid_a = worker_pid(&agent_dir);
     let pid_b = second_worker_pid(&agent_dir, pid_a);
     stop(pid_a);
@@ -906,10 +847,8 @@ fn wave_b10_catalog_slices_served_without_reforwarding() {
         "a re-forward to a frozen worker would hold the 5s timeout: {served:?}"
     );
 
-    // A worker-side mutation bumps that worker's generation: its slice is
-    // stale, so the next list consults it again — the frozen mutated
-    // worker fails the response (TS `failed`), not the stale pre-mutation
-    // rows.
+    // A worker-side mutation bumps that worker's generation: its slice is stale, so the
+    // next list consults it again (the frozen mutated worker fails, TS `failed`).
     cont(pid_a);
     cont(pid_b);
     client_b.send_command(
@@ -975,8 +914,8 @@ fn second_worker_pid(agent_dir: &std::path::Path, first: u32) -> u32 {
     }
 }
 
-/// Create one scripted live session on `client` (the `scripted_session`
-/// helper's shape, for a second session on a shared daemon).
+/// Create one scripted live session on `client` (the `scripted_session` helper's shape,
+/// for a second session on a shared daemon).
 fn create_scripted_session(
     client: &mut Client,
     agent_dir: &std::path::Path,

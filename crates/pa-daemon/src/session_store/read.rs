@@ -1,6 +1,5 @@
-//! The read arm (moved with its concern): the file-IO load surface - the
-//! streamed and windowed opens, the bounded header-only readers, the
-//! file-layout helpers, and the in-memory create.
+//! The read arm: the file-IO load surface — the streamed and windowed opens, the bounded
+//! header-only readers, the file-layout helpers, and the in-memory create.
 
 use super::view::is_warning_shown_row;
 use super::{
@@ -33,14 +32,12 @@ pub fn parse_session_entries(content: &str) -> Vec<Value> {
         .collect()
 }
 
-/// The bounded first-line read cap for header-only judgments (TS
-/// `SESSION_LIST_HEADER_PREFIX_MAX_CHARS`): a session header line is a
-/// serialized `SessionHeader` and lands well inside 512 bytes.
+/// The bounded first-line read cap for header-only judgments: a session
+/// header line lands well inside 512 bytes.
 pub const SESSION_LIST_HEADER_READ_MAX_BYTES: usize = 512;
 
-/// Parse one session file line as the `session` header (the TS
-/// `readSessionHeader` body): a JSON object tagged `session` that
-/// deserializes into the typed header.
+/// Parse one session file line as the `session` header: a JSON object tagged
+/// `session` that deserializes into the typed header.
 pub(crate) fn parse_session_header_line(line: &str) -> Option<SessionHeader> {
     let value: Value = serde_json::from_str(line.trim()).ok()?;
     if value.get("type").and_then(Value::as_str) != Some("session") {
@@ -49,27 +46,23 @@ pub(crate) fn parse_session_header_line(line: &str) -> Option<SessionHeader> {
     serde_json::from_value(value).ok()
 }
 
-/// Read the file's first line when it ends within `max_bytes` bytes.
-///
-/// `None` when no line ends within the bound (an over-long first line, an
-/// unreadable file, an empty file): the caller judges such a file with a full
-/// read, never on truncated bytes. A final line without a trailing newline is
-/// still a line (`str::lines` reads one too).
+/// Read the file's first line when it ends within `max_bytes` bytes. `None`
+/// when no line ends within the bound: the caller judges with a full read,
+/// never on truncated bytes. A final line without a trailing newline still
+/// counts.
 pub(crate) fn read_first_line_bounded(path: &Path, max_bytes: usize) -> Option<Vec<u8>> {
     let mut file = fs::File::open(path).ok()?;
     read_first_line_bounded_from(&mut file, max_bytes)
 }
 
-/// The bounded first-line read over an already-open handle (the roster
-/// gate shares one open with the fold: the fresh handle sits at byte 0,
-/// where the path-based read started).
+/// The bounded first-line read over an already-open handle (the roster gate shares one
+/// open with the fold).
 pub(crate) fn read_first_line_bounded_from(
     file: &mut fs::File,
     max_bytes: usize,
 ) -> Option<Vec<u8>> {
-    // One byte over the cap separates "a line that fits the cap" (judgeable)
-    // from "an over-long line" (not): a newline at index `max_bytes` still
-    // bounds a complete `max_bytes`-byte line.
+    // One byte over the cap separates a line that fits (judgeable) from an
+    // over-long one: a newline at index `max_bytes` still bounds a full line.
     let mut buf = vec![0u8; max_bytes + 1];
     let mut filled = 0;
     while filled < buf.len() {
@@ -101,10 +94,8 @@ fn strip_line_return(line: &[u8]) -> Vec<u8> {
 }
 
 /// The session file's header, read from the first line bounded to
-/// [`SESSION_LIST_HEADER_READ_MAX_BYTES`] (the TS `isValidSessionFile`
-/// precedent: judge a file by its header line, not a full-file read).
-/// `None` also covers an over-long first line: the bounded read refuses to
-/// judge a truncated one.
+/// [`SESSION_LIST_HEADER_READ_MAX_BYTES`]: `None` also covers an over-long
+/// first line — the bounded read refuses to judge a truncated one.
 #[must_use]
 pub fn read_session_header_bounded(path: &Path) -> Option<SessionHeader> {
     let line = read_first_line_bounded(path, SESSION_LIST_HEADER_READ_MAX_BYTES)?;
@@ -129,18 +120,14 @@ pub fn is_valid_session_file(path: &Path) -> bool {
 }
 
 impl SessionFile {
-    /// Load an existing session file. Errors when the header is missing/invalid.
+    /// Load an existing session file; malformed entry lines are skipped (the TS loader).
     ///
     /// # Errors
     ///
-    /// Returns an error when the file cannot be read, is empty, or its
-    /// header is missing or invalid; malformed entry lines are skipped,
-    /// matching the TS loader.
+    /// Returns an error when the file cannot be read, is empty, or its header is invalid.
     pub fn open(path: &Path) -> Result<Self> {
-        // Streamed line-by-line load: one line is resident at a time, so a
-        // grown session never holds the raw file bytes alongside the parsed
-        // entries (the whole-body String read was a transient copy the
-        // allocator kept resident long after `open` returned).
+        // Streamed line-by-line load: one line is resident at a time, so a grown session
+        // never holds the raw file bytes alongside the parsed entries.
         let file = fs::File::open(path)
             .with_context(|| format!("read session file {}", path.display()))?;
         let mut lines = std::io::BufReader::new(file).lines();
@@ -196,9 +183,8 @@ impl SessionFile {
     ///
     /// # Errors
     ///
-    /// Returns an error when the windowed load fails or the window holds
-    /// no session header; a malformed retained row falls back to the
-    /// full [`SessionFile::open`] load, so its errors surface here too.
+    /// Returns an error when the windowed load fails or holds no header; a
+    /// malformed retained row falls back to [`SessionFile::open`].
     pub fn open_windowed(path: &Path) -> Result<Self> {
         let Some(mut window) = pa_core::session::window::WindowedSessionStore::open(path)? else {
             return Self::open(path);
@@ -225,9 +211,8 @@ impl SessionFile {
             lease: None,
             anthropic_warning_shown,
         };
-        // The raw rows are consumed in place: each line String drops as
-        // soon as its parsed entry joins the store, instead of keeping the
-        // raw copy resident for the whole build.
+        // The raw rows are consumed in place: each line String drops as soon as its
+        // parsed entry joins the store.
         let raw_count = window.raw_entries().len();
         for line in window
             .take_metadata_entries()
@@ -239,10 +224,8 @@ impl SessionFile {
             };
             file.push_index(entry);
         }
-        // The window keeps the retained-target attributions as metadata and
-        // parses them BEFORE the raw retained rows, so the fold runs once
-        // every row is in (the push_index live-fold cannot see a target
-        // that has not joined the index yet).
+        // The window parses the retained-target attributions BEFORE the raw
+        // retained rows, so the fold runs once every row is in.
         fold_child_usage_attributions(&mut file.entries);
         file.leaf_id = Some(window.leaf_id().to_owned());
         let context = window.context();
@@ -260,10 +243,8 @@ impl SessionFile {
             boundary_model: window.boundary_model().cloned(),
             thinking_level: context.thinking_level,
             service_tier: context.service_tier,
-            // The retained rows joined the store verbatim above (any
-            // unparsable row fell back to the full reader), so their ids are
-            // exactly the trailing `raw_count` store ids — no third parse
-            // pass over the retained body.
+            // The retained rows joined the store verbatim above, so their ids are
+            // exactly the trailing `raw_count` store ids — no third parse pass.
             retained_ids: file.entries[file.entries.len() - raw_count..]
                 .iter()
                 .map(|entry| entry.id.clone())

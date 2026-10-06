@@ -1,36 +1,22 @@
-//! Headless e2e for the read-only inline info panel (the operator's
-//! 2026-09-26 directive): the flooding client commands — `/context`,
-//! `/session`, `/system-prompt`, `/logs`, `/changelog`, `/hotkeys`, and
-//! `/list` — must open the docked popup panel over the editor dock (the
-//! `/mcp` and `/model` panel grammar: the ruled frame, the scroll
-//! indicator, the key hint, one blank under it), ESC must close it back
-//! to the editor dock, and no transcript row may ever carry the
-//! command's content. The `?` quick-shortcut guide is REMOVED entirely
-//! (the operator's directive): pressing `?` types into the editor and no
-//! guide mounts anywhere in the run.
+//! Headless e2e for the read-only inline info panel (operator directive
+//! 2026-09-26): the flooding client commands (`/context`, `/session`,
+//! `/system-prompt`, `/logs`, `/changelog`, `/hotkeys`, `/list`) open the
+//! docked panel; ESC closes it; `?` types into the editor (guide removed).
 #![cfg(unix)]
-// Pedantic-gate exceptions (every other pedantic warning in this crate is
-// fixed in place; each exception carries its one-line justification):
-// - the casts: terminal-layout arithmetic narrows structurally bounded
-//   values (screen coordinates, byte counts, timestamps); guarded
-//   conversions would add panic paths the bounds guarantee away.
+// Casts: structurally bounded terminal-layout arithmetic; guarded conversions add panic paths.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// - the render routes are flat tables (one arm per route); splitting them
-//   would add indirection without changing the flow.
+// Render routes are flat tables (one arm per route); splitting adds indirection.
 #![allow(clippy::too_many_lines)]
-// - widget state structs carry independent flag bits; a nested struct
-//   would add indirection without changing the shape.
+// Widget state structs carry independent flag bits.
 #![allow(clippy::struct_excessive_bools, clippy::fn_params_excessive_bools)]
-// - the futures are bounded by the surface's lifetime; boxing them would
-//   add an allocation to the steady-state loop.
+// Futures are bounded by the surface's lifetime; boxing adds a steady-state allocation.
 #![allow(clippy::large_futures)]
-// - the wrappers preserve a uniform Result-returning API surface; unwrap
-//   removals would ripple through the callers without changing behavior.
+// The wrappers preserve a uniform Result-returning API surface.
 #![allow(clippy::unnecessary_wraps)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -55,9 +41,8 @@ impl MockSupervisor {
         }
     }
 
-    /// Serve one connection: attach an empty session, then answer the
-    /// loop's requests (the info commands' daemon fetches all land in
-    /// the default arm's empty-data success).
+    /// Serve one connection: the info commands' daemon fetches all land in the default arm's
+    /// empty-data success.
     fn serve(self) {
         let (stream, _) = self.listener.accept().expect("accept");
         let write_stream = stream.try_clone().expect("clone mock socket");
@@ -289,33 +274,26 @@ fn wait_gone(needle: &str) -> HeadlessStep {
     }
 }
 
-/// The panel's key hint (the shared docked-panel grammar): the scroll
-/// keys and the close key.
+/// The panel's key hint (the shared docked-panel grammar): the scroll keys and the close key.
 const PANEL_HINT: &str = "Esc close";
 
-/// Every flooding command opens the read-only info panel inline, ESC
-/// closes it, and the transcript gains nothing: the panel content appears
-/// in the frames only while the panel is open, and the final frame holds
-/// the empty transcript and the editor dock alone. `?` types into the
-/// editor instead of mounting the removed quick-shortcut guide.
+/// Every flooding command opens the read-only info panel inline, ESC closes it, and the transcript
+/// gains nothing; `?` types into the editor instead of mounting the removed guide.
 #[test]
 fn info_commands_open_inline_panels_that_esc_closes_without_transcript_rows() {
     let steps = vec![
-        // `/context`: the tree opens the panel (its `Tokens` section is
-        // panel-only content), the read-only surface consumes a key, and
-        // Esc closes it.
+        // `/context`: the tree opens the panel (its `Tokens` section is panel-only content).
         submit("/context"),
         wait_render("Tokens"),
         key(KeyCode::Down),
         key(KeyCode::Esc),
         wait_gone(PANEL_HINT),
-        // `/session`: the Session Info rows, same open/close cycle.
+        // `/session`: the Session Info rows.
         submit("/session"),
         wait_render("Session Info"),
         key(KeyCode::Esc),
         wait_gone(PANEL_HINT),
-        // `/system-prompt`: the unbounded document, paged by the panel's
-        // page keys.
+        // `/system-prompt`: the unbounded document, paged by the panel.
         submit("/system-prompt"),
         wait_render("chars)"),
         key(KeyCode::PageDown),
@@ -331,23 +309,20 @@ fn info_commands_open_inline_panels_that_esc_closes_without_transcript_rows() {
         wait_render("What's New"),
         key(KeyCode::Esc),
         wait_gone(PANEL_HINT),
-        // `/hotkeys`: the guide's first rows ride the panel, End jumps
-        // the scrollable window to the guide's bottom, Esc closes.
+        // `/hotkeys`: the guide's rows ride the panel; End jumps to the guide's bottom.
         submit("/hotkeys"),
         wait_render("Move cursor / browse history"),
         key(KeyCode::End),
         wait_render("mouse click on link"),
         key(KeyCode::Esc),
         wait_gone(PANEL_HINT),
-        // `/list`: the live-sessions listing (the mock daemon answers an
-        // empty roster).
+        // `/list`: the live-sessions listing (the mock answers an empty roster).
         submit("/list"),
         wait_render("live sessions:"),
         key(KeyCode::Esc),
         wait_gone(PANEL_HINT),
-        // The removed `?` command: with an empty editor the key types a
-        // literal `?` (the old build mounted the quick-shortcut guide);
-        // Esc clears the editor.
+        // The removed `?` command: with an empty editor the key types a literal `?`; Esc clears the
+        // editor.
         key(KeyCode::Char('?')),
         key(KeyCode::Esc),
     ];
@@ -355,20 +330,17 @@ fn info_commands_open_inline_panels_that_esc_closes_without_transcript_rows() {
     assert!(!frames.is_empty(), "frames were captured");
     let rendered = frames.join("\n");
 
-    // The panel grammar rendered: the scroll keys and the close key.
     assert!(
         rendered.contains("\u{2191}/\u{2193} scroll \u{b7} Esc close"),
         "the panel hint rendered:\n{rendered}"
     );
-    // The scrollable window scrolled: End put the guide's last rows on
-    // the screen (the first window never shows them).
+    // End put the guide's last rows on screen (the first window never shows them).
     assert!(
         rendered.contains("mouse click on link"),
         "the End key jumped the panel to the guide's bottom:\n{rendered}"
     );
-    // The `?` quick-shortcut guide never mounted anywhere in the run
-    // (its Help line is gone from the product): the `?` press typed
-    // editor text instead.
+    // The `?` quick-shortcut guide never mounted anywhere in the run: the `?` press typed editor
+    // text instead.
     assert!(
         !rendered.contains("full reference"),
         "the removed ? guide must never mount:\n{rendered}"
@@ -378,9 +350,8 @@ fn info_commands_open_inline_panels_that_esc_closes_without_transcript_rows() {
         "the removed ? guide's vocabulary is gone:\n{rendered}"
     );
 
-    // The transcript after every panel closed: the editor dock and none
-    // of the panel content — the panels leave the transcript untouched
-    // (the operator's no-flooding directive).
+    // The transcript after every panel closed: the editor dock and none of the panel content (the
+    // operator's no-flooding directive).
     let last = frames.last().expect("frames");
     assert!(
         last.contains("Collapsed mode ("),

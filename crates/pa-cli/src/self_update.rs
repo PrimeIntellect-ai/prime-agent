@@ -1,14 +1,12 @@
-//! The self-update command core (TS `handlePackageCommand`'s self-update
-//! half): the nightly-switch confirmation, the persisted-channel default,
-//! the native staged-activation update, and the completed-run channel
-//! persist. `prime-agent update` and `prime-agent package update`'s self
-//! target both run this one body, so the two entry points cannot diverge.
+//! The self-update command core: the nightly-switch confirmation, the
+//! staged-activation update, and the completed-run channel persist.
+//! `prime-agent update` and `prime-agent package update`'s self target
+//! both run this one body, so the two entry points cannot diverge.
 
 use pa_core::update::version::UpdateChannel;
 
 /// One parsed self-update invocation: `prime-agent update`'s options or the
-/// `package update` self target's (the package path never carries the
-/// direct-install payload pair).
+/// `package update` self target's.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SelfUpdateOptions {
     pub force: bool,
@@ -20,8 +18,8 @@ pub struct SelfUpdateOptions {
     pub source: Option<String>,
 }
 
-/// The settings `UpdateChannel` in the update vocabulary's wire name
-/// ("stable"/"nightly") — both entries read and persist one wire format.
+/// The settings `UpdateChannel` in the update vocabulary's wire name ("stable"/"nightly") — both
+/// entries read and persist one format.
 pub fn settings_channel_wire_name(channel: pa_core::settings::UpdateChannel) -> &'static str {
     UpdateChannel::wire_name(match channel {
         pa_core::settings::UpdateChannel::Stable => UpdateChannel::Stable,
@@ -29,13 +27,9 @@ pub fn settings_channel_wire_name(channel: pa_core::settings::UpdateChannel) -> 
     })
 }
 
-/// The nightly-switch confirmation (TS `handlePackageCommand`'s update
-/// case): warn, then confirm the switch unless `--force`. Declining — or a
-/// non-tty shell run without `--force` — changes nothing. Returns the
-/// abort exit code (75 for the interactive update
-/// child so the TUI can tell an aborted switch from a failure, else 1) when
-/// the run must stop, or `None` to proceed (also when no explicit nightly
-/// switch is requested).
+/// The nightly-switch confirmation: warn, then confirm unless `--force`. A decline
+/// changes nothing. Returns the abort exit code (75 for the interactive child,
+/// else 1) or `None`.
 pub fn confirm_nightly_switch(
     force: bool,
     channel: Option<UpdateChannel>,
@@ -73,15 +67,13 @@ pub fn confirm_nightly_switch(
     None
 }
 
-/// Run the native self-update (the staged-activation update flow) with the
-/// persisted-channel default and the TS `commitChannel` persist of a
-/// completed run. Returns the process exit code; failures print the update
-/// command's `Error: …` line and exit 1 — including the installer-ownership
-/// message a binary the Prime Agent installer does not own produces verbatim
-/// (the actionable, install-method-specific instruction).
+/// Run the native self-update (the staged-activation flow) with the
+/// persisted-channel default and the completed-run persist. Returns the exit
+/// code; failures print the `Error: …` line and exit 1 (including the
+/// installer-ownership message verbatim).
 pub fn run(options: &SelfUpdateOptions, persisted_wire: Option<&str>) -> i32 {
-    // The effective channel: an explicit flag wins, else the persisted
-    // one, else the running version infers it.
+    // The effective channel: an explicit flag wins, else the persisted one, else the running
+    // version infers it.
     let channel = options
         .channel
         .or_else(|| persisted_wire.and_then(UpdateChannel::from_wire));
@@ -106,11 +98,8 @@ pub fn run(options: &SelfUpdateOptions, persisted_wire: Option<&str>) -> i32 {
         &command_options,
     )) {
         Ok(code) => {
-            // TS `commitChannel`: a completed run persists an explicit
-            // switch (Complete and Skipped alike — a channel pin applies
-            // even when no newer release was needed) and reports it. The
-            // not-attempted exit (75) reaches here only as the child-mode
-            // no-change skip: a declined confirmation never runs the flow.
+            // A completed run persists an explicit switch (Complete and Skipped
+            // alike; TS `commitChannel`).
             let flag_wire = options.channel.map(UpdateChannel::wire_name);
             if (code == 0 || code == 75) && flag_wire.is_some() && flag_wire != persisted_wire {
                 let wire = flag_wire.unwrap_or_default();

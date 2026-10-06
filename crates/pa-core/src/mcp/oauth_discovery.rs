@@ -1,10 +1,7 @@
-//! OAuth discovery for MCP servers: RFC 9728 protected-resource metadata
-//! before the origin-level authorization-server fallback, RFC 8414/OIDC
-//! metadata, dynamic client registration, PKCE, and token exchange.
-//!
-//! Every request goes through the [`OAuthHttp`] transport seam so the flow
-//! is hermetically testable; validation errors carry the TS wording
-//! (they surface in login dialogs).
+//! OAuth discovery for MCP servers: RFC 9728 protected-resource metadata before the
+//! origin-level authorization-server fallback, RFC 8414/OIDC metadata, dynamic client
+//! registration, PKCE, and token exchange. Every request goes through the [`OAuthHttp`]
+//! seam; validation errors carry the TS wording.
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine as _;
@@ -318,16 +315,14 @@ pub(crate) async fn discover(http: &dyn OAuthHttp, url: &str) -> Result<Discover
 
 type ProtectedDiscovery = Option<(AuthServerMetadata, String, String)>;
 
-/// Probe protected-resource metadata: the `WWW-Authenticate`
-/// `resource_metadata` pointer first, then the RFC well-known location.
-/// `None` when the server serves no RFC 9728 metadata.
+/// Probe protected-resource metadata:`resource_metadata` pointer first, then the RFC well-known
+/// location. `None` when the server serves no RFC 9728 metadata.
 async fn try_protected_resource_metadata(
     http: &dyn OAuthHttp,
     resource_url: &Url,
 ) -> Result<ProtectedDiscovery> {
-    // This probe deliberately has no Authorization header; it must never
-    // leak an existing token. A failing probe is not an error (the server
-    // need not support a GET probe).
+    // This probe deliberately has no Authorization header; it must never leak an existing token. A
+    // failing probe is not an error.
     let probe = OAuthHttpRequest {
         method: OAuthHttpMethod::Get,
         url: resource_url.to_string(),

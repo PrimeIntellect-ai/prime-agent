@@ -1,6 +1,4 @@
-//! The manager unit battery (moved with its concern): the persistence
-//! bootstrap rule, the crash-repair resume, the ISO round-trip, and the
-//! fork contract (copy, torn-tail, cycles, rejection rows).
+//! Manager unit battery: persistence bootstrap, crash repair, ISO round-trip, fork contract.
 
 use super::*;
 
@@ -125,7 +123,6 @@ fn open_repairs_and_resumes() {
     });
     manager.append_message(assistant).unwrap();
     let file = manager.get_session_file().unwrap().to_path_buf();
-    // Simulate crash damage: torn tail (no trailing newline).
     let content = std::fs::read_to_string(&file).unwrap();
     std::fs::write(&file, content.trim_end()).unwrap();
     let reopened = SessionManager::open(tmp.path(), &dir, &file);
@@ -139,7 +136,6 @@ fn flush_now_durability_without_assistant() {
     let dir = tmp.path().join("sessions");
     let mut manager = SessionManager::persisted(tmp.path(), &dir);
     manager.append_session_info("my session").unwrap();
-    // session_info persists even without an assistant message.
     assert!(manager.get_session_file().unwrap().exists());
     assert_eq!(manager.get_session_name().as_deref(), Some("my session"));
 }
@@ -151,10 +147,6 @@ fn iso_format_round_trips() {
     assert_eq!(super::super::timestamp_to_millis(&stamp), 1_704_067_200_012);
 }
 
-/// TS `forkFrom`: the fork copies the source branch into a fresh
-/// session file under the target cwd, parented at the source; the
-/// source's `git_state` rows drop out and their children re-link to
-/// the nearest kept ancestor.
 #[test]
 fn fork_from_copies_the_branch_under_a_fresh_header() {
     let tmp = tempfile::tempdir().unwrap();
@@ -187,7 +179,6 @@ fn fork_from_copies_the_branch_under_a_fresh_header() {
     });
     source.append_message(assistant).unwrap();
     let assistant_id = source.get_leaf_id().unwrap().to_string();
-    // A git_state row: dropped by the fork, its child re-linked.
     source
         .append_entry(FileEntry::GitState {
             payload: pa_types::session::GitStateEntry {
@@ -207,7 +198,6 @@ fn fork_from_copies_the_branch_under_a_fresh_header() {
     let trailing_id = source.get_leaf_id().unwrap().to_string();
     let source_file = source.get_session_file().unwrap().to_path_buf();
 
-    // Fork into a different project root.
     let target_cwd = tmp.path().join("target-project");
     let target_dir = tmp.path().join("target-sessions");
     let forked = SessionManager::fork_from(&source_file, &target_cwd, &target_dir)
@@ -220,8 +210,6 @@ fn fork_from_copies_the_branch_under_a_fresh_header() {
         "the fork file lives in the target session dir"
     );
 
-    // Fresh header: new id, target cwd, source as parentSession, source
-    // depth carried over.
     let header = forked.get_header().unwrap();
     assert_ne!(header.id, source.get_session_id());
     assert_eq!(header.cwd, target_cwd.display().to_string());
@@ -231,9 +219,6 @@ fn fork_from_copies_the_branch_under_a_fresh_header() {
     );
     assert_eq!(header.rlm_depth, source.get_header().unwrap().rlm_depth);
 
-    // The branch copied: the user + assistant rows survive with the
-    // same ids; the git_state row is gone; its child re-linked to the
-    // git_state's parent (the assistant row).
     let entries = forked.get_all_entries();
     assert!(entries
         .iter()
@@ -253,7 +238,6 @@ fn fork_from_copies_the_branch_under_a_fresh_header() {
         .expect("the git_state child copied");
     assert_eq!(trailing.parent_id(), Some(assistant_id.as_str()));
 
-    // The fork continues from the copied branch and the copy is durable.
     let before = std::fs::read_to_string(&fork_file).unwrap();
     let trailing_line = before
         .lines()
@@ -273,10 +257,6 @@ fn fork_from_copies_the_branch_under_a_fresh_header() {
     assert!(after.lines().count() > before.lines().count());
 }
 
-/// The fork is a read-only copy: a source with a torn tail (an
-/// in-progress append by a live writer) is copied with the torn row
-/// skipped, and the source file itself stays byte-identical — repairing
-/// would rewrite (and truncate) the live source.
 #[test]
 fn fork_from_never_rewrites_the_source() {
     let tmp = tempfile::tempdir().unwrap();
@@ -288,7 +268,6 @@ fn fork_from_never_rewrites_the_source() {
     let target_dir = tmp.path().join("fork-sessions");
     let forked = SessionManager::fork_from(&file, tmp.path(), &target_dir)
         .expect("the torn tail is skipped, not fatal");
-    // The source is untouched, torn tail and all.
     assert_eq!(std::fs::read_to_string(&file).unwrap(), content);
     let entries = forked.get_all_entries();
     assert!(
@@ -297,9 +276,6 @@ fn fork_from_never_rewrites_the_source() {
     );
 }
 
-/// Malformed-but-parseable `git_state` parents can form a cycle (a's
-/// dropped parent is b, b's is a): the fork's parent walk terminates at
-/// the first repeated id instead of looping forever.
 #[test]
 fn fork_from_terminates_on_cyclic_git_state_parents() {
     let tmp = tempfile::tempdir().unwrap();
@@ -333,12 +309,9 @@ fn fork_from_terminates_on_cyclic_git_state_parents() {
     assert_eq!(survivor.parent_id(), Some("cyc01"));
 }
 
-/// TS `forkFrom`'s failure contract: the loader (TS
-/// `loadEntriesFromFile` -> `finalizeLoadedEntries`) returns no entries
-/// for a missing file, an empty file, AND a file without a valid leading
-/// header, so all three shapes take the "empty or invalid" arm (the
-/// no-header error stays as TS-faithful defense-in-depth — its own
-/// `forkFrom` finds the header only after the same finalize).
+/// The loader returns no entries for a missing file, an empty file, AND a
+/// file without a valid leading header (the no-header error stays as
+/// TS-faithful defense-in-depth).
 #[test]
 fn fork_from_rejects_empty_and_headerless_sources() {
     let tmp = tempfile::tempdir().unwrap();

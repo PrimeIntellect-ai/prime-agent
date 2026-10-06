@@ -1,25 +1,19 @@
-//! Log-line parsing for the incident classifier (TS
-//! `parseIncidentLogLine` / `parseIncidentDaemonLogLine` and the
-//! `timestampToMs` helper).
+//! Log-line parsing for the incident classifier (TS `parseIncidentLogLine` /
+//! `parseIncidentDaemonLogLine` and the `timestampToMs` helper).
 
 use super::IncidentLogEntry;
 use regex::Regex;
 use std::sync::LazyLock;
 
-/// `[<ISO>] supervisor: <msg>` or `[<ISO>] <msg>` (TS
-/// `parseIncidentDaemonLogLine`).
+/// `[<ISO>] supervisor: <msg>` or `[<ISO>] <msg>` (TS `parseIncidentDaemonLogLine`).
 static DAEMON_LINE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\[([^\]]+)\]\s*(.*)$").expect("valid daemon line pattern"));
 
-/// `~/.prime/agent/logs/agent.jsonl` is written with `Z`-suffixed ISO
-/// timestamps (the daemon's `now_iso`); the daemon-log fallback's
-/// bracketed timestamps carry the same zone. This parser accepts the
-/// `Date.parse` subset the daemon emits: `YYYY-MM-DD` (UTC midnight),
-/// optionally followed by `[T ]HH:MM[:SS[.fff...]]` and a zone (`Z` or
-/// `±HH:MM` / `±HHMM`). A date-time without a zone parses as UTC — the
-/// TS `Date.parse` would read the local zone there, but no daemon log
-/// line is ever emitted without one, and the incident window itself is
-/// UTC-end-to-end.
+/// Parses the `Date.parse` subset the daemon emits: `YYYY-MM-DD` (UTC midnight), optionally
+/// followed
+/// by `[T ]HH:MM[:SS[.fff...]]` and a zone (`Z` or `±HH:MM` / `±HHMM`). A date-time without a zone
+/// parses as UTC - TS `Date.parse` would read the local zone there, but no daemon log line is
+/// emitted without one, and the incident window is UTC-end-to-end.
 pub fn timestamp_to_ms(ts: &str) -> Option<i64> {
     let ts = ts.trim();
     let mut rest = ts;
@@ -48,17 +42,14 @@ pub fn timestamp_to_ms(ts: &str) -> Option<i64> {
             second = take_digits(&mut rest, 2)?;
             if let Some(after_seconds) = rest.strip_prefix('.') {
                 rest = after_seconds;
-                // Any fraction length parses, scaled to milliseconds
-                // like `Date.parse` (`.7` is 700ms, `.7654` truncates to
-                // 765ms): keep the first three digits, pad the rest to
-                // the right.
+                // Any fraction length parses, scaled to milliseconds (`.7` is 700ms, `.7654`
+                // truncates to 765ms): keep the first three digits, pad the rest to the right.
                 let fraction_digits = rest.chars().take_while(char::is_ascii_digit).count();
                 let mut digits: String = rest.chars().take(fraction_digits.min(3)).collect();
                 if digits.is_empty() {
                     return None;
                 }
-                // The digits are ASCII, so the char count is the byte
-                // length: advance past the whole fraction.
+                // The digits are ASCII, so the char count is the byte length.
                 rest = &rest[fraction_digits..];
                 while digits.len() < 3 {
                     digits.push('0');
@@ -67,8 +58,7 @@ pub fn timestamp_to_ms(ts: &str) -> Option<i64> {
             }
         }
         if rest.is_empty() {
-            // A date-time without a zone reads as UTC (see the doc
-            // comment); every daemon-emitted timestamp carries `Z`.
+            // No zone reads as UTC; every daemon timestamp carries `Z`.
         } else if rest == "Z" {
         } else {
             let sign = match rest.chars().next()? {
@@ -96,8 +86,7 @@ pub fn timestamp_to_ms(ts: &str) -> Option<i64> {
         return None;
     }
     let days = days_from_civil(year, month, day)?;
-    // The date must round-trip: `2026-02-31` is not a day (Date.parse
-    // returns NaN there; the line is skipped as unreadable).
+    // The date must round-trip: `2026-02-31` is not a day (Date.parse returns NaN there).
     if civil_from_days(days) != (year, month, day) {
         return None;
     }
@@ -139,8 +128,7 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> Option<i64> {
     Some(era * 146_097 + doe - 719_468)
 }
 
-/// `(year, month, day)` for days since 1970-01-01 (Howard Hinnant's
-/// `civil_from_days`).
+/// `(year, month, day)` for days since 1970-01-01 (Howard Hinnant's `civil_from_days`).
 fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
@@ -157,8 +145,7 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     (year, month, day)
 }
 
-/// Parse one `agent.jsonl` line; malformed lines return `None` (TS
-/// `parseIncidentLogLine`).
+/// Parse one `agent.jsonl` line; malformed lines return `None` (TS `parseIncidentLogLine`).
 pub fn parse_incident_log_line(line: &str) -> Option<IncidentLogEntry> {
     let trimmed = line.trim();
     if trimmed.is_empty() {
@@ -191,10 +178,10 @@ pub fn parse_incident_log_line(line: &str) -> Option<IncidentLogEntry> {
     })
 }
 
-/// The pid field accepts any integral JSON number (the daemon writes
-/// integer pids; a non-integral one is not a pid sighting).
-// Only whole JSON numbers reach the cast (fract filter); the saturating
-// `as` is the lenient contract for out-of-range pids.
+/// The pid field accepts any integral JSON number; a non-integral one is not a pid sighting. Only
+/// whole JSON numbers reach the cast (fract filter); the saturating `as` is lenient for
+/// out-of-range
+/// pids.
 #[allow(clippy::cast_possible_truncation)]
 fn pid_number(value: &serde_json::Value) -> Option<i64> {
     value.as_i64().or_else(|| {
@@ -205,8 +192,7 @@ fn pid_number(value: &serde_json::Value) -> Option<i64> {
     })
 }
 
-/// Parse one per-daemon log line: `[<ISO>] supervisor: <msg>` or
-/// `[<ISO>] <msg>` (TS `parseIncidentDaemonLogLine`).
+/// Parse one per-daemon log line: `[<ISO>] supervisor: <msg>` or `[<ISO>] <msg>`.
 pub fn parse_incident_daemon_log_line(line: &str) -> Option<IncidentLogEntry> {
     let captures = DAEMON_LINE.captures(line.trim())?;
     let ts = captures.get(1)?.as_str();
@@ -249,8 +235,7 @@ mod tests {
             timestamp_to_ms("2026-09-10T20:00:00.000Z"),
             Some(1_789_070_400_000)
         );
-        // The motivating incident's window (the TS test's `Date.parse`
-        // ground truth).
+        // The motivating incident's window (the TS test's `Date.parse` ground truth).
         assert_eq!(
             timestamp_to_ms("2026-09-10T20:00:00Z"),
             Some(1_789_070_400_000)

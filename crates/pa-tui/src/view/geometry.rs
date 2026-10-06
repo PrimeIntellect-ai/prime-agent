@@ -7,9 +7,7 @@ impl AgentView {
         #[cfg(test)]
         super::layout::ENTRY_VISITS.with(|count| count.set(count.get() + 1));
         let entry = &self.chat[index];
-        // TS `precededByToolActivity` = `isCompactAgentMessageNeighbor` of
-        // the previous row: a tool call, agent message, bash execution, or
-        // shell completion all count.
+        // TS `precededByToolActivity` = the compact set.
         let preceded_by_tool = index > 0 && Self::is_compact_neighbor(&self.chat[index - 1]);
         let spacing = self.entry_spacing(index, entry, index == 0, preceded_by_tool);
         let detail = self.entry_detail(index);

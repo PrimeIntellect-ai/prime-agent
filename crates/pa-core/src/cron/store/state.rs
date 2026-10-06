@@ -1,7 +1,6 @@
 //! State save/load for the cron job store: cross-process file locking
 //! (lockfile with stale takeover), state read/write/merge helpers, and the
 //! in-state due-claim / interrupted-dispatch recovery transitions.
-//! Section of the port of the `AgentCronJobStore` half of core/cron-jobs.ts.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -267,8 +266,8 @@ pub(crate) fn with_state_locks<T>(paths: &[PathBuf], action: impl FnOnce() -> T)
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        // TS `withCronJobsStateLocks`: proper-lockfile on the state file,
-        // 100 attempts x 10ms, 30s staleness takeover.
+        // TS `withCronJobsStateLocks`: proper-lockfile, 100 attempts x
+        // 10ms, 30s staleness takeover.
         let stale = std::time::Duration::from_millis(LOCK_STALE_MS);
         let mut acquired = false;
         let mut failure: Option<std::io::Error> = None;
@@ -289,11 +288,8 @@ pub(crate) fn with_state_locks<T>(paths: &[PathBuf], action: impl FnOnce() -> T)
             }
         }
         if !acquired {
-            // TS `withCronJobsStateLocks` throws when the lock is not
-            // acquired. The action still runs (as it did before this
-            // logging) because the store API has no failure channel, but the
-            // unlocked write is never silent: a concurrent writer may be
-            // mutating the same state file.
+            // TS throws when the lock is not acquired; the action still runs, but never silently: a
+            // concurrent writer may be mutating the file.
             tracing::warn!(
                 error = failure.as_ref().map_or_else(
                     || "lock still held after retries".to_string(),
@@ -363,11 +359,8 @@ pub(crate) fn write_jobs_state(path: &Path, state: &CronJobsState) {
         let _ = std::fs::create_dir_all(parent);
     }
     let serialized = serde_json::to_string_pretty(state).unwrap_or_default();
-    // The one opt-in in the shared helper's family: TS `writeJobsState`
-    // passes `{ mode: 0o600, fsync: true }`. One fsync per write — losing
-    // the atomic rename after a power failure rolls back to the previous
-    // valid file, which cron recovery already tolerates (the dispatch
-    // journal pairs with it; both products keep this write durable).
+    // The one opt-in fsync: losing the atomic rename rolls back to the previous valid file, which
+    // cron recovery tolerates (TS `writeJobsState` passes `{ mode: 0o600, fsync: true }`).
     let _ = crate::settings::storage::atomic_write_with(
         path,
         &format!("{serialized}\n"),
@@ -379,10 +372,7 @@ pub(crate) fn write_jobs_state(path: &Path, state: &CronJobsState) {
 mod tests {
     use super::*;
 
-    /// Per-call-site served-path oracle (cron-jobs.ts:1697 passes
-    /// `{ mode: 0o600, fsync: true }` — the TS test pins
-    /// `expect(options).toMatchObject({ fsync: true, mode: 0o600 })`):
-    /// the cron state write opts in and syncs exactly once, landing exactly
+    /// The cron state write opts in (the TS test pins `{ fsync: true, mode: 0o600 }`)
     /// `to_string_pretty(state) + "\n"` bytes.
     #[test]
     fn jobs_state_write_keeps_exactly_one_fsync() {

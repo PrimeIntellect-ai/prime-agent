@@ -1,6 +1,4 @@
-//! The uv discovery concern (moved with its concern): the PATH/PATHEXT
-//! executable search and the `ensure_uv` resolution with its install
-//! guidance.
+//! The uv discovery concern: the PATH/PATHEXT executable search and the `ensure_uv` resolution.
 
 use super::{anyhow, home_dir, Path, PathBuf};
 
@@ -28,15 +26,13 @@ fn find_executable(name: &str) -> Option<PathBuf> {
     None
 }
 
-/// TS `WINDOWS_PATHEXT_DEFAULT`: the extension order `windowsExecutableCandidates`
-/// uses when `PATHEXT` yields nothing usable.
+/// The extension order `windowsExecutableCandidates` uses when `PATHEXT`
+/// yields nothing usable.
 #[cfg(any(windows, test))]
 const WINDOWS_PATHEXT_DEFAULT: [&str; 4] = [".COM", ".EXE", ".BAT", ".CMD"];
 
-/// The bare name followed by the supported PATHEXT extensions, in
-/// `PATHEXT` order when it yields supported extensions, else the TS default
-/// order. A name that already ends in a default extension is never suffixed
-/// again (TS `windowsExecutableCandidates` verbatim).
+/// The bare name followed by the supported PATHEXT extensions, in `PATHEXT` order, else the TS
+/// default order. A name that already ends in a default extension is never suffixed again.
 #[cfg(any(windows, test))]
 pub(super) fn windows_executable_candidates(name: &str, pathext: Option<&str>) -> Vec<String> {
     let extensions = pathext
@@ -81,9 +77,8 @@ fn is_executable(path: &Path) -> bool {
     crate::platform::perms::is_executable(path)
 }
 
-/// Find `uv` on PATH or at `~/.local/bin/uv` (`uv.exe` on Windows). Returns
-/// `Err` with install guidance when missing: the Rust binary never
-/// auto-installs (the TS interactive confirm belongs to the CLI layer).
+/// Find `uv` on PATH or at `~/.local/bin/uv` (`uv.exe` on Windows). Returns `Err` with install
+/// guidance when missing: the Rust binary never auto-installs.
 pub(crate) fn ensure_uv() -> anyhow::Result<String> {
     if let Some(from_path) = find_executable("uv") {
         return Ok(from_path.to_string_lossy().to_string());

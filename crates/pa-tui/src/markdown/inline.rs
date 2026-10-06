@@ -7,12 +7,10 @@ pub fn render_inline(text: &str, style: &MarkdownStyle) -> Line {
     render_inline_with_url_slots(text, style).0
 }
 
-/// The same inline render, plus the `link_url` slot indices: which
-/// spans of the returned line carry a link's `[url]` bracket, in
-/// ascending span order. Style-tapering callers (headings) preserve
-/// those spans by origin — a code or body span that merely renders in
-/// the `link_url` style (a theme whose colors collide) is not a slot
-/// and tapers like any other span.
+/// The same inline render, plus the `link_url` slot indices: which spans of the
+/// returned line carry a link's `[url]` bracket, in ascending span order.
+/// Style-tapering callers preserve those spans by origin — a span that merely
+/// renders in the `link_url` style is not a slot.
 #[must_use]
 pub(crate) fn render_inline_with_url_slots(
     text: &str,
@@ -21,18 +19,15 @@ pub(crate) fn render_inline_with_url_slots(
     render_inline_ctx(text, style, false)
 }
 
-/// `in_link` mirrors marked's `lexer.state.inLink`: set while a link
-/// label's tokens are produced, and the gfm bare-url rule is skipped
-/// inside one (the angle `autolink` rule is not). The second return
-/// half lists the `[url]` bracket indices inside the returned spans,
-/// remapped across every recursive extend.
+/// `in_link` mirrors marked's `lexer.state.inLink`: the gfm bare-url rule is
+/// skipped inside a link label's tokens (the angle `autolink` rule is not).
+/// Returns the `[url]` bracket indices, remapped across every recursive extend.
 fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> (Line, Vec<usize>) {
     let mut spans: Vec<Span> = Vec::new();
     let mut url_slots: Vec<usize> = Vec::new();
     let bytes: Vec<char> = text.chars().collect();
-    // Byte offset per char index: the autolink rules run on a slice of the
-    // original text (zero-copy) instead of a copy of the remaining tail,
-    // so a candidate-heavy line stays linear in its attempts.
+    // Byte offset per char index: the autolink rules run on a slice of the original text, so a
+    // candidate-heavy line stays linear in its attempts.
     let byte_offsets: Vec<usize> = text.char_indices().map(|(b, _)| b).collect();
     let mut buf = String::new();
     let mut i = 0usize;
@@ -43,10 +38,8 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> (Line,
     // The bare-url email alternative only exists when the line carries an
     // `@` at all; the gate keeps the per-position regex attempts rare.
     let line_has_at = bytes.contains(&'@');
-    // `bare_candidate` gates every autolink attempt on the literal prefix
-    // the marked rules require, so the attempt regexes only ever run on
-    // actual urls/emails - plain text (even `history history ...` floods
-    // of `h` starts) never reaches the regex or the tail-string copy.
+    // `bare_candidate` gates every autolink attempt on the literal prefix the marked
+    // rules require, so the attempt regexes only ever run on actual urls/emails.
 
     macro_rules! flush {
         () => {
@@ -97,14 +90,9 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> (Line,
             if j + 1 < bytes.len() && bytes[j] == ']' && bytes[j + 1] == '(' {
                 let mut k = j + 2;
                 let mut url = String::new();
-                // CommonMark link destination: parentheses ride only as
-                // a balanced pair (TS marked's lexer), so the destination
-                // ends at the `)` that closes it — not at the first `)`
-                // inside, which a Wikipedia-style url carries. A
-                // backslash-escaped char rides through verbatim and
-                // never counts toward the balance either (so `\(` does
-                // not swallow the real closer); unescaping stays out of
-                // this port's inline subset.
+                // CommonMark link destination: parens ride as a balanced pair (the
+                // destination ends at its own `)`, not the first one inside); an
+                // escaped char rides verbatim and never counts toward the balance.
                 let mut paren_depth = 0usize;
                 while k < bytes.len() {
                     if bytes[k] == ')' && paren_depth == 0 {
@@ -158,19 +146,14 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> (Line,
                     }
                     url_slots.append(&mut label_slots);
                     spans.extend(label_spans);
-                    // The URL rides beside every link, in both the OSC 8
-                    // and legacy forms — after the wrap, so the region
-                    // covers the label only — in the dim `link_url` slot,
-                    // unless the label already is the URL (mailto stripped
-                    // for the comparison, like autolinked emails).
+                    // The URL rides after the wrap (the OSC 8 region covers the label
+                    // only), in the dim `link_url` slot unless the label already is
+                    // the URL (mailto stripped for the comparison).
                     let comparison = url.strip_prefix("mailto:").unwrap_or(url.as_str());
                     if label != url && label != comparison {
-                        // The bracket renders the destination as visible
-                        // text, so it gets the same control-byte hardening
-                        // the OSC 8 target gets (`resolve_link_href`): an
-                        // escape byte smuggled into an attacker-chosen url
-                        // can never re-enter the terminal as a live
-                        // OSC/CSI sequence.
+                        // The bracket renders the destination as visible text, so it
+                        // gets the same control-byte hardening as the OSC 8 target: a
+                        // smuggled escape byte can never re-enter the terminal live.
                         let shown = crate::hyperlinks::sanitize_control_bytes(url.clone());
                         url_slots.push(spans.len());
                         spans.push(Span::styled(format!(" [{shown}]"), style.link_url));
@@ -263,10 +246,9 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> (Line,
                 }
             }
         }
-        // marked inline `autolink` (angle form) then `url` (gfm bare
-        // links): the last two inline rules, tried once every other
-        // construct failed at this position. The two rules are disjoint on
-        // their first character, so the order collapses to this split.
+        // marked inline `autolink` (angle form) then `url` (gfm bare links): the last two
+        // inline rules, tried once every other construct failed. The two rules are
+        // disjoint on their first character, so the order collapses to this split.
         let autolink_hit = if c == '<' {
             autolink_token_at(&text[byte_offsets[i]..], true)
         } else if !in_link && crate::autolink::bare_candidate(&bytes, i, line_has_at) {
@@ -276,10 +258,9 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> (Line,
         };
         if let Some(token) = autolink_hit {
             flush!();
-            // The token carries one plain text token, so the label is a
-            // single body-colored run carrying the current emphasis (the
-            // theme.link color never reaches the wire, like explicit link
-            // labels).
+            // The token is one plain text token, so the label is a single
+            // body-colored run carrying the current emphasis (theme.link never
+            // reaches the wire).
             let mut m = Modifier::empty();
             if bold {
                 m |= style.bold;
@@ -287,8 +268,7 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> (Line,
             if italic {
                 m |= style.italic;
             }
-            // Every link render underlines (the standard link
-            // affordance), both capability forms.
+            // Every link render underlines, both capability forms.
             let mut label = Span::styled(
                 token.text.clone(),
                 base.add_modifier(m | Modifier::UNDERLINED),
@@ -301,12 +281,10 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> (Line,
                 label.content.push_str(crate::hyperlinks::OSC8_CLOSE);
             }
             spans.push(label);
-            // The URL rides beside the label in the dim `link_url` slot
-            // unless the label already shows it (the mailto-stripped
-            // comparison, TS token.href). The bare-url regex tail only
-            // excludes whitespace, so an escape byte can ride a bare
-            // url token's href into this visible span — the bracket gets
-            // the same control-byte hardening the OSC 8 target gets.
+            // The URL rides beside the label in the dim `link_url` slot unless the
+            // label already shows it (mailto-stripped comparison). The bare-url
+            // regex tail only excludes whitespace, so the bracket gets the same
+            // hardening as the OSC 8 target.
             let comparison = token.href.strip_prefix("mailto:").unwrap_or(&token.href);
             if token.text != token.href && token.text != comparison {
                 let shown = crate::hyperlinks::sanitize_control_bytes(token.href.clone());
@@ -326,10 +304,9 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> (Line,
     (spans, url_slots)
 }
 
-/// Run the marked autolink rules on the text starting at `rest` (the
-/// caller's slice of the original line, so no per-candidate tail copy;
-/// `angle` selects the `<...>` rule, otherwise the gfm bare-url rule).
-/// Returns the token; the caller advances by its `raw` char count.
+/// Run the marked autolink rules on the text starting at `rest` (the caller's slice of the original
+/// line, so no per-candidate tail copy; `angle` selects the `<...>` rule). Returns the token; the
+/// caller advances by its `raw` char count.
 fn autolink_token_at(rest: &str, angle: bool) -> Option<crate::autolink::AutolinkToken> {
     if angle {
         crate::autolink::angle_token(rest)

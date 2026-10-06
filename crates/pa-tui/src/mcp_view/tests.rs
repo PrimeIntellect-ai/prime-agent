@@ -24,10 +24,8 @@ fn frame_text(view: &mut McpView) -> Vec<String> {
         .collect()
 }
 
-/// A resolved-catalog response (the daemon's `services` array, in the
-/// daemon's TS-rank order: connected-first, then label): the daemon
-/// answers from local state — the connected row's tool count comes
-/// from the connection record, not a live listing.
+/// A resolved-catalog response (the daemon's `services` array, in the daemon's TS-rank order:
+/// connected-first, then label): the connected row's tool count comes from the connection record.
 fn catalog_response() -> serde_json::Value {
     json!({
         "connections": [],
@@ -67,9 +65,8 @@ fn catalog_response() -> serde_json::Value {
     })
 }
 
-/// The inline panel shape (TS `updateList` + `render`): the bordered
-/// search field, the row window with the trailing status, ONE blank
-/// row plus ONE fixed detail line, the hint — never a growing block.
+/// The inline panel shape (TS `updateList` + `render`): ONE blank row plus ONE fixed detail line,
+/// the hint — never a growing block.
 #[test]
 fn renders_the_ts_inline_panel_shape() {
     let mut view = McpView::from_response(&catalog_response(), 19);
@@ -78,9 +75,8 @@ fn renders_the_ts_inline_panel_shape() {
     assert_eq!(rows[0], border, "top rule");
     assert_eq!(rows[1], " >  Search MCP connections", "search field");
     assert_eq!(rows[2], border, "bottom rule");
-    // The connected row leads (the daemon's TS rank); its status
-    // reads the honest state. The record-carried tool count reads
-    // `Connected · N tools` (TS) on the notion row.
+    // The connected row leads (the daemon's TS rank); its status reads the honest state, and
+    // the record-carried tool count reads `Connected · N tools` (TS) on the notion row.
     let selected = rows
         .iter()
         .find(|row| row.starts_with("\u{203a}"))
@@ -94,8 +90,8 @@ fn renders_the_ts_inline_panel_shape() {
         "status flush right: {selected}"
     );
     assert_eq!(rows.len(), 10, "the fixed frame: {rows:?}");
-    // The user stdio row's detail falls back to its status (no
-    // description); the hint names the accounts step.
+    // The user stdio row's detail falls back to its status (no description); the hint
+    // names the accounts step.
     let detail = rows
         .iter()
         .position(|row| row == " Connected")
@@ -127,9 +123,8 @@ fn renders_the_ts_inline_panel_shape() {
     );
 }
 
-/// The frame never grows with the detail: at 69 catalog rows the
-/// window clamps to the viewport's budget, so the dock cannot
-/// overflow the terminal (the frame height is exactly the layout's).
+/// The frame never grows with the detail: at 69 catalog rows the window clamps to the viewport's
+/// budget, so the dock cannot overflow the terminal.
 #[test]
 fn the_frame_height_stays_within_the_viewport_budget() {
     let services: Vec<serde_json::Value> = (0..69)
@@ -147,8 +142,7 @@ fn the_frame_height_stays_within_the_viewport_budget() {
     let data = json!({ "connections": [], "services": services });
     let mut view = McpView::from_response(&data, 19);
     let lines = view.render(&theme(), 110, &kb());
-    // search field (3) + window (8) + counter (1) + blank (1) +
-    // detail (1) + hint (1).
+    // search field (3) + window (8) + counter (1) + blank (1) + detail (1) + hint (1).
     assert_eq!(lines.len(), 15, "the dock stays inside its budget");
     assert!(
         lines.iter().any(|line| {
@@ -159,8 +153,7 @@ fn the_frame_height_stays_within_the_viewport_budget() {
         }),
         "the scroll counter renders"
     );
-    // A short viewport drops the detail line instead of the search
-    // field: the frame only shrinks.
+    // A short viewport drops the detail line instead of the search field: the frame only shrinks.
     let mut view = McpView::from_response(&data, 7);
     let rows = frame_text(&mut view);
     assert_eq!(rows[0], "\u{2500}".repeat(110), "the search field stays");
@@ -169,10 +162,8 @@ fn the_frame_height_stays_within_the_viewport_budget() {
         "the detail line dropped in the short viewport: {rows:?}"
     );
     assert!(rows.len() <= 7, "the short frame stays within budget");
-    // A viewport the search field and hint alone fill renders the
-    // skeleton only: no service row, no scroll indicator, no detail —
-    // the empty row window is never raised back to one row (the
-    // panel cannot draw past its viewport).
+    // A viewport the search field and hint alone fill renders the skeleton only: no service row, no
+    // scroll indicator, no detail — the empty row window is never raised back to one row.
     let mut view = McpView::from_response(&data, 4);
     let rows = frame_text(&mut view);
     assert!(rows.len() <= 4, "the skeleton owns the frame: {rows:?}");
@@ -184,8 +175,8 @@ fn the_frame_height_stays_within_the_viewport_budget() {
         !rows.iter().any(|row| row.contains("(1/69)")),
         "no scroll indicator in the too-short frame: {rows:?}"
     );
-    // The selected not-connected catalog row's action names the
-    // hint (TS `actionText`): no `Enter select` filler.
+    // The selected not-connected catalog row's action names the hint (TS `actionText`):
+    // no `Enter select` filler.
     assert_eq!(
         rows.last().map(String::as_str),
         Some(" \u{2191}/\u{2193} navigate \u{b7} Enter connect \u{b7} Esc close"),
@@ -193,9 +184,8 @@ fn the_frame_height_stays_within_the_viewport_budget() {
     );
 }
 
-/// The TS row vocabulary: the pasteable row keeps its honest
-/// `Requires setup` status while the hint names the paste step, and
-/// the setup hint is its detail copy.
+/// The TS row vocabulary: the pasteable row keeps its honest `Requires setup` status while
+/// the hint names the paste step, and the setup hint is its detail copy.
 #[test]
 fn pasteable_rows_keep_the_honest_status() {
     let mut view = McpView::from_response(&catalog_response(), 19);
@@ -383,9 +373,8 @@ fn navigation_clamps_at_the_list_bounds() {
     assert_eq!(view.selected_server(), Some("github"));
 }
 
-/// Escape and Ctrl+C close without selecting; the modal back key
-/// (the #2730 auth-panel navigation) closes from an EMPTY search,
-/// and edits the field once the caret sits inside it.
+/// Escape and Ctrl+C close without selecting; the modal back key (the #2730 auth-panel navigation)
+/// closes from an EMPTY search, and edits the field once the caret sits inside it.
 #[test]
 fn escape_cancels() {
     let mut view = McpView::from_response(&catalog_response(), 19);
@@ -409,9 +398,8 @@ fn escape_cancels() {
     assert_eq!(view.search.value(), "lin");
 }
 
-/// The banded search: identity fields (label, id, aliases) rank before
-/// description text; the subsequence fallback finds tight
-/// abbreviations; every query token must match.
+/// The banded search: identity fields (label, id, aliases) rank before description text; the
+/// subsequence fallback finds tight abbreviations; every query token must match.
 #[test]
 fn search_ranks_identity_fields_before_descriptions() {
     let mut view = McpView::from_response(&catalog_response(), 19);
@@ -447,9 +435,8 @@ fn search_ranks_identity_fields_before_descriptions() {
     assert!(rows.iter().any(|row| row == "  No matching services"));
 }
 
-/// The TS scoring bands exactly: prefix ties break on the remaining
-/// length, substring ties on the position, the subsequence fallback
-/// carries its run floor and span penalty.
+/// The TS scoring bands exactly: prefix ties break on the remaining length, substring ties on the
+/// position, the subsequence fallback carries its run floor and span penalty.
 #[test]
 fn search_scores_match_the_ts_bands() {
     let data = json!({
@@ -484,8 +471,8 @@ fn search_scores_match_the_ts_bands() {
         row_search_score(row("linear-support"), "linear"),
         Some(SCORE_PREFIX + 8.0 * 0.01)
     );
-    // The description band only when no identity field matched: a
-    // word-start match there outranks a substring match.
+    // The description band only when no identity field matched: a word-start match
+    // there outranks a substring match.
     let github = json!({
         "serviceId": "github", "label": "GitHub", "aliases": [],
         "description": "timelinearity charts"
@@ -495,8 +482,8 @@ fn search_scores_match_the_ts_bands() {
         row_search_score(&McpRow::Service(github), "linear"),
         Some(SCORE_DESCRIPTION_SUBSTRING + 4.0 * 0.01)
     );
-    // The subsequence fallback with its run floor: "crdb"-style
-    // abbreviations match, scattered matches do not.
+    // The subsequence fallback with its run floor: "crdb"-style abbreviations match,
+    // scattered matches do not.
     let cockroach = json!({
         "serviceId": "cockroachdb", "label": "CockroachDB", "aliases": [],
         "description": "the SQL database"
@@ -551,9 +538,8 @@ fn the_empty_roster_renders_the_empty_message() {
     );
 }
 
-/// A query change resets the selection to the first row (TS
-/// `filterServices`), typing filters to the surviving rows, and the
-/// bracketed paste edits the search field too.
+/// A query change resets the selection to the first row (TS `filterServices`), typing
+/// filters to the surviving rows, and the bracketed paste edits the search field too.
 #[test]
 fn typing_filters_by_label_and_alias() {
     let mut view = McpView::from_response(&catalog_response(), 19);
@@ -585,31 +571,28 @@ fn typing_filters_by_label_and_alias() {
     );
 }
 
-/// TS string operations run on UTF-16 code units: a surrogate pair
-/// is TWO units to the subsequence walk, and the substring tiebreak
-/// measures unit positions. The emoji query ranks exactly like the
-/// TS picker (the review finding).
+/// TS string operations run on UTF-16 code units: a surrogate pair is TWO units to the
+/// subsequence walk, and the substring tiebreak measures unit positions. The emoji query
+/// ranks exactly like the TS picker (the review finding).
 #[test]
 fn scoring_measures_utf16_units_like_ts() {
-    // The prefix tiebreak: the rest after the emoji prefix is one
-    // more emoji — TWO UTF-16 units, not one char (TS `.length`).
+    // The prefix tiebreak: the rest after the emoji prefix is one more emoji — TWO
+    // UTF-16 units, not one char (TS `.length`).
     assert_eq!(
         identity_match_score("\u{1f600}\u{1f600}", "\u{1f600}"),
         Some(SCORE_PREFIX + 2.0 * 0.01),
         "the prefix remainder counts UTF-16 units"
     );
-    // The substring tiebreak: inside "xy" (a word the emoji split
-    // keeps whole) the token "y" is NOT a word start, so the
-    // substring position after the two-unit emoji is 3 — a UTF-16
-    // unit index, not the byte offset 6.
+    // The substring tiebreak: inside "xy" (a word the emoji split keeps whole) the token
+    // "y" is NOT a word start, so the substring position after the two-unit emoji is 3 —
+    // a UTF-16 unit index, not the byte offset 6.
     assert_eq!(
         identity_match_score("\u{1f600}xy", "y"),
         Some(SCORE_SUBSTRING + 3.0 * 0.01),
         "the substring position is a UTF-16 unit index"
     );
-    // The subsequence walk matches surrogate halves like TS: the
-    // query "\u{1f600}a" (3 units) is a subsequence of "\u{1f600}x a"
-    // (5 units) with the emoji's two consecutive units as a run.
+    // The subsequence walk matches surrogate halves like TS: the query "\u{1f600}a" (3 units) is a
+    // subsequence of "\u{1f600}x a" (5 units) with the emoji's two consecutive units as a run.
     let haystack: Vec<u16> = "\u{1f600}x a".encode_utf16().collect();
     let token: Vec<u16> = "\u{1f600}a".encode_utf16().collect();
     assert_eq!(
@@ -619,9 +602,8 @@ fn scoring_measures_utf16_units_like_ts() {
     );
 }
 
-/// A viewport too short for the empty state's message and its blank
-/// row keeps the skeleton alone (the frame never draws past its
-/// viewport; the review finding).
+/// A viewport too short for the empty state's message and its blank row keeps the
+/// skeleton alone (the frame never draws past its viewport; the review finding).
 #[test]
 fn the_empty_state_needs_its_window_budget() {
     let data = json!({ "connections": [], "services": [] });
@@ -642,15 +624,13 @@ fn the_empty_state_needs_its_window_budget() {
     assert!(rows.len() <= 6, "the empty frame fits: {rows:?}");
 }
 
-/// A narrow row keeps a SHORTENED trailing status (TS
-/// `getInlineTrailing`: the cluster reduces from the front, then
-/// truncates with the ellipsis) instead of dropping it at the row's
-/// right edge (the review finding).
+/// A narrow row keeps a SHORTENED trailing status (TS `getInlineTrailing`: the cluster reduces from
+/// the front, then truncates with the ellipsis) instead of dropping it (the review finding).
 #[test]
 fn narrow_rows_shorten_the_trailing_status() {
     let theme = theme();
-    // Width 24: the trailing budget is 17, so the 19-wide status
-    // SHORTENS with the ellipsis instead of dropping off the row.
+    // Width 24: the trailing budget is 17, so the 19-wide status SHORTENS with the
+    // ellipsis instead of dropping off the row.
     let row = trailing_menu_row(
         &theme,
         24,
@@ -677,9 +657,8 @@ fn narrow_rows_shorten_the_trailing_status() {
     );
 }
 
-/// A prefill from a typed partial (`/mcp lin` + Tab or `/plugins lin`)
-/// filters the view, the caret at the partial's end so typing extends
-/// it.
+/// A prefill from a typed partial (`/mcp lin` + Tab or `/plugins lin`) filters the view,
+/// the caret at the partial's end so typing extends it.
 #[test]
 fn set_search_filters_to_the_typed_partial() {
     let mut view = McpView::from_response(&catalog_response(), 19);

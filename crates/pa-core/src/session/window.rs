@@ -137,10 +137,8 @@ pub struct WindowStats {
     pub cost: f64,
 }
 
-/// One older-path assistant row's spend-relevant usage: the walk records
-/// raw rows, and an attribution targeting the row replaces it with the
-/// cumulative aggregate before the totals sum (TS
-/// `applyChildUsageAttributions` over the discarded prefix).
+/// One older-path assistant row's spend-relevant usage: an attribution
+/// targeting the row replaces it with the cumulative aggregate.
 #[derive(Debug, Clone, Copy, Default)]
 struct OlderPathUsage {
     input: u64,
@@ -189,15 +187,8 @@ pub struct WindowedSessionStore {
     retained_whole_file: bool,
     snapshot: Snapshot,
     reads: WindowReadStats,
-    /// The retained typed rows and raw lines were handed to the owning
-    /// [`super::manager::SessionManager`] ([`Self::take_retained`]): the
-    /// window still folds appends into its snapshot stats and serves its
-    /// settings/metadata lookups, but its transcript context is the
-    /// manager's `file_entries` — keeping a second resident copy of the
-    /// retained bodies here measured as ~29.5MiB of wire-equivalent
-    /// duplication on the 10MiB canonical fixture (worker-rss census,
-    /// 2026-09-26), and every retained row is re-derivable from the
-    /// JSONL file itself.
+    /// The retained rows were handed to the manager ([`Self::take_retained`]);
+    /// a second resident copy measured ~29.5MiB on the 10MiB fixture.
     detached: bool,
 }
 
@@ -207,22 +198,14 @@ impl WindowedSessionStore {
     ///
     /// # Errors
     ///
-    /// Returns the underlying I/O error when the session file cannot be
-    /// opened or read, or when a retained metadata row cannot be re-parsed.
-    /// Old schemas, torn rows, and ambiguous ancestry yield `Ok(None)`, not
-    /// an error.
+    /// I/O error when the file cannot be opened or read; other failures yield `Ok(None)`.
     ///
     /// # Panics
     ///
-    /// Two internal `expect`s cannot fire: retained window rows reach their
-    /// push only after a successful parse (an unparsable row returns
-    /// `Ok(None)` first), and the header `expect` runs only after the
-    /// deconstruction above proved it present.
+    /// The two internal `expect`s cannot fire (rows parse first; the header is proven).
     pub fn open(path: &Path) -> io::Result<Option<Self>> {
         // The generation certificate anchors on unix inode identity; a
-        // same-length replace is indistinguishable under the weak non-unix
-        // metadata, so windows never serves a windowed open — and must not
-        // pay the reverse scan first either: bail out before any reads.
+        // same-length replace is indistinguishable under weak non-unix metadata.
         if !cfg!(unix) {
             return Ok(None);
         }
@@ -239,7 +222,6 @@ impl WindowedSessionStore {
             return Ok(None);
         }
         // Appending to an unterminated row would merge two JSON records.
-        // Let the ordinary repair/rewrite path handle this file instead.
         file.seek(SeekFrom::End(-1))?;
         let mut last = [0];
         file.read_exact(&mut last)?;
@@ -280,10 +262,8 @@ impl WindowedSessionStore {
         let mut thinking = None;
         let mut tier = None;
         let mut model = None;
-        // The model in effect at the retained-window boundary (the newest
-        // `model_change` in the discarded prefix): the per-model usage fold
-        // seeds its timeline with this — not `model`, which ends up as the
-        // leaf's model.
+        // The boundary model: the usage fold seeds its timeline with this,
+        // not `model` (the leaf's).
         let mut boundary_model = None;
         let mut header = None;
         while let Some(line) = reader.next()? {
@@ -345,20 +325,14 @@ impl WindowedSessionStore {
                 );
             }
             if meta.kind == "child_usage_attributed" {
-                // Capture the aggregate wherever the row sits (retained or
-                // discarded region): an attribution targeting an older-path
-                // assistant is dropped from the retained metadata (its target
-                // never loads), and only this capture keeps the older stats
-                // from losing the attributed spend. The walk runs
-                // newest-first, so the FIRST aggregate seen per target is the
-                // last in file order — the cumulative aggregate the TS fold
-                // ends with.
+                // Older-path targets are dropped from the retained metadata, so
+                // capture here or their attributed spend is lost. Newest-first,
+                // the FIRST aggregate seen per target is the cumulative one.
                 if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
                     if let Some(target) = value.get("targetId").and_then(serde_json::Value::as_str)
                     {
                         // A malformed aggregate (null, a scalar) must not
-                        // replace a valid row usage with zeros — the session
-                        // store fold skips non-objects the same way.
+                        // replace a valid row usage with zeros.
                         if let Some(aggregate) = value
                             .get("aggregateUsage")
                             .filter(|aggregate| aggregate.is_object())
@@ -399,14 +373,8 @@ impl WindowedSessionStore {
                                         .count()
                                         as u64;
                                 }
-                                // Recorded per row, not summed inline: an
-                                // attribution targeting this older assistant
-                                // replaces its usage with the cumulative
-                                // aggregate (TS
-                                // `applyChildUsageAttributions` — assignment,
-                                // not merge: a row that never carried usage
-                                // still gets the aggregate inserted), and the
-                                // totals sum the folded rows after the walk.
+                                // Recorded per row, not summed inline: an attribution
+                                // replaces its usage with the cumulative aggregate.
                                 older_usage.push((
                                     id.to_owned(),
                                     message
@@ -432,8 +400,8 @@ impl WindowedSessionStore {
                     model = Some((provider.clone(), name.clone()));
                 }
             }
-            // Parse only retained bodies and sparse setting records from the
-            // older ancestry. Serde ignores old content without allocating it.
+            // Parse only retained bodies and sparse setting records; serde
+            // ignores the older ancestry without allocating it.
             let entry = if !window_done
                 || (on_path
                     && (matches!(
@@ -471,11 +439,7 @@ impl WindowedSessionStore {
                         if model.is_none() {
                             model = Some((payload.provider.clone(), payload.model_id.clone()));
                         }
-                        // The retained-window boundary's timeline: the newest
-                        // `model_change` in the discarded prefix (the first the
-                        // backward walk meets past the boundary) is the model the
-                        // window's early summarizer rows billed on — `model`
-                        // tracks the leaf's model, not the boundary's.
+                        // The boundary model: the newest `model_change` in the discarded prefix.
                         if window_done && boundary_model.is_none() {
                             boundary_model =
                                 Some((payload.provider.clone(), payload.model_id.clone()));
@@ -532,9 +496,8 @@ impl WindowedSessionStore {
                 {
                     latest.insert(format!("attribution:{}", value["targetId"]), index);
                 }
-                // The quota-park chain is scanned newest-first with resume
-                // entries ending episodes, so every park/resume row must
-                // survive the keep filter (not just the newest of a kind).
+                // Quota-park episodes end on resume rows, so every
+                // park/resume row must survive the keep filter.
                 "custom"
                     if matches!(
                         value["customType"].as_str(),
@@ -552,12 +515,8 @@ impl WindowedSessionStore {
             .enumerate()
             .filter_map(|(index, row)| keep.contains(&index).then_some(row))
             .collect();
-        // Fold the older path before summing, oldest-first (the cost sum's
-        // float order matches the pre-fold walk): an attributed assistant
-        // reports its cumulative aggregate — the same fold the retained
-        // window applies at load — so the windowed stats carry the child
-        // spend attributed to pre-window assistants instead of losing it
-        // (`get_session_stats` sums these rows with the in-window walk).
+        // Fold oldest-first (the cost sum's float order matches the pre-fold
+        // walk): an attributed assistant reports its cumulative aggregate.
         for (id, usage) in older_usage.iter().rev() {
             let folded = older_aggregates.get(id).unwrap_or(usage);
             older_path_stats.input += folded.input;
@@ -703,9 +662,8 @@ impl WindowedSessionStore {
             detached: false,
         }))
     }
-    /// Move the retained raw JSONL rows out (the daemon's `SessionFile`
-    /// build consumes them once; holding both the raw lines and the parsed
-    /// store doubles the load's resident peak).
+    /// Move the retained raw JSONL rows out; holding both the raw lines and
+    /// the parsed store doubles the load's resident peak.
     pub fn take_raw_entries(&mut self) -> Vec<String> {
         std::mem::take(&mut self.raw_entries)
     }
@@ -717,11 +675,7 @@ impl WindowedSessionStore {
 
     /// Move the retained typed rows AND raw JSONL lines out for a one-copy
     /// adoption ([`super::manager::SessionManager::adopt_window`]): the
-    /// manager owns the parsed trees from here on, and the raw lines drop
-    /// (the JSONL file itself is the durable raw copy). The window keeps
-    /// its snapshot/settings/metadata state, so lookups and append-time
-    /// stats stay exact; a detached window's transcript context comes from
-    /// the owning manager's entries ([`Self::context`] asserts this).
+    /// manager owns the parsed trees; a detached window's context comes from it.
     pub fn take_retained(&mut self) -> (Vec<FileEntry>, Vec<String>) {
         self.detached = true;
         (
@@ -730,23 +684,18 @@ impl WindowedSessionStore {
         )
     }
 
-    /// Whether [`Self::take_retained`] handed the bodies to the manager.
     #[must_use]
     pub fn retained_detached(&self) -> bool {
         self.detached
     }
 
-    /// Whether [`Self::ensure_full_history`] rehydrated the whole file.
     #[must_use]
     pub fn full_history(&self) -> bool {
         self.full
     }
 
-    /// Whether the open's walk retained every file row (no compaction
-    /// boundary): the owning manager's entries — the retained trees the
-    /// walk handed over plus every append since — cover every persisted
-    /// row, so a historical read over the file would rebuild a subset of
-    /// what the manager already holds.
+    /// Whether the walk retained every file row (no compaction boundary):
+    /// the manager's entries already cover every persisted row.
     #[must_use]
     pub fn retained_whole_file(&self) -> bool {
         self.retained_whole_file
@@ -794,12 +743,9 @@ impl WindowedSessionStore {
     pub fn append_entry(&mut self, entry: FileEntry) {
         if !self.detached {
             if let FileEntry::ChildUsageAttributed { payload, .. } = &entry {
-                // The full reader folds attributions at parse time; a live
-                // append must fold into the retained assistant copy too, or
-                // `context()` serves stale usage until reopen. A detached
-                // window holds no bodies: the owning manager's own append
-                // folds its copy (the manager is the one-copy authority
-                // after `take_retained`).
+                // A live append must fold into the retained assistant copy too, or
+                // `context()` serves stale usage until reopen; a detached window
+                // holds no bodies — the manager's append folds its copy.
                 for retained in self.entries.iter_mut().rev() {
                     if retained.id() == Some(payload.target_id.as_str()) {
                         if let FileEntry::Message {
@@ -881,9 +827,7 @@ impl WindowedSessionStore {
 
     /// The model in effect at the retained-window boundary (the newest
     /// `model_change` in the discarded prefix): the per-model usage fold
-    /// seeds its timeline with this — retained summarizer rows before the
-    /// branch's first in-window `model_change` billed on it. `None` on a
-    /// full-history load or a prefix without `model_change` rows.
+    /// seeds its timeline with it; `None` without `model_change` rows or full history.
     #[must_use]
     pub fn boundary_model(&self) -> Option<&(String, String)> {
         self.boundary_model.as_ref()
@@ -893,12 +837,7 @@ impl WindowedSessionStore {
     ///
     /// # Panics
     ///
-    /// Panics when this window handed its bodies to the owning manager
-    /// ([`Self::take_retained`]): a detached window serves lookups and
-    /// append-time stats only — its transcript context is the manager's
-    /// `file_entries` (the one-copy authority), never a re-walk of the
-    /// (absent) retained rows. `ensure_full_history` re-arms the bodies
-    /// and with them this constructor.
+    /// Panics when detached ([`Self::take_retained`]); `ensure_full_history` re-arms them.
     #[must_use]
     pub fn context(&self) -> SessionContext {
         assert!(
@@ -916,16 +855,13 @@ impl WindowedSessionStore {
         context
     }
 
-    /// Hydrate off the async executor; I/O and task failures reach the caller.
-    /// This store is read-only: disk appends are included, while the selected
-    /// leaf remains pinned. Mutable stores must merge their own pending rows
-    /// rather than replacing their state with this snapshot.
+    /// Hydrate off the async executor. This store is read-only: disk appends
+    /// are included, the selected leaf remains pinned, and mutable stores
+    /// must merge their own pending rows.
     ///
     /// # Errors
     ///
-    /// Returns an error when reading the session file fails or the blocking
-    /// read task fails to join; an already-full store succeeds without
-    /// touching the disk.
+    /// Error when reading the session file fails or the blocking read task fails to join.
     pub async fn ensure_full_history(&mut self) -> anyhow::Result<()> {
         if self.full {
             return Ok(());
@@ -937,8 +873,8 @@ impl WindowedSessionStore {
         .await??;
         self.entries = entries;
         self.full = true;
-        // Re-hydrated bodies re-arm the retained copies this constructor
-        // reloaded (and with them `context()`), exactly like a fresh walk.
+        // Re-hydrated bodies re-arm the retained copies (and with them
+        // `context()`), like a fresh walk.
         self.detached = false;
         Ok(())
     }

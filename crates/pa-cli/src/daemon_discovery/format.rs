@@ -1,12 +1,10 @@
-//! Output rendering for the discovery commands: the daemon table (TS
-//! `cli/daemon-ps-format.ts`) and the chalk-colored action lines of
-//! `daemon-ps.ts`. Colors follow chalk's auto-detection: styled output only
-//! when stdout is a terminal and `NO_COLOR` is unset. Piped output (the
-//! differential corpus) is plain.
+//! Output rendering for the discovery commands: the daemon table and the
+//! colored action lines. Colors follow chalk's auto-detection: styled
+//! output only when stdout is a terminal and `NO_COLOR` is unset. Piped
+//! output (the differential corpus) is plain.
 
 use super::{DaemonInfo, DaemonStatus};
 
-/// The wire name of a status (TS serializes the kebab-case literal).
 fn status_name(status: DaemonStatus) -> String {
     match status {
         DaemonStatus::Current => "current".to_string(),
@@ -41,24 +39,20 @@ fn reset_code(code: &str) -> &'static str {
     }
 }
 
-/// `chalk.green`
 fn green(text: &str) -> String {
     paint("32", text)
 }
 
-/// `chalk.red`
 fn red(text: &str) -> String {
     paint("31", text)
 }
 
-/// `chalk.dim`
 fn dim(text: &str) -> String {
     paint("2", text)
 }
 
-/// The discovered-daemon table (TS `formatDaemonListTable`): socket, pid,
-/// version, status, sessions, uptime; the default socket is starred with a
-/// footnote.
+/// The discovered-daemon table: socket, pid, version, status,
+/// sessions, uptime; the default socket is starred with a footnote.
 pub(crate) fn format_daemon_list_table(daemons: &[DaemonInfo]) -> String {
     let headers = ["socket", "pid", "version", "status", "sessions", "uptime"];
     let rows: Vec<[String; 6]> = daemons
@@ -92,7 +86,7 @@ pub(crate) fn format_daemon_list_table(daemons: &[DaemonInfo]) -> String {
                 .unwrap_or(0)
         })
         .collect();
-    // Two spaces between columns (TS `formatTable`).
+    // Two spaces between columns.
     let mut lines = vec![headers
         .iter()
         .enumerate()
@@ -116,8 +110,8 @@ pub(crate) fn format_daemon_list_table(daemons: &[DaemonInfo]) -> String {
     }
 }
 
-/// The status cell carries its severity color (TS `colorStatus`); the column
-/// width math runs on the visible text, not the escape codes.
+/// The status cell carries its severity color; the column width math
+/// runs on the visible text, not the escape codes.
 fn color_status(status: DaemonStatus, value: &str) -> String {
     match status {
         DaemonStatus::Current => green(value),
@@ -127,7 +121,7 @@ fn color_status(status: DaemonStatus, value: &str) -> String {
     }
 }
 
-/// Compact uptime (TS `formatUptime`): seconds, minutes, hours, days, weeks.
+/// Compact uptime: seconds, minutes, hours, days, weeks.
 pub(crate) fn format_uptime(uptime_seconds: Option<u64>) -> String {
     let Some(seconds) = uptime_seconds else {
         return String::new();
@@ -160,8 +154,7 @@ fn pad_end(text: &str, width: usize) -> String {
     }
 }
 
-/// The reap report: green `reaped` lines then dim `kept` lines
-/// (TS `runReap` text output).
+/// The reap report: green `reaped` lines then dim `kept` lines.
 pub(crate) fn print_reap_report(reaped: &[(String, String)], skipped: &[(String, String)]) {
     if reaped.is_empty() && skipped.is_empty() {
         println!("No background services found.");
@@ -175,8 +168,7 @@ pub(crate) fn print_reap_report(reaped: &[(String, String)], skipped: &[(String,
     }
 }
 
-/// The shutdown report: green `stopped` lines then red `failed` lines
-/// (TS `runShutdownAllConverging` text output).
+/// The shutdown report: green `stopped` lines then red `failed` lines.
 pub(crate) fn print_shutdown_report(stopped: &[(String, String)], failed: &[(String, String)]) {
     if stopped.is_empty() && failed.is_empty() {
         println!("No background services found.");
@@ -242,7 +234,6 @@ mod tests {
             .next()
             .unwrap()
             .starts_with("/tmp/prime-agent-1000/daemon.sock *  42   0.1.0"));
-        // The footnote names the default service.
         assert!(table.ends_with("* default background service"));
     }
 

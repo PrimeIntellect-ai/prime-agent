@@ -1,6 +1,5 @@
 //! Private Prime Inference models: bundled table, team-authorized fetch,
-//! HMAC-fingerprinted disk cache. Port of prime-inference-models.ts plus the
-//! registry's private-prime authorization cache.
+//! HMAC-fingerprinted disk cache.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
@@ -19,7 +18,7 @@ use super::prime_inference_catalog::{
 const PRIVATE_PRIME_AUTHORIZATION_CACHE_FILE: &str = "prime-inference-private-models.json";
 pub const PRIVATE_PRIME_AUTHORIZATION_CACHE_TTL_MS: u64 = 5 * 60_000;
 
-/// Foreground entitlement fetch timeout (TS `PRIVATE_MODEL_REFRESH_TIMEOUT_MS`).
+/// Foreground entitlement fetch timeout.
 pub const PRIVATE_MODEL_TIMEOUT_MS: u64 = 10_000;
 /// Stale-cache background refresh timeout.
 pub const PRIVATE_BACKGROUND_TIMEOUT_MS: u64 = 3_000;
@@ -34,8 +33,7 @@ pub fn get_private_prime_inference_models() -> Vec<Model> {
 ///
 /// # Panics
 ///
-/// The `expect` on HMAC key construction cannot fail: HMAC accepts any key
-/// length, so this never panics.
+/// The `expect` on HMAC key construction cannot fail: HMAC accepts any key length.
 #[must_use]
 pub fn private_prime_authorization_fingerprint(api_key: &str, team_id: &str) -> String {
     let mut mac = Hmac::<Sha256>::new_from_slice(api_key.as_bytes()).expect("hmac key");
@@ -133,11 +131,10 @@ pub fn private_prime_authorization_cache_path(models_json_path: &Path) -> PathBu
 }
 
 /// The stat identity a cached parse is validated against: device, inode,
-/// mtime (nanoseconds), and length — the same validation shape as the auth
-/// document's read-through cache (`crate::auth::storage`). Every writer
-/// the protocol knows replaces the file by atomic rename (a new inode) or
-/// rewrites it in place (a new mtime), so a matching identity means the
-/// cached parse is what a fresh read would return.
+/// mtime (nanoseconds), and length (same shape as the auth document's
+/// read-through cache). Every known writer replaces the file by atomic
+/// rename or rewrites in place, so a matching identity means the cached
+/// parse is what a fresh read would return.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct CacheFileIdentity {
     dev: u64,
@@ -176,11 +173,9 @@ fn cache_file_identity(metadata: &std::fs::Metadata) -> Option<CacheFileIdentity
     })
 }
 
-/// One validated parse held in the process-wide read-through cache. The
-/// port of TS #2479's stat snapshot: the port builds a fresh registry per
-/// model-resolution touchpoint (the TS session kept one long-lived
-/// registry), so the parse would otherwise re-run on every resolution
-/// while the file sits unchanged.
+/// One validated parse held in the process-wide read-through cache: the
+/// port builds a fresh registry per resolution (TS kept one long-lived
+/// registry), so the parse would otherwise re-run on every resolution.
 struct CachedParse {
     identity: CacheFileIdentity,
     cache: PrivatePrimeAuthorizationCache,
@@ -193,13 +188,9 @@ fn parse_cache() -> &'static std::sync::Mutex<HashMap<PathBuf, CachedParse>> {
 }
 
 /// Read and validate the authorization cache; `None` on any mismatch.
-///
-/// The parse is served from the process-wide stat-identity snapshot while
-/// the file is unchanged. Only a successful parse is pinned, and only
-/// when the file's stat identity is the same before and after the read
-/// (a concurrent writer replacing the file mid-read must not be pinned);
-/// a failed read unpins any stale entry so the next call retries (TS
-/// #2479 never pins an unstable or failed read).
+/// The parse is served from the stat-identity snapshot while the file is
+/// unchanged. Only a successful parse under an unchanged identity pins; a
+/// failed read unpins any stale entry so the next call retries.
 pub fn read_private_prime_authorization_cache(
     models_json_path: &Path,
 ) -> Option<PrivatePrimeAuthorizationCache> {
@@ -277,10 +268,8 @@ fn parse_private_prime_authorization_cache(path: &Path) -> Option<PrivatePrimeAu
 }
 
 /// Persist the authorization cache (best-effort atomic temp+rename write,
-/// 0o600 like the TS `writeFileAtomicSync` call, which the TS reference
-/// makes with no `fsync` — a failed or lost cache write only requires a
-/// later refetch (model-registry.ts: "A failed cache write only requires a
-/// later refetch")).
+/// 0o600 like the TS `writeFileAtomicSync` call, which TS makes with no
+/// `fsync`: a failed or lost cache write only requires a later refetch).
 pub fn write_private_prime_authorization_cache(
     models_json_path: &Path,
     cache: &PrivatePrimeAuthorizationCache,
@@ -341,10 +330,9 @@ mod tests {
         }
     }
 
-    /// Per-call-site served-path oracle (model-registry.ts:1185 passes only
-    /// `{ mode: 0o600 }`): the authorization-cache write takes NO fsync
-    /// branch — the refetchable cache has the weakest durability need in
-    /// the shared helper's family.
+    /// Served-path oracle (model-registry.ts:1185 passes only
+    /// `{ mode: 0o600 }`): the cache write takes NO fsync branch — the
+    /// refetchable cache has the weakest durability need.
     #[test]
     fn authorization_cache_write_takes_the_ts_default_no_sync() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -363,10 +351,8 @@ mod tests {
         assert!(written.ends_with('}') && !written.contains('\n'));
     }
 
-    /// The injected private models keep their zero pricing end to end: a
-    /// cache entry priced `0.0` (the free internal models) resolves to a
-    /// model whose costs are zero, so the provider cost calculation bills
-    /// nothing for them — never a template's or a fallback's pricing.
+    /// A cache entry priced `0.0` resolves to a model whose costs are zero —
+    /// never a template's or a fallback's pricing.
     #[test]
     fn zero_priced_private_cache_models_resolve_free() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -404,8 +390,7 @@ mod tests {
             .expect("the injected model resolves");
         assert_eq!(model.cost.input.0, 0.0);
         assert_eq!(model.cost.output.0, 0.0);
-        // The provider cost calculation over a heavy usage bills $0: the
-        // injected pricing, not a template's or a default's.
+        // Heavy usage over the injected pricing bills $0 — not a template's or default's.
         let usage = pa_types::ai::Usage {
             input: 21_000_000,
             output: 1_700_000,
