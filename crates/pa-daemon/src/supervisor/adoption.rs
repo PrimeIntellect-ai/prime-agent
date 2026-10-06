@@ -140,6 +140,11 @@ impl Supervisor {
                 failed,
             );
         }
+        // TS arms the owner cleanup for every adopted worker: an owner that
+        // does not reconnect within the grace loses its worker.
+        for resident in self.registry.list().await {
+            self.schedule_owned_worker_cleanup(&resident).await;
+        }
         // The boot roster seed runs exactly once, in the background, now
         // that adoption settled: the registry's residents are the seed
         // roots. TS awaits its seed before adoption; the Rust daemon

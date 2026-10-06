@@ -11,8 +11,8 @@ impl AgentView {
     /// The detail one entry's card renders at: the conversation level,
     /// flipped for the entries a click toggled away from it. Exact for
     /// both sides: the never-toggled entries get `self.detail` (a click
-    /// can only toggle the four card kinds `transcript_click_target`
-    /// matches), and the card renderers read `Detail` only through
+    /// can only toggle the kinds `transcript_click_target` matches),
+    /// and the card renderers read `Detail` only through
     /// `tool_output_expanded()` — the level's other readers (thinking
     /// blocks, edit diffs) belong to rows no click can toggle, so the
     /// flip never leaks into them.
@@ -97,7 +97,7 @@ pub(super) mod tests {
         }))
     }
 
-    fn transcript_text(view: &mut AgentView) -> String {
+    pub(in crate::view) fn transcript_text(view: &mut AgentView) -> String {
         view.render_transcript(80)
             .iter()
             .map(|line| line.iter().map(|span| span.content.as_str()).collect())

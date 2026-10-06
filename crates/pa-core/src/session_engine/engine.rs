@@ -17,6 +17,12 @@ use crate::skills::PromptTemplate;
 
 use super::{AgentSession, PromptOptions, PromptOutcome};
 
+/// The background MCP settle's per-server open bound (the kernel's
+/// `mcp_status` listing opens each not-yet-connected server bounded per
+/// server; the settle is off every user-visible path, so the bound only
+/// keeps the background task from outliving a wedged server forever).
+const MCP_SETTLE_PER_SERVER_TIMEOUT_MS: u64 = 10_000;
+
 /// Everything needed to assemble a session.
 #[derive(Default)]
 pub struct SessionEngineConfig {
@@ -126,6 +132,7 @@ pub struct SessionEngineConfig {
     /// spawn provenance. `None` keeps the session off the ledger (no
     /// request ids on the wire).
     pub semantic_edges: Option<super::semantic_edges::SemanticEdgeIdentity>,
+    pub on_late_sent_agent_message: Option<crate::tools::ipython::LateSentAgentMessageHandler>,
 }
 
 /// An assembled, running session.
@@ -496,7 +503,10 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     if !tools.iter().any(|tool| tool.name() == "ipython") {
         let definition = crate::tools::ipython::create_ipython_tool_definition(
             &cwd.to_string_lossy(),
-            super::runtime_wiring::ipython_tool_options(provisioner.clone()),
+            super::runtime_wiring::ipython_tool_options(
+                provisioner.clone(),
+                config.on_late_sent_agent_message.clone(),
+            ),
         );
         tools.push(Arc::new(
             crate::session_engine::tool_bridge::ToolDefinitionBridge::new(definition),
@@ -523,6 +533,27 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         && active_tool_names.iter().any(|name| name == "ipython")
     {
         provisioner.prewarm();
+        // The MCP settle rides the same background posture (the
+        // parallel-startup rule: nothing user-visible waits on the MCP
+        // spawn/settle; the join point is first use): once the kernel is
+        // up, the configured generic servers open in the background via
+        // the bounded `mcp_status` listing the connections view uses, so
+        // tool discovery is warm by the first turn. A tool call or
+        // listing that arrives first is never raced to an error — the
+        // runtime's registry serializes per-server opens on its lock and
+        // then reuses the open connection, so the earliest user of a
+        // server joins the settle's in-flight open and succeeds.
+        let settle_servers = generic_mcp_servers.clone();
+        let settle_provisioner = provisioner.clone();
+        tokio::spawn(async move {
+            if settle_provisioner.ensure(None, None).await.is_ok() {
+                if let Some(manager) = settle_provisioner.manager() {
+                    let _ = manager
+                        .mcp_tool_listing(&settle_servers, MCP_SETTLE_PER_SERVER_TIMEOUT_MS)
+                        .await;
+                }
+            }
+        });
     }
 
     let prompt_guidelines = config.prompt_guidelines.clone();
