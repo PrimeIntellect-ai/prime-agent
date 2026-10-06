@@ -132,9 +132,19 @@ impl Default for MutableAgentState {
     }
 }
 
+/// One queued batch with its admission provenance: user submissions
+/// (`steer`/`follow_up`) park when a run aborts (TS `runLoop` skips the
+/// polls); injected rows (agent messages and RLM terminal notices,
+/// `admit_or_enqueue`) still pump — a close cascade's post-abort notice
+/// claims must deliver.
+struct QueuedBatch {
+    messages: Vec<AgentMessage>,
+    injected: bool,
+}
+
 struct PendingMessageQueue {
     mode: QueueMode,
-    batches: Vec<Vec<AgentMessage>>,
+    batches: Vec<QueuedBatch>,
 }
 
 impl PendingMessageQueue {
@@ -145,14 +155,13 @@ impl PendingMessageQueue {
         }
     }
 
-    fn enqueue(&mut self, message: AgentMessageBatch) {
-        match message {
-            AgentMessageBatch::Single(message) => self.batches.push(vec![message]),
-            AgentMessageBatch::Batch(messages) => {
-                if !messages.is_empty() {
-                    self.batches.push(messages);
-                }
-            }
+    fn enqueue(&mut self, message: AgentMessageBatch, injected: bool) {
+        let messages = match message {
+            AgentMessageBatch::Single(message) => vec![message],
+            AgentMessageBatch::Batch(messages) => messages,
+        };
+        if !messages.is_empty() {
+            self.batches.push(QueuedBatch { messages, injected });
         }
     }
 
@@ -160,14 +169,22 @@ impl PendingMessageQueue {
         !self.batches.is_empty()
     }
 
+    /// Whether any queued batch may pump after an aborted run.
+    fn has_injected(&self) -> bool {
+        self.batches.iter().any(|batch| batch.injected)
+    }
+
     fn drain(&mut self) -> Vec<AgentMessage> {
         if self.mode == QueueMode::All {
-            let drained: Vec<AgentMessage> = self.batches.drain(..).flatten().collect();
+            let drained: Vec<AgentMessage> = self
+                .batches
+                .drain(..)
+                .flat_map(|batch| batch.messages)
+                .collect();
             return drained;
         }
-        if let Some(first) = self.batches.first().cloned() {
-            self.batches.remove(0);
-            return first;
+        if !self.batches.is_empty() {
+            return self.batches.remove(0).messages;
         }
         Vec::new()
     }
@@ -178,10 +195,10 @@ impl PendingMessageQueue {
 
     fn remove_where(&mut self, predicate: &dyn Fn(&AgentMessage) -> bool) -> Vec<AgentMessage> {
         let mut removed: Vec<AgentMessage> = Vec::new();
-        let mut retained: Vec<Vec<AgentMessage>> = Vec::new();
+        let mut retained: Vec<QueuedBatch> = Vec::new();
         for batch in self.batches.drain(..) {
-            if batch.iter().any(predicate) {
-                removed.extend(batch);
+            if batch.messages.iter().any(predicate) {
+                removed.extend(batch.messages);
             } else {
                 retained.push(batch);
             }
@@ -679,7 +696,7 @@ impl AgentInner {
     pub(crate) fn claim_or_enqueue(&self, batch: AgentMessageBatch) -> ClaimOrEnqueue {
         let mut run = self.run.lock().unwrap();
         if run.is_some() {
-            self.steering_queue.lock().unwrap().enqueue(batch);
+            self.steering_queue.lock().unwrap().enqueue(batch, true);
             return ClaimOrEnqueue::Enqueued;
         }
         let claim = Self::install_run_locked(&mut run, None);
@@ -772,14 +789,19 @@ impl AgentInner {
         {
             let mut run = self.run.lock().unwrap();
             if let Some(active) = run.take() {
-                // An aborted run parks its queued rows (TS runLoop skips
+                // An aborted run parks its USER rows (TS runLoop skips
                 // the steering/follow-up polls when abort settles the
-                // turn): they fold into the next admitted run's polls,
-                // never the idle pump, so an aborted finish keeps the
-                // wake clear even with rows queued.
-                let has_queued = !finish_signal.is_aborted()
-                    && (self.steering_queue.lock().unwrap().has_items()
-                        || self.follow_up_queue.lock().unwrap().has_items());
+                // turn) but injected rows (agent messages, RLM terminal
+                // notices) still pump: a close cascade's post-abort
+                // notice claims must deliver. A normal finish arms for
+                // anything queued.
+                let has_queued = if finish_signal.is_aborted() {
+                    self.steering_queue.lock().unwrap().has_injected()
+                        || self.follow_up_queue.lock().unwrap().has_injected()
+                } else {
+                    self.steering_queue.lock().unwrap().has_items()
+                        || self.follow_up_queue.lock().unwrap().has_items()
+                };
                 self.idle_queued_tx.send_modify(|armed| *armed = has_queued);
                 let _ = active.idle_tx.send(true);
             }
@@ -1195,7 +1217,7 @@ impl Agent {
             .steering_queue
             .lock()
             .unwrap()
-            .enqueue(message.into());
+            .enqueue(message.into(), false);
     }
 
     /// Queue a message batch to run only after the agent would otherwise stop.
@@ -1208,7 +1230,7 @@ impl Agent {
             .follow_up_queue
             .lock()
             .unwrap()
-            .enqueue(message.into());
+            .enqueue(message.into(), false);
     }
 
     /// # Panics
@@ -1240,7 +1262,7 @@ impl Agent {
             .unwrap()
             .batches
             .iter()
-            .map(|batch| batch_preview(batch))
+            .map(|batch| batch_preview(&batch.messages))
             .collect()
     }
 
@@ -1257,7 +1279,7 @@ impl Agent {
             .unwrap()
             .batches
             .iter()
-            .map(|batch| batch_preview(batch))
+            .map(|batch| batch_preview(&batch.messages))
             .collect()
     }
 
