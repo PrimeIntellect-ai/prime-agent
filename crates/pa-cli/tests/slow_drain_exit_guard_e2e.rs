@@ -1,13 +1,6 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
-// by design on hot paths (boxing 130 fns is allocation-churn with zero
-// correctness gain); the fn-length threshold is a style gate, not
-// correctness (the harness fns are intentionally linear); 64-bit targets -
-// the narrowing sits at OS/protocol boundaries where the values are
-// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
-// guarded parses), and checked conversions would add panic paths where
-// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
-// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
-// dossier for the conductor).
+// large_futures: stack-resident futures on hot paths by design.
+// too_many_lines: style gate, not correctness. Casts: 64-bit targets;
+// narrowing sits at bounded OS/protocol boundaries.
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -18,28 +11,10 @@
 )]
 
 //! Real-pty e2e for the slow-drain exit-guard contract: the exit flush
-//! streams the whole transcript into native scrollback, and on a terminal
-//! that consumes it slowly (a laggy ssh, a parsing tap) the drain outlasts
-//! the 1500ms force-quit deadline that arms at the second Ctrl+C. The
-//! contract under test has two sides:
-//!
-//! 1. A DRAINING terminal is not a stalled shutdown: the flush writer
-//!    reports progress per completed chunk (view.rs `FlushSink`), the
-//!    release tail and the resume hint report theirs, and the watchdog
-//!    holds its fire while progress lands — the flush completes
-//!    byte-identically (the frozen scrollback contract), the restore
-//!    tail lands after the last flushed row, and `shutdown stalled`
-//!    never prints (TS semantics: TS has no watchdog at all and simply
-//!    waits for its writes).
-//! 2. A genuinely stalled drain still fires: a terminal that stops
-//!    consuming mid-flush produces no progress for the whole grace
-//!    window, and the watchdog force-quits with the same message and
-//!    exit code as ever.
-//!
-//! The harness drives the REAL chat surface over a pty (the child is
-//! this binary re-executed against a mock supervisor socket, the
-//! kitty-release e2e's pattern) and paces its own reads of the pty
-//! master — the terminal's drain rate is the test's knob.
+//! streams the whole transcript into scrollback, and on a slow terminal
+//! the drain outlasts the 1500ms force-quit deadline armed at the second
+//! Ctrl+C. A DRAINING terminal is not a stalled shutdown (per-chunk progress
+//! holds the watchdog's fire; TS has no watchdog), and a stalled drain fires.
 #![cfg(unix)]
 
 use std::io::{BufRead, Read, Write};
@@ -57,47 +32,29 @@ use pa_tui::interactive::{
     run_interactive, InteractiveOptions, ModelSelection, SessionSelection, UiMode,
 };
 
-/// The kitty probe query and answer (the kitty-release e2e's pair): the
-/// child's startup asks for keyboard enhancements; answering like a
-/// kitty terminal keeps the probe's bounded wait from adding its full
-/// budget to the test.
+/// Answering like a kitty terminal keeps the probe's bounded wait from adding its full budget.
 const KITTY_QUERY: &[u8] = b"\x1b[?u";
 const KITTY_ANSWER: &[u8] = b"\x1b[?7u\x1b[?62;c";
 /// The alt-screen leave the exit flush begins with.
 const ALT_SCREEN_LEAVE: &[u8] = b"\x1b[?1049l";
-/// The release tail's first two writes (synchronized output off, SGR
-/// reset) — the boundary between the flushed rows and the restore.
+/// The release tail's first two writes — the flushed-rows/restore boundary.
 const TAIL_MARK: &[u8] = b"\x1b[?2026l\x1b[0m";
-/// The watchdog's user-visible line, printed only on a genuine forced
-/// exit. The re-executed test binary's libtest harness captures stderr
-/// per test, so the line never reaches the pty in this harness — the
-/// fire is asserted structurally (see `a_stalled_drain_still_fires`),
-/// and the line itself is asserted on the real product binary by the
-/// lane's VM bench legs.
+/// The watchdog's user-visible line (the test binary's libtest harness
+/// captures stderr per test, so the fire is asserted structurally here).
 #[allow(dead_code)]
 const STALL_MSG: &[u8] = b"shutdown stalled; forced exit.";
-/// The transcript rows this harness seeds: `row <index>` text, the same
-/// needle family the kitty-release e2e drives. The startup paint shows
-/// the viewport tail only, so the mount needle is the LAST seeded row;
-/// the exit flush writes the whole transcript, so the completeness
-/// assertion checks the FIRST row appears after the exit.
+/// The startup paint shows the viewport tail, so this row only ever
+/// appears in the exit flush (the completeness assertion).
 const FIRST_ROW: &[u8] = b"row 0";
 const CHILD_SOCKET_ENV: &str = "PA_SLOW_DRAIN_CHILD_SOCKET";
-/// The exit flush of the seeded transcript, at the paced read rate,
-/// must still be draining when the 1500ms deadline passes: the flush is
-/// sized (messages x wrapped rows) and the rate picked so the drain
-/// runs well past the deadline with chunk completions inside the guard's
-/// grace window.
+/// The paced rate: the flush must still drain past the 1500ms deadline,
+/// with chunk completions inside the grace window.
 const READ_RATE_BYTES_PER_S: f64 = 96.0 * 1024.0;
-/// The seed size: pairs of user/assistant messages whose wrapped rows
-/// flush to well over the drain the deadline covers at the paced rate.
+/// Pairs of user/assistant messages whose wrapped rows flush well past the deadline's drain.
 const SEED_MESSAGES: usize = 1_600;
-/// The LAST seeded row: the startup viewport paints the transcript tail,
-/// so this is the mount needle; the first row only ever appears in the
-/// exit flush (the completeness assertion).
+/// The LAST seeded row: the mount needle (the viewport paints the tail).
 const LAST_ROW: &[u8] = b"row 1599";
-/// The dock's exit-hint row (rendered after every transcript row in the
-/// flush): the flush-completeness anchor for the stream's tail.
+/// The dock's exit-hint row, rendered after every transcript row.
 const EXIT_HINT_ROW: &[u8] = b"Press Ctrl+C again to exit";
 
 #[test]
@@ -114,10 +71,8 @@ fn slow_drain_child_mode() {
         let outcome = run_interactive(options.clone(), UiMode::Terminal)
             .await
             .expect("the chat surface ran");
-        // The composition root's exit tail (pa-cli `interactive_mode`):
-        // the resume hint print, its exit-progress report, and the
-        // fixed pre-exit delay. Replicated here because the child drives
-        // the surface directly, not the CLI composition.
+        // The composition root's exit tail (pa-cli `interactive_mode`),
+        // replicated because the child drives the surface directly.
         if let Some(hint) = outcome.resume_hint {
             println!("\x1b[2m{hint}\x1b[22m");
         }
@@ -126,8 +81,7 @@ fn slow_drain_child_mode() {
     });
 }
 
-/// The pty harnesses serialize: each drives process-group signals and a
-/// raw pty; concurrent byte-level waits flake on the shared test CPUs.
+/// The pty harnesses serialize: concurrent byte-level waits flake on the shared test CPUs.
 static HARNESS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[test]
@@ -143,19 +97,15 @@ fn a_slow_drain_flushes_the_whole_transcript_without_forcing_the_exit() {
     harness.wait_from_start(LAST_ROW, "the attach snapshot rendered");
     harness.settle();
 
-    // The exit gesture: a Ctrl+C pair inside the exit window arms the
-    // force-quit deadline at the second press (exit_guard.rs); the loop
-    // consumes the pair and runs the exit, whose flush the paced drain
-    // keeps busy well past the deadline.
+    // The exit gesture: the Ctrl+C pair arms the deadline at the second press.
     let mark = harness.mark();
     harness.write(b"\x03");
     std::thread::sleep(Duration::from_millis(400));
     let keys_sent = Instant::now();
     harness.write(b"\x03");
 
-    // Pace the drain: the terminal consumes at READ_RATE_BYTES_PER_S,
-    // so the 1500ms deadline lands mid-flush and the guard must hold its
-    // fire on the writer's per-chunk progress.
+    // Pace the drain: the deadline lands mid-flush, and the guard must hold
+    // its fire on the writer's per-chunk progress.
     let drained = harness.pump_until_exit(READ_RATE_BYTES_PER_S, Duration::from_secs(120));
     let exit_wall = keys_sent.elapsed();
     assert_eq!(
@@ -163,31 +113,24 @@ fn a_slow_drain_flushes_the_whole_transcript_without_forcing_the_exit() {
         Some(0),
         "the child exits cleanly through its own exit path"
     );
-    // The terminal keeps draining after the process died: the kernel
-    // still holds every byte it accepted, and the assertions read the
-    // terminal's whole byte stream.
+    // The kernel still holds every byte it accepted after the process died.
     harness.settle();
     let output = harness.output();
     let _ = mark;
 
-    // The drain really ran past the deadline mid-flush: a fast drain
-    // would finish before the 1500ms force-quit window even matters.
+    // The drain really ran past the deadline mid-flush (anti-vacuity).
     assert!(
         exit_wall >= Duration::from_millis(1_800),
         "the paced drain must outlast the 1500ms deadline (wall {exit_wall:?}, {}KiB drained)",
         drained / 1024
     );
-    // TS semantics on a healthy exit: no forced-quit line ever prints.
     assert!(
         find_subsequence(&output, STALL_MSG).is_none(),
         "a draining terminal must never read as a stalled shutdown"
     );
-    // The whole transcript flushed (the frozen scrollback contract). The
-    // LAST occurrence is the flush's copy: the startup viewport also
-    // paints the transcript tail before the exit. The needles use the
-    // user-message rows (rendered as contiguous text; assistant rows
-    // carry per-word SGR spans) and the dock's exit hint, which the
-    // dock renders after every chat row.
+    // The whole transcript flushed: the LAST occurrence is the flush's
+    // copy (the startup viewport also painted the tail), and the needles
+    // use the user rows (contiguous; assistant rows carry SGR spans).
     let first_row_at = find_subsequence_last(&output, FIRST_ROW)
         .expect("the flush wrote the transcript's first row");
     let last_user_row = format!("row {}", SEED_MESSAGES - 2).into_bytes();
@@ -202,8 +145,7 @@ fn a_slow_drain_flushes_the_whole_transcript_without_forcing_the_exit() {
         "the flushed rows follow the alt-screen leave (output {}B, leave_at {leave_at}, first_row_at {first_row_at}, last_row_at {last_row_at}, dock_at {dock_at})",
         output.len()
     );
-    // The restore tail lands after the flushed rows: the terminal is
-    // handed back whole, not mid-transcript.
+    // The restore tail lands after the flushed rows.
     let tail_at = find_subsequence_last(&output, TAIL_MARK)
         .expect("the release tail wrote its restore sequence");
     assert!(
@@ -225,29 +167,23 @@ fn a_stalled_drain_still_fires_the_force_quit() {
     harness.wait_from_start(LAST_ROW, "the attach snapshot rendered");
     harness.settle();
 
-    // The exit gesture arms the 1500ms deadline; then the terminal
-    // stops consuming entirely: the writer blocks inside its chunk, no
-    // progress lands, and the grace window expiring must fire the
-    // watchdog exactly as before the drain-awareness existed.
+    // The exit gesture arms the deadline; then the terminal stops consuming
+    // entirely — no progress lands, and the grace window's expiry must fire.
     harness.write(b"\x03");
     std::thread::sleep(Duration::from_millis(400));
     let keys_sent = Instant::now();
     harness.write(b"\x03");
 
-    // The stall: nothing is read while the deadline (and the progress
-    // grace window) passes.
+    // The stall: nothing is read while the deadline and grace window pass.
     std::thread::sleep(Duration::from_millis(2_500));
     assert!(
         harness.child_alive(),
         "the force-quit's restore writes block on the full pty until the drain resumes"
     );
 
-    // Resume the drain: the watchdog has fired (the stall outlasted the
-    // deadline and the grace window), and its forced restore is queued
-    // behind the writer's blocked chunk write on the stdout lock — the
-    // restore bytes land as soon as the drain frees space, and the
-    // process dies with the guard's exit code, the flush truncated at
-    // the stall point exactly as the forced exit defines it.
+    // Resume the drain: the watchdog has fired, and its forced restore is
+    // queued behind the blocked chunk write — the process dies with the
+    // guard's exit code, the flush truncated at the stall point.
     let _ = harness.pump_until_exit(READ_RATE_BYTES_PER_S, Duration::from_secs(60));
     let exit_wall = keys_sent.elapsed();
     assert_eq!(
@@ -257,14 +193,9 @@ fn a_stalled_drain_still_fires_the_force_quit() {
     );
     harness.settle();
     let output2 = harness.output();
-    // The forced-exit line itself goes to stderr, which the re-executed
-    // test binary's libtest harness captures per test (never reaching
-    // the pty); the REAL binary's message is asserted by the lane's VM
-    // bench legs. Here the fire is asserted structurally: the forced
-    // restore writes its own alt-screen leave on top of the exit path's
-    // (a clean leg leaves the alternate screen exactly once), and the
-    // flush never reaches the transcript tail the drain would have
-    // needed seconds more to consume.
+    // The fire is asserted structurally: the forced restore writes its own
+    // alt-screen leave (a clean leg leaves exactly once), and the flush
+    // never reaches the transcript tail.
     let leave_count = output2
         .windows(ALT_SCREEN_LEAVE.len())
         .filter(|w| *w == ALT_SCREEN_LEAVE)
@@ -273,9 +204,8 @@ fn a_stalled_drain_still_fires_the_force_quit() {
         leave_count >= 2,
         "the forced restore ran after the exit path's own leave (leaves {leave_count}, wall {exit_wall:?})"
     );
-    // The last user row appears exactly once: the startup viewport's
-    // copy. A healthy drain (the slow leg) flushes a second copy into
-    // the stream; the forced exit cuts the flush before it.
+    // The last user row appears exactly once (the viewport's copy): a healthy
+    // drain flushes a second; the forced exit cuts it.
     let last_user_row = format!("row {}", SEED_MESSAGES - 2).into_bytes();
     let last_user_copies = output2
         .windows(last_user_row.len())
@@ -316,8 +246,7 @@ impl SlowDrainHarness {
         .expect("open pty");
 
         let child = spawn_child(&socket, &pty.slave);
-        // The child needs the socket for its lifetime; the tree dies with
-        // it at teardown.
+        // The child needs the socket for its lifetime.
         std::mem::forget(dir);
         SlowDrainHarness {
             child,
@@ -338,9 +267,8 @@ impl SlowDrainHarness {
         self.master.wait_from(0, needle, what);
     }
 
-    /// Let the surface settle: drain until the pty goes quiet (the mount
-    /// paint and the snapshot render are small; the drain here is fast
-    /// because the transcript never paints outside the viewport).
+    /// Drain until the pty goes quiet (the transcript never paints outside
+    /// the viewport, so this is fast).
     fn settle(&mut self) {
         self.master.drain_until_quiet(20);
     }
@@ -366,9 +294,8 @@ impl SlowDrainHarness {
         }
     }
 
-    /// Read the pty master at a fixed byte rate until the child exits:
-    /// the terminal's consumption pace, modeled with a token bucket that
-    /// refills at `rate` and allows one read per token slice.
+    /// Read the master at a fixed byte rate until the child exits (a token
+    /// bucket refilling at `rate`).
     fn pump_until_exit(&mut self, rate: f64, deadline: Duration) -> usize {
         let deadline = Instant::now() + deadline;
         let slice = Duration::from_millis(4);
@@ -397,15 +324,14 @@ impl SlowDrainHarness {
 
 impl Drop for SlowDrainHarness {
     fn drop(&mut self) {
-        // A panicking wait must never leak the pty child (it owns the
-        // controlling terminal of its own session).
+        // A panicking wait must never leak the pty child (it owns its
+        // session's controlling terminal).
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
 }
 
-/// Non-blocking reader over the pty master, collecting the raw byte
-/// stream the child writes.
+/// Non-blocking reader over the pty master, collecting the child's bytes.
 struct PtyReader {
     file: std::fs::File,
     output: Vec<u8>,
@@ -486,11 +412,9 @@ fn find_subsequence_last(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .map(|at| haystack.len() - at - needle.len())
 }
 
-/// A child of this very binary, re-executed in child mode with the pty
-/// slave as its terminal — and as its CONTROLLING terminal (`setsid` +
-/// `TIOCSCTTY`): crossterm's raw-mode and event reads go through
-/// `/dev/tty`, which must be the pty regardless of the runner's own
-/// environment (the kitty-release e2e's harness pattern).
+/// A child of this very binary, with the pty slave as its terminal AND
+/// controlling terminal (`setsid` + `TIOCSCTTY`): crossterm's raw-mode and
+/// event reads go through `/dev/tty`.
 fn spawn_child(socket: &Path, slave: &OwnedFd) -> Child {
     fn claim_controlling_tty(fd: i32) -> std::io::Result<()> {
         nix::unistd::setsid()?;
@@ -511,8 +435,7 @@ fn spawn_child(socket: &Path, slave: &OwnedFd) -> Child {
         .stdout(slave_as_stdio(slave))
         .stderr(slave_as_stdio(slave));
     // SAFETY: the pre_exec hook is the supported std seam for
-    // session/terminal setup; it runs post-fork pre-exec in the child
-    // only and cannot allocate.
+    // session/terminal setup; it runs post-fork pre-exec in the child only and cannot allocate.
     unsafe {
         command.pre_exec(move || claim_controlling_tty(slave_fd));
     }
@@ -561,8 +484,7 @@ fn child_options(socket: PathBuf) -> InteractiveOptions {
     }
 }
 
-/// One attached session behind a mock supervisor socket (the kitty-release
-/// e2e's frame contract; every connection served in turn).
+/// One attached session behind a mock supervisor socket.
 struct MockSupervisor {
     listener: std::os::unix::net::UnixListener,
 }
@@ -658,10 +580,8 @@ fn write_json(writer: &mut std::os::unix::net::UnixStream, value: &Value) {
     writer.flush().expect("flush mock frame");
 }
 
-/// The seeded transcript: `SEED_MESSAGES` rows of chat, alternating
-/// user/assistant, each text long enough to wrap at the harness's 120
-/// columns — a flush the paced drain cannot finish inside the 1500ms
-/// force-quit window.
+/// The seeded transcript: `SEED_MESSAGES` wrapped rows — a flush the
+/// paced drain cannot finish inside the 1500ms window.
 fn attach_data(id: &str) -> Value {
     let messages: Vec<Value> = (0..SEED_MESSAGES)
         .map(|index| {

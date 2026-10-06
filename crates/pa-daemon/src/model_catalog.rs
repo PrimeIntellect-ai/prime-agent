@@ -1,29 +1,7 @@
 //! The `/model` picker's catalog surface: serve the current validated
-//! snapshot instantly, refresh in the background (TS daemon-mode
-//! `get_model_catalog` → `session.modelRegistry.refreshModelCatalog`, with
-//! the operator-sanctioned no-stall divergence).
-//!
-//! TS awaits the refresh inside the request (`refreshProviderCatalog(false)`
-//! interval-gated + `refreshAvailableModels`' entitlement refresh), so a
-//! first picker open after a daemon boot — or past the hourly window —
-//! waits on the fetch (bounded by the 5 s catalog timeout) before the
-//! catalog lands. This port returns the current validated chain snapshot
-//! — disk cache → bundled → compiled, never a network request, cold start
-//! included — and runs the SAME refresh in a background task. When the
-//! refresh changes what this worker would answer, it broadcasts
-//! `model_catalog_changed` (Rust-only extension over the TS daemon-mode
-//! protocol): clients re-fetch — instant, from the now-warm caches — and
-//! an open picker folds the catalog through its stable update path, so
-//! the selected row never flickers. An unchanged refresh (the hourly
-//! gate, a failure, identical data) stays silent, so event → re-fetch →
-//! gated refresh terminates.
-//!
-//! Refresh schedule (TS `model-registry.ts` port): every catalog request
-//! spawns the interval-gated `PickerOpen` refresh; the hourly loop and the
-//! startup refresh are the supervisor's; a login or logout that changed the
-//! Prime Inference credential scope (the client process writes auth.json —
-//! the split-process port of `authStorage.onChange` → forced
-//! `scheduleCatalogRefresh`) forces the `AuthChange` refresh immediately.
+//! snapshot instantly and refresh in the background (a deliberate
+//! divergence from TS, which awaits the refresh inside the request); a
+//! changed snapshot broadcasts `model_catalog_changed`.
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -33,11 +11,8 @@ use serde_json::{json, Value};
 use crate::protocol::{response_success, DaemonResponse};
 use crate::worker::{OutboundFrame, Worker};
 
-/// The per-worker `/model` catalog background-refresh coalescing gate:
-/// at most one refresh runs with one queued trailing re-arm (the
-/// heartbeat-refresh shape), so concurrent picker opens or an
-/// auth-change storm cost one refresh cycle, never N parallel
-/// entitlement fetches.
+/// The catalog background-refresh coalescing gate: at most one refresh
+/// with one queued trailing re-arm, so concurrent opens cost one cycle.
 #[derive(Default)]
 pub(crate) struct RefreshGate {
     in_flight: std::sync::atomic::AtomicBool,
@@ -45,11 +20,8 @@ pub(crate) struct RefreshGate {
 }
 
 impl Worker {
-    /// `get_model_catalog`: the full catalog and the providers with
-    /// configured auth, from the current validated snapshot — never a
-    /// network request on the response path — with the refresh running in
-    /// the background (see the module docs for the divergence from TS's
-    /// awaited `refreshModelCatalog`).
+    /// `get_model_catalog`: the full catalog and configured providers from
+    /// the current validated snapshot — never a network request here.
     pub(crate) fn handle_get_model_catalog(&self) -> DaemonResponse {
         if let Err(response) = self.require_created("get_model_catalog") {
             return response;
@@ -61,10 +33,7 @@ impl Worker {
             models_json.clone(),
         );
         // The on-disk private authorization (fingerprint-checked): the
-        // validated current view of the account's private models, no
-        // network. A stale or absent cache simply gates private models
-        // out of the instant snapshot; the background refresh re-lands
-        // them.
+        // validated current view of the account's private models, no network.
         registry.load_private_authorization_from_cache();
         let available = registry
             .get_available()
@@ -72,10 +41,8 @@ impl Worker {
             .cloned()
             .collect::<Vec<_>>();
         let served = catalog_payload(&registry, &available);
-        // The refresh trigger: an observed Prime Inference credential-scope
-        // change forces the refresh (a login or logout wrote auth.json);
-        // anything else keeps the hourly gate. The observation consumes
-        // the current scope, so one auth change forces exactly once.
+        // An observed credential-scope change forces the refresh; the
+        // observation consumes the scope, so one change forces exactly once.
         let credentials = pa_core::models::prime_credentials_for_dir(&agent_dir);
         let catalog = pa_core::models::catalog_for(Some(&models_json));
         let trigger = if catalog.credentials_changed(credentials.as_ref()) {
@@ -87,22 +54,14 @@ impl Worker {
         response_success(None, "get_model_catalog", Some(served))
     }
 
-    /// The background catalog refresh (the daemon `create` path's
-    /// fire-and-forget refresh shape): the same awaited chain the TS
-    /// request runs — reload, gated-or-forced fetches, the private-model
-    /// entitlements — settled off the response path. A refresh that
-    /// changes the served snapshot broadcasts `model_catalog_changed`;
-    /// failures keep the last-good snapshot (the caches' contract) and
-    /// stay silent. The worker's [`RefreshGate`] coalesces concurrent
-    /// requests into one running refresh plus one trailing re-arm (the
-    /// heartbeat-refresh shape), so a picker burst never fans out into
-    /// parallel entitlement fetches.
+    /// The background catalog refresh: the same awaited chain the TS
+    /// request runs, settled off the response path; failures keep the
+    /// last-good snapshot and stay silent.
     fn spawn_catalog_refresh(&self, trigger: pa_core::models::RefreshTrigger, served: Value) {
         let gate = std::sync::Arc::clone(&self.model_catalog_refresh_gate);
         if gate.in_flight.swap(true, Ordering::SeqCst) {
-            // A refresh already runs for this worker: remember the request
-            // and return — the running task re-arms exactly once when it
-            // lands, so N concurrent opens cost one refresh, not N.
+            // A refresh already runs: remember the request and return — the
+            // running task re-arms exactly once when it lands.
             gate.queued.store(true, Ordering::SeqCst);
             return;
         }
@@ -132,23 +91,16 @@ impl Worker {
                     // trailing refresh.
                     return;
                 }
-                // The trailing re-arm stays gated: a mid-flight scope
-                // change is served by the fresh fetch (a new scope's
-                // caches are cold, so the hourly gate passes), and the
-                // next request's own scope observation re-detects and
-                // forces if anything flipped again.
+                // The trailing re-arm stays gated: the next request's own
+                // scope observation re-detects and forces any flip.
                 trigger = pa_core::models::RefreshTrigger::PickerOpen;
             }
         });
     }
 }
 
-/// The wire payload of one catalog snapshot (TS `refreshModelCatalog`'s
-/// `{models, configuredProviders}`): the full catalog minus private Prime
-/// Inference models the current credentials do not authorize, plus the
-/// sorted providers with configured auth. Both the served response and the
-/// post-refresh comparison use it, so the broadcast fires exactly when the
-/// answer would change.
+/// The wire payload of one catalog snapshot: the full catalog minus
+/// unauthorized private Prime Inference models, plus sorted providers.
 fn catalog_payload(
     registry: &pa_core::models::ModelRegistry,
     available: &[pa_types::ai::Model],
@@ -163,13 +115,8 @@ fn catalog_payload(
         .iter()
         .map(|model| format!("{}/{}", model.provider, model.id))
         .collect();
-    // The catalog keeps every model except private Prime Inference models
-    // the current credentials do not authorize, in a canonical
-    // (provider, id) order: the private-models append comes from a
-    // HashMap iteration, so identical model sets would otherwise
-    // serialize in different orders — a spurious broadcast (the served
-    // and refreshed payloads are compared verbatim) and a reordering of
-    // an open picker's rows.
+    // Canonical (provider, id) order: the private-models append comes from
+    // a HashMap iteration, so identical sets would serialize differently.
     let mut entries: Vec<&pa_types::ai::Model> = registry
         .get_all()
         .iter()
@@ -200,12 +147,10 @@ mod tests {
     use std::time::{Duration, Instant};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    // NOTE on ambient credentials: like the pa-core live-catalog verifiers,
-    // these tests pin the Prime Inference scope through the temp agent
-    // dir's auth.json — an ambient `PRIME_API_KEY` in the test process
-    // would win over the stored credential (environment before stored,
-    // by design) and change the resolved scope. The CI env is clean.
-    // Nothing here leaves loopback.
+    // NOTE on ambient credentials: these tests pin the Prime Inference
+    // scope through the temp agent dir's auth.json — an ambient
+    // `PRIME_API_KEY` would win over the stored credential and change
+    // the resolved scope.
 
     /// One scripted answer: raw bytes, or a gate the test releases.
     enum Answer {
@@ -213,11 +158,9 @@ mod tests {
         Gate(tokio::sync::oneshot::Receiver<Vec<u8>>),
     }
 
-    /// A scripted loopback HTTP server for the two catalog fetch layers
-    /// (the pa-models `tests/common` pattern): every request head is
-    /// recorded (headers included), answers come from a shared queue —
-    /// the last raw answer repeats when the queue drains, and a gate
-    /// parks its request until the test releases it.
+    /// A scripted loopback HTTP server for the two catalog fetch layers:
+    /// every request head is recorded; answers come from a shared queue
+    /// (the last raw answer repeats; a gate parks its request).
     struct CatalogServer {
         port: u16,
         requests: Arc<Mutex<Vec<String>>>,
@@ -319,8 +262,7 @@ mod tests {
     }
 
     /// One provider-catalog aggregate entry riding a compiled transport
-    /// tuple (the pinning invariant keeps fetched entries to compiled
-    /// transports; probe ids must stay outside the compiled catalog).
+    /// tuple (probe ids must stay outside the compiled catalog).
     fn catalog_aggregate(ids: &[&str]) -> String {
         let anthropic = pa_models::transports::compiled_models()
             .iter()
@@ -348,11 +290,8 @@ mod tests {
     }
 
     /// The Prime Inference `/models` payload: every compiled entry (the
-    /// coverage gate needs them) plus one full-specs public marker the
-    /// compiled catalog provably lacks, so a landed refresh visibly
-    /// changes the served catalog. Private ids are filtered from the
-    /// public snapshot (the private-model entitlements ride the
-    /// private-authorization fetch's own payload).
+    /// coverage gate needs them) plus one public marker the compiled
+    /// catalog provably lacks, so a landed refresh visibly changes it.
     fn pi_snapshot_payload(marker: &str) -> String {
         let mut data: Vec<Value> = pa_models::transports::prime_inference_offline_entries()
             .iter()
@@ -447,14 +386,10 @@ mod tests {
         .expect("write models.json");
     }
 
-    /// The hermetic fixture: a temp agent dir (auth + models.json), both
-    /// fetch layers aimed at the scripted server (empty bundled dir, so
-    /// the compiled fallback is the cold base), an installed
-    /// process-shared catalog, and a created worker. The daemon `create`
-    /// path's own fire-and-forget refresh warms the caches against the
-    /// server's initial answers; the fixture returns once that refresh
-    /// has fully settled (its last write is the private-authorization
-    /// cache), so every later fetch count is deterministic.
+    /// The hermetic fixture: a temp agent dir, both fetch layers aimed at
+    /// the scripted server, a process-shared catalog, and a created
+    /// worker. Returns once the create-path refresh has fully settled,
+    /// so later fetch counts are deterministic.
     struct Fixture {
         dir: PathBuf,
         agent_dir: PathBuf,
@@ -507,8 +442,7 @@ mod tests {
             .await;
         assert!(created.success, "create failed: {created:?}");
         // The create path's background refresh settles when its last
-        // write lands (the private-authorization cache, written by the
-        // refresh's final step).
+        // write lands (the private-authorization cache).
         let private_cache = agent_dir.join("prime-inference-private-models.json");
         let deadline = Instant::now() + Duration::from_secs(30);
         while !private_cache.exists() {
@@ -562,9 +496,7 @@ mod tests {
     }
 
     /// The payload's models are in canonical (provider, id) order: the
-    /// served snapshot and the refreshed one are compared verbatim, so a
-    /// HashMap-order append would broadcast spurious changes and reorder
-    /// an open picker.
+    /// served and refreshed snapshots are compared verbatim.
     fn assert_canonical_models_order(payload: &Value) {
         let models = payload["models"].as_array().expect("models array");
         let keys: Vec<(String, String)> = models
@@ -582,9 +514,7 @@ mod tests {
     }
 
     /// Whether a `model_catalog_changed` frame arrives within `bound`
-    /// (other frames pass through and do not count): the negative-assert
-    /// seam — a spurious broadcast lands inside the bound, an honestly
-    /// silent refresh simply lets the bound elapse.
+    /// (other frames pass through): the negative-assert seam.
     async fn catalog_changed_within(
         events: &mut tokio::sync::broadcast::Receiver<Arc<OutboundFrame>>,
         bound: Duration,
@@ -621,19 +551,11 @@ mod tests {
         }
     }
 
-    /// A picker open returns the current validated snapshot without
-    /// waiting on the fetch (the held-open gate proves the response path
-    /// never blocks on the network), and the auth-change forced refresh
-    /// lands in the background: the event fires, and the next open serves
-    /// the fresh catalog — the new account's marker and private model,
-    /// never the old account's (scope-keyed views; the refreshed requests
-    /// carry the new credentials).
     #[tokio::test]
     async fn picker_open_returns_instantly_and_the_auth_change_refresh_lands() {
         let mut fixture = fixture(create_phase_answers()).await;
-        // A login switched the account (key + team) between the create
-        // path's warm-up and this picker open: the scope observation seeds
-        // from the stored snapshot's scope and detects the change.
+        // A login switched the account between the create path's warm-up
+        // and this picker open: the scope observation detects the change.
         write_auth_json(&fixture.agent_dir, "sk-account-b", "team-b");
         let (release, held) = gate();
         fixture.server.push(held);
@@ -649,27 +571,17 @@ mod tests {
 
         let started = Instant::now();
         let served = get_model_catalog(&fixture.worker, "catalog-session").await;
-        // The response returned while the catalog fetch was still held:
-        // the response path never touched the network. It serves the
-        // current validated snapshot — the warm public view; the new
-        // account's credentialed entries land only with the refresh.
+        // The response returned while the catalog fetch was still held.
         assert!(
             started.elapsed() < Duration::from_secs(2),
             "the picker-open response waited on the fetch"
         );
         assert!(has_model(&served, "mock-1"), "the custom models.json entry");
         assert!(has_model(&served, "probe-v1"), "the warm provider catalog");
-        // The account switch never serves the old account's credentialed
-        // view: the Prime Inference snapshot is scope-keyed, so the marker
-        // and the private entitlement are absent from the instant
-        // response — and the new account's view has not landed yet (the
-        // refresh holds at the gate).
         assert!(!has_model(&served, "live/team-a-marker"));
         assert!(!has_model(&served, "live/team-b-marker"));
         assert!(!has_model(&served, "internal/team-a-private"));
 
-        // Release the held fetch: the background refresh lands the new
-        // account's catalog and broadcasts the change.
         let _ = release.send(ok_json(&catalog_aggregate(&["probe-v1", "probe-v2"])));
         await_catalog_changed(&mut fixture.events).await;
         let fresh = get_model_catalog(&fixture.worker, "catalog-session").await;
@@ -680,15 +592,11 @@ mod tests {
         assert_canonical_models_order(&fresh);
         assert_canonical_models_order(&served);
         assert!(has_model(&fresh, "live/team-b-marker"));
-        // The old account's view never serves the new scope: the marker
-        // and the private entitlement are gone the moment the scope moved.
         assert!(!has_model(&fresh, "live/team-a-marker"));
         assert!(!has_model(&fresh, "internal/team-a-private"));
         // The refreshed requests carried the new credentials only. The
         // team header carries the account's EFFECTIVE team — an ambient
-        // `PRIME_TEAM_ID` pins it (the production pin, set on the fleet
-        // VMs), otherwise the stored team-b header rides — and the old
-        // account's team never rides a refreshed fetch.
+        // `PRIME_TEAM_ID` pins it (the production pin), else team-b rides.
         let pinned_team = std::env::var("PRIME_TEAM_ID")
             .ok()
             .map(|value| value.trim().to_string())
@@ -714,9 +622,8 @@ mod tests {
                 .all(|header| header.contains("Bearer sk-account-b")),
             "no old credentials leak into the refreshed fetches: {auth_headers:?}"
         );
-        // HTTP/1.1 header names are case-insensitive and the client writes
-        // them lowercase: match the name case-insensitively, the team value
-        // exactly.
+        // Header names are case-insensitive and the client writes them
+        // lowercase: match the name case-insensitively, the value exactly.
         assert!(
             refreshed_heads.iter().any(|head| {
                 head.to_ascii_lowercase()
@@ -732,11 +639,6 @@ mod tests {
         );
     }
 
-    /// Concurrent opens coalesce: an auth-change burst forces the refresh
-    /// once — the refresh gate queues the rest — so the mock server sees
-    /// exactly one refresh cycle (the provider catalog, the PI snapshot,
-    /// the entitlement fetch), never one set of fetches per request, and
-    /// every concurrent open answers with the same canonical payload.
     #[tokio::test]
     async fn concurrent_opens_coalesce_into_one_refresh() {
         let mut fixture = fixture(create_phase_answers()).await;
@@ -772,9 +674,7 @@ mod tests {
         assert_eq!(third, fourth);
         assert_eq!(fourth, fifth);
         // Exactly one refresh left the worker while the provider fetch was
-        // held: the first open's forced refresh; the other four queued.
-        // The deadline is on the request log (the forced refresh's
-        // provider fetch must appear), never on a fixed sleep.
+        // held; the deadline is on the request log, never a fixed sleep.
         let deadline = Instant::now() + Duration::from_secs(10);
         while fixture.server.request_count() < requests_before + 1 {
             assert!(
@@ -809,8 +709,7 @@ mod tests {
     }
 
     /// Repeat picker opens inside the hourly window stay gated: no new
-    /// fetches, no event (the served snapshot is already current), so the
-    /// event -> re-fetch -> refresh cycle terminates.
+    /// fetches, no event, so event -> re-fetch -> refresh terminates.
     #[tokio::test]
     async fn repeat_opens_inside_the_gate_add_no_fetches_and_stay_silent() {
         let mut fixture = fixture(create_phase_answers()).await;
@@ -820,26 +719,21 @@ mod tests {
             assert!(has_model(&served, "probe-v1"));
             assert!(has_model(&served, "live/team-a-marker"));
         }
-        // No fetch left the worker: the hourly gate held for every open
-        // (the create-path refresh armed it).
+        // The hourly gate held for every open (the create-path refresh
+        // armed it).
         assert_eq!(
             fixture.server.request_count(),
             requests_before,
             "repeat opens stayed gated"
         );
-        // And nothing broadcast: the served snapshot never changed. A
-        // spurious broadcast (the event loop this test guards) lands
-        // inside the bound; an honestly gated refresh lets it elapse.
+        // Nothing broadcast: a spurious broadcast lands inside the bound;
+        // an honestly gated refresh lets it elapse.
         assert!(
             !catalog_changed_within(&mut fixture.events, Duration::from_millis(250)).await,
             "a gated refresh must not broadcast model_catalog_changed"
         );
     }
 
-    /// A refresh whose every layer fails keeps the last-good snapshot and
-    /// stays silent: the failures retain the caches, the served payload
-    /// is unchanged, so no event fires and the next open still serves the
-    /// warm catalog.
     #[tokio::test]
     async fn refresh_failure_keeps_the_last_good_catalog_and_stays_silent() {
         let mut fixture = fixture(create_phase_answers()).await;
@@ -851,8 +745,7 @@ mod tests {
         }
         let served = get_model_catalog(&fixture.worker, "catalog-session").await;
         // The instant snapshot still serves the validated public view; the
-        // changed scope isolates the old account's credentialed entries
-        // (scope-keyed snapshot, fingerprint-matched entitlements).
+        // changed scope isolates the old account's credentialed entries.
         assert!(has_model(&served, "probe-v1"));
         assert!(!has_model(&served, "live/team-a-marker"));
         assert!(!has_model(&served, "internal/team-a-private"));

@@ -1,12 +1,9 @@
-//! The fullscreen image-fallback guard (TS `withFullscreenImageFallback`).
-//!
-//! The guard is the frame-composition seam TS uses to force image
-//! components to their textual fallback while a fullscreen frame repaints;
-//! the transcript's image rows are always fallback-only metadata rows in
-//! this port (the render-path skip, the image-heavy session-open fix,
-//! removed the placement machinery), so the guard is the composition
-//! boundary the cache keys and frame sites share — kept for the TS
-//! parity contract and any future surface that places graphics.
+//! The fullscreen image-fallback guard (TS `withFullscreenImageFallback`):
+//! the frame-composition seam that forces image components to their
+//! textual fallback while a fullscreen frame repaints. The transcript's
+//! image rows are always fallback-only metadata rows in this port, so
+//! the guard is the composition boundary the cache keys and frame sites
+//! share — kept for the TS parity contract.
 
 use std::cell::Cell;
 
@@ -31,8 +28,7 @@ pub fn with_fullscreen_image_fallback<T>(render: impl FnOnce() -> T) -> T {
     })
 }
 
-/// Whether image graphics are currently suppressed by the fullscreen
-/// compose guard.
+/// Whether image graphics are currently suppressed by the fullscreen compose guard.
 pub fn fullscreen_image_fallback_active() -> bool {
     FULLSCREEN_FALLBACK.with(Cell::get)
 }

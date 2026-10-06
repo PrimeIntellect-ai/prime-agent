@@ -21,15 +21,14 @@ fn mode_with_notice(notice: &str) -> AgentsViewMode {
         keybindings: crate::keybindings::KeybindingsManager::new(),
         show_hardware_cursor: false,
         incident_notice_state: None,
+        create_config: serde_json::json!({}),
     });
     mode.rebuild_rows();
     mode
 }
 
-/// A multi-line notice — the cross-product lease refusal with its two
-/// ways out — renders as the panel: the full text stays visible and
-/// wrapped, never truncated to the single hint line, and any key
-/// dismisses it.
+/// A multi-line notice — the cross-product lease refusal with its two ways out — renders as
+/// the panel: the full text stays visible, and any key dismisses it.
 #[test]
 fn a_multiline_refusal_notice_renders_as_a_dismissible_panel() {
     let refusal = "This session is currently open in another Rust build of Prime Agent \
@@ -64,7 +63,6 @@ the holder exits.";
             "the panel shows {way_out:?} in full:\n{shown}"
         );
     }
-    // Any key dismisses the panel; the hint line returns.
     mode.handle_key("down");
     let dismissed = render(&mut mode);
     assert!(
@@ -73,14 +71,85 @@ the holder exits.";
     );
 }
 
-/// A single-line notice keeps the hint-line status: the panel arms only
-/// for notices with lines to show.
+/// A single-line notice keeps the hint-line status: the panel arms only for notices with
+/// lines to show.
 #[test]
 fn a_single_line_notice_keeps_the_status_line() {
     let mode = mode_with_notice("Saved sessions unavailable: no such directory");
     assert!(mode.notice.is_none());
     assert_eq!(
-        mode.status.as_deref(),
+        mode.status_text(),
         Some("Saved sessions unavailable: no such directory")
     );
+}
+
+/// The tone rule: the explicit tone wins, the `Failed` prefix reads error,
+/// everything else reads muted; the rendered row carries the tone's color
+/// (deliberate divergence).
+#[test]
+fn the_status_line_carries_its_tone() {
+    let mut mode = mode_with_parent_and_child();
+    mode.set_status("Renamed to new");
+    assert_eq!(
+        mode.status.as_ref().map(Status::tone),
+        Some(StatusTone::Muted)
+    );
+    mode.set_status("Failed to rename agent: nope");
+    assert_eq!(
+        mode.status.as_ref().map(Status::tone),
+        Some(StatusTone::Error)
+    );
+    mode.set_status_tone("Saved sessions\n   unavailable", StatusTone::Error);
+    assert_eq!(mode.status_text(), Some("Saved sessions unavailable"));
+    assert_eq!(
+        mode.status.as_ref().map(Status::tone),
+        Some(StatusTone::Error)
+    );
+    // The rendered row paints in the tone's color, not a fixed error color.
+    mode.set_status("Renaming agent...");
+    let span = mode
+        .render_hints(120, None)
+        .last()
+        .expect("the status span")
+        .clone();
+    assert_eq!(span.content, "Renaming agent...");
+    assert_eq!(span.style, mode.theme.fg_style(StatusTone::Muted.color()));
+    mode.set_status_tone("Saved sessions unavailable: gone", StatusTone::Error);
+    let span = mode
+        .render_hints(120, None)
+        .last()
+        .expect("the status span")
+        .clone();
+    assert_eq!(span.style, mode.theme.fg_style(StatusTone::Error.color()));
+}
+
+/// The 4.5s status timer through the loop's accessors: arms its expiry, holds
+/// before the deadline, clears after it; a line that REPLACED an expired one
+/// keeps a fresh window.
+#[test]
+fn the_status_expires_through_the_loop_deadline() {
+    let mut mode = mode_with_parent_and_child();
+    mode.set_status("Reply sent");
+    let now = std::time::Instant::now();
+    assert!(
+        mode.status_expiry(now).is_some(),
+        "a fresh line arms its timer"
+    );
+    assert!(
+        !mode.expire_status(now),
+        "before the deadline the line holds"
+    );
+    assert_eq!(mode.status_text(), Some("Reply sent"));
+    let after = now + std::time::Duration::from_millis(4500);
+    assert!(mode.status_expiry(after).is_none(), "the deadline passed");
+    assert!(mode.expire_status(after), "the expired line clears");
+    assert_eq!(mode.status_text(), None, "the cleared line renders nothing");
+    // The unchanged-line guard: a replacement line's own deadline is
+    // fresh again at the expired line's wake.
+    mode.set_status("Reply sent again");
+    assert!(
+        !mode.expire_status(after),
+        "the replacement keeps its own new window"
+    );
+    assert_eq!(mode.status_text(), Some("Reply sent again"));
 }

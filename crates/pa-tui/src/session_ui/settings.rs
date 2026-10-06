@@ -1,37 +1,33 @@
-//! The settings concern: the `/settings` menu and its row-apply/persist
-//! switches, the `/import` confirm flow, and the fast/rlm-max-depth/
-//! reload command surface, plus the parked `ReloadNote` and
-//! `PendingConfirm` types. The fullscreen toggle is retired (the surface
-//! always renders on the alternate screen; the operator's 2026-09-28
-//! ruling removed the setting and the command).
+//! The `/settings` menu and its row-apply/persist switches, the `/import`
+//! confirm flow, and the fast/rlm-max-depth/reload command surface. The
+//! fullscreen toggle is retired (the operator's 2026-09-28 ruling removed
+//! the setting and the command).
 use super::{
     key_event_to_id, AgentView, DaemonCommand, Duration, KeyEvent, Map, PathBuf, Result, SessionUi,
     StatusKind, Value, UI_REQUEST_TIMEOUT_MS,
 };
 
 /// The `/reload` task's report: the daemon reloaded the session's live
-/// inputs, or the failure message (TS `handleReloadCommand`'s outcome).
+/// inputs, or the failure message.
 pub(crate) type ReloadNote = Result<(), String>;
 
-/// The question a pending confirm answers (TS `showExtensionConfirm`
-/// callers await inline; the TUI loop parks the continuation instead).
+/// The question a pending confirm answers (callers await inline in TS;
+/// the TUI loop parks the continuation instead).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum PendingConfirm {
     /// `/import <path>`: replace the current session with the JSONL file.
     Import { path: String },
     /// The import's stored session cwd is gone: `Yes` retries with the
-    /// fallback cwd (TS `promptForMissingSessionCwd`).
+    /// fallback cwd.
     ImportCwdFallback { path: String, fallback_cwd: String },
-    /// `/update`: `Yes` spawns the out-of-band installer run (the
-    /// download+install never touches the session — the confirm guards
-    /// the binary replacement, not the session).
+    /// `/update`: `Yes` spawns the out-of-band installer run (the confirm
+    /// guards the binary replacement, not the session).
     Update,
 }
 
 impl SessionUi {
-    /// The shipped CHANGELOG.md path (TS `getChangelogPath`): the package
-    /// directory (`PI_PACKAGE_DIR` wins, else the directory of the running
-    /// executable — the TS bun-binary layout) plus `CHANGELOG.md`.
+    /// The shipped CHANGELOG.md path: the package directory (`PI_PACKAGE_DIR`
+    /// wins, else the running executable's directory) plus `CHANGELOG.md`.
     pub(super) fn changelog_path() -> std::path::PathBuf {
         let package_dir = match std::env::var("PI_PACKAGE_DIR") {
             Ok(dir) if !dir.is_empty() => PathBuf::from(dir),
@@ -43,13 +39,9 @@ impl SessionUi {
         package_dir.join("CHANGELOG.md")
     }
 
-    // ------------------------------------------------------------------
     // Session import (/import)
-    // ------------------------------------------------------------------
 
-    /// The import confirm (TS `handleImportCommand`'s
-    /// `showExtensionConfirm`): parse the path, park the confirm, and let
-    /// the panel answer it.
+    /// Parse the path, park the confirm, and let the panel answer it.
     pub(super) fn open_import_confirm(&mut self, command_text: &str, view: &mut AgentView) {
         let Some(input_path) = crate::export_share::path_command_argument(command_text, "/import")
         else {
@@ -110,9 +102,8 @@ impl SessionUi {
         Ok(())
     }
 
-    /// The import request and its outcomes (TS `handleImportCommand`'s
-    /// `importFromJsonl` call: the cancelled note, the typed error
-    /// surfaces, and the successful rebuild + status).
+    /// The import request and its outcomes: the cancelled note, the typed
+    /// error surfaces, and the successful rebuild + status.
     async fn run_import(
         &mut self,
         input_path: &str,
@@ -141,8 +132,7 @@ impl SessionUi {
                     );
                 }
                 Some(pa_types::daemon::DaemonErrorInfo::MissingSessionCwd { issue }) => {
-                    // TS `promptForMissingSessionCwd`: the confirm carries
-                    // the issue's text, and `Yes` retries with the fallback
+                    // The confirm carries the issue's text; `Yes` retries with the fallback
                     // cwd as the override.
                     let session_cwd = issue
                         .get("sessionCwd")
@@ -181,28 +171,23 @@ impl SessionUi {
             self.note("Import cancelled", view);
             return Ok(());
         }
-        // TS `renderCurrentSessionState`: the replacement's fresh branch
-        // renders from scratch, then the status row lands.
+        // The replacement's fresh branch renders from scratch, then the status row
+        // lands.
         self.rebuild_transcript(view).await;
         self.refresh_stats().await;
-        // The transcript rebuild ran before the refresh, so the refreshed
-        // context usage rides the chrome through this tray rebuild —
-        // without it the tray keeps the pre-import usage until the next
-        // settled turn.
+        // The transcript rebuild ran before the refresh, so the refreshed context usage rides the
+        // chrome through this tray rebuild — without it the tray keeps the pre-import usage until
+        // the next settled turn.
         self.rebuild_tray(view);
         self.note(&format!("Session imported from: {input_path}"), view);
         Ok(())
     }
 
-    // ------------------------------------------------------------------
     // Settings (/settings)
-    // ------------------------------------------------------------------
 
-    /// `/settings` (TS `showSettingsSelector`): read the daemon state and
-    /// the settings seam, then mount the menu.
+    /// Read the daemon state and the settings seam, then mount the menu.
     pub(super) async fn open_settings_menu(&mut self, view: &mut AgentView) {
         let Some(state) = self.connection_state(view).await else {
-            // The failure note already rendered.
             return;
         };
         let settings = self.client_settings.clone();
@@ -238,9 +223,7 @@ impl SessionUi {
                 .unwrap_or_default(),
             ..Default::default()
         };
-        // The settings-seam reads (TS `settingsManager` getters; the theme
-        // default matches TS `getTheme() || "prime"`). A missing seam keeps
-        // the TS defaults.
+        // A missing settings seam keeps the TS defaults.
         if let Some(settings) = &settings {
             values.show_images = settings.show_images();
             values.auto_resize_images = settings.image_auto_resize();
@@ -258,9 +241,7 @@ impl SessionUi {
             values.tree_filter_mode = settings.tree_filter_mode();
             values.warnings_anthropic_extra_usage = settings.warnings_anthropic_extra_usage();
             values.theme = settings.theme().unwrap_or_else(|| "prime".to_string());
-            // TS reads the persisted default tier through the settings
-            // manager (`getDefaultServiceTier`): the tier row preselects
-            // the saved value instead of the struct default.
+            // The tier row preselects the saved default instead of the struct default.
             values.default_service_tier = settings.default_service_tier();
         } else {
             values.show_images = true;
@@ -272,12 +253,10 @@ impl SessionUi {
             values.tree_filter_mode = "user-only".to_string();
             values.warnings_anthropic_extra_usage = true;
             values.theme = "prime".to_string();
-            // No settings seam: the tier row reads the TS default tier
-            // (getDefaultServiceTier's "default"), never a blank value.
+            // No settings seam: the tier row reads "default", never a blank value.
             values.default_service_tier = "default".to_string();
         }
-        // The registered themes (TS `getAvailableThemes`; this surface
-        // ships the builtins).
+        // This surface ships the builtin themes.
         values.available_themes = pa_types::themes::BUILTIN_THEME_NAMES
             .iter()
             .map(ToString::to_string)
@@ -288,8 +267,7 @@ impl SessionUi {
         self.dirty = true;
     }
 
-    /// One key press while the settings menu is open (TS `SettingsList`
-    /// callbacks reduced to actions the session applies).
+    /// One key press while the settings menu is open.
     pub(super) async fn handle_settings_menu_key(
         &mut self,
         key: KeyEvent,
@@ -305,19 +283,18 @@ impl SessionUi {
             menu.handle_key(&id, view.editor.keybindings())
         };
         match action {
-            // No-op closes: a bare None and Esc inside a submenu (TS
-            // `onCancel`) keep the menu itself open.
+            // No-op closes: a bare None and Esc inside a submenu keep the menu open.
             crate::settings_menu::SettingsMenuAction::None
             | crate::settings_menu::SettingsMenuAction::SubmenuClosed => {}
             crate::settings_menu::SettingsMenuAction::Cancel => {
                 view.settings_menu = None;
             }
             crate::settings_menu::SettingsMenuAction::PreviewTheme { name } => {
-                // TS `onThemePreview`: switch live without persisting.
+                // Switch live without persisting.
                 view.theme = crate::app::load_theme(&name);
             }
             crate::settings_menu::SettingsMenuAction::RestoreTheme { name } => {
-                // TS theme submenu cancel: preview the row's theme back.
+                // Preview the row's theme back.
                 view.theme = crate::app::load_theme(&name);
             }
             crate::settings_menu::SettingsMenuAction::Change { id, value } => {
@@ -328,9 +305,8 @@ impl SessionUi {
         Ok(())
     }
 
-    /// One settings row's change (the TS `SettingsSelectorComponent`
-    /// callback switch): daemon commands for session-owned switches, the
-    /// settings seam for persisted preferences.
+    /// One settings row's change: daemon commands for session-owned switches,
+    /// the settings seam for persisted preferences.
     async fn apply_settings_change(&mut self, id: &str, value: &str, view: &mut AgentView) {
         match id {
             "autocompact" => {
@@ -352,8 +328,6 @@ impl SessionUi {
                         return;
                     }
                 }
-                // The live tool-card effect (TS re-flags every tool
-                // component; the flag the view renders reads).
                 self.show_images = value == "true";
                 view.show_images = value == "true";
             }
@@ -377,11 +351,8 @@ impl SessionUi {
                     value,
                     view,
                 );
-                // TS `onEnableSkillCommandsChange` calls
-                // `setupAutocompleteProvider()` immediately: the cached
-                // skill list re-applies under the new setting value
-                // (no daemon round trip — the list the last refresh
-                // fetched is still the session's inventory).
+                // The cached skill list re-applies under the new setting value (no daemon
+                // round trip).
                 let enabled = self
                     .client_settings
                     .as_ref()
@@ -400,25 +371,20 @@ impl SessionUi {
                     value,
                     view,
                 );
-                // TS fires `handleReloadCommand()` — the toggle takes
-                // effect after a reload.
+                // The toggle takes effect after a reload.
                 let _ = self.handle_reload_command(view);
             }
             "show-hardware-cursor" => {
-                // The show-images shape: a failed persist surfaces the
-                // error and changes nothing — the live flag flips only
-                // when the setting actually persisted, so the view and
-                // the on-disk state can never disagree.
+                // A failed persist changes nothing: the live flag flips only when the
+                // setting actually persisted.
                 if let Some(settings) = &self.client_settings {
                     if let Err(error) = settings.set_show_hardware_cursor(value == "true") {
                         self.error_row(&format!("{error:#}"), view);
                         return;
                     }
                 }
-                // The live TUI effect (TS persists through the settings
-                // manager, then calls `ui.setShowHardwareCursor(enabled)`
-                // in place): the very next frame shows or hides the
-                // hardware cursor at the focused caret.
+                // The very next frame shows or hides the hardware cursor at the focused
+                // caret.
                 view.show_hardware_cursor = value == "true";
             }
             "editor-padding" => {
@@ -471,10 +437,8 @@ impl SessionUi {
                     view,
                 )
                 .await;
-                // The queue delivery mode changed (TS `setSteeringMode`
-                // applies live): refresh the cache the queued-input event
-                // reads, so a submission right after the switch reports
-                // the new mode.
+                // Refresh the steering-mode cache the queued-input event reads, so a
+                // submission right after the switch reports the new mode.
                 let _ = self.connection_state(view).await;
             }
             "follow-up-mode" => {
@@ -507,11 +471,8 @@ impl SessionUi {
                 .await;
             }
             "default-service-tier" => {
-                // TS `onDefaultServiceTierChange`: persist the default tier
-                // (the settings seam — new sessions start on it), then apply
-                // it to the running session through the same daemon tier
-                // switch `/tier` uses (the serialized change queue); the
-                // status row reports what the session actually applied.
+                // Persist the default tier (new sessions start on it), then apply it to
+                // the running session through the same daemon tier switch `/tier` uses.
                 if let Some(settings) = &self.client_settings {
                     if let Err(error) = settings.set_default_service_tier(value) {
                         self.error_row(&format!("{error:#}"), view);
@@ -542,11 +503,8 @@ impl SessionUi {
                     self.error_row(&format!("{error:#}"), view);
                     return;
                 }
-                // The status row reports what the session actually applied
-                // (TS `formatStatus(state.serviceTier)`); a state read that
-                // fails or omits the tier shows no success row (the
-                // `service_tier_changed` event refreshes the local tier
-                // when it lands).
+                // The status row reports what the session actually applied; a state read
+                // that fails or omits the tier shows no success row.
                 let Some(state) = self.connection_state(view).await else {
                     return;
                 };
@@ -629,8 +587,7 @@ impl SessionUi {
         }
     }
 
-    /// A session-switch daemon command (TS fire-and-forget with a
-    /// `showError` catch): the result never blocks the menu.
+    /// A session-switch daemon command: the result never blocks the menu.
     async fn daemon_switch(&mut self, command: DaemonCommand, view: &mut AgentView) {
         if let Err(error) = self
             .bounded_request(Duration::from_millis(UI_REQUEST_TIMEOUT_MS), command)
@@ -640,14 +597,10 @@ impl SessionUi {
         }
     }
 
-    // ------------------------------------------------------------------
     // Fast mode, depth, and reload (/fast, /rlm-max-depth, /reload)
-    // ------------------------------------------------------------------
 
-    /// `/fast` (TS `handleFastCommand`): toggle the priority service tier.
-    /// The TS queue (`fastModeToggleQueue`) serializes toggles; here the
-    /// dispatch is the only submission path and awaits to completion, so
-    /// toggles cannot interleave.
+    /// Toggle the priority service tier. TS serializes toggles through a queue; here the dispatch
+    /// awaits to completion, so toggles cannot interleave.
     pub(super) async fn handle_fast_command(&mut self, view: &mut AgentView) {
         const UNAVAILABLE: &str = "Fast mode requires GPT-5.4, GPT-5.5, or GPT-5.6 with ChatGPT or OpenAI API key authentication";
         let eligible = self
@@ -657,8 +610,8 @@ impl SessionUi {
             self.note(UNAVAILABLE, view);
             return;
         }
-        // TS reads `connectionState.serviceTier` (priority = on) and flips
-        // it; the refresh after the switch confirms the daemon's tier.
+        // Read the current tier (priority = on) and flip it; the refresh after the
+        // switch confirms the daemon's tier.
         let enabled = self.service_tier.as_deref() == Some("priority");
         let target = if enabled { "default" } else { "priority" };
         let tier = match serde_json::from_value::<pa_types::ai::ServiceTier>(
@@ -685,16 +638,13 @@ impl SessionUi {
             self.error_row(&format!("{error:#}"), view);
             return;
         }
-        // TS re-reads the state after the switch (`connection.getState()`)
-        // and patches the local tier from the response.
         let state = self.connection_state(view).await;
         if let Some(state) = state {
             if let Some(tier) = state.get("serviceTier").and_then(Value::as_str) {
                 self.service_tier = Some(tier.to_string());
             }
         }
-        // The tray badge and the `/tier` completions follow the applied
-        // tier (the `fast` token for priority).
+        // The tray badge and the `/tier` completions follow the applied tier.
         view.chrome.service_tier.clone_from(&self.service_tier);
         self.update_model_eligibility_filters(view);
         let on = self.service_tier.as_deref() == Some("priority");
@@ -704,9 +654,8 @@ impl SessionUi {
         );
     }
 
-    /// `/rlm-max-depth` (TS `handleRlmMaxDepthCommand`): a missing
-    /// argument reports the depth and its source; `<int> [--global]` sets
-    /// the per-chat depth immediately and optionally the global default.
+    /// A missing argument reports the depth and its source; `<int> [--global]`
+    /// sets the per-chat depth immediately and optionally the global default.
     pub(super) async fn handle_rlm_max_depth_command(&mut self, view: &mut AgentView, args: &str) {
         let tokens: Vec<&str> = if args.is_empty() {
             Vec::new()
@@ -796,23 +745,18 @@ impl SessionUi {
         }
     }
 
-    /// TS #2709: the Ctrl+O cycle saves the new level as the global
-    /// `chatDetail` setting (`settingsManager.setChatDetail`), so every
-    /// later chat opens at it. A failed save only lands in the settings
-    /// store's own diagnostics (TS `save` -> `recordError`): the chat
-    /// keeps the applied level either way, so the keybind shows no error.
+    /// The Ctrl+O cycle saves the new level as the global `chatDetail` setting, so every later chat
+    /// opens at it. A failed save lands only in the settings store's diagnostics.
     pub(crate) fn save_chat_detail(&self, view: &AgentView) {
         if let Some(settings) = &self.client_settings {
             let _ = settings.set_chat_detail(view.detail.wire_name());
         }
     }
 
-    /// `/reload` (TS `handleReloadCommand`): the reload box replaces the
-    /// editor (TS swaps the editor container) while the daemon reload
-    /// runs; the run loop folds the outcome in when it lands.
+    /// The reload box replaces the editor while the daemon reload runs; the
+    /// run loop folds the outcome in when it lands.
     pub(super) fn handle_reload_command(&mut self, view: &mut AgentView) -> Result<()> {
-        view.reload_box =
-            Some("Reloading keybindings, extensions, skills, prompts, themes...".to_string());
+        view.reload_box = Some("Reloading keybindings, skills, prompts, themes...".to_string());
         self.dirty = true;
         let client = self.client.clone();
         let active_session_id = self.active_session_id.clone();
@@ -833,46 +777,35 @@ impl SessionUi {
         Ok(())
     }
 
-    /// The `/reload` request settled (TS's post-reload client work): drop
-    /// the box, re-read the user keybindings and theme, refresh the model
-    /// catalog, and surface the TS status row.
+    /// Drop the box, re-read the user keybindings and theme, refresh the model
+    /// catalog, and surface the status row.
     pub(crate) async fn apply_reload_outcome(&mut self, outcome: ReloadNote, view: &mut AgentView) {
         self.reload = None;
         view.reload_box = None;
         match outcome {
             Ok(()) => {
-                // TS's reload re-mounts the editor container: client-side
-                // transcript state resets and the view rebuilds from the
-                // durable session store, so client status rows drop
-                // exactly like the TS re-mount.
+                // The view rebuilds from the durable session store, so client status rows
+                // drop exactly like the TS re-mount.
                 self.rebuild_transcript(view).await;
-                // TS `keybindings.reload()` + the startup editor/theme
-                // re-reads; the Rust editor consumes the keybinding set,
-                // so the reloaded manager replaces it.
+                // The Rust editor consumes the keybinding set, so the reloaded manager
+                // replaces it.
                 let mut keybindings = view.editor.keybindings().clone();
                 keybindings.reload();
                 view.editor.set_keybindings(keybindings);
-                // TS re-applies the settings theme (`getTheme` -> `setTheme`);
-                // an unknown name keeps the current theme (the startup
-                // loader's fallback).
+                // An unknown theme name keeps the current theme (the startup loader's
+                // fallback).
                 if let Some(settings) = &self.client_settings {
                     if let Some(name) = settings.theme() {
                         view.theme = crate::app::load_theme(&name);
                     }
                 }
-                // TS `refreshConnectionCatalog`: the daemon's model catalog
-                // re-fetch lands through the run loop's channel.
+                // The model catalog re-fetch lands through the run loop's channel.
                 self.spawn_model_catalog_refresh();
-                // The same refresh re-fetches the slash-command catalog
-                // (skills the reload may have changed).
+                // The same refresh re-fetches the slash-command catalog (skills may have
+                // changed).
                 self.spawn_command_catalog_refresh();
-                // TS `showStatus`: tracked, so a back-to-back status
-                // (e.g. the `/thinking` unavailable row) rewrites it in
-                // place.
-                self.note(
-                    "Reloaded keybindings, extensions, skills, prompts, themes",
-                    view,
-                );
+                // Tracked, so a back-to-back status rewrites it in place.
+                self.note("Reloaded keybindings, skills, prompts, themes", view);
             }
             Err(error) => {
                 self.error_row(&format!("Reload failed: {error}"), view);

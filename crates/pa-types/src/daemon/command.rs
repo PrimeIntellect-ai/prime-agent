@@ -8,15 +8,10 @@ use super::{
     DaemonResumeCursor, Deserialize, JsonMap, Serialize, Value,
 };
 
-// ---------------------------------------------------------------------------
-// Commands (client/worker -> supervisor/worker)
-// ---------------------------------------------------------------------------
-
 /// `type: "command"` envelope wrapping a [`DaemonCommand`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DaemonCommandEnvelope {
-    /// Fixed `"command"` frame tag.
     #[serde(rename = "type")]
     pub frame_type: DaemonCommandFrameType,
     pub id: DaemonCommandId,
@@ -26,7 +21,6 @@ pub struct DaemonCommandEnvelope {
     pub command: DaemonCommand,
 }
 
-/// Frame tag of [`DaemonCommandEnvelope`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DaemonCommandFrameType {
     #[serde(rename = "command")]
@@ -82,19 +76,14 @@ pub struct PromptInput {
     /// Unique only when the caller needs cancellable pre-ownership admission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admission_id: Option<String>,
-    /// One-shot capability ONLY the daemon's own RLM children delivery
-    /// mints (`child_status_notices`, same worker process as the queue
-    /// admission): the parent worker accepts a reserved child-status
-    /// custom row exclusively with a live mint. Never a client field —
-    /// a caller-supplied value can never name a live mint, so the
-    /// reserved-kind intake rejects it all the same.
+    /// One-shot capability only the daemon's own RLM children delivery mints; never a client field:
+    /// a caller-supplied value can never name a live mint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rlm_notice_nonce: Option<String>,
 }
 
-/// Client commands, tagged by `type`. Every variant also carries `id` (when
-/// sent as a bare command) and a catch-all for unknown fields, so wire
-/// round-trips are lossless across schema revisions.
+/// Client commands, tagged by `type`. Every variant carries `id` (bare
+/// commands) and a catch-all for unknown fields, so round-trips stay lossless.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "type",
@@ -116,8 +105,7 @@ pub enum DaemonCommand {
         #[serde(flatten)]
         rest: JsonMap,
     },
-    /// `list_saved_sessions` (session-addressed or cwd-addressed forms share
-    /// this shape; unaddressed fields stay absent).
+    /// `list_saved_sessions` (session- and cwd-addressed forms share this shape).
     ListSavedSessions {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
@@ -135,9 +123,8 @@ pub enum DaemonCommand {
     ListAgentPeers {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
-        /// The requester's worker token; optional on the wire (the TS
-        /// supervisor arm reads an absent token as an authentication
-        /// failure, not a parse one).
+        /// The requester's worker token; optional on the wire (an absent
+        /// token is an auth failure, not a parse one).
         #[serde(default)]
         worker_token: String,
         #[serde(flatten)]
@@ -150,11 +137,9 @@ pub enum DaemonCommand {
         #[serde(flatten)]
         rest: JsonMap,
     },
-    /// Worker-to-worker peer ticket (thin-supervisor stage 3): a worker
-    /// acting for its session asks the supervisor to mint a single-use
-    /// `worker`-purpose grant for a target worker's direct socket so the
-    /// delivery bypasses the supervisor's route plane. Authenticated by
-    /// the requester's worker token, like `list_agent_peers`.
+    /// Worker-to-worker peer ticket: mint a single-use `worker`-purpose grant for a target worker's
+    /// direct socket, bypassing the supervisor's route plane; authenticated by the requester's
+    /// worker token, like `list_agent_peers`.
     GetWorkerPeerTransport {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
@@ -169,14 +154,9 @@ pub enum DaemonCommand {
         #[serde(flatten)]
         rest: JsonMap,
     },
-    /// Worker -> supervisor idle-passivation request (TS's whole-worker
-    /// idle eviction, worker-driven): a parent-owned child worker whose
-    /// park arm proved the idle state and whose idle clock crossed the
-    /// `idleEvictionMinutes` threshold asks the supervisor to run the
-    /// graceful stop (`stop_worker`: tombstone, routed shutdown, registry
-    /// retirement, roster passivation). The supervisor verifies the worker
-    /// token and the parent-owned descriptor before stopping. Clients
-    /// never send this command; it rides the worker's supervisor link.
+    /// Worker -> supervisor idle-passivation request: a parent-owned child whose idle clock crossed
+    /// `idleEvictionMinutes` asks for the graceful stop; the supervisor verifies the worker token
+    /// and the parent-owned descriptor. Clients never send this.
     WorkerIdlePassivation {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
@@ -186,10 +166,8 @@ pub enum DaemonCommand {
         #[serde(flatten)]
         rest: JsonMap,
     },
-    /// Worker -> supervisor roster delta (the Rust-native form of the TS
-    /// `roster_delta` worker frame): the worker pushes its slim session
-    /// summary so the supervisor's roster tracks live status without
-    /// polling. Authenticated by the worker token, like `worker_register`.
+    /// Worker -> supervisor roster delta (TS `roster_delta`): the worker pushes its slim session
+    /// summary so the roster tracks live status without polling.
     WorkerRosterDelta {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
@@ -197,21 +175,13 @@ pub enum DaemonCommand {
         summary: Value,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         removed: Option<Vec<String>>,
-        /// The worker's monotonic roster-delta sequence: the per-request
-        /// supervisor links deliver deltas unordered, so the supervisor
-        /// drops a stale delta (a newer one already applied) instead of
-        /// letting a delayed older snapshot overwrite it. The sequence is
-        /// stamped under the worker's push-order lock together with the
-        /// snapshot it describes, so sequence order is snapshot order.
-        /// Absent means unsequenced (always applied).
+        /// Monotonic per-worker sequence; the supervisor drops a delta older
+        /// than one already applied. Absent means unsequenced (always applied).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sequence: Option<u64>,
-        /// The sending worker process instance: a replacement process
-        /// reuses the resident worker id but restarts its sequence, so the
-        /// supervisor's stale-delta gate names the current generation in
-        /// one bounded slot per worker (flipped at the replacement's
-        /// registration) — a predecessor's in-flight deltas drop on the
-        /// generation mismatch.
+        /// The sending worker process instance: a replacement reuses the
+        /// worker id but restarts its sequence, so the stale-delta gate keeps
+        /// one generation slot per worker and drops a predecessor's deltas.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         worker_instance_id: Option<String>,
         #[serde(flatten)]
@@ -236,8 +206,7 @@ pub enum DaemonCommand {
         name: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         config: Option<Value>,
-        /// Telemetry opt-out (TS main.ts `telemetryDisabled`: only ever
-        /// `Some(true)`; absent means enabled).
+        /// Telemetry opt-out: only ever `Some(true)`; absent means enabled.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         telemetry_disabled: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -256,8 +225,6 @@ pub enum DaemonCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         active_session_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        supports_extension_ui: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         client_id: Option<DaemonClientId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -280,8 +247,6 @@ pub enum DaemonCommand {
         id: Option<String>,
         active_session_id: String,
         target_active_session_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        supports_extension_ui: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         client_id: Option<DaemonClientId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -333,6 +298,12 @@ pub enum DaemonCommand {
         id: Option<String>,
         active_session_id: String,
         name: String,
+        /// Who directed the rename (`renamedBy` on the wire, TS
+        /// `AgentFamilyRelationship` — only `"parent"` is sent): set when a
+        /// parent session renames one of its direct children, so the
+        /// renamed session's transcript notice can name it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        renamed_by: Option<String>,
         #[serde(flatten)]
         rest: JsonMap,
     },
@@ -470,10 +441,8 @@ pub enum DaemonCommand {
         #[serde(flatten)]
         rest: JsonMap,
     },
-    /// `abort_and_send_queued` (schema 29, capability-gated in TS): abort
-    /// the active run and deliver the visible queued steering batch at the
-    /// turn boundary; a plain abort when no steering is queued (TS
-    /// `AgentSession.abortAndSendQueued`).
+    /// `abort_and_send_queued` (schema 29, capability-gated in TS): abort the run and deliver the
+    /// queued steering batch at the turn boundary (TS `AgentSession.abortAndSendQueued`).
     AbortAndSendQueued {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
@@ -485,8 +454,7 @@ pub enum DaemonCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         active_session_id: String,
-        // Optional on the wire (the TS runtime validates nothing at
-        // parse; a routing miss answers before the payload is read).
+        // Optional on the wire (a routing miss answers before the payload is read).
         #[serde(default)]
         side_question_id: String,
         #[serde(default)]
@@ -553,6 +521,23 @@ pub enum DaemonCommand {
         #[serde(flatten)]
         rest: JsonMap,
     },
+    /// The `/factory` view's bridge lane over the session kernel's factory
+    /// executor (`graph`/`status`/`watch`/`run`/`stop`/`resume`).
+    /// Rust-native extension, advertised by the `factory_activity` capability.
+    FactoryActivity {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        active_session_id: String,
+        action: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        spec_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<u64>,
+        #[serde(flatten)]
+        rest: JsonMap,
+    },
     CancelRlmChild {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
@@ -573,6 +558,10 @@ pub enum DaemonCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         active_session_id: String,
+        /// Also hold until every RLM child run of the session settled
+        /// (the `wait_for_headless_completion` barrier of the same name).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wait_for_rlm_quiescence: Option<bool>,
         #[serde(flatten)]
         rest: JsonMap,
     },
@@ -656,8 +645,7 @@ pub enum DaemonCommand {
         rest: JsonMap,
     },
     /// The inline paste flow: install a pasted static token for one
-    /// pasteable catalog service (`server`), binding it to the service
-    /// endpoint and verifying with a real MCP handshake.
+    /// pasteable catalog service, verifying with a real MCP handshake.
     SetMcpStaticToken {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
@@ -667,8 +655,8 @@ pub enum DaemonCommand {
         #[serde(flatten)]
         rest: JsonMap,
     },
-    /// Remove one MCP connection: its credential and its connection record
-    /// (the durable endpoint pin), in one step.
+    /// Remove one MCP connection: credential and connection record (the
+    /// durable endpoint pin) in one step.
     RemoveMcpConnection {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
@@ -1144,12 +1132,18 @@ pub enum DaemonCommand {
         #[serde(flatten)]
         rest: JsonMap,
     },
-    ExtensionUiResponse {
+    /// Rust-native client command (operator directive 2026-09-29): the
+    /// interactive client's report that it just drew the Anthropic
+    /// subscription ban-risk warning — the worker persists the session's
+    /// once-per-lifecycle marker row so a reattach, a resume, or a worker
+    /// replacement of the same session skips the warning (the TS gate is
+    /// per interactive-mode instance, so the TS protocol has no
+    /// counterpart; an older daemon rejects the frame and the client
+    /// degrades to its per-instance gate).
+    MarkAnthropicWarningShown {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         active_session_id: String,
-        request_id: String,
-        response: DaemonExtensionUiResponse,
         #[serde(flatten)]
         rest: JsonMap,
     },
@@ -1160,10 +1154,8 @@ pub enum DaemonCommand {
         #[serde(flatten)]
         rest: JsonMap,
     },
-    /// Coordinator -> supervisor: start (or idempotently poll) the prepare
-    /// transaction for `updateId`. The supervisor owns the deadline and the
-    /// self-expiry marker; a repeated request with the same id returns the
-    /// current state, a different id is refused.
+    /// Coordinator -> supervisor: start (or idempotently poll) the prepare transaction for
+    /// `updateId`; same id returns the current state, a different id is refused.
     PrepareUpdateRestart {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
@@ -1189,10 +1181,8 @@ pub enum DaemonCommand {
         #[serde(flatten)]
         rest: JsonMap,
     },
-    /// Query the supervisor's boot-time restore pass (spec §6/§9): the
-    /// successor reports whether the roster restore is in flight and the
-    /// per-session counts/failures so the coordinator's `Restoring` phase
-    /// reports real numbers (the adoption heuristic is gone). Read-only.
+    /// Query the supervisor's boot-time restore pass (spec §6/§9): whether the restore is in flight
+    /// and the per-session counts/failures for the coordinator's `Restoring` phase. Read-only.
     UpdateRestoreStatus {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
@@ -1215,11 +1205,9 @@ pub enum DaemonCommand {
         #[serde(flatten)]
         rest: JsonMap,
     },
-    /// Session-worker self-registration (worker -> supervisor). A booting
-    /// worker presents its supervisor-issued identity so the supervisor can
-    /// rebuild its roster; the same command re-registers the worker after a
-    /// supervisor restart (the token was issued when the supervisor spawned
-    /// or adopted the worker, so only the real worker can present it).
+    /// Session-worker self-registration (worker -> supervisor); the same
+    /// command re-registers after a supervisor restart. The token was issued
+    /// by the supervisor, so only the real worker can present it.
     WorkerRegister {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
@@ -1249,15 +1237,6 @@ pub enum ForkPosition {
     At,
 }
 
-/// Response payload of an `extension_ui_request` dialog.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum DaemonExtensionUiResponse {
-    Value { value: String },
-    Confirmed { confirmed: bool },
-    Cancelled { cancelled: bool },
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1280,9 +1259,7 @@ mod tests {
     }
 
     #[test]
-    fn extension_ui_response_variants() {
-        rt::<DaemonExtensionUiResponse>(r#"{"value":"pick"}"#);
-        rt::<DaemonExtensionUiResponse>(r#"{"confirmed":true}"#);
-        rt::<DaemonExtensionUiResponse>(r#"{"cancelled":true}"#);
+    fn mark_anthropic_warning_shown_roundtrip() {
+        rt::<DaemonCommand>(r#"{"type":"mark_anthropic_warning_shown","activeSessionId":"s1"}"#);
     }
 }

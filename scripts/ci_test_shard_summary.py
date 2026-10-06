@@ -1,20 +1,26 @@
 #!/usr/bin/env python3
 """Audit the shard manifests and merge their failure summaries (ci.yml).
 
-The overall test gate is green only when EVERY shard reported and the union of
-their executed units still covers the full enumeration. This script verifies
-exactly that, so sharding can never silently drop coverage when test targets
-are added, renamed, or move packages:
+The overall test gate is green only when EVERY shard reported and the union
+of their executed units still covers the run's SELECTION — the full
+enumeration on push runs (main is the authority), or the touched crates'
+subset on the PR smoke (`--crates`, recorded by every shard as the run's
+`scope`). This script verifies exactly that, so sharding can never silently
+drop coverage when test targets are added, renamed, or move packages — and a
+narrowed run can never masquerade as a full one:
 
   1. every shard produced a manifest;
   2. all shards enumerated the same unit set (digest match);
-  3. shard assignments are disjoint and their union is the whole set;
-  4. every shard completed all of its assigned units;
-  5. every executed unit passed.
+  3. all shards record the SAME selection scope (a mixed-scope wave is a
+     broken partition; the summary names it instead of auditing a chimera);
+  4. shard assignments are disjoint and their union is the selected set
+     (nothing selected is skipped, nothing outside the selection ran);
+  5. every shard completed all of its selected units;
+  6. every executed unit passed.
 
-It then prints ONE merged report: which binaries failed, in which shard, with
-their failing test names — the single place a lane looks when a PR run goes
-red, instead of crawling four job logs.
+It then prints ONE merged report: the scope, which binaries failed, in which
+shard, with their failing test names — the single place a lane looks when a
+PR run goes red, instead of crawling the job logs.
 
 Usage (from the repo root, in ci.yml's test summary job):
 
@@ -44,6 +50,32 @@ def load_manifests(manifest_dir: Path, total: int):
     return manifests
 
 
+def run_scope(manifests: dict) -> tuple[str, list[str] | None]:
+    """The wave's selection scope, from the manifests (one source of truth)."""
+    scopes = {json.dumps(m.get("scope", {"kind": "all"}), sort_keys=True)
+              for m in manifests.values()}
+    if len(scopes) != 1:
+        return "MIXED", None
+    scope = json.loads(next(iter(scopes)))
+    return scope.get("kind", "all"), scope.get("crates")
+
+
+def selected_ids(manifest: dict, crates: list[str] | None) -> list[str]:
+    """The selected universe: the manifest's recorded selection, or (older
+    manifests without one) the full enumeration."""
+    if "selected_unit_ids" in manifest:
+        return manifest["selected_unit_ids"]
+    all_ids = manifest["all_unit_ids"]
+    if crates is None:
+        return all_ids
+    packages = set(crates)
+    return [i for i in all_ids if _unit_package(i) in packages]
+
+
+def _unit_package(unit_id: str) -> str:
+    return unit_id.split("#", 1)[0]
+
+
 def audit(manifests: dict, total: int) -> tuple[list[str], set[str]]:
     """Structural audit failures and the set of failing unit ids."""
     problems = []
@@ -63,6 +95,17 @@ def audit(manifests: dict, total: int) -> tuple[list[str], set[str]]:
         return problems, failed_units
     all_ids = manifests[1]["all_unit_ids"]
 
+    kind, crates = run_scope(manifests)
+    if kind == "MIXED":
+        described = sorted(json.dumps(m.get("scope"), sort_keys=True)
+                           for m in manifests.values())
+        problems.append("shards recorded different selection scopes — a "
+                        "mixed-scope wave is a broken partition: " +
+                        ", ".join(described))
+        return problems, failed_units
+    selection = selected_ids(manifests[1], crates)
+    selection_set = set(selection)
+
     executed: dict[str, str] = {}  # unit id -> shard that ran it
     for shard, manifest in sorted(manifests.items()):
         for unit in manifest["units"]:
@@ -78,16 +121,19 @@ def audit(manifests: dict, total: int) -> tuple[list[str], set[str]]:
             if unit["rc"] != 0:
                 failed_units.add(uid)
 
-    missing = sorted(set(all_ids) - set(executed))
+    missing = sorted(selection_set - set(executed))
     if missing:
-        problems.append(f"unassigned units (no shard ran them): {missing}")
-    extra = sorted(set(executed) - set(all_ids))
+        problems.append(f"selected units no shard ran: {missing}")
+    extra = sorted(set(executed) - selection_set)
     if extra:
-        problems.append(f"assigned outside the enumeration: {extra}")
+        problems.append(f"units outside the selection ran: {extra}")
+    outside = sorted(set(executed) - set(all_ids))
+    if outside:
+        problems.append(f"assigned outside the enumeration: {outside}")
 
     for shard, manifest in sorted(manifests.items()):
         if not manifest.get("complete", False):
-            assigned = [i for i in all_ids if shard_of(i, total) == shard - 1]
+            assigned = [i for i in selection if shard_of(i, total) == shard - 1]
             unfinished = sorted(set(assigned) - {u["id"] for u in manifest["units"]})
             problems.append(f"shard {shard} is incomplete; units it never "
                             f"reported: {unfinished}")
@@ -96,7 +142,13 @@ def audit(manifests: dict, total: int) -> tuple[list[str], set[str]]:
 
 def merged_report(manifests: dict, total: int, problems: list[str],
                   failed_units: set[str]) -> str:
-    lines = [f"### test summary ({total} shards)"]
+    kind, crates = run_scope(manifests)
+    scope = ("full selection" if kind == "all"
+             else f"crate selection: {', '.join(crates or [])}")
+    selected = selected_ids(manifests.get(1, {"all_unit_ids": []}), crates)
+    union_size = len(manifests.get(1, {}).get("all_unit_ids", []))
+    lines = [f"### test summary ({total} shards)",
+             f"- scope: {scope} — {len(selected)} of {union_size} units selected"]
     for shard in sorted(manifests):
         manifest = manifests[shard]
         units = manifest["units"]

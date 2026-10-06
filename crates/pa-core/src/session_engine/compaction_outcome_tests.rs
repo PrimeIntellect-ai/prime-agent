@@ -51,9 +51,6 @@ fn seeded_assistant() -> SessionAgentMessage {
     })
 }
 
-/// The disclosure row's shape (TS `createCompactionOutcomeMessage`):
-/// customType `compaction_outcome`, the outcome message as text content,
-/// displayed, `{reason, outcome}` details.
 #[test]
 fn outcome_row_shape_matches_ts() {
     let row = create_compaction_outcome_message(
@@ -77,12 +74,8 @@ fn outcome_row_shape_matches_ts() {
     assert_eq!(wire["customType"], "compaction_outcome");
 }
 
-/// The seam (TS `_persistCompactionOutcome`): the row lands in the
-/// session entry chain and on the live loop context, a context rebuild
-/// over the entries keeps it, and the LLM conversion drops it — the
-/// model never sees the disclosure, so the KV-cacheable prefix is
-/// unaffected (TS `agent-session-compaction.test.ts` pins the same
-/// exclusion).
+/// The row lands in the entry chain and on the live loop context, a rebuild
+/// keeps it, and the LLM conversion drops it — the model never sees the disclosure.
 #[tokio::test]
 async fn record_appends_row_to_entries_and_live_context_but_not_llm_input() {
     let tmp = tempfile::tempdir().unwrap();
@@ -118,8 +111,6 @@ async fn record_appends_row_to_entries_and_live_context_but_not_llm_input() {
         Some(serde_json::json!({ "reason": "requested", "outcome": "failed" }))
     );
     assert!(outcome_entries[0].display);
-    // The live loop context owns the disclosure (TS
-    // `agent.state.messages.push`).
     let state = session.agent().state().await;
     assert!(
         matches!(
@@ -128,8 +119,6 @@ async fn record_appends_row_to_entries_and_live_context_but_not_llm_input() {
         ),
         "the live context carries the outcome row"
     );
-    // A rebuild over the session entries keeps the disclosure (the TS
-    // `_unpersistedOutcomes` invariant: a rebuild cannot drop it).
     let guard = session.session.lock().await;
     let context =
         crate::session::build_session_context(guard.get_all_entries(), guard.get_leaf_id());
@@ -141,14 +130,11 @@ async fn record_appends_row_to_entries_and_live_context_but_not_llm_input() {
             .any(|message| matches!(message, SessionAgentMessage::Custom(custom) if custom.custom_type == "compaction_outcome")),
         "the rebuilt context keeps the outcome row"
     );
-    // Model context exclusion: the LLM conversion drops the row.
     assert!(convert_to_llm(std::slice::from_ref(&SessionAgentMessage::Custom(row))).is_empty());
 }
 
-/// The disclosure survives a failed disk write (the TS
-/// `_unpersistedOutcomes` fallback's guarantee): the entry chain keeps
-/// the row in memory, so a context rebuild never drops it even when the
-/// session file could not be written.
+/// The disclosure survives a failed disk write: the entry chain keeps
+/// the row in memory, so a rebuild never drops it.
 #[tokio::test]
 async fn record_survives_a_failed_disk_write() {
     let tmp = tempfile::tempdir().unwrap();
@@ -159,8 +145,7 @@ async fn record_survives_a_failed_disk_write() {
     let file = manager.get_session_file().unwrap().to_path_buf();
     assert!(file.exists(), "the session file materialized");
     // Replace the session file with a directory at the same path: every
-    // disk write path fails (the append line and the atomic rename),
-    // even for root (permission bits would not stop root).
+    // disk write path fails, even for root.
     std::fs::remove_file(&file).unwrap();
     std::fs::create_dir(&file).unwrap();
     let session = scripted_session_over(manager).await;
@@ -172,8 +157,6 @@ async fn record_survives_a_failed_disk_write() {
         )
         .await
         .unwrap();
-    // The write failed (the file path is a directory) — but the entry
-    // chain and a context rebuild keep the disclosure.
     let entries = session.entries().await;
     assert!(
         entries.iter().any(
@@ -195,11 +178,8 @@ async fn record_survives_a_failed_disk_write() {
     );
 }
 
-/// The subscriber arm (TS `_processAgentEvent` on `_agentEventQueue`
-/// whose `.catch(() => {})` swallows persistence failures) never fails
-/// the run for a write error: the loop already owns the row in live
-/// state, so the session retains it and the error only logs — no error
-/// assistant row lands in either store.
+/// The subscriber arm never fails the run for a write error: the session
+/// retains the row and the error only logs.
 #[tokio::test]
 async fn message_end_persist_failure_retains_the_row_and_swallows() {
     let tmp = tempfile::tempdir().unwrap();
@@ -253,8 +233,6 @@ async fn message_end_persist_failure_retains_the_row_and_swallows() {
         "a context rebuild keeps the retained row"
     );
 }
-
-// ---- refine: the live-context push (TS `_appendDurableRefineMessage`) ----
 
 fn session_ai_model() -> pa_types::ai::Model {
     serde_json::from_value(serde_json::json!({
@@ -334,8 +312,7 @@ const APPLIED_PLAN: &str = r#"{"summary":"note it","rationale":"repeated","expec
 const EMPTY_PLAN: &str = r#"{"summary":"bench","edits":[]}"#;
 
 /// A persisted session over two seeded rows, with the live loop context
-/// built the way the resume path builds it (one rebuild:
-/// `restore_windowed_context`'s construction).
+/// built the way the resume path builds it (one rebuild).
 async fn refine_test_session() -> (AgentSession, tempfile::TempDir) {
     let provider = Arc::new(ScriptedProvider::new(test_model()));
     let options = AgentOptions {
@@ -375,7 +352,7 @@ async fn refine_test_session() -> (AgentSession, tempfile::TempDir) {
 }
 
 /// The pre-change mechanism, verbatim: the full active-context rebuild
-/// plus the shared-shape conversion (the oracle's reference).
+/// plus the shared-shape conversion.
 async fn full_rebuild_reference(session: &AgentSession) -> Vec<AgentMessage> {
     let persistence = session.shared_persistence();
     let manager = persistence.lock().await;
@@ -421,17 +398,13 @@ async fn refine_pushed_live_context_matches_a_full_rebuild_byte_for_byte() {
         .await
         .unwrap();
     assert!(result.applied_edits.iter().any(|edit| edit.applied));
-    // Candidate: the pushed live loop context.
     let candidate = session.agent().state().await.messages;
-    // Reference: the pre-change full-rebuild mechanism, run verbatim.
     let reference = full_rebuild_reference(&session).await;
     assert_eq!(
         serde_json::to_value(&candidate).unwrap(),
         serde_json::to_value(&reference).unwrap(),
         "the pushed live context is byte-identical to the full rebuild"
     );
-    // The pushed rows land exactly once, in durable order (outcome,
-    // then notice); the audit entry never enters the context.
     assert_eq!(candidate.len(), 4);
     assert_eq!(
         custom_types(&candidate[candidate.len() - 2..]),
@@ -474,10 +447,8 @@ async fn refine_with_an_empty_plan_pushes_only_the_outcome_row() {
 
 #[tokio::test]
 async fn sequential_refines_push_exactly_their_own_rows() {
-    // Two runs back-to-back: the second must select exactly its own
-    // rows (by id), never the first run's — the pushed live context
-    // stays byte-identical to a full rebuild, which holds exactly one
-    // copy of each appended row.
+    // The second run must select exactly its own rows (by id), never
+    // the first run's.
     let (session, tmp) = refine_test_session().await;
     let global_dir = tmp.path().join("harness");
     let first = r#"{"summary":"one","edits":[{"action":"create","kind":"memory","id":"m1","title":"A","content":"a"}]}"#;
@@ -509,7 +480,6 @@ async fn sequential_refines_push_exactly_their_own_rows() {
         serde_json::to_value(&reference).unwrap(),
         "two sequential refines hold exactly one copy of each appended row"
     );
-    // Base rows + two outcomes + two notices, in durable order.
     assert_eq!(candidate.len(), 6);
     assert_eq!(
         custom_types(&candidate[candidate.len() - 4..]),
@@ -522,12 +492,63 @@ async fn sequential_refines_push_exactly_their_own_rows() {
     );
 }
 
+/// A plan whose one edit creates a factory entry (a stored state-machine
+/// workflow spec): valid shape, so only the opt-in gate decides it.
+const FACTORY_PLAN: &str = r#"{"summary":"sweep","edits":[{"action":"create","kind":"factory","id":"sweep","title":"Factory","content":"Sweep review.","arguments":{"machine":{"states":[{"id":"collect","entry":true,"subagent":"worker"}],"transitions":[]}}}]}"#;
+
+#[tokio::test]
+async fn refine_factory_edits_follow_the_agent_dir_opt_in_setting() {
+    // The host /refine flow reads `factory.enabled` live from the session's
+    // agent dir on every run — the same settings.json the kernel-side
+    // factory gate reads — so a refinement cannot author factories the
+    // user has not opted into. Without a wired agent dir (or with the
+    // setting off), the factory create refuses with the one exact
+    // disabled message; opted in, the same proposal applies.
+    let (mut session, tmp) = refine_test_session().await;
+    let global_dir = tmp.path().join("harness");
+    let refused = session
+        .refine_with_refiner(
+            &refine::RefineOptions::default(),
+            refine::RefinementSource::User,
+            &session_ai_model(),
+            refine_plan_call(FACTORY_PLAN),
+            global_dir.clone(),
+        )
+        .await
+        .unwrap();
+    assert!(!refused.applied_edits[0].applied);
+    assert_eq!(
+        refused.applied_edits[0].error.as_deref(),
+        Some(crate::refinement::FACTORY_DISABLED_MESSAGE)
+    );
+    // The user opts in: the next run of the same proposal applies.
+    let agent_dir = tmp.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("settings.json"),
+        r#"{"factory": {"enabled": true}}"#,
+    )
+    .unwrap();
+    session.set_agent_dir(agent_dir);
+    let applied = session
+        .refine_with_refiner(
+            &refine::RefineOptions::default(),
+            refine::RefinementSource::User,
+            &session_ai_model(),
+            refine_plan_call(FACTORY_PLAN),
+            global_dir,
+        )
+        .await
+        .unwrap();
+    assert!(applied.applied_edits[0].applied);
+    assert!(applied.applied_edits[0].error.is_none());
+}
+
 #[tokio::test]
 async fn refine_keeps_the_retry_drop_instead_of_resurrecting_the_error_row() {
     let (session, tmp) = refine_test_session().await;
-    // The retry arm's sanctioned live/durable divergence: the failed
-    // turn's error assistant row is durable, then dropped from the live
-    // context (`drop_trailing_assistant`, TS's retry `slice(0, -1)`).
+    // The retry arm's sanctioned live/durable divergence: the failed turn's
+    // error assistant row is durable, then dropped from the live context.
     {
         let persistence = session.shared_persistence();
         let mut manager = persistence.lock().await;
@@ -562,10 +583,8 @@ async fn refine_keeps_the_retry_drop_instead_of_resurrecting_the_error_row() {
         )
         .await
         .unwrap();
-    // The served-path gate: the push preserves the live list (the
-    // pre-change rebuild would have replaced it). TS `_applyRefine`
-    // pushes onto `agent.state.messages`; the dropped error row stays
-    // out of the live context exactly like TS.
+    // The push preserves the live list: the dropped error row stays
+    // out of the live context.
     let live = session.agent().state().await.messages;
     assert_eq!(live.len(), 4);
     assert!(
@@ -576,8 +595,8 @@ async fn refine_keeps_the_retry_drop_instead_of_resurrecting_the_error_row() {
         custom_types(&live[live.len() - 2..]),
         vec!["refinement_outcome", "refinement_notice"]
     );
-    // The deliberate, TS-anchored divergence: the full rebuild WOULD
-    // resurrect the row (the pre-change mechanism's behavior).
+    // The deliberate divergence: the full rebuild WOULD resurrect the
+    // row (the pre-change mechanism's behavior).
     let reference = full_rebuild_reference(&session).await;
     assert_eq!(reference.len(), 5);
     assert!(

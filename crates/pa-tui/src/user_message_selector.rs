@@ -1,7 +1,5 @@
-//! The `/fork` user-message selector (TS `UserMessageSelectorComponent`):
-//! the session's user messages, one fork point per row, rendered through
-//! the shared menu grammar (the `›` marker rows, the `(n/m)` scroll row,
-//! the key-hint status row every picker renders with).
+//! The `/fork` user-message selector, rendered through the shared menu
+//! grammar.
 
 use crate::keybindings::KeybindingsManager;
 use crate::menu_panel::{hint_row, key_hint, menu_row, no_match_row, scroll_row};
@@ -68,12 +66,12 @@ impl UserMessageSelector {
         }
     }
 
-    /// The full pane: the title and description rows, then the shared menu
-    /// list (one row per message, the scroll indicator, the key hint).
+    /// The full pane: title and description rows, then the shared menu
+    /// list (one row per message, the scroll row, the key hint).
     #[must_use]
     pub fn render(&self, theme: &Theme, width: usize, kb: &KeybindingsManager) -> Vec<Line> {
-        // TS mounts the title and description with a one-space margin
-        // (`new Text(..., 1, 0)`): the indent sits outside any escape.
+        // TS mounts the title/description with a one-space margin
+        // (`new Text(..., 1, 0)`).
         let mut lines: Vec<Line> = vec![
             Vec::new(),
             vec![Span::raw(" Fork from Message")],
@@ -124,9 +122,8 @@ impl UserMessageSelector {
     }
 }
 
-/// The selector's key hint: the shared hint-row grammar, this surface's
-/// vocabulary (an unbound action is omitted, never advertised with a
-/// default key).
+/// The selector's key hint: the shared hint-row grammar (an unbound
+/// action is omitted).
 fn hint(kb: &KeybindingsManager) -> String {
     [
         key_hint(kb, &["tui.select.up", "tui.select.down"], "navigate"),
@@ -171,7 +168,6 @@ mod tests {
             selector.handle_key(&kb(), "escape"),
             UserMessageSelectorAction::Cancel
         );
-        // The latest message is preselected; Enter forks from it.
         assert_eq!(
             selector.handle_key(&kb(), "enter"),
             UserMessageSelectorAction::Select("entry-11".to_string())
@@ -195,10 +191,6 @@ mod tests {
         );
     }
 
-    /// The selector renders through the shared menu grammar: the `›`
-    /// marker on the selected row, the `(n/m)` scroll row once the window
-    /// cannot hold every message, the hint row — and no per-row metadata
-    /// lines.
     #[test]
     fn the_pane_renders_through_the_shared_menu_grammar() {
         let selector = UserMessageSelector::new(messages());
@@ -220,10 +212,6 @@ mod tests {
             .any(|row| row.contains("\u{2191}/\u{2193} navigate · Enter select · Esc close")));
     }
 
-    /// The hint never advertises an unbound action: with the cancel
-    /// binding disabled (an empty user binding), the rendered hint drops
-    /// the close segment instead of showing an `Esc close` key the
-    /// selector does not handle.
     #[test]
     fn the_hint_omits_unbound_actions() {
         let mut bindings = crate::keybindings::KeybindingsConfig::new();

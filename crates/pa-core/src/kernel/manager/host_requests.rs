@@ -6,17 +6,12 @@ use super::{
     MAX_HANDLED_HOST_REQUEST_IDS,
 };
 
-/// The cell source attached to a host request is capped at this many
-/// characters (TS #2475: `MAX_CELL_SOURCE_CHARS`, repl-manager.ts:81-82):
-/// the spawning cell's source rides on every host request it triggers, and
-/// an uncapped multi-KB cell re-shipped per progress note (and persisted
-/// per child as spawn code) dwarfs the request it tags.
+/// The cell source attached to a host request is capped at this many characters (TS #2475:
+/// `MAX_CELL_SOURCE_CHARS`): the spawning cell's source rides on every host request it triggers.
 const MAX_CELL_SOURCE_CHARS: usize = 2 * 1024;
 
-/// Cap a cell source for host-request attachment: a source within the cap
-/// passes verbatim; a longer one keeps the first `MAX_CELL_SOURCE_CHARS`
-/// characters and carries the truncation marker so the consumer knows the
-/// prefix is partial (TS repl-manager.ts:110-111's cap helper).
+/// Cap a cell source for host-request attachment: a longer one keeps the first
+/// `MAX_CELL_SOURCE_CHARS` characters and carries the truncation marker.
 fn cap_cell_source(code: &str) -> String {
     if code.chars().count() <= MAX_CELL_SOURCE_CHARS {
         code.to_string()
@@ -25,10 +20,6 @@ fn cap_cell_source(code: &str) -> String {
         format!("{head}\n[... cell source truncated at {MAX_CELL_SOURCE_CHARS} chars ...]")
     }
 }
-
-// ---------------------------------------------------------------------------
-// Host requests
-// ---------------------------------------------------------------------------
 
 impl Inner {
     /// Dispatch one typed request from kernel code to the registered handler
@@ -93,8 +84,7 @@ impl Inner {
                 anyhow!("host request type \"{request_type}\" is not available in this session")
             })?
             .clone();
-        // Tag the request with the cell that triggered it. A blocking call is
-        // still the in-flight execution; detached spawns fire after the
+        // Tag the request with the cell that triggered it. Detached spawns fire after the
         // scheduling cell goes idle, so fall back to that last cell's source.
         let cell_source_code = {
             let g = lock(&self.guarded);

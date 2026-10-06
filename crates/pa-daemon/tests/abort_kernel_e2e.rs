@@ -1,10 +1,7 @@
-//! End-to-end verifier for the interrupt on a running kernel cell (the
-//! dogfood P0 wedge): a daemon worker session whose turn executes a long
-//! kernel cell must abort at once - `abort` cancels the in-flight tool
-//! execution (kernel interrupt + force-abort), the turn unwinds, and the
-//! session returns to ready - instead of running the cell out or wedging
-//! with the loader spinning. Drives the exact worker stack (real kernel,
-//! real turn runner) over the daemon wire.
+//! End-to-end verifier for the interrupt on a running kernel cell (the dogfood
+//! P0 wedge): a worker session whose turn executes a long kernel cell must abort
+//! at once — the turn unwinds, the session returns to ready — instead of running
+//! the cell out or wedging with the loader spinning.
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -15,9 +12,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-/// The kernel Python with prime-agent-runtime installed; the release dir
-/// ships the runtime sidecar. Skipped (with a note) on machines without a
-/// live install.
+/// The kernel Python with prime-agent-runtime installed. Skipped (with a
+/// note) on machines without a live install.
 fn kernel_python() -> Option<PathBuf> {
     let candidate = PathBuf::from(std::env::var("HOME").map_or_else(
         |_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string(),
@@ -31,27 +27,6 @@ fn kernel_python() -> Option<PathBuf> {
         candidate.display()
     );
     None
-}
-
-fn release_dir() -> Option<PathBuf> {
-    let releases = PathBuf::from(std::env::var("HOME").map_or_else(
-        |_| "/home/ubuntu/.local/share/prime-agent/releases".to_string(),
-        |home| format!("{home}/.local/share/prime-agent/releases"),
-    ));
-    let Ok(entries) = std::fs::read_dir(&releases) else {
-        eprintln!(
-            "no releases dir at {}; skipping live kernel test",
-            releases.display()
-        );
-        return None;
-    };
-    let mut candidates: Vec<PathBuf> = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.join("prime-agent-runtime").is_dir())
-        .collect();
-    candidates.sort();
-    candidates.pop()
 }
 
 /// The faux provider script: turn one calls the kernel with a cell that
@@ -117,7 +92,6 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path, script: &Path) -> Superviso
             "PRIME_AGENT_KERNEL_PYTHON",
             kernel_python().expect("kernel python"),
         )
-        .env("PI_PACKAGE_DIR", release_dir().expect("release dir"))
         .env(
             pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
             "15000",
@@ -163,11 +137,11 @@ impl Client {
             .get_mut()
             .set_read_timeout(Some(Duration::from_millis(100)))
             .expect("timeout");
+        let mut line = String::new();
         loop {
-            let mut line = String::new();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => {}
+                Ok(_) if line.trim().is_empty() => line.clear(),
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse line"),
                 Err(error) => {
                     assert!(
@@ -220,9 +194,9 @@ impl Client {
     fn drain_events(&mut self, quiet_ms: Duration) {
         let deadline = Instant::now() + Duration::from_mins(1);
         let mut last_line = Instant::now();
+        let mut line = String::new();
         loop {
             assert!(Instant::now() < deadline, "event drain timed out");
-            let mut line = String::new();
             self.reader
                 .get_mut()
                 .set_read_timeout(Some(Duration::from_millis(100)))
@@ -233,6 +207,7 @@ impl Client {
                     let value: Value = serde_json::from_str(line.trim()).expect("parse line");
                     self.collect_event(&value);
                     last_line = Instant::now();
+                    line.clear();
                 }
                 Err(_) => {
                     if last_line.elapsed() >= quiet_ms {
@@ -244,16 +219,10 @@ impl Client {
     }
 }
 
-/// An abort on a running kernel cell settles the worker's turn at once:
-/// the turn unwinds (`turn_end` + `agent_end` reach attached clients within
-/// the budget) and the cell dies (its finish marker never appears). A
-/// wedge keeps the loader spinning while the cell runs out.
+/// The turn unwinds within the budget and the cell dies (its finish marker never appears).
 #[test]
 fn abort_during_a_kernel_cell_settles_the_daemon_turn_immediately() {
     let Some(_) = kernel_python() else {
-        return;
-    };
-    let Some(_) = release_dir() else {
         return;
     };
     let dir = tempfile::TempDir::new().expect("temp dir");

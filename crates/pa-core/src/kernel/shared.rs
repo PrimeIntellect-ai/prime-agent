@@ -1,6 +1,4 @@
 //! Shared constants, result shapes, and host-bridge types for the kernel layer.
-//!
-//! Ported from `core/kernel/shared.ts`.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -18,6 +16,14 @@ pub const DEFAULT_SNAPSHOT_DEBOUNCE_MS: u64 = 1_500;
 pub const SNAPSHOT_EXECUTION_TIMEOUT_MS: u64 = 5_000;
 /// Restore deserializes everything a snapshot serializes: bounded like the repair step.
 pub const RESTORE_EXECUTION_TIMEOUT_MS: u64 = 30_000;
+/// The provisioner's runtime bootstrap imports the runtime and skills in one
+/// cell: bounded like the restore step, so a lost bootstrap frame fails the
+/// boot loudly instead of parking it forever. Shrunk in test builds so the
+/// regression test does not wait out the production bound.
+#[cfg(not(test))]
+pub const BOOTSTRAP_EXECUTION_TIMEOUT_MS: u64 = 30_000;
+#[cfg(test)]
+pub const BOOTSTRAP_EXECUTION_TIMEOUT_MS: u64 = 500;
 pub const KERNEL_ABORT_GRACE_MS: u64 = 1_000;
 pub const KERNEL_BUSY_REUSE_WAIT_MS: u64 = 5_000;
 pub const KERNEL_BUSY_INTERRUPT_INTERVAL_MS: u64 = 500;
@@ -28,13 +34,25 @@ pub const KERNEL_BUSY_AFTER_INTERRUPT_MESSAGE: &str = "The Python kernel is stil
 pub const MAX_BACKGROUND_OUTPUT_CHARS: usize = 64 * 1024;
 
 pub const MAX_KERNEL_STDERR_CHARS: usize = 8 * 1024;
+
+/// The `factory_activity` out-of-band frame's action vocabulary, mirroring
+/// the kernel executor's `ACTIVITY_ACTIONS` (the `/factory` view's bridge).
+pub const FACTORY_ACTIVITY_ACTIONS: [&str; 6] =
+    ["graph", "status", "watch", "run", "stop", "resume"];
+
+/// Upper bound on one `factory_activity` watch's `timeoutMs` (the kernel
+/// caps its own at 60s; the host bridge pins the view's polling cadence
+/// lower). Mirrors the kernel's `ACTIVITY_TIMEOUT_MS_CAP` for the preflight.
+pub const FACTIVITY_WATCH_TIMEOUT_MS_CAP: u64 = 60_000;
+
+/// Fixed settle bound for one `factory_activity` request (a watch adds its
+/// own declared timeout on top, plus this margin for the executor's work).
+pub const FACTIVITY_SETTLE_TIMEOUT_MS: u64 = 5_000;
 pub const MAX_KERNEL_STDERR_LOG_BYTES: u64 = 5 * 1024 * 1024;
 pub const KERNEL_STDERR_LOG_BUDGET_MARKER: &str = "[stderr log budget exhausted]\n";
 
-/// Hard ceiling on a single attachment's base64 payload, a defensive guard
-/// against a runaway direct display emit. The `attach-image` skill caps its own
-/// images well under this, so a skill-produced attachment is never dropped
-/// here — only a non-skill emit can hit this.
+/// Hard ceiling on a single attachment's base64 payload, a defensive guard against a runaway direct
+/// display emit. The `attach-image` skill caps its own images well under this.
 pub const MAX_ATTACHMENT_DATA_CHARS: usize = 10_000_000;
 
 /// MIME tag the `edit` skill emits diff payloads under.
@@ -45,6 +63,8 @@ pub const ATTACHMENT_DISPLAY_MIME: &str = "application/vnd.prime-agent.attachmen
 pub const AGENT_MESSAGE_DISPLAY_MIME: &str = "application/vnd.prime-agent.agent-message+json";
 /// Internal lifetime notices, consumed before user display rendering.
 pub const BASH_ACTIVITY_DISPLAY_MIME: &str = "application/vnd.prime-agent.bash-activity+json";
+/// One `bash()` call's command text (capped) and non-blank line count.
+pub const BASH_COMMAND_DISPLAY_MIME: &str = "application/vnd.prime-agent.bash-command+json";
 
 pub const EXECUTE_STATUS_OK: &str = "ok";
 pub const EXECUTE_STATUS_ERROR: &str = "error";
@@ -80,9 +100,8 @@ pub enum StreamName {
 /// Callback receiving streamed output chunks as they arrive.
 pub type StreamCallback = Arc<dyn Fn(&str, StreamName) + Send + Sync>;
 
-/// Fires when the kernel's last live background `bash()` handle settles
-/// (its activity track empties or the kernel tears down), so owed
-/// continuations can resume (TS `KernelManagerOptions.onBackgroundWorkSettled`).
+/// Fires when the kernel's last live background `bash()` handle settles, so owed continuations can
+/// resume.
 pub type BackgroundWorkSettledCallback = Arc<dyn Fn() + Send + Sync>;
 
 /// Callback receiving an agent message sent late by the kernel.
@@ -149,6 +168,14 @@ pub struct SentAgentMessageTarget {
     pub session_name: Option<String>,
 }
 
+/// The `bash()` commands one cell started, summarized for display.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KernelBashCommands {
+    pub first: String,
+    pub count: usize,
+    pub lines: usize,
+}
+
 /// A kernel error reported by a failed cell.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KernelError {
@@ -170,6 +197,8 @@ pub struct ExecuteResult {
     pub attachments: Option<Vec<KernelAttachment>>,
     /// Agent messages sent from this cell, in order.
     pub sent_agent_messages: Option<Vec<KernelSentAgentMessage>>,
+    /// The `bash()` commands this cell started, summarized for display.
+    pub bash_commands: Option<KernelBashCommands>,
     /// Output that arrived without this cell's id (user threads, other cells' leftovers, raw fd writes).
     pub background_output: Option<String>,
     pub status: ExecuteStatus,
@@ -308,9 +337,8 @@ pub struct KernelManagerOptions {
     pub session_id: Option<String>,
     pub host_handlers: HostRequestHandlers,
     pub python_skills: Vec<KernelPythonSkill>,
-    /// Fires when the last live background `bash()` handle settles (its
-    /// activity track empties or the kernel tears down), so owed
-    /// continuations can resume.
+    /// Fires when the last live background `bash()` handle settles (its activity
+    /// track empties or the kernel tears down), so owed continuations can resume.
     pub on_background_work_settled: Option<BackgroundWorkSettledCallback>,
     /// Persist/revive the user namespace across kernel restarts and session resume.
     pub snapshot: Option<KernelSnapshotConfig>,
@@ -347,10 +375,8 @@ pub fn parse_diff_display(payload: &Value) -> Option<KernelDiffDisplay> {
     })
 }
 
-/// Parse an [`ATTACHMENT_DISPLAY_MIME`] payload. Malformed payloads are
-/// tolerantly ignored (`None`); a well-formed payload exceeding
-/// [`MAX_ATTACHMENT_DATA_CHARS`] is reported as [`AttachmentParse::Oversized`]
-/// so the caller can fail the cell loudly rather than silently dropping the image.
+/// Parse an [`ATTACHMENT_DISPLAY_MIME`] payload. Malformed payloads are tolerantly ignored;
+/// [`MAX_ATTACHMENT_DATA_CHARS`] is reported as [`AttachmentParse::Oversized`].
 pub fn parse_attachment_display(
     payload: &Value,
 ) -> Option<Result<KernelAttachment, AttachmentOversized>> {

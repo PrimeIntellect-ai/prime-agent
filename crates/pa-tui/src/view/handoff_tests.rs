@@ -1,10 +1,7 @@
 //! The cross-view layout handoff oracles: the reuse serves the re-entry's
 //! window byte-identically without a re-render, and every changed
-//! transcript (a different session, a moved sequence, a different entry
-//! count), a changed render shape, or a post-adopt mutation re-renders
-//! exactly as before the cut. The served-path assertions ride the
-//! test-only `ENTRY_RENDERS` counter (a held pack serving a window never
-//! enters `render_entry`).
+//! transcript, changed render shape, or post-adopt mutation re-renders.
+//! The served-path assertions ride the test-only `ENTRY_RENDERS` counter.
 use super::super::expansion::tests::finished_tool_card;
 use super::super::layout::{EntryLayout, ENTRY_RENDERS};
 use super::super::AgentView;
@@ -20,11 +17,8 @@ fn view() -> AgentView {
     AgentView::new(Theme::builtin("prime", ColorMode::TrueColor))
 }
 
-/// The round-trip fixture shape: a handful of settled one-row entries
-/// (the window walks back through them) plus a wide tail entry (the
-/// class the view-switch record measured: the visible window fills
-/// inside one big entry). Every entry is cacheable so the window build
-/// packs them.
+/// A handful of settled one-row entries plus a wide tail entry (the
+/// visible window fills inside one big entry), all cacheable.
 fn fill(view: &mut AgentView) {
     for text in [
         "one",
@@ -64,8 +58,7 @@ fn the_reentry_window_serves_the_held_packs_byte_identically() {
     );
     let (session_id, generation, sequence) = stash(&mut left, 7);
 
-    // The re-entry: a FRESH view (the run boundary's shape) over the same
-    // transcript, adopting the held handoff on the key's exact match.
+    // The re-entry: a FRESH view over the same transcript, adopting the held handoff.
     let mut reentry = view();
     fill(&mut reentry);
     reentry.adopt_layout_handoff(&session_id, &generation, sequence);
@@ -85,8 +78,6 @@ fn the_reentry_window_serves_the_held_packs_byte_identically() {
         "the served-path observable counts the window the packs served"
     );
 
-    // The full frame is the frozen surface: the re-entry's composed
-    // frame equals the pre-exit frame row for row.
     assert_eq!(reentry.render_frame(80, 24), left.render_frame(80, 24));
 }
 
@@ -101,8 +92,7 @@ fn a_changed_transcript_misses_and_re_renders() {
     let _ = left.visible_transcript_window(80, 6);
     let (session_id, generation, sequence) = stash(&mut left, 7);
 
-    // A different entry count (a message landed while away) adopts
-    // nothing.
+    // A different entry count (a message landed while away) adopts nothing.
     let mut reentry = view();
     fill(&mut reentry);
     reentry.push_entry(ChatEntry::Status {
@@ -112,12 +102,8 @@ fn a_changed_transcript_misses_and_re_renders() {
     reentry.adopt_layout_handoff(&session_id, &generation, sequence);
     assert!(reentry.pending_handoff.is_none());
 
-    // Each mismatch probe needs its OWN held handoff: a mismatching
-    // adopt consumes the one-shot store (a stale key never serves — not
-    // even to the next probe), so probing two mismatched keys back to
-    // back would only prove the second probe read an empty slot. The
-    // held key is re-stashed before every probe so each mismatch key is
-    // genuinely exercised against a live store.
+    // Each mismatch probe needs its OWN held handoff: a mismatching adopt consumes the one-shot
+    // store, so the held key is re-stashed before every probe.
     let mut reentry_same_count = view();
     fill(&mut reentry_same_count);
     // A moved event sequence (any event since the stored attach): the
@@ -187,9 +173,8 @@ fn a_post_adopt_mutation_retires_the_held_packs() {
     fill(&mut reentry);
     reentry.adopt_layout_handoff(&session_id, &generation, sequence);
     assert!(reentry.pending_handoff.is_some());
-    // A mutation lands between the adopt and the first draw (a startup
-    // notice, a live event): the held packs retire and the window
-    // re-renders.
+    // A mutation lands between the adopt and the first draw: the held
+    // packs retire and the window re-renders.
     reentry.push_entry(ChatEntry::Status {
         text: "a late notice after the adopt".to_string(),
         kind: StatusKind::Info,
@@ -262,9 +247,8 @@ fn the_slot_is_one_shot_and_a_second_store_wins() {
     second.adopt_layout_handoff(&session_id, &generation, sequence);
     assert!(second.pending_handoff.is_none());
 
-    // A different session's handoff overwrites the slot (the one-slot
-    // bound: the previous session's packs are dropped with it), and a
-    // mismatching adopt consumes the slot — the stale key never serves.
+    // A different session's handoff overwrites the slot, and a mismatching
+    // adopt consumes it — the stale key never serves.
     let mut other = view();
     fill(&mut other);
     let _ = other.visible_transcript_window(80, 6);
@@ -287,14 +271,8 @@ fn the_slot_is_one_shot_and_a_second_store_wins() {
     );
 }
 
-/// The post-turn sojourn class (the live-sequence key): a turn during the
-/// run advanced the worker's sequence past this run's own attach value —
-/// the stash keys the LATEST sequence the run saw (the live tracker), so
-/// the transcript-unchanged sojourn's re-entry (the next attach reporting
-/// that same live value) adopts. Keying the run's own stale attach value
-/// instead (the pre-fix shape) misses the same re-entry: a re-entry whose
-/// transcript DID change must miss either way, but a turn before the exit
-/// never changes the sojourn's transcript.
+/// The post-turn sojourn class: a turn during the run advanced the worker's sequence past the
+/// run's own attach value — the stash keys the LATEST sequence, so the re-entry adopts.
 #[test]
 fn a_post_turn_sojourn_reentry_matches_the_live_sequence_key() {
     let _guard = HANDOFF_TEST_LOCK
@@ -329,8 +307,8 @@ fn a_post_turn_sojourn_reentry_matches_the_live_sequence_key() {
         "the served rows are byte-identical"
     );
 
-    // The pre-fix shape for the same re-entry: a stash keyed at the run's
-    // own stale attach value misses the post-turn re-attach and re-renders.
+    // A stash keyed at the run's own stale attach value misses the
+    // post-turn re-attach and re-renders.
     let mut stale_left = view();
     fill(&mut stale_left);
     let _ = stale_left.visible_transcript_window(80, 6);
@@ -350,10 +328,8 @@ fn a_post_turn_sojourn_reentry_matches_the_live_sequence_key() {
     );
 }
 
-/// The retry-episode pop (`pop_chat_entry`, the retry collapse that
-/// retires the failed attempt's error row) is a transcript mutation: the
-/// held handoff retires exactly like every other post-adopt mutation, so a
-/// pop between the adopt and the first draw never serves pre-pop packs.
+/// The retry-episode pop (`pop_chat_entry`) is a transcript mutation: the held handoff
+/// retires exactly like every other post-adopt mutation.
 #[test]
 fn a_retry_episode_pop_retires_the_held_handoff() {
     let _guard = HANDOFF_TEST_LOCK
@@ -368,8 +344,6 @@ fn a_retry_episode_pop_retires_the_held_handoff() {
     fill(&mut reentry);
     reentry.adopt_layout_handoff(&session_id, &generation, sequence);
     assert!(reentry.pending_handoff.is_some());
-    // The retry episode collapses the failed attempt's error row between
-    // the adopt and the first draw: the pop is a transcript mutation.
     reentry.pop_chat_entry();
     assert!(
         reentry.pending_handoff.is_none(),
@@ -383,11 +357,8 @@ fn a_retry_episode_pop_retires_the_held_handoff() {
     );
 }
 
-/// A clicked card is not held across the round trip: its slot holds the
-/// flipped rows, but the re-entry mounts every card at the level (the
-/// toggles live in the exiting view). The card follows a status row, so
-/// its leading spacing is the same either way and the spacing guard
-/// cannot discard a stale pack.
+/// A clicked card is not held across the round trip: its slot holds the flipped rows, but the
+/// re-entry mounts every card at the level.
 #[test]
 fn a_clicked_card_re_renders_at_the_level_after_the_round_trip() {
     let _guard = HANDOFF_TEST_LOCK

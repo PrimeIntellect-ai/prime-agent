@@ -1,22 +1,11 @@
 //! The daemon-level model allowlist (settings `allowedModels`): the model
-//! patterns a daemon may resolve to. A daemon policy, not a session
-//! preference — `SettingsManager::get_allowed_models` reads the global
-//! scope, and the daemon's model-resolution seams (the `set_model`
-//! command, RLM child-model resolution, and the worker's startup model
-//! chain) enforce it: a model outside the allowlist fails loudly with
-//! [`ModelAllowlistRefusal`] instead of resolving, and the daemon never
-//! falls back to a different model on a refusal.
-//!
-//! Rust-only guardrail (no TS equivalent): unset means unrestricted, which
-//! is byte-for-byte the TS behavior. Motivation: a silent fallback to an
-//! unintended route (an unavailable pinned model falling back to a
-//! metered featured default) must surface as an error, never as a running
-//! session on the wrong model.
+//! patterns a daemon may resolve to — a daemon policy, not a session
+//! preference; an outside model fails loudly with [`ModelAllowlistRefusal`].
+//! Rust-only guardrail (no TS equivalent; unset means unrestricted).
 
 /// A model the daemon refused to resolve: the resolved selector is outside
-/// the configured allowlist. Typed so enforcement seams can downcast the
-/// refusal (adoption telemetry) out of the resolution errors that stay
-/// TS-parity (unknown / unauthenticated / expired models).
+/// the configured allowlist, typed so enforcement seams can downcast the
+/// refusal (adoption telemetry) out of the TS-parity resolution errors.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelAllowlistRefusal {
     /// The refused model, full selector form `provider/model-id`.
@@ -37,12 +26,10 @@ impl std::fmt::Display for ModelAllowlistRefusal {
 
 impl std::error::Error for ModelAllowlistRefusal {}
 
-/// Whether a resolved model selector is allowed by the `allowedModels`
-/// patterns. Patterns use the `--models` CLI scope grammar, matched
-/// case-insensitively against the full selector `provider/model-id` and
-/// against the bare model id (whose `prime-inference` ids may carry
-/// slashes, e.g. `internal/glm-5.3-fast`): a pattern with wildcards
-/// (`*`, `?`, `[`) globs, a plain pattern must match exactly. An empty
+/// Whether a selector is allowed by the `allowedModels` patterns (the
+/// `--models` grammar, case-insensitive, matched against the full selector
+/// `provider/model-id` and the bare id, whose `prime-inference` ids may
+/// carry slashes): wildcards glob, plain patterns match exactly. An empty
 /// pattern list allows nothing.
 #[must_use]
 pub fn model_allowed(selector: &str, allowlist: &[String]) -> bool {
@@ -80,12 +67,10 @@ mod tests {
 
     #[test]
     fn exact_and_bare_id_patterns_match_case_insensitively() {
-        // Full selector, exact.
         assert!(model_allowed(
             SELECTOR,
             &["prime-inference/internal/glm-5.3-fast".to_string()]
         ));
-        // Case folds both sides.
         assert!(model_allowed(
             SELECTOR,
             &["Prime-Inference/Internal/GLM-5.3-Fast".to_string()]
@@ -97,7 +82,6 @@ mod tests {
             &["internal/glm-5.3-fast".to_string()]
         ));
         assert!(!model_allowed(SELECTOR, &["glm-5.3-fast".to_string()]));
-        // A different model does not.
         assert!(!model_allowed(
             SELECTOR,
             &["prime-inference/internal/glm-5.3-turbo".to_string()]
@@ -121,9 +105,7 @@ mod tests {
         // An empty pattern list allows nothing (the settings getter never
         // produces one, but the matching must stay total).
         assert!(!model_allowed(SELECTOR, &[]));
-        // Blank patterns never match.
         assert!(!model_allowed(SELECTOR, &["  ".to_string()]));
-        // An invalid glob never matches.
         assert!(!model_allowed(SELECTOR, &allow("[")));
     }
 

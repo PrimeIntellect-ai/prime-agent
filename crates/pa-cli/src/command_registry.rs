@@ -1,8 +1,7 @@
-//! Command specs and help formatting, ported from `cli/command-registry.ts`.
+//! Command specs and help formatting.
 
 use crate::config::APP_NAME;
 
-/// A registered public command.
 #[derive(Debug, Clone)]
 pub struct CommandSpec {
     pub path: &'static [&'static str],
@@ -117,6 +116,14 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         "Show background service status",
     ),
     CommandSpec::new(
+        &["telemetry"],
+        "telemetry [status|on|off]",
+        "Show or change usage telemetry",
+    )
+    .description(
+        "Prime Agent sends pseudonymous usage and performance metrics, never prompts, responses, tool content, file paths, or repository data. status (the default) shows whether telemetry is on and why, where it sends, and the installation id; on and off save the choice in settings.",
+    ),
+    CommandSpec::new(
         &["doctor"],
         "doctor [--fix] [--json]",
         "Inspect and safely clean up background services",
@@ -173,7 +180,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         "package <install|remove|list|update>",
         "Manage capability packages",
     )
-    .description("Packages can provide extensions, skills, prompts, and themes."),
+    .description("Packages can provide skills, prompts, and themes."),
     CommandSpec::new(
         &["package", "install"],
         "package install <source> [--local]",
@@ -198,28 +205,28 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
     ),
     CommandSpec::new(
         &["update"],
-        "update [--check]",
+        "update [--check] [--nightly|--stable]",
         "Update to the latest Rust build (uninstalls the TypeScript version)",
     )
     .options(&[
-        "--check  Print the latest available build vs the running version, without installing",
-        "--force     Reinstall even if the current version is the latest on the channel (the managed-install flow)",
-        "--rollback  Restore the previous compiled release (the managed-install flow)",
-        "--nightly   Switch updates to the nightly channel (the managed-install flow)",
-        "--stable    Return updates to the stable channel (the managed-install flow)",
-        "--archive <path>  Install a local release payload (the managed-install flow)",
-        "--source <url>     The https:// origin recorded as the release's install source (required with --archive)",
+        "--check  Print the update channel's latest release vs the running version, without installing",
+        "--force     Reinstall the latest build of the channel",
+        "--rollback  Restore the previous version the last update kept",
+        "--nightly   Switch updates to the nightly channel (the latest main build)",
+        "--stable    Return updates to the stable channel",
+        "--archive <path>  Install a local release archive",
+        "--source <url>     The https:// origin recorded as the release's install source (managed installs; required there with --archive)",
     ])
     .description(
         "Move from the TypeScript version to the Rust port in one step: `prime-agent update` \
-         fetches the installer from the official domain endpoint \
-         (https://app.primeintellect.ai/prime-agent/install.sh — never a GitHub raw or workflow \
-         URL) and runs it, which uninstalls the TypeScript version and installs the latest Rust \
-         build; your sessions and configuration (~/.prime/agent) are never touched. Restart \
-         prime-agent after the update to run the new build. This command exists only in the \
-         Rust binary — the TypeScript version does not have it; the move happens when you run \
-         the installer's curl|sh URL (the README's Install section) or `prime-agent update` \
-         (after the Rust install exists).",
+         fetches the update channel's installer (stable: \
+         https://app.primeintellect.ai/prime-agent/install.sh; nightly: install-beta.sh from the \
+         release download base — never a GitHub raw or workflow URL) and runs it, which \
+         uninstalls the TypeScript version and installs the latest Rust build; your sessions and \
+         configuration (~/.prime/agent) are never touched. Restart prime-agent after the update \
+         to run the new build. This command exists only in the Rust binary — the TypeScript \
+         version does not have it; the move happens when you run the installer's curl|sh URL (the \
+         README's Install section) or `prime-agent update` (after the Rust install exists).",
     ),
     CommandSpec::new(&["model"], "model list [search]", "Inspect available models"),
     CommandSpec::new(&["model", "list"], "model list [search]", "List available models"),
@@ -234,6 +241,51 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         "Export a saved session to HTML",
     ),
     CommandSpec::new(&["config"], "config", "Configure package resources"),
+    CommandSpec::new(
+        &["factory"],
+        "factory <list|import|export>",
+        "Share and run factory machines from the machine library",
+    )
+    .description(
+        "Machines are MACHINE.md templates (frontmatter plus a fenced machine-spec block) \
+resolved from the bundled library shipped inside the runtime, then from the personal \
+library under the agent dir. Run one with `await rlm.factory.run(\"<name>\")` from a session.",
+    ),
+    CommandSpec::new(
+        &["factory", "list"],
+        "factory list [--json]",
+        "List the machine library",
+    )
+    .description(
+        "Lists the bundled machines and the personal machines with their descriptions; \
+files that fail the parser skip with a warning.",
+    )
+    .options(&["--json  Print JSON"]),
+    CommandSpec::new(
+        &["factory", "import"],
+        "factory import <path> [--json]",
+        "Validate and import a MACHINE.md into the personal library",
+    )
+    .description(
+        "The machine's spec passes the kernel's write-time validator; an invalid spec \
+never persists and the exact errors print verbatim.",
+    )
+    .options(&["--json  Print JSON"]),
+    CommandSpec::new(
+        &["factory", "export"],
+        "factory export <name> --out <path> [--json]",
+        "Export a machine to a MACHINE.md file",
+    )
+    .description(
+        "Resolves the library machine named <name> (bundled first, then the personal \
+library) and copies its MACHINE.md to the output path; an existing target is \
+refused, never overwritten.",
+    )
+    .options(&[
+        "--out <path>  Destination MACHINE.md path",
+        "--json        Print JSON",
+    ])
+    .examples(&["factory export review-sweep --out shared-review-sweep.MACHINE.md"]),
     CommandSpec::new(
         &["prompt"],
         "prompt [--model <selector>] [--cwd <dir>] [--json]",
@@ -254,7 +306,6 @@ and prints the per-layer breakdown (cached static layers, then the dynamic tail)
 pub const REMOVED_COMMAND_NAMES: &[&str] =
     &["app", "daemon", "install", "manage", "remove", "uninstall"];
 
-/// The top-level public command names.
 pub fn public_command_names() -> Vec<&'static str> {
     COMMAND_SPECS
         .iter()
@@ -324,16 +375,8 @@ const TOP_LEVEL_OPTION_GROUPS: &[OptionGroup] = &[
         ],
     },
     OptionGroup {
-        heading: "Tool and resource options",
+        heading: "Resource options",
         options: &[
-            ("-t, --tools <list>", "Allowlist comma-separated tool names"),
-            ("-nt, --no-tools", "Disable all tools by default"),
-            (
-                "-nbt, --no-builtin-tools",
-                "Disable built-in tools by default",
-            ),
-            ("-e, --extension <source>", "Load an extension (repeatable)"),
-            ("-ne, --no-extensions", "Disable extension discovery"),
             ("--skill <path>", "Load a skill (repeatable)"),
             ("-ns, --no-skills", "Disable skill discovery"),
             (
@@ -412,14 +455,12 @@ const TOP_LEVEL_OPTION_GROUPS: &[OptionGroup] = &[
     },
 ];
 
-/// Look up a command spec by its exact path.
 pub fn get_command_spec(path: &[&str]) -> Option<&'static CommandSpec> {
     COMMAND_SPECS.iter().find(|spec| {
         spec.path.len() == path.len() && spec.path.iter().zip(path).all(|(a, b)| a == b)
     })
 }
 
-/// The direct child command specs of a path.
 pub fn get_child_command_specs(path: &[&str]) -> Vec<&'static CommandSpec> {
     COMMAND_SPECS
         .iter()
@@ -452,9 +493,8 @@ pub fn is_help_command_request(path: &[&str]) -> bool {
     find_command_suggestion(path[path.len() - 1], &candidates).is_some()
 }
 
-/// Suggest the closest candidate command name. The edit-distance heuristic
-/// (`findSlashCommandSuggestion` in core/slash-commands.ts) is shared
-/// vocabulary: `pa_types::slash_commands`.
+/// Suggest the closest candidate command name (the shared edit-distance
+/// heuristic in `pa_types::slash_commands`).
 pub fn find_command_suggestion<'a>(input: &str, candidates: &[&'a str]) -> Option<&'a str> {
     pa_types::slash_commands::find_slash_command_suggestion(input, candidates)
 }
@@ -468,7 +508,7 @@ fn pad_end(value: &str, width: usize) -> String {
     }
 }
 
-/// The full `--help` output, mirroring `formatTopLevelHelp`.
+/// The full `--help` output.
 pub fn format_top_level_help() -> String {
     let commands: Vec<&CommandSpec> = COMMAND_SPECS
         .iter()
@@ -525,7 +565,7 @@ pub fn format_top_level_help() -> String {
     )
 }
 
-/// Per-command help output, mirroring `formatCommandHelp`.
+/// Per-command help output.
 pub fn format_command_help(path: &[&str]) -> Option<String> {
     let spec = get_command_spec(path)?;
     let children = get_child_command_specs(path);

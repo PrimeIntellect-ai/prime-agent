@@ -1310,6 +1310,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha1",
  "sha2",
  "tar",
  "tempfile",
@@ -1335,9 +1336,11 @@ dependencies = [
  "pa-models",
  "pa-telemetry",
  "pa-types",
+ "proptest",
  "serde",
  "serde_json",
  "sha2",
+ "socket2",
  "tempfile",
  "thiserror",
  "tokio",
@@ -1383,6 +1386,7 @@ version = "0.9.8"
 dependencies = [
  "anyhow",
  "reqwest",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "tempfile",
@@ -1425,6 +1429,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "socket2",
  "tempfile",
  "thiserror",
  "tokio",
@@ -2864,9 +2869,9 @@ dependencies = [
 
 [[package]]
 name = "yoke-derive"
-version = "0.8.3"
+version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33811428bee40dbceb6d545e95754741d17a6aef9a4849f0fd62e2ba4f412a78"
+checksum = "ec8ebde2db3681e8c9980cc27822030e68752690ddfa9473e739aeb4dbde6d71"
 dependencies = [
  "proc-macro2",
  "quote",
