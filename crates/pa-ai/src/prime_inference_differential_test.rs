@@ -47,6 +47,7 @@ fn glm_53_flash(base_url: &str) -> Model {
         },
         context_window: 1_310_720,
         max_tokens: 131_072,
+        max_tokens_explicit: false,
         featured: None,
         headers: None,
         compat: Some(crate::types::ModelCompat::from_kind(

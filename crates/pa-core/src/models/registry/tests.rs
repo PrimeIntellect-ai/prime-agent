@@ -40,6 +40,20 @@ fn in_memory_loads_built_in_catalog() {
         .any(|m| m.id == "internal/glm-5.2-fast"));
 }
 
+/// TS `755-configured-max-tokens.test.ts`: built-in catalog models stay
+/// unmarked when no override configures `maxTokens` — the default 32000
+/// ceiling keeps applying to them (901 of the catalog's models declare
+/// more than 32000 and their request size must not change).
+#[test]
+fn built_in_catalog_models_stay_unmarked() {
+    let registry = ModelRegistry::in_memory(auth_with(&serde_json::json!({})));
+    assert!(!registry.get_all().is_empty());
+    assert!(registry
+        .get_all()
+        .iter()
+        .all(|model| !model.max_tokens_explicit));
+}
+
 #[test]
 fn available_filters_by_configured_auth() {
     let auth = auth_with(&serde_json::json!({
