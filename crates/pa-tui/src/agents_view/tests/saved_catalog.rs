@@ -3,11 +3,9 @@
 
 use super::*;
 
-/// The streamed catalog lands progressively: a buffered row flushes
-/// as one rebuild, and the entry anchor's wait ends with the flush -
-/// the row the scan streams first (newest) is selectable (and
-/// Enter-able) inside the first batch window instead of after the
-/// whole scan (the operator's `Still loading sessions` hold).
+/// The streamed catalog lands progressively: the row the scan streams first (newest) is
+/// selectable inside the first batch window instead of after the whole scan (the operator's
+/// `Still loading sessions` hold).
 #[test]
 fn streamed_catalog_rows_land_progressively_and_settle_the_anchor() {
     let mut mode = mode_with_anchor(
@@ -22,7 +20,6 @@ fn streamed_catalog_rows_land_progressively_and_settle_the_anchor() {
         "the anchor landed from the stream, before the final response"
     );
     assert_eq!(mode.rows[mode.selected].summary["sessionId"], "s2");
-    // Enter opens the anchor now: no hint, no wait.
     mode.handle_key("enter");
     assert!(
         mode.opened.is_some(),
@@ -31,10 +28,8 @@ fn streamed_catalog_rows_land_progressively_and_settle_the_anchor() {
     assert_ne!(mode.status_text(), Some(ANCHOR_LOADING_HINT));
 }
 
-/// The streamed upsert never duplicates: a row re-streamed by a
-/// superseded fetch's late frames replaces by path (then durable id),
-/// and the final response's authoritative array replaces the whole
-/// catalog.
+/// The streamed upsert never duplicates: a re-streamed row replaces by path (then durable id),
+/// and the final response's authoritative array replaces the whole catalog.
 #[test]
 fn streamed_catalog_upserts_by_identity_and_the_final_response_replaces() {
     let mut mode = mode_with_anchor(None, vec![]);
@@ -52,12 +47,10 @@ fn streamed_catalog_upserts_by_identity_and_the_final_response_replaces() {
         "the same path upserts, never duplicates"
     );
     assert_eq!(mode.saved[0]["name"], "first (again)");
-    // A row whose path moved but id survived still upserts by id.
     mode.buffer_saved_stream_item(saved_catalog_row("/x/a-moved.jsonl", "a", "moved"));
     assert!(mode.flush_saved_stream());
     assert_eq!(mode.saved.len(), 2, "the durable id upserts too");
     assert_eq!(mode.saved[0]["path"], "/x/a-moved.jsonl");
-    // The final response replaces the catalog wholesale.
     mode.drop_saved_stream();
     mode.saved = vec![saved_catalog_row(
         "/x/c.jsonl",
@@ -70,12 +63,8 @@ fn streamed_catalog_upserts_by_identity_and_the_final_response_replaces() {
     assert!(mode.saved_stream.is_empty());
 }
 
-/// The carried catalog seeds the mode (TS
-/// `persistentState.savedSessions`): the surface writes the link's
-/// rows into `saved` before the first rebuild, so the Inactive
-/// section paints them immediately, the anchor lands from the carried
-/// rows, and a terminal load flips the loaded flag for the flow's
-/// next run.
+/// The carried catalog seeds the mode: the link's rows paint the Inactive section immediately,
+/// and a terminal load flips the loaded flag for the flow's next run.
 #[test]
 fn the_carried_catalog_paints_and_the_load_flags_the_carry() {
     let mut mode = mode_with_anchor(Some("s2"), vec![]);
@@ -83,7 +72,6 @@ fn the_carried_catalog_paints_and_the_load_flags_the_carry() {
         mode.saved.is_empty() && !mode.saved_catalog_loaded,
         "a fresh run starts with no catalog"
     );
-    // The surface's seeding (the link's carried rows).
     mode.saved = vec![saved_catalog_row("/x/s2.jsonl", "s2", "carried chat")];
     mode.rebuild_rows();
     assert!(

@@ -1,7 +1,5 @@
-//! Process-kill primitives for stopping daemons and tracked workers (TS
-//! `forceKillDaemon`, `stopTrackedProcess`, `terminateVerifiedListener(s)`):
-//! every signal is identity-gated by the process start id so a recycled pid
-//! can never be mistaken for the process discovery saw.
+//! Process-kill primitives: every signal is identity-gated by the process start
+//! id so a recycled pid can never be mistaken for the process discovery saw.
 
 use std::path::Path;
 
@@ -10,17 +8,15 @@ use pa_types::platform::process::{is_process_alive, process_start_id};
 
 use super::{evaluate_shutdown_quiet_period, DaemonStateRoot, DiscoveredDaemonProcess};
 
-/// How long the residual sweep may run before it declares the listener set
-/// stuck (TS `SHUTDOWN_CONVERGENCE_TIMEOUT_MS`).
+/// How long the residual sweep may run before it declares the listener
+/// set stuck.
 const SHUTDOWN_CONVERGENCE_TIMEOUT_MS: u128 = 10_000;
 
-/// Verified force-kill (TS `forceKillDaemon`, hardened): SIGTERM, a 1s
-/// grace, then SIGKILL, then a poll loop (25ms slices, 1s deadline) that
-/// reports the kill only once the process is confirmed gone (zombies count
-/// as dead — [`is_process_alive`]'s lease semantics). TS fires the
-/// SIGKILL and returns without verifying; the supervisor-side stop paths
-/// here must not claim a stop a D-state process never performed, so the
-/// verdict is the divergence.
+/// Verified force-kill, hardened: SIGTERM, a 1s grace, then SIGKILL, then a
+/// poll loop (25ms slices, 1s deadline) reporting the kill only once the
+/// process is confirmed gone (zombies count as dead — [`is_process_alive`]).
+/// Deliberate TS divergence (TS fires SIGKILL and returns without verifying):
+/// a stop path must not claim a stop a D-state process never performed.
 pub(super) fn force_kill_daemon(pid: u32) -> bool {
     kill_daemon(pid);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
@@ -53,9 +49,8 @@ pub(super) fn is_alive(pid: u32) -> bool {
     is_process_alive(pid).unwrap_or(false)
 }
 
-/// Remove a socket file if present; false when the unlink fails (TS
-/// `removeSocketFile`). Never-touch paths are refused here as the last line
-/// of containment, whatever the caller derived.
+/// Remove a socket file if present; false when the unlink fails. Never-touch
+/// paths are refused here as the last line of containment.
 pub(super) fn remove_socket_file(socket_path: &Path) -> bool {
     if super::is_never_touch(socket_path) {
         return false;
@@ -67,10 +62,8 @@ pub(super) fn remove_socket_file(socket_path: &Path) -> bool {
     }
 }
 
-/// Stop every worker tracked for one supervisor socket and clean up its
-/// records (TS `forceStopTrackedWorkers`). Returns the failure reasons.
-/// Workers are read from the given agent dir only (the invocation's state
-/// root), never the ambient agent dir.
+/// Stop every worker tracked for one supervisor socket and clean up its records.
+/// Returns the failure reasons. Workers are read from the given agent dir.
 pub(super) fn force_stop_tracked_workers(
     supervisor_socket_path: &Path,
     agent_dir: &Path,
@@ -96,9 +89,8 @@ pub(super) fn force_stop_tracked_workers(
     Ok(failures)
 }
 
-/// Identity-gated stop: SIGTERM the worker (it exits keeping its resume
-/// entry), then SIGKILL if it hangs (TS `stopTrackedProcess`). The start-id
-/// gate defeats pid reuse between discovery and the signal.
+/// Identity-gated stop: SIGTERM the worker (it exits keeping its resume entry),
+/// then SIGKILL if it hangs. The start-id gate defeats pid reuse.
 pub(super) fn stop_tracked_process(pid: u32, expected_start_id: Option<&str>) -> bool {
     if !is_alive(pid) {
         return true;
@@ -129,11 +121,11 @@ pub(super) fn stop_tracked_process(pid: u32, expected_start_id: Option<&str>) ->
     !is_alive(pid)
 }
 
-/// The `--force` residual sweep (TS `terminateVerifiedResiduals`): kill
-/// whatever product listeners remain in the invocation's state root until
-/// the set quiets down or proves stuck; report the survivors as failures.
-/// The sweep re-scans with the same root it was given, so daemons in any
-/// other root — or on the never-touch list — are never candidates.
+/// The `--force` residual sweep: kill whatever product listeners remain in
+/// the invocation's state root until the set quiets down or proves stuck;
+/// report the survivors as failures. The sweep re-scans with the same root,
+/// so daemons in any other root — or on the never-touch list — are never
+/// candidates.
 pub(super) fn terminate_verified_residuals(
     root: &DaemonStateRoot,
     stopped: &mut Vec<(String, String)>,
@@ -206,8 +198,8 @@ pub(super) fn record_residuals(
     }
 }
 
-/// Kill one verified listener (TS `terminateVerifiedListener`): the start-id
-/// gate must still name the same process before and after the signal.
+/// Kill one verified listener: the start-id gate must still name the
+/// same process before and after the signal.
 pub(super) fn terminate_verified_listener(listener: &DiscoveredDaemonProcess) -> bool {
     let Some(start_id) = process_start_id(listener.pid) else {
         return false;
@@ -224,10 +216,8 @@ pub(super) fn terminate_verified_listener(listener: &DiscoveredDaemonProcess) ->
     }
     if process_start_id(listener.pid).as_deref() == Some(start_id.as_str()) {
         let _ = kill_pid(listener.pid as i32, Signal::Kill);
-        // Verified death (the same hardening as `force_kill_daemon`): a
-        // single post-SIGKILL check races a slow teardown or reads a
-        // mid-death process as survived, so poll the identity until it
-        // changes or the deadline lapses.
+        // Verified death (the same hardening as `force_kill_daemon`): a single
+        // post-SIGKILL check races a slow teardown, so poll the identity.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
         while process_start_id(listener.pid).as_deref() == Some(start_id.as_str())
             && std::time::Instant::now() < deadline
@@ -315,9 +305,8 @@ mod tests {
     }
 
     fn spawn_term_ignoring_shell() -> std::process::Child {
-        // A shell that swallows SIGTERM: the force-kill must escalate to
-        // SIGKILL to make it die (the grandchild `sleep 1` exits on its own
-        // at most a second after the shell dies, so no stray processes).
+        // A shell that swallows SIGTERM: the force-kill must escalate to SIGKILL
+        // (the grandchild `sleep 1` exits on its own shortly after, no strays).
         std::process::Command::new("sh")
             .arg("-c")
             .arg("trap : TERM; while :; do sleep 1; done")
@@ -375,11 +364,8 @@ mod tests {
             .spawn()
             .expect("spawn a sleep child");
         let pid = child.id();
-        // A dead direct child lingers as a zombie until its parent reaps
-        // it, and a zombie's start id never changes - the production
-        // daemon's parent (the spawning shell) reaps it, so the test
-        // reaps concurrently or the identity poll would outwait both
-        // deadlines on a process that is already dead.
+        // A dead direct child lingers as a zombie until its parent reaps it, and
+        // a zombie's start id never changes — the test reaps concurrently.
         let reaper = std::thread::spawn(move || child.wait());
         let listener = DiscoveredDaemonProcess {
             pid,

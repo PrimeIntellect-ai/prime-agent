@@ -1,10 +1,7 @@
-//! Session JSONL entry format, ported from
-//! `packages/coding-agent/src/core/session-manager.ts` (entries) and
-//! `packages/coding-agent/src/core/messages.ts` (coding-agent message roles).
-//!
-//! Session files are append-only JSONL: the first line is a [`FileEntry::Header`]
-//! (session header), every following line is one [`FileEntry`] entry. Entry
-//! timestamps are ISO-8601 strings; message timestamps are Unix milliseconds.
+//! Session JSONL entry format (TS `session-manager.ts` entries, `messages.ts` message roles):
+//! append-only JSONL - the first line is a [`FileEntry::Header`], every following line is one
+//! [`FileEntry`] entry. Entry timestamps are ISO-8601 strings; message timestamps are Unix
+//! milliseconds.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -13,10 +10,6 @@ use crate::ai::{
     AssistantMessage, ServiceTier, ToolResultMessage, Usage, UserContent, UserMessage,
 };
 use crate::JsonMap;
-
-// ---------------------------------------------------------------------------
-// Git context
-// ---------------------------------------------------------------------------
 
 /// Git repository identity captured alongside session headers and `git_state` entries.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -30,21 +23,12 @@ pub struct GitContext {
     pub branch: Option<String>,
 }
 
-// ---------------------------------------------------------------------------
-// Session header
-// ---------------------------------------------------------------------------
-
 /// First line of a session file (`type: "session"`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionHeader {
-    /// Session format version; v1 sessions have no `version` field.
-    ///
-    /// Field order is the TS `SessionHeader` declaration order
-    /// (`type` tag, `version`, `id`, `timestamp`, `cwd`, `parentSession`,
-    /// `rlmDepth`, `git`); the serialized line must byte-match the TS
-    /// session file's first line, and the JSON map preserves this order
-    /// (the workspace's `serde_json` runs with `preserve_order`).
+    /// Session format version; v1 sessions have no `version` field. Field order must byte-match the
+    /// TS session file's first line (`preserve_order`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<u32>,
     /// A single file name: the session's artifact dir joins it under
@@ -142,8 +126,8 @@ pub struct CompactionSummaryMessage {
     /// Harness digest snapshot attached mechanically at compaction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_digest: Option<String>,
-    /// Fingerprint of the harness state behind `harness_digest` at
-    /// compaction time; lets cold boundaries skip re-delivery (TS #2400).
+    /// Fingerprint of the harness state behind `harness_digest`; lets cold
+    /// boundaries skip re-delivery (TS #2400).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_state_fingerprint: Option<String>,
     /// Unix timestamp in milliseconds.
@@ -163,10 +147,6 @@ pub enum AgentMessage {
     BranchSummary(BranchSummaryMessage),
     CompactionSummary(CompactionSummaryMessage),
 }
-
-// ---------------------------------------------------------------------------
-// Session entries
-// ---------------------------------------------------------------------------
 
 /// `type: "message"`: one conversation message.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -222,8 +202,8 @@ pub struct CompactionEntry {
     /// Harness digest snapshot taken at compaction time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_digest: Option<String>,
-    /// Fingerprint of the harness state behind `harness_digest` at
-    /// compaction time; lets cold boundaries skip re-delivery (TS #2400).
+    /// Fingerprint of the harness state behind `harness_digest`; lets cold
+    /// boundaries skip re-delivery (TS #2400).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_state_fingerprint: Option<String>,
 }
@@ -334,22 +314,12 @@ pub struct CustomMessageEntry {
     pub rest: JsonMap,
 }
 
-// ---------------------------------------------------------------------------
-// File entry
-// ---------------------------------------------------------------------------
-
-/// One line of a session JSONL file: the header on line one, then tree entries.
+/// One line of a session JSONL file: the header on line one, then tree entries sharing `id`,
+/// `parentId` (null at the root), and an ISO-8601 `timestamp`; the `type` tag selects the payload.
 ///
-/// Every entry shares `id`, `parentId` (null at the root), and an ISO-8601
-/// `timestamp`; the `type` tag selects the payload.
-///
-/// Deserialization is catch-all like the TS loader (`JSON.parse` per line):
-/// an entry whose `type` is not a known kind - written by a newer build, or a
-/// different JSONL file in the sessions tree - is preserved verbatim as
-/// [`FileEntry::Unknown`] instead of failing the whole session load. A known
-/// kind that fails its own payload validation also degrades to `Unknown`
-/// (lossless: the original JSON is kept), so a corrupt line can never block
-/// a resume.
+/// Deserialization is catch-all like the TS loader: an unknown `type`, or a known kind whose
+/// payload fails validation, degrades verbatim to [`FileEntry::Unknown`] instead of failing the
+/// whole session load.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(
     tag = "type",
@@ -439,17 +409,16 @@ pub enum FileEntry {
         #[serde(flatten)]
         base: EntryBase,
     },
-    /// An entry this version does not model (unknown `type` tag, or a known
-    /// tag whose payload failed validation); preserved verbatim.
+    /// An entry this version does not model (unknown `type` tag or failed
+    /// payload); preserved verbatim.
     Unknown {
         #[serde(flatten)]
         rest: JsonMap,
     },
 }
 
-/// Derived internally-tagged deserialization form of [`FileEntry`] over the
-/// known entry types; [`FileEntry`] falls back to [`FileEntry::Unknown`] for
-/// anything else (see [`FileEntry`] docs).
+/// Internally-tagged deserialization form of [`FileEntry`] over the known
+/// types; [`FileEntry`] falls back to [`FileEntry::Unknown`] for the rest.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(
     tag = "type",
@@ -575,8 +544,6 @@ impl From<KnownFileEntry> for FileEntry {
 impl<'de> Deserialize<'de> for FileEntry {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = Value::deserialize(deserializer)?;
-        // Known kinds parse through the tagged mirror; anything else degrades
-        // to the verbatim `Unknown` entry instead of failing the load.
         match KnownFileEntry::deserialize(&value) {
             Ok(entry) => Ok(FileEntry::from(entry)),
             Err(_) => match value {
@@ -700,8 +667,7 @@ mod tests {
 
     #[test]
     fn unknown_entry_type_is_preserved_verbatim() {
-        // Live shape from a daemon semantic-edge stream: an entry kind this
-        // version does not model must not fail the load.
+        // Live shape from a daemon semantic-edge stream: must not fail the load.
         let json = r#"{"type":"request_started","request_id":"r","session_id":"s"}"#;
         let FileEntry::Unknown { rest } = entry(json) else {
             panic!("expected an Unknown entry");
@@ -722,8 +688,7 @@ mod tests {
 
     #[test]
     fn malformed_known_entry_degrades_to_unknown_verbatim() {
-        // A known tag with an invalid payload must not fail the whole session
-        // load; the line is preserved exactly as written.
+        // A known tag with an invalid payload must not fail the whole load.
         let json = r#"{"type":"model_change","id":"m1","provider":123,"modelId":null}"#;
         let FileEntry::Unknown { rest } = entry(json) else {
             panic!("expected an Unknown entry");

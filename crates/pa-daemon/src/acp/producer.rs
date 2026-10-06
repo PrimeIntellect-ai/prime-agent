@@ -1,14 +1,8 @@
-//! The sole producer of ACP `session/update` notifications for one session.
-//!
-//! ACP notifications are asynchronous, so assigning an id at each call site
-//! is insufficient: detached calls can be observed out of order. This
-//! producer serializes publication and stamps the *delivered* order:
-//! a strictly increasing `eventSequence` per connection, the
-//! `promptTurnId` allocated at prompt admission, and a phase
-//! (ordinary work / response boundary / terminal quiescence). Updates
-//! published before the `session/new` response is queued are held in a
-//! buffer and released after it, so no session-scoped update can precede
-//! the admission response.
+//! The sole producer of ACP `session/update` notifications for one session:
+//! serializes publication and stamps the delivered order (a strictly
+//! increasing `eventSequence`, the `promptTurnId` allocated at prompt
+//! admission, and a phase). Updates published before the `session/new`
+//! response is queued are held and released after it.
 
 use std::sync::Arc;
 
@@ -27,7 +21,6 @@ use serde_json::{json, Value};
 /// publication order.
 pub type FrameSink = tokio::sync::mpsc::UnboundedSender<Value>;
 
-/// Per-session update producer.
 pub struct UpdateProducer {
     session_id: String,
     sink: FrameSink,
@@ -113,9 +106,9 @@ impl UpdateProducer {
         state.admission.held.clear();
     }
 
-    /// Publish one update with its correlation fields. Returns `false`
-    /// when the producer is fenced or the sink is gone; a false boundary
-    /// publication fails the prompt (TS reports the same failure).
+    /// Publish one update with its correlation fields. Returns `false` when
+    /// the producer is fenced or the sink is gone; a false boundary
+    /// publication fails the prompt.
     pub async fn publish(
         &self,
         update: &AcpSessionUpdate,

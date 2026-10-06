@@ -1,12 +1,7 @@
-//! Orphan-process journal: how the host tracks `bash()` children a kernel left
-//! behind, so a killed/crashed kernel cannot leak process groups.
-//!
-//! The Python runtime journals every `bash()` process group under the kernel
-//! pid (`kernelPid`) into the file named by `PRIME_AGENT_INTERNAL_ORPHAN_PROCESS_JOURNAL`;
-//! the host reaps those groups when the kernel dies without running its
-//! shutdown hook.
-//!
-//! Ported from `core/orphan-process-journal.ts`.
+//! Orphan-process journal: the runtime journals every `bash()` process group
+//! under the kernel pid into the file named by
+//! `PRIME_AGENT_INTERNAL_ORPHAN_PROCESS_JOURNAL`; the host reaps those
+//! groups when a killed/crashed kernel cannot run its own shutdown hook.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -21,10 +16,8 @@ pub const ORPHAN_PROCESS_JOURNAL_ENV: &str = "PRIME_AGENT_INTERNAL_ORPHAN_PROCES
 pub struct ActiveOrphanProcess {
     pub pid: i32,
     pub kernel_pid: Option<i32>,
-    /// Missing on identity-free records: old journals or host writes whose
-    /// start-id query failed. Identity-free records cannot prove the pid still
-    /// names the journaled process; on POSIX the group-scoped kill stays
-    /// best-effort safe, so they may still be reaped.
+    /// Missing on identity-free records: old journalsthe POSIX group-scoped kill stays best-effort
+    /// safe.
     pub process_start_id: Option<String>,
 }
 
@@ -121,14 +114,11 @@ fn civil_from_unix(secs: i64) -> (i64, u32, u32, u32, u32, u32) {
 ///
 /// # Errors
 ///
-/// Returns an error when the journal file cannot be read (a missing file is
-/// an empty record; malformed or partial lines are skipped).
+/// Returns an error when the journal file cannot be read (a missing file is an empty record).
 ///
 /// # Panics
 ///
-/// The `pid` field of a record is unwrapped, but only after the validity
-/// filter guarantees it is a positive integer, so the unwraps are
-/// unreachable.
+/// The `pid` unwrap is unreachable behind the validity filter.
 pub fn read_active_orphan_processes(path: &Path) -> anyhow::Result<Vec<ActiveOrphanProcess>> {
     let owner_pid = i64::from(std::process::id());
     let contents = match std::fs::read_to_string(path) {

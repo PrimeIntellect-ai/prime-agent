@@ -1,10 +1,7 @@
 //! `PackageManager`: install/remove/list/update of package sources against
-//! the settings store.
-//!
-//! Scope semantics: `user` sources install into the agent directory and
-//! global npm root; `project` sources install under the project config dir
-//! (`.prime/agent`) and install into the project npm prefix. Local sources
-//! bind directly by path and persist relative to their settings base.
+//! the settings store. `user` installs into the agent directory and global
+//! npm root; `project` into `.prime/agent` and the project npm prefix;
+//! local sources bind by path, persisted relative to their settings base.
 
 use std::path::{Path, PathBuf};
 
@@ -66,8 +63,7 @@ pub struct PackageUpdate {
 /// Progress sink for install/remove/update operations.
 type ProgressCallback = Box<dyn Fn(&ProgressEvent) + Send>;
 
-/// Built-in skills directory selection: the packaged layout, disabled
-/// entirely, or an explicit directory.
+/// Built-in skills directory selection: packaged, disabled, or explicit.
 #[derive(Debug, Clone, Default)]
 pub enum BundledSkillsDir {
     /// Exe-adjacent `skills/` (the packaged layout).
@@ -75,11 +71,9 @@ pub enum BundledSkillsDir {
     Packaged,
     /// Built-in skills disabled (tests, embedded hosts).
     Disabled,
-    /// An explicit directory.
     Directory(PathBuf),
 }
 
-/// Construction options for [`PackageManager`].
 pub struct PackageManagerOptions {
     pub cwd: PathBuf,
     pub agent_dir: PathBuf,
@@ -240,8 +234,7 @@ impl PackageManager {
     ///
     /// # Errors
     ///
-    /// Returns an error when the installation fails; settings are only
-    /// updated when it succeeds.
+    /// Error when the installation fails; settings are only updated when it succeeds.
     pub fn install_and_persist(&mut self, source: &str, scope: UserOrProject) -> Result<()> {
         self.install(source, scope)?;
         self.add_source_to_settings(source, scope);
@@ -252,8 +245,7 @@ impl PackageManager {
     ///
     /// # Errors
     ///
-    /// Returns an error when the npm or git install fails, or when a local
-    /// source path does not exist.
+    /// Error when the npm or git install fails, or a local source path does not exist.
     pub fn install(&mut self, source: &str, scope: UserOrProject) -> Result<()> {
         let parsed = parse_source(source);
         self.with_progress(
@@ -282,8 +274,7 @@ impl PackageManager {
     ///
     /// # Errors
     ///
-    /// Returns an error when the npm uninstall or git removal fails. Local
-    /// sources have no installed files and always succeed.
+    /// Error when the npm uninstall or git removal fails; local sources always succeed.
     pub fn remove(&mut self, source: &str, scope: UserOrProject) -> Result<()> {
         let parsed = parse_source(source);
         self.with_progress(
@@ -310,15 +301,13 @@ impl PackageManager {
     ///
     /// # Errors
     ///
-    /// Returns an error when the removal fails; settings are only updated
-    /// when it succeeds.
+    /// Error when the removal fails; settings are only updated when it succeeds.
     pub fn remove_and_persist(&mut self, source: &str, scope: UserOrProject) -> Result<bool> {
         self.remove(source, scope)?;
         Ok(self.remove_source_from_settings(source, scope))
     }
 
-    /// Add a source to settings; false when an equivalent source is already
-    /// configured.
+    /// Add a source to settings; false when an equivalent one is configured.
     pub fn add_source_to_settings(&mut self, source: &str, scope: UserOrProject) -> bool {
         let current: Vec<serde_json::Value> = self.packages_for_scope(scope).unwrap_or_default();
         let normalized = self.normalize_package_source_for_settings(source, scope);
@@ -390,8 +379,6 @@ impl PackageManager {
         }
     }
 
-    // -- scoped settings helpers --------------------------------------------
-
     pub(super) fn packages_for_scope(
         &self,
         scope: UserOrProject,
@@ -417,8 +404,7 @@ impl PackageManager {
         }
     }
 
-    /// Local sources persist relative to their settings base (git/npm sources
-    /// persist verbatim).
+    /// Local sources persist relative to their settings base; git/npm verbatim.
     fn normalize_package_source_for_settings(&self, source: &str, scope: UserOrProject) -> String {
         if !matches!(parse_source(source), ParsedSource::Local(_)) {
             return source.to_string();
@@ -494,8 +480,6 @@ impl PackageManager {
         }
         super::source::lexical_resolve(base, trimmed)
     }
-
-    // -- npm ------------------------------------------------------------------
 
     pub(super) fn global_npm_root(&self) -> Result<PathBuf> {
         if let Some(root) = &self.global_npm_root {
@@ -614,8 +598,7 @@ impl PackageManager {
     }
 }
 
-/// A settings `packages` entry: a plain source string or the filter object
-/// form (`{ source, skills?, prompts?, themes? }`).
+/// A settings `packages` entry: a plain source string or the filter object form.
 pub(super) fn split_entry(entry: &serde_json::Value) -> (String, bool) {
     match entry {
         serde_json::Value::String(source) => (source.clone(), false),
@@ -691,7 +674,6 @@ mod tests {
             serde_json::json!(["../cwd/local-pkg"])
         );
 
-        // list shows the resolved install path.
         let configured = manager.list_configured_packages();
         assert_eq!(configured.len(), 1);
         assert_eq!(configured[0].source, "../cwd/local-pkg");
@@ -702,7 +684,6 @@ mod tests {
             Some(dir.path().join("cwd").join("local-pkg").as_path())
         );
 
-        // Remove by the equivalent absolute form and confirm the round trip.
         assert!(manager
             .remove_and_persist(
                 &dir.path()
@@ -716,7 +697,6 @@ mod tests {
         assert!(manager.list_configured_packages().is_empty());
         assert_eq!(read_settings(&dir)["packages"], serde_json::json!([]));
 
-        // Removing again is not a match.
         assert!(!manager
             .remove_and_persist("./local-pkg", UserOrProject::User)
             .unwrap());
@@ -788,7 +768,6 @@ mod tests {
         manager
             .install_and_persist("./remove-pkg", UserOrProject::User)
             .unwrap();
-        // A trailing slash resolves to the same identity.
         assert!(manager
             .remove_and_persist("./remove-pkg/", UserOrProject::User)
             .unwrap());

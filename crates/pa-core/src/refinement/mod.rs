@@ -1,6 +1,5 @@
-//! Continual harness state: entries, refinement events, persistence, merge,
-//! history, and prompt rendering. Port of core/refinement/refinement.ts
-//! (state half).
+//! Continual harness state: entries, refinement events, persistence,
+//! merge, history, and prompt rendering.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -12,7 +11,6 @@ pub const REFINEMENT_KINDS: [&str; 5] = ["prompt", "memory", "skill", "subagent"
 
 /// Directory name under the agent dir (or session artifact dir).
 pub const HARNESS_STATE_DIR_NAME: &str = "harness";
-/// Cross-session refinement history file name.
 pub const REFINEMENT_HISTORY_FILE_NAME: &str = "refinement_history.jsonl";
 
 /// Default overview limits (TS `DEFAULT_OVERVIEW_*` constants).
@@ -20,7 +18,6 @@ pub const DEFAULT_OVERVIEW_ENTRY_LIMIT: usize = 3;
 pub const DEFAULT_OVERVIEW_REFINEMENT_LIMIT: usize = 10;
 pub const DEFAULT_OVERVIEW_CONTENT_LIMIT: usize = 140;
 
-/// Harness component kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RefinementKind {
@@ -31,7 +28,6 @@ pub enum RefinementKind {
     Factory,
 }
 
-/// Edit action against a harness entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RefinementAction {
@@ -40,7 +36,6 @@ pub enum RefinementAction {
     Delete,
 }
 
-/// Session scope of a harness entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum HarnessScope {
@@ -48,10 +43,9 @@ pub enum HarnessScope {
     Global,
 }
 
-/// One editable continual harness entry. The TS entry schema keeps
+/// One editable continual harness entry. The TS schema keeps
 /// `created_at`/`updated_at` snake-cased (the rest of the fields are
-/// single words); the wire result and the saved state file both carry the
-/// TS naming.
+/// single words).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessEntry {
@@ -74,7 +68,6 @@ pub struct HarnessEntry {
     pub version: u64,
 }
 
-/// One refinement event record.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessRefinementEvent {
@@ -83,13 +76,11 @@ pub struct HarnessRefinementEvent {
     pub changes: Vec<String>,
     pub evidence: String,
     pub outcome: String,
-    /// The TS event schema keeps the snake-cased `created_at` (the rest of
-    /// the fields are single words).
+    /// The TS event schema keeps the snake-cased `created_at`.
     #[serde(rename = "created_at")]
     pub created_at: String,
 }
 
-/// The persisted continual harness state.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HarnessState {
     pub schema: u64,
@@ -180,8 +171,7 @@ pub fn factory_enabled(agent_dir: &Path) -> bool {
 ///
 /// # Panics
 ///
-/// The `get_mut(kind).unwrap()` on the per-kind entry maps cannot panic:
-/// the empty state pre-populates every kind map.
+/// The `get_mut(kind).unwrap()` cannot panic: the empty state pre-populates every kind map.
 pub fn load_harness_state(harness_state_dir: &Path, scope: HarnessScope) -> HarnessState {
     let state_path = get_harness_state_path(harness_state_dir);
     let Ok(raw) = std::fs::read_to_string(&state_path) else {
@@ -235,8 +225,7 @@ pub fn load_harness_state(harness_state_dir: &Path, scope: HarnessScope) -> Harn
 ///
 /// # Panics
 ///
-/// The `get_mut(kind).unwrap()` on the per-kind entry maps cannot panic:
-/// the empty state pre-populates every kind map.
+/// The `get_mut(kind).unwrap()` cannot panic: the empty state pre-populates every kind map.
 #[must_use]
 pub fn merge_harness_states(
     global_state: &HarnessState,
@@ -286,8 +275,7 @@ pub fn merge_harness_states(
 ///
 /// # Errors
 ///
-/// Returns an error when the harness directory cannot be created, the state
-/// cannot be serialized, or the atomic write fails.
+/// Error when the directory cannot be created, serialization fails, or the atomic write fails.
 pub fn save_harness_state(
     harness_state_dir: &Path,
     state: &HarnessState,
@@ -320,10 +308,9 @@ pub struct RefinementResult {
     pub scope: Option<HarnessScope>,
 }
 
-/// One applied (or failed) edit with before/after snapshots. The wire shape
-/// is the TS `AppliedRefinementEdit extends RefinementEdit`: the planned
-/// edit's own fields (title, content, path, reference, arguments,
-/// metadata) ride along with the snapshots.
+/// One applied (or failed) edit with before/after snapshots: the TS
+/// `AppliedRefinementEdit extends RefinementEdit` shape — the planned
+/// edit's own fields ride along with the snapshots.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppliedRefinementEdit {
@@ -354,10 +341,9 @@ pub struct AppliedRefinementEdit {
 }
 
 impl AppliedRefinementEdit {
-    /// Start one applied-edit row from a planned edit: the TS wire shape
-    /// (`AppliedRefinementEdit extends RefinementEdit`) carries the plan's
-    /// own fields; the applying branch fills the action/kind/id resolution
-    /// and the outcome fields (before/after, applied, error).
+    /// Start one applied-edit row from a planned edit (the TS wire shape
+    /// carries the plan's own fields); the applying branch fills the
+    /// action/kind/id resolution and the outcome fields.
     fn planned(
         edit: &planner::RefinementEdit,
         action: RefinementAction,
@@ -383,7 +369,6 @@ impl AppliedRefinementEdit {
     }
 }
 
-/// Infer a result scope from its edits' before/after scopes.
 #[must_use]
 pub fn infer_refinement_result_scope(result: &RefinementResult) -> Option<HarnessScope> {
     if let Some(scope) = result.scope {
@@ -409,9 +394,8 @@ pub fn infer_refinement_result_scope(result: &RefinementResult) -> Option<Harnes
 ///
 /// # Errors
 ///
-/// Returns an error when the harness directory cannot be created, the
-/// refinement cannot be serialized, or the history file cannot be opened or
-/// appended to.
+/// Error when the directory cannot be created, serialization fails, or the
+/// history append fails.
 pub fn append_global_refinement(
     harness_state_dir: &Path,
     result: &RefinementResult,
@@ -625,10 +609,10 @@ mod tests {
     fn state_round_trips_and_degrades_gracefully() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = get_global_harness_state_dir(tmp.path());
-        // Missing dir loads empty.
+
         let state = load_harness_state(&dir, HarnessScope::Global);
         assert!(state.refinements.is_empty());
-        // Save + reload preserves entries.
+
         let mut state = empty_harness_state();
         state
             .entries
@@ -644,7 +628,7 @@ mod tests {
             loaded.entries[&RefinementKind::Memory]["m1"].content,
             "a fact"
         );
-        // Corrupt content degrades to empty instead of panicking.
+
         std::fs::write(get_harness_state_path(&dir), "not json").unwrap();
         assert!(
             load_harness_state(&dir, HarnessScope::Global).entries[&RefinementKind::Memory]
@@ -652,10 +636,9 @@ mod tests {
         );
     }
 
-    /// Per-call-site served-path oracle (refinement.ts:404 passes only
-    /// `{ mode }` — THE MEASURED SIGNAL of record 20260928-172400): the
-    /// harness save takes NO fsync branch, landing exactly
-    /// `to_string_pretty(state) + "\n"` bytes.
+    /// Served-path oracle (refinement.ts:404 passes only `{ mode }` — the
+    /// measured signal of record 20260928-172400): the save takes NO fsync
+    /// branch, landing exactly `to_string_pretty(state) + "\n"` bytes.
     #[test]
     fn harness_save_takes_the_ts_default_no_sync() {
         let tmp = tempfile::tempdir().unwrap();
@@ -753,7 +736,7 @@ mod tests {
         let loaded = load_global_refinement_history(&dir);
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].scope, Some(HarnessScope::Global));
-        // Session history wins on id conflicts.
+
         let mut session_result = result;
         session_result.summary = "session version".to_string();
         let merged = merge_refinement_history(&loaded, &[session_result]);
@@ -797,7 +780,7 @@ mod tests {
         let body = format_refinement_notice_body(&result);
         assert!(body.starts_with("created a memory about the flaky test"));
         assert!(body.contains("- create memory [global:m1] Entry m1: dup tests are flaky"));
-        // Scope inference from edits.
+
         assert_eq!(
             infer_refinement_result_scope(&result),
             Some(HarnessScope::Global)

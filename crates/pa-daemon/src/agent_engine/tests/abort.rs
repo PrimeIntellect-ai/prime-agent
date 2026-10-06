@@ -1,13 +1,9 @@
 //! The abort tests (the in-flight cancel, settled-turn payloads, retries, the live-kernel cancel).
 use super::*;
 
-/// The eager turn abort (TS `requestAbort`'s closing `this.agent.abort()`):
-/// an abort that lands while the provider response is pending — the
-/// compaction flow's interrupt-and-settle wait, the `abort` command, kill,
-/// shutdown — cancels the in-flight fetch immediately instead of at the
-/// next streamed event. The turn settles on its aborted message with
-/// `EMPTY_USAGE` (TS `createAbortedAssistantMessage` with no partial), so the
-/// aborted turn's usage never reaches the goal accounting.
+/// The eager turn abort: an abort landing mid-provider-wait cancels the
+/// in-flight fetch immediately; the aborted row carries `EMPTY_USAGE`,
+/// never the goal accounting.
 #[test]
 fn abort_in_flight_turn_cancels_a_mid_provider_wait() {
     let _faux = FAUX_TEST_LOCK
@@ -58,8 +54,7 @@ fn abort_in_flight_turn_cancels_a_mid_provider_wait() {
             },
         );
     });
-    // Wait until the turn is live (the agent run started) so the abort
-    // lands mid-provider-wait, the window TS's requestAbort owns.
+    // Wait until the turn is live, so the abort lands mid-provider-wait.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         let agent = engine.turn_agent.lock().expect("turn agent lock").clone();
@@ -77,8 +72,7 @@ fn abort_in_flight_turn_cancels_a_mid_provider_wait() {
     }
     let started = std::time::Instant::now();
     engine.abort_in_flight_turn();
-    // The fetch cancels now (TS aborts the fetch, not the next event): the
-    // turn settles far inside the 60s hold.
+    // The fetch cancels now: the turn settles far inside the 60s hold.
     let (settled_tx, settled_rx) = std::sync::mpsc::channel::<()>();
     let waiter = std::thread::spawn(move || {
         turn.join().unwrap();
@@ -89,9 +83,7 @@ fn abort_in_flight_turn_cancels_a_mid_provider_wait() {
         .expect("the aborted turn settles immediately, not after the 60s hold");
     waiter.join().unwrap();
     assert!(started.elapsed() < std::time::Duration::from_secs(10));
-    // The aborted turn settles on the aborted message with EMPTY usage —
-    // the accounting input the goal accounting's aborted guard sees, so
-    // the aborted turn's usage is not counted (TS parity).
+    // The aborted row carries EMPTY usage, so the goal accounting skips it.
     let events = events.lock().unwrap();
     let assistant = events
         .iter()
@@ -106,10 +98,6 @@ fn abort_in_flight_turn_cancels_a_mid_provider_wait() {
     assert_eq!(assistant["usage"]["totalTokens"], json!(0));
     assert_eq!(assistant["usage"]["input"], json!(0));
     assert_eq!(assistant["usage"]["output"], json!(0));
-    // The terminal `turn_end` frame follows the aborted row's message
-    // pair (TS `turn_end` on an aborted turn): the aborted assistant
-    // message is the payload, the tool-result list is empty, and the
-    // frame precedes the trailing `DoneAborted` settle.
     let turn_end_index = events
         .iter()
         .position(|event| {
@@ -126,20 +114,15 @@ fn abort_in_flight_turn_cancels_a_mid_provider_wait() {
     };
     assert_eq!(message, &assistant, "the aborted row is the payload");
     assert!(tool_results.is_empty(), "the aborted turn ran no tools");
-    // The run's terminal settle is the structural aborted one
-    // (`DoneAborted`, the #2617 typed-settles rework): TS classifies the
-    // aborted settle structurally — an abort is not a failure, so the
-    // retry backoff never applies and the wire keeps its own
-    // `turn_end`/`agent_end` frames — not the generic `Done` variant this
-    // pin predates.
+    // The settle is the structural `DoneAborted` (#2617 typed-settles
+    // rework): an abort is not a failure, so the retry backoff never
+    // applies — not the generic `Done` variant this pin predates.
     let done_index = events
         .iter()
         .position(|event| matches!(event, EngineEvent::DoneAborted))
         .expect("the run's trailing DoneAborted settle");
     assert!(turn_end_index < done_index, "turn_end precedes the settle");
-    // The aborted run still ends with its `agent_end` (TS emits it on the
-    // abort paths): the payload carries the run's whole message set with
-    // the aborted row as the terminal message.
+    // The aborted run still ends with its `agent_end`, the aborted row as the terminal message.
     let agent_end_index = events
         .iter()
         .position(|event| matches!(event, EngineEvent::AgentEnd { .. }))
@@ -159,19 +142,10 @@ fn abort_in_flight_turn_cancels_a_mid_provider_wait() {
     );
 }
 
-/// The abort-and-send idle race's engine seam (the gate-pool lane's solo
-/// finding, reproduced at rate): an abort landing after the delivery's
-/// pickup but before the agent run registers — the lazy session build and
-/// the policy reads widened TS's microscopic registration gap to the whole
-/// admission prefix — was entirely lost: `abort_in_flight_turn`'s
-/// `agent.abort()` found an empty run slot, the run registered fresh after
-/// it, and the turn ran its full provider hold (the session never went
-/// idle after the abort). The delivery's cancel flag (the worker's
-/// probe, armed by the abort after the pickup's clear) is consulted at
-/// the model-turn admission: the turn settles aborted BEFORE the provider
-/// call, no run registers, and the scripted response survives untouched —
-/// the next delivery serves it as its first reply (the served-path
-/// proof).
+/// The abort-and-send idle race's engine seam: an abort landing in the
+/// [pickup, registration] window was entirely lost. The turn settles
+/// aborted BEFORE the provider call, and the scripted response survives
+/// untouched (the next delivery serves it).
 #[test]
 fn abort_racing_the_admission_prefix_settles_the_turn_before_the_provider_call() {
     let _faux = FAUX_TEST_LOCK
@@ -181,9 +155,6 @@ fn abort_racing_the_admission_prefix_settles_the_turn_before_the_provider_call()
         &serde_json::json!({ "responses": ["raced reply", "next reply"] }),
         1,
     );
-    // The racing abort, pinned exactly as the race arms it: the probe
-    // reads the delivery's cancel flag TRUE at the model-turn admission
-    // (cleared at the pickup, armed by the abort before the consult).
     let mut events: Vec<EngineEvent> = Vec::new();
     engine.run_prompt(
         0,
@@ -201,8 +172,7 @@ fn abort_racing_the_admission_prefix_settles_the_turn_before_the_provider_call()
             true
         },
     );
-    // The accepted row persists; the turn settles the structural aborted
-    // (never a failure the retry backoff would re-issue).
+    // The accepted row persists; the turn settles the structural aborted.
     assert!(
         matches!(&events[0], EngineEvent::UserMessage(_)),
         "the accepted row leads: {events:?}"
@@ -213,10 +183,6 @@ fn abort_racing_the_admission_prefix_settles_the_turn_before_the_provider_call()
             .any(|event| matches!(event, EngineEvent::DoneAborted)),
         "the raced turn settles aborted: {events:?}"
     );
-    // No run registered, so no assistant row ever streamed and no
-    // turn/agent boundary frames fired (the worker's settle synthesizes
-    // its own trailing `agent_end` fallback for runs without a model
-    // turn).
     assert!(
         events.iter().all(|event| !matches!(
             event,
@@ -231,8 +197,7 @@ fn abort_racing_the_admission_prefix_settles_the_turn_before_the_provider_call()
         )),
         "no run boundary frames (no run registered): {events:?}"
     );
-    // The served-path proof: the scripted response was never consumed —
-    // the next delivery receives it as its first reply.
+    // The served-path proof: the scripted response was never consumed.
     let mut next_events: Vec<EngineEvent> = Vec::new();
     admit(&engine, "the next turn".to_string(), &mut next_events);
     assert!(
@@ -246,11 +211,6 @@ fn abort_racing_the_admission_prefix_settles_the_turn_before_the_provider_call()
     );
 }
 
-/// The settled turn's terminal frame (TS `turn_end`): the loop's boundary
-/// event carries the final assistant message as its payload with the
-/// turn's (empty) tool-result list, positioned between the final
-/// `AssistantMessage` and the trailing `Done` — the worker frames it as
-/// the wire `turn_end` with the TS shape.
 #[test]
 fn settled_turn_emits_the_terminal_turn_end_payload() {
     let _faux = FAUX_TEST_LOCK
@@ -294,13 +254,6 @@ fn settled_turn_emits_the_terminal_turn_end_payload() {
     assert!(tool_results.is_empty(), "the text-only turn ran no tools");
 }
 
-/// The run's terminal frame (TS `agent_end`): the loop's run-end event
-/// carries the run's whole message set — the accepted user row and the
-/// settled assistant row, in the session wire shapes — positioned after
-/// the terminal `turn_end` and before the trailing `Done`. The worker
-/// frames it as the wire `agent_end` with the TS `messages` payload; the
-/// run-opening `agent_start` stays with the worker's own opening frames,
-/// so the engine forwards none for the item's first run.
 #[test]
 fn settled_turn_emits_the_run_agent_end_payload() {
     let _faux = FAUX_TEST_LOCK
@@ -363,14 +316,9 @@ fn settled_turn_emits_the_run_agent_end_payload() {
     );
 }
 
-/// One `agent_end` per agent run (TS emits per run, so a retried run
-/// restarts with its own frames): a retryable provider failure ends the
-/// first run with its whole message set — the user row and the failed
-/// assistant row — then the retry re-issues as a new run whose `agent_end`
-/// carries only the retry's messages (the failed row left the loop
-/// context first, TS `messages.slice(0, -1)`). The retry run's opening
-/// `agent_start` and `turn_start` forward — a boundary frame (the first
-/// run's `agent_end`) already passed in the item.
+/// One `agent_end` per agent run: a retried run restarts with its own
+/// frames; the retry's `agent_end` carries only the retry's messages (the
+/// failed row left the loop context first), and its opening frames forward.
 #[test]
 fn retried_run_restarts_with_its_own_agent_frames() {
     let _faux = FAUX_TEST_LOCK
@@ -458,9 +406,7 @@ fn retried_run_restarts_with_its_own_agent_frames() {
         json!([{ "type": "text", "text": "recovered reply" }]),
         "the retried run's settled row"
     );
-    // The retry run restarted with its own opening frames: the forwarded
-    // `agent_start` and `turn_start` both follow the first run's
-    // `agent_end`.
+    // The retry's opening frames both follow the first run's `agent_end`.
     let agent_start_index = events
         .iter()
         .position(|event| matches!(event, EngineEvent::AgentStart))
@@ -489,8 +435,8 @@ fn retried_run_restarts_with_its_own_agent_frames() {
 }
 
 /// Scoped process-env overrides for the live-kernel tests: applied on
-/// construction, restored on drop. The live-kernel tests are serialized by
-/// the faux lock, so nothing races.
+/// construction, restored on drop. Serialized by the faux lock, so
+/// nothing races.
 #[cfg(test)]
 struct KernelEnvOverride {
     saved: Vec<(String, Option<String>)>,
@@ -525,8 +471,7 @@ impl Drop for KernelEnvOverride {
     }
 }
 
-/// The kernel python for the live-kernel abort test (skipped without a live
-/// install).
+/// The kernel python for the live-kernel abort test (skipped without one).
 #[cfg(test)]
 fn live_kernel_python() -> Option<std::path::PathBuf> {
     let candidate = std::path::PathBuf::from(std::env::var("HOME").map_or_else(

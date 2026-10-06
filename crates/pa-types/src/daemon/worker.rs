@@ -7,10 +7,6 @@ use super::{
     AgentMessage, DaemonClientCapability, Deserialize, JsonMap, Serialize, SnapshotPurpose, Value,
 };
 
-// ---------------------------------------------------------------------------
-// Worker protocol (supervisor <-> worker)
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DaemonWorkerLifecycle {
@@ -44,8 +40,7 @@ pub enum DaemonWorkerRosterOutbound {
     },
 }
 
-/// Frame header the worker writes to the supervisor pipe, tagging the payload
-/// that follows in the same frame.
+/// Frame header the worker writes to the supervisor pipe, tagging the payload that follows.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
@@ -265,10 +260,6 @@ pub struct DaemonWorkerDescriptor {
     #[serde(flatten)]
     pub rest: JsonMap,
 }
-
-// ---------------------------------------------------------------------------
-// Update-restart manifest
-// ---------------------------------------------------------------------------
 
 pub const DAEMON_UPDATE_RESTART_FORMAT_VERSION: u64 = 1;
 

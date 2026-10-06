@@ -13,7 +13,6 @@ use pa_core::update::installer::{self, InstallerOutput};
 use pa_core::update::release::{artifact_for_platform, LatestRelease};
 use pa_core::update::version::UpdateChannel;
 
-/// One parsed `prime-agent update` invocation.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UpdateOptions {
     /// `--check`: print the latest release of the update channel vs the

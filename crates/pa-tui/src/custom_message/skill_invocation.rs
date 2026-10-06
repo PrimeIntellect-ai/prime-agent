@@ -1,37 +1,25 @@
-//! The skill-invocation card: TS `skill-invocation-message.ts` +
-//! `skill-blocks.ts`. A user message whose text is one `<skill ...>` block
-//! (what a `/skill:<name>` submission expands into) renders the compact
-//! expandable card instead of the raw block: the `[skill]` label and the
-//! skill name header, with the content markdown under the branch gutter
-//! when expanded; the trailing argument text renders as its own user block
-//! below (no spacer between, TS `addMessageToChat`'s user case). The block
-//! parse itself lives in the shared vocabulary crate
-//! (`pa_types::skill_blocks`), so the session engine and every rendering
-//! surface agree on the format.
+//! The skill-invocation card: a user message whose text is one `<skill ...>` block (what a
+//! `/skill:<name>` submission expands into) renders the compact expandable card — the `[skill]`
+//! label and skill name header, the content markdown under the branch gutter when expanded; the
+//! block parse lives in `pa_types::skill_blocks`, shared with the session engine.
 
 use crate::chat::{ChatEntry, Detail};
 use crate::theme::{Theme, ThemeColor};
 use crate::{Line, Span};
 
-/// One skill-invocation card (TS `SkillInvocationMessageComponent`): the
-/// `[skill]` label and the skill name header, the content markdown under
-/// the branch gutter when expanded. Parsed out of a user message whose
-/// text is one `<skill ...>` block (TS `parseSkillBlock` in
-/// `addMessageToChat`).
+/// One skill-invocation card: the `[skill]` label and the skill name
+/// header, the content markdown under the branch gutter when expanded.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SkillInvocationRow {
     /// The invoked skill's name.
     pub name: String,
-    /// The skill content (frontmatter stripped).
+    /// The skill content.
     pub content: String,
 }
 
-/// The skill-invocation decode for a user message (TS `parseSkillBlock` in
-/// `addMessageToChat`'s user case): a message whose text is one
-/// `<skill ...>` block renders the expandable card, and a trailing user
-/// message after the block renders as its own user block below it
-/// (the TS component adds no spacer between them). `None` means the text
-/// is an ordinary user prompt.
+/// The skill-invocation decode for a user message: one `<skill ...>` block renders the
+/// expandable card, and a trailing user message after the block renders as its own user block
+/// below it. `None` means the text is an ordinary user prompt.
 #[must_use]
 pub fn skill_invocation_entries(text: &str) -> Option<Vec<ChatEntry>> {
     let block = pa_types::skill_blocks::parse_skill_block(text)?;
@@ -45,9 +33,8 @@ pub fn skill_invocation_entries(text: &str) -> Option<Vec<ChatEntry>> {
     Some(entries)
 }
 
-/// The card's header row: the bold `[skill]` label in `customMessageLabel`,
-/// a space, and the skill name in `customMessageText` — the same row in
-/// both states (the header never depends on expansion).
+/// The card's header row: the bold `[skill]` label, a space, and the
+/// skill name — the same row in both states.
 fn skill_header(row: &SkillInvocationRow, theme: &Theme) -> Line {
     vec![
         super::render::custom_message_label("skill", theme),
@@ -79,11 +66,8 @@ pub(crate) fn count_skill_invocation(
         }
 }
 
-/// One skill-invocation card (TS `SkillInvocationMessageComponent`, after
-/// #2779's one shared layout): the optional leading blank, the `[skill]` +
-/// name header, then the content markdown under the branch gutter when
-/// expanded (the name lives on the header, never duplicated in the
-/// body).
+/// One skill-invocation card: the optional leading blank, the `[skill]` + name header, then the
+/// content markdown under the branch gutter when expanded (the name never duplicates in the body).
 #[must_use]
 pub fn render_skill_invocation(
     row: &SkillInvocationRow,
@@ -124,8 +108,8 @@ mod tests {
 
     #[test]
     fn entries_decode_the_card_and_args() {
-        // TS `parseSkillBlock`: the block card plus the trailing argument
-        // text as its own user block.
+        // The block card plus the trailing argument text as its own user
+        // block.
         let entries = skill_invocation_entries(
             "<skill name=\"websearch\" location=\"/s/SKILL.md\">\nRun one query.\n</skill>\n\nfind parity tuis",
         )
@@ -142,7 +126,6 @@ mod tests {
                 },
             ]
         );
-        // A block without arguments renders the card alone.
         let entries = skill_invocation_entries(
             "<skill name=\"websearch\" location=\"/s/SKILL.md\">\nRun one query.\n</skill>",
         )
@@ -151,13 +134,11 @@ mod tests {
             entries.as_slice(),
             [ChatEntry::SkillInvocation(_)]
         ));
-        // Every other user text is an ordinary prompt.
         assert!(skill_invocation_entries("hello world").is_none());
         assert!(skill_invocation_entries("/skill:websearch find tuis").is_none());
     }
 
-    /// The collapsed card is the header row alone: no box, no pad rows,
-    /// no bold-name body.
+    /// The collapsed card is the header row alone.
     #[test]
     fn collapsed_header_row() {
         let row = SkillInvocationRow {
@@ -170,8 +151,6 @@ mod tests {
             .map(|row| flat(row).trim_end().to_string())
             .collect();
         assert_eq!(trimmed, vec!["", " [skill] websearch"], "{rows:?}");
-        // The label is the shared `customMessageLabel` span, the name the
-        // `customMessageText` fg.
         assert_eq!(
             rows[1][1],
             super::super::render::custom_message_label("skill", &theme())
@@ -180,9 +159,7 @@ mod tests {
             rows[1][3].style.fg,
             theme().fg_style(ThemeColor::CustomMessageText).fg
         );
-        // The skill content stays out of the collapsed card.
         assert!(!trimmed.iter().any(|row| row.contains("Run one query.")));
-        // Without the leading blank the header row leads.
         let rows = render_skill_invocation(&row, Detail::Overview, &theme(), 40, false);
         assert_eq!(rows.len(), 1, "{rows:?}");
     }

@@ -1,5 +1,3 @@
-//! Port of `packages/coding-agent/src/core/tools/ipython-cell-code.ts`.
-
 /// Matches leading blank lines and a `%%bash` cell-magic line.
 #[cfg_attr(not(test), allow(dead_code))]
 fn bash_cell_magic_match(code: &str) -> Option<usize> {

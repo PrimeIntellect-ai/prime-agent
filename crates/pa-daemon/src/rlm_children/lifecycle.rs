@@ -52,9 +52,8 @@ fn custom_message_text(message: &CustomMessage) -> Option<String> {
 }
 
 impl SupervisorChildSessionsInner {
-    /// Create one child session over the supervisor link (no prompt yet).
-    /// `depth` is the child's recursion depth; `session_dir` holds its
-    /// persisted session; `model` is the resolved `provider/id` selector.
+    /// Create one child session over the supervisor link (no prompt yet);
+    /// `model` is the resolved `provider/id` selector.
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn create_child(
         &self,
@@ -98,13 +97,12 @@ impl SupervisorChildSessionsInner {
         }
         if let Some(script) = &identity.child_script {
             config["script"] = json!(script);
-            // The scripted engine rides the identity down the recursion
-            // (the TS child runtime inherits the parent's sessionConfig, so
-            // a harness child spawns harness grandchildren the same way).
+            // The scripted engine rides the identity down the recursion (TS
+            // inherits the parent's sessionConfig, so harness children spawn
+            // the same way).
             config["childScript"] = json!(script);
         }
-        // Runtime metadata mirrors the TS subagent runtime identity; a
-        // depth-0 resident session carries none (it is a plain root session).
+        // Runtime metadata mirrors the TS subagent runtime identity.
         let runtime_metadata = runtime_metadata.map(|mut metadata| {
             if let Some(session_id) = &identity.session_id {
                 metadata["parentSessionId"] = json!(session_id);
@@ -131,9 +129,8 @@ impl SupervisorChildSessionsInner {
             no_session: None,
             name: name.map(str::to_string),
             config: Some(config),
-            // RLM children never report telemetry (the depth-0 gate in the
-            // session engine installs nothing); the worker's own opt-out
-            // stays process-level.
+            // RLM children never report telemetry (the depth-0 gate installs
+            // nothing); the worker's own opt-out stays process-level.
             telemetry_disabled: None,
             runtime_metadata,
             lifecycle: Some(DaemonSessionLifecycle::Resident),
@@ -191,8 +188,7 @@ impl SupervisorChildSessionsInner {
         Ok(created)
     }
 
-    /// Parse a created-session summary into its ids (TS `createRlmRootSession`
-    /// reads `activeSessionId`/`sessionId`/`sessionFile`/`sessionName`).
+    /// Parse a created-session summary into its ids.
     fn created_summary_ids(summary: &Value) -> Result<CreatedSessionIds> {
         let active_session_id = summary
             .get("activeSessionId")
@@ -386,9 +382,8 @@ impl SupervisorChildSessionsInner {
             .await;
     }
 
-    /// Refresh one record against its worker: settle a child whose worker
-    /// ran out of work and capture its answer once. An unreachable child
-    /// keeps its last known state (the supervisor may be restarting).
+    /// Refresh one record against its worker: settle a child whose worker ran out of work and
+    /// capture its answer once; an unreachable child keeps its last known state.
     pub(super) async fn refresh_record(&self, record: &Arc<Mutex<ChildRecord>>) {
         {
             let record = record.lock().await;
@@ -407,8 +402,8 @@ impl SupervisorChildSessionsInner {
         let mut record = record.lock().await;
         if record.settled_status.is_none() {
             record.settled_status = Some("done");
-            // A settled preview is never overwritten with a later miss, but
-            // a `None` capture (the settle raced the admission-to-run
+            // A settled preview is never overwritten with a later miss; a
+            // `None` capture (the settle raced the admission-to-run
             // hand-off) recovers on a later refresh.
             if !record.answer_captured || record.answer_preview.is_none() {
                 record.answer_preview = answer;
@@ -417,31 +412,22 @@ impl SupervisorChildSessionsInner {
         }
     }
 
-    /// Watch one admitted child until its run settles, then deliver the
-    /// parent's terminal notice when the child never replied (TS
-    /// `deliverTerminalMessageToParent` on the detached run task). The
-    /// watcher owns no registry state: it stops as soon as the record is
-    /// removed (deleted children carry their own cancelled notice).
+    /// Watch one admitted child until its run settles, then deliver the parent's terminal notice
+    /// when the child never replied; the watcher stops as soon as the record is removed.
     pub(super) async fn watch_child_settle(&self, record: &Arc<Mutex<ChildRecord>>) {
         let mut unreachable_polls: u32 = 0;
         loop {
-            // The parent's session closed with this child running (a
-            // replacement teardown or a session close): the child dies with
-            // the parent (TS `closeChildSessions`) and no notice is owed to
-            // the torn-down session - the watch ends without polling the
-            // killed child.
+            // The parent closed with this child running: the child dies
+            // with it and no notice is owed — end without polling it.
             if record.lock().await.closed_by_parent {
                 return;
             }
             // Slice-top usage flush: rows of turns that completed since the
-            // last slice land here (TS flushes pending usage at each child
-            // `agent_end`; the slice cadence bounds crash loss to one
-            // slice, the TS staleness window's role).
+            // last slice land here (crash loss is bounded to one slice).
             self.emit_child_usage(record).await;
             let active_session_id = record.lock().await.active_session_id.clone();
-            // One bounded idle-wait slice: a slice that times out while the
-            // child still runs re-slices; the returned slice means the child
-            // drained its queue.
+            // One bounded idle-wait slice: a timeout while the child still
+            // runs re-slices; a returned slice means the queue drained.
             self.wait_for_child(
                 &active_session_id,
                 Duration::from_millis(WATCH_WAIT_SLICE_MS),
@@ -465,8 +451,7 @@ impl SupervisorChildSessionsInner {
                 }
                 self.refresh_record(record).await;
                 // The run's final rows are attributed before the terminal
-                // notice rides the parent's follow-up route (TS: the run
-                // task's `finally` flushes pending usage at settlement).
+                // notice rides the parent's follow-up route.
                 self.emit_child_usage(record).await;
                 // TS records the return before delivering the notice: the
                 // pending edge must be on the parent's ledger before the
@@ -501,9 +486,7 @@ impl SupervisorChildSessionsInner {
                     }
                 }
                 self.deliver_settle_notice(record).await;
-                // A settled child releases an owed goal continuation (TS
-                // `_maybeResumeGoalContinuationAfterRlmWork` at the child
-                // settle sites).
+                // A settled child releases an owed goal continuation.
                 self.fire_settle_hook(record).await;
                 return;
             }

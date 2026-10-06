@@ -1,39 +1,22 @@
-//! Headless e2e for the click-to-open hyperlink dispatch: a mock
-//! supervisor serves one attached session whose transcript holds a
-//! markdown link, and the headless harness feeds byte-identical SGR mouse
-//! reports (press, release; drag variants) through the same
-//! decode-and-dispatch path a terminal's mouse takes.
-//!
-//! Verifies the TS parity contract of `tui.ts`'s `handleFullscreenInput`
-//! click branches: a plain release over a link opens its OSC 8 target
-//! (the run's recorded `opened_urls` stand in for the browser spawn a
-//! terminal receives — terminals gate their native link handling while
-//! mouse reporting is active, so the TUI opens the clicks it consumes),
-//! a release after a drag ends the selection instead of opening, and a
-//! release over plain text opens nothing.
+//! Headless e2e for the click-to-open hyperlink dispatch (TS
+//! `handleFullscreenInput`): a plain release over a link opens its OSC 8
+//! target (recorded `opened_urls` stand in for the browser spawn); a
+//! release after a drag selects instead; plain text opens nothing.
 #![cfg(unix)]
-// Pedantic-gate exceptions (every other pedantic warning in this crate is
-// fixed in place; each exception carries its one-line justification):
-// - the casts: terminal-layout arithmetic narrows structurally bounded
-//   values (screen coordinates, byte counts, timestamps); guarded
-//   conversions would add panic paths the bounds guarantee away.
+// Casts: structurally bounded terminal-layout arithmetic; guarded conversions add panic paths.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// - the render routes are flat tables (one arm per route); splitting them
-//   would add indirection without changing the flow.
+// Render routes are flat tables (one arm per route); splitting adds indirection.
 #![allow(clippy::too_many_lines)]
-// - widget state structs carry independent flag bits; a nested struct
-//   would add indirection without changing the shape.
+// Widget state structs carry independent flag bits.
 #![allow(clippy::struct_excessive_bools, clippy::fn_params_excessive_bools)]
-// - the futures are bounded by the surface's lifetime; boxing them would
-//   add an allocation to the steady-state loop.
+// Futures are bounded by the surface's lifetime; boxing adds a steady-state allocation.
 #![allow(clippy::large_futures)]
-// - the wrappers preserve a uniform Result-returning API surface; unwrap
-//   removals would ripple through the callers without changing behavior.
+// The wrappers preserve a uniform Result-returning API surface.
 #![allow(clippy::unnecessary_wraps)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -41,8 +24,8 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 
-/// Mouse tracking is process-global state, so the headless runs serialize
-/// (the capability override rides the same thread-local the render reads).
+/// Mouse tracking is process-global state, so the headless runs serialize (the capability override
+/// rides the same thread-local the render reads).
 static RUN_LOCK: Mutex<()> = Mutex::new(());
 
 fn run_lock() -> MutexGuard<'static, ()> {
@@ -58,8 +41,8 @@ use pa_tui::interactive::{
 };
 use serde_json::{json, Value};
 
-/// The SGR reports a real terminal sends with ?1002+?1006 tracking active:
-/// a left press, a left drag (button 0 + the motion bit 32), and a release.
+/// The SGR reports a real terminal sends with ?1002+?1006 tracking active: a left press, a left
+/// drag (button 0 + the motion bit 32), and a release.
 fn press(col: usize, row: usize) -> String {
     format!("\x1b[<0;{col};{row}M")
 }
@@ -83,8 +66,6 @@ impl MockSupervisor {
         }
     }
 
-    /// Serve one connection: attach a session whose snapshot holds the
-    /// linked transcript, then answer the loop's requests.
     fn serve(self) {
         let (stream, _) = self.listener.accept().expect("accept");
         let write_stream = stream.try_clone().expect("clone mock socket");
@@ -187,8 +168,8 @@ fn write_json(writer: &mut UnixStream, value: &Value) {
     writer.flush().expect("flush mock frame");
 }
 
-/// The slim attach result with the linked transcript: the assistant
-/// message carries one markdown link, the row a click targets.
+/// The slim attach result with the linked transcript: the assistant message carries one markdown
+/// link, the row a click targets.
 fn attach_data(id: &str) -> Value {
     let messages = vec![
         json!({ "role": "user", "content": [{ "type": "text", "text": "show the docs link" }] }),
@@ -269,14 +250,12 @@ fn options(socket: PathBuf) -> InteractiveOptions {
     }
 }
 
-/// Run the headless plan against a fresh mock supervisor and return the
-/// captured frames, the opened links, and the selection copies. Holds the
-/// run lock: mouse tracking is process-global, and the hyperlink
-/// capability override rides the same thread-local the render reads.
+/// Run the headless plan and return the captured frames, the opened links, and the selection
+/// copies. Holds the run lock: mouse tracking is process-global.
 fn run_plan(steps: Vec<HeadlessStep>) -> (Vec<String>, Vec<String>, Vec<String>) {
     let _guard = run_lock();
-    // A hyperlink-capable terminal: the link's label carries its OSC 8
-    // target, exactly the row the click dispatch resolves.
+    // A hyperlink-capable terminal: the link's label carries its OSC 8 target, exactly the row the
+    // click dispatch resolves.
     pa_tui::hyperlinks::set_hyperlinks_override(Some(true));
     let dir = tempfile::TempDir::new().expect("temp dir");
     let socket = dir.path().join("tui.sock");
@@ -300,8 +279,7 @@ fn run_plan(steps: Vec<HeadlessStep>) -> (Vec<String>, Vec<String>, Vec<String>)
     (outcome.frames, outcome.opened_urls, outcome.copies)
 }
 
-/// The last frame holding a needle and the needle's (row, column) within
-/// it — the rendered coordinates a mouse press targets.
+/// The last frame holding a needle and its (row, column) — the coordinates a press targets.
 fn locate<'a>(frames: &'a [String], needle: &str) -> Option<(usize, usize, usize, &'a str)> {
     frames
         .iter()
@@ -315,8 +293,8 @@ fn locate<'a>(frames: &'a [String], needle: &str) -> Option<(usize, usize, usize
         .next_back()
 }
 
-/// The link label's rendered position after `ScrollTop` (the probe's
-/// captured frame is the click target's geometry).
+/// The link label's rendered position after `ScrollTop` (the probe's captured frame is the click
+/// target's geometry).
 fn link_position() -> (usize, usize) {
     let (frames, opened, _) = run_plan(vec![HeadlessStep::ScrollTop]);
     assert!(opened.is_empty(), "the probe never clicks: {opened:?}");
@@ -331,15 +309,13 @@ fn plain_position() -> (usize, usize) {
     (row, col)
 }
 
-/// A press-release without a drag over the link label opens its OSC 8
-/// target (TS `fullscreenPressedHyperlink`'s release branch): the click
-/// the TUI consumes opens the browser itself.
+/// A press-release without a drag over the link label opens its OSC 8 target (TS
+/// `fullscreenPressedHyperlink`'s release branch).
 #[test]
 fn click_on_a_transcript_link_opens_it() {
     let (row, col) = link_position();
     let steps = vec![
-        // Mount the window at the transcript top: the probe layout is the
-        // click target only while the view sits there.
+        // The located click target is valid only while the view sits at the top.
         HeadlessStep::ScrollTop,
         HeadlessStep::Mouse(press(col + 4, row + 1)),
         HeadlessStep::Mouse(release(col + 4, row + 1)),
@@ -353,8 +329,7 @@ fn click_on_a_transcript_link_opens_it() {
     assert!(copies.is_empty(), "a click copies nothing: {copies:?}");
 }
 
-/// A drag over the link ends the selection instead — the release with a
-/// selection copies and never opens (TS: the hasSelection branch wins).
+/// The release with a selection copies and never opens (TS: the hasSelection branch wins).
 #[test]
 fn drag_over_a_link_selects_it_instead_of_opening() {
     let (row, col) = link_position();
@@ -373,14 +348,13 @@ fn drag_over_a_link_selects_it_instead_of_opening() {
     );
 }
 
-/// A release over plain rendered text opens nothing: only cells inside a
-/// link's OSC 8 range resolve a URL.
+/// Only cells inside a link's OSC 8 range resolve a URL.
 #[test]
 fn click_on_plain_text_opens_nothing() {
     let (row, col) = plain_position();
     let steps = vec![
-        // The dock's detail row sits far from every link range; no
-        // ScrollTop is needed (the dock never moves).
+        // The dock's detail row sits far from every link range; no ScrollTop is needed (the dock
+        // never moves).
         HeadlessStep::Mouse(press(col + 1, row + 1)),
         HeadlessStep::Mouse(release(col + 1, row + 1)),
     ];

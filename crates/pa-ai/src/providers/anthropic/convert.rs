@@ -1,5 +1,4 @@
 //! Anthropic Messages conversion: content blocks, messages, and tools.
-//! Section of the port of `packages/ai/src/providers/anthropic.ts`.
 
 use serde_json::{json, Map, Value};
 
@@ -69,7 +68,7 @@ pub(crate) fn convert_content_blocks(content: &[UserOrToolContent]) -> Value {
     json!(blocks)
 }
 
-// Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+// Long by design: mirrors the provider's stream shape.
 #[allow(clippy::too_many_lines)]
 pub fn convert_messages(
     context: &Context,

@@ -1,15 +1,13 @@
-//! The boundary renderers: the TS wire-event surface of the print
-//! runtime's turn boundary — the `compaction_start`/`compaction_end`
-//! event builders and the json-mode emission methods, the child cut
-//! of the `print_boundary` facade (text mode rides the durable rows).
+//! The boundary renderers: the `compaction_start`/`compaction_end` event builders
+//! and the json-mode emission methods.
 
 use super::{
     json, CompactRun, CompactionOutcomeKind, CompactionOutcomeReason, SessionEngine, TurnBoundary,
     Value,
 };
 
-/// The `compaction_start` event (TS `_runAutoCompaction`): the reason plus
-/// the consumed request's instructions when it carried any.
+/// The `compaction_start` event: the reason plus the consumed
+/// request's instructions when it carried any.
 pub(super) fn compaction_start_event(reason: &str, custom_instructions: Option<&str>) -> Value {
     let mut event = json!({ "type": "compaction_start", "reason": reason });
     if let Some(instructions) = custom_instructions {
@@ -18,18 +16,16 @@ pub(super) fn compaction_start_event(reason: &str, custom_instructions: Option<&
     event
 }
 
-/// The successful `compaction_end` event (TS `_runAutoCompaction`): the TS
-/// `CompactionResult` wire shape plus `willRetry` (true only for the
-/// overflow compact-and-retry arm).
+/// The successful `compaction_end` event: the `CompactionResult` wire shape plus
+/// `willRetry` (true only for the overflow compact-and-retry arm).
 pub(super) fn compaction_end_success_event(
     reason: &str,
     run: &CompactRun,
     will_retry: bool,
     custom_instructions: Option<&str>,
 ) -> Value {
-    // The wire result is the TS `CompactionResult` shape: the client-facing
-    // summary fields plus the persisted entry's `details` (the TS default
-    // when the entry carried none).
+    // The wire result carries the client-facing summary fields plus the
+    // persisted entry's `details`.
     let result = json!({
         "summary": run.result.summary,
         "firstKeptEntryId": run.result.first_kept_entry_id,
@@ -54,11 +50,8 @@ pub(super) fn compaction_end_success_event(
 }
 
 impl TurnBoundary {
-    /// The post-compaction kernel notice (TS
-    /// `_syncKernelStateAfterCompaction` runs inside `_performCompaction`):
-    /// json mode streams its `message_start`/`message_end` pair before the
-    /// `compaction_end` event, exactly like the TS session's `_emit` pair;
-    /// text mode keeps the row as durable bookkeeping (`display: false`).
+    /// The post-compaction kernel notice: json mode streams its message pair before
+    /// the `compaction_end` event; text mode keeps the row as durable bookkeeping.
     pub(super) fn emit_ipython_state_row(&self, run: &CompactRun) {
         if !self.json_mode {
             return;
@@ -72,14 +65,9 @@ impl TurnBoundary {
         }
     }
 
-    /// The unsuccessful-compaction surface (TS `_endCompactionUnsuccessfully`
-    /// -> `_persistCompactionOutcome`): record the durable
-    /// `compaction_outcome` row (json mode also broadcasts its
-    /// `message_start`/`message_end` pair on the event stream, exactly like
-    /// the TS session's row push), then emit the `compaction_end` event. A
-    /// skip carries `errorSeverity: "warning"`; automatic failures carry no
-    /// `errorSeverity` (TS passes none). The text-mode surface rides the
-    /// durable rows through the headless terminal result.
+    /// The unsuccessful-compaction surface: record the durable `compaction_outcome`
+    /// row, then emit the `compaction_end` event. A skip carries `errorSeverity:
+    /// "warning"`.
     pub(super) async fn end_unsuccessfully(
         &self,
         engine: &SessionEngine,
@@ -93,8 +81,7 @@ impl TurnBoundary {
             .record_compaction_outcome(reason, outcome, message)
             .await;
         // A failed durable row skips only the row events; the terminal
-        // `compaction_end` below still fires so a streamed
-        // `compaction_start` never stays pending.
+        // `compaction_end` below still fires.
         match row {
             Ok(row) => {
                 if self.json_mode {

@@ -1,8 +1,5 @@
-//! The `bash` tool: shell command execution with output truncation and a
-//! destructive-git dirty-tree guard.
-//!
-//! Port of `packages/coding-agent/src/core/tools/bash.ts` (TUI renderers
-//! excluded; execution, guard, truncation, and formatting are identical).
+//! The `bash` tool: shell command execution with output truncation and a destructive-git dirty-tree
+//! guard (execution, guard, truncation, and formatting match the TS tool).
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
@@ -50,20 +47,13 @@ pub struct ExecOptions<'a> {
     pub env: Option<HashMap<String, String>>,
 }
 
-/// Pluggable operations for the bash tool (TS: `BashOperations`).
-///
-/// Implementations stream merged stdout/stderr through `on_data`, honor the
-/// cancellation token by killing the whole process tree, resolve with the
-/// child exit code (`None` when killed by a signal), and reject with
-/// `"aborted"` / `"timeout:<seconds>"` on abort/timeout.
-///
-/// Object-safe on purpose: the tool takes `&dyn` operations so remote
-/// execution backends can be injected without generics — hence the
-/// `Pin<Box<dyn Future>>` return instead of RPITIT.
+/// Pluggable operations for the bash tool. Implementations stream merged stdout/stderr through
+/// `on_data`, kill the process tree on cancellation, resolve with the child exit code (`None` when
+/// killed by a signal), and reject with `"aborted"` / `"timeout:<seconds>"`. Object-safe on purpose
+/// (`&dyn` injection).
 pub trait BashOperations: Send + Sync {
-    /// Execute a command and stream output; resolves with the exit code
-    /// (`None` when killed by a signal), or an error:
-    /// `"aborted"` or `"timeout:<seconds>"`.
+    /// Execute a command and stream output through `on_data`; resolves with the exit code (`None`
+    /// when killed by a signal), or an error: `"aborted"` or `"timeout:<seconds>"`.
     fn exec<'a>(
         &'a self,
         command: &'a str,
@@ -338,7 +328,6 @@ pub async fn execute_bash(
         }
     }
 
-    // Stream output through the accumulator with throttled updates.
     let acc = Arc::new(Mutex::new(OutputAccumulator::new(
         &OutputAccumulatorOptions {
             temp_file_prefix: "pi-bash".to_string(),
@@ -423,7 +412,6 @@ pub async fn execute_bash(
         }
     };
 
-    // Finish the accumulator, settle the spill, then snapshot.
     {
         let mut acc = acc.lock().unwrap();
         acc.finish();

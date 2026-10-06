@@ -1,28 +1,23 @@
-//! Piped-stdin read for the initial prompt, ported from
-//! `utils/piped-stdin.ts`: read a piped (non-terminal) stdin without ever
-//! hanging a non-interactive boot.
+//! Piped-stdin read for the initial prompt: read a piped (non-terminal) stdin
+//! without ever hanging a non-interactive boot.
 //!
-//! Daemon workers, agent harnesses, and CI runners spawn this CLI with a
-//! stdin pipe they never write to and never close; an unbounded read would
-//! hang boot forever, so the read gives up after an idle window. A live
-//! producer resets the window on every chunk; a producer that already
-//! wrote delivers its buffered bytes the moment the listener attaches.
+//! Workers and CI runners spawn this CLI with a stdin pipe they never write
+//! to or close; the read gives up after an idle window a live producer resets.
 
 use std::io::IsTerminal as _;
 use std::io::Read as _;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::Duration;
 
-/// Env override for the no-input window of a non-interactive stdin read,
-/// in milliseconds. `0` skips the read entirely; values above the cap are
-/// clamped (TS `PI_STDIN_TIMEOUT_MS`).
+/// Env override for the no-input window, in milliseconds: `0` skips the read
+/// entirely; values above the cap are clamped.
 pub const STDIN_IDLE_TIMEOUT_MS_ENV: &str = "PI_STDIN_TIMEOUT_MS";
 
 const DEFAULT_STDIN_IDLE_TIMEOUT_MS: u64 = 250;
 const MAX_STDIN_IDLE_TIMEOUT_MS: u64 = 30_000;
 
-/// TS `resolveStdinIdleTimeoutMs`: absent, empty, or non-numeric/negative
-/// values fall back to the default; `0` opts out; the cap clamps.
+/// Absent, empty, or non-numeric/negative values fall back to the
+/// default; `0` opts out; the cap clamps.
 pub fn resolve_stdin_idle_timeout_ms(raw: Option<&str>) -> u64 {
     let Some(raw) = raw.filter(|raw| !raw.is_empty()) else {
         return DEFAULT_STDIN_IDLE_TIMEOUT_MS;
@@ -34,11 +29,10 @@ pub fn resolve_stdin_idle_timeout_ms(raw: Option<&str>) -> u64 {
     }
 }
 
-/// Read all content from a piped stdin without ever hanging the boot
-/// (TS `readPipedStdin`): TTY stdin reads nothing, an empty read is
-/// `None`, and a non-TTY stdin that stays silent past the idle window
-/// gives up with the TS stderr notice (the reader thread parks on the
-/// stream; nothing else reads stdin in the modes that reach here).
+/// Read all content from a piped stdin without ever hanging the boot: TTY
+/// stdin reads nothing, an empty read is `None`, a silent non-TTY stdin
+/// gives up at the idle window with the stderr notice (the reader thread
+/// parks on the stream).
 pub fn read_piped_stdin(idle_timeout_ms: u64) -> Option<String> {
     if idle_timeout_ms == 0 || std::io::stdin().is_terminal() {
         return None;
@@ -71,10 +65,8 @@ pub fn read_piped_stdin(idle_timeout_ms: u64) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
-/// Drain chunks until EOF or the idle window lapses: the collected bytes
-/// and whether the window (not EOF) ended the read. A live producer
-/// resets the window on every chunk (TS `scheduleIdleTimeout` re-arms on
-/// each `data` event); only silence expires it.
+/// Drain chunks until EOF or the idle window lapses, returning whether the window
+/// (not EOF) ended the read: a live producer resets it, only silence expires it.
 fn collect_from(receiver: &Receiver<Vec<u8>>, idle_timeout_ms: u64) -> (Vec<u8>, bool) {
     let idle_window = Duration::from_millis(idle_timeout_ms);
     let mut data = Vec::new();

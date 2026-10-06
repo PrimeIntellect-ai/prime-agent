@@ -1,13 +1,5 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
-// by design on hot paths (boxing 130 fns is allocation-churn with zero
-// correctness gain); the fn-length threshold is a style gate, not
-// correctness (the harness fns are intentionally linear); 64-bit targets -
-// the narrowing sits at OS/protocol boundaries where the values are
-// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
-// guarded parses), and checked conversions would add panic paths where
-// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
-// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
-// dossier for the conductor).
+// large_futures: stack futures on hot paths by design. too_many_lines: style gate
+// only. Casts: 64-bit targets; narrowing sits at bounded OS/protocol boundaries.
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -17,13 +9,10 @@
     clippy::cast_precision_loss
 )]
 
-//! End-to-end containment tests for the daemon-discovery commands.
-//!
-//! Every daemon lives in a test-created fixture directory. A discovery scan
-//! or `shutdown --force` run from a *different* fixture root must never see
-//! or stop it — nor any other live daemon on the machine (this sandbox runs
-//! next to the real mission daemon; its sockets must never surface in a
-//! report).
+//! End-to-end containment tests for the daemon-discovery commands. Every
+//! daemon lives in a test-created fixture directory. A discovery scan or
+//! `shutdown --force` run from a *different* fixture root must never see or
+//! stop it — nor any other live daemon on the machine.
 #![cfg(unix)]
 
 use std::os::unix::net::UnixStream;
@@ -34,8 +23,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 /// Environment keys this box's own prime-agent worker sets; they must not
-/// leak into spawned supervisors (the same scrub list as
-/// `daemon_commands_e2e.rs`).
+/// leak into spawned supervisors.
 const SCRUB_ENV: [&str; 9] = [
     "PRIME_AGENT_INTERNAL_DAEMON_WORKER",
     "PRIME_AGENT_INTERNAL_DAEMON_WORKER_TOKEN",
@@ -95,10 +83,9 @@ fn spawn_daemon(socket: &Path, agent_dir: &Path, tmp_dir: &Path) -> Daemon {
     for key in SCRUB_ENV {
         command.env_remove(key);
     }
-    // A supervisor killed at teardown must not leak its session workers
-    // into later test binaries: the worker's supervisor-lost exit (TS
-    // `exitIfSupervisorOrphanedForTooLong`) runs on this short window
-    // instead of the 5-minute default.
+    // A supervisor killed at teardown must not leak its session workers into
+    // later test binaries: the worker's supervisor-lost exit runs on this
+    // short window instead of the 5-minute default.
     command.env(
         pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
         "15000",
@@ -336,9 +323,6 @@ fn reported_socket_paths(report: &Value) -> Vec<String> {
         .collect()
 }
 
-/// A live supervisor on a non-default socket inside the root: `doctor`
-/// (inspect only) lists it and leaves it running; `doctor --fix` stops the
-/// idle daemon and reports the reap.
 #[test]
 fn doctor_lists_and_then_reaps_an_idle_root_owned_daemon() {
     let fixture = tempfile::tempdir().expect("fixture");
@@ -402,9 +386,6 @@ fn doctor_lists_and_then_reaps_an_idle_root_owned_daemon() {
     wait_until_stopped(&socket, &mut daemon);
 }
 
-/// `shutdown` without `--force` demands confirmation: no TTY on stdin is the
-/// router error, `--json` without force is the JSON confirmation error. The
-/// daemon survives both.
 #[test]
 fn shutdown_without_force_requires_confirmation_and_harms_nothing() {
     let fixture = tempfile::tempdir().expect("fixture");

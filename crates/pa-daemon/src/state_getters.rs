@@ -1,11 +1,7 @@
-//! The read-only state getters (protocol breadth wave b2): the worker
-//! arms for the daemon `get_*` commands that surfaced no handler before
-//! this wave (TS daemon-mode `case "get_connection_state"` ... `case
-//! "get_tool_definition"`). Each handler answers the exact TS wire shape;
-//! the data comes from the worker's persisted session store, the engine
-//! seams (`SessionEngine::rlm_child_snapshots` / `connection_commands` /
-//! `resource_snapshot` / `system_prompt` / `tool_definition` /
-//! `rlm_max_depth_status`), and the model registry.
+//! The read-only state getters: the worker arms for the daemon `get_*`
+//! commands. Each handler answers the exact TS wire shape; the data comes
+//! from the worker's persisted session store, the engine seams, and the
+//! model registry.
 
 use serde_json::{json, Value};
 
@@ -15,10 +11,8 @@ use crate::protocol::{response_failure, response_success, DaemonResponse};
 use crate::worker::Worker;
 
 impl Worker {
-    /// `get_connection_state`: the connection state block (the same shape
-    /// the attach snapshot carries) with the TS `createConnectionState`
-    /// `heartbeat` overlay (this worker owns no cron store, so the
-    /// overlay is the TS null).
+    /// `get_connection_state`: the connection state block with the TS
+    /// `createConnectionState` `heartbeat` overlay (the TS null here).
     pub(crate) fn handle_get_connection_state(&self) -> DaemonResponse {
         if let Err(response) = self.require_created("get_connection_state") {
             return response;
@@ -31,10 +25,8 @@ impl Worker {
         response_success(None, "get_connection_state", Some(value))
     }
 
-    /// `get_rlm_children`: the authoritative child roster plus the
-    /// session's event sequence captured before the walk (TS
-    /// `buildRlmChildSnapshotsWithPassiveRlmSubagents` freshness
-    /// contract).
+    /// `get_rlm_children`: the authoritative child roster plus the session's
+    /// event sequence captured before the walk (the freshness contract).
     pub(crate) async fn handle_get_rlm_children(&self) -> DaemonResponse {
         if let Err(response) = self.require_created("get_rlm_children") {
             return response;
@@ -45,8 +37,7 @@ impl Worker {
         };
         let mut children = self.engine.rlm_child_snapshots().await;
         // The parent's own RLM node id overlays each child's `parentId`
-        // (TS `_rlmParentNodeId`; absent for top-level sessions, where TS
-        // serializes the field out).
+        // (absent for top-level sessions, serialized out on the wire).
         let parent_id = {
             let core = self.core.lock().unwrap();
             core.rlm_child_id.clone()
@@ -63,36 +54,18 @@ impl Worker {
         )
     }
 
-    /// `get_context_tree` (TS `session.getContextTree`): the root node is
-    /// the session itself — label, model, and the cumulative usage totals
-    /// over the persisted branch (own usage excludes child usage
-    /// attributions; the usage walk bridges ghost-parent gaps so one lost
-    /// append cannot zero the session's real spend) — and the children are
-    /// the live RLM roster plus every persisted child session dir under the
-    /// session's artifact tree (TS live runs + resident children +
-    /// `loadContextTreeChildrenFromDisk`): idle, settled, and
-    /// restart-orphaned subagents all appear, with their real usage and
-    /// recursive grandchildren. A live child's node carries its session
-    /// file's usage (the TS disk-fallback shape; the id, label, and status
-    /// come from the live registry, the fresher sources for a running
-    /// child), and ids tombstoned in the RLM ledger stay hidden at every
-    /// depth of the walk. The disk walk and registry reads are blocking
-    /// I/O owned by the background cache refresh
-    /// (`context_tree_cache`): they run on the blocking pool, never the
-    /// runtime worker, and never on this request path — the response
-    /// serves the cached walk with the fresh live identity overlaid
-    /// (usage and grandchildren lag the last completed refresh; a
-    /// running child's status and identity never lag).
+    /// `get_context_tree`: the root is the session itself (usage totals over
+    /// the persisted branch, ghost-parent gaps bridged); the children are the
+    /// live RLM roster plus every persisted child dir (tombstoned ids stay
+    /// hidden). The disk walk runs in the background cache refresh: this path
+    /// serves the cached walk with fresh live identity overlaid (usage lags;
+    /// a child's status never lags).
     pub(crate) async fn handle_get_context_tree(&self) -> DaemonResponse {
         if let Err(response) = self.require_created("get_context_tree") {
             return response;
         }
-        // The root node is in-memory data: the usage totals and the
-        // context estimate walk the live store under the core lock
-        // borrow-based (no owned copy of the history), so the request
-        // answers from memory in bounded time even on a grown store. The
-        // artifact-tree walk is the cache's background refresh
-        // (`context_tree_cache`), never the request path.
+        // The root node is in-memory data: the usage walk reads the live store
+        // borrow-based, so the request answers from memory even on a grown store.
         let (label, context_usage, own_usage, total_usage, session_id, own_usage_by_model) = {
             let core = self.core.lock().unwrap();
             let store = core.store.as_ref();
@@ -104,10 +77,7 @@ impl Worker {
             });
             let session_id = store.map(|store| store.session_id().to_string());
             // The per-model own-usage breakdown rides the node when every
-            // usage-carrying row resolved to a model (None degrades to the
-            // plain TS totals): a session that switched models mid-run —
-            // or whose subagents billed on other models — shows which
-            // model billed what.
+            // usage-carrying row resolved to a model (`None` degrades to the plain totals).
             let (own_usage, total_usage, own_usage_by_model) = match store {
                 Some(store) => {
                     let branch = store.branch_bridged();
@@ -140,10 +110,8 @@ impl Worker {
             }))
         });
         let snapshots = self.engine.rlm_child_snapshots().await;
-        // The children come from the cache instantly (fresh live-roster
-        // identity and status over the cached bodies; the background walk
-        // in `context_tree_cache` keeps them as fresh as its last
-        // refresh) — the walk itself never blocks this response.
+        // The children come from the cache instantly (fresh live-roster identity and status
+        // over the cached bodies) — the walk itself never blocks this response.
         let children = self
             .context_tree
             .serve_children(session_id.as_deref(), &snapshots);
@@ -169,14 +137,8 @@ impl Worker {
         response_success(None, "get_context_tree", Some(tree))
     }
 
-    /// Arm the background context-tree walk (`context_tree_cache`) for
-    /// this session: the walk inputs resolve against the worker's current
-    /// store (the durable session id for the artifact tree, the session
-    /// file for the ledger's tombstone record), so a replaced session
-    /// never walks the previous tree. Called by the `get_context_tree`
-    /// handler (re-arm on every read older than the TTL), and as the
-    /// warm at session open (create/attach), so the cache is usually
-    /// filled before the first read.
+    /// Arm the background context-tree walk (the inputs resolve against the
+    /// current store): called on reads older than the TTL and as the warm at open.
     pub(crate) fn poke_context_tree_refresh(&self) {
         let (session_id, session_file) = {
             let core = self.core.lock().unwrap();
@@ -203,8 +165,7 @@ impl Worker {
         response_success(None, "get_commands", Some(json!({ "commands": commands })))
     }
 
-    /// `get_resource_snapshot` (TS
-    /// `createAgentConnectionResourceSnapshot`).
+    /// `get_resource_snapshot` (TS `createAgentConnectionResourceSnapshot`).
     pub(crate) async fn handle_get_resource_snapshot(&self) -> DaemonResponse {
         if let Err(response) = self.require_created("get_resource_snapshot") {
             return response;
@@ -213,10 +174,8 @@ impl Worker {
         response_success(None, "get_resource_snapshot", Some(snapshot))
     }
 
-    /// `get_session_context` (TS `session.buildSessionContext`): the
-    /// resolved model context at the branch leaf — messages, the
-    /// effective thinking level and service tier, and the last model
-    /// selector.
+    /// `get_session_context`: the resolved model context at the branch leaf
+    /// (messages, thinking level, service tier, last model selector).
     pub(crate) fn handle_get_session_context(&self) -> DaemonResponse {
         if let Err(response) = self.require_created("get_session_context") {
             return response;
@@ -270,10 +229,8 @@ impl Worker {
         }
     }
 
-    /// `get_tool_definition { name }` (TS
-    /// `createAgentConnectionToolDefinition`): the definition of one
-    /// active tool; an unknown name answers success with the key omitted,
-    /// exactly like the TS `undefined` field.
+    /// `get_tool_definition { name }`: the definition of one active tool; an
+    /// unknown name answers success with the key omitted (the TS `undefined` field).
     pub(crate) async fn handle_get_tool_definition(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("get_tool_definition") {
             return response;
@@ -306,8 +263,7 @@ impl Worker {
         )
     }
 
-    /// `get_available_models` (TS `refreshAvailableModels`): the
-    /// auth-configured models.
+    /// `get_available_models` (TS `refreshAvailableModels`): the auth-configured models.
     pub(crate) fn handle_get_available_models(&self) -> DaemonResponse {
         if let Err(response) = self.require_created("get_available_models") {
             return response;
@@ -325,22 +281,13 @@ impl Worker {
         )
     }
 }
-// The usage math (the model registry resolution, the TS `Usage` wire shape,
-// the add/subtract folds, and the own/total + by-model computations) moved to
-// the child module at the same tree position (state_getters::usage); the
-// re-exports keep the facade's paths stable (context_tree_cache.rs's
-// empty_usage, rlm_child_model.rs's + setting_switches.rs's +
-// worker/create.rs's worker_model_registry, context_tree_children.rs's
-// compute_*). The private add_usage/subtract_usage folds ride with their
-// callers.
+// The usage math lives in state_getters::usage; the re-exports keep the facade's paths stable.
 mod usage;
 
 pub(crate) use usage::{
     compute_own_and_total_usage, compute_own_usage_by_model, empty_usage, worker_model_registry,
 };
 
-// The getter battery moved to the child module at the same tree position
-// (state_getters::state_getters_tests); the #[cfg(test)] decl rides at the
-// facade tail.
+// The getter battery lives in state_getters::state_getters_tests.
 #[cfg(test)]
 mod state_getters_tests;

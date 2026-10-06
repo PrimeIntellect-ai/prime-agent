@@ -1,7 +1,5 @@
 //! Char-index helpers for editor text manipulation and key-id decoding.
 
-// ---- helpers -------------------------------------------------------------
-
 /// Normalize CRLF/CR to LF and tabs to 4 spaces (TS normalizeText).
 #[must_use]
 pub fn normalize_text(text: &str) -> String {
@@ -14,10 +12,9 @@ pub fn normalize_text(text: &str) -> String {
 /// `handlePaste`'s pre-filter decode): a tmux popup with
 /// `extended-keys-format=csi-u` re-encodes control bytes inside bracketed
 /// paste as `ESC [ <codepoint> ; 5 u`. Decode them back to their literal
-/// byte so the per-char filter below keeps newlines instead of leaking the
-/// printable tail into the editor: both `a`-`z` (minus 96) and `A`-`Z`
-/// (minus 64) map to the control byte 1-26 (`j` -> LF); any other
-/// sequence stays literal.
+/// byte so the per-char filter below keeps newlines instead of leaking
+/// the printable tail into the editor (`j` -> LF); any other sequence
+/// stays literal.
 pub(crate) fn decode_paste_ctrl_sequences(text: &str) -> String {
     let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len());
@@ -136,10 +133,10 @@ pub(crate) fn decode_printable(input: &str) -> Option<String> {
 }
 
 fn split_key_id(input: &str) -> (String, String) {
-    // `+` is itself a key id (shift+= on a US layout): a TRAILING
-    // separator is the literal plus key, never an empty segment (`+` ->
-    // key `+`, `ctrl++` -> ctrl + `+`). TS needs no such rule — its
-    // printable insert reads the raw character before key-id parsing.
+    // `+` is itself a key id (shift+= on a US layout): a TRAILING separator
+    // is the literal plus key, never an empty segment (`+` -> key `+`,
+    // `ctrl++` -> ctrl + `+`). TS reads the raw character before key-id
+    // parsing, so it needs no such rule.
     let parts: Vec<&str> = input.split('+').collect();
     if parts.len() > 1 && parts[parts.len() - 1].is_empty() {
         return (parts[..parts.len() - 2].join("+"), "+".to_string());
@@ -160,7 +157,6 @@ pub(crate) fn ends_with_symbol_token(text: &str) -> bool {
     if chars.is_empty() {
         return false;
     }
-    // find last whitespace boundary
     let start = chars
         .iter()
         .rposition(|&c| c == ' ' || c == '\t')
@@ -176,30 +172,23 @@ mod tests {
 
     #[test]
     fn decodes_csi_u_ctrl_letters_to_literal_bytes() {
-        // Ctrl+J inside a tmux csi-u paste decodes to LF (TS: cp - 96).
         assert_eq!(decode_paste_ctrl_sequences("\x1b[106;5u"), "\n");
-        // Uppercase form decodes the same control byte (cp - 64).
         assert_eq!(decode_paste_ctrl_sequences("\x1b[74;5u"), "\n");
-        // Ctrl+I is the tab byte; normalize_text expands it later.
         assert_eq!(decode_paste_ctrl_sequences("\x1b[105;5u"), "\t");
         assert_eq!(decode_paste_ctrl_sequences("\x1b[73;5u"), "\t");
     }
 
     #[test]
     fn leaves_non_matching_sequences_literal() {
-        // A non-ctrl modifier (shift) and out-of-range codepoints stay.
         assert_eq!(decode_paste_ctrl_sequences("\x1b[106;2u"), "\x1b[106;2u");
         assert_eq!(decode_paste_ctrl_sequences("\x1b[13;5u"), "\x1b[13;5u");
-        // Incomplete sequences and plain text pass through untouched.
         assert_eq!(decode_paste_ctrl_sequences("a\x1b[1"), "a\x1b[1");
         assert_eq!(decode_paste_ctrl_sequences("plain text"), "plain text");
-        // Multi-byte UTF-8 survives byte-wise scanning.
         assert_eq!(decode_paste_ctrl_sequences("héllo"), "héllo");
     }
 
     #[test]
     fn decodes_only_the_reencoded_ctrl_bytes_in_a_block() {
-        // A re-encoded newline inside otherwise-normal paste content.
         let input = "alpha\x1b[106;5ubeta";
         assert_eq!(decode_paste_ctrl_sequences(input), "alpha\nbeta");
     }

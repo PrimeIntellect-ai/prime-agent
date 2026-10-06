@@ -1,6 +1,4 @@
 //! The `/tree` list state: flatten, filter, fold, search, and navigation.
-//! Port of the TS `TreeList` component's model (interactive-mode's
-//! tree-selector.ts).
 
 use std::collections::{HashMap, HashSet};
 
@@ -15,7 +13,7 @@ mod render;
 use crate::width::str_width;
 use render::{toggle, Direction, FlattenItem};
 
-/// Tree filter modes (TS `FilterMode`).
+/// Tree filter modes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FilterMode {
     Default,
@@ -60,7 +58,7 @@ impl FilterMode {
         }
     }
 
-    /// The status-line suffix (TS `getStatusLabels`).
+    /// The status-line suffix.
     fn status_label(self) -> &'static str {
         match self {
             Self::Default => "",
@@ -112,7 +110,6 @@ pub enum TreeListAction {
     Cancel,
     /// `app.tree.editLabel` on a row.
     EditLabel(String),
-    /// Nothing emitted.
     None,
 }
 
@@ -188,10 +185,9 @@ impl TreeList {
         let Some(leaf) = self.current_leaf_id.clone() else {
             return;
         };
-        // An id-indexed walk (TS `entryMap`): a linear session nests one
-        // level per entry, and a scan per hop turns the walk quadratic.
-        // The visited set terminates a corrupted parent cycle instead of
-        // spinning.
+        // An id-indexed walk: a scan per hop turns the walk quadratic on
+        // a linear session. The visited set terminates a corrupted
+        // parent cycle.
         let index_by_id: HashMap<&str, usize> = self
             .flat
             .iter()
@@ -212,9 +208,9 @@ impl TreeList {
         }
     }
 
-    /// Flatten the tree (TS `flattenTree`): roots and children carrying the
-    /// active leaf come first, single-child chains stay flat, branch points
-    /// indent one level, and branch points record gutters for descendants.
+    /// Flatten the tree: active-leaf roots/children come first,
+    /// single-child chains stay flat, branch points indent one level
+    /// and record gutters for descendants.
     fn flatten_tree(roots: &[TreeNode], leaf_id: Option<&str>) -> Vec<FlatNode> {
         // Which subtrees contain the active leaf (post-order, iterative).
         let mut contains_active: HashMap<*const TreeNode, bool> = HashMap::new();
@@ -239,9 +235,6 @@ impl TreeList {
         let has = |node: &TreeNode| contains_active.get(&std::ptr::from_ref(node)) == Some(&true);
 
         let mut result: Vec<FlatNode> = Vec::new();
-        // Stack of (node, indent, just_branched, show_connector, is_last,
-        // gutters, is_virtual_root_child) pushed in reverse so pops come in
-        // forward order.
         let mut ordered_roots: Vec<&TreeNode> = roots.iter().collect();
         // Active-leaf root first (stable within the groups).
         ordered_roots.sort_by_key(|node| !has(node));
@@ -321,20 +314,18 @@ impl TreeList {
         result
     }
 
-    /// Whether an entry passes the active filter (TS `applyFilter`).
+    /// Whether an entry passes the active filter.
     fn passes_filter(&self, index: usize) -> bool {
         let node = &self.flat[index];
         let entry = &node.data.entry;
         let is_current_leaf = self.current_leaf_id.as_deref() == entry.id();
-        // Assistant messages with only tool calls are hidden unless the
-        // active leaf or an error/abort.
         if let FileEntry::Message {
             message: pa_types::session::AgentMessage::Assistant(assistant),
             ..
         } = entry
         {
-            // Assistant messages with only tool calls are hidden unless the
-            // current leaf or an error/abort (TS `applyFilter`).
+            // Assistant messages with only tool calls are hidden unless
+            // the current leaf or an error/abort.
             if !is_current_leaf {
                 let has_text = tree_display::assistant_has_text(assistant);
                 let is_error_or_aborted = !matches!(
@@ -397,8 +388,8 @@ impl TreeList {
             })
     }
 
-    /// Recompute the filtered view: filters, fold-skips, visual structure,
-    /// and cursor preservation (TS `applyFilter`).
+    /// Recompute the filtered view: filters, fold-skips, visual
+    /// structure, and cursor preservation.
     pub fn apply_filter(&mut self) {
         if !self.filtered.is_empty() {
             self.last_selected_id = self
@@ -410,7 +401,7 @@ impl TreeList {
         self.filtered = (0..self.flat.len())
             .filter(|index| self.passes_filter(*index))
             .collect();
-        // Descendants of folded nodes are skipped (TS skip-set walk).
+        // Descendants of folded nodes are skipped.
         if !self.folded.is_empty() {
             let mut skip: HashSet<String> = HashSet::new();
             for node in &self.flat {
@@ -446,9 +437,9 @@ impl TreeList {
         }
     }
 
-    /// Recompute indent/connectors for the filtered view (TS
-    /// `recalculateVisualStructure`): hidden intermediates reattach
-    /// descendants to the nearest visible ancestor.
+    /// Recompute indent/connectors for the filtered view: hidden
+    /// intermediates reattach descendants to the nearest visible
+    /// ancestor.
     fn recalculate_visual_structure(&mut self) {
         self.visible_parent.clear();
         self.visible_children.clear();
@@ -459,10 +450,8 @@ impl TreeList {
             .filter_map(|index| self.flat[*index].data.entry.id().map(str::to_string))
             .collect();
         // Nearest visible ancestors resolve in one pass over the
-        // parent-index graph: hidden chains memoize (a later walk through
-        // the same chain stops at the memo instead of re-walking it), and
-        // the stamp array closes corrupted parent cycles without
-        // per-node allocations.
+        // parent-index graph: hidden chains memoize, and the stamp array
+        // closes corrupted parent cycles.
         let index_by_id: HashMap<&str, usize> = self
             .flat
             .iter()
@@ -495,9 +484,7 @@ impl TreeList {
                 Some(id) => id.to_string(),
                 None => continue,
             };
-            // Hidden nodes never join the visible tree: only filtered
-            // (visible) entries attach to their nearest visible ancestor
-            // (TS builds the maps over `filteredNodes` only).
+            // Hidden nodes never join the visible tree.
             if !visible.contains(&id) {
                 continue;
             }
@@ -554,8 +541,7 @@ impl TreeList {
                 self.multiple_roots,
             ));
         }
-        // The DFS resolves each visited id's row through one index map
-        // (TS `filteredNodeMap`), not a scan per node.
+        // Each visited id's row resolves through one index map, not a scan.
         let index_by_id: HashMap<String, usize> = self
             .flat
             .iter()
@@ -625,7 +611,7 @@ impl TreeList {
     }
 
     /// Index (into `filtered`) of the nearest visible entry from `entry_id`
-    /// walking up the parent chain (TS `findNearestVisibleIndex`).
+    /// walking up the parent chain.
     fn find_nearest_visible_index(&self, entry_id: Option<&str>) -> usize {
         if self.filtered.is_empty() {
             return 0;
@@ -638,9 +624,7 @@ impl TreeList {
                 self.flat[*index].data.entry.id().map(|id| (id, position))
             })
             .collect();
-        // The same id-indexed walk as [`Self::build_active_path`]: Map
-        // lookups per hop (TS `entryMap`), with the visited set
-        // terminating a corrupted parent cycle.
+        // The same id-indexed walk as [`Self::build_active_path`].
         let index_by_id: HashMap<&str, usize> = self
             .flat
             .iter()
@@ -684,7 +668,6 @@ impl TreeList {
         }
     }
 
-    /// The active search query.
     #[must_use]
     pub fn search_query(&self) -> &str {
         &self.search_query
@@ -711,8 +694,8 @@ impl TreeList {
         self.folded.contains(id)
     }
 
-    /// Whether a node can fold: it has visible children and is a root or a
-    /// branch-point child (TS `isFoldable`).
+    /// Whether a node can fold: it has visible children and is a root
+    /// or a branch-point child.
     fn is_foldable(&self, id: &str) -> bool {
         let children = self.visible_children.get(&Some(id.to_string()));
         if children.is_none_or(Vec::is_empty) {
@@ -727,9 +710,8 @@ impl TreeList {
         }
     }
 
-    /// The next branch-segment start in a direction (TS
-    /// `findBranchSegmentStart`): fold-or-up walks the visible parent
-    /// chain, unfold-or-down follows children.
+    /// The next branch-segment start in a direction: fold-or-up walks
+    /// the parent chain, unfold-or-down follows children.
     fn find_branch_segment_start(&self, direction: Direction) -> usize {
         let Some(selected_id) = self.selected_id() else {
             return self.selected;
@@ -794,7 +776,7 @@ impl TreeList {
     /// # Panics
     ///
     /// Cannot panic: the `expect` runs only when the foldable check
-    /// already proved the selected id is `Some`.
+    /// proved the selected id is `Some`.
     pub fn handle_key(&mut self, kb: &KeybindingsManager, id: &str) -> TreeListAction {
         let mut action = TreeListAction::None;
         if kb.matches(id, "tui.select.up") {

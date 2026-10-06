@@ -1,5 +1,5 @@
-//! The share concern: the `/update`, `/traces`, `/copy`, `/export`, and
-//! `/share` runs — the spawned one-way tasks and their note outcomes.
+//! The `/update`, `/traces`, `/copy`, `/export`, and `/share` runs — the
+//! spawned one-way tasks and their note outcomes.
 use super::{
     export_share, key_event_to_id, AgentView, DaemonCommand, Duration, GhAuthStatus, GistOutcome,
     InfoContent, KeyEvent, Map, Result, SessionUi, ShareLoader, StatusKind, Value,
@@ -7,17 +7,15 @@ use super::{
 };
 
 /// The `/share` upload task's report: the created gist or the failure
-/// message (TS resolves the same promise from the gh process result).
+/// message.
 pub(crate) type ShareNote = Result<GistOutcome, String>;
 
-/// The background `/update` run's report: the new build's version line,
-/// or the failure message (the same funnel `prime-agent update` runs —
-/// the runner the composition root owns).
+/// The background `/update` run's report: the new build's version line, or
+/// the failure message.
 pub(crate) type UpdateNote = std::result::Result<String, String>;
 
 /// The `/traces upload-all` sweep's reports: the live progress counter and
-/// the settled summary (TS `onProgress`'s status row + the arm's awaited
-/// result).
+/// the settled summary.
 pub(crate) type TracesUploadNote = crate::traces::TraceUploadAllNote;
 
 /// A `/share` upload in flight: the abortable task and the temp export.
@@ -28,35 +26,27 @@ pub(crate) struct ShareRun {
     tmp_file: std::path::PathBuf,
 }
 
-/// A `/traces upload-all` run in flight (TS the arm's
-/// `traceUploadAllAbortController` + the awaited sweep).
+/// A `/traces upload-all` run in flight.
 pub(super) struct TraceUploadAllRun {
-    /// The sweep task; aborting it drops the engine's requests mid-flight
-    /// (the engine's own cancel keeps the sleeps and workers bounded).
+    /// The sweep task; aborting it drops the engine's requests mid-flight.
     task: tokio::task::JoinHandle<()>,
-    /// The cancel handle the clear key fires (TS `app.clear` → abort).
+    /// The cancel handle the clear key fires.
     pub(super) cancel: crate::traces::TraceUploadCancel,
 }
 
 /// Why the parked traces login runs: the `login` arm, or the `on` arm's
-/// credential-less entry (TS `handleTracesCommand` runs the login flow
-/// inline, then continues the enable).
+/// credential-less entry.
 pub(super) enum TracesLoginIntent {
     Login,
     Enable,
 }
 
 impl SessionUi {
-    // ------------------------------------------------------------------
     // Update (/update)
-    // ------------------------------------------------------------------
 
-    /// The confirmed update: spawn the download+install OUT-OF-BAND. The
-    /// run replaces only the on-disk binary (the running binary is
-    /// in-memory — replacing it is safe), so nothing here blocks or tears
-    /// down: the TUI stays mounted, the daemon keeps running, and the
-    /// outcome lands as a row through [`Self::update_notes`] when the
-    /// task finishes.
+    /// The confirmed update: spawn the download+install OUT-OF-BAND. The run replaces only the
+    /// on-disk binary (the running binary is in-memory), so the TUI stays mounted, the daemon keeps
+    /// running, and the outcome lands as a row through [`Self::update_notes`].
     pub(super) fn spawn_update(&mut self, view: &mut AgentView) {
         let Some(update) = self.update_commands.clone() else {
             self.note("/update is not available in this client yet", view);
@@ -74,10 +64,8 @@ impl SessionUi {
         });
     }
 
-    /// The background update run's landed outcome: the success row names
-    /// the new build (restart runs it — the running binary keeps serving
-    /// this session until then), else the error row carries the
-    /// installer's failure.
+    /// The landed outcome: the success row names the new build (restart runs
+    /// it), else the error row carries the installer's failure.
     pub(crate) fn apply_update_note(&mut self, outcome: UpdateNote, view: &mut AgentView) {
         self.update_in_flight = false;
         match outcome {
@@ -93,15 +81,10 @@ impl SessionUi {
         }
     }
 
-    // ------------------------------------------------------------------
     // Trace sharing (/traces)
-    // ------------------------------------------------------------------
 
-    /// `/traces [status|on|off|preview|upload|upload-current|upload-all|
-    /// login]` (TS `handleTracesCommand`): the status block, the
-    /// enable/disable settings writes, the preview, the one-shot upload,
-    /// the upload-all sweep, and the terminal login — the full TS command
-    /// family over the composition root's trace engine.
+    /// `/traces [status|on|off|preview|upload|upload-current|upload-all|login]`:
+    /// the full TS command family over the composition root's trace engine.
     pub(crate) async fn handle_traces_command(
         &mut self,
         resolved: &pa_types::slash_commands::ResolvedSlashCommand,
@@ -112,8 +95,8 @@ impl SessionUi {
             return Ok(());
         };
         let command = resolved.args.trim().to_lowercase();
-        // TS reads the connection state for the session file (and the
-        // upload-all sweep for the session dir).
+        // The connection state serves the session file (and the upload-all sweep
+        // the session dir).
         let state = self.connection_state(view).await;
         let state_field = |name: &str| {
             state
@@ -126,8 +109,7 @@ impl SessionUi {
         let session_dir = state_field("sessionDir");
         match command.as_str() {
             "" | "status" => {
-                // TS `settingsManager.reload()` then the block: the
-                // fresh-manager reads are the reload's post-state.
+                // The reads are the reload's post-state.
                 let enabled = traces.0.enabled().await;
                 let credential = traces.0.credential().await;
                 let rows = crate::traces::status_block(
@@ -136,15 +118,12 @@ impl SessionUi {
                     session_file.as_deref(),
                     &crate::traces::traces_base_url(),
                 );
-                // The info-display rows the `/session`-style commands
-                // share — in the read-only info panel (the operator's
-                // 2026-09-26 directive), never as transcript rows.
+                // In the read-only info panel (the operator's 2026-09-26 directive),
+                // never as transcript rows.
                 self.open_info_panel(view, None, InfoContent::Rows(rows));
                 self.track_menu_opened("traces", "command");
             }
             "off" | "disable" => {
-                // TS `setAgentTracesEnabled(false)` + `flush()`, then the
-                // status row.
                 if let Err(error) = traces.0.set_enabled(false).await {
                     self.error_row(
                         &format!("Trace sharing disabled write failed: {error:#}"),
@@ -155,9 +134,8 @@ impl SessionUi {
                 self.note("Trace sharing disabled.", view);
             }
             "on" | "enable" => {
-                // TS the enable arm: a missing credential runs the login
-                // flow first (the run loop parks it on the plain
-                // terminal); a cancelled or failed login stops here.
+                // A missing credential runs the login flow first (the run loop parks it);
+                // a cancelled or failed login stops here.
                 let credential = traces.0.credential().await;
                 if credential.is_none() {
                     self.pending_traces_login = Some(TracesLoginIntent::Enable);
@@ -167,13 +145,10 @@ impl SessionUi {
                     .await?;
             }
             "preview" => {
-                // TS `previewCurrentTrace`: the block, or the fallback
-                // status rows.
+                // The block, or the fallback status rows.
                 match traces.0.preview(session_file.as_deref()).await {
                     crate::traces::TracePreviewOutcome::Ready(info) => {
                         let rows = crate::traces::preview_block(&info);
-                        // The preview block's own `Trace Preview`
-                        // header row is the panel's head.
                         self.open_info_panel(view, None, InfoContent::Rows(rows));
                         self.track_menu_opened("traces", "command");
                     }
@@ -193,8 +168,6 @@ impl SessionUi {
                 }
             }
             "upload" | "upload-current" => {
-                // TS the one-shot upload: the credential gate, then the
-                // formatted row (a failure is the error row).
                 let credential = traces.0.credential().await;
                 if credential.is_none() {
                     self.error_row(
@@ -211,9 +184,6 @@ impl SessionUi {
                 }
             }
             "upload-all" => {
-                // TS the sweep: the credential gate, the one-sweep-at-a-
-                // time guard, then the background run (progress through
-                // the note channel, the clear key cancels).
                 let credential = traces.0.credential().await;
                 if credential.is_none() {
                     self.error_row(
@@ -247,9 +217,8 @@ impl SessionUi {
                 self.trace_upload = Some(TraceUploadAllRun { task, cancel });
             }
             "login" => {
-                // TS runs the login dialog; the terminal port parks the
-                // flow against the inline auth panel (the run loop mounts
-                // it right after this key).
+                // The terminal port parks the flow against the inline auth panel (the run
+                // loop mounts it right after this key).
                 self.pending_traces_login = Some(TracesLoginIntent::Login);
             }
             _ => {
@@ -263,9 +232,6 @@ impl SessionUi {
         Ok(())
     }
 
-    /// TS the enable arm's tail (after the credential): set the flag,
-    /// flush, then the one-shot upload whose message rides the status
-    /// row.
     async fn enable_traces(
         &mut self,
         traces: &crate::traces::TracesCommandsHandle,
@@ -287,19 +253,16 @@ impl SessionUi {
         Ok(())
     }
 
-    /// Whether a parked `/traces login` waits for the panel mount (the
-    /// run loop checks this after each key).
+    /// Whether a parked `/traces login` waits for the panel mount.
     pub(crate) fn pending_traces_login(&self) -> bool {
         self.pending_traces_login.is_some()
     }
 
-    /// The parked traces login: mount the inline auth panel (TS the
-    /// login dialog mounts as the flow starts) and spawn the flow against
-    /// it; the settled outcome folds in through the panel channel and
-    /// continues the enable intent (TS's `on` arm).
+    /// The parked traces login: mount the inline auth panel and spawn the flow against it; the
+    /// settled outcome folds in through the panel channel and continues the enable intent.
     pub(crate) fn run_traces_login(&mut self, view: &mut AgentView) {
-        // The park is consumed here (the intent moves to the in-flight
-        // run): the key-path check spawns the flow exactly once.
+        // The park is consumed here: the key-path check spawns the flow exactly
+        // once.
         let Some(intent) = self.pending_traces_login.take() else {
             return;
         };
@@ -319,8 +282,8 @@ impl SessionUi {
         });
     }
 
-    /// A settled traces login (the panel channel's `TracesSettled`): the
-    /// outcome row lands, and the enable intent continues TS's `on` arm.
+    /// A settled traces login: the outcome row lands, and the enable intent
+    /// continues.
     pub(crate) async fn finish_traces_login(
         &mut self,
         outcome: crate::traces::TraceLoginOutcome,
@@ -334,9 +297,8 @@ impl SessionUi {
             crate::traces::TraceLoginOutcome::Status(message) => {
                 self.note(&message, view);
                 if matches!(intent, Some(TracesLoginIntent::Enable)) {
-                    // TS re-reads the credential after the login: still
-                    // none is the TS error row; a resolved one continues
-                    // the enable (set, flush, upload once).
+                    // A still-missing credential is the error row; a resolved one continues
+                    // the enable.
                     let credential = traces.0.credential().await;
                     if credential.is_none() {
                         self.error_row("Trace sharing needs a Prime API key.", view);
@@ -359,8 +321,7 @@ impl SessionUi {
             crate::traces::TraceLoginOutcome::Error(message) => {
                 self.error_row(&message, view);
             }
-            // A cancelled login stays silent (TS the cancelled dialog
-            // shows no row).
+            // A cancelled login stays silent.
             crate::traces::TraceLoginOutcome::Cancelled => {}
         }
         self.dirty = true;
@@ -372,9 +333,8 @@ impl SessionUi {
         self.trace_upload.is_some()
     }
 
-    /// One upload-all note (the run loop folds it in): the live counter
-    /// rewrites the status row in place (TS `showStatus`), the settled
-    /// run reports TS's summary (or the cancel row).
+    /// One upload-all note (the run loop folds it in): the live counter rewrites the status row in
+    /// place; the settled run reports the summary (or the cancel row).
     pub(crate) fn apply_traces_upload_note(
         &mut self,
         note: crate::traces::TraceUploadAllNote,
@@ -389,9 +349,8 @@ impl SessionUi {
                 );
             }
             crate::traces::TraceUploadAllNote::Done { result, cancelled } => {
-                // A late outcome after the run went away is ignored (the
-                // sweep was superseded); the settled run's task is
-                // reaped here.
+                // A late outcome after the run went away is ignored (the sweep was superseded); the
+                // settled run's task is reaped here.
                 let Some(run) = self.trace_upload.take() else {
                     return;
                 };
@@ -406,8 +365,6 @@ impl SessionUi {
                     self.note("No persisted traces were found.", view);
                     return;
                 }
-                // TS's summary: the uploaded count, the optional skipped
-                // and failed counts, then the stored bytes.
                 let mut parts = vec![format!(
                     "Uploaded {} of {} traces",
                     crate::traces::thousands(result.uploaded as u64),
@@ -443,14 +400,10 @@ impl SessionUi {
         }
     }
 
-    // ------------------------------------------------------------------
     // Clipboard (/copy)
-    // ------------------------------------------------------------------
 
-    /// `/copy` (TS `handleCopyCommand`): fetch the last assistant text
-    /// from the daemon and copy it to the clipboard. No assistant text
-    /// yet is the TS error row; a clipboard failure surfaces the copy
-    /// chain's own message.
+    /// Fetch the last assistant text from the daemon and copy it to the
+    /// clipboard.
     pub(crate) async fn handle_copy_command(&mut self, view: &mut AgentView) -> Result<()> {
         let data = self
             .bounded_request(
@@ -484,14 +437,10 @@ impl SessionUi {
         Ok(())
     }
 
-    // ------------------------------------------------------------------
     // Session export and share (/export, /share)
-    // ------------------------------------------------------------------
 
-    /// `/export [path]` (TS `handleExportCommand`): export the session to
-    /// HTML — or, for an explicit `.jsonl` path, the current branch as a
-    /// JSONL file — and report the written path. The daemon owns the
-    /// export; failures surface as the TS error row.
+    /// Export the session to HTML — or, for an explicit `.jsonl` path, the
+    /// current branch as a JSONL file — and report the written path.
     pub(crate) async fn handle_export_command(
         &mut self,
         resolved: &pa_types::slash_commands::ResolvedSlashCommand,
@@ -537,9 +486,8 @@ impl SessionUi {
         Ok(())
     }
 
-    /// `/share` (TS `handleShareCommand`): gate on the GitHub CLI, export
-    /// the session to a temp file, then upload it as a secret gist while
-    /// the cancellable loader replaces the editor.
+    /// Gate on the GitHub CLI, export the session to a temp file, then upload it
+    /// as a secret gist while the cancellable loader replaces the editor.
     pub(crate) async fn handle_share_command(&mut self, view: &mut AgentView) -> Result<()> {
         match export_share::probe_gh_auth() {
             GhAuthStatus::NotLoggedIn => {
@@ -558,7 +506,7 @@ impl SessionUi {
             }
             GhAuthStatus::Ok => {}
         }
-        // The temp export `gh` uploads (TS `os.tmpdir()/session.html`).
+        // The temp export `gh` uploads.
         let tmp_file = std::env::temp_dir().join("session.html");
         let export = self
             .bounded_request(
@@ -605,10 +553,8 @@ impl SessionUi {
         self.share.is_some()
     }
 
-    /// A `/share` upload settled: drop the loader, clean the temp file, and
-    /// surface the TS rows — the share URL, or the failure. A late outcome
-    /// after a cancel is ignored (the run is gone, the cancel showed its
-    /// own row).
+    /// A `/share` upload settled: drop the loader, clean the temp file, and surface the share URL,
+    /// or the failure. A late outcome after a cancel is ignored.
     pub(crate) fn apply_share_outcome(&mut self, outcome: ShareNote, view: &mut AgentView) {
         let Some(run) = self.share.take() else {
             return;
@@ -629,9 +575,8 @@ impl SessionUi {
         self.dirty = true;
     }
 
-    /// One key press while the `/share` loader is open (TS
-    /// `CancellableLoader`): the cancel binding aborts the upload, every
-    /// other key is the loader's.
+    /// One key press while the `/share` loader is open: the cancel binding aborts
+    /// the upload, every other key is the loader's.
     pub(crate) fn handle_share_loader_key(
         &mut self,
         key: KeyEvent,

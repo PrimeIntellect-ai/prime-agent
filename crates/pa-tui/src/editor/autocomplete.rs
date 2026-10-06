@@ -7,8 +7,6 @@ use super::text_utils::{char_at, char_prefix, ends_with_symbol_token};
 use super::{AutocompleteSearch, Editor, EditorEvent, PendingAutocomplete};
 
 impl Editor {
-    // ---- autocomplete ------------------------------------------------------
-
     pub(crate) fn current_slash_command_context(
         &self,
     ) -> Option<crate::autocomplete::SlashContext> {
@@ -91,10 +89,8 @@ impl Editor {
             return;
         }
         // An empty prompt has nothing to complete: the forced file pass
-        // would otherwise list the whole cwd (`file_suggestions("")`),
-        // a junk menu with no anchor token. Tab on an empty (or
-        // whitespace-only) prompt is a no-op; completion after text is
-        // typed keeps its existing behavior.
+        // would otherwise list the whole cwd, a junk menu with no anchor
+        // token.
         if self.get_text().trim().is_empty() {
             return;
         }
@@ -151,21 +147,16 @@ impl Editor {
         // previous lookup at request time): dropping the handle sets
         // its cancel flag and the walk quits.
         self.autocomplete_search = None;
-        // TS resolves suggestions asynchronously (a `getSuggestions`
-        // promise): the dropdown only materializes after the current
-        // keystroke batch, so the request parks here and the host loop
-        // materializes it when the input queue drains.
         self.pending_autocomplete = Some(PendingAutocomplete {
             force,
             explicit_tab,
         });
     }
 
-    /// Materialize the parked suggestion request (TS
-    /// `runAutocompleteRequest` after the promise resolves). The host loop
-    /// calls this once the input queue drains, so a burst of keystrokes
-    /// never sees a dropdown open mid-batch; a background `@` search is
-    /// polled here too.
+    /// Materialize the parked suggestion request. The host loop calls
+    /// this once the input queue drains, so a keystroke burst never sees
+    /// a dropdown open mid-batch; a background `@` search is polled
+    /// here too.
     pub fn materialize_autocomplete(&mut self) {
         if let Some(pending) = self.pending_autocomplete.take() {
             self.run_autocomplete_request(pending);
@@ -174,9 +165,9 @@ impl Editor {
         let Some(active) = self.autocomplete_search.take() else {
             return;
         };
-        // TS `isAutocompleteRequestCurrent`: the editor moved past the
-        // snapshot the search answers, so the result would land stale —
-        // drop the handle (cancelling the walk) without touching the UI.
+        // The editor moved past the snapshot the search answers, so the
+        // result would land stale — drop the handle (cancelling the
+        // walk) without touching the UI.
         if self.lines != active.lines
             || self.cursor_line != active.cursor_line
             || self.cursor_col != active.cursor_col
@@ -222,10 +213,9 @@ impl Editor {
         }
     }
 
-    /// Apply a resolved lookup (TS `runAutocompleteRequest` once the
-    /// promise settles): no items cancels the open menu, a forced Tab
-    /// with a single item applies it inline, and otherwise the dropdown
-    /// opens with the best match selected.
+    /// Apply a resolved lookup: no items cancels the open menu, a forced
+    /// Tab with a single item applies it inline, and otherwise the
+    /// dropdown opens with the best match selected.
     fn apply_suggestions(
         &mut self,
         suggestions: Option<crate::autocomplete::Suggestions>,
@@ -285,10 +275,9 @@ impl Editor {
         let has_ctx =
             self.current_slash_command_context().is_some() || ends_with_symbol_token(&before);
 
-        // An edit that empties the prompt cancels both the open menu and
-        // the parked request (a parked request can exist without an open
-        // menu; if it survived, it would materialize a dropdown on an
-        // empty prompt).
+        // An edit that empties the prompt cancels both the open menu and the
+        // parked request (a parked request can exist without an open menu; if it
+        // survived, it would materialize a dropdown on an empty prompt).
         if self.get_text().trim().is_empty() {
             self.cancel_autocomplete();
             return;
@@ -312,6 +301,4 @@ impl Editor {
             self.emit(EditorEvent::AutocompleteToggled(false));
         }
     }
-
-    // ---- layout / rendering ------------------------------------------------
 }

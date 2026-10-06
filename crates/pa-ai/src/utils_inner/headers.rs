@@ -1,4 +1,4 @@
-//! Header helpers. Ported from `packages/ai/src/utils/headers.ts`.
+//! Header helpers.
 
 /// Convert a header map into a plain record with lowercase keys.
 #[allow(dead_code)] // SDK header conversion for upcoming providers
