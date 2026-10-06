@@ -574,15 +574,18 @@ impl Supervisor {
         #[cfg(unix)]
         let serving = tokio::select! {
             result = accept_loop::serve(&self, listener) => {
-                // The serve return races the compromise monitor: a return
-                // landing while the lease is already lost must take the
-                // same abort-and-shutdown path the compromise arm runs,
-                // so the boot's ownership passes never keep running
-                // against the successor that took the socket over.
+                // The accept loop has ended - healthy, accept-error, or a
+                // return racing the compromise monitor. The boot's
+                // ownership passes must not outlive it: with the monitor
+                // arm gone, nothing else would abort the archive sweep or
+                // the restore pass if a successor takes the socket over
+                // during the exit path, so the tasks die here in every
+                // outcome, and a lease lost by then additionally takes
+                // the same shutdown path the compromise arm runs.
+                for task in &boot_tasks {
+                    task.abort();
+                }
                 if socket_lease.assert_held().is_err() {
-                    for task in &boot_tasks {
-                        task.abort();
-                    }
                     self.shutting_down.store(true, Ordering::SeqCst);
                     self.accept_exit.store(true, Ordering::SeqCst);
                     self.shutdown_notify.notify_waiters();

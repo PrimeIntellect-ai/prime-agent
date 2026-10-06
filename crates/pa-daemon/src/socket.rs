@@ -305,9 +305,13 @@ impl Drop for SocketLease {
         // A successor that reclaimed a stale lock must never be released
         // by us. Linux runs the claim-verify-release choreography;
         // elsewhere the identity check below removes only this lease's
-        // own directory (proper-lockfile's residual rename window is the
-        // documented floor there - no no-replace rename exists to close
-        // it).
+        // own directory. That check-then-act remove carries
+        // proper-lockfile's own residual window: after a suspension
+        // longer than the staleness threshold, a contender may reclaim
+        // the stale lock between the check and the remove, and the old
+        // holder then deletes the successor's directory - the documented
+        // floor on platforms without a portable no-replace rename
+        // (macOS's renameatx_np is not used here).
         if !self.compromised() {
             self.release_lock_dir();
         }
@@ -333,8 +337,12 @@ impl SocketLease {
     fn release_lock_dir(&self) {
         // The identity check is the whole guard: only a directory whose
         // path still pins this lease's inode is removed, so a successor
-        // that displaced it keeps theirs. The residual window between
-        // the check and the remove is the platform floor.
+        // that displaced it before the check keeps theirs. The residual
+        // window between the check and the remove is proper-lockfile's
+        // own floor (see the Drop comment above): a stale reclaim that
+        // lands inside it can be deleted by this holder. The refresh
+        // join in Drop does not guarantee a current mtime - a longer
+        // suspension leaves the lock stale and reclaimable here.
         if lock_identity_matches(&self.lock_path, &self.identity) {
             let _ = std::fs::remove_dir(&self.lock_path);
         }
