@@ -460,6 +460,22 @@ impl Worker {
                     .lock()
                     .unwrap()
                     .session_started(active, session_ref);
+                // The replacement opened the moved-to file's durable
+                // inbox: unread rows there (a digest-lane backlog the
+                // target session never read) would sit silent — the
+                // teardown purged the retired session's pending notice,
+                // and the replacement reset push-pins the lane, so no
+                // later digest arrival ever calls the re-arm. Reconcile
+                // the target's unread backlog exactly like the create
+                // path does on reload (a no-op on a clean or fully-read
+                // inbox — a fresh `new_session` is unchanged). The re-arm
+                // rides the replacement's completion wake, past every
+                // flow await (the identity and summary reseed, the
+                // scheduled-job bind, the roster push, the reporter
+                // bind), so the recovered turn lands on a fully
+                // initialized session — the create path's deferral
+                // lesson; the swap section above stays untouched.
+                self.agent_digest.ensure_digest_notice();
                 response_success(None, command, Some(json!({ "cancelled": false })))
             }
             Err(error) => {

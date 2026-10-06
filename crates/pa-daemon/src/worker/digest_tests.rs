@@ -661,6 +661,81 @@ async fn a_reloaded_worker_re_arms_the_notice_for_unread_inbox_entries() {
         "the reload did not re-arm the digest notice"
     );
 }
+/// A whole-runtime replacement onto a file that already holds unread
+/// inbox rows (`switch_session` here; `import_jsonl` rides the same
+/// tail): the teardown purged the retired session's pending notice and
+/// the replacement reset push-pins the lane, so without a re-arm the
+/// moved-to file's durable backlog sits silent with no later trigger to
+/// wake the session — the same reconcile the create path runs on
+/// reload, at the replacement's completion wake.
+#[tokio::test]
+async fn a_session_replacement_re_arms_the_notice_for_a_targets_unread_inbox() {
+    let worker = created_worker().await;
+    let dir =
+        std::env::temp_dir().join(format!("pa-worker-digest-switch-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let target_path = dir.join("switch-target.jsonl");
+    // The target session's durable backlog: one unread inbox entry the
+    // target never read before it was switched away from.
+    let mut store = crate::session_store::SessionFile::create("/tmp", None, 0);
+    store.set_path(target_path.clone());
+    store.rewrite().unwrap();
+    store
+        .persist_entry(
+            "custom",
+            json!({
+                "customType": crate::worker::digest::AGENT_MESSAGE_INBOX_ENTRY_CUSTOM_TYPE,
+                "data": {
+                    "messageId": "agentmsg_backlog",
+                    "content": "REPORT 602",
+                    "from": { "activeSessionId": "sender", "sessionName": "sender" },
+                    "fromRelationship": "sibling",
+                    "target": { "activeSessionId": "target", "sessionId": "target" },
+                    "receivedAt": "2026-01-01T00:00:00.000Z",
+                    "kind": "agent_message",
+                },
+            }),
+        )
+        .unwrap();
+    // The queue stays parked across the replacement so the re-armed
+    // notice's queued state is deterministic (the runner would otherwise
+    // consume the wake turn asynchronously).
+    {
+        let mut core = worker.core.lock().unwrap();
+        core.queued_input_suspended = true;
+    }
+    let switched = worker
+        .dispatch(
+            "switch_session",
+            &json!({
+                "activeSessionId": worker.config.active_session_id,
+                "sessionPath": target_path.to_string_lossy(),
+            }),
+        )
+        .await;
+    assert!(switched.success, "switch failed: {switched:?}");
+    assert_eq!(switched.data, Some(json!({ "cancelled": false })));
+    // The target's unread backlog loaded into the live inbox...
+    let snapshot = worker.agent_digest.inbox_snapshot();
+    assert_eq!(snapshot["unread"], json!(1), "{snapshot}");
+    assert_eq!(
+        snapshot["entries"][0]["content"],
+        json!("REPORT 602"),
+        "{snapshot}"
+    );
+    // ...and its notice re-armed at the replacement's completion wake
+    // (the reload reconcile — not a lane flip: the replacement stays
+    // push-pinned).
+    assert_eq!(
+        lane_custom_types(&worker.core, Lane::FollowUp),
+        vec!["agent_message_digest_notice"],
+        "the replacement did not re-arm the digest notice"
+    );
+    assert!(
+        !worker.core.lock().unwrap().agent_message_digest_mode,
+        "the replacement stays push-pinned"
+    );
+}
 /// The re-armed notice's wake must not admit the recovered turn before the
 /// create's remaining initialization lands: `ensure_digest_notice` is a
 /// turn-runner admission, so the re-arm defers to the create's completion
