@@ -321,11 +321,14 @@ impl Drop for SocketLease {
 
 /// The lease release: Linux runs the airtight claim-verify-release
 /// choreography (`release_lock_dir_identity` below). Other unix
-/// platforms have no no-replace rename, so the release removes the lock
-/// directory only after the identity check confirms the path still pins
-/// this lease's own inode - proper-lockfile's residual check-then-act
-/// rename window is the documented floor there, and a displaced
-/// successor's directory is never touched.
+/// platforms have no no-replace rename in use (macOS's
+/// `renameatx_np(RENAME_EXCL)` is not portable and not used here), so
+/// the release removes the lock directory only after the identity check
+/// confirms the path still pins this lease's own inode. That
+/// check-then-act remove carries proper-lockfile's own residual window:
+/// a stale reclaim landing between the check and the remove is deleted by
+/// this holder - the documented floor, matched to the Drop and release
+/// comments below.
 #[cfg(unix)]
 impl SocketLease {
     #[cfg(target_os = "linux")]
