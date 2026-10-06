@@ -200,6 +200,16 @@ impl SocketLease {
         if self.assert_path_held(path).is_err() {
             return;
         }
+        // A live listener answering at the path outranks the identity
+        // match: a replacement bound while this holder's capture was
+        // parked in the bind->capture gap can poison the captured
+        // identity to name the successor's own inode. Only a
+        // definitely-closed file is this holder's to take (Linux-only
+        // definitive verdict; elsewhere the probe fails closed and the
+        // next bind's stale-socket prepare cleans a file nothing serves).
+        if !pa_types::platform::transport::unix_listener_definitely_closed(path) {
+            return;
+        }
         let claim = pa_core::platform::private_sibling_for(path, "unlinked");
         if std::fs::rename(path, &claim).is_err() {
             // Nothing at the path is ours to unlink.
@@ -580,9 +590,13 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("already in use"), "{error}");
+        // A live listener at the path outranks even the holder's own
+        // identity match: the exit cleanup only takes dead files.
         lease.cleanup_socket_path(&socket, socket_identity(&socket));
-        assert!(!socket.exists());
+        assert!(socket.exists(), "the live socket survives the cleanup");
         drop(listener);
+        lease.cleanup_socket_path(&socket, socket_identity(&socket));
+        assert!(!socket.exists(), "the dead socket is claimed and unlinked");
         drop(lease);
         assert!(!pa_core::platform::LockDir::path_for(&socket).exists());
     }
@@ -674,22 +688,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn socket_cleanup_claims_and_restores_a_replaced_socket() {
+    async fn socket_cleanup_spares_a_live_successor_and_claims_dead_files() {
         let dir = tempfile::TempDir::new().unwrap();
         let socket = dir.path().join("daemon.sock");
         let lease = SocketLease::acquire(&socket).await.unwrap();
         let lock_path = pa_core::platform::LockDir::path_for(&socket);
         let listener = bind_transport(&socket).await.unwrap();
         let bound = socket_identity(&socket);
-        lease.cleanup_socket_path(&socket, bound.clone());
-        assert!(!socket.exists(), "the claimed socket was unlinked");
-        // A successor binds a replacement at the vacated path; the lease's
-        // cleanup must restore it, never remove it.
-        let successor = bind_transport(&socket).await.unwrap();
-        lease.cleanup_socket_path(&socket, bound);
-        assert!(socket.exists(), "the successor's socket survives");
+        // The exit sequence closes the listener before the cleanup: the
+        // dead file is the only thing the claim may take.
         drop(listener);
+        lease.cleanup_socket_path(&socket, bound.clone());
+        assert!(
+            !socket.exists(),
+            "the dead bound socket is claimed and unlinked"
+        );
+        // A poisoned capture (a replacement bound while the capture was
+        // parked in the bind->capture gap) names the successor's own
+        // inode; the live-listener probe outranks the identity match.
+        let successor = bind_transport(&socket).await.unwrap();
+        let poisoned = socket_identity(&socket);
+        lease.cleanup_socket_path(&socket, poisoned.clone());
+        assert!(
+            socket.exists(),
+            "the live successor survives the poisoned identity"
+        );
+        // Once the successor dies, the same cleanup takes its dead file.
         drop(successor);
+        lease.cleanup_socket_path(&socket, poisoned);
+        assert!(
+            !socket.exists(),
+            "the dead successor file is claimed and unlinked"
+        );
         drop(lease);
         assert!(!lock_path.exists());
     }
