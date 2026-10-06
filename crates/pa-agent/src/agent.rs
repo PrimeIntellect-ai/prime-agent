@@ -1797,8 +1797,6 @@ mod tests {
         assert!(!agent.has_queued_messages());
         subscription.unsubscribe().await;
     }
-}
-
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_model_switch_updates_the_model_and_level_atomically() {
