@@ -1,14 +1,14 @@
 # install.ps1 — the Windows-native installer for Prime Agent (Rust build).
 #
-# THE ONE-LINER (the served copy carries the official domain + the stable
-# channel rendered in by the release pipeline's publish step):
-#
-#   irm https://app.primeintellect.ai/prime-agent/install.ps1 | iex
-#
-# The repo copy's defaults are the same bucket-root base, so the raw form
-# works out of the box too (the README's Windows command):
+# THE ONE-LINER (the repo copy's defaults are the channel's own bucket-root
+# base + the stable channel, so the raw form works out of the box — the
+# README's Windows command):
 #
 #   irm https://raw.githubusercontent.com/PrimeIntellect-ai/prime-agent/main/install.ps1 | iex
+#
+# The release pipeline's publish step renders this file to <base>/install.ps1
+# (the stable channel) and <base>/install-beta.ps1 (the beta channel), the
+# build's download base + channel stamped in.
 #
 # The Git Bash route is the same channel through install-rust.sh (the sh
 # one-liner `curl -fsSL .../install.sh | sh` under Git Bash/MSYS2/Cygwin);
@@ -20,8 +20,10 @@
 # or <base>/beta) gives the version, the channel manifest (<base>/latest.json
 # or <base>/beta.json) gives this platform's artifact row, and the versioned
 # release prefix serves the tarball plus its SHA256SUMS; the checksum is
-# verified before anything is published. NO GITHUB SURFACE anywhere in the
-# user path.
+# verified before anything is published. The channel carries no GitHub
+# surface: every file this installer READS comes from the base — the one
+# GitHub fetch on the Windows route is this script itself (the README's raw
+# copy), and the sh route has none.
 #
 # THE WINDOWS CHANNEL FALLBACK: the stable releases predate Windows
 # support, so the stable manifest carries no win32-x64 row until the first
@@ -285,7 +287,11 @@ if (-not (Test-Path $payloadExe -PathType Leaf)) { Fail "the tarball did not con
 # funnel's channel-stickiness read keys on it).
 $channelLine = "install-rust.sh channel $channel"
 $marker = "$channelLine`nversion $version"
-Set-Content -LiteralPath (Join-Path $stage '.prime-agent-install') -Value $marker -NoNewline
+# -Encoding Ascii keeps the marker byte-exact: Set-Content's default
+# encoding follows $PSDefaultParameterValues['*:Encoding'] (UTF-16 or a
+# BOM), and the update funnel's channel-stickiness read + the rollback's
+# marker validation grep the raw ASCII line.
+Set-Content -LiteralPath (Join-Path $stage '.prime-agent-install') -Value $marker -Encoding Ascii -NoNewline
 
 # The launcher paths (the section below the publish writes both).
 $launcher = Join-Path $bin 'prime-agent.cmd'

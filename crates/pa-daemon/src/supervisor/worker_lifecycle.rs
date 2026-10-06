@@ -335,6 +335,9 @@ impl Supervisor {
         // self-registers on boot, and the registration handler must find its
         // identity in the registry (registration races the create replay).
         self.registry.insert(Arc::clone(&resident)).await;
+        // An owner whose last connection closed before this insert was
+        // missed by its disconnect scan; the arm checks the owner itself.
+        self.schedule_owned_worker_cleanup(&resident).await;
         let deadline = self.connect_deadline();
         // A failed launch never leaves its half-registered resident behind:
         // a later stale-id rebind (or resolve) must not select a worker

@@ -396,6 +396,56 @@ async fn a_worker_leaving_inside_the_settle_grace_keeps_the_verdict() {
         .is_some_and(|content| content.contains("the child final answer")));
 }
 
+#[tokio::test]
+async fn child_updates_surface_through_the_sink() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let (sessions, _kill_rx) =
+        sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success, FakeChild::Healthy).await;
+    let rows: Arc<std::sync::Mutex<Vec<Value>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink_rows = Arc::clone(&rows);
+    sessions.set_child_update_sink(Arc::new(move |child| {
+        sink_rows.lock().unwrap().push(child);
+    }));
+    let settled = sessions.settle_notified();
+    let handle = spawn_child(&sessions).await;
+    sessions.notify_turn_done();
+    tokio::time::timeout(Duration::from_secs(10), settled)
+        .await
+        .expect("the child settles");
+    let result = sessions
+        .delete_subagent(handle.rlm_child_id.clone())
+        .await
+        .expect("the settled child deletes");
+    assert_eq!(result.outcome, Some("deleted"));
+    let rows = rows.lock().unwrap().clone();
+    assert!(
+        rows.iter().any(|row| {
+            row["id"] == json!(handle.rlm_child_id)
+                && row["status"] == json!("running")
+                && row["sessionName"] == json!("f20-worker")
+                && row["model"] == json!("mock/mock-1")
+                && row["sessionDir"].is_string()
+        }),
+        "the admission row carries the snapshot: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|row| {
+            row["id"] == json!(handle.rlm_child_id)
+                && row["status"] == json!("done")
+                && row["answerPreview"] == json!("the child final answer")
+        }),
+        "the settle row carries the terminal status: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|row| {
+            row["id"] == json!(handle.rlm_child_id)
+                && row["status"] == json!("cancelled")
+                && row["error"] == json!("Deleted by parent orchestrator")
+        }),
+        "the delete surfaces the removal row: {rows:?}"
+    );
+}
+
 /// A cancelled run's watcher settle leaves the display `running`, so a
 /// restart relists the child as `error` instead of `completed`.
 #[tokio::test]
@@ -1004,6 +1054,7 @@ fn an_already_settled_child_never_re_scores_as_an_unreachable_error() {
         active_session_id: "child-live".to_string(),
         session_id: Some("child-file".to_string()),
         session_dir: "/tmp".to_string(),
+        model: String::new(),
         label: "task".to_string(),
         started_at_ms: 0,
         settled_status: None,
@@ -1020,6 +1071,8 @@ fn an_already_settled_child_never_re_scores_as_an_unreachable_error() {
         usage_watch_live: false,
         usage_rearm: false,
         emit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        last_emitted_status: None,
+        rename_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
     };
     // A running child that goes unreachable is the error class.
     assert!(super::lifecycle::should_mark_unreachable_error(&base()));

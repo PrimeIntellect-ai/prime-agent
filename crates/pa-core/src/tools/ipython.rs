@@ -73,6 +73,7 @@ pub struct ExecuteResult {
 /// The wire form of one sent agent message (TS `KernelSentAgentMessage`):
 /// `id`, `message`, `deliveryStatus`, `receiverRole` when present, and the
 /// `target` endpoint (`sessionName` only when present).
+#[must_use]
 pub fn sent_agent_message_json(
     sent: &crate::kernel::shared::KernelSentAgentMessage,
 ) -> serde_json::Value {
@@ -162,10 +163,14 @@ impl KernelExecError {
 /// Options for one kernel execute call.
 pub type StreamFn<'a> = Option<&'a (dyn Fn(&str, &'static str) + Send + Sync)>;
 
+pub type LateSentAgentMessageHandler =
+    std::sync::Arc<dyn Fn(&str, crate::kernel::shared::KernelSentAgentMessage) + Send + Sync>;
+
 pub struct KernelExecuteOptions<'a> {
     pub signal: Option<AbortSignal>,
     /// Streams cell output while the cell runs.
     pub on_stream: StreamFn<'a>,
+    pub on_late_sent_agent_message: Option<crate::kernel::shared::LateSentAgentMessageCallback>,
 }
 
 type ExecuteCellFuture =
@@ -284,30 +289,34 @@ async fn execute_with_busy_kernel_choice(
     provisioner: &dyn IpythonKernelProvisioner,
     report_startup_progress: &BootstrapProgressHandler,
     code: &str,
-    signal: Option<AbortSignal>,
-    on_stream: StreamFn<'_>,
+    execute: KernelExecuteOptions<'_>,
     on_working_message: &(dyn Fn(Option<&str>) + Send + Sync),
     ui: Option<&Arc<dyn IpythonToolUi>>,
 ) -> Result<(ExecuteResult, bool), KernelExecError> {
     let mut kernel_restarted = false;
     loop {
         let manager = provisioner
-            .ensure(Some(report_startup_progress.clone()), signal.clone())
+            .ensure(
+                Some(report_startup_progress.clone()),
+                execute.signal.clone(),
+            )
             .await
             .map_err(KernelExecError::Other)?;
         let result = manager
             .execute(
                 code,
                 KernelExecuteOptions {
-                    signal: signal.clone(),
-                    on_stream,
+                    signal: execute.signal.clone(),
+                    on_stream: execute.on_stream,
+                    on_late_sent_agent_message: execute.on_late_sent_agent_message.clone(),
                 },
             )
             .await;
         match result {
             Ok(result) => return Ok((result, kernel_restarted)),
             Err(err) => {
-                let aborted = signal
+                let aborted = execute
+                    .signal
                     .as_ref()
                     .is_some_and(tokio_util::sync::CancellationToken::is_cancelled);
                 if !err.is_busy_after_interrupt() || aborted {
@@ -321,7 +330,7 @@ async fn execute_with_busy_kernel_choice(
                     .select(
                         &busy_kernel_prompt(),
                         &[BUSY_KERNEL_WAIT_CHOICE, BUSY_KERNEL_KILL_CHOICE],
-                        signal.as_ref(),
+                        execute.signal.as_ref(),
                     )
                     .await;
                 match choice.as_deref() {
@@ -346,6 +355,7 @@ pub struct IpythonToolOptions {
     pub provisioner: Arc<dyn IpythonKernelProvisioner>,
     /// UI surface; `None` in headless sessions.
     pub ui: Option<Arc<dyn IpythonToolUi>>,
+    pub on_late_sent_agent_message: Option<LateSentAgentMessageHandler>,
 }
 
 pub fn ipython_tool_schema() -> serde_json::Value {
@@ -369,7 +379,7 @@ pub fn ipython_tool_description() -> &'static str {
 #[tracing::instrument(
     level = "debug",
     name = "tool_ipython_execute",
-    skip(options, on_update)
+    skip(options, on_update, on_late_sent_agent_message)
     fields(code),
 )]
 pub async fn execute_ipython(
@@ -377,6 +387,7 @@ pub async fn execute_ipython(
     code: &str,
     signal: Option<AbortSignal>,
     on_update: Option<OnUpdate>,
+    on_late_sent_agent_message: Option<crate::kernel::shared::LateSentAgentMessageCallback>,
 ) -> anyhow::Result<ToolExecutionResult> {
     let set_tool_working_message = |message: Option<&str>| {
         if let Some(ui) = &options.ui {
@@ -415,8 +426,11 @@ pub async fn execute_ipython(
         options.provisioner.as_ref(),
         &report_startup_progress,
         code,
-        signal,
-        Some(&stream_update),
+        KernelExecuteOptions {
+            signal,
+            on_stream: Some(&stream_update),
+            on_late_sent_agent_message,
+        },
         &|message| {
             set_tool_working_message(message);
         },
@@ -500,15 +514,29 @@ pub fn create_ipython_tool_definition(_cwd: &str, options: IpythonToolOptions) -
     let options = Arc::new(options);
     let execute: crate::tools::tool_definition::ExecuteFn = {
         let options = options;
-        Arc::new(move |_tool_call_id, params, signal, on_update| {
+        Arc::new(move |tool_call_id, params, signal, on_update| {
             let options = options.clone();
+            let on_late_sent_agent_message =
+                options.on_late_sent_agent_message.as_ref().map(|handler| {
+                    let handler = std::sync::Arc::clone(handler);
+                    let tool_call_id = tool_call_id.to_string();
+                    std::sync::Arc::new(move |message| handler(&tool_call_id, message))
+                        as crate::kernel::shared::LateSentAgentMessageCallback
+                });
             Box::pin(async move {
                 let code = params
                     .get("code")
                     .and_then(serde_json::Value::as_str)
                     .ok_or_else(|| anyhow::anyhow!("ipython tool requires a code string"))?
                     .to_string();
-                execute_ipython(&options, &code, signal, on_update).await
+                execute_ipython(
+                    &options,
+                    &code,
+                    signal,
+                    on_update,
+                    on_late_sent_agent_message,
+                )
+                .await
             })
         })
     };
