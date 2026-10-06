@@ -57,7 +57,7 @@ pub(crate) struct ChildActivity {
 pub struct InProcessChildRecord {
     pub(crate) rlm_child_id: String,
     /// The child's display name: the admission name until `rlm.rename`
-    /// updates it (the durable session_info row is the source of truth;
+    /// updates it (the durable `session_info` row is the source of truth;
     /// this copy feeds the roster rows).
     pub(crate) session_name: std::sync::RwLock<String>,
     /// The child session's durable id: its roster identity and the

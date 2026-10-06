@@ -684,10 +684,10 @@ pub(super) fn collect(
 }
 
 /// `rlm.rename` (TS `renameAgentFamilySession`): the absent session id
-/// renames the parent session itself (a durable session_info row, TS
+/// renames the parent session itself (a durable `session_info` row, TS
 /// `setSessionName`); a present one renames one direct child by child id
 /// or durable session id ONLY — a child NAME never selects a rename
-/// target — appending the child's own durable session_info row and the
+/// target — appending the child's own durable `session_info` row and the
 /// parent-side roster copy, with the TS sibling-uniqueness refusal.
 pub(super) fn rename(
     host: InProcessRlmHost,

@@ -1682,7 +1682,6 @@ mod tests {
         assert_eq!(failure.stop_reason, crate::types::StopReason::Error);
     }
 
-
     // The legacy queued-drain path (continue()'s `runQueuedMessages`): the
     // drain and the run-slot claim are ONE critical section, so a drain
     // against an active run refuses with the typed `Busy` error and never
