@@ -80,40 +80,25 @@ $serverLog = Join-Path $scratch 'channel-server.log'
 $server = Start-Process -FilePath $py -ArgumentList '-u','-m','http.server','0','--bind','127.0.0.1','--directory',$channel -PassThru -WindowStyle Hidden -RedirectStandardOutput $serverLog
 # install.ps1 writes the User PATH (the PATH-parity flow) and installs uv
 # when the machine has none (the astral route); the harness strips exactly
-# its own scratch-prefixed PATH entries in the cleanup below. THE UV
-# BINARIES ARE THE USER'S OWN STATE (the
-# reviewers' finding): an unconditional cleanup delete destroyed a
-# pre-existing ~/.local/bin install, so both binaries are snapshotted
-# (byte backups) before the installer runs and restored in the cleanup
-# below - the test deletes only the files it itself created. The snapshot
-# runs INSIDE the try, so a snapshot failure still lands in the finally
-# (the server stops, the scratch goes); a half-done snapshot neither
-# restores a backup that does not exist nor deletes a file it never
-# recorded (the $uvSnapshotDone guard below).
-$uvBinDir = Join-Path $HOME '.local\bin'
-$uvSnapshotDir = Join-Path $scratch 'uv-snapshot'
-$uvBinaries = @('uv.exe', 'uvx.exe')
-$uvBefore = @{}
-$uvSnapshotDone = $false
+# its own scratch-prefixed PATH entries in the cleanup below.
+# THE UV INSTALL IS ISOLATED (the reviewers' finding): ownership of a file
+# in the shared ~/.local/bin is unprovable, so the harness never lets the
+# installer touch the shared dir - install.ps1 honors
+# PRIME_AGENT_UV_BIN_DIR and the harness points it at its scratch.
 # The kernel pre-warm's writes (the venv, uv's cache, uv's pythons) would
-# land in the real user profile; the harness steers all three into its own
-# scratch dir through the product's override knobs and restores the
-# caller's values in the cleanup (the discipline install.ps1 itself runs).
+# land in the real user profile too; the harness steers all of them into
+# its own scratch dir through the product's override knobs and restores
+# the caller's values in the cleanup (the discipline install.ps1 itself
+# runs).
 $callerKernelVenv = $env:PRIME_AGENT_KERNEL_VENV
 $callerUvCacheDir = $env:UV_CACHE_DIR
 $callerUvPythonDir = $env:UV_PYTHON_INSTALL_DIR
+$callerUvBinDir = $env:PRIME_AGENT_UV_BIN_DIR
 try {
-    foreach ($uvName in $uvBinaries) {
-        $uvBefore[$uvName] = Test-Path (Join-Path $uvBinDir $uvName) -PathType Leaf
-        if ($uvBefore[$uvName]) {
-            New-Item -ItemType Directory -Path $uvSnapshotDir -Force | Out-Null
-            Copy-Item -LiteralPath (Join-Path $uvBinDir $uvName) -Destination (Join-Path $uvSnapshotDir $uvName) -Force
-        }
-    }
-    $uvSnapshotDone = $true
     $env:PRIME_AGENT_KERNEL_VENV = Join-Path $scratch 'kernel-venv'
     $env:UV_CACHE_DIR = Join-Path $scratch 'uv-cache'
     $env:UV_PYTHON_INSTALL_DIR = Join-Path $scratch 'uv-python'
+    $env:PRIME_AGENT_UV_BIN_DIR = Join-Path $scratch 'uv-bin'
     # The port the server itself announced, then readiness is it answering
     # a request for this test's own channel (beta.json): bounded deadlines,
     # and a dead child fails fast instead of hanging the installer.
@@ -212,44 +197,15 @@ try {
     } finally {
         if ($envKey) { $envKey.Close() }
     }
-    # The uv binaries: a recorded pre-existing install is restored
-    # byte-for-byte from its backup - a restore that FAILS (a locked
-    # binary) is recorded and the remaining cleanup steps still run; a
-    # file the snapshot recorded ABSENT is the test's own and leaves with
-    # it; anything else - a snapshot that never completed, or a recorded
-    # binary whose backup went missing - touches NOTHING: the delete below
-    # runs only for files the snapshot itself recorded absent, so the
-    # user's own uv can never be deleted. The loud tail below reports
-    # every failure together, after the cleanup has finished (never
-    # swallowed - a test that ends green with the user's uv replaced is a
-    # silent restore failure).
-    $uvRestoreFailed = @()
-    foreach ($uvName in $uvBinaries) {
-        $uvPath = Join-Path $uvBinDir $uvName
-        if ($uvBefore[$uvName] -and (Test-Path (Join-Path $uvSnapshotDir $uvName))) {
-            try {
-                Copy-Item -LiteralPath (Join-Path $uvSnapshotDir $uvName) -Destination $uvPath -Force
-            } catch {
-                $uvRestoreFailed += $uvName
-            }
-        } elseif (-not $uvBefore[$uvName] -and $uvSnapshotDone) {
-            Remove-Item -LiteralPath $uvPath -Force -ErrorAction SilentlyContinue
-        } elseif ($uvBefore[$uvName] -and $uvSnapshotDone) {
-            $uvRestoreFailed += $uvName
-        }
-    }
+    # The uv install needs no cleanup: it never left the scratch dir (the
+    # PRIME_AGENT_UV_BIN_DIR knob above steered the installer), and the
+    # user's ~/.local/bin was never touched at all.
     $env:PRIME_AGENT_KERNEL_VENV = $callerKernelVenv
     $env:UV_CACHE_DIR = $callerUvCacheDir
     $env:UV_PYTHON_INSTALL_DIR = $callerUvPythonDir
+    $env:PRIME_AGENT_UV_BIN_DIR = $callerUvBinDir
     Remove-Item -Recurse -Force $scratch -ErrorAction SilentlyContinue
-    if ($pathCleanFailed -or $uvRestoreFailed.Count -gt 0) {
-        $cleanupFailures = @()
-        if ($pathCleanFailed) {
-            $cleanupFailures += 'could not clean the user PATH entries this test added'
-        }
-        if ($uvRestoreFailed.Count -gt 0) {
-            $cleanupFailures += "could not restore the pre-existing uv binary ($($uvRestoreFailed -join ', ')): the restore failed or its byte backup went missing, so the file on disk may be the test's own; reinstall uv with: irm https://astral.sh/uv/install.ps1 | iex"
-        }
-        throw ($cleanupFailures -join '; ')
+    if ($pathCleanFailed) {
+        throw 'could not clean the user PATH entries this test added'
     }
 }

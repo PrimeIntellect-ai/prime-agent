@@ -126,42 +126,30 @@ Set-Content -LiteralPath (Join-Path $channel 'latest.json') -Value "{`"version`"
 $server = Start-Process -FilePath $py -ArgumentList '-m','http.server','8123','--directory',$channel -PassThru -WindowStyle Hidden
 # install.ps1 writes the User PATH (the PATH-parity flow); the e2e strips
 # exactly its own scratch-prefixed PATH entries in the cleanup below (a
-# stale whole-value snapshot would linger or clobber). The uv binaries are
-# the user's own state too (the reviewers' finding): an unconditional
-# cleanup delete destroyed a pre-existing ~/.local/bin install, so both
-# binaries are snapshotted (byte backups) before the installer runs and
-# restored in the cleanup below; the uv PRE-STATE also guards the parity
-# gate below - install.ps1 skips its uv branch when the machine already
-# answers uv, so the gate runs only against the fresh-runner contract. The
-# snapshot runs INSIDE the try, so a snapshot failure still lands in the
-# finally (the server stops, the scratch goes); a half-done snapshot
-# neither restores a backup that does not exist nor deletes a file it
-# never recorded (the $uvSnapshotDone guard below).
-$uvBinDir = Join-Path $HOME '.local\bin'
-$uvSnapshotDir = Join-Path $scratch 'uv-snapshot'
-$uvBinaries = @('uv.exe', 'uvx.exe')
-$uvBefore = @{}
-$uvSnapshotDone = $false
+# stale whole-value snapshot would linger or clobber). THE UV INSTALL IS
+# ISOLATED (the reviewers' finding): ownership of a file in the shared
+# ~/.local/bin is unprovable (a transcript line proves an attempt, not a
+# landing; a concurrent external install races the attribution) - so the
+# harness never lets the installers touch the shared dir: both routes
+# honor PRIME_AGENT_UV_BIN_DIR and the harness points it at its scratch.
+# The uv PRE-STATE still guards the parity gate below - install.ps1 skips
+# its uv branch when the machine already answers uv, so the gate runs
+# only against the fresh-runner contract.
 $uvWasOnPath = [bool](Get-Command uv -ErrorAction SilentlyContinue) -or (Test-Path (Join-Path $HOME '.local\bin\uv.exe'))
-# The kernel pre-warm's writes (the venv, uv's cache, uv's pythons) would
-# land in the real user profile; the harness steers all three into its own
-# scratch dir through the product's override knobs and restores the
-# caller's values in the cleanup (the discipline install.ps1 itself runs).
+# The kernel pre-warm's writes (the venv, uv's cache, uv's pythons) and the
+# uv install itself would land in the real user profile; the harness
+# steers all of them into its own scratch dir through the product's
+# override knobs and restores the caller's values in the cleanup (the
+# discipline install.ps1 itself runs).
 $callerKernelVenv = $env:PRIME_AGENT_KERNEL_VENV
 $callerUvCacheDir = $env:UV_CACHE_DIR
 $callerUvPythonDir = $env:UV_PYTHON_INSTALL_DIR
+$callerUvBinDir = $env:PRIME_AGENT_UV_BIN_DIR
 try {
-    foreach ($uvName in $uvBinaries) {
-        $uvBefore[$uvName] = Test-Path (Join-Path $uvBinDir $uvName) -PathType Leaf
-        if ($uvBefore[$uvName]) {
-            New-Item -ItemType Directory -Path $uvSnapshotDir -Force | Out-Null
-            Copy-Item -LiteralPath (Join-Path $uvBinDir $uvName) -Destination (Join-Path $uvSnapshotDir $uvName) -Force
-        }
-    }
-    $uvSnapshotDone = $true
     $env:PRIME_AGENT_KERNEL_VENV = Join-Path $scratch 'kernel-venv'
     $env:UV_CACHE_DIR = Join-Path $scratch 'uv-cache'
     $env:UV_PYTHON_INSTALL_DIR = Join-Path $scratch 'uv-python'
+    $env:PRIME_AGENT_UV_BIN_DIR = Join-Path $scratch 'uv-bin'
     Start-Sleep -Seconds 2
     $base = 'http://localhost:8123'
 
@@ -175,8 +163,11 @@ try {
     $env:PRIME_AGENT_RELEASE_CHANNEL = 'stable'
     $env:PRIME_AGENT_RUST_PREFIX = $prefixA
     $env:PRIME_AGENT_ALLOW_HTTP = '1'
-    & pwsh -File (Join-Path $repo 'install.ps1')
-    if ($LASTEXITCODE -ne 0) { throw 'install.ps1 failed' }
+    # The transcript is captured (the fallback harness's pattern): it is the
+    # uv gate's evidence below - the branch's own verdict, not the network's.
+    $ps1Lines = @(& pwsh -File (Join-Path $repo 'install.ps1') 2>&1 | ForEach-Object { "$_" })
+    if ($LASTEXITCODE -ne 0) { $ps1Lines | Write-Host; throw 'install.ps1 failed' }
+    $ps1Transcript = $ps1Lines -join [Environment]::NewLine
     $cmdLauncher = Join-Path $prefixA 'bin\prime-agent.cmd'
     if (-not (Test-Path $cmdLauncher)) { throw "the cmd launcher is missing: $cmdLauncher" }
     $versionA = (& $cmdLauncher --version) | Select-Object -First 1
@@ -184,14 +175,17 @@ try {
     foreach ($entry in @('share\prime-agent\prime-agent.exe', 'share\prime-agent\prime-agent-runtime\pyproject.toml', 'share\prime-agent\LICENSE', 'share\prime-agent\skills')) {
         if (-not (Test-Path (Join-Path $prefixA $entry))) { throw "the ps1 route's payload is missing $entry" }
     }
-    # The uv parity gate: this runner had no uv and the network is up, so
-    # the ps1 route's uv branch must have installed it (the branch is
-    # best-effort by design; this asserts the online path). A box that
-    # already answers uv makes the installer skip the branch by design, so
-    # the gate runs only against the fresh-runner contract it asserts.
-    if (-not $uvWasOnPath) {
-        $uvExePath = Join-Path $HOME '.local\bin\uv.exe'
-        if (-not (Test-Path $uvExePath)) { throw "install.ps1 did not install uv at $uvExePath" }
+    # The uv parity gate asserts the CONTRACT, never astral.sh availability
+    # (the reviewer's finding): the branch is best-effort by design - offline
+    # it degrades to the honest note and the install still succeeds - so
+    # the gate demands either the landed binary (the online path) or the
+    # honest degradation in the transcript. A branch that lands NEITHER is
+    # broken; the network being down is not.
+    $uvExePath = Join-Path (Join-Path $scratch 'uv-bin') 'uv.exe'
+    $uvLanded = Test-Path $uvExePath
+    $degradedHonestly = $ps1Transcript -match [regex]::Escape('could not install uv; the kernel pre-warm was skipped')
+    if (-not $uvWasOnPath -and -not $uvLanded -and -not $degradedHonestly) {
+        throw "install.ps1's uv branch landed no uv.exe and no honest degradation note (the branch is broken, not the network)"
     }
 
     # 6. Route B: install-rust.sh under Git Bash (the sh entry point).
@@ -254,44 +248,15 @@ try {
     } finally {
         if ($envKey) { $envKey.Close() }
     }
-    # The uv binaries: a recorded pre-existing install is restored
-    # byte-for-byte from its backup - a restore that FAILS (a locked
-    # binary) is recorded and the remaining cleanup steps still run; a
-    # file the snapshot recorded ABSENT is the test's own and leaves with
-    # it; anything else - a snapshot that never completed, or a recorded
-    # binary whose backup went missing - touches NOTHING: the delete below
-    # runs only for files the snapshot itself recorded absent, so the
-    # user's own uv can never be deleted. The loud tail below reports
-    # every failure together, after the cleanup has finished (never
-    # swallowed - a test that ends green with the user's uv replaced is a
-    # silent restore failure).
-    $uvRestoreFailed = @()
-    foreach ($uvName in $uvBinaries) {
-        $uvPath = Join-Path $uvBinDir $uvName
-        if ($uvBefore[$uvName] -and (Test-Path (Join-Path $uvSnapshotDir $uvName))) {
-            try {
-                Copy-Item -LiteralPath (Join-Path $uvSnapshotDir $uvName) -Destination $uvPath -Force
-            } catch {
-                $uvRestoreFailed += $uvName
-            }
-        } elseif (-not $uvBefore[$uvName] -and $uvSnapshotDone) {
-            Remove-Item -LiteralPath $uvPath -Force -ErrorAction SilentlyContinue
-        } elseif ($uvBefore[$uvName] -and $uvSnapshotDone) {
-            $uvRestoreFailed += $uvName
-        }
-    }
+    # The uv install needs no cleanup: it never left the scratch dir (the
+    # PRIME_AGENT_UV_BIN_DIR knob above steered both installers), and the
+    # user's ~/.local/bin was never touched at all.
     $env:PRIME_AGENT_KERNEL_VENV = $callerKernelVenv
     $env:UV_CACHE_DIR = $callerUvCacheDir
     $env:UV_PYTHON_INSTALL_DIR = $callerUvPythonDir
+    $env:PRIME_AGENT_UV_BIN_DIR = $callerUvBinDir
     Remove-Item -Recurse -Force $scratch -ErrorAction SilentlyContinue
-    if ($pathCleanFailed -or $uvRestoreFailed.Count -gt 0) {
-        $cleanupFailures = @()
-        if ($pathCleanFailed) {
-            $cleanupFailures += 'could not clean the user PATH entries this test added'
-        }
-        if ($uvRestoreFailed.Count -gt 0) {
-            $cleanupFailures += "could not restore the pre-existing uv binary ($($uvRestoreFailed -join ', ')): the restore failed or its byte backup went missing, so the file on disk may be the test's own; reinstall uv with: irm https://astral.sh/uv/install.ps1 | iex"
-        }
-        throw ($cleanupFailures -join '; ')
+    if ($pathCleanFailed) {
+        throw 'could not clean the user PATH entries this test added'
     }
 }

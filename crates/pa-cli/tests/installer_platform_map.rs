@@ -371,8 +371,20 @@ fn install_ps1_adds_bin_to_the_user_path_and_the_session_path() {
         .find("# --- verify: the launcher must answer --version")
         .expect("the smoke test section exists");
     let section = &text[section_start..section_end];
-    let markers: [(&str, &str); 9] = [
-        ("the session PATH add", "$env:PATH = \"$env:PATH;$bin\""),
+    let markers: [(&str, &str); 12] = [
+        (
+            "the PATH-add targets: the launcher's bin dir, plus the custom uv target when the knob placed one (a documented install target must stay discoverable)",
+            "$pathDirs = @($bin)",
+        ),
+        (
+            "the custom uv dir joins the adds (deduped against the launcher's own bin: the packaged shape points both at the same dir)",
+            "if ($uvInstallDir -ne (Join-Path $HOME '.local\\bin') -and $uvInstallDir -ne $bin) { $pathDirs += $uvInstallDir }",
+        ),
+        (
+            "the any-append flag initialized OUTSIDE the loop (a write on any iteration must broadcast; a later no-op iteration must not suppress it)",
+            "$pathAdded = $false",
+        ),
+        ("the session PATH add", "$env:PATH = \"$env:PATH;$binDir\""),
         (
             "the registry key open (writable: the append needs it anyway)",
             "[Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)",
@@ -391,14 +403,14 @@ fn install_ps1_adds_bin_to_the_user_path_and_the_session_path() {
         ),
         (
             "the idempotent absent check (a whole-entry compare on BOTH spellings, never a substring: a sibling entry like C:\\Tools\\bin-old must not mask C:\\Tools\\bin)",
-            "if (-not (Test-PathEntry $rawUserPath $bin) -and -not (Test-PathEntry $expandedUserPath $bin)) {",
+            "if (-not (Test-PathEntry $rawUserPath $binDir) -and -not (Test-PathEntry $expandedUserPath $binDir)) {",
         ),
         (
             "the kind-preserving user PATH write",
             "$envKey.SetValue('Path', $newUserPath, $rawUserKind)",
         ),
         ("the change broadcast", "SendMessageTimeout([IntPtr]0xffff"),
-        ("the new-terminal hint", "picks it up automatically"),
+        ("the new-terminal hint", "picks them up automatically"),
     ];
     let mut positions: Vec<usize> = Vec::new();
     for (what, marker) in markers {
@@ -427,6 +439,77 @@ fn install_ps1_adds_bin_to_the_user_path_and_the_session_path() {
     assert!(
         !section.contains("[Environment]::SetEnvironmentVariable('Path'"),
         "the user PATH write must preserve the registry value's kind (never the flattening SetEnvironmentVariable route)"
+    );
+    // The durable add is best-effort (the macroscope finding): the session
+    // PATH already works and the payload is published, so a registry
+    // failure must degrade to the honest manual note - never abort the
+    // finished install.
+    assert!(
+        section.contains("could not persist the PATH entry to the user environment")
+            && section.contains("put this entry on the user PATH"),
+        "a registry failure in the PATH add must degrade to the honest manual note instead of failing the install"
+    );
+    // The broadcast reflects ANY append (the reviewer's finding): the flag
+    // initializes before the loop and never resets - a later no-op
+    // iteration must not suppress the WM_SETTINGCHANGE of an earlier one.
+    let flag_at = section
+        .find("$pathAdded = $false")
+        .expect("the any-append flag exists");
+    let loop_at = section
+        .find("foreach ($binDir in $pathDirs)")
+        .expect("the PATH-add loop");
+    assert!(
+        flag_at < loop_at,
+        "the any-append flag must initialize OUTSIDE (before) the loop"
+    );
+    assert!(
+        !section.contains("\n    $pathAdded = $false"),
+        "the flag must never reset inside an iteration (an earlier append's broadcast would be lost)"
+    );
+}
+
+/// install-rust.sh's uv target honors the same knob install.ps1 does (the
+/// reviewer's finding: BOTH e2e routes must be isolatable - the sh route's
+/// Git Bash run would otherwise still write the shared ~/.local/bin): the
+/// operator-set dir wins, the Windows C:\ spelling normalizes through
+/// cygpath exactly like `PRIME_AGENT_RUST_PREFIX`, and the knob is
+/// documented in the header's Configuration block.
+#[test]
+fn install_rust_sh_honors_the_uv_bin_dir_knob() {
+    let text =
+        std::fs::read_to_string(repo_root().join("install-rust.sh")).expect("read install-rust.sh");
+    assert!(
+        text.contains("[ -n \"${PRIME_AGENT_UV_BIN_DIR:-}\" ]"),
+        "install-rust.sh must honor PRIME_AGENT_UV_BIN_DIR (both e2e routes isolate)"
+    );
+    assert!(
+        text.contains("cygpath -u \"$uv_bin_dir\""),
+        "the Windows spelling of the knob must normalize exactly like PRIME_AGENT_RUST_PREFIX"
+    );
+    assert!(
+        text.contains("#   PRIME_AGENT_UV_BIN_DIR"),
+        "the knob must be documented in the header's Configuration block"
+    );
+    assert!(
+        text.contains("elif [ -x \"${HOME}/.local/bin/uv\" ]"),
+        "the sh's uv discovery must still fall back to the canonical ~/.local/bin/uv when the knob redirects the target (no duplicate install)"
+    );
+    assert!(
+        text.contains("|| [ -x \"${HOME}/.local/bin/uv\" ]"),
+        "the sh's pre-warm 'uv found' gate must also see a default-location uv when the knob redirects the target"
+    );
+    assert!(
+        text.contains("! command -v uv >/dev/null 2>&1 && [ -n \"$uv_bin_dir\" ]"),
+        "the sh's pre-warm PATH prepend must run only when no uv already answers on PATH (never shadow a working system uv)"
+    );
+    assert!(
+        text.contains("path_check_note \"${bin_dir}\"")
+            && text.contains("path_check_note \"${uv_bin_dir}\""),
+        "the sh's PATH guidance must cover the custom uv target too (a documented install target must stay discoverable)"
+    );
+    assert!(
+        text.contains("incoming_path=\"$PATH\"") && text.contains("case \":$incoming_path:\" in"),
+        "the sh's PATH guidance must compare against the INCOMING PATH (the pre-warm's temporary prepend must never suppress the persistent-PATH guidance)"
     );
 }
 
@@ -536,8 +619,15 @@ fn install_ps1_installs_uv_like_the_linux_installer() {
         .find("# --- the PATH add")
         .expect("the PATH-add section follows");
     let section = &text[section_start..section_end];
-    let markers: [(&str, &str); 7] = [
-        ("the uv target", "Join-Path $HOME '.local\\bin'"),
+    let markers: [(&str, &str); 8] = [
+        (
+            "the uv target knob (install-rust.sh's own PRIME_AGENT_UV_BIN_DIR parity: an operator-set dir wins - a packaged install keeps uv inside its own tree, the e2e harnesses point it at their scratch so a run never touches the shared ~/.local/bin)",
+            "$uvInstallDir = if ($env:PRIME_AGENT_UV_BIN_DIR) { $env:PRIME_AGENT_UV_BIN_DIR } else { Join-Path $HOME '.local\\bin' }",
+        ),
+        (
+            "the default-location presence check (a uv that predates the knob at ~/.local/bin is still honored: no duplicate install)",
+            "$uvDefaultExe = Join-Path (Join-Path $HOME '.local\\bin') 'uv.exe'",
+        ),
         (
             "the astral installer fetch",
             "Invoke-WebRequest -Uri 'https://astral.sh/uv/install.ps1' -OutFile $uvInstallerPath",
@@ -729,16 +819,14 @@ fn install_ps1_download_survives_a_stalled_body() {
 }
 
 /// The pre-warm's PATH fix must not shadow a working uv (the macroscope
-/// finding): the prepend exists so a FRESHLY INSTALLED uv rides the
-/// pre-warm child's PATH, but an unconditional prepend also runs when a
-/// working system uv already answered `Get-Command` and a stale
-/// `~/.local/bin/uv.exe` sits unwired on disk - and then the stale local
-/// file shadows the working system one for the pre-warm and the immediate
-/// bootstrap. The prepend runs only when this run owns the local uv: none
-/// found on PATH and the local executable present. (The product's own
-/// `ensure_uv` falls back to `~/.local/bin/uv.exe` by itself, so a local
-/// file that predates the install still serves the pre-warm without the
-/// prepend.)
+/// finding) and must make the uv the installer ACTUALLY knows about
+/// findable (the reviewer's finding): the product's `ensure_uv` searches
+/// PATH and `~/.local/bin/uv(.exe)` - it does NOT know the
+/// `PRIME_AGENT_UV_BIN_DIR` target - so the prepend serves the uv THIS
+/// RUN installed or found at the target when nothing usable is on PATH,
+/// while a working PATH uv is never shadowed (a stale target file cannot
+/// displace it) and a uv at the canonical `~/.local/bin` needs no prepend
+/// (`ensure_uv` finds it by itself).
 #[test]
 fn install_ps1_does_not_shadow_a_working_uv() {
     let text = std::fs::read_to_string(repo_root().join("install.ps1")).expect("read install.ps1");
@@ -750,7 +838,7 @@ fn install_ps1_does_not_shadow_a_working_uv() {
         .expect("the PATH-add section follows");
     let section = &text[section_start..section_end];
     let guard =
-        "if (-not $uv -and (Test-Path $uvExe -PathType Leaf) -and -not (Test-PathEntry $env:PATH $uvInstallDir)) {";
+        "if (-not $uvOnPath -and $uvAtTarget -and -not (Test-PathEntry $env:PATH $uvInstallDir)) {";
     let guard_at = section
         .find(guard)
         .expect("the PATH fix must be guarded: it prepends only when this run owns the local uv");
@@ -808,15 +896,18 @@ fn install_ps1_passes_the_uv_installer_path_as_process_data() {
     );
 }
 
-/// The Windows e2e harnesses must not destroy a pre-existing user uv (the
-/// macroscope and cursor findings): both `finally` blocks unconditionally
-/// deleted `~/.local/bin/uv.exe` and `uvx.exe`, so a dev machine carrying
-/// its own uv install lost both binaries to the test run. Each harness
-/// snapshots both binaries (byte backups in its own scratch dir) BEFORE
-/// the installer runs and restores them in cleanup: the test deletes only
-/// the files it itself created.
+/// The Windows e2e harnesses ISOLATE the uv install (the macroscope and
+/// reviewer findings): ownership of a file in the SHARED ~/.local/bin can
+/// never be proven airtightly (a transcript's uv-branch line proves an
+/// attempt, not the landing; a concurrent external install races the
+/// attribution) - so the harnesses never touch the shared dir at all:
+/// both installers honor the `PRIME_AGENT_UV_BIN_DIR` knob and the
+/// harnesses point it at their own scratch dir, with the caller's value
+/// saved and restored. The cleanup has no uv work left to do, and the
+/// user's ~/.local/bin is referenced only by the read-only pre-state
+/// check.
 #[test]
-fn windows_e2e_harnesses_restore_the_users_uv_binaries() {
+fn windows_e2e_harnesses_isolate_the_uv_install() {
     for harness_name in [
         "test_windows_install.ps1",
         "test_windows_channel_fallback.ps1",
@@ -828,53 +919,27 @@ fn windows_e2e_harnesses_restore_the_users_uv_binaries() {
                 .join(harness_name),
         )
         .unwrap_or_else(|_| panic!("read {harness_name}"));
-        let snapshot_markers: [(&str, &str); 3] = [
-            ("the snapshot dir", "$uvSnapshotDir = Join-Path $scratch 'uv-snapshot'"),
-            (
-                "the prior-state record",
-                "$uvBefore[$uvName] = Test-Path (Join-Path $uvBinDir $uvName) -PathType Leaf",
-            ),
-            (
-                "the byte backup",
-                "Copy-Item -LiteralPath (Join-Path $uvBinDir $uvName) -Destination (Join-Path $uvSnapshotDir $uvName) -Force",
-            ),
-        ];
-        for (what, marker) in snapshot_markers {
-            assert!(
-                harness.contains(marker),
-                "{harness_name} must carry its {what} line: {marker}"
-            );
-        }
         assert!(
-            harness.contains("if ($uvBefore[$uvName] -and (Test-Path (Join-Path $uvSnapshotDir $uvName))) {"),
-            "{harness_name}'s cleanup must restore a recorded binary only when its byte backup exists"
+            harness.contains("$env:PRIME_AGENT_UV_BIN_DIR = Join-Path $scratch 'uv-bin'"),
+            "{harness_name} must steer BOTH installers' uv installs into its own scratch dir (ownership of shared-profile files is unprovable; isolation removes the class)"
         );
         assert!(
-            harness.contains("Copy-Item -LiteralPath (Join-Path $uvSnapshotDir $uvName) -Destination $uvPath -Force"),
-            "{harness_name}'s cleanup must restore a pre-existing uv binary from its byte backup"
+            harness.contains("$callerUvBinDir = $env:PRIME_AGENT_UV_BIN_DIR")
+                && harness.contains("$env:PRIME_AGENT_UV_BIN_DIR = $callerUvBinDir"),
+            "{harness_name} must save and restore the caller's PRIME_AGENT_UV_BIN_DIR like the other override knobs"
+        );
+        // The cleanup finally must never touch the user's uv binaries at
+        // all: no snapshot, no restore, no delete, no ownership guess.
+        let finally_at = harness
+            .rfind("} finally {")
+            .expect("the cleanup finally exists");
+        assert!(
+            !harness[finally_at..].contains(".local\\bin"),
+            "{harness_name}'s cleanup must not touch ~/.local/bin (the install never lands there under the knob)"
         );
         assert!(
-            harness.contains("elseif (-not $uvBefore[$uvName] -and $uvSnapshotDone) {"),
-            "{harness_name}'s cleanup must delete only a file the snapshot itself recorded absent (a recorded pre-existing binary is never deleted, even if its backup went missing)"
-        );
-        assert!(
-            harness.contains("} catch {")
-                && harness.contains("$uvRestoreFailed += $uvName"),
-            "{harness_name}'s cleanup must survive a failing restore Copy-Item (a locked binary): record the failure and keep cleaning, never abort the finally"
-        );
-        assert!(
-            harness.contains("if ($uvRestoreFailed.Count -gt 0) {")
-                && harness.contains("could not restore the pre-existing uv binary"),
-            "{harness_name}'s cleanup must report a restore it could not perform LOUDLY after the other cleanup steps (a restore failure must fail the run, never end green over silent loss)"
-        );
-        assert!(
-            harness
-                .contains("Remove-Item -LiteralPath $uvPath -Force -ErrorAction SilentlyContinue"),
-            "{harness_name}'s cleanup must still delete the uv binaries the test itself installed"
-        );
-        assert!(
-            !harness.contains("Remove-Item -Force (Join-Path $HOME '.local\\bin\\uv.exe')"),
-            "{harness_name}'s cleanup must not unconditionally delete the user's own uv.exe"
+            !harness.contains("$uvSnapshotDir") && !harness.contains("$uvRestoreFailed"),
+            "{harness_name} must not carry the snapshot/restore/ownership machinery anymore (the isolated target needs none of it)"
         );
     }
 }
@@ -899,11 +964,35 @@ fn windows_install_e2e_gates_the_uv_install_on_a_fresh_runner() {
         harness.contains(
             "$uvWasOnPath = [bool](Get-Command uv -ErrorAction SilentlyContinue) -or (Test-Path (Join-Path $HOME '.local\\bin\\uv.exe'))"
         ),
-        "the harness must record the uv pre-state before the install runs (both places install.ps1 looks)"
+        "the harness must record the uv pre-state before the install runs (the PATH and the ~/.local/bin places install.ps1 looks)"
     );
     assert!(
-        harness.contains("if (-not $uvWasOnPath) {"),
-        "the uv parity gate must run only against the fresh-runner contract"
+        harness.contains("$uvExePath = Join-Path (Join-Path $scratch 'uv-bin') 'uv.exe'"),
+        "the gate must check the ISOLATED uv target (the harness steers both installers at its scratch dir)"
+    );
+    // The transcript capture: the evidence for both the contract gate and
+    // the cleanup's ownership tracking.
+    assert!(
+        harness.contains(
+            "$ps1Lines = @(& pwsh -File (Join-Path $repo 'install.ps1') 2>&1 | ForEach-Object { \"$_\" })"
+        ),
+        "the harness must capture the ps1 route's transcript (the uv gate's evidence)"
+    );
+    // The gate asserts the CONTRACT, never astral.sh availability: either
+    // uv.exe landed (the online path), or the transcript carries the honest
+    // degradation note (offline is a supported state of the best-effort
+    // branch - the install.ps1 flow treats it as non-fatal by design).
+    assert!(
+        harness.contains("if (-not $uvWasOnPath -and -not $uvLanded -and -not $degradedHonestly) {"),
+        "the uv gate must demand the online install OR the honest degradation, never astral.sh luck"
+    );
+    assert!(
+        harness.contains("no uv.exe and no honest degradation note"),
+        "the uv gate's failure must name the broken contract, not a network state"
+    );
+    assert!(
+        !harness.contains("did not install uv at $uvExePath"),
+        "the uv gate must not demand astral availability (the branch is best-effort by design)"
     );
 }
 

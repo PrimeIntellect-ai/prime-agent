@@ -42,6 +42,7 @@
 #   PRIME_AGENT_RELEASE_CHANNEL    stable | beta
 #   PRIME_AGENT_VERSION            pin an exact version
 #   PRIME_AGENT_RUST_PREFIX        install prefix (default: $HOME\.local)
+#   PRIME_AGENT_UV_BIN_DIR         uv install dir (default: $HOME\.local\bin)
 #
 # Prerequisites: Windows 10+ (tar.exe and Get-FileHash ship with the OS;
 # the kernel's Python runtime bootstraps through uv on first session — the
@@ -652,11 +653,24 @@ exec "$(dirname "$0")/../share/prime-agent/prime-agent.exe" "$@"
 # --- and the caller's values come back. Offline the step degrades to the
 # --- honest note plus the exact manual command (install-rust.sh's
 # --- note/todo shape); the install itself still succeeds.
-$uvInstallDir = Join-Path $HOME '.local\bin'
+# THE UV TARGET KNOB (install-rust.sh's own PRIME_AGENT_UV_BIN_DIR): an
+# operator-set dir wins (a packaged install keeps uv inside its own tree,
+# the e2e harnesses point it at their scratch dir so a run never touches
+# the shared ~/.local/bin); without the knob the canonical ~/.local/bin is
+# the target (where the product's ensure_uv also looks).
+$uvInstallDir = if ($env:PRIME_AGENT_UV_BIN_DIR) { $env:PRIME_AGENT_UV_BIN_DIR } else { Join-Path $HOME '.local\bin' }
 $uvExe = Join-Path $uvInstallDir 'uv.exe'
-$uv = Get-Command uv -ErrorAction SilentlyContinue
-if (-not $uv -and (Test-Path $uvExe -PathType Leaf)) { $uv = $true }
-if (-not $uv) {
+$uvDefaultExe = Join-Path (Join-Path $HOME '.local\bin') 'uv.exe'
+# THE THREE-WAY LOOKUP (the reviewer's finding): a usable uv is one on
+# PATH (Get-Command), at the install target, or at the canonical
+# ~/.local/bin - the product's own ensure_uv searches PATH and
+# ~/.local/bin, so both pre-existing spellings are honored (no duplicate
+# install), and the pre-warm gate below follows the record.
+$uvOnPath = [bool](Get-Command uv -ErrorAction SilentlyContinue)
+$uvAtTarget = Test-Path $uvExe -PathType Leaf
+$uvAtDefault = Test-Path $uvDefaultExe -PathType Leaf
+$uvKnown = $uvOnPath -or $uvAtTarget -or $uvAtDefault
+if (-not $uvKnown) {
     Write-Host "installing uv (the kernel venv's package manager)"
     $uvInstallerPath = Join-Path $download 'uv-install.ps1'
     $callerProgressPreference = $ProgressPreference
@@ -729,20 +743,21 @@ if (-not $uv) {
     }
 }
 # THE PRE-WARM'S PATH FIX (install-rust.sh's own): the product's ensure_uv
-# searches PATH and ~/.local/bin/uv(.exe), and the pre-warm's child inherits
-# this PATH — the freshly installed uv rides it. THE GUARD (the reviewer's
-# finding): the prepend serves the uv THIS RUN installed; an unconditional
-# prepend would also run when a working system uv already answered
-# Get-Command and a stale ~/.local/bin/uv.exe sits unwired on disk - and
-# then the stale local file would shadow the working system one for the
-# pre-warm and the immediate bootstrap. So the prepend runs only when this
-# run owns the local uv: none found on PATH and the local file present. (A
-# local uv that predates the install still serves the pre-warm: ensure_uv
-# checks ~/.local/bin/uv.exe by itself.)
-if (-not $uv -and (Test-Path $uvExe -PathType Leaf) -and -not (Test-PathEntry $env:PATH $uvInstallDir)) {
+# searches PATH and ~/.local/bin/uv(.exe) - it does NOT know the
+# PRIME_AGENT_UV_BIN_DIR target - so the prepend serves the uv THIS RUN
+# installed or found at the target when nothing usable answers on PATH
+# (the reviewer's finding: a pre-warm whose uv is known but unfindable
+# fails). THE GUARD (the macroscope finding): a working PATH uv is never
+# shadowed - a stale target file cannot displace it - and a uv at the
+# canonical ~/.local/bin needs no prepend (ensure_uv finds it by itself).
+# The record is recomputed first: the install above may have landed the
+# target uv.
+$uvAtTarget = Test-Path $uvExe -PathType Leaf
+$uvKnown = $uvOnPath -or $uvAtTarget -or $uvAtDefault
+if (-not $uvOnPath -and $uvAtTarget -and -not (Test-PathEntry $env:PATH $uvInstallDir)) {
     $env:PATH = "$uvInstallDir;$env:PATH"
 }
-if ($uv -or (Test-Path $uvExe -PathType Leaf)) {
+if ($uvKnown) {
     Write-Host 'kernel pre-warm: provisioning the Python kernel runtime'
     & $launcher --prime-agent-bootstrap
     if ($LASTEXITCODE -ne 0) {
@@ -768,10 +783,6 @@ if ($uv -or (Test-Path $uvExe -PathType Leaf)) {
 # WM_SETTINGCHANGE broadcast tells the running shells the environment
 # changed, the same way setx does — best-effort; the registry write is
 # what lasts).
-if (-not (Test-PathEntry $env:PATH $bin)) {
-    $env:PATH = "$env:PATH;$bin"
-    Write-Host "PATH: added $bin to this session - prime-agent works in this console now"
-}
 # THE REGISTRY-KIND DISCIPLINE (the reviewer's finding): the user Path is
 # often REG_EXPAND_SZ (the %VAR%-carrying kind Windows template profiles
 # write), and [Environment]::GetEnvironmentVariable returns it EXPANDED
@@ -780,28 +791,55 @@ if (-not (Test-PathEntry $env:PATH $bin)) {
 # run's expansion and stop following their variables. The add reads the
 # RAW value with its kind through the registry API and writes the append
 # back with the SAME kind: the %VAR% spellings survive verbatim.
+# The durable add is BEST-EFFORT (the reviewer's finding): the session
+# PATH above already works and the payload is published at this point, so
+# a registry that will not open or write must degrade to the honest
+# manual note - never abort a finished install over the nicety.
+# THE PATH-ADD TARGETS (the reviewer's finding: a documented install
+# target must stay discoverable once the installer exits - the product's
+# own ensure_uv searches PATH and ~/.local/bin only): the launcher's bin
+# dir always, and the custom uv target when the knob placed one outside
+# the canonical default (the prefix's own bin is already the launcher's
+# bin dir then; the e2e harnesses strip their scratch entries again).
+$pathDirs = @($bin)
+if ($uvInstallDir -ne (Join-Path $HOME '.local\bin') -and $uvInstallDir -ne $bin) { $pathDirs += $uvInstallDir }
+# THE ANY-APPEND FLAG (the reviewer's finding): a write on ANY iteration
+# must broadcast - a later no-op iteration must never suppress an earlier
+# append's WM_SETTINGCHANGE (Explorer would hand new terminals a stale
+# environment). The flag initializes OUTSIDE the loop and never resets.
 $pathAdded = $false
-$envKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
-try {
-    $rawUserPath = $envKey.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
-    $rawUserKind = [Microsoft.Win32.RegistryValueKind]::ExpandString
-    if ($envKey.GetValueNames() -contains 'Path') {
-        $rawUserKind = $envKey.GetValueKind('Path')
+foreach ($binDir in $pathDirs) {
+    if (-not (Test-PathEntry $env:PATH $binDir)) {
+        $env:PATH = "$env:PATH;$binDir"
+        Write-Host "PATH: added $binDir to this session - prime-agent works in this console now"
     }
-    # THE DUAL-SPELLING DEDUP (the reviewer's finding): a raw entry like
-    # %USERPROFILE%\.local\bin spells the SAME directory as the expanded
-    # $bin, and a raw-text compare alone would miss it - the add would
-    # append the directory a second time in its expanded spelling. So the
-    # membership check runs against BOTH spellings while the append and
-    # the kind-preserving write-back keep the raw text untouched.
-    $expandedUserPath = [Environment]::ExpandEnvironmentVariables($rawUserPath)
-    if (-not (Test-PathEntry $rawUserPath $bin) -and -not (Test-PathEntry $expandedUserPath $bin)) {
-        $newUserPath = if ($rawUserPath) { $rawUserPath.TrimEnd(';') + ";$bin" } else { $bin }
-        $envKey.SetValue('Path', $newUserPath, $rawUserKind)
-        $pathAdded = $true
+    $envKey = $null
+    try {
+        $envKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+        $rawUserPath = $envKey.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        $rawUserKind = [Microsoft.Win32.RegistryValueKind]::ExpandString
+        if ($envKey.GetValueNames() -contains 'Path') {
+            $rawUserKind = $envKey.GetValueKind('Path')
+        }
+        # THE DUAL-SPELLING DEDUP (the reviewer's finding): a raw entry like
+        # %USERPROFILE%\.local\bin spells the SAME directory as the expanded
+        # $binDir, and a raw-text compare alone would miss it - the add would
+        # append the directory a second time in its expanded spelling. So the
+        # membership check runs against BOTH spellings while the append and
+        # the kind-preserving write-back keep the raw text untouched.
+        $expandedUserPath = [Environment]::ExpandEnvironmentVariables($rawUserPath)
+        if (-not (Test-PathEntry $rawUserPath $binDir) -and -not (Test-PathEntry $expandedUserPath $binDir)) {
+            $newUserPath = if ($rawUserPath) { $rawUserPath.TrimEnd(';') + ";$binDir" } else { $binDir }
+            $envKey.SetValue('Path', $newUserPath, $rawUserKind)
+            $pathAdded = $true
+        }
+    } catch {
+        Write-Host "note: could not persist the PATH entry to the user environment: $($_.Exception.Message)"
+        Write-Host ' this session works; to add it by hand, put this entry on the user PATH:'
+        Write-Host "  $binDir"
+    } finally {
+        if ($envKey) { $envKey.Close() }
     }
-} finally {
-    if ($envKey) { $envKey.Close() }
 }
 if ($pathAdded) {
     try {
@@ -816,7 +854,7 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wP
         # The registry write stands; the broadcast is a courtesy (a re-login
         # reloads the environment too).
     }
-    Write-Host "PATH: added $bin to the user PATH (a new terminal picks it up automatically)"
+    Write-Host "PATH: added the missing entries to the user PATH (a new terminal picks them up automatically)"
 }
 
 # --- verify: the launcher must answer --version -----------------------------------
