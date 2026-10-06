@@ -1,18 +1,7 @@
 //! The strict `models/catalog.v1.json` schema.
-//!
-//! Ported from `parseModelCatalog` + `CatalogModelSchema` in
-//! `packages/ai/src/model-catalog.ts`:
-//! - version gate first: `schemaVersion` must be exactly `1`; anything else
-//!   (including a future v3) rejects the payload, silently, forever;
-//! - strict entry deserialization (`deny_unknown_fields`) — an entry
-//!   carrying a `headers` key is invalid (request headers live in the
-//!   compiled transport templates, never in catalog data);
-//! - field constraints (lengths, control chars, ranges) checked after the
-//!   structural parse;
-//! - `compat` validated per `api` (`crate::compat`);
-//! - duplicates reject even in skip-invalid mode;
-//! - remote refresh parses with skip-invalid semantics: bad entries drop,
-//!   the rest of the refresh survives.
+//! `schemaVersion` must be exactly `1`; an entry carrying a `headers`
+//! key is invalid (request headers live in the compiled transport
+//! templates).
 
 use std::collections::BTreeSet;
 
@@ -25,7 +14,6 @@ use crate::compat::is_model_compat;
 
 const MAX_MODEL_CATALOG_MODELS: usize = 20_000;
 
-/// Parsed model catalog (`ModelCatalogV1` in the TS reference).
 #[derive(Debug, Clone)]
 pub struct ModelCatalogV1 {
     pub schema_version: u64,
@@ -41,8 +29,7 @@ pub enum InvalidEntries {
     Reject,
 }
 
-/// The strict catalog entry schema (`deny_unknown_fields` — TS
-/// `strictObject`).
+/// The strict catalog entry schema (TS `strictObject`).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct CatalogModelSchema {
@@ -85,10 +72,8 @@ struct CatalogEnvelope {
 ///
 /// # Errors
 ///
-/// Fails on an unsupported `schemaVersion` or payload shape, a `models`
-/// list that is empty or over the size limit, an invalid entry under
-/// [`InvalidEntries::Reject`], duplicate `(provider, id)` pairs, or when
-/// no entry survives validation.
+/// Fails on an unsupported `schemaVersion`, an empty or oversized `models`
+/// list, invalid entries, duplicates, or no surviving entry.
 pub fn parse_model_catalog(
     value: &serde_json::Value,
     policy: InvalidEntries,

@@ -1,24 +1,7 @@
 //! The fork-isolation verifier (operator bug #5): a session forked with
-//! `/fork` must be a FULLY detached session. The worker replaces its live
-//! session file in place (a new durable id and file under the same worker
-//! address), and every supervisor-side route must follow that move: a
-//! message targeted at the ORIGINAL session file reaches the original
-//! (its own worker), never the fork; the fork's own sends flow to the
-//! fork; and the roster keeps both sessions visible, each owned by the
-//! worker that serves it.
-//!
-//! The pin battery: (a) the isolation pin — a create over the original
-//! file after the fork opens the ORIGINAL (a fresh worker over the
-//! file), and its prompt never lands in the fork's transcript; (b) the
-//! reverse pin — the fork's own prompt never lands in the original's
-//! transcript; (c) the independence pin — the fork's client keeps
-//! serving its own turns; (d) the visibility pin — the roster carries
-//! both sessions, and the fork's swap retires the stale row that still
-//! presented the original as the fork worker's live root; plus the
-//! stale-binding pin — after the fork's worker dies, the fork's old
-//! address does not rebind into the original's worker.
-// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR
-// for the full rationale).
+//! `/fork` must be a FULLY detached session: the worker replaces its live
+//! session file in place, and every supervisor-side route must follow that
+//! move, never crossing original and fork.
 #![allow(clippy::large_futures)]
 #![allow(
     clippy::cast_possible_truncation,
@@ -54,8 +37,7 @@ impl Drop for Daemon {
     }
 }
 
-// The timeout panic path cannot wait on the child; the test process exits
-// immediately afterwards, reaping it.
+// The timeout panic path cannot wait on the child; the test process exits and reaps it.
 #[allow(clippy::zombie_processes)]
 fn spawn_daemon(socket: &std::path::Path, agent_dir: &std::path::Path) -> Daemon {
     let binary = env!("CARGO_BIN_EXE_pa-daemon");
@@ -161,8 +143,6 @@ impl Client {
         }
     }
 
-    /// The first `roster_update` push whose changed entries satisfy
-    /// `accept` (the roster observer's convergence wait).
     fn next_roster_update<F>(&mut self, mut accept: F) -> serde_json::Value
     where
         F: FnMut(&serde_json::Value) -> bool,
@@ -180,7 +160,6 @@ impl Client {
         }
     }
 
-    /// One scripted prompt turn (`prompt_and_wait`) on the session `id`.
     fn scripted_turn(&mut self, id: &str, session_id: &str, message: &str) -> serde_json::Value {
         self.send_command(
             id,
@@ -196,7 +175,6 @@ impl Client {
     }
 }
 
-/// The text of every message row in a `get_messages` response.
 fn message_texts(client: &mut Client, id: &str, session_id: &str) -> Vec<String> {
     client.send_command(
         id,
@@ -223,7 +201,6 @@ fn message_texts(client: &mut Client, id: &str, session_id: &str) -> Vec<String>
         .collect()
 }
 
-/// The session-dir files' concatenated content (the durable transcripts).
 fn session_dir_text(session_dir: &std::path::Path) -> String {
     std::fs::read_dir(session_dir)
         .expect("read session dir")
@@ -264,9 +241,8 @@ fn the_fork_is_a_fully_detached_session() {
         .to_string(),
     )
     .expect("write script");
-    // Client A owns the ORIGINAL session, drives the fork, and stays
-    // attached to the fork (the client that ran /fork keeps its worker
-    // address and sees the forked session).
+    // Client A owns the original, runs /fork, and stays attached to the fork
+    // (the client that ran /fork keeps its worker address).
     let mut client_a = Client::connect(&socket);
     client_a.send_command(
         "c1",
@@ -300,8 +276,7 @@ fn the_fork_is_a_fully_detached_session() {
 
     client_a.scripted_turn("p1", &original_active, "fork point message");
 
-    // The roster observer: the agents-view surface that must keep seeing
-    // both sessions, each owned by the worker that serves it.
+    // The roster observer: the agents-view surface that must keep seeing both sessions.
     let mut observer = Client::connect(&socket);
     observer.send_command("r1", &serde_json::json!({ "type": "roster_subscribe" }));
     let subscribed = observer.read_response("r1");
@@ -342,8 +317,7 @@ fn the_fork_is_a_fully_detached_session() {
         serde_json::json!("fork point message")
     );
 
-    // The fork's identity moved: the worker serves a new durable id and
-    // file under the same address.
+    // The fork's identity moved: a new durable id and file under the same address.
     client_a.send_command(
         "s1",
         &serde_json::json!({ "type": "get_session_stats", "activeSessionId": original_active }),
@@ -364,8 +338,6 @@ fn the_fork_is_a_fully_detached_session() {
         "the original file survives the fork"
     );
 
-    // The supervisor's roster saw the fork (the worker's roster push): the
-    // fork's row exists under the fork's durable id.
     let fork_row = observer.next_roster_update(|line| {
         line["changed"].as_array().is_some_and(|entries| {
             entries.iter().any(|entry| {
@@ -385,12 +357,8 @@ fn the_fork_is_a_fully_detached_session() {
         .expect("the fork row names its worker");
     assert_eq!(fork_worker, original_active.as_str());
 
-    // THE SWAP PIN: the row the fork worker previously owned for the same
-    // address described the ORIGINAL session — it is dead now (the fork
-    // worker serves the fork, and the original file's open must not find a
-    // stale "live" row). A stale row here is what re-presents the
-    // original as the fork worker's live root and what later wakes by
-    // address would resolve to the wrong file.
+    // THE SWAP PIN: the row the fork worker previously owned for the same address described
+    // the ORIGINAL — it must be dead now, or a later wake by address resolves to the wrong file.
     observer.send_command("r2", &serde_json::json!({ "type": "roster_subscribe" }));
     let snapshot = observer.read_response("r2");
     assert_eq!(snapshot["success"], true, "re-subscribe failed");
@@ -403,9 +371,8 @@ fn the_fork_is_a_fully_detached_session() {
         "the fork's swap must retire the stale row for the original: {stale:?}"
     );
 
-    // THE ISOLATION PIN: a create over the ORIGINAL file opens the
-    // ORIGINAL — a worker of its own, not the fork worker reused for the
-    // path it no longer serves.
+    // THE ISOLATION PIN: a create over the ORIGINAL file opens the ORIGINAL —
+    // a worker of its own, not the fork worker reused.
     let mut client_b = Client::connect(&socket);
     client_b.send_command(
         "c2",
@@ -438,17 +405,13 @@ fn the_fork_is_a_fully_detached_session() {
     let attached_b = client_b.read_response("a2");
     assert_eq!(attached_b["success"], true, "attach B failed: {attached_b}");
 
-    // The message the operator sent in the ORIGINAL session.
     client_b.scripted_turn("p2", &reopened_id, "message for the original");
 
-    // The leak evidence: the fork's transcript and both files' durable
-    // content, gathered before the pins so every failure names the full
-    // matrix.
+    // The leak evidence gathered before the pins, so every failure names the full matrix.
     let fork_texts = message_texts(&mut client_a, "m1", &original_active);
     let texts = session_dir_text(&session_dir);
 
-    // PIN 1: the re-open of the original resolved to the ORIGINAL session
-    // (its own worker), never the fork.
+    // PIN 1: the re-open of the original resolved to the ORIGINAL session, never the fork.
     assert_eq!(
         reopened_durable, original_durable,
         "the create over the original file must open the original, not the fork (the values print above)"
@@ -458,8 +421,7 @@ fn the_fork_is_a_fully_detached_session() {
         "the original's re-open must not reuse the fork worker's address"
     );
 
-    // PIN 2 (the operator's report): the original's message never lands
-    // in the fork's transcript.
+    // PIN 2 (the operator's report): the original's message never lands in the fork's transcript.
     assert!(
         !fork_texts
             .iter()
@@ -477,7 +439,6 @@ fn the_fork_is_a_fully_detached_session() {
         "the original's message must reach the original's file"
     );
 
-    // THE REVERSE PIN: the fork's own message never lands in the original.
     client_a.scripted_turn("p3", &original_active, "message for the fork");
     let original_texts = message_texts(&mut client_b, "m2", &reopened_id);
     assert!(
@@ -497,7 +458,6 @@ fn the_fork_is_a_fully_detached_session() {
         "the fork's own message must reach the fork's file"
     );
 
-    // THE INDEPENDENCE PIN: the fork's client keeps serving its own turns.
     let fork_texts = message_texts(&mut client_a, "m3", &original_active);
     assert!(
         fork_texts
@@ -510,9 +470,7 @@ fn the_fork_is_a_fully_detached_session() {
         "the fork's turn must answer on the fork's transcript (the replacement restarts the script): {fork_texts:?}"
     );
 
-    // THE VISIBILITY PIN: the roster carries BOTH sessions, each owned by
-    // the worker that serves it (the family edges are not the bug; the
-    // routing was).
+    // THE VISIBILITY PIN: the roster carries BOTH sessions, each owned by the worker serving it.
     observer.send_command("r3", &serde_json::json!({ "type": "roster_subscribe" }));
     let snapshot = observer.read_response("r3");
     assert_eq!(snapshot["success"], true, "final subscribe failed");
@@ -536,11 +494,8 @@ fn the_fork_is_a_fully_detached_session() {
         "the fork's row names the fork worker: {fork_row:?}"
     );
 
-    // THE STALE-BINDING PIN: the fork worker dies, and its old address
-    // must NOT rebind into the original's worker — the address's binding
-    // follows the fork (the fork's file), so the stale id answers the
-    // unknown-session failure instead of landing the fork's client in
-    // the original.
+    // THE STALE-BINDING PIN: the fork worker dies and its old address must NOT rebind into
+    // the original's worker — the stale id answers the unknown-session failure.
     client_a.send_command(
         "k1",
         &serde_json::json!({ "type": "kill", "activeSessionId": original_active }),
@@ -581,14 +536,12 @@ fn the_fork_is_a_fully_detached_session() {
     );
 }
 
-/// One session file's content.
 fn fork_file_text(path: &str) -> String {
     std::fs::read_to_string(path).unwrap_or_default()
 }
 
-/// Wait until the supervisor socket accepts connections (a restarted
-/// supervisor parks on the stale socket file for up to a second before
-/// replacing it, so file existence is not readiness).
+/// Wait until the socket accepts connections (a restarted supervisor parks on
+/// the stale socket file briefly before replacing it, so file existence is not readiness).
 fn wait_socket_accepts(socket: &std::path::Path) {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
@@ -603,10 +556,8 @@ fn wait_socket_accepts(socket: &std::path::Path) {
     }
 }
 
-/// FINDING 3's restart pin: a daemon restart AFTER a failed identity
-/// persist, BEFORE any new roster write — the boot serves the NEW identity
-/// (never replays the old session) because the boot paths reconcile the
-/// resident from the live worker state before the routing opens.
+/// FINDING 3's restart pin: a failed identity persist, then a restart — the boot serves
+/// the NEW identity (reconciles from live worker state before routing).
 #[test]
 fn a_restart_after_a_failed_identity_persist_serves_the_moved_session() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -626,13 +577,9 @@ fn a_restart_after_a_failed_identity_persist_serves_the_moved_session() {
     )
     .expect("write script");
 
-    // Supervisor A: the original session, the fork, the failed persist.
     let mut supervisor_a = spawn_supervisor_raw(&socket, &agent_dir);
     let mut client_a = Client::connect(&socket);
-    // The roster observer: the fork's supervisor-side convergence signal
-    // (the worker's roster push carries the identity follow; the pins
-    // assert the settled state, so the test waits for the row like every
-    // other roster-observing surface).
+    // The roster observer: the fork's convergence signal; wait for the settled row.
     let mut observer = Client::connect(&socket);
     observer.send_command("r1", &serde_json::json!({ "type": "roster_subscribe" }));
     assert_eq!(
@@ -665,9 +612,8 @@ fn a_restart_after_a_failed_identity_persist_serves_the_moved_session() {
         .to_string();
     client_a.scripted_turn("p1", &address, "fork point message");
 
-    // The persisted record this boot owns: save the pre-fork record (the
-    // stale identity the restart must NOT serve), then break the record
-    // path so the fork's identity persist fails.
+    // Save the pre-fork record (the stale identity the restart must NOT serve),
+    // then break the record path so the fork's identity persist fails.
     let descriptor_dir = pa_daemon::descriptor::descriptor_dir(&agent_dir, &socket);
     let descriptor_path = descriptor_dir.join(format!("{address}.json"));
     let stale_record = std::fs::read_to_string(&descriptor_path)
@@ -675,9 +621,8 @@ fn a_restart_after_a_failed_identity_persist_serves_the_moved_session() {
     std::fs::remove_file(&descriptor_path).expect("remove the record file");
     std::fs::create_dir_all(&descriptor_path).expect("the record path takes a directory");
 
-    // The fork: the worker moves onto the forked file; the identity
-    // persist fails against the directory (the in-memory identity moved,
-    // the marker armed).
+    // The worker moves onto the forked file; the identity persist fails against
+    // the directory (the in-memory identity moved, the marker armed).
     client_a.send_command(
         "g1",
         &serde_json::json!({
@@ -719,10 +664,7 @@ fn a_restart_after_a_failed_identity_persist_serves_the_moved_session() {
         .expect("the fork's durable id")
         .to_string();
     assert_ne!(fork_file, original_file, "the fork moved the worker");
-    // The supervisor-side convergence wait: the fork's roster push carries
-    // the identity follow (the worker's response does NOT wait for its
-    // landing — the TS-parity async flush — so the pins assert the
-    // settled identity, never the in-flight window).
+    // The fork's roster push carries the identity follow; the response does not wait for it.
     let _ = observer.next_roster_update(|line| {
         line["changed"].as_array().is_some_and(|entries| {
             entries.iter().any(|entry| {
@@ -732,8 +674,7 @@ fn a_restart_after_a_failed_identity_persist_serves_the_moved_session() {
         })
     });
 
-    // The LIVE isolation still holds with the failed persist (the
-    // in-memory identity follows the worker).
+    // The LIVE isolation still holds: the in-memory identity follows the worker.
     let mut prober = Client::connect(&socket);
     prober.send_command(
         "c2",
@@ -759,9 +700,9 @@ fn a_restart_after_a_failed_identity_persist_serves_the_moved_session() {
     );
     assert_eq!(prober.read_response("k2")["success"], true, "kill failed");
 
-    // THE RESTART: the stale record back on disk (the boot's only word on
-    // the worker is the pre-fork identity), the supervisor killed, the
-    // WORKER left alive, a fresh supervisor over the same agent dir.
+    // THE RESTART: the stale record back on disk (the boot's only word on the worker is
+    // the pre-fork identity), the supervisor killed, the worker left alive, a fresh
+    // supervisor over the same agent dir.
     std::fs::remove_dir_all(&descriptor_path).expect("clear the record path");
     std::fs::write(&descriptor_path, &stale_record).expect("restore the stale record");
     supervisor_a.kill().expect("kill supervisor A");
@@ -773,8 +714,8 @@ fn a_restart_after_a_failed_identity_persist_serves_the_moved_session() {
     };
     wait_socket_accepts(&socket);
 
-    // The boot adopts the live worker and reconciles from its live state
-    // BEFORE the routing opens: the address serves the FORK.
+    // The boot adopts the live worker and reconciles from live state BEFORE the routing opens: the
+    // address serves the FORK.
     let mut client_b = Client::connect(&socket);
     let deadline = Instant::now() + Duration::from_secs(15);
     let restarted = loop {
@@ -795,8 +736,8 @@ fn a_restart_after_a_failed_identity_persist_serves_the_moved_session() {
     );
     assert_eq!(restarted["data"]["sessionId"], fork_durable);
 
-    // The reconciliation re-persisted the repaired record: a future
-    // restart reads the FORK's identity, never the original's.
+    // The reconciliation re-persisted the repaired record: a future restart reads the FORK's
+    // identity.
     let repaired_record = std::fs::read_to_string(&descriptor_path).expect("the repaired record");
     assert!(
         repaired_record.contains(&fork_durable),
@@ -807,8 +748,7 @@ fn a_restart_after_a_failed_identity_persist_serves_the_moved_session() {
         "the durable record dropped the original's identity"
     );
 
-    // THE ISOLATION AT BOOT: the original's routes still open the
-    // original, never the fork worker.
+    // THE ISOLATION AT BOOT: the original's routes still open the original, never the fork worker.
     let mut client_c = Client::connect(&socket);
     client_c.send_command(
         "c3",
@@ -851,7 +791,6 @@ fn a_restart_after_a_failed_identity_persist_serves_the_moved_session() {
         "the original's message never reaches the fork's file"
     );
 
-    // The fork's own sends still flow its own way after the restart.
     client_b.scripted_turn("p4", &address, "message for the fork");
     let fork_texts = message_texts(&mut client_b, "m1", &address);
     assert!(
@@ -868,9 +807,8 @@ fn a_restart_after_a_failed_identity_persist_serves_the_moved_session() {
     );
 }
 
-/// One raw supervisor child (no drop-time kill: the restart test manages
-/// the process itself). The timeout panic path cannot wait on the child;
-/// the test process exits immediately afterwards, reaping it.
+/// One raw supervisor child (no drop-time kill: the restart test manages the process
+/// itself). The timeout panic path cannot wait on the child; the test exits and reaps it.
 #[allow(clippy::zombie_processes)]
 fn spawn_supervisor_raw(socket: &std::path::Path, agent_dir: &std::path::Path) -> Child {
     let binary = env!("CARGO_BIN_EXE_pa-daemon");

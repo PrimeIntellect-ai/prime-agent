@@ -1,6 +1,6 @@
-//! The once-runner (moved with its concern): one model-turn attempt
-//! with its retry/failover selection and the wire-shape
-//! serializers for stream events, tool results, and agent messages.
+//! The once-runner: one model-turn attempt with its retry/failover
+//! selection and the wire-shape serializers for stream events, tool
+//! results, and agent messages.
 use crate::engine::{session_wire_value, AssistantSnapshot};
 
 use super::{
@@ -9,7 +9,6 @@ use super::{
 };
 
 impl AgentSessionEngine {
-    /// The provider retry policy from settings (TS `providerRetryPolicy`).
     pub(super) fn retry_policy(
         &self,
     ) -> pa_core::session_engine::provider_retry::ProviderRetryPolicy {
@@ -27,12 +26,8 @@ impl AgentSessionEngine {
 
     /// The failover chain for `model`: the other auth-configured providers
     /// serving the same model id, in catalog order after the current one,
-    /// filtered by the daemon model allowlist — a failover must never land
-    /// a turn on a provider the operator pinned out (the same
-    /// `allowedModels` gate as every other resolution). Faux-script
-    /// sessions never fail over (their failures are deterministic test
-    /// fixtures, and a second provider would only reroute the scripted
-    /// queue).
+    /// filtered by the daemon model allowlist. Faux-script sessions never
+    /// fail over.
     pub(super) fn failover_candidates(
         &self,
         model: &pa_types::ai::Model,
@@ -58,21 +53,16 @@ impl AgentSessionEngine {
                     )
                 })
                 .collect(),
-            // Fail closed on an unreadable policy: no failover candidate
-            // may bypass the configured allowlist.
+            // Fail closed on an unreadable policy.
             DaemonAllowlist::Unreadable(_) => Vec::new(),
         }
     }
 
     /// Run one turn, streaming assistant updates through `emit` as they
     /// arrive. The first attempt prompts the session; retries continue the
-    /// parked turn. Returns the turn outcome: the final assistant message
-    /// (provider failures included), `None` when no assistant message was
-    /// produced, or `Aborted` when the emit callback cancelled the run or
-    /// the delivery's cancel flag raced the admission (the abort-and-send
-    /// idle race: an abort landing between the runner's pickup and the
-    /// agent run's registration was lost to a run that registered fresh
-    /// after it — see [`Self::run_model_turn`]'s admission consult).
+    /// parked turn. Returns the final assistant message, `None` when none
+    /// was produced, or `Aborted` when the emit cancelled or the cancel flag
+    /// raced the admission.
     pub(super) async fn run_turn_once(
         &self,
         agent: &std::sync::Arc<pa_agent::agent::Agent>,
@@ -82,32 +72,18 @@ impl AgentSessionEngine {
         aborted: &dyn Fn() -> bool,
         emit: &mut dyn FnMut(EngineEvent) -> bool,
     ) -> anyhow::Result<TurnOnce> {
-        // Stream assistant events while the turn runs.
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<EngineEvent>();
-        // Goal usage accounting (TS `_accountGoalUsageForAssistantMessage`
-        // at the message_end hook) shares the same per-message hook: while a
-        // goal is active, each settled non-error assistant message records
-        // its token delta; a budget crossing moves the goal to
-        // `budget_limited` and the next emitted event publishes the
-        // `goal_update`. The handles come from the engine mirror: the core
-        // session's own mutex is held across the turn's admission.
+        // Goal usage accounting at the message_end hook: each settled non-error
+        // assistant message records its token delta, from the engine mirror.
         let goal_runtime = self.goal_runtime.lock().expect("goal runtime lock").clone();
         let goal_budget_crossed = std::sync::Arc::clone(&self.goal_budget_crossed);
-        // The run-opening boundary frames (TS `agent_start` / `turn_start`)
-        // are carried by the worker's own run-opening frames for the
-        // item's first run, so this subscription forwards them only once a
-        // boundary frame already passed in the item: an inner turn of the
-        // same run (after the first `turn_end`) or a later run of the same
-        // item (after an `agent_end` — a retry or a compact-and-retry
-        // re-issue, exactly the runs TS restarts with their own frames).
+        // The run-opening boundary frames are the worker's own for the
+        // item's first run; this subscription forwards them only once a
+        // boundary frame already passed.
         let boundary_passed = std::sync::Arc::clone(boundary_passed);
         let subscription = {
             let tx = tx.clone();
             let boundary_passed = std::sync::Arc::clone(&boundary_passed);
-            // Per-message usage accounting runs on every settled assistant
-            // message (whatever the stop reason except errors), matching the
-            // TS message_end hook. The driver owns the policy; this loop
-            // only forwards the message to it.
             let autonomous_state = std::sync::Arc::clone(&self.autonomous);
             let autonomous_driver = std::sync::Arc::clone(
                 &*self
@@ -137,10 +113,9 @@ impl AgentSessionEngine {
                             {
                                 let mut state = autonomous_state.lock().await;
                                 autonomous_driver.account_message(&mut state, &message);
-                                // Goal accounting mirrors the TS guard: only
-                                // turns that were neither errors nor aborted
-                                // spend the goal's budget, and only while
-                                // the goal is active.
+                                // Goal accounting: only turns neither errors
+                                // nor aborted spend the budget, only while
+                                // active.
                                 if let Some(handles) = goal_runtime.as_ref() {
                                     if !matches!(
                                         message.stop_reason,
@@ -149,30 +124,20 @@ impl AgentSessionEngine {
                                     ) {
                                         let mut driver = handles.driver.lock().await;
                                         let mut session = handles.session.lock().await;
-                                        // The loop does not assign message
-                                        // ids in-process; the timestamp is
-                                        // the double-counting guard identity.
+                                // The timestamp is the double-counting guard identity (no
+                                // in-process ids).
                                         let message_id = format!("a-{}", message.timestamp);
-                                        // TS `_accountGoalUsageForAssistantMessage`
-                                        // returning true: the budget crossing
-                                        // moves the goal to `budget_limited`
-                                        // (the tracking wrapper publishes the
-                                        // `goal_update` with the next emit),
-                                        // and the natural boundary mints the
-                                        // budget-limit wrap-up steer.
-                                        // TS `_shouldStopAfterTurn`'s catch:
-                                        // goal accounting must not interrupt
-                                        // the core agent loop; a failed
-                                        // persist only warns.
+                                        // A budget crossing moves the goal to
+                                        // `budget_limited` (the wrapper publishes
+                                        // the `goal_update`; the boundary mints
+                                        // the wrap-up steer); a failed persist
+                                        // only warns.
                                         match driver
                                             .record_assistant_usage(&mut session, &message_id, &message.usage)
                                         {
                                             Ok(
                                                 pa_core::session_engine::goal_driver::UsageOutcome::BudgetReached,
                                             ) => {
-                                                // TS `_shouldStopAfterTurn`'s budget
-                                                // arm arms the wrap-up steer: the
-                                                // natural boundary reads it.
                                                 goal_budget_crossed
                                                     .store(true, std::sync::atomic::Ordering::SeqCst);
                                             }
@@ -226,12 +191,9 @@ impl AgentSessionEngine {
                             AgentEvent::MessageEnd {
                                 message: agent_message,
                             } => {
-                                // Settled messages persist as session entries
-                                // and reach clients: every assistant message
-                                // (the TS `message_end` hook appends each
-                                // one, mid-run tool-call turns included) and
-                                // every tool-result message (framed as a
-                                // message pair).
+                                // Settled messages persist as entries and reach
+                                // clients: every assistant and tool-result
+                                // message.
                                 match agent_message {
                                     pa_agent::types::AgentMessage::Standard(
                                         pa_agent::types::Message::Assistant(_)
@@ -251,15 +213,10 @@ impl AgentSessionEngine {
                                             let _ = tx.send(event);
                                         }
                                     }
-                                    // An in-run continuation's user row
-                                    // (the autonomous hook's mint): the
-                                    // loop drains it between turns, so the
-                                    // `boundary_passed` gate separates it
-                                    // from the admitted prompt's row — the
-                                    // turn loop already emitted that one at
-                                    // admission. Forwarded as the accepted
-                                    // user-message frame (persist + the
-                                    // message pair).
+                                    // An in-run continuation's user row: the
+                                    // `boundary_passed` gate separates it from
+                                    // the admitted prompt's row, which the loop
+                                    // already emitted.
                                     pa_agent::types::AgentMessage::Standard(
                                         pa_agent::types::Message::User(_),
                                     ) if boundary_passed
@@ -272,20 +229,9 @@ impl AgentSessionEngine {
                                     _ => {}
                                 }
                             }
-                            // The loop-boundary frames (TS `turn_start` /
-                            // `turn_end` / `agent_start` / `agent_end`): the
-                            // run-opening `turn_start` and `agent_start`
-                            // stay with the worker's run-opening frames for
-                            // the item's first run (the `boundary_passed`
-                            // gate above — a later run of the same item
-                            // forwards its own), `turn_end` carries the
-                            // terminal assistant message plus the turn's
-                            // tool-result messages, and `agent_end` the
-                            // run's whole message set (the rows themselves
-                            // persist and broadcast through their own
-                            // events; these frames carry only the
-                            // accumulated payloads, in the session wire
-                            // shapes).
+                            // The loop-boundary frames: the run-opening frames stay with the
+                            // worker's first run (the `boundary_passed` gate); `turn_end` carries
+                            // the terminal message plus tool results, `agent_end` the whole set.
                             AgentEvent::TurnStart => {
                                 if boundary_passed.load(std::sync::atomic::Ordering::SeqCst) {
                                     let _ = tx.send(EngineEvent::TurnStart);
@@ -364,20 +310,14 @@ impl AgentSessionEngine {
                 })
                 .await
         };
-        // Admit the turn on the engine runtime without blocking the
-        // forwarding loop below: the admission future settles only when the
-        // whole turn settles (the TS daemon fires `prompt` with `void` and
-        // streams events from the session listeners while it runs), while
-        // the loop hands each streamed event to `emit` the moment it
-        // arrives. Buffering events until the future resolves is what made
-        // clients render a turn as one final batch.
+        // Admit the turn without blocking the forwarding loop: the admission
+        // future settles only when the whole turn settles, while the loop
+        // hands each streamed event to `emit` the moment it arrives (buffering
+        // made clients render a turn as one final batch).
         let prompt = prompt.clone();
         // The same admission consult as [`Self::run_model_turn`]'s, at the
-        // admission future's head — the last stop before the agent run
-        // registers: an abort landing in the driver's or the subscription's
-        // prefix (after the model-turn consult, before the registration)
-        // is honoured here the same way, so the whole [pickup,
-        // registration] window honours the delivery's cancel flag.
+        // admission future's head: the whole [pickup, registration] window
+        // honours the delivery's cancel flag.
         let abort_raced_admission = std::sync::atomic::AtomicBool::new(false);
         let mut admitted = std::pin::pin!(async {
             if aborted() {
@@ -385,32 +325,21 @@ impl AgentSessionEngine {
                 return Ok(());
             }
             if first_attempt {
-                // The session lock covers the clone only: the turn below
-                // runs for the whole provider stream, and holding the
-                // mutex across it serialized every client read seam
-                // (`get_system_prompt` and its family waited for the turn
-                // to settle and hit the client's 10s bound — the
-                // 2026-09-22 dogfood failure). The Arc clone keeps the
-                // turn on the same built session while the mutex stays
-                // free for reads (the TS event loop interleaves both).
+                // The session lock covers the clone only: holding it across
+                // the turn serialized every client read seam (the 2026-09-22
+                // dogfood failure); the Arc clone keeps reads free.
                 let session = self.session.lock().await.clone();
                 let engine = session.expect("session built");
                 match &prompt {
-                    // A plain turn admits a user prompt (text plus
-                    // images); an injected turn admits the custom row
-                    // itself (TS `_promptInjectedMessage`: the loop
-                    // context holds ONE representation of the turn —
-                    // the custom row — and the provider request carries
-                    // its user-role view at the loop boundary).
+                    // A plain turn admits a user prompt; an injected turn admits the
+                    // custom row itself — ONE representation.
                     TurnPrompt::User {
                         text,
                         images,
                         batch,
                     } => {
-                        // The batched co-delivery rows ride the same
-                        // admission (TS `_startPreparedTurnActions`'s one
-                        // `agent.prompt(preparedMessages)`): one run over
-                        // the primary plus every batched user row.
+                        // The batched co-delivery rows ride the same admission: one run over
+                        // the primary plus every batched row.
                         let options = pa_core::session_engine::PromptOptions {
                             batch: batch
                                 .iter()
@@ -458,8 +387,6 @@ impl AgentSessionEngine {
                         Ok(()) => {}
                         Err(error) => admission_error = Some(error),
                     }
-                    // The turn settled: drain the events that raced the
-                    // resolution, then stop the loop.
                     while let Ok(event) = rx.try_recv() {
                         if !emit(event) {
                             aborted = true;
@@ -474,20 +401,13 @@ impl AgentSessionEngine {
         }
         if aborted && !settled {
             // The emit callback cancelled the turn: stop the still-running
-            // admission and wait out its abort path before returning, so no
-            // run outlives this attempt. A turn whose admission already
-            // settled (the abort gate dropped only the settled run's tail
-            // events in the drain) must not re-poll the completed future -
-            // `std::pin::pin!` futures panic when resumed after
-            // completion - so only an in-flight admission is awaited out.
+            // admission and wait out its abort path. A settled admission
+            // must not be re-polled (pinned futures panic after completion).
             agent.abort();
             let _ = (&mut admitted).await;
         }
-        // The settled run's tail still holds the aborted assistant row: the
-        // abort finalize emits the row after the cancel (TS
-        // `createAbortedAssistantMessage`), so every queued event drains
-        // through the emit gate — the row's frames pass (broadcast +
-        // persist), the post-abort stragglers drop.
+        // The settled run's tail still holds the aborted assistant row: drain
+        // every queued event.
         while let Ok(event) = rx.try_recv() {
             let _ = emit(event);
         }
@@ -495,27 +415,21 @@ impl AgentSessionEngine {
         if aborted {
             return Ok(TurnOnce::Aborted);
         }
-        // The admission consult fired: the turn never started (no run
-        // registered, no provider call) — the aborted outcome, never an
-        // admission error the retry driver would classify as a provider
-        // failure and re-issue.
+        // The admission consult fired: the turn never started — the aborted
+        // outcome, never an admission error the retry driver would re-issue.
         if abort_raced_admission.load(std::sync::atomic::Ordering::SeqCst) {
             return Ok(TurnOnce::Aborted);
         }
         if let Some(error) = admission_error {
             return Err(anyhow::anyhow!("{error:#}"));
         }
-        // The final assistant message decides the outcome (provider
-        // failures included: the retry driver classifies them).
         let state = agent.state().await;
         for message in state.messages.iter().rev() {
             if let pa_agent::types::AgentMessage::Standard(pa_agent::types::Message::Assistant(
                 assistant,
             )) = message
             {
-                // The message must carry the session wire shape (the
-                // transcript already received it through message_end); a
-                // round-trip failure means no usable turn outcome.
+                // A round-trip failure means no usable outcome.
                 if json_round_trip::<_, pa_types::ai::AssistantMessage>(assistant).is_none() {
                     return Ok(TurnOnce::None);
                 }
@@ -528,8 +442,8 @@ impl AgentSessionEngine {
     }
 }
 
-/// Wire form of one provider stream event (TS `assistantMessageEvent`):
-/// the event `type` plus the `delta` when the event carries one.
+/// Wire form of one provider stream event: the event `type` plus the
+/// `delta` when the event carries one.
 fn stream_event_value(event: &pa_agent::stream::AssistantMessageEvent) -> Option<Value> {
     use pa_agent::stream::AssistantMessageEvent;
     let (kind, delta) = match event {

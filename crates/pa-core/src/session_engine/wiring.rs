@@ -4,9 +4,7 @@ use super::{
 };
 
 impl AgentSession {
-    /// Install the image-model routing host seam (the headless surfaces'
-    /// settings + registry + pinned stream target); `None` keeps image
-    /// turns on the session model.
+    /// Install the image-model routing host seam; `None` keeps image turns on the session model.
     pub fn set_image_model_router(
         &mut self,
         router: Option<image_model_routing::ImageModelRouter>,
@@ -14,16 +12,10 @@ impl AgentSession {
         self.image_model_router = router;
     }
 
-    /// The dispatch-time routing decision for one admitted batch (TS
-    /// `_imageModelOverrideForTurns` at commit): when the batch attaches
-    /// image blocks the session model cannot serve, the host's route
-    /// takes the stream target and the agent's per-run override, so the
-    /// run serves on the configured image model while the session model
-    /// keeps identifying the session. The fresh decision of EVERY admitted
-    /// batch (image-free included) re-evaluates the route, so retries and
-    /// post-compaction continuations of a routed turn keep serving it and
-    /// the next image-free batch returns to the session model. `Err` fails
-    /// the turn with the actionable refusal.
+    /// The dispatch-time routing decision for one admitted batch (TS `_imageModelOverrideForTurns`
+    /// at commit): when the batch attaches image blocks the session model cannot serve, the host's
+    /// route takes the stream target and the agent's per-run override. EVERY admitted batch
+    /// re-evaluates the route, so the next image-free batch returns to the session model.
     pub(super) async fn apply_image_model_routing(
         &self,
         images: &[pa_agent::types::ImageContent],
@@ -32,24 +24,17 @@ impl AgentSession {
         let Some(router) = self.image_model_router.as_ref() else {
             return Ok(());
         };
-        // The prior episode never outlives this admission (TS
-        // `_clearModelOverrideWhenIdle`: an explicit selection wins over
-        // routing lingering from the last dispatched turn, and the next
-        // dispatch re-evaluates against the new selection). The settle
-        // runs only while no run streams — the winner of an admission
-        // race keeps its own live serving target — and its still-routed
-        // guard leaves a mid-idle model switch alone, so the capture this
-        // batch's decision reads is always the live session model, never
-        // one from before a switch.
+        // The prior episode never outlives this admission (TS `_clearModelOverrideWhenIdle`): an
+        // explicit selection wins over routing lingering from the last dispatched turn, and the
+        // settle runs only while no run streams.
         if !self.agent.state().await.is_streaming {
             (router.swap_target)(None);
             self.agent.set_model_override(None);
         }
         let carries_images = !images.is_empty() || batch.iter().any(|row| !row.images.is_empty());
-        // The live thinking level (the agent state's, matching
-        // `request_output_budget`'s read) rides the decision: a mid-run
-        // `/effort` or model switch must not route with the build-time
-        // level.
+        // The live thinking level (the agent state's, matching `request_output_budget`'s
+        // read) rides the decision: a mid-run `/effort` or model switch must not
+        // route with the build-time level.
         let live_level =
             provider_adapter::model_thinking_level(self.agent.state().await.thinking_level);
         let route = (router.decide)(carries_images, live_level).map_err(anyhow::Error::msg)?;
@@ -59,10 +44,8 @@ impl AgentSession {
             return Ok(());
         };
         (router.swap_target)(Some(resolved));
-        // The conversion failure happens AFTER the swap armed the routed
-        // target: unwind the route so the failed turn does not leave it
-        // serving the next batch (the same unwind the admission race and
-        // the refusal paths perform).
+        // The conversion failure happens AFTER the swap armed the routed target:
+        // unwind the route so the failed turn does not leave it serving the next batch.
         let Some(agent_model) =
             crate::session_engine::provider_adapter::json_round_trip(&resolved.model)
         else {
@@ -80,10 +63,8 @@ impl AgentSession {
         Ok(())
     }
 
-    /// Override the compaction settings from the session's resolved
-    /// settings (TS `getCompactionSettings`); the engine wiring calls this
-    /// so `/compact` honors `compaction.keepRecentTokens`/`reserveTokens`
-    /// like the TS product instead of the defaults.
+    /// Override the compaction settings from the session's resolved settings so
+    /// `/compact` honors `compaction.keepRecentTokens`/`reserveTokens`.
     pub fn set_compaction_settings(&self, settings: compaction::CompactionSettings) {
         *self
             .compaction
@@ -91,9 +72,8 @@ impl AgentSession {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = settings;
     }
 
-    /// Toggle automatic compaction for this session (TS
-    /// `setAutoCompactionEnabled`): the live settings the auto-compaction
-    /// arms and `/compact` read.
+    /// Toggle automatic compaction for this session: the live settings
+    /// the auto-compaction arms and `/compact` read.
     pub fn set_auto_compaction_enabled(&self, enabled: bool) {
         let mut settings = self
             .compaction
@@ -102,11 +82,8 @@ impl AgentSession {
         settings.enabled = enabled;
     }
 
-    /// Install the auxiliary-model routing context (TS #2411's
-    /// `_resolveAuxiliaryModel` settings/registry access); the engine
-    /// wiring calls this so compaction summaries resolve through the
-    /// `auxiliaryModel` setting. Without it every summarizer stays on the
-    /// session model.
+    /// Install the auxiliary-model routing context: compaction summaries resolve through the
+    /// `auxiliaryModel` setting. Without it every summarizer stays on the session model.
     pub fn set_auxiliary_model_context(&mut self, context: auxiliary_model::AuxiliaryModelContext) {
         self.auxiliary_model = Some(context);
     }
@@ -125,11 +102,9 @@ impl AgentSession {
         self.skill_telemetry = Some(telemetry);
     }
 
-    /// Bind the auto-refine surface for this session (the engine wiring
-    /// resolves both once the session is assembled): whether the session
-    /// may auto-refine (TS `_autoRefineAllowedForSession`: depth 0 with a
-    /// local harness state dir) and the resolved gates (TS
-    /// `getAutoRefineSettings`).
+    /// Bind the auto-refine surface for this session: whether the session may
+    /// auto-refine (TS `_autoRefineAllowedForSession`: depth 0 with a local
+    /// harness state dir) and the resolved gates.
     pub fn set_auto_refine(&mut self, allowed: bool, gates: refine::AutoRefineGates) {
         self.auto_refine_allowed = allowed;
         self.auto_refine = gates;
@@ -157,12 +132,8 @@ impl AgentSession {
     }
 
     /// Install the live compaction summary-delta sink (the daemon's
-    /// `compaction_summary_delta` broadcast seam): every summarizer text
-    /// delta the session's compactions stream reaches the sink while the
-    /// summary generates, in arrival order. The daemon wires this onto
-    /// the assembled session (the worker's event pump); every other
-    /// embedding leaves it unset — the one-shot summarizer completion,
-    /// byte-identical to the pre-seam behavior.
+    /// `compaction_summary_delta` broadcast seam): every summarizer delta reaches the
+    /// sink while the summary generates, in arrival order.
     ///
     /// # Panics
     ///
@@ -174,20 +145,18 @@ impl AgentSession {
             .expect("compaction summary sink lock") = Some(sink);
     }
 
-    /// Whether the session may run auto-refinement (TS
-    /// `_autoRefineAllowedForSession`).
+    /// Whether the session may run auto-refinement.
     pub fn auto_refine_allowed(&self) -> bool {
         self.auto_refine_allowed
     }
 
-    /// The resolved auto-refine gates (TS `getAutoRefineSettings`).
+    /// The resolved auto-refine gates.
     pub fn auto_refine_gates(&self) -> refine::AutoRefineGates {
         self.auto_refine
     }
 
-    /// Whether automatic compaction is enabled for this session (the TS
-    /// `getCompactionSettings().enabled` gate the automatic arms check
-    /// before any trigger).
+    /// Whether automatic compaction is enabled for this session: the
+    /// gate the automatic arms check before any trigger.
     pub fn auto_compaction_enabled(&self) -> bool {
         self.compaction
             .read()
@@ -195,10 +164,8 @@ impl AgentSession {
             .enabled
     }
 
-    /// The resolved compaction settings (TS `getCompactionSettings`): the
-    /// in-run continuation consult reads the threshold headroom without
-    /// owning the session (a compaction in flight owns it across its
-    /// model turn).
+    /// The resolved compaction settings: the in-run continuation consult reads the threshold
+    /// headroom without owning the session (a compaction in flight owns it across its model turn).
     pub fn compaction_settings(&self) -> compaction::CompactionSettings {
         *self
             .compaction

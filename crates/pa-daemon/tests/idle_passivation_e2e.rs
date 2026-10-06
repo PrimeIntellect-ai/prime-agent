@@ -76,7 +76,6 @@ fn wait_socket_ready(socket: &Path) {
     }
 }
 
-/// JSONL supervisor client (command envelopes, id-matched responses).
 struct Client {
     reader: BufReader<UnixStream>,
     writer: UnixStream,
@@ -151,8 +150,7 @@ fn kernel_python() -> Option<PathBuf> {
     None
 }
 
-/// The worker's token from its persisted descriptor (the same lookup the
-/// family e2e uses for the parent's token).
+/// The worker's token from its persisted descriptor (the same lookup the family e2e uses).
 fn worker_token(agent_dir: &Path, active_session_id: &str) -> Option<String> {
     let instances = std::fs::read_dir(agent_dir.join("daemon-workers")).ok()?;
     for instance in instances.flatten() {
@@ -216,9 +214,8 @@ async fn a_settled_child_passivates_stays_listable_and_revives_by_agent_message(
     let agent_dir = dir.path().join("agent");
     let sessions_dir = agent_dir.join("sessions");
     std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
-    // The idle-eviction threshold both sides read (the worker's park arm
-    // and the supervisor's fence): the same settings-driven shape the VM
-    // census measures.
+    // The idle-eviction threshold both sides read (the worker's park arm and the
+    // supervisor's fence): the settings-driven shape the VM census measures.
     std::fs::write(
         agent_dir.join("settings.json"),
         json!({ "idleEvictionMinutes": 1 }).to_string(),
@@ -303,9 +300,8 @@ async fn a_settled_child_passivates_stays_listable_and_revives_by_agent_message(
         .expect("spawn the child");
     assert_eq!(handle.name, "parked-kid");
 
-    // The detached task prompt admits at the parent's turn boundary:
-    // this harness owns the children registry (separate from the parent
-    // worker's engine), so the boundary bump is simulated here.
+    // The detached task prompt admits at the parent's turn boundary: this harness
+    // owns the children registry, so the boundary bump is simulated here.
     children.notify_turn_done();
 
     // The child settles done with a resident worker.
@@ -330,9 +326,9 @@ async fn a_settled_child_passivates_stays_listable_and_revives_by_agent_message(
     assert!(std::path::Path::new(&format!("/proc/{child_pid}")).exists());
     let child_alive = || std::path::Path::new(&format!("/proc/{child_pid}")).exists();
 
-    // THE PASSIVATION ASK: the child worker's supervisor-link request
-    // (the worker-side clock and gates are unit-covered; this drives the
-    // supervisor's handler, the graceful stop, and the roster passive).
+    // THE PASSIVATION ASK: the child worker's supervisor-link request (the worker-side
+    // clock and gates are unit-covered; this drives the supervisor's handler, the
+    // graceful stop, and the roster passive).
     client.send_command(
         "passivate",
         &json!({
@@ -347,8 +343,8 @@ async fn a_settled_child_passivates_stays_listable_and_revives_by_agent_message(
         "the idle passivation stop must succeed: {passivated}"
     );
 
-    // The child worker's PROCESS is GONE (TS's whole-worker eviction
-    // semantics: worker AND its kernel leave; the session file stays).
+    // The child worker's PROCESS is GONE (TS's whole-worker eviction semantics:
+    // worker AND its kernel leave; the session file stays).
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         if !child_alive() {
@@ -398,8 +394,7 @@ async fn a_settled_child_passivates_stays_listable_and_revives_by_agent_message(
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
-    // The parent's roster STILL lists the child (done — the POSITIVE
-    // verdict; the passive representation).
+    // The parent's roster STILL lists the child (the passive representation).
     let roster = children.list_subagents().await.expect("roster after");
     let row = roster
         .iter()

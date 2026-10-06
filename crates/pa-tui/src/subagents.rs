@@ -1,15 +1,14 @@
-//! The subagent-family data layer shared by the session view's summary box
-//! and the agents view's scoped mode: which roster entries descend from a
-//! session, and how their statuses classify. Pure functions over roster
-//! entries (the supervisor's `roster_subscribe` wire form); the wire
-//! classification vocabulary lives in pa-types.
+//! The subagent-family data layer shared by the session view's summary
+//! box and the agents view's scoped mode: which roster entries descend
+//! from a session, and how their statuses classify. Pure functions over
+//! `roster_subscribe` wire entries.
 
 use serde_json::Value;
 
 use pa_types::daemon::agent_roster::{classify_summary_value, AgentRosterStatus};
 
-/// One session's family-addressing identity (TS `AgentsViewScopeKey` plus
-/// the file key): the keys its child rows reference it by.
+/// One session's family-addressing identity: the keys its child rows
+/// reference it by.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SessionIdentity {
     pub active_session_id: Option<String>,
@@ -31,10 +30,8 @@ impl SessionIdentity {
         }
     }
 
-    /// The keys this session is referenced by as a parent, in the one
-    /// format `summary_parent_keys`/`summary_identity_keys` build (the
-    /// same `active:`/`session:`/`file:` vocabulary the roster rows and
-    /// the agents-view records speak).
+    /// The keys this session is referenced by as a parent (the same
+    /// `active:`/`session:`/`file:` vocabulary the roster rows speak).
     pub(crate) fn keys(&self) -> Vec<String> {
         let mut keys = Vec::new();
         if let Some(id) = self.active_session_id.as_deref() {
@@ -50,11 +47,9 @@ impl SessionIdentity {
     }
 }
 
-/// Live descendant counts of one session's subtree (TS
-/// `SubagentSummaryCounts`), with the operator's 2026-09-25 running
-/// split: `running_direct` counts the immediately-running children,
-/// `running_nested` the further running descendants below them (their
-/// sum is the recursive `running` total).
+/// Live descendant counts of one session's subtree, with the
+/// operator's 2026-09-25 running split: `running_direct` counts
+/// immediately-running children, `running_nested` the deeper ones.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SubagentCounts {
     pub total: usize,
@@ -72,8 +67,8 @@ fn get_str<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
         .filter(|text| !text.is_empty())
 }
 
-/// The parent-reference keys of one summary (TS `getParentKeys`):
-/// `active:<id>`, `session:<id>`, `file:<path>` over the parent fields.
+/// The parent-reference keys of one summary: `active:<id>`,
+/// `session:<id>`, `file:<path>` over the parent fields.
 pub(crate) fn summary_parent_keys(summary: &Value) -> Vec<String> {
     let mut keys = Vec::new();
     if let Some(id) = get_str(summary, "parentActiveSessionId") {
@@ -88,7 +83,7 @@ pub(crate) fn summary_parent_keys(summary: &Value) -> Vec<String> {
     keys
 }
 
-/// The keys a session is referenced by as a parent (TS `parentIdentityKeys`).
+/// The keys a session is referenced by as a parent.
 pub(crate) fn summary_identity_keys(summary: &Value) -> Vec<String> {
     let mut keys = Vec::new();
     if let Some(id) = get_str(summary, "activeSessionId") {
@@ -200,7 +195,7 @@ pub fn descendant_positions_with_depth(
     let mut linked: std::collections::HashSet<usize> = std::collections::HashSet::new();
     let mut index = 0;
     while index < queue.len() {
-        // The owned copy ends the slice borrow before the extend below
+        // The owned copy ends the slice borrow before the extend
         // mutates the queue.
         let (key, owner_depth, owner) = queue[index].clone();
         for position in by_parent_key.get(&key).into_iter().flatten() {
@@ -228,8 +223,8 @@ pub fn descendant_positions_with_depth(
     positions
 }
 
-/// The descendant positions of `parent`, depth-free (the flat consumers:
-/// row and entry collection).
+/// The descendant positions of `parent`, depth-free (the flat
+/// consumers).
 #[must_use]
 pub fn descendant_positions(summaries: &[&Value], parent: &SessionIdentity) -> Vec<usize> {
     descendant_positions_with_depth(summaries, parent)
@@ -252,8 +247,7 @@ pub fn descendant_rows<'a>(summaries: &[&'a Value], parent: &SessionIdentity) ->
 ///
 /// # Panics
 ///
-/// Cannot panic: the `expect` re-reads the same `"summary"` key the
-/// filter kept, so it always resolves on the collected entries.
+/// Cannot panic: the `expect` re-reads the `"summary"` key the filter kept.
 #[must_use]
 pub fn descendant_entries_with_depth<'a>(
     roster: &'a [Value],
@@ -282,8 +276,8 @@ pub fn descendant_entries<'a>(roster: &'a [Value], parent: &SessionIdentity) -> 
         .collect()
 }
 
-/// The roster status of one entry (the supervisor's classification, with
-/// the shared formula as the fallback: TS `rosterStatus ??
+/// The roster status of one entry: the supervisor's classification,
+/// with the shared formula as the fallback (TS `rosterStatus ??
 /// classifySessionRosterStatus`).
 #[must_use]
 pub fn entry_status(entry: &Value) -> AgentRosterStatus {
@@ -306,11 +300,9 @@ pub fn entry_status(entry: &Value) -> AgentRosterStatus {
 }
 
 /// Count the live subagent descendants of one session (TS
-/// `countRosterSubagentStatuses`: rows of any lifecycle count on the live
-/// roster; callers that mix saved catalog rows filter their input). The
-/// running split rides the descendant depths: depth 1 counts direct,
-/// deeper counts nested — the two addends the dock's single running
-/// total sums (the operator's 2026-09-28 one-number readout).
+/// `countRosterSubagentStatuses`; callers that mix saved catalog rows
+/// filter their input). The running split rides the depths: depth 1
+/// direct, deeper nested (the operator's 2026-09-28 one-number readout).
 #[must_use]
 pub fn count_descendants(roster: &[Value], parent: &SessionIdentity) -> SubagentCounts {
     let mut counts = SubagentCounts::default();
@@ -409,9 +401,6 @@ mod tests {
         assert_eq!(counts.inactive, 1);
     }
 
-    /// The operator's `direct, nested` running pair: the one directly
-    /// running child counts direct, the two running grandchildren below
-    /// it count nested, and their sum stays the recursive running total.
     #[test]
     fn running_split_counts_direct_and_nested() {
         let mut roster = vec![
@@ -435,16 +424,12 @@ mod tests {
         assert_eq!(counts.running, 3);
         assert_eq!(counts.running_direct, 1);
         assert_eq!(counts.running_nested, 2);
-        // The pair never double counts: 1 direct + 2 nested = 3 running,
-        // the recursive total.
         assert_eq!(
             counts.running,
             counts.running_direct + counts.running_nested
         );
     }
 
-    /// The title bills the same family rollup as the agents-view row:
-    /// the root's own spend plus every descendant's, recursively.
     #[test]
     fn family_cost_is_the_agents_view_row_rollup() {
         let summary = |id: &str, depth: u32, usage_cost: f64| {
@@ -482,8 +467,8 @@ mod tests {
             Some("/sessions/root.jsonl".to_string()),
         );
         assert_eq!(family_cost(&roster, &identity), Some(2.30));
-        // The same number the agents view bills the root's row — pinned
-        // against the row itself, not a second copy of the formula.
+        // Pinned against the agents-view row itself, not a second copy
+        // of the formula.
         let records = crate::agents_view_state::reconcile_unified_sessions(&roster, &[]);
         let rollups = crate::agents_view_forest::compute_rollups(&records);
         let rows = crate::agents_view_forest::build_rows(
@@ -503,7 +488,6 @@ mod tests {
             Some(row.cost),
             "the title and the agents-view row agree"
         );
-        // An identity the roster holds no record for renders nothing.
         assert_eq!(
             family_cost(
                 &roster,

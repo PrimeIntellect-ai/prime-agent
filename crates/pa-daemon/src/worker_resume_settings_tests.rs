@@ -132,14 +132,9 @@ mod resume_settings_tests {
             );
             {
                 let selected = capture.selected.lock().unwrap();
-                // The worker's live-selection adoption carries the create
-                // flags and the saved THINKING level only: the saved MODEL
-                // restores through the engine's session-model restore
-                // (the bounded readiness window and the published
-                // fallback), never a direct selection adoption that would
-                // bypass the window — the real engine records the
-                // restored decision instead, so the capture double sees
-                // no model adoption.
+                // The live-selection adoption carries the create flags and the
+                // saved THINKING level only: the saved MODEL restores through the
+                // engine's session-model restore, so the capture double sees none.
                 assert_eq!(
                     (
                         selected.provider.as_deref(),
@@ -178,8 +173,7 @@ mod resume_settings_tests {
                     .is_some());
             }
             // The worker's core is Arc-shared with its handler seams, so an
-            // in-process drop never releases the store; `kill` is the real
-            // teardown (a production worker exits its process).
+            // in-process drop never releases the store; `kill` is the real teardown.
             let killed = worker.dispatch("kill", &json!({})).await;
             assert!(killed.success, "{killed:?}");
             drop(worker);

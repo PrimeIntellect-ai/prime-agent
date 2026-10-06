@@ -1,16 +1,7 @@
 //! The per-session kernel provisioner: owns one kernel manager, guards its
 //! startup, revives the saved namespace before the runtime bootstrap, and
-//! disposes/kills on demand.
-//!
-//! Teardown contract: the provisioner is the manager's strong owner, and the
-//! manager's reader/watcher tasks hold only weak references — so dropping the
-//! last provisioner handle tears the kernel PROCESS down synchronously
-//! (`Inner::drop` sends the kill). An explicit `dispose()` is still the
-//! product path (it flushes a final namespace snapshot first), but no kernel
-//! can outlive the object graph that created it.
-//!
-//! Ported from `core/tools/ipython.ts` (`IpythonKernelProvisioner`) and
-//! `core/kernel/boot-gate.ts`.
+//! disposes/kills on demand. Reader tasks hold only weak references, so no
+//! kernel outlives its provisioner; `dispose()` flushes the snapshot first.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -27,7 +18,7 @@ use crate::kernel::manager::{KernelStartOptions, ReplKernelManager};
 use crate::kernel::shared::ExecuteStatus;
 use crate::kernel::shared::{
     ExecuteOptions, HostRequestHandlers, KernelManagerOptions, KernelShutdownOptions,
-    KernelSnapshotConfig,
+    KernelSnapshotConfig, BOOTSTRAP_EXECUTION_TIMEOUT_MS,
 };
 use crate::kernel::state_snapshot::RestoreResult;
 use crate::kernel::state_snapshot::{manifest_path_in, snapshot_path_in};
@@ -78,8 +69,6 @@ where
     boot().await
 }
 
-/// Options for the provisioner's kernel, mirroring the TS `IpythonToolOptions`
-/// subset the provisioner consumes.
 /// Publishes the restore outcome once the kernel is usable.
 pub type RestoreCallback = Arc<dyn Fn(&RestoreResult) + Send + Sync>;
 
@@ -132,13 +121,10 @@ pub struct IpythonKernelProvisionerOptions {
     /// Publishes the restore outcome once the kernel is usable.
     pub on_restore: Option<RestoreCallback>,
     /// Fires when the kernel's last live background `bash()` handle
-    /// settles, so owed continuations can resume (TS
-    /// `IpythonToolOptions.onBackgroundWorkSettled`).
+    /// settles, so owed continuations can resume.
     pub on_background_work_settled: Option<crate::kernel::shared::BackgroundWorkSettledCallback>,
-    /// Fires once per kernel start when installed Python skills failed to
-    /// import into the kernel (skill import name -> import error), so the
-    /// session can tell the model before it wastes turns calling them
-    /// (TS `IpythonToolOptions.onUnavailableSkills`).
+    /// Fires once per kernel start when installed Python skills failed to import into the kernel,
+    /// so the session can tell the model before it wastes turns calling them.
     pub on_unavailable_skills: Option<UnavailableSkillsCallback>,
     /// Publishes the per-boot result for the `kernel_bootstrap_*` counters.
     /// Telemetry only; kernel behavior never depends on it.
@@ -240,9 +226,8 @@ struct ProvisionerState {
     doomed_startups: Vec<tokio::sync::watch::Receiver<Option<StartupResult>>>,
 }
 
-/// Owns one kernel for one session: lazily starts it, memoizes the startup so
-/// concurrent callers join the same boot, revives the saved namespace before
-/// the runtime bootstrap, and disposes/kill()s on demand.
+/// Owns one kernel for one session: starts it, memoizes the startup so concurrent callers join the
+/// same boot.
 ///
 /// Cloning shares the same kernel and startup state.
 #[derive(Clone)]
@@ -314,9 +299,7 @@ impl IpythonKernelProvisioner {
         });
     }
 
-    /// The kernel manager, starting it first when necessary. Concurrent
-    /// callers join one startup; the current startup stage is replayed to
-    /// listeners that attach mid-flight.
+    /// The kernel manager, starting it first when necessary. Concurrent callers join one startup.
     ///
     /// # Errors
     ///
@@ -878,9 +861,8 @@ fn emit_startup_progress(
     }
 }
 
-/// Extra startup attempts beyond the first (one transient-failure retry by
-/// default). The promise here is resilience against a wedged boot — a venv
-/// python still settling, a slow fork under load — not masking a broken setup.
+/// Extra startup attempts beyond the first. The promise here is resilience against a wedged boot,
+/// not masking a broken setup.
 const DEFAULT_STARTUP_RETRIES: u32 = 1;
 const DEFAULT_STARTUP_BUDGET_MS: u64 = 90_000;
 const RETRY_BACKOFF_MS: [u64; 4] = [250, 1_000, 2_500, 5_000];
@@ -908,10 +890,7 @@ fn resolve_startup_budget_ms() -> u64 {
 }
 
 /// A failed boot the provisioner may retry on its own: transient spawn or
-/// ready-handshake problems. Structural failures (disposed, aborts, a
-/// misconfigured interpreter, a protocol mismatch, a failed runtime
-/// bootstrap) never auto-retry — each needs either user action or a fresh
-/// attempt initiated by the caller.
+/// ready-handshake problems. Structural failures never auto-retry.
 fn startup_failure_is_retryable(error: &anyhow::Error) -> bool {
     const FATAL_MARKERS: [&str; 9] = [
         "provisioner disposed",
@@ -993,10 +972,8 @@ async fn run_startup(
     }
 }
 
-/// Boot one kernel, restore the prior namespace, then run the runtime
-/// bootstrap. Reports the result through `on_bootstrap_result` once per
-/// actual boot (`kernel bootstrap` telemetry): timing starts at the first
-/// spawn, `cold` means no prior namespace snapshot existed to restore.
+/// Boot one kernel, restore the prior namespace, then run the runtime bootstrap. Reports the result
+/// through `on_bootstrap_result` once per actual boot.
 async fn start_kernel(
     inner: &Arc<ProvisionerInner>,
     on_progress: Option<&KernelBootstrapProgressHandler>,
@@ -1134,9 +1111,7 @@ async fn start_kernel_impl(
             })
             .await;
         // The drained stderr tail is the only extra evidence a failed boot
-        // leaves behind; attach it to the cause so `ensure()` callers see it.
-        // Cap the tail: the in-memory buffer holds up to 8 KiB, but the
-        // surfaced error must stay readable.
+        // leaves; attach it to the cause.
         let stderr_tail = {
             let tail = manager.kernel_stderr();
             let chars: Vec<char> = tail.chars().collect();
@@ -1172,12 +1147,13 @@ async fn start_kernel_impl(
     // settles the cell aborted, and the aborted-status arm below tears the
     // kernel down instead of leaking it into a disposed provisioner.
     let bootstrap = manager
-        .execute(
+        .execute_bounded(
             &bootstrap_code,
             ExecuteOptions {
                 signal: Some(dispose_signal.clone()),
                 ..Default::default()
             },
+            Some(BOOTSTRAP_EXECUTION_TIMEOUT_MS),
         )
         .await;
     match bootstrap {
@@ -1197,9 +1173,7 @@ async fn start_kernel_impl(
         Ok(bootstrap) if bootstrap.status == ExecuteStatus::Ok => {
             if snapshot_existed {
                 // The just-restored namespace is fresh: the debounced
-                // auto-snapshot the bootstrap scheduled would rewrite identical
-                // content — or, after a failed restore, clobber the healthy
-                // on-disk payload with a skills-only namespace.
+                // auto-snapshot would rewrite identical content.
                 manager.mark_restored_namespace_fresh();
             }
             // Broken skill imports stay importable-looking placeholders;
@@ -1230,9 +1204,8 @@ async fn start_kernel_impl(
             }
         }
         Ok(bootstrap) => {
-            // The kernel booted but its runtime did not initialize: the venv
-            // is the prime suspect, so drop the memoized runtime-ready result
-            // and let the next start re-probe (and rebuild when broken).
+            // The kernel booted but its runtime did not initialize: the venv is the prime suspect,
+            // so drop the memoized runtime-ready result.
             crate::kernel::bootstrap::invalidate_runtime_probe_cache();
             let details = [bootstrap.stderr.clone()]
                 .into_iter()
@@ -1249,9 +1222,20 @@ async fn start_kernel_impl(
                     drain_host_requests: true,
                 })
                 .await;
-            return Err(anyhow!(
-                "Failed to initialize rlm runtime in the Python kernel:\n{details}"
-            ));
+            // An aborted bootstrap with a live dispose signal is the bound
+            // firing on a kernel that stopped answering: name the lost
+            // bootstrap instead of a bare runtime failure.
+            let error = if bootstrap.status == ExecuteStatus::Aborted
+                && !dispose_signal.is_aborted()
+            {
+                anyhow!(
+                    "Failed to initialize rlm runtime in the Python kernel: \
+                     the runtime bootstrap did not finish within {BOOTSTRAP_EXECUTION_TIMEOUT_MS}ms:\n{details}"
+                )
+            } else {
+                anyhow!("Failed to initialize rlm runtime in the Python kernel:\n{details}")
+            };
+            return Err(error);
         }
         Err(error) => {
             let (snapshot_policy, _teardown_gate) = hold_snapshot_flush_gate(inner, memo);
@@ -1642,10 +1626,6 @@ mod tests {
         assert!(clone.ensure(None, None).await.is_err());
     }
 
-    /// The prewarm contract (TS `prewarm(): void this.ensure().catch(() =>
-    /// {})`): a background boot never surfaces its failure at the call site,
-    /// and the swallowed failure stays recoverable — the next `ensure()` runs
-    /// (and surfaces) a fresh attempt, the lazy first-call start.
     #[tokio::test]
     async fn prewarm_swallows_failure_and_keeps_lazy_fallback() {
         let options = IpythonKernelProvisionerOptions {
@@ -1653,7 +1633,6 @@ mod tests {
             ..Default::default()
         };
         let provisioner = IpythonKernelProvisioner::new("/tmp", options);
-        // Returns immediately; the background boot fails on its own.
         provisioner.prewarm();
         // Let the background startup settle into its failure.
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -1661,8 +1640,7 @@ mod tests {
             !provisioner.has_running_kernel(),
             "the failed prewarm must not leave a running kernel"
         );
-        // The next ensure() surfaces the prewarm's swallowed cause (or a
-        // fresh attempt's identical one) instead of hanging on the memo.
+        // The next ensure() surfaces the swallowed cause, not a memo hang.
         let error = provisioner
             .ensure(None, None)
             .await
@@ -1670,6 +1648,120 @@ mod tests {
         assert!(
             format!("{error:#}").contains("failed to spawn"),
             "ensure must surface the spawn cause: {error:#}"
+        );
+    }
+
+    /// A ready kernel that stops reading stdin must not wedge its bootstrap
+    /// request or the failed boot's shutdown behind a full pipe.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn nonreading_kernel_fails_bootstrap_without_parking_shutdown() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let python = dir.path().join("ready-but-not-reading");
+        std::fs::write(
+            &python,
+            "#!/usr/bin/env python3\nimport json, time\nprint(json.dumps({'event': 'ready', 'protocol': 3, 'python': '3.13.0'}), flush=True)\ntime.sleep(30)\n",
+        )
+        .expect("write fake kernel");
+        std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod fake kernel");
+        let provisioner = IpythonKernelProvisioner::new(
+            dir.path(),
+            IpythonKernelProvisionerOptions {
+                python: Some(python),
+                python_skills: vec![KernelPythonSkill {
+                    name: "oversized".into(),
+                    import_name: "x".repeat(1024 * 1024),
+                    package_path: dir.path().into(),
+                    pyproject_path: dir.path().join("pyproject.toml"),
+                }],
+                ..Default::default()
+            },
+        );
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(9),
+            provisioner.ensure(None, None),
+        )
+        .await
+        .expect("timed out bootstrap must not park during failed-boot cleanup")
+        .expect_err("kernel never reads bootstrap");
+        assert!(format!("{error:#}").contains("runtime bootstrap did not finish"));
+        assert!(!provisioner.has_running_kernel());
+    }
+
+    /// A kernel that answers the ready handshake but never answers the
+    /// bootstrap execute (the wedged-kernel shape: the frame is lost inside
+    /// the kernel) fails `ensure` with the bound's message instead of parking
+    /// forever, tears its kernel down, and does not auto-retry the fatal
+    /// failure.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn silent_bootstrap_fails_bounded_and_leaves_no_kernel() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Speaks protocol v3: answers the ready handshake, stays silent on
+        // every execute (the runtime bootstrap included), and answers the
+        // shutdown frame so a teardown does not wait out its kill deadline.
+        const SILENT_BOOTSTRAP_RUNTIME: &str = r#"#!/usr/bin/env python3
+import json
+import os
+import sys
+
+base = os.path.dirname(os.path.abspath(__file__))
+with open(os.path.join(base, "starts"), "a") as f:
+    f.write("x")
+print(json.dumps({"event": "ready", "protocol": 3, "python": "3.13.0"}), flush=True)
+for line in sys.stdin:
+    try:
+        req = json.loads(line)
+    except Exception:
+        continue
+    if req.get("type") == "shutdown":
+        print(json.dumps({"event": "done", "id": req.get("id"), "status": "ok"}), flush=True)
+        break
+"#;
+
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let python = dir.path().join("fake-kernel");
+        std::fs::write(&python, SILENT_BOOTSTRAP_RUNTIME).expect("write fake runtime");
+        std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod fake runtime");
+        let provisioner = IpythonKernelProvisioner::new(
+            dir.path(),
+            IpythonKernelProvisionerOptions {
+                python: Some(python),
+                ..Default::default()
+            },
+        );
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            provisioner.ensure(None, None),
+        )
+        .await
+        .expect("the bounded bootstrap must settle the boot")
+        .expect_err("a kernel that never answers the bootstrap must not report success");
+        let chain = format!("{outcome:#}");
+        assert!(
+            chain.contains("Failed to initialize rlm runtime"),
+            "{chain}"
+        );
+        assert!(
+            chain.contains(&format!(
+                "the runtime bootstrap did not finish within {BOOTSTRAP_EXECUTION_TIMEOUT_MS}ms"
+            )),
+            "{chain}"
+        );
+        assert!(
+            !provisioner.has_running_kernel(),
+            "the failed boot must tear its kernel down"
+        );
+        assert_eq!(
+            std::fs::metadata(dir.path().join("starts")).map_or(0, |m| m.len()),
+            1,
+            "the fatal classification must not auto-retry the boot"
         );
     }
 }

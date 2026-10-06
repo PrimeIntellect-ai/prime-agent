@@ -1,6 +1,6 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28) - this target's own
-// crate root: the same bounded-boundary disposition as src/lib.rs
-// (large_futures/too_many_lines/the cast family; details there).
+// Same bounded-boundary disposition as src/lib.rs: large_futures stack
+// futures by design, too_many_lines is a style gate only, casts target
+// 64-bit with narrowing at bounded OS/protocol boundaries.
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -11,24 +11,9 @@
 )]
 
 //! Kernel bootstrap / lifecycle benchmark harness (verifier tooling, not a
-//! test): measures the cold and warm kernel bootstrap paths, per-execute
-//! overhead, and snapshot/restore cost against a real `python -m rlm.repl`
-//! child.
-//!
-//! Usage:
-//!   `kernel_bench` ensure-python      — time `ensure_kernel_python`
-//!   `kernel_bench` boot               — full provisioner boot + N executes
-//!   `kernel_bench` snapshot-restore   — build a ~5 MiB namespace, time
-//!                                      snapshot + restore (+ idempotence)
-//!
-//! Environment:
-//!   `PA_BENCH_SKILLS_DIR`   — skills directory (repo `skills/`); defaults to
-//!                           `../skills` relative to the crate
-//!   `PRIME_AGENT_KERNEL_VENV` / `PRIME_AGENT_KERNEL_PYTHON` / HOME as for the
-//!                           product paths themselves.
-//!
-//! Run cold with a fresh HOME + venv dir, then warm with the same dirs to
-//! measure the cross-process cache hit.
+//! test): measures cold and warm kernel bootstrap, per-execute overhead,
+//! and snapshot/restore cost against a real `python -m rlm.repl` child.
+//! Modes: `ensure-python`, `boot`, `snapshot-restore`.
 
 use std::path::PathBuf;
 use std::time::Instant;

@@ -1,6 +1,5 @@
-//! The loaded-session view (moved with its concern): the branch walks,
-//! the window/settings reads, the compacted message fold and its scalars,
-//! and the wire-shape message helpers.
+//! The loaded-session view: the branch walks, the window/settings reads, the
+//! compacted message fold and its scalars, and the wire-shape message helpers.
 
 use super::{json, MessageWindowScalars, SessionEntry, SessionFile, Value};
 
@@ -77,9 +76,8 @@ impl SessionFile {
         &self.header.id
     }
 
-    /// The header's RLM depth (TS `sessionManager.getHeader()?.rlmDepth`):
-    /// a resumed session inherits its persisted depth when the create
-    /// payload does not carry one (TS `config.rlmDepth ?? header.rlmDepth`).
+    /// The header's RLM depth (TS `config.rlmDepth ?? header.rlmDepth`): a resumed
+    /// session inherits its persisted depth when the create payload does not carry one.
     #[must_use]
     pub fn rlm_depth(&self) -> Option<u32> {
         self.header
@@ -87,9 +85,8 @@ impl SessionFile {
             .and_then(|depth| u32::try_from(depth).ok())
     }
 
-    /// Walk the leaf-to-root entry path (the active branch). A corrupt
-    /// file can hold a parent cycle; the walk must terminate anyway (the
-    /// same guard `build_session_context` has).
+    /// Walk the leaf-to-root entry path (the active branch). A corrupt file can
+    /// hold a parent cycle; the walk must terminate anyway.
     #[must_use]
     pub fn branch(&self) -> Vec<&SessionEntry> {
         let mut path = Vec::new();
@@ -112,21 +109,10 @@ impl SessionFile {
         path
     }
 
-    /// The leaf-to-root walk with parent gaps bridged: a session file can
-    /// carry a parent id that was minted but never persisted (one lost
-    /// append). At a gap the walk continues from the gap entry's file
-    /// predecessor — the last entry that reached the file, and the gap
-    /// entry's true parent whenever the writer persisted anything after a
-    /// branch move (a `branch_summary` marker chains from the moved-to
-    /// entry, so the abandoned fork stays out). A gap directly after an
-    /// unmarked `branch_to` is indistinguishable from a plain chain gap —
-    /// the minted parent id is simply absent from the file — so the walk
-    /// keeps the persisted chain rather than dropping spend the session
-    /// really logged. The strict [`Self::branch`] stays the model-facing
-    /// truth (a gap really truncates the rebuilt context); this walk
-    /// serves the cumulative usage accounting (`get_session_stats`, the
-    /// /context totals). Forks resolve by parent id; only a missing
-    /// parent bridges.
+    /// The leaf-to-root walk with parent gaps bridged: a parent id minted but
+    /// never persisted continues from the gap entry's file predecessor. The strict
+    /// [`Self::branch`] stays the model-facing truth; this walk serves the usage
+    /// accounting.
     #[must_use]
     pub fn branch_bridged(&self) -> Vec<&SessionEntry> {
         self.branch_bridged_positions()
@@ -135,9 +121,8 @@ impl SessionFile {
             .collect()
     }
 
-    /// [`Self::branch_bridged`] as file positions — the accounting walks
-    /// (the compaction-kept region of `get_session_stats`) restrict the
-    /// chain by file position.
+    /// [`Self::branch_bridged`] as file positions — the accounting walks restrict the chain
+    /// by file position.
     pub(crate) fn branch_bridged_positions(&self) -> Vec<usize> {
         let mut positions: Vec<usize> = Vec::new();
         let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
@@ -159,8 +144,7 @@ impl SessionFile {
             {
                 Some(parent) => Some(parent),
                 // A minted-but-never-persisted parent: bridge to the file
-                // predecessor. The first entry has none, so the walk ends
-                // there, exactly like a plain root.
+                // predecessor (the first entry has none, so the walk ends).
                 None if entry.parent_id.is_some() => (position > 0).then(|| position - 1),
                 None => None,
             };
@@ -170,10 +154,7 @@ impl SessionFile {
     }
 
     /// The model in effect at the retained-window boundary (the newest
-    /// `model_change` in the discarded prefix; `None` on a full-history
-    /// load): the per-model cost fold seeds its timeline with it, so
-    /// retained rows before the branch's first in-window `model_change`
-    /// bill on the boundary's model instead of the leaf's.
+    /// `model_change` in the discarded prefix; `None` on a full-history load).
     pub(crate) fn window_boundary_model(&self) -> Option<(String, String)> {
         self.window.as_ref()?.boundary_model.clone()
     }
@@ -288,12 +269,9 @@ impl SessionFile {
             .map(normalize_state_status)
     }
 
-    /// The branch's conversation, compacted view first (port of the TS
-    /// `buildSessionContext` fold): when the branch holds a compaction, the
-    /// read starts at a `compactionSummary` message, followed by the
-    /// retained messages from `firstKeptEntryId`, then everything appended
-    /// after the compaction. Without a compaction this is the plain
-    /// message list.
+    /// The branch's conversation, compacted view first: a `compactionSummary`
+    /// message, the retained messages from `firstKeptEntryId`, then everything
+    /// appended after; without a compaction, the plain message list.
     #[must_use]
     pub fn messages(&self) -> Vec<Value> {
         let mut messages = Vec::new();
@@ -301,13 +279,8 @@ impl SessionFile {
         messages
     }
 
-    /// The summary scalars the TS `summaryForActiveSession` fold derives
-    /// from the windowed message sequence — the newest message timestamp
-    /// (the last message in fold order that carries one, matching the
-    /// fold's reverse scan) and the window's message count — without
-    /// materializing the transcript. One borrowed walk of the same
-    /// sequence [`Self::messages`] folds, so the scan can never disagree
-    /// with the materialized fold.
+    /// The summary scalars — the newest message timestamp and the window's message
+    /// count — without materializing the transcript: one borrowed walk.
     #[must_use]
     pub fn scan_message_scalars(&self) -> MessageWindowScalars {
         let mut scalars = MessageWindowScalars::default();
@@ -320,15 +293,9 @@ impl SessionFile {
         scalars
     }
 
-    /// The windowed message sequence behind [`Self::messages`]: `message`
-    /// rows borrow their persisted message; `custom_message` rows rejoin as
-    /// their wire message form (`role: "custom"`), the shape TS sessions
-    /// keep in `agent.state.messages`; a compaction window prepends its
-    /// summary message and keeps `firstKeptEntryId` onward (the id is only
-    /// recognized on a message-bearing row, matching the fold), then
-    /// everything appended after the compaction. Every consumer — the
-    /// materialized fold and the scalar scan — derives from this one walk,
-    /// so the two can never disagree on the sequence.
+    /// The windowed message sequence behind [`Self::messages`] (`custom_message`
+    /// rows rejoin as their wire form, `role: "custom"`; a compaction window
+    /// prepends its summary message). Every consumer derives from this one walk.
     fn walk_message_values<'a>(&'a self, mut visit: impl FnMut(std::borrow::Cow<'a, Value>)) {
         let entry_message = |entry: &'a SessionEntry| -> Option<std::borrow::Cow<'a, Value>> {
             match entry.type_.as_str() {
@@ -364,9 +331,8 @@ impl SessionFile {
             .get("firstKeptEntryId")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        // Counting pass: the compaction summary message carries the retained
-        // count, so the kept prefix is counted before anything is visited.
-        // The bearing check borrows only — no message is materialized here.
+        // Counting pass: the summary message carries the retained count, so the kept
+        // prefix is counted before anything is visited (the bearing check borrows only).
         let mut keeping = false;
         let mut retained_count = 0usize;
         for entry in &branch[..compaction_position] {
@@ -405,15 +371,9 @@ impl SessionFile {
         }
     }
 
-    /// The durable entry id the compaction cut keeps: the same
-    /// `find_cut_point` walk the engine ran over its in-memory entries,
-    /// re-run over this store's branch. The engine's own
-    /// `firstKeptEntryId` references its in-memory entry ids, which never
-    /// exist in the session file (the store mints fresh ids on persist);
-    /// verbatim it retains nothing on the `messages` read. TS has a single
-    /// store so its ids match by construction — the durable re-cut here
-    /// pins the boundary the file read recognizes (TS: one store, ids
-    /// match by construction).
+    /// The durable entry id the compaction cut keeps: the engine's
+    /// `firstKeptEntryId` references in-memory ids that never exist in the file —
+    /// the re-cut pins the boundary the file read recognizes.
     pub fn durable_first_kept_entry_id(&self, keep_recent_tokens: u64) -> Option<String> {
         let branch = self.branch();
         let entries: Vec<pa_types::session::FileEntry> = branch
@@ -470,9 +430,8 @@ impl SessionFile {
             .filter(|t| !t.is_empty())
     }
 
-    /// True when the session holds user-meaningful persisted content (port of
-    /// `hasUserContent`): the default model/thinking/service-tier creation
-    /// prefix is skipped.
+    /// True when the session holds user-meaningful persisted content: the
+    /// default model/thinking/service-tier creation prefix is skipped.
     #[must_use]
     pub fn has_user_content(&self) -> bool {
         let content: Vec<&SessionEntry> = self
@@ -498,12 +457,9 @@ pub(super) fn message_role(message: &Value) -> Option<&str> {
     message.get("role").and_then(Value::as_str)
 }
 
-/// The `compactionSummary` message a compaction fold starts with (TS
-/// `createCompactionSummaryMessage`).
-/// Whether one entry contributes a message to the windowed fold: `message`
-/// rows need their persisted message; `custom_message` rows always rejoin as
-/// their wire form. The borrowing twin of the `entry_message` Some-ness, so
-/// counting and keeping walks never materialize what they only classify.
+/// Whether one entry contributes a message to the fold: `message` rows need
+/// their persisted message; `custom_message` rows rejoin as their wire form.
+/// The borrowing twin of the `entry_message` Some-ness.
 fn entry_bears_message(entry: &SessionEntry) -> bool {
     match entry.type_.as_str() {
         "message" => entry.fields.get("message").is_some(),
@@ -512,12 +468,12 @@ fn entry_bears_message(entry: &SessionEntry) -> bool {
     }
 }
 
+/// The `compactionSummary` message a compaction fold starts with.
 fn compaction_summary_message(entry: &SessionEntry, retained_count: usize) -> Value {
     let timestamp = crate::util::iso_to_unix_ms(&entry.timestamp).unwrap_or(0);
-    // TS `createCompactionSummaryMessage` key order: role, summary,
-    // tokensBefore, retainedMessageCount, customInstructions?,
-    // harnessDigest?, timestamp. The JSON map preserves insertion order,
-    // so the optional keys insert before `timestamp`.
+    // The TS `compactionSummary` key order: role, summary, tokensBefore,
+    // retainedMessageCount, customInstructions?, harnessDigest?, timestamp —
+    // optional keys insert before `timestamp`.
     let mut message = json!({
         "role": "compactionSummary",
         "summary": entry.fields.get("summary").cloned().unwrap_or_default(),

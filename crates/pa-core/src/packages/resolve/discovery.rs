@@ -149,10 +149,10 @@ impl IgnoreMatcher {
     }
 }
 
-/// Prepare one ignore-file line for the root-relative matcher: comments drop,
-/// `!`/`\!` negation/escape prefixes and leading `/` anchors normalize, and
-/// nested-directory patterns get their directory prefix. Returns the
-/// negation-prefixed pattern (or `None` for blank/comment lines).
+/// Prepare one ignore-file line for the root-relative matcher: comments
+/// drop, `!`/`\!` negation/escape prefixes and leading `/` anchors
+/// normalize, and nested-directory patterns get their directory prefix
+/// (returns the negation-prefixed pattern, `None` for blank/comment).
 fn prefix_ignore_pattern(line: &str, prefix: &str) -> Option<String> {
     let trimmed = line.trim();
     if trimmed.is_empty() {

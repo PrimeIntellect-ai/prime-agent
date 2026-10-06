@@ -1,6 +1,5 @@
-//! The panels concern: the activity dock and its group views, the
-//! roster-driven subagent summary, the goal and info panels, and the
-//! retry-episode collapse (TS `activityBar` composition + panel keys).
+//! The activity dock and its group views, the roster-driven subagent
+//! summary, the goal and info panels, and the retry-episode collapse.
 
 use super::{
     key_event_to_id, mpsc, paused_heartbeat_count, picker_viewport_rows, tray_goal_label,
@@ -17,10 +16,8 @@ pub(crate) struct ActivityUpdates {
 }
 
 impl SessionUi {
-    /// Subscribe this client to the live agent roster (TS
-    /// `subscribeAgentRoster`): the snapshot seeds the subagent summary
-    /// counts, `roster_update` pushes keep them live. A failed
-    /// subscription degrades to no counts (TS `rosterBar = undefined`).
+    /// Subscribe this client to the live agent roster: the snapshot seeds the subagent summary
+    /// counts, `roster_update` pushes keep them live. A failed subscription degrades to no counts.
     pub(super) async fn subscribe_roster(&mut self) {
         let snapshot = self
             .client
@@ -42,8 +39,8 @@ impl SessionUi {
         }
     }
 
-    /// Apply one roster push (`changed` upsert by agent id, `removed`
-    /// deletes, `resync` replaces the whole roster; TS `roster-store`).
+    /// Apply one roster push: `changed` upserts by agent id, `removed` deletes,
+    /// `resync` replaces the whole roster.
     pub(super) fn apply_roster_update(
         &mut self,
         changed: Vec<Value>,
@@ -74,9 +71,8 @@ impl SessionUi {
         }
     }
 
-    /// Refresh the one-line activity dock and the title's cost (the
-    /// only writer of `chrome.cost_usd`) from the existing session
-    /// feeds.
+    /// Refresh the one-line activity dock and the title's cost (the only writer
+    /// of `chrome.cost_usd`).
     pub(super) fn update_subagent_summary(&mut self, view: &mut AgentView) {
         let identity = crate::subagents::SessionIdentity::new(
             (!self.active_session_id.is_empty()).then(|| self.active_session_id.clone()),
@@ -84,13 +80,12 @@ impl SessionUi {
             self.session_file.clone(),
         );
         self.subagent_counts = crate::subagents::count_descendants(&self.roster, &identity);
-        // The title's spend is the family rollup the agents view bills
-        // the session's row, refreshed on every roster push.
+        // The title's spend is the family rollup the agents view bills the
+        // session's row.
         view.chrome.cost_usd = crate::subagents::family_cost(&self.roster, &identity);
         let dock = self.activity_dock_state();
-        // A focused selection must stay on a rendered group: only the
-        // goal group can leave the row (its goal ended), and the
-        // selection steps back to the group that now ends the row.
+        // A focused selection must stay on a rendered group: only the goal group can leave the row
+        // (its goal ended), and the selection steps back to the group that now ends the row.
         if self.subagents_focused && !dock.groups().contains(&self.activity_group) {
             self.activity_group =
                 dock.step(self.activity_group, crate::chrome::ActivityDirection::Prev);
@@ -107,25 +102,15 @@ impl SessionUi {
         }
     }
 
-    /// The dock's feed state: the live counts, the goal row's label, and
-    /// the selection/focus the caller owns. The row render, the focus
-    /// hand-off, and the arrows' traversal all read this one mapping —
-    /// a group renders exactly when it stays traversable.
+    /// The dock's feed state: the live counts, the goal row's label, and the selection/focus the
+    /// caller owns. A group renders exactly when it stays traversable.
     pub(super) fn activity_dock_state(&self) -> crate::chrome::ActivityDock {
-        // The dock is the goal's one chrome surface (the operator's
-        // 2026-09-24 directive moved it off the line below the prompt
-        // bar): every live state renders its row — pursuing reads the
-        // elapsed time ("make it 'Pursuing goal (time)'"), and the
-        // paused and budget-limited states keep their persistent label
-        // here too (the tray's TS cluster no longer exists to carry
-        // them; terminal states carry no row). The token budget lives
-        // inside the goal panel the row opens, not on the bar.
+        // The dock is the goal's one chrome surface (the operator's 2026-09-24 directive): every
+        // live state renders its row — pursuing reads the elapsed time, the paused and
+        // budget-limited states keep their label here.
         let goal_label = tray_goal_label(&self.goal_view.goal);
-        // The dock's bash indicator counts only runs actively running
-        // right now (operator scoping): finished runs stay as rows inside
-        // the bash view, never in the indicator. The feed is the
-        // current session's kernel registry — nested subagents' kernels
-        // are separate and never appear here.
+        // The dock's bash indicator counts only runs actively running right now (operator scoping):
+        // finished runs stay in the bash view.
         let bash_rows = crate::bash_view::parse_bash_activities(&self.bash_activities);
         let bash_running = bash_rows
             .iter()
@@ -169,11 +154,8 @@ impl SessionUi {
         source: &DockFocusSource,
         view: &mut AgentView,
     ) -> bool {
-        // The tray override label blocks the hand-off (TS
-        // `focusSubagentSummary`'s `getTrayOverrideLabel()` gate): the
-        // armed Ctrl+C exit hint, or the streaming follow-up hint over a
-        // non-empty draft — the override covers the streaming arm, so no
-        // separate draft check is needed.
+        // The tray override label blocks the hand-off (the exit hint or the
+        // streaming follow-up hint over a non-empty draft).
         if self.tray_override(view).is_some() {
             return false;
         }
@@ -195,15 +177,12 @@ impl SessionUi {
         true
     }
 
-    /// Open the scoped agents view from the focused summary line (TS
-    /// `openScopedAgentsView` -> `returnToAgentsView("scoped_agents_view")`):
-    /// the session detaches and the agents view reopens scoped to this
-    /// session's subtree, anchored on it.
+    /// Open the scoped agents view from the focused summary line: the session
+    /// detaches and the agents view reopens scoped to this session's subtree.
     pub(super) fn open_scoped_agents_view(&mut self, view: &mut AgentView) {
         self.subagents_focused = false;
         self.update_subagent_summary(view);
-        // `tui subagents open`: fire-and-forget like the scroll adoption
-        // event - the keypress never waits on the telemetry flush.
+        // `tui subagents open`: fire-and-forget.
         if let Some(telemetry) = self.telemetry.clone() {
             let children_total = self.subagent_counts.total as u64;
             tokio::spawn(async move {
@@ -228,11 +207,8 @@ impl SessionUi {
         }
     }
 
-    /// The dock group a plain click opens (the dock's Enter route,
-    /// operator directive 2026-09-29): the click is an explicit user
-    /// choice, a direction key's peer — it moves the dock's selection
-    /// to the clicked group, takes the focus, and opens the group's
-    /// own view through the focused Enter's exact dispatch.
+    /// The dock group a plain click opens (operator directive 2026-09-29): a click moves the dock's
+    /// selection to the clicked group, takes the focus, and opens the group's own view.
     pub(crate) fn open_dock_group_from_click(
         &mut self,
         group: crate::chrome::ActivityGroup,
@@ -244,13 +220,9 @@ impl SessionUi {
         self.open_dock_group_view(view);
     }
 
-    /// The tray's `← manage` hint click performs the hinted action
-    /// (operator directive 2026-09-29): the left arrow's agents-back
-    /// handoff — the pane goes to the agents view (a `--no-session`
-    /// run has no daemon fleet to browse, so the click reports that
-    /// exactly like the key). The dispatch gates on the empty editor
-    /// exactly like `app.agents.back`, so the click never does more
-    /// than the hint promises.
+    /// The tray's `← manage` hint click performs the hinted action (operator directive 2026-09-29):
+    /// the left arrow's agents-back handoff, gated the same way as `app.agents.back` (a
+    /// `--no-session` run reports that like the key).
     pub(crate) fn open_agents_view_from_hint(&mut self, view: &mut AgentView) {
         if self.return_to_agents_view {
             self.open_agents_view = true;
@@ -264,17 +236,14 @@ impl SessionUi {
         self.dirty = true;
     }
 
-    /// The dock's Enter hand-off (the operator's direct-navigation
-    /// redesign): the focused group opens its own view directly — the
-    /// scoped agents view for subagents, the heartbeats view, or the
-    /// bash view — with no intermediate grouped list.
+    /// The dock's Enter hand-off (the operator's direct-navigation redesign):
+    /// the focused group opens its own view directly, no intermediate list.
     pub(super) fn open_dock_group_view(&mut self, view: &mut AgentView) {
         match self.activity_group {
             crate::chrome::ActivityGroup::Subagents => {
                 self.emit_activity_opened("subagents");
-                // The same gate as before: a run that cannot open the
-                // scoped agents view shows the note instead of leaving
-                // the session view.
+                // A run that cannot open the scoped agents view shows the note instead of
+                // leaving the session view.
                 if self.return_to_agents_view {
                     self.open_scoped_agents_view(view);
                 } else {
@@ -304,15 +273,14 @@ impl SessionUi {
         }
     }
 
-    /// The dock's goal row opens the read-only goal panel (the
-    /// operator's 2026-09-24 directive: selecting the `Pursuing goal`
-    /// row shows "what the goal prompt is").
+    /// The dock's goal row opens the read-only goal panel (the operator's
+    /// 2026-09-24 directive).
     fn open_goal_panel(&mut self, view: &mut AgentView) {
         view.goal_panel = Some(GoalPanel {
             goal: self.goal_view.goal.clone(),
-            // The panel renders inside this row budget: a multi-screen
-            // objective clips (with a marker) instead of growing the dock
-            // past the frame, which would front-crop the title away.
+            // The panel renders inside this row budget: a multi-screen objective clips (with a
+            // marker) instead of growing the dock past the frame, which would front-crop the title
+            // away.
             viewport_rows: picker_viewport_rows(view.terminal_rows()),
         });
         self.subagents_focused = false;
@@ -320,14 +288,9 @@ impl SessionUi {
         self.dirty = true;
     }
 
-    /// Open the read-only info panel over the editor dock (the
-    /// operator's 2026-09-26 directive: the client info displays —
-    /// `/context`, `/session`, `/system-prompt`, `/logs`, `/changelog`,
-    /// `/hotkeys`, the `/traces` blocks, and `/list` — render as the
-    /// docked popup panel, the `/mcp` and `/model` panel grammar,
-    /// instead of flooding the transcript with rows that persist). The
-    /// content is whatever the command already built; ESC closes and
-    /// returns focus to the chat with the transcript untouched.
+    /// Open the read-only info panel over the editor dock (the operator's 2026-09-26 directive: the
+    /// client info displays render as the docked popup panel instead of flooding the transcript).
+    /// ESC closes with the transcript untouched.
     pub(super) fn open_info_panel(
         &mut self,
         view: &mut AgentView,
@@ -348,10 +311,8 @@ impl SessionUi {
         let Some(id) = key_event_to_id(&key) else {
             return Ok(());
         };
-        // The panel consumes Ctrl+C (close, not exit): report the handled
-        // press so the force-quit guard can disarm once the whole pair was
-        // consumed with TS semantics (the same discipline as the other
-        // modal handlers).
+        // The panel consumes Ctrl+C (close, not exit); report it so the force-quit
+        // guard can disarm.
         if id == "ctrl+c" {
             self.exit_guard.note_ctrl_c_handled();
         }
@@ -360,19 +321,16 @@ impl SessionUi {
             || view.editor.keybindings().matches(&id, "app.clear")
         {
             view.goal_panel = None;
-            // The exit restores the dock's own group (the operator's
-            // 2026-09-26 panel-exit ruling): ESC/left lands back on the
-            // goal row, ready to re-open, not on the prompt bar.
+            // The exit restores the dock's own group (the operator's 2026-09-26
+            // panel-exit ruling).
             self.focus_activity_dock(view);
             self.dirty = true;
         }
         Ok(())
     }
 
-    /// The info panel owns the frame while open: the navigation keys
-    /// scroll its window, the close keys dismiss it, and every other key
-    /// is consumed — the read-only document never leaks a key back to
-    /// the editor, and the transcript gains nothing while it is open.
+    /// The info panel owns the frame while open: the navigation keys scroll its
+    /// window, the close keys dismiss it, every other key is consumed.
     pub(super) fn handle_info_panel_key(
         &mut self,
         key: KeyEvent,
@@ -381,10 +339,8 @@ impl SessionUi {
         let Some(id) = key_event_to_id(&key) else {
             return Ok(());
         };
-        // The panel consumes Ctrl+C (close, not exit): report the handled
-        // press so the force-quit guard can disarm once the whole pair was
-        // consumed with TS semantics (the same discipline as the other
-        // modal handlers).
+        // The panel consumes Ctrl+C (close, not exit); report it so the force-quit
+        // guard can disarm.
         if id == "ctrl+c" {
             self.exit_guard.note_ctrl_c_handled();
         }
@@ -397,9 +353,8 @@ impl SessionUi {
         Ok(())
     }
 
-    /// The activity dock follows the scoped heartbeat catalog (TS
-    /// `getTrayHeartbeatLabel` moved into the dock: the tray no longer
-    /// carries a heartbeat count beside the model name).
+    /// The activity dock follows the scoped heartbeat catalog (the tray no
+    /// longer carries a heartbeat count beside the model name).
     pub(crate) fn sync_activity_dock(&mut self, view: &mut AgentView) {
         let previous = view.chrome.activity.clone();
         self.update_subagent_summary(view);
@@ -409,12 +364,9 @@ impl SessionUi {
     }
 }
 
-/// The retry-episode collapse (SANCTIONED DIVERGENCE from TS, operator
-/// ruling 2026-09-23): pop the trailing failed-attempt error row the
-/// retry supersedes, so the ONE line the episode shows while it runs is
-/// the transient loader (updated in place) and the ONE line it leaves is
-/// the durable outcome row. No-op when the trailing entry is anything
-/// else (an abort row, tool-call-carrying failures, a settled reply).
+/// The retry-episode collapse (SANCTIONED DIVERGENCE from TS, operator ruling 2026-09-23): pop the
+/// trailing failed-attempt error row the retry supersedes, leaving the transient loader while the
+/// episode runs and the durable outcome row at the settle. No-op on anything else.
 pub(crate) fn pop_superseded_attempt_row(view: &mut AgentView) -> bool {
     if view
         .chat
@@ -452,9 +404,6 @@ mod activity_dock_counts_tests {
         })
     }
 
-    /// The dock's paused count is the helper the dock reads (not a local
-    /// recount) and stays label-independent: unlabeled agent heartbeats
-    /// (the dogfood repro) count exactly like labeled ones.
     #[test]
     fn dock_counts_heartbeats_and_paused() {
         let labeled = entry(&job("labeled", "active"));
@@ -465,15 +414,12 @@ mod activity_dock_counts_tests {
         let catalog = vec![labeled, unlabeled, paused];
         assert_eq!(catalog.len(), 3);
         assert_eq!(paused_heartbeat_count(&catalog), 1);
-        // An all-active catalog renders no paused suffix.
         let active = vec![entry(&job("a", "active")), entry(&job("c", "active"))];
         assert_eq!(paused_heartbeat_count(&active), 0);
     }
 
-    /// Operator scoping: the session wrapper passes no child session ids,
-    /// so a nested session's heartbeat drops while the session's own
-    /// rows stay (TS `scopeHeartbeatsToSession` kept the children's jobs
-    /// — the divergence lives in the caller).
+    /// Operator scoping divergence (TS `scopeHeartbeatsToSession` kept the
+    /// children's jobs — the divergence lives in the caller).
     #[test]
     fn dock_heartbeats_scope_to_the_current_session_only() {
         let own = entry(&job("own", "active"));
@@ -493,9 +439,6 @@ mod activity_dock_counts_tests {
         assert_eq!(scoped[0].job.id, "own");
     }
 
-    /// Operator scoping: the dock's bash indicator counts only runs
-    /// actively running right now — finished runs stay in the bash view
-    /// as rows, never in the indicator.
     #[test]
     fn dock_bash_counts_only_running_runs() {
         let activities = crate::bash_view::parse_bash_activities(&json!({"activities": [
@@ -547,10 +490,6 @@ mod retry_collapse_tests {
         }))
     }
 
-    /// The 429-storm single-line collapse (operator ruling 2026-09-23): the
-    /// trailing failed-attempt error row pops when its retry supersedes it —
-    /// and only that row (an abort, a settled reply, or a tool-carrying
-    /// failure stays).
     #[test]
     fn pops_only_the_superseded_failed_attempt() {
         let mut view = view_with(vec![

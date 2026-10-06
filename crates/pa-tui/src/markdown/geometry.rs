@@ -89,8 +89,7 @@ pub(crate) fn markdown_row_count_tagged(
     for (index, block) in blocks.iter().enumerate() {
         let next = blocks.get(index + 1);
         total += usize::from(block.sep_blank);
-        // The key build clones the block's lines, so an empty cache skips
-        // it for the count-only callers.
+        // The key build clones the block's lines, so an empty cache skips it.
         let cached = (!cache.0.is_empty())
             .then(|| block_cache_key(style_tag, &blocks, index, width))
             .flatten()

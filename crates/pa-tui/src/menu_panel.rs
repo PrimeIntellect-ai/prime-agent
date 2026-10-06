@@ -1,26 +1,16 @@
-//! The inline menu panel: the ONE menu component every picker and
-//! completion surface renders through. The inline paths of TS
-//! `menu-panel.ts` — the bordered search field, the `›`-marker menu rows
-//! with right-aligned trailing segments (muted or status-colored), the
-//! shared truncate/pad budgeting — plus the status rows every menu frame
-//! shares: the `(n/m)` scroll indicator, the no-match row, and the key
-//! hint row. The `/model` picker, the `/mcp` connections view, the
-//! provider selectors, the activity panel, and the editor's
-//! slash-command/file completion dropdown all compose these primitives,
-//! so selection highlight, padding, and status rows read as one visual
-//! grammar across every menu.
+//! The inline menu panel: the ONE menu component every picker and completion surface renders
+//! through — the bordered search field, the `›`-marker menu rows with right-aligned trailing
+//! segments, the shared truncate/pad budgeting, and the status rows every menu frame shares.
 
 use crate::theme::{Theme, ThemeColor};
 use crate::width::{str_width, truncate_line};
 use crate::{Line, Span};
 use ratatui::style::Style;
 
-/// The field prompt (TS `Input` renders `"> "`).
 const FIELD_PROMPT: &str = "> ";
 
-/// One right-aligned trailing segment of a menu row: `text` joined into the
-/// row's trailing cluster, colored by the theme when the surface carries a
-/// status vocabulary (mcp connection states), muted otherwise.
+/// One right-aligned trailing segment of a menu row, muted by default or themed by the surface's
+/// status vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct MenuSegment<'a> {
     pub text: &'a str,
@@ -28,12 +18,10 @@ pub(crate) struct MenuSegment<'a> {
 }
 
 impl<'a> MenuSegment<'a> {
-    /// A muted segment (the TS `MenuRow` inline trailing).
     pub fn muted(text: &'a str) -> Self {
         Self { text, color: None }
     }
 
-    /// A status segment with its theme color.
     pub fn themed(color: ThemeColor, text: &'a str) -> Self {
         Self {
             text,
@@ -42,8 +30,7 @@ impl<'a> MenuSegment<'a> {
     }
 }
 
-/// Trailing segments are joined with `" · "` and shrink from the front when
-/// the row is too narrow (TS `reduceInlineTrailingSegments`).
+/// Trailing segments are joined with `" · "` and shrink from the front when the row is too narrow.
 fn reduce_trailing_segments<'a>(
     segments: &[MenuSegment<'a>],
     budget: usize,
@@ -67,9 +54,8 @@ fn segments_text(segments: &[MenuSegment<'_>]) -> String {
         .join(" · ")
 }
 
-/// Rendered width of a trailing cluster at the given row width, mirroring how
-/// the row degrades and truncates it (TS `getInlineTrailingWidth`). Pickers
-/// use this to budget row content.
+/// Rendered width of a trailing cluster at the given row width, mirroring how the row degrades and
+/// truncates it.
 pub(crate) fn trailing_width(segments: &[MenuSegment<'_>], width: usize) -> usize {
     let inner_width = width.saturating_sub(2).max(1);
     let budget = inner_width.saturating_sub(5).max(1);
@@ -80,10 +66,8 @@ pub(crate) fn trailing_width(segments: &[MenuSegment<'_>], width: usize) -> usiz
     str_width(&segments_text(&reduced)).min(budget)
 }
 
-/// Render the trailing cluster: segments joined with `" · "`, shrunk from
-/// the front and truncated to the row's trailing budget (TS
-/// `MenuRow.getInlineTrailing`); each segment carries its own theme color,
-/// muted by default.
+/// Render the trailing cluster: segments joined with `" · "`, shrunk from the front and truncated
+/// to the row's trailing budget.
 pub(crate) fn trailing_spans(
     theme: &Theme,
     segments: &[MenuSegment<'_>],
@@ -107,9 +91,8 @@ pub(crate) fn trailing_spans(
     truncate_line(&line, budget, "\u{2026}")
 }
 
-/// One inline menu row (TS `MenuRow.renderContent`, inline mode): the `›`
-/// marker, the primary cell, a filler gap, and the trailing cluster flush to
-/// the right edge. Selected rows carry the soft selection background.
+/// One inline menu row: the `›` marker, the primary cell, a filler gap, and the trailing cluster
+/// flush to the right edge; selected rows carry the soft selection background.
 pub(crate) fn menu_row(
     theme: &Theme,
     width: usize,
@@ -117,8 +100,7 @@ pub(crate) fn menu_row(
     trailing: &[MenuSegment<'_>],
     selected: bool,
 ) -> Line {
-    // Trailing rows run flush to the right edge; the trailing cell leaves a
-    // two-column gap after the primary cell.
+    // The trailing cell leaves a two-column gap after the primary cell.
     let inner_width = width.saturating_sub(2).max(1);
     let trailing = trailing_spans(theme, trailing, inner_width);
     let trailing_width = crate::width::spans_width(&trailing);
@@ -135,7 +117,6 @@ pub(crate) fn menu_row(
             .collect();
     }
     let primary = truncate_line(&primary, primary_width, "\u{2026}");
-    // The filler centers the trailing cluster against the right edge.
     let filler_width = inner_width
         .saturating_sub(crate::width::spans_width(&primary))
         .saturating_sub(trailing_width);
@@ -150,11 +131,10 @@ pub(crate) fn menu_row(
     finish_menu_row(theme, &row, width, selected)
 }
 
-/// The shared row finish: truncate to the width, pad so the selection
-/// band spans the row, and patch the soft selection background.
+/// The shared row finish: truncate to the width, pad so the selection band spans the row, and patch
+/// the soft selection background.
 fn finish_menu_row(theme: &Theme, row: &Line, width: usize, selected: bool) -> Line {
     let mut row = truncate_line(row, width, "");
-    // Pad to the full width so the selection band spans the row.
     let used = crate::width::spans_width(&row);
     if used < width {
         row.push(Span::raw(" ".repeat(width - used)));
@@ -172,17 +152,15 @@ fn finish_menu_row(theme: &Theme, row: &Line, width: usize, selected: bool) -> L
     row
 }
 
-/// One plain-text cell truncated and padded to its column budget by
-/// display width (wide glyphs never overflow into the next column; no
-/// ellipsis — the tables stay aligned, and the detail drill-ins carry
-/// the full text).
+/// One plain-text cell truncated and padded to its column budget by display width: wide glyphs
+/// never overflow into the next column; no ellipsis — the tables stay aligned.
 pub(crate) fn plain_cell(text: &str, width: usize) -> String {
     crate::width::pad_cell(text, width)
 }
 
-/// Non-newline control characters become spaces (ANSI/OSC sequences in
-/// daemon- or process-supplied text can never execute terminal control
-/// operations when rendered); newlines stay for the wraps.
+/// Non-newline control characters become spaces, so ANSI/OSC sequences in daemon- or
+/// process-supplied text can never execute terminal control operations; newlines stay for the
+/// wraps.
 pub(crate) fn scrub_controls(value: &str) -> String {
     value
         .chars()
@@ -190,12 +168,9 @@ pub(crate) fn scrub_controls(value: &str) -> String {
         .collect::<String>()
 }
 
-/// The status-dot vocabulary (the operator's 2026-09-23 directive; TS
-/// `subagent-summary-line`'s counts box `● running / ◐ idle /
-/// ○ inactive`): the filled circle rides the live states (running,
-/// active), the half circle the waiting ones (idle, paused), the open
-/// circle the dead ones. The glyph is the state at a glance; the
-/// surface's word rides beside it.
+/// The status-dot vocabulary (operator directive 2026-09-23, TS `subagent-summary-line`'s counts
+/// box): the filled circle rides the live states, the half circle the waiting ones, the open circle
+/// the dead ones; the surface's word rides beside the glyph.
 pub(crate) fn status_dot(status: &str) -> (&'static str, ThemeColor) {
     match status {
         "running" | "active" => ("\u{25cf}", ThemeColor::Success),
@@ -204,28 +179,19 @@ pub(crate) fn status_dot(status: &str) -> (&'static str, ThemeColor) {
     }
 }
 
-/// How far the selection hug trails past the text (TS
-/// `OnboardingChoiceComponent`'s `ROW_TRAILING`).
 pub(crate) const HUG_TRAILING: usize = 6;
 
-/// The selection hug's floor (TS `MIN_ROW_WIDTH`).
 pub(crate) const MIN_HUG_WIDTH: usize = 30;
 
-/// The selected row's wash width (TS `OnboardingChoiceComponent.render`'s
-/// `rowWidth`): the content plus a little trailing pad, floored at
-/// [`MIN_HUG_WIDTH`] and capped at the pane width — never the full-width
-/// band of the plain menu rows.
+/// The selected row's wash width: the content plus a little trailing pad,
+/// floored at [`MIN_HUG_WIDTH`] and capped at the pane width.
 pub(crate) fn hug_width(content_width: usize, width: usize) -> usize {
     (content_width + HUG_TRAILING).max(MIN_HUG_WIDTH).min(width)
 }
 
-/// One hug row: the content truncated to the pane, the selected row
-/// padded to its band width and painted over the hug only — the style
-/// the CALLER passes (the activity surfaces pass the ONE shared
-/// selection style, the operator's 2026-09-28 consistency rule: the
-/// same one band color the hover paints and the dock's groups and
-/// the agents view's rows carry), a little past the text, not the
-/// whole terminal width.
+/// One hug row: the content truncated to the pane, the selected row padded to its band width and
+/// painted over the hug only with the style the CALLER passes — the activity surfaces pass the ONE
+/// shared selection style (operator's 2026-09-28 consistency rule).
 pub(crate) fn hug_row(
     row: &Line,
     content_width: usize,
@@ -250,15 +216,9 @@ pub(crate) fn hug_row(
         .collect()
 }
 
-/// The selected row's wash spans the full frame width (the agents-view
-/// treatment, the operator's 2026-09-24 "table fills the width" ruling):
-/// the row is truncated to the frame width and padded out to it, so the
-/// selection reads as one full-width table surface while the columns
-/// themselves keep their content-hug geometry.
-/// The full-width mirror of [`hug_row`]: the selected row pads to the
-/// frame width and paints the CALLER's style (the activity surfaces
-/// pass the ONE shared selection style — the operator's 2026-09-28
-/// consistency rule).
+/// The selected row's wash spans the full frame width (the agents-view treatment, the operator's
+/// 2026-09-24 "table fills the width" ruling). The full-width mirror of [`hug_row`]: the selected
+/// row pads to the frame width and paints the CALLER's style.
 pub(crate) fn fill_row(row: &Line, selected: bool, width: usize, style: Style) -> Line {
     let mut row = truncate_line(row, width, "");
     if !selected {
@@ -276,16 +236,13 @@ pub(crate) fn fill_row(row: &Line, selected: bool, width: usize, style: Style) -
         .collect()
 }
 
-/// The full-width horizontal rule (TS `MenuSearchInput`'s inline-mode
-/// border rows): the subtle border grammar every menu bar carries.
+/// The full-width horizontal rule: the subtle border grammar every menu bar carries.
 pub(crate) fn rule_row(theme: &Theme, width: usize) -> Line {
     vec![theme.fg_span(ThemeColor::BorderMuted, "\u{2500}".repeat(width.max(1)))]
 }
 
-/// The inline search field (TS `MenuSearchInput.render`, inline mode): a
-/// full-width border rule, the field row, a border rule. The field is the
-/// single-line input with its `"> "` prompt; an empty field shows the dim
-/// placeholder with the caret on its first cell when focused.
+/// The inline search field: a full-width border rule, the field row, a border rule; an empty field
+/// shows the dim placeholder with the caret on its first cell when focused.
 pub(crate) fn search_field_lines(
     theme: &Theme,
     width: usize,
@@ -298,8 +255,6 @@ pub(crate) fn search_field_lines(
     vec![rule_row(theme, width), field, rule_row(theme, width)]
 }
 
-/// The field row: `" " + "> " + <input render at width-2>` (TS
-/// `MenuSearchInput` inline composition).
 fn render_input_field(
     theme: &Theme,
     width: usize,
@@ -312,9 +267,8 @@ fn render_input_field(
     let mut line: Line = vec![Span::raw(" "), Span::raw(FIELD_PROMPT)];
     if value.is_empty() {
         if focused {
-            // The empty input renders its caret (a reversed space); the dim
-            // placeholder trails it, so the field keeps the same left edge
-            // as the rows below it.
+            // The empty input renders its caret (a reversed space) with the dim
+            // placeholder trailing it, so the field keeps the rows' left edge.
             line.push(Span::styled(
                 " ".to_string(),
                 ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::REVERSED),
@@ -334,10 +288,8 @@ fn render_input_field(
     line
 }
 
-/// The login dialog's paste field (TS `MenuSearchInput("Paste value",
-/// true, true)` — inline + plain, the `> ` prompt kept): one full-width
-/// row with the prompt, no enclosing rules — the rules read as clutter
-/// inside the login panel.
+/// The login dialog's paste field (inline + plain, the `> ` prompt kept): one full-width row with
+/// the prompt, no enclosing rules — the rules read as clutter inside the login panel.
 pub(crate) fn login_field_row(
     theme: &Theme,
     width: usize,
@@ -349,10 +301,8 @@ pub(crate) fn login_field_row(
     render_input_field(theme, width, value, cursor, focused, placeholder)
 }
 
-/// The prompt-less field row (TS `MenuSearchInput`'s inline + plain +
-/// hidePrompt call: `" "` + the field, no `> ` prompt — the onboarding
-/// picker marks selection with its own caret): one full-width line for
-/// surfaces that own their selection language.
+/// The prompt-less field row (no `> ` prompt — the onboarding picker marks selection with its own
+/// caret): one full-width line for surfaces that own their selection language.
 pub(crate) fn search_field_plain_row(
     theme: &Theme,
     width: usize,
@@ -364,8 +314,8 @@ pub(crate) fn search_field_plain_row(
     let input_width = width.saturating_sub(2).max(1);
     let mut line: Line = vec![Span::raw(" ")];
     if value.is_empty() {
-        // TS puts the caret on the first placeholder character, so the
-        // field keeps the same left edge as the text above it.
+        // The caret sits on the first placeholder character, so the field keeps the text's left
+        // edge.
         let mut characters = placeholder.chars();
         match characters.next() {
             Some(first) if focused => {
@@ -403,13 +353,11 @@ pub(crate) fn input_render(
     if available_width == 0 {
         return vec![Span::raw(FIELD_PROMPT)];
     }
-    // Cursor position in characters, clamped to the value.
     let cursor = cursor.min(value.chars().count());
     let total_width = str_width(value);
     let (visible, cursor_display) = if total_width < available_width {
         (value.to_string(), cursor)
     } else {
-        // Horizontal scroll: keep the caret visible, centered otherwise.
         let scroll_width = if cursor == value.chars().count() {
             available_width.saturating_sub(1)
         } else {
@@ -448,13 +396,9 @@ pub(crate) fn input_render(
     line
 }
 
-/// The input's visible window (TS `String.prototype.slice`, which is
-/// column-based in the reference): the window starts at the first
-/// character reaching the display-column offset — a wide character
-/// straddling the left edge renders whole, never split — ends before the
-/// first that would cross the right edge, and returns the caret's
-/// character index inside the window (the boundary's position). ASCII
-/// content reduces to the plain character slice.
+/// The input's visible window (TS `String.prototype.slice` is column-based): the window starts at
+/// the first character reaching the display-column offset — a wide character straddling the left
+/// edge renders whole, never split. ASCII content reduces to the plain character slice.
 fn scroll_window(
     value: &str,
     start_col: usize,
@@ -483,9 +427,8 @@ fn scroll_window(
     (window, caret)
 }
 
-/// The inline list's visible-row count (TS `getMenuListLayout`, inline
-/// shape: one row per item, no list padding, one scroll-indicator row when
-/// the window cannot show everything).
+/// The inline list's visible-row count (one row per item, no list padding,
+/// one scroll-indicator row when the window cannot show everything).
 pub(crate) fn menu_list_layout(
     viewport_rows: Option<usize>,
     preferred: usize,
@@ -510,19 +453,16 @@ pub(crate) fn menu_list_layout(
     }
 }
 
-/// The scroll-indicator status row: the selection's position in the full
-/// list, `  (n/m)` muted, aligned with the rows' inner column. Menus show
-/// it once the window cannot hold every item (model picker, mcp view,
-/// completion dropdown). Like every status row, it truncates to the
-/// frame width, so a narrow overlay never spills past its dock.
+/// The scroll-indicator status row: the selection's position in the full list, ` (n/m)` muted,
+/// aligned with the rows' inner column. Like every status row, it truncates to the frame width, so
+/// a narrow overlay never spills past its dock.
 pub(crate) fn scroll_row(theme: &Theme, width: usize, position: usize, total: usize) -> Line {
     let line = vec![theme.fg_span(ThemeColor::Muted, format!("  ({position}/{total})"))];
     truncate_line(&line, width, "")
 }
 
 /// The no-match status row: `  {message}` muted, aligned with the rows'
-/// inner column, shown when a filter empties the list. Like every status
-/// row, it truncates to the frame width.
+/// inner column, shown when a filter empties the list.
 pub(crate) fn no_match_row(theme: &Theme, width: usize, message: &str) -> Line {
     let line = vec![
         Span::raw("  "),
@@ -531,9 +471,8 @@ pub(crate) fn no_match_row(theme: &Theme, width: usize, message: &str) -> Line {
     truncate_line(&line, width, "")
 }
 
-/// The key-hint status row: ` {hint}` dim, truncated to the frame width.
-/// Each surface composes its own hint text (its key vocabulary); the row's
-/// look is the shared grammar.
+/// The key-hint status row: ` {hint}` dim, truncated to the frame width; each surface composes its
+/// own hint text.
 pub(crate) fn hint_row(theme: &Theme, width: usize, hint: &str) -> Line {
     let line = vec![
         Span::raw(" "),
@@ -542,9 +481,8 @@ pub(crate) fn hint_row(theme: &Theme, width: usize, hint: &str) -> Line {
     truncate_line(&line, width, "")
 }
 
-/// One hint segment: the resolved bindings' labels joined with `/` plus the
-/// action (TS `keyHint`). An action whose binding is unconfigured is
-/// omitted — the hint never advertises a key the surface does not handle.
+/// One hint segment: the resolved bindings' labels joined with `/` plus the action; an unconfigured
+/// binding omits the action.
 pub(crate) fn key_hint(
     kb: &crate::keybindings::KeybindingsManager,
     bindings: &[&str],
@@ -562,8 +500,7 @@ pub(crate) fn key_hint(
 }
 
 /// One detail-block row: the selected item's metadata under the list,
-/// truncated to the frame width (marked) and padded to the full row; the
-/// content's own spans carry the color and leading indent.
+/// truncated to the frame width and padded to the full row.
 pub(crate) fn detail_row(theme: &Theme, width: usize, content: &Line) -> Line {
     let _ = theme;
     let mut line = truncate_line(content, width, "\u{2026}");
@@ -588,9 +525,8 @@ mod tests {
         line.iter().map(|span| span.content.as_str()).collect()
     }
 
-    /// The hint segment resolves the bound keys and omits an unbound
-    /// action entirely — a hint must never advertise a key the surface
-    /// does not handle (an empty user binding disables the action).
+    /// The hint segment resolves the bound keys and omits an unbound action
+    /// entirely (an empty user binding disables the action).
     #[test]
     fn key_hint_omits_unbound_actions() {
         let kb = KeybindingsManager::new();
@@ -608,9 +544,8 @@ mod tests {
         );
     }
 
-    /// The table cell pads by GRAPHEME width: a multi-codepoint cluster
-    /// (the family emoji is four scalars but renders one cell-picture)
-    /// never pads short or overflows its column.
+    /// The table cell pads by GRAPHEME width: a multi-codepoint cluster (the family emoji renders
+    /// one cell-picture) never pads short or overflows its column.
     #[test]
     fn plain_cell_pads_by_grapheme_width() {
         use unicode_segmentation::UnicodeSegmentation;
@@ -643,15 +578,9 @@ mod tests {
         assert!(text.ends_with("connected"));
     }
 
-    /// The panel's own `›`-marker rows keep the soft selection wash
-    /// (the operator's 2026-09-26 directive: the panel redesign's
-    /// selection must be unmistakable), while the shared row painters
-    /// (`fill_row`/`hug_row`) paint the style their CALLER passes: the
-    /// activity surfaces (the heartbeats picker, the shell view) pass
-    /// the ONE shared selection style — the operator's 2026-09-28
-    /// consistency rule — the same one band color the hover paints
-    /// and the dock's groups and the agents view's rows carry, so
-    /// every activity surface's selected row reads identically.
+    /// The panel's own `›`-marker rows keep the soft selection wash (the operator's 2026-09-26
+    /// directive: the panel redesign's selection must be unmistakable), while the shared row
+    /// painters paint the style their CALLER passes.
     #[test]
     fn menu_rows_wash_and_the_row_painters_take_the_callers_style() {
         let theme = theme();
@@ -661,8 +590,8 @@ mod tests {
             menu.iter().all(|span| span.style.bg == Some(wash)),
             "the menu row washes with the soft selection: {menu:?}"
         );
-        // The menu wash is unmistakable: its rendered luminance clears
-        // the theme's visibility bar over the editor surface.
+        // The menu wash is unmistakable: its rendered luminance clears the theme's visibility bar
+        // over the editor surface.
         let surface = theme
             .bg_color(crate::theme::ThemeBg::UserMessageBg)
             .expect("the editor surface");
@@ -673,8 +602,8 @@ mod tests {
             (wash_lum - surface_lum).abs() >= crate::theme::SELECTION_MIN_LUMINANCE_DELTA - 1.0,
             "the wash reads off the surface: lum {wash_lum:.2} vs {surface_lum:.2}"
         );
-        // The shared row painters paint exactly the style passed: the
-        // activity surfaces' selection band (the hover's own color).
+        // The shared row painters paint exactly the style passed: the activity surfaces' selection
+        // band.
         let band = theme.selection_row_style();
         let filled = fill_row(&vec![Span::raw("label")], true, 40, band);
         assert!(
@@ -690,7 +619,6 @@ mod tests {
             ),
             "the hug row paints the caller's style: {hugged:?}"
         );
-        // Unselected rows keep the surface: no band at all.
         for plain in [
             menu_row(&theme, 40, vec![Span::raw("label")], &[], false),
             fill_row(&vec![Span::raw("label")], false, 40, band),
@@ -703,11 +631,9 @@ mod tests {
         }
     }
 
-    /// A theme too partial to compute a selection (no `selectedBg`, no
-    /// RGB on either side) still paints a wash — the onboarding wash —
-    /// so a selected heartbeat/shell row never reads as unselected
-    /// (Macroscope PR #2908: the `highlight_wash` fallback must survive
-    /// the shared-wash switch).
+    /// A theme too partial to compute a selection still paints a wash — the onboarding wash — so a
+    /// selected row never reads as unselected (Macroscope PR #2908: the `highlight_wash` fallback
+    /// must survive the shared-wash switch).
     #[test]
     fn partial_themes_keep_the_onboarding_wash_on_selected_rows() {
         let json = serde_json::from_str::<crate::theme::ThemeJson>(
@@ -722,10 +648,8 @@ mod tests {
             theme.soft_selection_style().bg.is_none(),
             "the partial theme computes no selection"
         );
-        // The ONE shared selection style keeps the same contract: with
-        // no band color resolvable, it falls back to the onboarding
-        // wash, so a selected heartbeat/shell row never reads as
-        // unselected.
+        // With no band color resolvable, the shared selection style falls back to the onboarding
+        // wash.
         let fallback = crate::onboarding::highlight_wash(&theme);
         assert_eq!(theme.selection_row_style().bg, Some(fallback));
         for washed in [
@@ -762,10 +686,8 @@ mod tests {
         assert!(row_text(&hint).starts_with(" Enter select"));
     }
 
-    /// Every status row truncates to the frame width: a narrow menu never
-    /// emits a row wider than its dock (the completion overlay renders
-    /// the rows straight into the editor dock, so an unclamped `(n/m)`
-    /// would overwrite the adjacent terminal cells).
+    /// Every status row truncates to the frame width: a narrow menu never emits a row wider than
+    /// its dock (an unclamped `(n/m)` would overwrite the adjacent terminal cells).
     #[test]
     fn status_rows_never_exceed_the_frame_width() {
         let theme = theme();
@@ -787,11 +709,9 @@ mod tests {
             MenuSegment::muted("mid"),
             MenuSegment::muted("end"),
         ];
-        // At a narrow width the front segments drop off until the joined
-        // cluster fits the budget (width 12 -> inner 10 -> budget 5: only
-        // "end" survives).
+        // At a narrow width the front segments drop off until the joined cluster fits the budget
+        // (width 12 -> inner 10 -> budget 5: only "end" survives).
         assert_eq!(trailing_width(&segments, 12), 3);
-        // Wide rows keep every segment.
         assert_eq!(trailing_width(&segments, 60), 32);
     }
 }

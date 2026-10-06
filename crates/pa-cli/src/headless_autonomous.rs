@@ -1,14 +1,8 @@
 //! The autonomous run state for headless print/json runs — the verifier and
-//! eval composition surface. CLI autonomous flags build the run state (TS
-//! `runtimeAutonomousConfigFromArgs`); after every settled model turn the
-//! [`ShellAutonomousDriver`] runs the configured gate commands in the
-//! session cwd (the #98 seams, reused unmodified). The continuation itself
-//! rides the agent's natural-turn-end hook
-//! ([`crate::print_autonomous`], the TS in-run shape): continuations land
-//! as durable user rows churned inside the one prompt wait, and a stop
-//! surfaces only through the process exit code and its stderr line (the TS
-//! print-mode contract, `print-mode.ts` + the selection half of
-//! `headless-completion.ts`, which live in pa-core).
+//! eval composition surface. After every settled turn the [`ShellAutonomousDriver`]
+//! runs the gate commands in the session cwd (the #98 seams, unmodified); the
+//! continuation rides the natural-turn-end hook ([`crate::print_autonomous`]),
+//! a stop surfaces only through the exit code and its stderr line.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -25,8 +19,8 @@ use pa_types::session::CustomMessage;
 
 use crate::args::AutonomousConfig;
 
-/// The autonomous runtime config from the typed CLI flags (TS
-/// `runtimeAutonomousConfigFromArgs`: any autonomous flag enables the run).
+/// The autonomous runtime config from the typed CLI flags: any
+/// autonomous flag enables the run.
 pub fn autonomous_runtime_config(config: &AutonomousConfig) -> AgentAutonomousConfig {
     AgentAutonomousConfig {
         enabled: Some(true),
@@ -47,16 +41,12 @@ pub fn autonomous_runtime_config(config: &AutonomousConfig) -> AgentAutonomousCo
     }
 }
 
-/// One headless autonomous run: the runtime state plus the shell-gate
-/// driver, shared with the per-message accounting subscription, the in-run
-/// continuation hook, and the session-command executor (`/autonomous`
-/// rewrites the same state live).
+/// One headless autonomous run: the runtime state plus the shell-gate driver.
 pub struct HeadlessAutonomous {
     state: Arc<tokio::sync::Mutex<AutonomousRuntimeState>>,
     driver: ShellAutonomousDriver,
-    /// The continuation the threshold arm minted ahead of its compaction
-    /// (TS `_queueAutonomousContinuationForThresholdCompaction`): held for
-    /// the settled boundary's queued `followUp` admission.
+    /// The continuation the threshold arm minted ahead of its compaction,
+    /// held for the settled boundary's queued `followUp` admission.
     held: tokio::sync::Mutex<Option<String>>,
 }
 
@@ -68,9 +58,8 @@ impl HeadlessAutonomous {
         Self::from_state(state, cwd)
     }
 
-    /// The session's default run (TS `createAgentSession` always carries an
-    /// autonomous state; a print run without CLI flags starts disabled, and
-    /// `/autonomous on` rewrites it live).
+    /// The session's default run: a print run without CLI flags starts
+    /// disabled, and `/autonomous on` rewrites it live.
     pub fn disabled(cwd: impl Into<PathBuf>) -> Self {
         let state = create_autonomous_runtime_state(None, None);
         Self::from_state(state, cwd)
@@ -90,9 +79,8 @@ impl HeadlessAutonomous {
         Arc::clone(&self.state)
     }
 
-    /// Per-message usage accounting: every settled assistant message is
-    /// forwarded to the driver as it arrives (the daemon worker runs the
-    /// same policy through its own subscription).
+    /// Per-message usage accounting: every settled assistant message forwards to
+    /// the driver as it arrives (the daemon worker runs the same policy).
     pub async fn wire_accounting(
         &self,
         agent: &Arc<pa_agent::agent::Agent>,
@@ -124,12 +112,8 @@ impl HeadlessAutonomous {
             .await
     }
 
-    /// The in-run continuation decision for one settled turn (TS
-    /// `nextAutonomousContinuation` inside `_getContinuationMessages`):
-    /// the driver decides, a `Continue` returns the continuation text, a
-    /// stop (or an inactive mode) ends the loop. The budget bump rides
-    /// the driver's decision (the caller owns the admission: the in-run
-    /// hook runs the text as the next turn, the threshold arm holds it).
+    /// The in-run continuation decision for one settled turn: the driver decides,
+    /// `Continue` returns the text, a stop (or inactive mode) ends the loop.
     pub(crate) async fn follow_up_text(
         &self,
         message: &pa_agent::types::AssistantMessage,
@@ -145,22 +129,14 @@ impl HeadlessAutonomous {
         }
     }
 
-    /// Hold the continuation the threshold arm minted ahead of its
-    /// compaction (TS `_queueAutonomousContinuationForThresholdCompaction`
-    /// queues it as a `followUp` admission): the print boundary compacts
-    /// at the settled turn, then [`HeadlessAutonomous::drive_boundary`]
-    /// admits the held turn through the boundary pair.
+    /// Hold the continuation the threshold arm minted ahead of its compaction; the
+    /// boundary compacts at the settled turn, then `drive_boundary` admits it.
     pub(crate) async fn hold_threshold_continuation(&self, text: String) {
         *self.held.lock().await = Some(text);
     }
 
-    /// The settled boundary's autonomous drain (the print driver's queue
-    /// loop, the TS queued `followUp` admission): each held continuation
-    /// runs as this invocation's follow-up turn through the boundary pair
-    /// (the pre-turn compaction arm runs before it, the settled-turn arms
-    /// after it), and its own natural end churns the in-run hook again —
-    /// a re-crossing threshold holds the next continuation for the next
-    /// drain.
+    /// The settled boundary's autonomous drain: each held continuation runs as
+    /// this invocation's follow-up turn; a re-crossing threshold holds the next.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn drive_boundary(
         &self,
@@ -184,10 +160,10 @@ impl HeadlessAutonomous {
         Ok(())
     }
 
-    /// The TS print-mode exit contract: stderr text when the run must exit
-    /// non-zero — a configured gate still failing (after its retry window,
-    /// or with an autonomous limit reached), or an autonomous run without
-    /// gates that stopped before terminal evidence.
+    /// The print-mode exit contract: stderr text when the run must exit
+    /// non-zero — a configured gate still failing (after its retry window or
+    /// an autonomous limit), or an ungated run stopping before terminal
+    /// evidence.
     pub async fn exit_stderr(&self) -> Option<String> {
         let state = self.state.lock().await;
         let status = autonomous_status(&state);
@@ -226,7 +202,6 @@ impl HeadlessAutonomous {
     }
 }
 
-/// The latest settled assistant message of the loop state, if any.
 async fn latest_assistant(engine: &SessionEngine) -> Option<pa_types::ai::AssistantMessage> {
     let state = engine.session.agent().state().await;
     state
@@ -241,9 +216,8 @@ async fn latest_assistant(engine: &SessionEngine) -> Option<pa_types::ai::Assist
         })
 }
 
-/// The latest settled assistant message's error text, when the loop's
-/// terminal state is a failed model request (the goal's terminal-error
-/// surface: a failed turn fails an active goal, an abort keeps it).
+/// The latest settled assistant message's error text, when the loop's terminal
+/// state is a failed model request.
 pub(crate) async fn latest_assistant_error(engine: &SessionEngine) -> Option<Option<String>> {
     latest_assistant(engine).await.and_then(|message| {
         (message.stop_reason == pa_types::ai::StopReason::Error)

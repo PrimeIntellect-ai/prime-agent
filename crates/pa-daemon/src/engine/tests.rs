@@ -1,4 +1,4 @@
-//! The engine trait-side test battery (moved with its concern).
+//! The engine trait-side test battery.
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;

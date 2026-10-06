@@ -458,7 +458,7 @@ fn base64_byte_length(data: &str) -> u64 {
     (data.len() as u64 * 3 / 4).saturating_sub(padding)
 }
 
-/// TS `ipythonRichOutput`: media and diffs ride the namespaced meta.
+/// Media and diffs ride the namespaced meta.
 fn ipython_rich_output(result: Option<&Value>) -> Option<Value> {
     let details = result?.get("details")?;
     let attachments = details
@@ -541,8 +541,8 @@ mod tests {
 
     #[test]
     fn goal_update_maps_to_the_namespaced_goal_meta() {
-        // TS acp-events.ts `case "goal_update"`: the GoalState fields the
-        // meta carries, nothing else.
+        // The GoalState fields the meta carries,
+        // nothing else.
         let mut state = WireMappingState::default();
         let updates = wire_updates(
             &json!({

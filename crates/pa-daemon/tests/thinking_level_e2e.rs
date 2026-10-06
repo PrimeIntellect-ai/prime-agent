@@ -1,28 +1,18 @@
-//! End-to-end verifier for thinking-level propagation on the interactive
-//! daemon path: the `create` config's `thinking` flag (the TUI's
-//! `--thinking`) must reach the worker, clamp to the model's supported
+//! E2e for thinking-level propagation on the interactive daemon path: the
+//! `create` config's `thinking` flag must clamp to the model's supported
 //! levels (`max` -> `high` for a reasoning model without xhigh/max maps),
-//! persist the effective level in the session JSONL, and apply it to every
-//! provider request — the hermetic reproduction of the owner's live
-//! `--thinking max` trial that previously recorded `off` and drew a
-//! provider 400 for the unsupported effort.
-// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
-// the full rationale).
-// Stack-resident futures by design on the daemon's hot paths; boxing the
-// call sites for a lint tick is a perf regression with zero correctness gain.
+//! persist the effective level, and apply it to every provider request.
+// Stack-resident futures by design on the daemon's hot paths.
 #![allow(clippy::large_futures)]
-// 64-bit-only targets; the narrowing casts sit at OS boundaries
-// (pid/fd/time/size) where the values are bounded by the kernel - the
-// dead-guard expect()s would add panic paths where silent wrap was
-// deliberate.
+// Narrowing casts sit at OS boundaries (pid/fd/time/size) where the kernel
+// bounds the values.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// The fn-length threshold is a style gate, not correctness; the structure
-// campaign owns the god-fn splits as a follow-up.
+// Style gate only, not correctness.
 #![allow(clippy::too_many_lines)]
 // API-shape opinions, not defects; the surfaces are deliberate.
 #![allow(
@@ -56,8 +46,6 @@ impl Drop for Supervisor {
     }
 }
 
-/// A mock OpenAI-completions provider that records every request body and
-/// answers one fixed SSE stream. No network beyond loopback.
 struct RecordingMock {
     bodies: Arc<Mutex<Vec<Value>>>,
     port: u16,
@@ -159,9 +147,8 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path) -> Supervisor {
         .env_remove("PRIME_API_KEY")
         .env_remove("PRIME_AGENT_CODING_AGENT_DIR")
         // A supervisor killed at teardown must not leak its session workers
-        // into later test binaries: the worker's supervisor-lost exit (TS
-        // `exitIfSupervisorOrphanedForTooLong`) runs on this short window
-        // instead of the 5-minute default.
+        // into later test binaries: the worker's supervisor-lost exit runs
+        // on this short window instead of the 5-minute default.
         .env(
             pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
             "15000",
@@ -281,10 +268,8 @@ impl Client {
     }
 }
 
-/// Shared harness: supervisor + a reasoning model behind the recording mock.
-/// The model supports the thinking levels a reasoning model without a
-/// `thinkingLevelMap` has (`off`..`high`), so `max` must clamp to `high` —
-/// the same shape as the owner's `internal/glm-5.3-fast` trial.
+/// Shared harness: supervisor + a reasoning model behind the recording
+/// mock; no `thinkingLevelMap`, so `max` must clamp to `high`.
 struct Harness {
     #[allow(dead_code)]
     dir: tempfile::TempDir,
@@ -366,7 +351,6 @@ fn setup(name: &str, thinking: Option<&str>) -> Harness {
 }
 
 impl Harness {
-    /// Run one prompt turn and return the `prompt_and_wait` response.
     fn prompt(&mut self, id: &str, message: &str) -> Value {
         self.client.send_command(
             id,
@@ -377,7 +361,6 @@ impl Harness {
         done
     }
 
-    /// The persisted session JSONL entries.
     fn session_entries(&self) -> Vec<Value> {
         let files: Vec<PathBuf> = std::fs::read_dir(&self.session_dir)
             .expect("read session dir")
@@ -392,7 +375,6 @@ impl Harness {
             .collect()
     }
 
-    /// The recorded thinking level from the session's creation prefix.
     fn persisted_thinking_level(&self) -> String {
         let entries = self.session_entries();
         let level = entries
@@ -405,7 +387,6 @@ impl Harness {
             .to_string()
     }
 
-    /// The persisted `model_change` pair.
     fn persisted_model_change(&self) -> (String, String) {
         let entries = self.session_entries();
         let change = entries
@@ -418,8 +399,7 @@ impl Harness {
         )
     }
 
-    /// The durable create command's thinking flag on the worker descriptor
-    /// (what a respawned worker replays).
+    /// The durable create's thinking flag (what a respawned worker replays).
     fn durable_create_thinking(&self) -> Value {
         let daemon_workers = self.agent_dir.join("daemon-workers");
         let descriptors: Vec<PathBuf> = std::fs::read_dir(&daemon_workers)
@@ -453,7 +433,6 @@ impl Harness {
 fn interactive_thinking_max_clamps_to_effective_high_end_to_end() {
     let mut harness = setup("thinking-max", Some("max"));
 
-    // The durable create carries the requested flag for respawned workers.
     assert_eq!(
         harness.durable_create_thinking(),
         json!("max"),
@@ -472,16 +451,12 @@ fn interactive_thinking_max_clamps_to_effective_high_end_to_end() {
         harness.client.events
     );
 
-    // The session JSONL records the EFFECTIVE level (high, not the
-    // unsupported max, and not the old hardcoded off).
     assert_eq!(harness.persisted_thinking_level(), "high");
     assert_eq!(
         harness.persisted_model_change(),
         ("battery".to_string(), "mock-1".to_string())
     );
 
-    // Every provider request carries the clamped effort: high, never max
-    // (the 400 of the live trial) and never off (the old default).
     let bodies = harness.mock.request_bodies();
     assert!(!bodies.is_empty(), "the provider was called");
     for body in &bodies {
@@ -495,7 +470,7 @@ fn interactive_sessions_without_a_flag_default_to_medium() {
     let done = harness.prompt("p1", "hi");
     assert_eq!(done["success"], true, "turn failed: {done}");
     // The TS sdk default (settings default ?? DEFAULT_THINKING_LEVEL) is
-    // medium, clamped by the model — not the old hardcoded off.
+    // medium, clamped by the model.
     assert_eq!(harness.persisted_thinking_level(), "medium");
     let bodies = harness.mock.request_bodies();
     assert!(!bodies.is_empty(), "the provider was called");
@@ -560,17 +535,14 @@ fn invalid_thinking_level_fails_the_create() {
     drop(supervisor);
 }
 
-/// The agents-view roster summaries carry the session's thinking level for
-/// BOTH session kinds: a top-level session after `set_thinking_level`
-/// (live `get_state`), a spawned subagent (the create summary), and — after
-/// their workers stop — the durable-row-backed surfaces (`list --all` saved
-/// rows and the ledger-seeded roster rows) keep rendering "model:level".
+/// After their workers stop, the durable-row-backed surfaces (`list --all`
+/// saved rows and the ledger-seeded roster rows) keep rendering
+/// "model:level".
 #[test]
 fn session_summaries_carry_the_thinking_level_for_both_session_kinds() {
     let mut harness = setup("summary-levels", None);
     let top_level = harness.session_id.clone();
 
-    // The top-level summary carries the level SetThinkingLevel applies.
     harness.client.send_command(
         "stl",
         &json!({ "type": "set_thinking_level", "activeSessionId": top_level, "level": "high" }),
@@ -592,12 +564,9 @@ fn session_summaries_carry_the_thinking_level_for_both_session_kinds() {
         "the top-level summary carries the SetThinkingLevel level: {state}"
     );
 
-    // One prompt persists the durable rows (model_change + the new level).
     let done = harness.prompt("p1", "persist the level");
     assert_eq!(done["success"], true, "turn failed: {done}");
 
-    // A spawned subagent (the spawn task context carries its thinking
-    // level into the create): its summary carries it too.
     let parent_info = {
         let entries = harness.session_entries();
         entries
@@ -656,9 +625,6 @@ fn session_summaries_carry_the_thinking_level_for_both_session_kinds() {
         .expect("child active session id")
         .to_string();
 
-    // The subagent's live roster row carries the level; after its worker
-    // stops (a plain kill, no ledger tombstone), the ledger-seeded roster
-    // row still carries the model and the persisted level.
     harness.client.send_command(
         "ck",
         &json!({ "type": "kill", "activeSessionId": child_id }),
@@ -700,9 +666,6 @@ fn session_summaries_carry_the_thinking_level_for_both_session_kinds() {
         "the seeded subagent row hydrates the durable thinking level: {seeded}"
     );
 
-    // After the top-level worker stops too, the saved-session summary row
-    // (the `list --all` agents-view source) still carries the level the
-    // SetThinkingLevel command persisted.
     harness.client.send_command(
         "tk",
         &json!({ "type": "kill", "activeSessionId": top_level }),

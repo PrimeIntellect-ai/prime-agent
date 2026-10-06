@@ -1,17 +1,9 @@
-//! The daemon-only provenance of RLM child status notices: the reserved
-//! custom kinds and the one-shot capability that lets the daemon's own
-//! notice injection park them in a parent session's queue.
-//!
-//! Wire trust boundary (the queue-fold anti-spoof, 2026-09-25): a
-//! caller-supplied `customMessage` on `prompt`/`steer`/`follow_up` — and a
-//! custom row restored through `restore_actions` — is answered LOUDLY
-//! whenever it claims either reserved kind; the row never parks. The only
-//! rows that reach a queue lane with a reserved kind are the ones
-//! [`crate::rlm_children::deliver_terminal_notice`] parks with a
-//! capability minted here (same process, one socket round-trip) and the
-//! ones the daemon-written recovery journal restores, so
-//! [`crate::worker::is_rlm_child_status_item`]'s classification sees only
-//! daemon-authentic kinds.
+//! The daemon-only provenance of RLM child status notices: the reserved custom kinds
+//! and the one-shot capability that parks the daemon's own notice injection in a
+//! parent session's queue. Wire trust boundary (queue-fold anti-spoof, 2026-09-25):
+//! a caller-supplied row claiming a reserved kind is answered LOUDLY, never parked;
+//! only the daemon's own delivery or recovery journal reaches a queue lane with a
+//! reserved kind.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -39,8 +31,7 @@ pub(crate) fn is_reserved_child_status_custom_type(custom_message: &Value) -> bo
 }
 
 /// The loud intake rejection for a caller-supplied row claiming a
-/// reserved kind (one string on every client surface, so the rule reads
-/// as one rule).
+/// reserved kind.
 pub(crate) fn reserved_intake_error() -> String {
     format!(
         "Invalid customMessage: the {} custom types are reserved for daemon-injected RLM child status notices",
@@ -48,10 +39,8 @@ pub(crate) fn reserved_intake_error() -> String {
     )
 }
 
-/// A mint whose admission never arrived (the child died before the
-/// parent parked the notice, or the command failed in flight) ages out
-/// after this window; the notice's own socket round-trip is
-/// milliseconds, so the sweep only reclaims dead mints.
+/// A mint whose admission never arrived ages out after this window; the notice's own
+/// socket round-trip is milliseconds, so the sweep only reclaims dead mints.
 const MINT_TTL: Duration = Duration::from_secs(60);
 
 fn pending() -> &'static Mutex<HashMap<String, Instant>> {
@@ -59,19 +48,11 @@ fn pending() -> &'static Mutex<HashMap<String, Instant>> {
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Mint a fresh one-shot notice capability. Only
-/// [`crate::rlm_children::deliver_terminal_notice`] calls this — it runs
-/// in the same worker process as the queue admission that consumes the
-/// mint, and the map is process memory, so a caller on the client command
-/// plane can never mint, observe, or replay one.
-///
-/// The registry has NO capacity bound on purpose (review round 3): a
-/// capacity eviction could drop a still-live mint and with it that
-/// child's outcome at admission — a burst of settling watchers must keep
-/// every notice deliverable. Growth is inherently bounded instead: each
-/// entry is a short uuid minted once per child-exit notice round-trip by
-/// the daemon's own delivery (nothing client-facing can mint), and dead
-/// mints age out with the sweep below.
+/// Mint a fresh one-shot notice capability: only
+/// [`crate::rlm_children::deliver_terminal_notice`] calls this, in the same worker
+/// process as the consuming queue admission, so a client-plane caller can never mint,
+/// observe, or replay one. The registry has NO capacity bound on purpose (review round
+/// 3): eviction could drop a still-live mint; growth is bounded and mints age out.
 pub(crate) fn mint() -> String {
     let nonce = uuid::Uuid::new_v4().to_string();
     let mut registry = pending().lock().unwrap();

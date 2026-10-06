@@ -1,25 +1,8 @@
-//! Session archiving: the disk-side retirement mechanism for the sessions
-//! directory (roadmap: the directory must not grow forever).
-//!
-//! Sessions the sweep retires MOVE (never delete) to
-//! `<agent-dir>/sessions-archive`, mirroring the sessions-dir layout one file
-//! per `<uuid>.jsonl`. Two independent rules (settings `sessionArchive*`,
-//! defaults 30 days / 200 sessions; each can be off):
-//!
-//! - age: a session untouched for `maxAgeDays` days (file mtime) archives;
-//! - count: beyond `maxSessions` files, the oldest by mtime archive.
-//!
-//! Protected sessions (resident workers, sessions with active scheduled
-//! jobs) are never archived; the count rule counts them toward the cap but
-//! spares them. Restore is the resume path: an archived session resolves
-//! through the saved-session catalog and moves back into the sessions
-//! directory before its worker spawns, so it is addressable again by every
-//! existing selector (TS parity: an archived session stays reachable via
-//! `--resume <selector>`).
-//!
-//! Windows-readiness: paths resolve through `pa_types::platform::home_dir`
-//! via the agent dir; moves fall back to copy+delete when rename cannot
-//! cross filesystems.
+//! Session archiving: retired sessions MOVE (never delete) to
+//! `<agent-dir>/sessions-archive` under two settings rules — age and count
+//! (oldest first). Protected sessions (resident workers, active scheduled jobs)
+//! are counted but never archived; restore moves a session back before its
+//! worker spawns, so every selector still finds it.
 
 use std::collections::HashSet;
 use std::fs;
@@ -96,9 +79,8 @@ pub fn plan_archive<'a>(
     doomed
 }
 
-/// One sweep over the sessions directory: collect candidates, plan, move
-/// the doomed files into the archive. Returns the archived session ids.
-/// Idempotent; a move failure skips that file (the next sweep retries).
+/// One sweep over the sessions directory: collect, plan, move the doomed files
+/// into the archive. Idempotent; a move failure skips that file.
 pub fn sweep_sessions(
     sessions_dir: &Path,
     archive_dir: &Path,
@@ -121,15 +103,14 @@ pub fn sweep_sessions(
         let destination = archive_dir.join(session_file_name(&candidate.session_id));
         if destination.exists() {
             // A same-id file already archived: leave the live file alone
-            // rather than clobber history; the id is not a duplicate in
-            // practice, so this only guards a corrupted archive.
+            // rather than clobber history (this guards a corrupted archive).
             continue;
         }
         match move_file(&candidate.path, &destination) {
             Ok(()) => archived.push(candidate.session_id.clone()),
             Err(error) => {
-                // A failed move leaves the session in place; the sweep
-                // retries on its next pass. Degrade, never fail the batch.
+                // A failed move leaves the session in place; the sweep retries on its next
+                // pass.
                 eprintln!(
                     "session archive: could not move {}: {error:#}",
                     candidate.path.display()
@@ -211,20 +192,15 @@ fn collect_candidates(
     Ok(candidates)
 }
 
-// ---------------------------------------------------------------------------
 // Supervisor sweep seam
-// ---------------------------------------------------------------------------
 
-/// Sweep cadence (TS idle-eviction precedent: a boot sweep, then a
-/// periodic re-sweep at the TS max sweep interval).
+/// Sweep cadence: a boot sweep, then a periodic re-sweep.
 const SWEEP_INTERVAL: Duration = Duration::from_mins(5);
 /// The periodic loop sleeps in chunks so a shutdown exits promptly.
 const SWEEP_SLEEP_CHUNK: Duration = Duration::from_secs(5);
 
 /// The daemon's archive-sweep loop: one sweep at boot, then every
-/// [`SWEEP_INTERVAL`] until the supervisor shuts down. Sweep failures log
-/// and retry on the next pass (the sweep is best-effort housekeeping; it
-/// must never take the daemon down).
+/// [`SWEEP_INTERVAL`]. Failures log and retry (never take the daemon down).
 pub(crate) async fn archive_sweep_loop(supervisor: &std::sync::Arc<crate::supervisor::Supervisor>) {
     loop {
         match run_archive_sweep(supervisor).await {
@@ -246,10 +222,7 @@ pub(crate) async fn archive_sweep_loop(supervisor: &std::sync::Arc<crate::superv
 }
 
 /// One sweep: resolve the policy from the current settings, collect the
-/// protected paths (resident workers' session files plus sessions with
-/// active scheduled jobs — the disk analogue of the TS idle-eviction
-/// `hasRegisteredCronJob` guard), and move the retired sessions into the
-/// archive directory.
+/// protected paths, and move the retired sessions into the archive.
 pub(crate) async fn run_archive_sweep(
     supervisor: &std::sync::Arc<crate::supervisor::Supervisor>,
 ) -> Result<()> {
@@ -271,7 +244,7 @@ pub(crate) async fn run_archive_sweep(
         }
     }
     // Active scheduled jobs own their saved session files: a wake target
-    // must never move (TS `hasRegisteredCronJob` parity for the disk sweep).
+    // must never move.
     for job in crate::update_roster::scan_scheduled_jobs(&agent_dir) {
         if job.status == pa_core::cron::JobStatus::Active && !job.session_file.is_empty() {
             protected.insert(canonical_session_path(Path::new(&job.session_file)));
@@ -326,8 +299,7 @@ mod tests {
         ];
         let doomed = plan_archive(&candidates, &policy(Some(30), None), now);
         let ids: Vec<&str> = doomed.iter().map(|c| c.session_id.as_str()).collect();
-        // The boundary is inclusive: 30 days untouched is archival;
-        // the plan reports oldest first.
+        // The boundary is inclusive: 30 days untouched is archival; oldest first.
         assert_eq!(ids, vec!["old", "edge"]);
     }
 
@@ -342,9 +314,8 @@ mod tests {
     #[test]
     fn count_rule_keeps_the_newest_cap_and_spares_protected() {
         let now = SystemTime::now();
-        // Cap 2 keeps the two newest ("a", "b"); the rest archive, except
-        // the protected file which is counted toward the cap (it ranks)
-        // but never archives.
+        // Cap 2 keeps the two newest ("a", "b"); the rest archive, except the
+        // protected file which is counted toward the cap but never archives.
         let candidates = [
             candidate("a", 1, false, now),
             candidate("b", 2, false, now),
@@ -354,8 +325,8 @@ mod tests {
         let doomed = plan_archive(&candidates, &policy(None, Some(2)), now);
         let ids: Vec<&str> = doomed.iter().map(|c| c.session_id.as_str()).collect();
         assert_eq!(ids, vec!["c"]);
-        // The protected file beyond the cap stays too: it ranks into the
-        // doomed set but the plan spares it.
+        // The protected file beyond the cap stays too: it ranks into the doomed set but the
+        // plan spares it.
         let candidates = [
             candidate("a", 1, false, now),
             candidate("b", 2, false, now),
@@ -381,8 +352,8 @@ mod tests {
     #[test]
     fn both_rules_union_without_duplicates() {
         let now = SystemTime::now();
-        // "old" hits the age rule; "b" is beyond the count cap but not
-        // aged. Both go, oldest first.
+        // "old" hits the age rule; "b" is beyond the count cap but not aged — both go, oldest
+        // first.
         let candidates = [
             candidate("a", 0, false, now),
             candidate("b", 29, false, now),

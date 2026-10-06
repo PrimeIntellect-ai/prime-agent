@@ -1,8 +1,6 @@
-//! Theme engine ported from `coding-agent/src/modes/interactive/theme`.
-//!
-//! Ships the `prime`, `dark`, and `light` built-in palettes with the same
-//! variable/color layout as the TS JSON themes. Colors resolve to truecolor or
-//! 256-color ANSI depending on `COLORTERM`/`TERM`.
+//! The `prime`, `dark`, and `light` built-in palettes with the TS JSON
+//! themes' variable/color layout; colors resolve to truecolor or 256-color
+//! ANSI depending on `COLORTERM`/`TERM`.
 
 use anyhow::{Context, Result};
 use ratatui::style::{Color, Modifier, Style};
@@ -155,9 +153,8 @@ pub struct ThemeJson {
     colors: BTreeMap<String, serde_json::Value>,
 }
 
-/// Resolve one var reference (TS `resolveVarRefs`): empty and hex values pass
-/// through, any other name looks up `vars` once and stays as-is when unknown
-/// (it then fails hex parsing and the slot drops).
+/// Resolve one var reference: an unknown name stays as-is, so the slot
+/// drops at hex parsing.
 fn resolve_var_ref<'a>(value: &'a str, vars: &'a BTreeMap<String, String>) -> &'a str {
     if value.is_empty() || value.starts_with('#') {
         return value;
@@ -165,7 +162,7 @@ fn resolve_var_ref<'a>(value: &'a str, vars: &'a BTreeMap<String, String>) -> &'
     vars.get(value).map_or(value, String::as_str)
 }
 
-/// Resolve a color value: hex string, var reference, or "" (terminal default).
+/// Resolve a color value: hex string, var reference, or "" (default).
 fn resolve_color(value: &serde_json::Value, vars: &BTreeMap<String, String>) -> Option<Color> {
     let Some(s) = value.as_str() else {
         return value
@@ -179,11 +176,8 @@ fn resolve_color(value: &serde_json::Value, vars: &BTreeMap<String, String>) -> 
     hex_to_color(s)
 }
 
-/// TS `parseHexColor` on the theme record's `background` (the onboarding
-/// wash canvas): `^#?([0-9a-f]{6})$` case-insensitive on the trimmed value,
-/// after var resolution — only the 6-hex shape parses; anything else (empty,
-/// 3-hex shorthand, an ANSI index, a var miss) stays `None` so callers fall
-/// back to their hardcoded canvases.
+/// The theme record's `background` (the onboarding wash canvas): only
+/// the 6-hex shape parses after var resolution.
 fn parse_theme_background(
     value: &serde_json::Value,
     vars: &BTreeMap<String, String>,
@@ -219,9 +213,8 @@ fn hex_to_color(s: &str) -> Option<Color> {
     Some(Color::Rgb(r, g, b))
 }
 
-/// Quantize RGB to the xterm 256-color palette (TS `rgbTo256`): nearest cube
-/// level per channel, gray chosen by luma, gray wins only for near-neutral
-/// colors where it is the closer weighted distance.
+/// Quantize RGB to the xterm 256-color palette; gray wins only for
+/// near-neutral colors.
 #[must_use]
 pub fn rgb_to_256(rgb: (u8, u8, u8)) -> u8 {
     const CUBE_VALUES: [u8; 6] = [0, 95, 135, 175, 215, 255];
@@ -287,9 +280,9 @@ pub enum ColorMode {
     Color256,
 }
 
-/// TS `detectColorMode`: truecolor unless the terminal is truly limited.
-/// tmux reports `screen*` but forwards 24-bit color, so it stays truecolor;
-/// only genuine GNU screen (no `$TMUX`) falls back to the 256-color cube.
+/// Truecolor unless the terminal is truly limited. tmux reports
+/// `screen*` but forwards 24-bit color, so it stays truecolor; only
+/// genuine GNU screen (no `$TMUX`) falls back to the 256-color cube.
 #[must_use]
 pub fn detect_color_mode() -> ColorMode {
     let colorterm = std::env::var("COLORTERM").unwrap_or_default();
@@ -322,30 +315,22 @@ fn to_terminal_color(color: Color, mode: ColorMode) -> Color {
     }
 }
 
-/// How far a selection wash must stand off the surface it renders on:
-/// TS `SELECTION_MIN_LUMINANCE_DELTA` — "Selection rows must stand out
-/// clearly, much more than passive surfaces" (TS theme.ts). The operator's
-/// 2026-09-26 directive makes the bar binding for the panel redesign's
-/// selection: a wash within a few luminance points of the surface reads as
-/// no selection at all.
+/// How far a selection wash must stand off its surface (TS
+/// `SELECTION_MIN_LUMINANCE_DELTA`): the operator's 2026-09-26 directive
+/// — a wash within a few luminance points reads as no selection at all.
 pub(crate) const SELECTION_MIN_LUMINANCE_DELTA: f64 = 28.0;
 
-/// The contrast lift's blend cap (TS `SELECTION_MAX_BLEND_ALPHA`): the
-/// wash never lifts further than halfway toward the endpoint.
+/// The contrast lift's blend cap.
 const SELECTION_MAX_BLEND_ALPHA: f32 = 0.5;
 
-/// The contrast lift's step (TS `SELECTION_BLEND_STEP`).
 const SELECTION_BLEND_STEP: f32 = 0.05;
 
-/// The perceived-lightness blend TS weighs every color decision with
-/// (TS `luminance`).
 fn luminance(rgb: (u16, u16, u16)) -> f64 {
     0.299 * f64::from(rgb.0) + 0.587 * f64::from(rgb.1) + 0.114 * f64::from(rgb.2)
 }
 
-/// The xterm-256 palette slot's RGB (TS `ansi256ToRgb`): the 6x6x6 cube
-/// and the gray ramp. The base ANSI slots (0-15) are terminal-defined, so
-/// their rendered color is unknown.
+/// The xterm-256 palette slot's RGB: the 6x6x6 cube and the gray ramp;
+/// base ANSI slots (0-15) are terminal-defined.
 fn indexed_to_rgb(index: u8) -> Option<(u16, u16, u16)> {
     const CUBE_VALUES: [u16; 6] = [0, 95, 135, 175, 215, 255];
     match index {
@@ -368,8 +353,7 @@ fn indexed_to_rgb(index: u8) -> Option<(u16, u16, u16)> {
 }
 
 /// The luminance of what actually renders: a 256-color terminal paints the
-/// palette slot, not the configured RGB (the quantized candidate evaluates
-/// through this; base ANSI slots stay unknown).
+/// palette slot, not the configured RGB; base ANSI slots stay unknown.
 pub(crate) fn quantized_luminance(color: Color) -> Option<f64> {
     match color {
         Color::Rgb(r, g, b) => Some(luminance((u16::from(r), u16::from(g), u16::from(b)))),
@@ -385,9 +369,8 @@ pub struct Theme {
     fg: BTreeMap<&'static str, Style>,
     bg: BTreeMap<&'static str, Style>,
     bg_colors: BTreeMap<&'static str, Color>,
-    /// The theme record's parseable `background` key, raw RGB: blends that
-    /// use it (TS `onboardingHighlightBackground`) mix against the true
-    /// colour and quantize their result per [`Theme::mode`], not this.
+    /// The theme record's parseable `background` key, raw RGB: blends
+    /// that use it mix against the true colour, not this.
     background: Option<(u8, u8, u8)>,
     pub mode: ColorMode,
 }
@@ -418,8 +401,8 @@ impl Theme {
             fg,
             bg,
             bg_colors,
-            // `background` is not a fg/bg slot, so the loop above drops it;
-            // the wash reads it as its canvas (TS `parseHexColor`).
+            // `background` is not a fg/bg slot; the wash reads it as its
+            // canvas.
             background: json
                 .colors
                 .get("background")
@@ -449,14 +432,12 @@ impl Theme {
         self.bg_colors.get(color.name()).copied()
     }
 
-    /// The theme record's parseable `background` (strict 6-hex shape after
-    /// var resolution, TS `parseHexColor`), raw RGB; `None` when the theme
-    /// carries no such value, so callers fall back to their own canvases.
+    /// The theme record's parseable `background` (strict 6-hex after var
+    /// resolution), raw RGB; `None` when the theme carries no such value.
     pub(crate) fn background_rgb(&self) -> Option<(u8, u8, u8)> {
         self.background
     }
 
-    /// `theme.fg("muted", text)` equivalent.
     pub fn fg(&self, color: ThemeColor, text: impl Into<String>) -> crate::Span {
         crate::Span::styled(text.into(), self.fg_style(color))
     }
@@ -465,7 +446,6 @@ impl Theme {
         self.fg(color, text)
     }
 
-    /// Bold helper (chalk.bold equivalent).
     #[must_use]
     pub fn bold(&self, span: crate::Span) -> crate::Span {
         span_with(span, Modifier::BOLD)
@@ -498,47 +478,28 @@ impl Theme {
             .collect()
     }
 
-    /// Editor surface background (userMessageBg) — in the TS theme the editor
-    /// and user messages share the surface color.
+    /// Editor surface background (userMessageBg).
     #[must_use]
     pub fn editor_background(&self) -> Option<Style> {
         Some(self.bg_style(ThemeBg::UserMessageBg))
     }
 
-    /// Filled effort squares: a pastel purple that reads softer than the
-    /// theme accent (TS `getEffortSquareColor`). The TS theme picks a light
-    /// pastel on light terminal backgrounds; the Rust theme does not yet
-    /// detect the terminal background kind, so the dark pastel is the
-    /// default-terminal match.
+    /// Filled effort squares (TS `getEffortSquareColor`): a pastel softer
+    /// than the accent; TS lightens it on light terminals, which the
+    /// Rust theme does not detect.
     #[must_use]
     pub fn effort_square_style(&self) -> Style {
         const EFFORT_SQUARE_DARK_COLOR: Color = Color::Rgb(0xa7, 0x8b, 0xfa);
         Style::default().fg(to_terminal_color(EFFORT_SQUARE_DARK_COLOR, self.mode))
     }
 
-    /// Row-selection highlight for menu rows (TS
-    /// `getSoftSelectionBackgroundColor`): the selection color blended
-    /// halfway toward the editor surface — a softer band than the full
-    /// selection block. Non-RGB palettes have no reliable blend base, so
-    /// they keep the plain selection background.
-    ///
-    /// The halfway blend is kept only when it still READS against the
-    /// surface: every built-in theme's selection sits a few luminance
-    /// points off the editor surface, so the blend used to paint as a
-    /// near-invisible wash — the operator could not tell which row was
-    /// selected (the operator's 2026-09-26 directive: the panel redesign's
-    /// selection must be unmistakable). When the blend cannot clear
-    /// [`SELECTION_MIN_LUMINANCE_DELTA`] over the surface, the wash steps
-    /// toward the contrast endpoint — white when the selection reads
-    /// lighter than the surface, black when it reads darker — until it
-    /// clears the bar (TS `getSelectionBackgroundColor`'s endpoint ladder,
-    /// anchored to the editor surface because the TUI cannot query the
-    /// terminal's own background the way TS's `getDefaultTerminalColors`
-    /// does; the endpoint machinery is TS's own, TS `theme.ts`:207-209
-    /// "Selection rows must stand out clearly, much more than passive
-    /// surfaces"). Candidates evaluate after [`Theme::mode`]
-    /// quantization, so a 256-color terminal keeps a wash the palette
-    /// actually separates from the surface.
+    /// Row-selection highlight (TS `getSoftSelectionBackgroundColor`):
+    /// the selection blended halfway toward the editor surface; non-RGB
+    /// palettes keep the plain selection. When the blend cannot clear
+    /// [`SELECTION_MIN_LUMINANCE_DELTA`], the wash steps toward the
+    /// contrast endpoint until it does (the operator's 2026-09-26
+    /// directive: the selection must be unmistakable; anchored to the
+    /// editor surface — the TUI cannot query the terminal background).
     #[must_use]
     pub fn soft_selection_style(&self) -> Style {
         let blend = |top: (u16, u16, u16), bottom: (u16, u16, u16), alpha: f32| {
@@ -548,12 +509,8 @@ impl Theme {
                 (f32::from(top.2) * alpha + f32::from(bottom.2) * (1.0 - alpha)).round() as u8,
             )
         };
-        // The blend needs real RGB. A truecolor theme carries its
-        // configured RGB directly; a 256-color theme stores the
-        // quantized slot, whose palette RGB is what the terminal
-        // actually renders there. The base ANSI slots (0-15) are
-        // terminal-defined, so those keep the plain selection (TS's
-        // ANSI guard: no reliable blend base exists).
+        // Base ANSI slots (0-15) are terminal-defined, so those keep
+        // the plain selection.
         let slot_rgb = |color: Option<Color>| -> Option<(u16, u16, u16)> {
             match color? {
                 Color::Rgb(r, g, b) => Some((u16::from(r), u16::from(g), u16::from(b))),
@@ -573,9 +530,7 @@ impl Theme {
             editor_surface.2 as u8,
         );
         let surface_ansi = to_terminal_color(surface_color, self.mode);
-        // The selection also evaluates through the palette: a 256-color
-        // terminal paints the quantized slot, so the ladder aims from
-        // what actually renders (TS's `renderedSelection`).
+        // The ladder aims from what actually renders.
         let selection_render_luminance = quantized_luminance(to_terminal_color(
             Color::Rgb(selection.0 as u8, selection.1 as u8, selection.2 as u8),
             self.mode,
@@ -583,11 +538,8 @@ impl Theme {
         .unwrap_or(luminance(selection));
         let surface_render_luminance =
             quantized_luminance(surface_ansi).unwrap_or(luminance(editor_surface));
-        // The wash reads when its rendered color clears the visibility bar
-        // over the surface (both after mode quantization — a 256-color
-        // terminal paints the palette slot, not the blend). A candidate the
-        // palette maps to an unknown slot never blocks: showing the wash
-        // beats refusing to compute.
+        // A candidate the palette maps to an unknown slot never blocks:
+        // showing the wash beats refusing to compute.
         let reads = |candidate: Color| {
             quantized_luminance(candidate).is_none_or(|candidate_luminance| {
                 (candidate_luminance - surface_render_luminance).abs()
@@ -602,14 +554,10 @@ impl Theme {
                 return Style::default().bg(adjusted);
             }
         }
-        // The blend reads too close to the surface (every built-in
-        // theme): step the wash toward the contrast endpoint — the one on
-        // the selection's side of the surface first, the opposite one
-        // (crossing the surface) second — until the quantized candidate
-        // clears the bar. The strongest step is tracked across BOTH
-        // endpoints like TS: the first candidate to clear the bar wins,
-        // and when nothing clears it a step replaces the selection only
-        // if it improved on the selection's own delta.
+        // The blend reads too close to the surface: step the wash toward
+        // the contrast endpoint — the selection's side first, the opposite
+        // one second — until a candidate clears the bar. A below-bar step
+        // replaces the selection only if it improved on its own delta.
         let delta = (selection_render_luminance - surface_render_luminance).abs();
         let endpoints = if selection_render_luminance >= surface_render_luminance {
             [(255u16, 255, 255), (0, 0, 0)]
@@ -626,9 +574,7 @@ impl Theme {
             let target = surface_render_luminance + spread.signum() * SELECTION_MIN_LUMINANCE_DELTA;
             let base_alpha = ((target - selection_render_luminance) / spread)
                 .clamp(0.0, f64::from(SELECTION_MAX_BLEND_ALPHA));
-            // If the direct hit undershoots the bar, keep stepping toward
-            // the cap — a stronger blend may quantize to a palette slot
-            // that passes.
+            // A stronger blend may quantize to a palette slot that passes.
             let mut alphas = Vec::new();
             let mut alpha = base_alpha as f32;
             while alpha < SELECTION_MAX_BLEND_ALPHA {
@@ -658,31 +604,17 @@ impl Theme {
         }
         match best {
             Some(candidate) => Style::default().bg(candidate),
-            // A selection pinned at its own endpoint with a palette too
-            // coarse to reach the bar: the plain selection is the least
-            // surprising fallback (TS keeps the configured value too).
+            // Palette too coarse to reach the bar: the plain selection is
+            // the least surprising fallback.
             None => self.bg_style(ThemeBg::SelectedBg),
         }
     }
 
     /// The ONE selected-row style every activity surface paints (the
-    /// operator's consistency rule: the selected row's background is
-    /// IDENTICAL across the dock's groups, the agents view's rows, the
-    /// heartbeats picker, and the bash view — one style, not
-    /// per-surface copies): the SAME light band the hover paints
-    /// ([`Theme::hover_row_style`] — the operator's 2026-09-29
-    /// one-color ruling: one band color for both states). The two
-    /// states distinguish by their CUES, never by color: the hover is
-    /// transient and rides the mouse position; the selection is
-    /// sticky and rides the keyboard — and where they overlap the
-    /// hover paint skips cells that already carry the selection's
-    /// background, so the focused state is never repainted. Each
-    /// surface keeps its own foreground colors; the style patches
-    /// only the background, with no extra modifiers. A theme whose
-    /// slots resolve to no band (a `selectedBg` that is missing or
-    /// explicitly empty resolves to `Color::Reset`, which paints
-    /// nothing) falls through to the onboarding wash, so a selected
-    /// row always reads as selected (Macroscope PR #2908's contract).
+    /// operator's 2026-09-29 one-color ruling): the SAME band
+    /// [`Theme::hover_row_style`] paints for hover — the states
+    /// distinguish by cues, never by color. A theme whose band resolves
+    /// to nothing falls through to the onboarding wash.
     #[must_use]
     pub fn selection_row_style(&self) -> Style {
         let band = self
@@ -693,9 +625,7 @@ impl Theme {
         Style::default().bg(band)
     }
 
-    /// Paint one line's spans with [`Theme::selection_row_style`] —
-    /// the `bg_paint` counterpart for the one selection style: each
-    /// span keeps its own foreground, gains the one band.
+    /// The `bg_paint` counterpart for [`Theme::selection_row_style`].
     #[must_use]
     pub fn selection_paint(&self, line: crate::Line) -> crate::Line {
         let style = self.selection_row_style();
@@ -707,40 +637,19 @@ impl Theme {
             .collect()
     }
 
-    /// The ONE hover affordance style every clickable surface paints
-    /// (the operator's 2026-09-29 consistency rule): a LIGHT
-    /// background band — the same soft wash the menu panels' selected
-    /// rows carry — that marks "the mouse can click here" (the dock's
-    /// group segments, the tray's `← manage` hint, the agents view's
-    /// rows). The wash is the established light band: it clears the
-    /// visibility bar over the surfaces it renders on and follows the
-    /// theme in both color modes, so one style serves every surface
-    /// instead of a per-surface copy. The operator's 2026-09-29
-    /// one-color ruling: the keyboard selection paints this SAME band
-    /// ([`Theme::selection_row_style`] reads this very style) — the
-    /// two states distinguish by their cues (the hover is transient,
-    /// rides the mouse position; the selection is sticky, rides the
-    /// keyboard), never by color.
+    /// The hover affordance band for clickable surfaces: the same soft
+    /// wash the menu panels' selected rows carry; the keyboard selection
+    /// paints this SAME band (the operator's 2026-09-29 one-color ruling).
     #[must_use]
     pub fn hover_row_style(&self) -> Style {
         self.soft_selection_style()
     }
 
     /// Paint one hover band over the given column span of a composed
-    /// row (the hover affordance's row painter): a span straddling the
-    /// span's edge splits, so the band covers exactly the hovered
-    /// region - a dock group's own segment, the hint's own text - and
-    /// cells that already carry a background keep it (a cell inside
-    /// the selection band keeps the focused state's band: the one
-    /// shared color makes the overlap read as one band, and the hover
-    /// never demotes the selection).
-    ///
-    /// The split walks GRAPHEME CLUSTERS, never scalar values: a
-    /// combining mark stays with its base (`e` + U+0301 is one cell)
-    /// and a wide glyph stays whole, so a title the band crosses
-    /// renders byte-identical on both sides of the edge - the band's
-    /// edges snap to the cluster that starts them, the same integrity
-    /// rule the composition's own truncation keeps.
+    /// row: a straddling span splits, and cells that already carry a
+    /// background keep it (the hover never demotes the selection). The
+    /// split walks GRAPHEME CLUSTERS, so a combining mark keeps its
+    /// base and a wide glyph stays whole.
     pub fn paint_hover_band(&self, line: &mut crate::Line, cols: std::ops::Range<usize>) {
         use unicode_segmentation::UnicodeSegmentation;
         let band = self.hover_row_style();
@@ -859,9 +768,8 @@ fn bg_name_lookup(name: &str) -> Option<&'static str> {
     })
 }
 
-/// The bundled theme files, shared with the session HTML exporter via
-/// [`pa_types::themes`] (the theme *data* is shared vocabulary; this crate
-/// owns everything built on top of it).
+/// The bundled theme files, shared with the session HTML exporter
+/// via [`pa_types::themes`].
 pub const PRIME_JSON: &str = pa_types::themes::PRIME_THEME_JSON;
 pub const DARK_JSON: &str = pa_types::themes::DARK_THEME_JSON;
 pub const LIGHT_JSON: &str = pa_types::themes::LIGHT_THEME_JSON;
@@ -871,8 +779,7 @@ pub const LIGHT_JSON: &str = pa_types::themes::LIGHT_THEME_JSON;
 ///
 /// # Panics
 ///
-/// Panics only if the bundled `prime` theme JSON fails to parse (a
-/// build-time invariant the shipped constant satisfies).
+/// Panics only if the bundled `prime` theme JSON fails to parse.
 #[must_use]
 pub fn builtin_theme_json(name: &str) -> ThemeJson {
     let raw = pa_types::themes::builtin_theme_json(name).unwrap_or(PRIME_JSON);
@@ -884,8 +791,7 @@ pub fn builtin_theme_json(name: &str) -> ThemeJson {
 ///
 /// # Errors
 ///
-/// Returns `Err` when the file cannot be read or its JSON cannot be
-/// parsed; both errors carry the theme path.
+/// Returns `Err` when the file cannot be read or its JSON cannot be parsed.
 pub fn load_theme_from_path(path: &std::path::Path, mode: ColorMode) -> Result<Theme> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("reading theme {}", path.display()))?;
@@ -934,19 +840,9 @@ mod tests {
         )
         .expect("valid theme json");
         let theme = Theme::from_json(&json, ColorMode::TrueColor);
-        // Case-insensitive 6-hex, reached through a var reference.
         assert_eq!(theme.background_rgb(), Some((0x0a, 0x0b, 0x0c)));
     }
 
-    /// The ONE selection style paints the hover band's own color (the
-    /// operator's 2026-09-29 one-color ruling: one band color for
-    /// both states): the selection IS the hover color in every theme,
-    /// never the accent, never a bold modifier. A theme whose slots
-    /// resolve to no band (a `selectedBg` that is missing or
-    /// explicitly empty resolves to `Color::Reset`, which paints
-    /// nothing) falls through to the onboarding wash (Macroscope
-    /// 2026-09-28: an unresolvable slot must fall through, not strand
-    /// the selection without a band).
     #[test]
     fn the_selection_style_is_the_hover_color_never_the_accent() {
         let theme = Theme::builtin("prime", ColorMode::TrueColor);
@@ -983,8 +879,6 @@ mod tests {
             Some(crate::onboarding::highlight_wash(&bare)),
             "with no resolvable band, the wash keeps the selected row readable"
         );
-        // An empty `selectedBg` resolves the same way: the slot's
-        // Reset is filtered too, so the wash takes the band.
         let empty_slot = serde_json::from_str::<ThemeJson>(
             r##"{
                 "name": "empty-slot",
@@ -1001,11 +895,6 @@ mod tests {
         );
     }
 
-    /// The selection wash must READ (the operator's 2026-09-26 directive:
-    /// the panel redesign's selection was barely visible): every built-in
-    /// theme's wash clears [`SELECTION_MIN_LUMINANCE_DELTA`] over the
-    /// editor surface, in both color modes — a 256-color terminal
-    /// evaluates the palette slots it actually paints.
     #[test]
     fn soft_selection_reads_off_the_editor_surface() {
         for name in ["prime", "dark", "light"] {
@@ -1031,10 +920,6 @@ mod tests {
         }
     }
 
-    /// The ladder's pinned values: the wash clears the bar by stepping
-    /// from the selection toward the endpoint on its side of the surface
-    /// (white for the dark themes, black for the light one), and the
-    /// 256-color palette keeps a slot the surface's slot separates from.
     #[test]
     fn soft_selection_pins_the_contrast_ladder_values() {
         let prime = Theme::builtin("prime", ColorMode::TrueColor);
@@ -1063,9 +948,6 @@ mod tests {
         );
     }
 
-    /// No reliable blend base, no ladder: a base-ANSI selection (the
-    /// terminal defines its rendered color) keeps the plain selection —
-    /// TS's ANSI guard.
     #[test]
     fn soft_selection_keeps_the_plain_selection_without_a_blend_base() {
         let json = serde_json::from_str::<ThemeJson>(
@@ -1087,9 +969,6 @@ mod tests {
 
     #[test]
     fn background_stays_none_for_non_six_hex_shapes() {
-        // Empty, 3-hex shorthand, an unknown var, an ANSI index, and a
-        // missing value are all unparseable: the wash falls back to its
-        // hardcoded canvas (the built-in themes carry no background at all).
         for raw in ["\"\"", "\"#abc\"", "\"5\"", "17", "null"] {
             let json: ThemeJson = serde_json::from_str(&format!(
                 r#"{{ "name": "custom", "colors": {{ "background": {raw} }} }}"#
@@ -1100,15 +979,6 @@ mod tests {
         }
     }
 
-    /// The ONE band color (the operator's 2026-09-29 one-color
-    /// ruling): the hover and the keyboard selection paint the SAME
-    /// light band in every theme and color mode — the states
-    /// distinguish by their cues (the hover is transient and rides the
-    /// mouse position; the selection is sticky and rides the
-    /// keyboard), never by color, and where they overlap the hover
-    /// paint skips cells that already carry the selection's
-    /// background. The selection carries NO modifiers — a selected
-    /// row's own styles stay its own.
     #[test]
     fn the_hover_band_and_the_selection_share_one_color() {
         for name in ["prime", "dark", "light"] {
@@ -1144,20 +1014,12 @@ mod tests {
         }
     }
 
-    /// The band's edges snap to GRAPHEME CLUSTERS (Macroscope: the
-    /// scalar-slice dropped a combining mark and cut wide glyphs): a
-    /// cluster the band crosses stays whole — the content renders
-    /// byte-identical on both sides of the edge, and a combining mark
-    /// keeps its base, a wide glyph its two cells.
     #[test]
     fn the_hover_band_splits_on_grapheme_clusters() {
         let theme = Theme::builtin("prime", ColorMode::TrueColor);
         let combining = "e\u{301}x";
         let wide = "\u{4e2d}y";
         let mut line = vec![crate::Span::raw(combining), crate::Span::raw(wide)];
-        // The band starts inside the first span (the combining cluster
-        // rides its base) and ends inside the second (the wide glyph
-        // spans the edge's last cell).
         theme.paint_hover_band(&mut line, 1..3);
         assert_eq!(flat(&line), format!("{combining}{wide}"));
         assert_eq!(
@@ -1184,11 +1046,6 @@ mod tests {
         assert_eq!(line[3].style.bg, None, "the tail stays bare");
     }
 
-    /// The hover band paints only its own column span: a span
-    /// straddling an edge splits, and a cell already carrying the
-    /// selection's band keeps it (both state styles apply where they
-    /// overlap — the hover never demotes the focused band, and the
-    /// one shared color makes the overlap read as one band).
     #[test]
     fn the_hover_band_covers_its_columns_and_never_demotes_the_selection() {
         let theme = Theme::builtin("prime", ColorMode::TrueColor);
@@ -1205,7 +1062,6 @@ mod tests {
             "the straddling spans split at the band edges"
         );
         assert_eq!(flat(&line), "plain focused tail");
-        // The plain cells inside the band carry the light background.
         assert_eq!(
             line[0].style.bg, None,
             "the cells outside the band stay bare"
@@ -1232,7 +1088,6 @@ mod tests {
         line.iter().map(|s| s.content.as_str()).collect()
     }
 
-    /// [`str_width`] over one span's content.
     fn span_width(line: &crate::Line) -> Vec<usize> {
         line.iter()
             .map(|s| crate::width::str_width(&s.content))

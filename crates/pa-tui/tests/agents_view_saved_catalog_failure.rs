@@ -1,32 +1,22 @@
-//! The saved-catalog loading lifecycle, headless against a mock supervisor:
-//! a terminal `list_saved_sessions` failure settles the entry anchor's wait
-//! and reports the honest error, so an Enter after the failure opens the
-//! default row instead of re-arming "Still loading sessions" behind the
-//! error it already showed (the operator's stuck loading state). The fetch
+//! The saved-catalog loading lifecycle: a terminal `list_saved_sessions`
+//! failure settles the entry anchor's wait and reports the honest error —
+//! an Enter after the failure opens the default row, and the fetch
 //! re-arms on the next query change (TS `rearmSavedSearchFetch`).
 #![cfg(unix)]
-// Pedantic-gate exceptions (every other pedantic warning in this crate is
-// fixed in place; each exception carries its one-line justification):
-// - the casts: terminal-layout arithmetic narrows structurally bounded
-//   values (screen coordinates, byte counts, timestamps); guarded
-//   conversions would add panic paths the bounds guarantee away.
+// Casts: structurally bounded terminal-layout arithmetic; guarded conversions add panic paths.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// - the render routes are flat tables (one arm per route); splitting them
-//   would add indirection without changing the flow.
+// Render routes are flat tables (one arm per route); splitting adds indirection.
 #![allow(clippy::too_many_lines)]
-// - widget state structs carry independent flag bits; a nested struct
-//   would add indirection without changing the shape.
+// Widget state structs carry independent flag bits.
 #![allow(clippy::struct_excessive_bools, clippy::fn_params_excessive_bools)]
-// - the futures are bounded by the surface's lifetime; boxing them would
-//   add an allocation to the steady-state loop.
+// Futures are bounded by the surface's lifetime; boxing adds a steady-state allocation.
 #![allow(clippy::large_futures)]
-// - the wrappers preserve a uniform Result-returning API surface; unwrap
-//   removals would ripple through the callers without changing behavior.
+// The wrappers preserve a uniform Result-returning API surface.
 #![allow(clippy::unnecessary_wraps)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -38,13 +28,12 @@ use pa_tui::agents_view::{AgentsHeadlessPlan, AgentsStep, AgentsViewOptions, Age
 use pa_tui::interactive::SessionSelection;
 use serde_json::{json, Value};
 
-/// The failure the daemon answers `list_saved_sessions` with (the honest
-/// terminal error class: the scan itself refused).
+/// The failure the daemon answers `list_saved_sessions` with (the honest terminal error class: the
+/// scan itself refused).
 const SAVED_SCAN_ERROR: &str = "the session scan failed: no such directory";
 
 struct MockSupervisor {
     listener: UnixListener,
-    /// Every recorded `list_saved_sessions` request.
     saved_requests: Arc<Mutex<Vec<Value>>>,
 }
 
@@ -56,9 +45,8 @@ impl MockSupervisor {
         }
     }
 
-    /// Serve one agents-view connection: hello, then the command loop. The
-    /// roster answers one live session; the saved catalog answers the
-    /// terminal failure.
+    /// Serve one agents-view connection: the roster answers one live session; the catalog answers
+    /// the terminal failure.
     fn serve(self) {
         let (stream, _) = self.listener.accept().expect("accept view connection");
         stream
@@ -161,9 +149,7 @@ fn respond_failure(writer: &mut UnixStream, id: &str, command: &str, error: &str
     );
 }
 
-/// One line with a bounded quiet window: the view connection sits quiet
-/// between its inputs (settle waits), so timeouts keep the loop alive for a
-/// bounded span; `None` ends the serve loop on EOF or the quiet cap (a
+/// One line with a bounded quiet window; `None` ends the serve loop on EOF or the quiet cap (a
 /// failing test's teardown never hangs the thread).
 fn read_line(reader: &mut BufReader<UnixStream>) -> Option<String> {
     const QUIET_WINDOW_MS: u32 = 60;
@@ -194,8 +180,8 @@ fn read_line(reader: &mut BufReader<UnixStream>) -> Option<String> {
     }
 }
 
-/// One view options set: anchored on a session whose row can only come from
-/// the saved catalog (the roster carries a different live session).
+/// One view options set: anchored on a session whose row can only come from the saved catalog (the
+/// roster carries a different live session).
 fn view_options(socket: &std::path::Path) -> AgentsViewOptions {
     AgentsViewOptions {
         socket_path: socket.to_path_buf(),
@@ -217,10 +203,8 @@ fn view_options(socket: &std::path::Path) -> AgentsViewOptions {
     }
 }
 
-/// The terminal saved-catalog failure settles the entry anchor's wait: the
-/// status line keeps the honest error, an Enter after the failure opens the
-/// default row (never the re-armed loading hint), and the anchor never
-/// wedges the view behind the error it already showed.
+/// The terminal saved-catalog failure settles the entry anchor's wait: the status line keeps the
+/// honest error, and an Enter after the failure opens the default row (never the loading hint).
 #[tokio::test]
 async fn a_terminal_saved_catalog_failure_settles_the_anchor_wait() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -231,11 +215,11 @@ async fn a_terminal_saved_catalog_failure_settles_the_anchor_wait() {
 
     let plan = AgentsHeadlessPlan {
         steps: vec![
-            // The roster snapshot and the failed catalog land inside the
-            // settle window; the failure settles the anchor's wait.
+            // The roster snapshot and the failed catalog land inside the settle window; the failure
+            // settles the anchor's wait.
             AgentsStep::WaitSettle { timeout_ms: 2000 },
-            // Enter after the failure: the settled view opens the default
-            // row; pre-settle it would re-arm the loading hint instead.
+            // Enter after the failure: pre-settle it would re-arm the loading hint instead of
+            // opening the default row.
             AgentsStep::Key("enter".to_string()),
         ],
         width: 120,
@@ -250,8 +234,8 @@ async fn a_terminal_saved_catalog_failure_settles_the_anchor_wait() {
     .expect("the agents view run")
     .outcome;
 
-    // The saved catalog was asked for (the lifecycle's fetch really ran)
-    // and answered with the terminal failure.
+    // The saved catalog was asked for (the lifecycle's fetch really ran) and answered with the
+    // terminal failure.
     {
         let requests = saved_requests.lock().unwrap();
         assert_eq!(
@@ -260,7 +244,6 @@ async fn a_terminal_saved_catalog_failure_settles_the_anchor_wait() {
             "the saved-catalog fetch ran exactly once: {requests:?}"
         );
     }
-    // The honest error survived to the frames (the status line carried it).
     let frames_text: String = outcome.frames.join("\n");
     assert!(
         frames_text.contains("Saved sessions unavailable"),
@@ -270,8 +253,7 @@ async fn a_terminal_saved_catalog_failure_settles_the_anchor_wait() {
         frames_text.contains(SAVED_SCAN_ERROR),
         "the error names the scan failure: {frames_text}"
     );
-    // The anchor's wait settled: the loading hint never re-armed — the
-    // last frames carry the error, not the hint, and Enter opened the
+    // The loading hint never re-armed: the last frames carry the error, and Enter opened the
     // default row instead of parking the open.
     assert!(
         !outcome
@@ -287,14 +269,11 @@ async fn a_terminal_saved_catalog_failure_settles_the_anchor_wait() {
         "Enter after the failure opens the default row (the settled anchor)"
     );
 
-    // The mock served one connection; its thread ends with the run.
     let _ = server.join();
 }
 
-/// The failed fetch re-arms on the next query change (TS
-/// `rearmSavedSearchFetch`): a typed query after the failure sends a SECOND
-/// saved-catalog request instead of leaving the Inactive section empty
-/// behind one terminal error.
+/// The failed fetch re-arms on the next query change (TS `rearmSavedSearchFetch`): a typed query
+/// after the failure sends a SECOND saved-catalog request.
 #[tokio::test]
 async fn a_failed_fetch_rearms_on_the_next_query_change() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -306,7 +285,6 @@ async fn a_failed_fetch_rearms_on_the_next_query_change() {
     let plan = AgentsHeadlessPlan {
         steps: vec![
             AgentsStep::WaitSettle { timeout_ms: 2000 },
-            // A query change after the failure re-arms the fetch.
             AgentsStep::Type("q".to_string()),
             AgentsStep::WaitSettle { timeout_ms: 2000 },
         ],
