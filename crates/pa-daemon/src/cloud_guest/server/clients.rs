@@ -555,7 +555,7 @@ fn handle_submit(
         server.write_line(client, frame);
     };
     server
-        .admit_submit(&command_id, &request_value, &write_frame)
+        .admit_submit(command_id, &request_value, &write_frame)
         .is_some()
 }
 
