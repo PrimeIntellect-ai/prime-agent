@@ -150,15 +150,17 @@ pub fn validate_replacement_daemon(
             socket_path.display()
         );
     }
-    // TS's exact shape: a predecessor field rejects only when it is set
-    // and the successor carries the same one, and the pid axis requires
-    // the start id, so a recycled pid can never impersonate the
-    // predecessor.
+    // The predecessor identity axes that cannot collide by accident: the
+    // owner token (a fresh UUID per boot) and the full process identity
+    // (pid AND start id, so a recycled pid can never impersonate the
+    // predecessor). The TS generation field is deliberately NOT an axis
+    // here: this daemon's `supervisorGeneration` is `sup:<pid>`-derived
+    // (supervisor/clients.rs), so a valid successor booting onto the
+    // predecessor's recycled pid carries the same generation string and
+    // would be wrongly refused - a generation equal by pid-reuse is not
+    // predecessor identity (the spawn pin below proves the child, and
+    // the start id distinguishes the processes).
     if let Some(predecessor) = predecessor {
-        let same_generation = predecessor
-            .supervisor_generation
-            .as_ref()
-            .is_some_and(|expected| successor.supervisor_generation.as_ref() == Some(expected));
         let same_owner_token = predecessor
             .supervisor_owner_token
             .as_ref()
@@ -168,7 +170,7 @@ pub fn validate_replacement_daemon(
                 .process_start_id
                 .as_ref()
                 .is_some_and(|expected| successor.process_start_id.as_ref() == Some(expected));
-        if same_generation || same_owner_token || same_process {
+        if same_owner_token || same_process {
             bail!(
                 "Replacement daemon on {} still has the predecessor identity",
                 socket_path.display()
@@ -261,8 +263,14 @@ pub async fn wait_for_hello(
 ) -> Option<Value> {
     let deadline = Instant::now() + Duration::from_millis(budget_ms.max(1));
     loop {
-        if let Ok((client, _events)) =
-            pa_tui::daemon_client::DaemonClient::connect(socket_path).await
+        // The handshake attempt is bounded by the REMAINING budget: a
+        // socket that accepts but never greets cannot stretch the wait
+        // past budget_ms by its own handshake timeout.
+        if let Ok(Ok((client, _events))) = tokio::time::timeout(
+            deadline.saturating_duration_since(Instant::now()),
+            pa_tui::daemon_client::DaemonClient::connect(socket_path),
+        )
+        .await
         {
             let hello = client.hello().clone();
             client.close();

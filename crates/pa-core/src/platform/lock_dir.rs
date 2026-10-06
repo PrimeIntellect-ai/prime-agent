@@ -642,7 +642,7 @@ impl LockDir {
         // replaces. The gate's flock attempt resolves the path's CURRENT
         // occupant, and a flock-free incumbent cannot GAIN a live holder
         // in the gate-to-park window (its holder is dead - permanently).
-        #[cfg(unix)]
+        #[cfg(target_os = "linux")]
         {
             if Self::dir_flock_held(path) {
                 return Err(io::Error::new(
@@ -660,7 +660,7 @@ impl LockDir {
         // can replace the incumbent (every rust takeover gates on this
         // flock), so the park below captures exactly the directory the
         // claim verified.
-        #[cfg(unix)]
+        #[cfg(target_os = "linux")]
         let _claim = match Self::claim_occupant(path, stale_after) {
             Ok(claim) => claim,
             // A live occupant under the claim: contention.
@@ -756,52 +756,76 @@ impl LockDir {
                     format!("lock path not encodable: {}", path.display()),
                 )
             })?;
-            let result = unsafe {
-                libc::renameat2(
-                    libc::AT_FDCWD,
-                    parked_c.as_ptr(),
-                    libc::AT_FDCWD,
-                    path_c.as_ptr(),
-                    RENAME_NOREPLACE,
-                )
-            };
-            if result == 0 {
-                return Ok(());
-            }
-            let error = io::Error::last_os_error();
-            match error.kind() {
-                // The path was re-taken while it was vacated: the park is
-                // abandoned for the taker's fresh lock, never clobbered.
-                io::ErrorKind::AlreadyExists | io::ErrorKind::NotFound => {
-                    tracing::warn!(
-                        "abandoned a parked lock directory beside {} (the path was re-taken)",
-                        path.display()
-                    );
-                    Ok(())
+            // A re-taken path is usually a guard hold in flight (the
+            // guarded actions are read-modify-write cycles measured in
+            // microseconds): the restore retries for a short bounded
+            // window before the park is abandoned, so a live displaced
+            // lock almost always returns to the path. The abandonment
+            // (the displaced holder's next mtime write fails and it
+            // aborts, fail-closed) stays the last resort.
+            let mut attempts = 10;
+            loop {
+                let result = unsafe {
+                    libc::renameat2(
+                        libc::AT_FDCWD,
+                        parked_c.as_ptr(),
+                        libc::AT_FDCWD,
+                        path_c.as_ptr(),
+                        RENAME_NOREPLACE,
+                    )
+                };
+                if result == 0 {
+                    return Ok(());
                 }
-                _ => Err(error),
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::AlreadyExists && attempts > 0 {
+                    attempts -= 1;
+                    std::thread::sleep(Duration::from_millis(20));
+                    continue;
+                }
+                return match error.kind() {
+                    // The park vanished (a concurrent cleanup): done.
+                    io::ErrorKind::NotFound => Ok(()),
+                    _ => Err(error),
+                };
             }
         }
         #[cfg(not(target_os = "linux"))]
         {
-            if fs::symlink_metadata(path).is_ok() {
-                tracing::warn!(
-                    "abandoned a parked lock directory beside {} (the path was re-taken)",
-                    path.display()
-                );
-                return Ok(());
-            }
-            match fs::rename(parked, path) {
-                Ok(()) => Ok(()),
-                // The path was taken in the stat-rename window: abandon.
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                    tracing::warn!(
-                        "abandoned a parked lock directory beside {} (the path was re-taken)",
-                        path.display()
-                    );
-                    Ok(())
+            // The disclosed stat-then-rename window: a re-taken path is
+            // usually a hold in flight, so the restore retries for a short
+            // bounded window (the same budget as the linux arm) before
+            // the park is abandoned.
+            let mut attempts = 10;
+            loop {
+                if fs::symlink_metadata(path).is_ok() {
+                    if attempts == 0 {
+                        tracing::warn!(
+                            "abandoned a parked lock directory beside {} (the path stayed re-taken)",
+                            path.display()
+                        );
+                        return Ok(());
+                    }
+                    attempts -= 1;
+                    std::thread::sleep(Duration::from_millis(20));
+                    continue;
                 }
-                Err(error) => Err(error),
+                match fs::rename(parked, path) {
+                    Ok(()) => return Ok(()),
+                    // The path was taken in the stat-rename window: retry.
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                        if attempts == 0 {
+                            tracing::warn!(
+                                "abandoned a parked lock directory beside {} (the path stayed re-taken)",
+                                path.display()
+                            );
+                            return Ok(());
+                        }
+                        attempts -= 1;
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(error) => return Err(error),
+                }
             }
         }
     }
@@ -820,7 +844,7 @@ impl LockDir {
     /// steps) restarts the loop too - it exits with the vanished
     /// occupant's retry. The fd is the claim's lifetime: dropped when
     /// the reclaim returns.
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     fn claim_occupant(path: &Path, stale_after: Duration) -> io::Result<std::os::fd::OwnedFd> {
         use std::os::fd::AsRawFd;
         use std::os::unix::fs::MetadataExt;
@@ -879,7 +903,7 @@ impl LockDir {
     /// the lock DIRECTORY (the probe `flock` [`LockDir::witness_fd`] takes
     /// at acquisition). An unopenable path means no witness holder: the
     /// stale judgment alone decides.
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     fn dir_flock_held(path: &Path) -> bool {
         use std::os::unix::io::AsRawFd;
         let Ok(dir) = fs::File::open(path) else {
@@ -1052,7 +1076,7 @@ impl LockDir {
         // guard just refreshed away (proper-lockfile's unlock runs the
         // same check-then-remove against the same window).
         let still_ours = mtime_ours && !self.is_stolen();
-        #[cfg(unix)]
+        #[cfg(target_os = "linux")]
         let still_ours = match self.witness.as_ref() {
             Some(_) => still_ours && Self::was_witness_held(&self.path),
             // An unwitnessed guard has no kernel truth to consult - the
@@ -1077,7 +1101,7 @@ impl LockDir {
     /// that reuses the inode number and repeats the same-second probe is
     /// still a different kernel object, and the attempt on it succeeds,
     /// briefly taking and releasing the foreign flock it acquired).
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     fn was_witness_held(path: &Path) -> bool {
         Self::dir_flock_held(path)
     }
