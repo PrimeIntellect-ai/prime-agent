@@ -1729,6 +1729,48 @@ fn acp_autonomous_disabled_reports_end_turn_without_accounting() {
 }
 
 #[test]
+fn acp_truncated_final_response_maps_to_max_tokens_stop_reason() {
+    // Issue #3363: a turn whose final assistant message stopped at the
+    // provider's output-token cap resolves with max_tokens, not end_turn;
+    // and the stop reason is per-turn — the following /compact prompt runs
+    // no model call (the faux session is short, so it skips), so it must
+    // not inherit the truncated turn's length.
+    let script = json!({
+        "engine": "faux",
+        "responses": [{ "text": "half an answer", "stopReason": "length" }],
+    });
+    let mut client = AcpChild::spawn(&["--mode", "acp", "--no-session"], &script);
+    let init = client.request("initialize", &initialize_params());
+    let _ = client.wait_response(init, TIMEOUT);
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
+    let (new_response, _) = client.wait_response(new, TIMEOUT);
+    let session_id = new_response["result"]["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let prompt = client.request(
+        "session/prompt",
+        &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "write a long essay" }] }),
+    );
+    let (prompt_response, _) = client.wait_response(prompt, TIMEOUT);
+    assert_eq!(
+        prompt_response["result"],
+        json!({ "stopReason": "max_tokens" })
+    );
+
+    let slash = client.request(
+        "session/prompt",
+        &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "/compact" }] }),
+    );
+    let (slash_response, _) = client.wait_response(slash, TIMEOUT);
+    assert_eq!(
+        slash_response["result"],
+        json!({ "stopReason": "end_turn" })
+    );
+}
+
+#[test]
 fn acp_daemon_attached_reports_autonomous_accounting_and_limit_stop_reason() {
     // An autonomous run with --max-turns 1: the completion envelope carries
     // the _meta.autonomous accounting (TS waitForHeadlessCompletion), the
