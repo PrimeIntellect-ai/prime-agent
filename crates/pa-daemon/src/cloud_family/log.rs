@@ -257,7 +257,7 @@ impl FamilyRequestLog {
             // A crash truncated the final append: drop it and repair the
             // file to the last complete record.
             lines.pop();
-            self.rewrite(lines.iter().map(|line| (*line).to_string()).collect())?;
+            self.rewrite(&lines)?;
         }
         for (index, line) in lines.iter().enumerate() {
             let record: Value = serde_json::from_str(line)
@@ -287,14 +287,14 @@ impl FamilyRequestLog {
 
     /// Rewrite the log with the given canonical envelope lines, durably
     /// (temp file, fsync, rename), repairing a truncated tail in place.
-    fn rewrite(&mut self, lines: Vec<String>) -> Result<()> {
+    fn rewrite(&mut self, lines: &[&str]) -> Result<()> {
         let parent = self.pinned_parent()?;
         let temp = format!("{EVENTS_FILE}.tmp-{}", std::process::id());
         {
             let file = pa_core::platform::private_fs::create_replace_at(parent, &temp)
                 .with_context(|| format!("create {temp}"))?;
             let mut writer = BufWriter::new(file);
-            for line in &lines {
+            for line in lines {
                 writer.write_all(line.as_bytes())?;
                 writer.write_all(b"\n")?;
             }

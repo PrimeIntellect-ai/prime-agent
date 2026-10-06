@@ -29,7 +29,6 @@
 //! uses, and a receipt exists only after the target admitted the
 //! message.
 
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use pa_types::daemon::cloud::{CloudAgentMessageReceipt, CloudFamilyRow, CloudFamilyRowStatus};
@@ -65,10 +64,10 @@ impl LocalFamilyDelivery {
     /// # Errors
     ///
     /// Returns an error when the inbox journal cannot be opened.
-    pub fn new(supervisor: Arc<Supervisor>, inbox_path: PathBuf) -> anyhow::Result<Self> {
+    pub fn new(supervisor: Arc<Supervisor>, inbox_path: &Path) -> anyhow::Result<Self> {
         Ok(Self {
             supervisor,
-            inbox: Mutex::new(CloudInboxLog::open(&inbox_path)?),
+            inbox: Mutex::new(CloudInboxLog::open(inbox_path)?),
         })
     }
 
@@ -318,6 +317,7 @@ impl CloudFamilyDelivery for LocalFamilyDelivery {
     /// same depth). A session without a parent edge answers its own row
     /// alone (TS returns early); a resolution failure degrades to empty
     /// rows.
+    #[allow(clippy::unused_async_trait_impl)] // The seam stays async (TS parity); the local roster resolves synchronously today.
     async fn family_roster(
         &self,
         for_remote_session_id: &str,

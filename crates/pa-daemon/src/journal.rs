@@ -747,7 +747,7 @@ const CHECKPOINT_TRANSACTION_VERSION: u32 = 1;
 fn checkpoint_transaction_digest(
     verdict: &Option<WorkerRecoveryRecord>,
     snapshot: &WorkerQueueSnapshotRecord,
-    cloud_admission: &Option<CloudInboxAdmissionRecord>,
+    cloud_admission: Option<&CloudInboxAdmissionRecord>,
 ) -> Result<String> {
     let payload = serde_json::json!({
         "verdict": verdict,
@@ -981,7 +981,7 @@ fn classify_journal_line(line: &str) -> ScannedLine {
             if checkpoint_transaction_digest(
                 &transaction.verdict,
                 &transaction.snapshot,
-                &transaction.cloud_admission,
+                transaction.cloud_admission.as_ref(),
             )
             .is_ok_and(|digest| digest == transaction.digest)
             {
@@ -1610,7 +1610,7 @@ impl WorkerRecoveryJournal {
                 verdict: record.clone(),
                 snapshot: snapshot.clone(),
                 cloud_admission: admission.clone(),
-                digest: checkpoint_transaction_digest(&record, &snapshot, &admission)?,
+                digest: checkpoint_transaction_digest(&record, &snapshot, admission.as_ref())?,
             };
             self.append_cloud_transaction(&transaction)?;
         } else {
