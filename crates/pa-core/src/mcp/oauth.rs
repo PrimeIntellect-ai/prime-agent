@@ -304,7 +304,10 @@ pub async fn mcp_login(
         &ResourceBinding {
             resource: discovery.resource.clone(),
             issuer: discovery.issuer.clone(),
-            audience_mode: discovery.audience_mode.map(AudienceMode::as_str).map(str::to_string),
+            audience_mode: discovery
+                .audience_mode
+                .map(AudienceMode::as_str)
+                .map(str::to_string),
         },
         None,
     ))

@@ -729,7 +729,8 @@ mod tests {
         .to_string();
         assert_eq!(
             error,
-            "Protected-resource metadata resource does not match the configured endpoint              https://mcp.example/mcp or its origin"
+            "Protected-resource metadata resource does not match the configured endpoint \
+             https://mcp.example/mcp or its origin"
         );
         // A same-origin resource with a different path fails closed too.
         let error = resource_metadata(
@@ -743,7 +744,8 @@ mod tests {
         .to_string();
         assert_eq!(
             error,
-            "Protected-resource metadata resource does not match the configured endpoint              https://mcp.example/mcp or its origin"
+            "Protected-resource metadata resource does not match the configured endpoint \
+             https://mcp.example/mcp or its origin"
         );
         let error = resource_metadata(
             &serde_json::json!({ "resource": "https://mcp.example/mcp" }),
