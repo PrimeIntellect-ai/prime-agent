@@ -1,19 +1,15 @@
-//! The worker-handshake boundary oracles (the launch-storm wedge class,
-//! 2026-09-28): the handshake owns its channel privately until the auth
-//! answer installs it for routing — the TS `pendingClient`/`worker.client`
-//! boundary. Split from `tests.rs` at the file-size advisory (the worker
-//! test mass precedent: one family per module).
+//! The worker-connection boundary oracles: the handshake owns its channel
+//! privately until the auth answer installs it for routing — the TS
+//! `pendingClient`/`worker.client` boundary — and a lost connection fails
+//! its in-flight routes (one family per module).
 
 use super::*;
 
-/// A worker socket the test drives by hand: it stands in for the real
-/// worker process on the far side of `connect_worker`'s connection, so
-/// the oracles can hold the handshake at exact points and read exactly
-/// what the supervisor put on the wire.
+/// A worker socket the test drives by hand: it stands in for the real worker on the
+/// far side of `connect_worker`, so the oracles hold the handshake at exact points.
 struct FakeWorkerSocket {
-    // The listener is held (never used again) so the bound socket path
-    // stays owned by the test for the connection's whole lifetime; the
-    // listener itself is never read after the accept.
+    // The listener is held so the bound socket path stays owned by the
+    // test for the connection's whole lifetime.
     #[allow(dead_code)]
     listener: Box<dyn pa_types::platform::transport::TransportListener>,
     read_half: Box<dyn pa_types::platform::transport::AsyncReadHalf>,
@@ -78,12 +74,6 @@ async fn answer_supervisor_frame(socket: &mut FakeWorkerSocket, request_id: &str
     .expect("write the auth answer");
 }
 
-/// The handshake owns its channel privately until the auth answer proves
-/// the connection (the TS `pendingClient` boundary): while the handshake
-/// is in flight the resident has NO installed command channel — a
-/// supervisor route that fires in that window fails fast with the
-/// retryable not-connected error instead of racing the handshake onto the
-/// unauthenticated connection.
 #[tokio::test]
 async fn handshake_channel_stays_private_until_auth_answers() {
     let dir = std::env::temp_dir().join(format!("pa-handshake-{}", uuid::Uuid::new_v4()));
@@ -160,14 +150,92 @@ async fn handshake_channel_stays_private_until_auth_answers() {
     );
 }
 
-/// The launch-storm wedge oracle (2026-09-28): a registration that lands
-/// mid-handshake must not kill the launch. Pre-fix, the registration
-/// path's roster refresh routed `get_state` onto the same unauthenticated
-/// connection the launch's `worker_auth` was handshakeing on; the worker
-/// answered the refresh as the failed unauthenticated FIRST command and
-/// closed the connection, stranding the handshake for the whole connect
-/// budget — a fully-healthy worker failing its launch "did not come up in
-/// time" (a warm ~12.5% rate on the four-launch e2e storm). Served-path:
+/// A tombstoned stop's entire silent-peer authentication uses the strict
+/// one-second budget, closes both transport halves, and drops its pending slot.
+#[tokio::test]
+async fn silent_peer_stop_auth_closes_socket_without_leaving_pending() {
+    run_silent_peer_auth(false).await;
+}
+
+#[tokio::test]
+async fn cancelled_auth_closes_socket_without_leaving_pending() {
+    run_silent_peer_auth(true).await;
+}
+
+async fn run_silent_peer_auth(cancel_connect: bool) {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let socket_path = dir.path().join("worker.sock");
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let supervisor = Arc::new(
+        Supervisor::new(SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir,
+        })
+        .expect("supervisor"),
+    );
+    let descriptor: DaemonWorkerDescriptor = serde_json::from_value(json!({
+        "version": 2, "workerId": "w-silent", "pid": 4242,
+        "socketPath": socket_path.to_string_lossy(),
+        "recoveryJournalPath": "/tmp/none.jsonl", "supervisorSocketPath": "/tmp/none.sock",
+        "authenticationToken": "silent-token", "rootActiveSessionId": "none",
+        "createdAt": "2026-09-23T00:00:00Z", "updatedAt": "2026-09-23T00:00:00Z",
+        "lifecycle": "ready", "createCommand": {}, "consecutiveFailures": 0,
+    }))
+    .expect("descriptor");
+    let resident = ResidentWorker::new(
+        "w-silent".to_string(),
+        descriptor,
+        dir.path().join("w-silent.json"),
+    );
+    let listener = bind_fake_worker(&socket_path).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(150);
+    let connect = {
+        let supervisor = Arc::clone(&supervisor);
+        let resident = Arc::clone(&resident);
+        tokio::spawn(async move {
+            supervisor
+                .connect_worker_for_stop(&resident, deadline)
+                .await
+        })
+    };
+    let mut fake = accept_fake_worker(listener).await;
+    let frame = read_supervisor_frame(&mut fake).await;
+    assert_eq!(frame.header.get("commandType"), Some(&json!("worker_auth")));
+    if cancel_connect {
+        connect.abort();
+        assert!(connect.await.is_err(), "connect future must be cancelled");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !resident.pending.lock().await.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelled auth pending cleanup");
+    } else {
+        let result = tokio::time::timeout(Duration::from_secs(1), connect)
+            .await
+            .expect("strict deadline")
+            .expect("join");
+        assert!(result.is_err(), "silent peer must time out");
+    }
+    assert!(
+        resident.pending.lock().await.is_empty(),
+        "auth pending slot must be cleared"
+    );
+    let mut reader = PrivateFrameReader::new(&mut fake.read_half, DEFAULT_PRIVATE_FRAME_LIMITS);
+    let closed = tokio::time::timeout(Duration::from_secs(1), reader.read_frame())
+        .await
+        .expect("peer must close promptly")
+        .expect("clean EOF");
+    assert!(closed.is_none(), "failed auth must close the socket");
+}
+
+/// A registration that lands mid-handshake must not kill the launch:
+/// the registration's roster refresh routes onto its own authenticated
+/// channel once the handshake installs it, while the handshake's
+/// `worker_auth` keeps the unauthenticated connection to itself until
+/// the answer arrives. Served-path:
 /// the wire carries EXACTLY the auth frame (no route rides the private
 /// channel), the registration itself succeeds, and the launch completes.
 #[tokio::test]
@@ -223,8 +291,7 @@ async fn a_mid_handshake_registration_cannot_kill_the_handshake() {
         .expect("request id")
         .to_string();
 
-    // The registration lands while the handshake is still in flight — the
-    // exact interleave that wedged the launch pre-fix.
+    // The registration lands while the handshake is still in flight.
     let command = DaemonCommand::WorkerRegister {
         id: None,
         active_session_id: "w-wedge".to_string(),
@@ -247,9 +314,8 @@ async fn a_mid_handshake_registration_cannot_kill_the_handshake() {
         "the registration installs no channel of its own"
     );
 
-    // SERVED-PATH: the wire carries exactly the handshake — the
-    // registration's roster refresh found no channel and skipped, so no
-    // `get_state` raced the auth frame.
+    // SERVED-PATH: the wire carries exactly the handshake — the refresh found no channel,
+    // so no `get_state` raced the auth frame.
     let raced =
         tokio::time::timeout(Duration::from_millis(100), read_supervisor_frame(&mut fake)).await;
     assert!(
@@ -269,11 +335,11 @@ async fn a_mid_handshake_registration_cannot_kill_the_handshake() {
     );
 }
 
-/// The install guard's TOCTOU pin (the Macroscope HIGH finding on the
-/// first PR head): a stale connect that passed its epoch check before a
-/// newer connection installed must never overwrite the newer channel —
-/// the recheck happens under the channel lock, so the stale install is
-/// dropped and the newer channel stays routable.
+/// The install guard's TOCTOU pin: a stale connect that passed its
+/// epoch check before a newer connection installed must never
+/// overwrite the newer channel — the recheck happens under the channel
+/// lock, so the stale install is dropped and the newer channel stays
+/// routable.
 #[tokio::test]
 async fn a_stale_epoch_never_overwrites_the_installed_channel() {
     let dir = std::env::temp_dir().join(format!("pa-install-{}", uuid::Uuid::new_v4()));
@@ -304,10 +370,8 @@ async fn a_stale_epoch_never_overwrites_the_installed_channel() {
     let (stale_tx, _stale_rx) =
         mpsc::channel::<WorkerRequest>(crate::backpressure::WORKER_INFLIGHT_CAPACITY);
 
-    // The stale epoch is a real issued one: the superseded connect went
-    // live first, before the newer connection superseded it (an epoch-0
-    // oracle would also pass a guard that only rejects the never-issued
-    // epoch, leaving the live stale interleaving unexercised).
+    // The stale epoch is a real issued one (an epoch-0 oracle would pass a guard that
+    // only rejects the never-issued epoch, leaving the live stale interleaving unexercised).
     let stale_epoch = resident.note_connection_live();
     // The newer connection installs first; the stale connect's epoch is
     // now superseded.
@@ -320,9 +384,8 @@ async fn a_stale_epoch_never_overwrites_the_installed_channel() {
         "the newer connection installs"
     );
 
-    // The stale connect installs last (the TOCTOU window: its pre-lock
-    // epoch check passed before the newer install) — under the lock the
-    // recheck drops it, and the newer channel stays the routable one.
+    // The stale connect installs last (the TOCTOU window: its pre-lock check passed
+    // before the newer install) — under the lock the recheck drops it.
     resident
         .install_command_channel(stale_epoch, stale_tx)
         .await;
@@ -346,4 +409,96 @@ async fn a_stale_epoch_never_overwrites_the_installed_channel() {
         .expect("the newer channel answers")
         .expect("the channel stays open");
     assert_eq!(frame.command_type, "get_state");
+}
+
+/// A lost worker connection fails its in-flight routes right away (TS
+/// `notifyClosed` -> `rejectAll`): the reader drains the connection's reply
+/// slots when the socket ends, so a route waiting on the worker's answer
+/// cannot outlive the connection it was sent on.
+#[tokio::test]
+async fn a_lost_worker_connection_fails_its_in_flight_route() {
+    let dir = std::env::temp_dir().join(format!("pa-lost-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let socket_path = dir.join("worker.sock");
+    let agent_dir = dir.join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let supervisor = Arc::new(
+        Supervisor::new(SupervisorOptions {
+            socket_path: dir.join("daemon.sock"),
+            agent_dir,
+        })
+        .expect("supervisor"),
+    );
+    let descriptor: DaemonWorkerDescriptor = serde_json::from_value(serde_json::json!({
+        "version": 2,
+        "workerId": "w-lost",
+        "pid": 4242,
+        "socketPath": socket_path.to_string_lossy(),
+        "recoveryJournalPath": "/tmp/none.jsonl",
+        "supervisorSocketPath": "/tmp/none.sock",
+        "authenticationToken": "lost-token",
+        "rootActiveSessionId": "none",
+        "createdAt": "2026-09-23T00:00:00Z",
+        "updatedAt": "2026-09-23T00:00:00Z",
+        "lifecycle": "ready",
+        "createCommand": {},
+        "consecutiveFailures": 0,
+    }))
+    .expect("descriptor");
+    let resident = ResidentWorker::new("w-lost".to_string(), descriptor, dir.join("w-lost.json"));
+    supervisor.registry.insert(Arc::clone(&resident)).await;
+
+    let listener = bind_fake_worker(&socket_path).await;
+    let connect = {
+        let supervisor = Arc::clone(&supervisor);
+        let resident = Arc::clone(&resident);
+        tokio::spawn(async move {
+            supervisor
+                .connect_worker(&resident, worker_connect_deadline())
+                .await
+        })
+    };
+    let mut fake = accept_fake_worker(listener).await;
+    let frame = read_supervisor_frame(&mut fake).await;
+    assert_eq!(frame.header.get("commandType"), Some(&json!("worker_auth")));
+    let request_id = frame
+        .header
+        .get("requestId")
+        .and_then(Value::as_str)
+        .expect("request id")
+        .to_string();
+    answer_supervisor_frame(&mut fake, &request_id, "worker_auth").await;
+    connect
+        .await
+        .expect("the connect task lives")
+        .expect("the handshake completes");
+
+    // A turn-long route in flight on the live connection.
+    let route = {
+        let supervisor = Arc::clone(&supervisor);
+        let resident = Arc::clone(&resident);
+        tokio::spawn(async move {
+            supervisor
+                .route_command_typed(
+                    &resident,
+                    "prompt_and_wait",
+                    json!({ "activeSessionId": "w-lost", "message": "go" }),
+                    super::routing::WORKER_REQUEST_TIMEOUT_MS,
+                    RouteAdmission::ClientRequest,
+                )
+                .await
+        })
+    };
+    let frame = read_supervisor_frame(&mut fake).await;
+    assert_eq!(
+        frame.header.get("commandType"),
+        Some(&json!("prompt_and_wait"))
+    );
+    drop(fake);
+    let error = tokio::time::timeout(Duration::from_secs(5), route)
+        .await
+        .expect("the lost connection fails the in-flight route")
+        .expect("the route task lives")
+        .expect_err("the drained route fails");
+    assert_eq!(error.to_string(), super::routing::WORKER_SOCKET_CLOSED);
 }

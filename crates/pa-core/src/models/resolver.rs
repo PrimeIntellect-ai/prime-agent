@@ -1,4 +1,4 @@
-//! Model resolution, scoping, and CLI selection. Port of model-resolver.ts.
+//! Model resolution, scoping, and CLI selection.
 
 use pa_agent::types::ThinkingLevel;
 use pa_types::ai::Model;
@@ -7,7 +7,6 @@ use super::prime_inference::is_private_prime_inference_model;
 
 pub const PRIME_INFERENCE_DEFAULT_MODEL_ID: &str = "z-ai/glm-5.3";
 
-/// Default model ids per provider (TS `defaultModelPerProvider`).
 pub fn default_model_per_provider(provider: &str) -> Option<&'static str> {
     Some(match provider {
         "amazon-bedrock" => "us.anthropic.claude-opus-4-6-v1",
@@ -347,7 +346,6 @@ fn models_equal(a: &Model, b: &Model) -> bool {
     a.provider == b.provider && a.id == b.id
 }
 
-/// Result of CLI model resolution.
 #[derive(Debug, Default)]
 pub struct ResolveCliModelResult {
     pub model: Option<Model>,
@@ -504,14 +502,8 @@ pub fn resolve_cli_model(
 
 /// Provider-failover candidates for `current`: the other providers serving
 /// the same model id, in catalog order starting after `current`'s provider,
-/// one per provider.
-///
-/// The list is what the provider-failover loop walks when the current
-/// provider exhausts its retries; the caller passes the auth-configured
-/// catalog (`ModelRegistry::get_available`) so unconfigured providers never
-/// surprise the user with a switch. Rotation keeps the chain stable for
-/// every starting provider: with catalog order A, B, C the candidates for
-/// B are C then A.
+/// one per provider. The caller passes the auth-configured catalog so
+/// unconfigured providers never surprise the user with a switch.
 #[must_use]
 pub fn failover_candidates(current: &Model, available: &[Model]) -> Vec<Model> {
     // Same model id, other providers: first catalog entry wins per provider.
@@ -527,8 +519,7 @@ pub fn failover_candidates(current: &Model, available: &[Model]) -> Vec<Model> {
             candidates.push(model);
         }
     }
-    // Rotate so the provider after `current` (by catalog position) leads:
-    // with catalog order A, B, C the candidates for B are C then A.
+    // Rotate so the provider after `current` (by catalog position) leads.
     let current_position = available
         .iter()
         .position(|model| model.provider == current.provider);
@@ -552,15 +543,13 @@ pub fn failover_candidates(current: &Model, available: &[Model]) -> Vec<Model> {
 /// the `--models`-scope handling from `prepareSessionOptions`).
 #[derive(Clone, Copy)]
 pub struct InitialModelOptions<'a> {
-    /// Explicit `--provider` flag.
     pub cli_provider: Option<&'a str>,
     /// Explicit `--model` flag (a `provider/model` reference is inferred).
     pub cli_model: Option<&'a str>,
     /// Models resolved from `--models` patterns (against the available
     /// catalog, TS `resolveModelScope`).
     pub scoped_models: &'a [ScopedModel],
-    /// A continued/resumed session skips the scoped-model step (TS
-    /// `isContinuing`).
+    /// A continued/resumed session skips the scoped-model step (TS `isContinuing`).
     pub is_continuing: bool,
     /// Saved default provider (settings `defaultProvider`).
     pub default_provider: Option<&'a str>,
@@ -568,7 +557,6 @@ pub struct InitialModelOptions<'a> {
     pub default_model_id: Option<&'a str>,
     /// The full catalog (custom + built-in, auth not filtered).
     pub all_models: &'a [Model],
-    /// The auth-configured catalog (TS `refreshAvailableModels`).
     pub available_models: &'a [Model],
 }
 
@@ -662,9 +650,8 @@ mod tests {
         let mut catalog = catalog();
         catalog.push(model("zai", "z-ai/glm-5.3", "GLM via zai"));
         catalog.push(model("openrouter", "z-ai/glm-5.3", "GLM via openrouter"));
-        // The prime-inference entry (provider at catalog position 2)
-        // fails over to the providers after it in catalog order
-        // (openrouter's provider first appears at position 3, zai at 4).
+        // The prime-inference entry (catalog position 2) fails over to the
+        // providers after it (openrouter first at position 3, zai at 4).
         let current = model("prime-inference", "z-ai/glm-5.3", "GLM");
         let candidates = failover_candidates(&current, &catalog);
         assert_eq!(
@@ -674,7 +661,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["openrouter", "zai"]
         );
-        // A later provider wraps to the front of the catalog.
         let current = model("openrouter", "z-ai/glm-5.3", "GLM");
         let candidates = failover_candidates(&current, &catalog);
         assert_eq!(
@@ -684,7 +670,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["zai", "prime-inference"]
         );
-        // No other provider serves the model: no candidates, no failover.
         let current = model("anthropic", "claude-sonnet-4-5", "Sonnet");
         assert!(failover_candidates(&current, &catalog).is_empty());
         // The current provider itself is never a candidate, even when the
@@ -699,7 +684,6 @@ mod tests {
         let catalog = catalog();
         let exact = find_exact_model_reference_match("anthropic/claude-sonnet-4-5", &catalog);
         assert_eq!(exact.map(|m| m.id.as_str()), Some("claude-sonnet-4-5"));
-        // Bare id matches uniquely.
         assert_eq!(
             fuzzy_exact("claude-sonnet", &catalog).map(|m| m.id.as_str()),
             Some("claude-sonnet-4-5")
@@ -741,7 +725,6 @@ mod tests {
         assert!(unknown.error.unwrap().contains("Unknown provider"));
 
         let missing = resolve_cli_model(Some("anthropic"), "missing-model", &catalog);
-        // Falls back to the provider template with a warning.
         assert_eq!(
             missing.model.as_ref().map(|m| m.id.as_str()),
             Some("missing-model")
@@ -775,10 +758,9 @@ mod tests {
         assert_eq!(fallback.cost.output.0, 0.0);
     }
 
-    /// Port of the TS regression (#2459): Prime Inference rejects
-    /// `enable_thinking` with a 400, so a fallback model — public or
-    /// private — must never inherit the zai thinking format from its
-    /// template.
+    /// TS regression (#2459): Prime Inference rejects `enable_thinking`
+    /// with a 400, so a fallback model — public or private — must never
+    /// inherit the zai thinking format from its template.
     #[test]
     fn fallback_models_never_inherit_the_zai_thinking_format() {
         use pa_ai::types::ModelExt;
@@ -861,7 +843,6 @@ mod tests {
     #[test]
     fn initial_model_falls_back_to_featured_then_first_available() {
         let catalog = catalog();
-        // The featured default (prime-inference glm-5.3) wins when present.
         let options = InitialModelOptions {
             cli_provider: None,
             cli_model: None,
@@ -875,7 +856,6 @@ mod tests {
         let model = find_initial_model(&options).expect("featured default resolves");
         assert_eq!(model.provider, "prime-inference");
         assert_eq!(model.id, "z-ai/glm-5.3");
-        // Without it, the first available model takes over.
         let available: Vec<Model> = catalog
             .iter()
             .filter(|model| model.provider == "anthropic")
@@ -888,7 +868,6 @@ mod tests {
         let model = find_initial_model(&fallback).expect("first available resolves");
         assert_eq!(model.provider, "anthropic");
         assert_eq!(model.id, "claude-sonnet-4-5");
-        // An empty available catalog resolves to nothing.
         let empty = InitialModelOptions {
             available_models: &[],
             ..options
@@ -915,9 +894,7 @@ mod tests {
         };
         let model = find_initial_model(&options).expect("scoped model resolves");
         assert_eq!(model.provider, "prime-inference");
-        // The saved default is in scope and wins over scoped order.
         assert_eq!(model.id, "z-ai/glm-5.3");
-        // A continued session skips the scope entirely.
         let continued = InitialModelOptions {
             is_continuing: true,
             ..options

@@ -1,44 +1,37 @@
-//! The one process-exit terminal restore.
+//! The one process-exit terminal restore: every route that ends the TUI
+//! surface funnels through here. The contract is the whole-terminal
+//! invariant set, in one place:
 //!
-//! Every route that ends the TUI surface funnels through this module: the
-//! deliberate teardown tails (`Renderer::finish`'s parity exit in
-//! `interactive.rs`/`agents_view.rs`), the config selector and the replay
-//! surface exits, the force-quit watchdog, the fatal error return, and a
-//! panic unwind. The contract is the whole-terminal invariant set, in one
-//! place:
-//!
-//! 1. the kitty probe stands down first ([`crate::enhanced_keys::release_for_exit`])
-//!    — an answer landing after the pop would re-arm CSI-u reporting on
-//!    the parent shell (the "escape codes while typing" leak);
-//! 2. in-flight key releases drain before the modes come off (TS
-//!    `drainInput` before `stop`);
+//! 1. the kitty probe stands down first;
+//! 2. in-flight key releases drain before the modes come off;
 //! 3. mouse tracking, bracketed paste, and the keyboard modes release;
 //! 4. synchronized output and SGR reset — a crash between a frame's
 //!    sync brackets or inside a styled write must not hand the shell a
 //!    terminal holding pending updates or a dangling color;
 //! 5. the alternate screen is left (`?1049l`), the cursor shows;
-//! 6. raw mode ends, and the tty is *verified* cooked — crossterm's
+//! 6. the kitty stack drains its stale levels AFTER the alt-screen
+//!    leave ([`crate::enhanced_keys::pop_stale_levels`]) — a
+//!    mode-counting relay (herdr's pane emulator) discards the
+//!    keyboard-protocol writes made while the pane's alt screen is up,
+//!    so the pair's pop needs a post-leave drain to land on the relay
+//!    (the bare pops are clamped no-ops at spec depth zero);
+//! 7. raw mode ends, and the tty is *verified* cooked — crossterm's
 //!    `disable_raw_mode` restores its first-saved "original" and
 //!    swallows errors, so a poisoned start (a killed previous run left
 //!    the tty raw and crossterm adopted that state as the baseline)
 //!    would silently restore raw ([`pa_types::platform::terminal`]'s
 //!    `stty sane` reconstruction repairs it);
-//! 7. a pending Ctrl+S output stop lifts FIRST — the stop is runtime
+//! 8. a pending Ctrl+S output stop lifts FIRST — the stop is runtime
 //!    state, not termios, and it HOLDS writes: the lift (the IXON-toggle,
 //!    [`pa_types::platform::terminal::restart_output`]) must precede the
 //!    restore's own output writes or the restore itself would hang on a
 //!    stopped tty, and the shell would keep the frozen prompt the
 //!    restore owed it.
 //!
-//! The parity exit (the normal quit) keeps the TS byte order for its
-//! visible exit frame — the inline transcript flush after the
-//! alt-screen leave (`TUI.stop` -> `exitFullscreen`) — and ends through
-//! the same tail here ([`terminal_release_tail`]); the best-effort exits
-//! (force quit, panic, error) run the whole sequence without the flush.
-//! Divergences from the TS stop set are hardening, documented per
-//! sequence: the synchronized-output release and SGR reset (TS emits
-//! neither) and the cooked-tty verification (TS restores its captured
-//! `wasRaw` — the poisoned state).
+//! The parity exit keeps the TS byte order and ends through
+//! [`terminal_release_tail`]; the best-effort exits run the whole sequence
+//! without the flush. Divergences from TS (sync-output release, SGR reset,
+//! cooked-tty verification) are hardening, documented per sequence.
 
 use std::io::{IsTerminal, Stdout, Write};
 
@@ -57,74 +50,63 @@ pub(crate) static RESTORE_ATTEMPTS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
 /// Serializes the tests that read [`RESTORE_ATTEMPTS`]: the counter is
-/// process-global and the test threads run in parallel, so a reader must
-/// hold this lock across its read window (the unwind-guard test's
-/// `catch_unwind` and the interactive error-path test's run both take it).
+/// process-global and the test threads run in parallel.
 #[cfg(test)]
 pub(crate) static TEST_STATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// The one best-effort exit restore: the full sequence above, with no
 /// inline flush. Idempotent — every mode release is gated on its own
-/// process-global flag, so a restore after a deliberate teardown only
-/// re-emits the two unconditional bytes (`?2026l`, SGR reset) and the
-/// cursor show. A no-op off a terminal (headless harness pipes).
+/// process-global flag. A no-op off a terminal.
 pub(crate) fn restore_terminal() {
     #[cfg(test)]
     RESTORE_ATTEMPTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     // The output-stop lift runs FIRST: a tty still holding a Ctrl+S stop
-    // (armed in a cooked window this bracket never re-armed — the suspend
-    // error paths, the force-quit from a wedge) holds every WRITE below,
-    // so the restore itself would hang before reaching the lift. The
-    // lift is two termios writes, no terminal-output writes — it flows.
+    // holds every WRITE below, so the restore itself would hang before
+    // reaching the lift. The lift is termios writes only — it flows.
     pa_types::platform::terminal::restart_output();
     let mut out = std::io::stdout();
     crate::enhanced_keys::release_for_exit();
     // The exit drain below reads the tty through crossterm's global
-    // event-reader lock: the surface's input reader must stand down
-    // first — a parked reader holds that lock indefinitely, and the
-    // drain would starve. A no-op when no reader is alive (headless
-    // runs, pre-session surfaces).
+    // event-reader lock: a parked surface reader would hold it indefinitely
+    // and starve the drain. A no-op when no reader is alive.
     crate::input::request_reader_stop();
     if out.is_terminal() {
         crate::enhanced_keys::drain_for_exit(&mut out);
         let _ = crate::mouse_tracking::disable(&mut out);
         let _ = crate::enhanced_keys::disable(&mut out);
-        // The unconditional leave: the restore is the last line of defense,
-        // so it must not trust the ownership flag (a surface that mounted the
-        // screen outside the module — a partial restore, a desynced flag —
-        // would otherwise keep the alt buffer up past the process death).
+        // The unconditional leave: the restore must not trust the ownership flag
+        // — a desynced flag would keep the alt buffer up past the process death.
         crate::altscreen::force_leave(&mut out);
+        // The stale-level drain: bare kitty pops AFTER the alt-screen
+        // leave, where a mode-counting relay keeps them — the drain's
+        // own pop above, written inside the alt screen, does not (see
+        // enhanced_keys::pop_stale_levels).
+        crate::enhanced_keys::pop_stale_levels(&mut out);
         let _ = out.write_all(SYNC_OUTPUT_OFF);
         let _ = out.write_all(SGR_RESET);
         let _ = crossterm::execute!(out, crossterm::cursor::Show);
     }
     // The raw-mode release and the cooked verification run regardless of a
-    // redirected stdout (`prime-agent >capture`): raw mode lives on the
-    // controlling tty, not on stdout — skipping the termios restoration
-    // there would hand the shell a raw tty with no repair.
+    // redirected stdout: raw mode lives on the controlling tty, not stdout.
     let _ = crossterm::terminal::disable_raw_mode();
     let _ = report_cooked_repair();
     let _ = out.flush();
 }
 
-/// The shared exit tail: synchronized output off, SGR reset, cursor show,
-/// raw mode off, then the cooked-tty verification and repair. The parity
-/// teardown (`Renderer::finish`) runs its TS byte order for the visible
-/// exit frame — the drain, the mode releases, the alt-screen leave with
-/// the inline flush — and ends through here, so every exit path lands in
-/// the same terminal state.
+/// The shared exit tail: synchronized output off, SGR reset, cursor
+/// show, raw mode off, then the cooked-tty verification and repair.
 ///
 /// Each completed write reports exit-path progress: on a slow terminal
-/// these tail writes block behind the flush draining the pty, and the
-/// exit guard's watchdog must read that block-and-complete as movement
-/// (a terminal still draining), not as a stalled shutdown — a forced
-/// exit here would cut the terminal restore in half.
+/// these writes block behind the flush draining the pty, and the exit
+/// guard's watchdog must read that as movement, not a stalled shutdown.
 pub(crate) fn terminal_release_tail(out: &mut Stdout) {
-    // The output-stop lift runs FIRST, before the tail's first write: a
-    // tty still holding a Ctrl+S stop would hold SYNC_OUTPUT_OFF (and
-    // every write after it), hanging the release before the lift could
-    // run — the exact stall the guard's progress windows exist to catch.
     pa_types::platform::terminal::restart_output();
+    // The stale-level drain: bare kitty pops AFTER the alt-screen leave
+    // (this tail runs past `flush_to_main_screen`'s `?1049l`), where a
+    // mode-counting relay keeps them — the teardown's own pop, written
+    // inside the alt screen, never lands on the relay's stack (see
+    // enhanced_keys::pop_stale_levels).
+    crate::enhanced_keys::pop_stale_levels(out);
     let _ = out.write_all(SYNC_OUTPUT_OFF);
     let _ = out.write_all(SGR_RESET);
     let _ = crossterm::execute!(out, crossterm::cursor::Show);
@@ -137,8 +119,7 @@ pub(crate) fn terminal_release_tail(out: &mut Stdout) {
 
 /// The repair notice goes through a fallible write: `eprintln!` panics
 /// when stderr is gone, and a panic inside the unwind guard's restore
-/// would abort the process mid-restore — exactly when the terminal is
-/// half-handed-back.
+/// would abort the process mid-restore.
 fn report_cooked_repair() -> std::io::Result<()> {
     if pa_types::platform::terminal::ensure_cooked_tty()
         == pa_types::platform::terminal::TtyCooked::Repaired
@@ -158,11 +139,9 @@ fn report_cooked_repair() -> std::io::Result<()> {
 /// back whole when the process dies on the unwind.
 ///
 /// A `std::panic::set_hook` cannot carry this contract: tokio catches
-/// task-level panics (the process lives on with a restored-but-live UI —
-/// a cooked tty under a running surface is its own corruption), and the
-/// codebase's `catch_unwind` sites (the fullscreen image-fallback guard)
-/// re-raise rather than swallow, so the unwind crosses this drop exactly
-/// when the surface frame is actually dying.
+/// task-level panics (the process lives on), and the codebase's
+/// `catch_unwind` sites re-raise rather than swallow, so the unwind
+/// crosses this drop exactly when the surface frame is actually dying.
 pub(crate) struct SurfaceRestore;
 
 impl SurfaceRestore {
@@ -176,9 +155,8 @@ impl SurfaceRestore {
 impl Drop for SurfaceRestore {
     fn drop(&mut self) {
         // `std::thread::panicking()` is true exactly while the unwind is
-        // crossing this drop: a normal return stays silent, and a panic
-        // tokio caught (the process lives on) never crosses the surface
-        // frame, so the guard never fires for it.
+        // crossing this drop: a normal return stays silent, and a panic tokio
+        // caught never crosses the surface frame.
         if std::thread::panicking() {
             restore_terminal();
         }

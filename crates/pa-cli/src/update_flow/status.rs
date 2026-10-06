@@ -1,9 +1,7 @@
 //! The coordinator status file (spec §7 `status.json`): every state writes
 //! `{update_id, state, epoch, updated_at}` before acting, atomically
 //! (tmp + rename, 0600), with a 5 s heartbeat so a tailed coordinator can
-//! distinguish "working" from "hung" (TS `DaemonUpdateRestartStatusWriter`
-//! parity; the `epoch` is the spec's monotonic counter that keeps a dying
-//! predecessor's late writes from regressing state).
+//! distinguish "working" from "hung" (the `epoch` blocks late writes).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -16,12 +14,11 @@ use pa_types::daemon::update_flow::{
 use serde_json::json;
 use tokio::sync::Mutex;
 
-/// The status heartbeat interval (TS `COORDINATOR_STATUS_HEARTBEAT_MS`).
+/// The status heartbeat interval.
 pub const STATUS_HEARTBEAT_MS: u64 = 5_000;
 
-/// The telemetry outcome names for terminal states (`complete`, `skipped`,
-/// `aborted`, `failed`; a rollback that ends serving is `complete` on the old
-/// version with the rollback noted in the status message).
+/// The telemetry outcome names for terminal states (a rollback that ends
+/// serving is `complete` on the old version, the rollback in the message).
 pub const UPDATE_TELEMETRY_STATE_NAMES: &[(UpdateState, &str)] = &[
     (UpdateState::Complete, "complete"),
     (UpdateState::Skipped, "skipped"),
@@ -36,10 +33,8 @@ pub struct StatusWriter {
 }
 
 impl StatusWriter {
-    /// A fresh coordinator status at `Acquire` (epoch starts at 1), with
-    /// the initial record on disk before the caller proceeds (TS
-    /// `DaemonUpdateRestartStatusWriter` persists in its constructor, so
-    /// a joining process that tails this path never races the first write).
+    /// A fresh coordinator status at `Acquire` (epoch starts at 1), the initial
+    /// record on disk before the caller proceeds (a joining tail never races it).
     ///
     /// # Errors
     /// Returns an error when the initial status record cannot be persisted.
@@ -51,8 +46,8 @@ impl StatusWriter {
         Ok(writer)
     }
 
-    /// The in-memory `Acquire` record without a disk write (the adoption
-    /// path rewrites the epoch before its single persisting write).
+    /// The in-memory `Acquire` record without a disk write (the adoption path rewrites the epoch
+    /// before its single persisting write).
     fn fresh(path: &Path, update_id: &UpdateId, socket_path: &str) -> Self {
         let now = crate::util_time::now_iso8601();
         let identity = coordinator_identity();
@@ -79,8 +74,8 @@ impl StatusWriter {
     }
 
     /// Adopt the status file of an earlier writer (the CLI staged through
-    /// `Staged`): the epoch continues above the recorded one, so this
-    /// process's writes can never be regressed by the predecessor's.
+    /// `Staged`): the epoch continues above the recorded one, so the
+    /// predecessor's writes can never regress this process's.
     ///
     /// # Errors
     /// Returns an error when the adopted status record cannot be persisted.
@@ -96,8 +91,8 @@ impl StatusWriter {
         Ok(writer)
     }
 
-    /// Move to `state` (a driver bug to move illegally — pa-types owns the
-    /// table) and persist before acting.
+    /// Move to `state` (illegal moves are a driver bug — pa-types owns
+    /// the table) and persist before acting.
     ///
     /// # Errors
     /// Returns an error when the status record cannot be written to disk.
@@ -113,9 +108,8 @@ impl StatusWriter {
         self.persist()
     }
 
-    /// Record the coordinator's status message and persist.
-    ///
     /// # Errors
+    ///
     /// Returns an error when the status record cannot be written to disk.
     pub fn set_message(&mut self, message: Option<String>) -> Result<()> {
         self.status.message = message;
@@ -123,9 +117,8 @@ impl StatusWriter {
         self.persist()
     }
 
-    /// Record the predecessor identity and persist.
-    ///
     /// # Errors
+    ///
     /// Returns an error when the status record cannot be written to disk.
     pub fn set_predecessor(&mut self, identity: UpdateProcessIdentity) -> Result<()> {
         self.status.predecessor = Some(identity);
@@ -133,9 +126,8 @@ impl StatusWriter {
         self.persist()
     }
 
-    /// Record the successor identity and persist.
-    ///
     /// # Errors
+    ///
     /// Returns an error when the status record cannot be written to disk.
     pub fn set_successor(&mut self, identity: UpdateProcessIdentity) -> Result<()> {
         self.status.successor = Some(identity);
@@ -143,9 +135,8 @@ impl StatusWriter {
         self.persist()
     }
 
-    /// Record the session counts and persist.
-    ///
     /// # Errors
+    ///
     /// Returns an error when the status record cannot be written to disk.
     pub fn set_counts(&mut self, counts: UpdateStatusCounts) -> Result<()> {
         self.status.counts = counts;
@@ -153,9 +144,8 @@ impl StatusWriter {
         self.persist()
     }
 
-    /// Record the failure list and persist.
-    ///
     /// # Errors
+    ///
     /// Returns an error when the status record cannot be written to disk.
     pub fn set_failures(
         &mut self,
@@ -184,12 +174,10 @@ impl StatusWriter {
         self.status.epoch += 1;
     }
 
-    /// The atomic status write: temp file in the same directory, `rename`
-    /// over the old file. The parent directory is (re)created on every
-    /// write: the successor supervisor's boot sweep (spec §6 step 1) deletes
-    /// this socket's scratch dir — including a live coordinator's status
-    /// file — before the coordinator's `Restoring`/`Complete` writes land,
-    /// and the writer must recreate the dir it was handed.
+    /// The atomic status write: temp file in the same directory, `rename` over
+    /// the old file. The parent directory is (re)created on every write: the
+    /// successor's boot sweep (spec §6 step 1) deletes the scratch dir — a
+    /// live coordinator's status file included — before `Restoring`/`Complete`.
     fn persist(&self) -> Result<()> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)
@@ -235,10 +223,8 @@ pub fn coordinator_identity() -> UpdateProcessIdentity {
     }
 }
 
-/// Parse a status file; `None` when absent or unparseable (the tailed
-/// coordinator decides what a missing status means — a not-yet-started
-/// coordinator or a corrupt write both surface as "keep waiting" while the
-/// holder lives).
+/// Parse a status file; `None` when absent or unparseable (a missing status surfaces as "keep
+/// waiting" while the holder lives).
 #[must_use]
 pub fn read_status(path: &Path) -> Option<UpdateStatus> {
     let content = std::fs::read_to_string(path).ok()?;
@@ -251,10 +237,8 @@ pub struct StatusHeartbeat {
 }
 
 impl StatusHeartbeat {
-    /// Heartbeat `writer` every [`STATUS_HEARTBEAT_MS`] until stopped.
-    /// A failed write never kills the FSM: the next phase write retries,
-    /// and the tailing side treats a stale heartbeat as a liveness signal
-    /// (TS parity).
+    /// Heartbeat `writer` every [`STATUS_HEARTBEAT_MS`] until stopped. A failed
+    /// write never kills the FSM: the tail treats a stale beat as liveness.
     pub fn start(writer: Arc<Mutex<StatusWriter>>) -> Self {
         let task = tokio::spawn(async move {
             let mut ticker =
@@ -308,9 +292,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("status.json");
         let predecessor_epoch = {
-            // The predecessor drives the spec's legal path to `Staged`
-            // (`Acquire -> Planning -> Downloading -> Staged`): the
-            // coordinator's `set_state` asserts the transition table.
+            // The predecessor drives the spec's legal path to `Staged`: the coordinator's
+            // `set_state` asserts the transition table.
             let mut writer = StatusWriter::new(&path, &update_id(), "/tmp/s.sock").unwrap();
             writer.set_state(UpdateState::Planning).unwrap();
             writer.set_state(UpdateState::Downloading).unwrap();

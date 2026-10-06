@@ -6,8 +6,6 @@ use super::{Editor, EditorEvent, JumpDirection};
 use crate::keybindings::TUI_KEYBINDINGS;
 
 impl Editor {
-    // ---- input dispatch ----------------------------------------------------
-
     /// Handle one key event (already decoded to a TS-style key id, e.g.
     /// "ctrl+k", or a literal character for printable input).
     pub fn handle_input(&mut self, input: &str) {
@@ -82,89 +80,56 @@ impl Editor {
             return;
         }
         if self.kb_matches(input, "tui.editor.selectRight") {
-            // Selection motions move the cursor away from the completion
-            // token: the dropdown closes instead of holding a stale
-            // anchor for the next Enter.
             self.cancel_autocomplete();
             self.select_right();
             return;
         }
         if self.kb_matches(input, "tui.editor.selectUp") {
-            // Selection motions move the cursor away from the completion
-            // token: the dropdown closes instead of holding a stale
-            // anchor for the next Enter.
             self.cancel_autocomplete();
             self.select_up();
             return;
         }
         if self.kb_matches(input, "tui.editor.selectDown") {
-            // Selection motions move the cursor away from the completion
-            // token: the dropdown closes instead of holding a stale
-            // anchor for the next Enter.
             self.cancel_autocomplete();
             self.select_down();
             return;
         }
         if self.kb_matches(input, "tui.editor.selectWordLeft") {
-            // Selection motions move the cursor away from the completion
-            // token: the dropdown closes instead of holding a stale
-            // anchor for the next Enter.
             self.cancel_autocomplete();
             self.select_word_left();
             return;
         }
         if self.kb_matches(input, "tui.editor.selectWordRight") {
-            // Selection motions move the cursor away from the completion
-            // token: the dropdown closes instead of holding a stale
-            // anchor for the next Enter.
             self.cancel_autocomplete();
             self.select_word_right();
             return;
         }
         if self.kb_matches(input, "tui.editor.selectLineStart") {
-            // Selection motions move the cursor away from the completion
-            // token: the dropdown closes instead of holding a stale
-            // anchor for the next Enter.
             self.cancel_autocomplete();
             self.select_line_start();
             return;
         }
         if self.kb_matches(input, "tui.editor.selectLineEnd") {
-            // Selection motions move the cursor away from the completion
-            // token: the dropdown closes instead of holding a stale
-            // anchor for the next Enter.
             self.cancel_autocomplete();
             self.select_line_end();
             return;
         }
         if self.kb_matches(input, "tui.editor.selectParagraphUp") {
-            // Selection motions move the cursor away from the completion
-            // token: the dropdown closes instead of holding a stale
-            // anchor for the next Enter.
             self.cancel_autocomplete();
             self.select_paragraph_up();
             return;
         }
         if self.kb_matches(input, "tui.editor.selectParagraphDown") {
-            // Selection motions move the cursor away from the completion
-            // token: the dropdown closes instead of holding a stale
-            // anchor for the next Enter.
             self.cancel_autocomplete();
             self.select_paragraph_down();
             return;
         }
         if self.kb_matches(input, "tui.editor.selectDocStart") {
-            // Selection motions move the cursor away from the completion
-            // token: the dropdown closes instead of holding a stale
-            // anchor for the next Enter.
             self.cancel_autocomplete();
             self.select_doc_start();
             return;
         }
         if self.kb_matches(input, "tui.editor.selectDocEnd") {
-            // Selection motions move the cursor away from the completion
-            // token: the dropdown closes instead of holding a stale
-            // anchor for the next Enter.
             self.cancel_autocomplete();
             self.select_doc_end();
             return;
@@ -408,8 +373,8 @@ mod tests {
     }
 
     /// A keystroke burst (typed command + Enter in one batch, the tmux
-    /// send-keys pattern) submits as typed: the suggestion request is
-    /// parked, so the dropdown never opens between the keys.
+    /// send-keys pattern) submits as typed: the request is parked, so the
+    /// dropdown never opens between the keys.
     #[test]
     fn typed_slash_burst_submits_as_typed() {
         let mut e = ed();
@@ -430,10 +395,7 @@ mod tests {
         assert_eq!(e.get_text(), "");
     }
 
-    /// Once the parked request materializes (the input queue drained), a
-    /// typed-exact command with an open dropdown completes into the
-    /// argument position on Enter instead of submitting — the TS
-    /// async-suggestion behavior for a command typed character-by-character
+    /// The TS async-suggestion behavior for character-by-character typing
     /// with pauses.
     #[test]
     fn materialized_dropdown_enter_completes_into_args() {
@@ -454,10 +416,9 @@ mod tests {
         assert_eq!(e.get_text(), "/goal ");
     }
 
-    /// A typed ZWJ family sequence lands in the buffer byte-exact (the
-    /// 2026-09-22 harness reproduction of the audit crash class verified
-    /// the editor MODEL is correct end to end: one key event per cluster
-    /// char, each char inserted at the cursor).
+    /// A typed ZWJ family sequence lands in the buffer byte-exact: one key
+    /// event per cluster char, each char inserted at the cursor (the
+    /// 2026-09-22 harness reproduction of the audit crash class).
     #[test]
     fn typed_zwj_family_lands_intact() {
         let mut e = ed();

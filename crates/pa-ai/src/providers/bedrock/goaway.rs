@@ -1,15 +1,8 @@
 //! Passive inbound GOAWAY tracking for the bedrock h2c transport.
 //!
-//! The `h2` crate files a received GOAWAY as the connection's pending error,
-//! but any later connection-level failure (a TCP reset from a peer that
-//! closes with unread request data — exactly what the provider-error probe
-//! drives, and what broken middleboxes do in the wild) overwrites it before
-//! a mid-body stream read can observe it. The TS transport (bun's
-//! node:http2) reports the session error even then, so this module observes
-//! the inbound wire directly: a pass-through frame-boundary scanner that
-//! records the last GOAWAY error code the peer sent. It never interprets
-//! anything else (no HPACK, no flow control) and feeds only the failure
-//! classification in [`super::h2`].
+//! The `h2` crate files a received GOAWAY as the connection's pending error, but a later
+//! failure overwrites it before a mid-body read observes it; this module scans the wire for
+//! GOAWAYs and feeds the classification to [`super::h2`].
 
 use std::sync::{Arc, Mutex};
 
@@ -19,21 +12,16 @@ use crate::utils_inner::stream_failure::H2Failure;
 const H2_FRAME_HEADER_LEN: usize = 9;
 const H2_FRAME_GOAWAY: u8 = 0x7;
 
-/// The inbound frame scanner. `h2` reads through it, so every inbound byte is
-/// observed in order; frame headers are self-delimiting so no HPACK
-/// knowledge is needed to track boundaries.
+/// The inbound frame scanner. `h2` reads through it, so every inbound byte is observed in order;
+/// frame headers are self-delimiting so no HPACK knowledge is needed to track boundaries.
 #[derive(Default)]
 struct GoAwayTracker {
-    /// Bytes of the current frame header collected so far.
     header: [u8; H2_FRAME_HEADER_LEN],
     header_filled: usize,
-    /// Payload bytes still expected for the current frame.
     payload_remaining: usize,
-    /// The current frame is a connection-level GOAWAY.
     tracking_goaway: bool,
     /// First bytes of a GOAWAY payload (`last_stream_id` + error code prefix).
     goaway_prefix: Vec<u8>,
-    /// The last GOAWAY error code received from the peer.
     last_goaway_code: Option<u32>,
 }
 
@@ -107,9 +95,9 @@ impl GoAwayObserver {
             .map_or(None, |tracker| tracker.last_goaway_code)
     }
 
-    /// The mid-body failure detail behind an `h2` error, preferring a
-    /// received GOAWAY over the stream/socket failure that followed it (the
-    /// TS transport reports the session error even when a reset clobbers it).
+    /// The mid-body failure detail behind an `h2` error, preferring a received GOAWAY over the
+    /// stream/socket failure that followed it (the TS transport reports the session error even when
+    /// a reset clobbers it).
     pub(crate) fn classify_mid_body(&self, error: &h2::Error) -> H2Failure {
         if let Some(code) = self.last_goaway_code() {
             return H2Failure::SessionClosed { code };
@@ -118,8 +106,7 @@ impl GoAwayObserver {
     }
 }
 
-/// The pass-through read half: observes the inbound bytes, then hands them
-/// to the socket untouched.
+/// The pass-through read half: observes the inbound bytes, then hands them to the socket untouched.
 pub(crate) struct TrackedReadHalf {
     inner: tokio::net::tcp::OwnedReadHalf,
     observer: GoAwayObserver,
@@ -155,8 +142,7 @@ impl tokio::io::AsyncRead for TrackedReadHalf {
     }
 }
 
-/// The stream handed to `h2::client::handshake`: tracked inbound half,
-/// pass-through outbound half.
+/// The stream handed to `h2::client::handshake`: tracked inbound half, pass-through outbound half.
 pub(crate) struct TrackedStream {
     read: TrackedReadHalf,
     write: tokio::net::tcp::OwnedWriteHalf,
@@ -218,8 +204,8 @@ mod tests {
         out
     }
 
-    /// Byte-chunked observation: HEADERS, DATA, then GOAWAY(1) split across
-    /// arbitrary read boundaries is still recognized.
+    /// Byte-chunked observation: HEADERS, DATA, then GOAWAY(1) split across arbitrary read
+    /// boundaries is still recognized.
     #[test]
     fn tracks_goaway_across_chunk_boundaries() {
         let observer = GoAwayObserver::default();
@@ -241,8 +227,8 @@ mod tests {
         assert_eq!(tracker.last_goaway_code, Some(1));
     }
 
-    /// A connection-level GOAWAY (stream 0) only; a stream-scoped frame with
-    /// the same type is ignored (reserved-bit stripped on read).
+    /// A connection-level GOAWAY (stream 0) only; a stream-scoped frame with the same type is
+    /// ignored (reserved-bit stripped on read).
     #[test]
     fn ignores_non_connection_frames() {
         let observer = GoAwayObserver::default();

@@ -1,14 +1,10 @@
-//! Pure normalization/search helpers of the RLM surface — the host side of
-//! `rlm.spawn` / `rlm.find_models` kwargs validation.
-//!
-//! Ported from `core/rlm-runtime.ts`. The handler adapters that bind these to
-//! the agent session (`createRlmRunHostHandler` and friends) live with the
-//! session wiring; this module holds the behavior they share.
+//! Pure normalization/search helpers of the RLM surface — the host side of `rlm.spawn` /
+//! `rlm.find_models` kwargs validation.
 
 use serde_json::Value;
 
-/// Thinking levels the RLM surface accepts, matching the TS `THINKING_LEVELS`
-/// (`core/thinking-levels.ts`); the values live in `pa-types`.
+/// Thinking levels the RLM surface accepts, matching the TS
+/// `THINKING_LEVELS`; the values live in `pa-types`.
 pub const THINKING_LEVELS: [&str; 7] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 const RLM_SUBAGENT_SESSION_NAME_MAX_LENGTH: usize = 64;
@@ -48,8 +44,7 @@ fn error(operation: &str, message: &str) -> anyhow::Error {
 ///
 /// # Errors
 ///
-/// Returns an error, prefixed with `operation`, when the name is empty after
-/// trimming or longer than the subagent name length limit.
+/// Returns an error, prefixed with `operation`, when the name is empty or too long.
 pub fn normalize_requested_rlm_subagent_session_name(
     value: Option<&str>,
     operation: &str,
@@ -72,8 +67,7 @@ pub fn normalize_requested_rlm_subagent_session_name(
 ///
 /// # Errors
 ///
-/// Returns an error, prefixed with `operation`, when the level is not one of
-/// the supported thinking levels.
+/// Returns an error, prefixed with `operation`, when the level is unsupported.
 pub fn normalize_requested_rlm_subagent_thinking_level(
     value: Option<&str>,
     operation: &str,
@@ -180,8 +174,7 @@ pub fn normalize_requested_rlm_spawn_target(
 ///
 /// # Errors
 ///
-/// Returns an error, prefixed with `operation`, when the model override is
-/// empty after trimming.
+/// Returns an error, prefixed with `operation`, when the model override is empty.
 pub fn normalize_requested_rlm_subagent_model(
     value: Option<&str>,
     operation: &str,
@@ -229,16 +222,14 @@ pub fn create_default_rlm_subagent_session_name(prompt: &str, child_id: &str) ->
     format!("subagent-{prompt_part}-{id_suffix}")
 }
 
-/// NFKD-equivalent slug for the practical character space: Latin letters
-/// decompose to their base ASCII letter (dropping diacritics), everything
-/// else collapses into the separator.
+/// NFKD-equivalent slug for the practical character space: Latin letters decompose to their base
+/// ASCII letter, everything else collapses into the separator.
 fn slugify(prompt: &str) -> String {
     let mut slug = String::with_capacity(prompt.len());
     let mut last_dash = false;
     for ch in prompt.chars() {
-        // ASCII passes through (alphanumerics kept, rest collapse to `-`);
-        // accented Latin decomposes to its base letter (NFKD strip of marks);
-        // everything else is non-[a-z0-9] for the slug, so it collapses too.
+        // ASCII passes through (alphanumerics kept, rest collapse to `-`); accented Latin
+        // decomposes to its base letter (NFKD strip of marks).
         let mapped = if ch.is_ascii() {
             Some(ch)
         } else {
@@ -308,13 +299,12 @@ fn normalize_model_search_text(value: &str) -> String {
         .collect()
 }
 
-/// Rank and cap model matches the same way `findRlmModelMatches` does:
-/// exact match, then prefix, then substring, then alphabetical order.
+/// Rank and cap model matches the same way `findRlmModelMatches` does: exact match,
+/// then prefix, then substring, then alphabetical order.
 ///
 /// # Panics
 ///
-/// Candidates are sorted by score with a `partial_cmp().unwrap()`; every
-/// score is finite by construction, so the unwrap cannot fail.
+/// Candidates are sorted by score with a `partial_cmp().unwrap()`; every score is finite.
 #[must_use]
 pub fn find_rlm_model_matches(
     query: &str,
@@ -398,9 +388,8 @@ fn find_rlm_short_form_model_matches<'a>(
         .collect()
 }
 
-/// The single model a short-form reference resolves to: its unique match, or
-/// the fallback when nothing matches. `None` when several match or nothing
-/// resolves, so an ambiguous reference is never auto-resolved.
+/// The single model a short-form reference resolves to: its unique match, or the fallback when
+/// nothing matches. `None` when several match or nothing resolves.
 #[must_use]
 pub fn find_unique_rlm_short_form_model_match<'a>(
     reference: &str,

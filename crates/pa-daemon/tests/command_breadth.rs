@@ -1,12 +1,7 @@
-//! Daemon command-type breadth coverage (roadmap item 7, wave 1).
-//!
-//! The TS `DAEMON_COMMAND_TYPES` list (daemon-supervisor.ts) is the accept
-//! contract: the pinned constant below is the TS list verbatim, in TS
-//! declaration order. The verifier: every TS command type (plus the
-//! Rust-native supervisor/worker frames) must parse through the envelope
-//! gate, keep its exact wire `type` through the router table, and report the
-//! right session selector; unknown types keep failing with the TS wire
-//! error string.
+//! Daemon command-type breadth coverage (roadmap item 7, wave 1): the TS
+//! `DAEMON_COMMAND_TYPES` list (daemon-supervisor.ts) is the accept contract,
+//! pinned verbatim below in declaration order. Every TS type (plus the Rust-
+//! native frames) must parse, keep its wire `type`, and route by selector.
 
 use pa_daemon::protocol::command_active_session_id;
 use pa_daemon::protocol::command_type_name;
@@ -118,17 +113,15 @@ const TS_DAEMON_COMMAND_TYPES: &[&str] = &[
     "get_system_prompt",
     "get_tool_definition",
     "set_session_entry_label",
-    "extension_ui_response",
     "prepare_update_restart",
     "retry_worker",
     "restart",
     "shutdown",
 ];
 
-/// Minimal wire fixture per command type: the fields the `pa-types`
-/// `DaemonCommand` union requires on the wire (everything else is optional
-/// or captured by the lossless `rest` map). The session selector is `"sess"`
-/// everywhere a command carries one.
+/// Minimal wire fixture per command type: the fields the `DaemonCommand` union
+/// requires on the wire (everything else is optional or in the lossless `rest`
+/// map); the session selector is "sess" everywhere a command carries one.
 const WIRE_FIXTURES: &[(&str, &str)] = &[
     ("ack_result", r#"{"type": "ack_result", "commandId": "c1"}"#),
     ("list", r#"{"type": "list"}"#),
@@ -490,10 +483,6 @@ const WIRE_FIXTURES: &[(&str, &str)] = &[
         r#"{"type": "set_session_entry_label", "activeSessionId": "sess", "entryId": "e"}"#,
     ),
     (
-        "extension_ui_response",
-        r#"{"type": "extension_ui_response", "activeSessionId": "sess", "requestId": "r", "response": {"value": "pick"}}"#,
-    ),
-    (
         "prepare_update_restart",
         r#"{"type": "prepare_update_restart"}"#,
     ),
@@ -527,10 +516,13 @@ const WIRE_FIXTURES: &[(&str, &str)] = &[
         "get_mcp_connections",
         r#"{"type": "get_mcp_connections", "activeSessionId": "sess"}"#,
     ),
+    (
+        "mark_anthropic_warning_shown",
+        r#"{"type": "mark_anthropic_warning_shown", "activeSessionId": "sess"}"#,
+    ),
 ];
 
-/// The accept list is the TS list, in TS order, followed by the Rust-native
-/// supervisor/worker frames.
+/// The accept list is the TS list, in TS order, then the Rust-native supervisor/worker frames.
 #[test]
 fn known_command_types_match_the_ts_list() {
     assert!(KNOWN_COMMAND_TYPES.len() > TS_DAEMON_COMMAND_TYPES.len());
@@ -555,21 +547,18 @@ fn known_command_types_match_the_ts_list() {
                     | "list_kernel_bash"
                     | "tail_kernel_bash"
                     | "kill_kernel_bash"
+                    | "mark_anthropic_warning_shown"
             ),
             "unexpected non-TS command type: {extra}"
         );
     }
 }
 
-/// Every fixture parses, keeps its exact wire `type`, and routes by the
-/// session selector it carries (commands with a `activeSessionId` selector
-/// report it; commands without one report none, matching the TS
-/// `findWorkerForClient` gate `!("activeSessionId" in command)`).
 #[test]
 fn every_command_type_parses_and_routes() {
     for (type_name, wire) in WIRE_FIXTURES {
-        // String concat keeps the raw fixture braces intact (a format! call
-        // would treat them as placeholders).
+        // String concat keeps the raw fixture braces intact (a format! call would treat them as
+        // placeholders).
         let line = r#"{"type":"command","id":"c1","protocol":{"name":"prime-agent.daemon","version":7},"command":"#
             .to_string()
             + wire
@@ -586,7 +575,7 @@ fn every_command_type_parses_and_routes() {
         assert_eq!(
             selector.is_some(),
             wire_has_selector,
-            "{type_name}: session selector mismatch (got {selector:?})"
+            "{type_name}: session selector mismatch"
         );
         assert_eq!(selector, wire_has_selector.then_some("sess"));
     }
@@ -599,8 +588,8 @@ fn unknown_type_keeps_the_ts_error_string() {
     let error = parse_daemon_command_line(line).unwrap_err();
     assert_eq!(error.to_string(), "Unknown daemon command: not_a_command");
 
-    // A known type with a malformed body is a malformed command, not
-    // unknown (the TS second-pass error class).
+    // A known type with a malformed body is a malformed command, not unknown (the TS second-pass
+    // error class).
     let line = r#"{"type":"command","id":"c2","protocol":{"name":"prime-agent.daemon","version":7},"command":{"type":"kill"}}"#;
     let error = parse_daemon_command_line(line).unwrap_err();
     assert_eq!(

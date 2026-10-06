@@ -1,32 +1,7 @@
-//! Live token-stream coalescing on the worker broadcast path.
-//!
-//! With live turn-event forwarding (see `agent_engine`), one assistant
-//! message streams as one `message_update` wire event per provider delta,
-//! each carrying the full partial message. Providers emit tens to hundreds
-//! of deltas per second, so the turn's emit path parks those frames in a
-//! single-slot coalescer instead of broadcasting every one: a flusher task
-//! emits at most one parked update per interval, while every other frame
-//! (`message_start`, `message_end`, tool events, `turn_end`) flushes the parked
-//! update first and then goes out immediately, so wire order and
-//! event-sequence order stay identical to uncoalesced streaming.
-//!
-//! A superseded snapshot is equivalent for the message content (the newest
-//! frame carries the full partial), but the frames' `assistantMessageEvent`
-//! deltas are ADDITIVE — downstream consumers map delta text to chunks (the
-//! ACP adapter) and activity labels. The coalescer therefore merges the
-//! parked frame's delta text instead of dropping it: a burst of same-kind
-//! deltas broadcasts as one frame whose delta is the concatenated run. A
-//! block-end stream event (`text_end` and friends) flushes the parked frame
-//! instead of superseding it, so no delta run is ever cut short.
-//!
-//! The parked update is shared, not copied: it parks as the loop's own
-//! message behind an `Arc` and converts to the wire form once, at flush,
-//! so the per-delta cost is a reference bump, not a full-payload
-//! conversion.
-//!
-//! The supervisor stays payload-free: coalescing happens in the worker, on
-//! the worker -> client session-event stream (direct-attach or
-//! supervisor-routed), before any broadcast.
+//! Live token-stream coalescing: the emit path parks `message_update` frames in a
+//! single-slot coalescer — a flusher emits at most one parked update per interval;
+//! every other frame flushes the parked update first, so wire order stays identical.
+//! The deltas are ADDITIVE, so the parked run merges delta text; block-end events flush it.
 
 use std::sync::Mutex;
 use std::time::Duration;
@@ -91,12 +66,8 @@ impl TurnStreamCoalescer {
         }
     }
 
-    /// Park one streamed update: the newest snapshot wins, and the
-    /// update's delta text merges into the parked run (same kind) or
-    /// starts a fresh run (a `*_start` event carries no delta, so a kind
-    /// switch never loses text). Returns `false` when the turn already
-    /// ended (the caller drops the update instead of broadcasting a stale
-    /// streaming event).
+    /// Park one streamed update: the newest snapshot wins; the delta merges into the
+    /// parked run (same kind) or starts a fresh one. `false` when the turn already ended.
     pub(crate) fn park_update(
         &self,
         message: AssistantSnapshot,
@@ -131,10 +102,8 @@ impl TurnStreamCoalescer {
     }
 
     /// Broadcast every `payloads` frame directly, after flushing any parked
-    /// update first (the parked snapshot is ordered before the frames that
-    /// supersede it). All sends happen under the coalescer lock, so the
-    /// flusher can never interleave between the parked update and its
-    /// settling frame.
+    /// update first. All sends happen under the coalescer lock, so the flusher
+    /// can never interleave between the parked update and its settling frame.
     pub(crate) fn send_direct(&self, payloads: &[Vec<u8>], events: &crate::worker::EventPump) {
         let mut inner = self.inner.lock().unwrap();
         self.flush_locked(&mut inner, events);
@@ -246,9 +215,6 @@ mod tests {
         assert!(rx.try_recv().is_err(), "no further frames");
     }
 
-    /// Superseded snapshots merge their delta text: a coalesced burst must
-    /// still deliver the whole delta run to delta-mapping consumers (the
-    /// ACP adapter), not just the last delta.
     #[test]
     fn a_newer_snapshot_merges_the_superseded_deltas() {
         let (pump, mut rx) = subscribe();
@@ -286,9 +252,6 @@ mod tests {
         );
     }
 
-    /// A kind switch (a `*_start` event carries no delta) starts a fresh
-    /// run without losing the merged text of the previous kind: the newer
-    /// snapshot wins, the previous kind's delta run is superseded whole.
     #[test]
     fn a_kind_switch_replaces_the_run() {
         let (pump, mut rx) = subscribe();

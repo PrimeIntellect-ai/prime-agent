@@ -1,7 +1,5 @@
-//! Kernel host-request handlers for the bundled goal and rlm-heartbeat
-//! skills: the `snake_case` bridge the Python REPL skills call. Port of
-//! handleGoalHostRequest / handleRlmHeartbeatHostRequest in agent-session.ts
-//! plus rlmHeartbeatHostResponse.
+//! Kernel host-request handlers for the bundled goal and rlm-heartbeat skills: the
+//! `snake_case` bridge the Python REPL skills call.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -17,7 +15,7 @@ use crate::session::manager::SessionManager;
 
 use super::goal_driver::GoalDriver;
 
-/// The `snake_case` heartbeat payload returned to the rlm-heartbeat skill.
+/// The `snake_case` heartbeat payload returned to the skill.
 pub fn rlm_heartbeat_host_response(job: &AgentCronJob) -> Value {
     json!({
         "id": job.id,
@@ -58,14 +56,13 @@ fn nullable_string(value: Option<String>) -> Value {
     }
 }
 
-/// Handle a `goal.*` host request. All goal state stays host-side; the kernel
-/// only sees the serialized `snake_case` response.
+/// Handle a `goal.*` host request. All goal state stays host-side; the
+/// kernel only sees the serialized response.
 ///
 /// # Errors
 ///
-/// Returns an error when the request payload's fields are invalid, the
-/// objective or budget fails validation, the request type is unknown, or a
-/// goal-state persist fails.
+/// Returns an error when the request payload's fields are invalid, the objective or
+/// budget fails validation, the request type is unknown, or a goal-state persist fails.
 pub fn handle_goal_host_request(
     request_type: &str,
     payload: &Value,
@@ -138,25 +135,18 @@ fn complete_goal_from_host(
     Ok(driver.state_with_creation_elapsed())
 }
 
-/// One kernel `rlm_heartbeat.*` mutation: the changed job plus the
-/// daemon-side post-mutation work it owes (TS daemon-mode runs
-/// `removeQueuedHeartbeatFollowUp` and `cronScheduler.wake()` inside its
-/// `createRlmHeartbeatForState` / `updateRlmHeartbeatForState` /
-/// `deleteRlmHeartbeatForState` controllers).
-///
-/// `drop_queued` is the TS update condition: instruction/interval/pause/
-/// delivery updates withdraw the queued fire, a label-only or resume-only
-/// update does not, and every delete does.
+/// One kernel `rlm_heartbeat.*` mutation: the changed job plus the daemon-side
+/// post-mutation work it owes. `drop_queued` mirrors the TS update condition:
+/// field updates withdraw the queued fire, label-only or resume-only do not.
 #[derive(Debug, Clone)]
 pub struct RlmHeartbeatMutation {
     pub job: AgentCronJob,
     pub drop_queued: bool,
 }
 
-/// The embedding's seam for kernel rlm heartbeat mutations: invoked by the
-/// `rlm_heartbeat.*` host handlers after the store mutation, before the
-/// response returns. The daemon worker installs the hook that withdraws
-/// the queued fire and re-arms the scheduler.
+/// The embedding's seam for kernel rlm heartbeat mutations: invoked after the store
+/// mutation, before the response returns; the daemon worker installs the hook that
+/// withdraws the queued fire and re-arms the scheduler.
 pub type RlmHeartbeatMutationHook = std::sync::Arc<
     dyn Fn(RlmHeartbeatMutation) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync,
 >;
@@ -169,9 +159,8 @@ pub struct RlmHeartbeatHostOutcome {
     pub mutation: Option<RlmHeartbeatMutation>,
 }
 
-/// Handle an `rlm_heartbeat.*` host request from the bundled rlm-heartbeat
-/// skill. These heartbeats are internal to the active session and never read
-/// or mutate the user-level /heartbeat.
+/// Handle an `rlm_heartbeat.*` host request. These heartbeats are internal to the
+/// active session and never touch the user-level /heartbeat.
 ///
 /// # Errors
 ///
@@ -382,11 +371,9 @@ mod tests {
     fn goal_host_requests() {
         let mut session = persisted_session();
         let mut driver = GoalDriver::new();
-        // goal.get with no goal.
         let response =
             handle_goal_host_request("goal.get", &json!({}), &mut driver, &mut session).unwrap();
         assert!(response.goal.is_none());
-        // goal.create.
         let response = handle_goal_host_request(
             "goal.create",
             &json!({ "objective": "ship it", "token_budget": 5000 }),
@@ -452,7 +439,6 @@ mod tests {
     fn rlm_heartbeat_host_requests() {
         let store = heartbeat_store();
         let bind = binding();
-        // Create.
         let created = handle_rlm_heartbeat_host_request(
             "rlm_heartbeat.create",
             &json!({ "instruction": "watch pods", "interval": "every 10m", "label": "podwatch" }),
@@ -467,15 +453,14 @@ mod tests {
         assert_eq!(heartbeat["label"], "podwatch");
         assert_eq!(heartbeat["delivery_mode"], "steer");
         assert!(heartbeat["schedule"]["kind"].is_string());
-        // Create carries the mutation (TS `createRlmHeartbeatForState`
-        // wakes; it never withdraws a queued fire).
+        // Create carries the mutation (wakes; never withdraws a queued
+        // fire).
         let mutation = created.mutation.expect("create mutation");
         assert_eq!(mutation.job.id, heartbeat["id"].as_str().unwrap());
         assert_eq!(mutation.job.source.as_deref(), Some("rlm_heartbeat"));
         assert_eq!(mutation.job.active_session_id, "live-1");
         assert!(!mutation.drop_queued);
         let id = heartbeat["id"].as_str().unwrap().to_string();
-        // List.
         let listed = handle_rlm_heartbeat_host_request(
             "rlm_heartbeat.list",
             &json!({ "include_inactive": true }),
@@ -486,7 +471,6 @@ mod tests {
         .unwrap();
         assert_eq!(listed.response["heartbeats"].as_array().unwrap().len(), 1);
         assert!(listed.mutation.is_none(), "a catalog read mutates nothing");
-        // Update with pause.
         let paused = handle_rlm_heartbeat_host_request(
             "rlm_heartbeat.update",
             &json!({ "id": id, "status": "pause" }),
@@ -520,7 +504,6 @@ mod tests {
         .unwrap();
         assert_eq!(resumed.response["heartbeat"]["status"], "active");
         assert!(!resumed.mutation.expect("resume mutation").drop_queued);
-        // Delete.
         let deleted = handle_rlm_heartbeat_host_request(
             "rlm_heartbeat.delete",
             &json!({ "id": id }),
@@ -541,7 +524,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(again.response["heartbeat"]["status"], "cancelled");
-        // Unknown type.
         let error = handle_rlm_heartbeat_host_request(
             "rlm_heartbeat.nope",
             &json!({}),

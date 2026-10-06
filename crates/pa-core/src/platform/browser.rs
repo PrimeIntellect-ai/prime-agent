@@ -4,19 +4,16 @@
 
 use std::process::{Command, Stdio};
 
-/// The opener program and its argument list for one URL.
 #[cfg(target_os = "macos")]
 fn opener(url: &str) -> (&'static str, Vec<String>) {
     ("open", vec![url.to_string()])
 }
 
-/// The opener program and its argument list for one URL.
 #[cfg(all(unix, not(target_os = "macos")))]
 fn opener(url: &str) -> (&'static str, Vec<String>) {
     ("xdg-open", vec![url.to_string()])
 }
 
-/// The opener program and its argument list for one URL.
 #[cfg(windows)]
 fn opener(url: &str) -> (&'static str, Vec<String>) {
     // Absolute System32 path (the TS dialog resolves it from
@@ -35,10 +32,9 @@ fn opener(url: &str) -> (&'static str, Vec<String>) {
     )
 }
 
-/// Open `url` in the user's browser. Fire-and-forget like the TS dialog
-/// (`execFileHidden` with a swallowed callback): the caller also shows the
-/// URL itself, so a failed launch (no desktop session, no opener) never
-/// fails the login. The spawn result is deliberately not an error surface.
+/// Open `url` in the user's browser. Fire-and-forget like the TS dialog:
+/// the caller also shows the URL itself, so a failed launch never fails
+/// the login.
 pub fn open_in_browser(url: &str) {
     let (program, args) = opener(url);
     let _ = Command::new(program)
@@ -55,7 +51,6 @@ mod tests {
 
     #[test]
     fn opener_selection() {
-        // The command table per platform; the program matches the TS dialog.
         let (program, args) = opener("https://example.com/login");
         assert!(!program.is_empty());
         assert!(!args.is_empty());

@@ -6,7 +6,10 @@
 //! load, atomically replaced when the stored state is invalid. The exclusive
 //! create publishes a fully-written candidate (unique temp file + hard
 //! link), so concurrent creators converge on one id and never observe a
-//! half-written winner.
+//! half-written winner. Durability matches the TS product at both sites:
+//! neither the fresh create nor the invalid-state replacement fsyncs, so a
+//! crash may lose the state file — it is re-created on the next boot and a
+//! torn file is invalid state, replaced atomically.
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -26,16 +29,14 @@ struct State {
 }
 
 /// Load the installation id from `<agentDir>/telemetry.json`, creating it on
-/// first use. Concurrent callers on the same directory converge on one id:
-/// the create is exclusive, the winner's state is published fully written,
-/// and losers re-read the winner's state.
+/// first use; concurrent callers converge on one id.
 ///
 /// # Errors
 ///
 /// Returns an error when a filesystem step fails: creating `agent_dir`,
 /// reading an existing state file (a missing file is not an error),
-/// publishing the candidate state (exclusive create, write, sync, hard
-/// link), or atomically replacing invalid state (temp file + rename).
+/// publishing the candidate state (exclusive create, write, hard link),
+/// or atomically replacing invalid state (temp file + rename).
 pub fn install_id(agent_dir: &Path) -> Result<String> {
     let path = agent_dir.join(STATE_FILE);
     if let Some(existing) = read_install_id(&path)? {
@@ -53,38 +54,53 @@ pub fn install_id(agent_dir: &Path) -> Result<String> {
     let payload = serde_json::to_vec_pretty(&state)?;
 
     match publish_exclusive(&path, &payload)? {
-        // Return the id the state file stores now: on the hard-link path the
-        // durable file is this caller's own payload, and on the no-hard-link
-        // fallback a concurrent repairer may have replaced a partial state
-        // while the fallback writer was writing, so every caller converges
-        // on the durable id.
+        // Return the id the state file stores now: on the no-hard-link
+        // fallback a concurrent repairer may have replaced a partial state,
+        // so every caller converges on the durable id.
         Publish::Won => Ok(read_install_id(&path)?.unwrap_or(installation_id)),
         Publish::Lost => {
-            // Lost a create race: prefer the winner's id if it is valid,
-            // otherwise replace the invalid state atomically. The winner's
-            // publish is atomic, so this re-read can only miss on state that
-            // was already invalid before the race, never on a winner whose
-            // write is still in flight.
+            // Lost a create race: prefer the winner's id; the winner's
+            // publish is atomic, so a miss here means the state was already
+            // invalid before the race.
             if let Some(existing) = read_install_id(&path)? {
                 Ok(existing)
             } else {
                 replace_invalid_state(&path, &payload)?;
-                // Return the id the state file stores now: a concurrent
-                // repair may have landed its rename after ours, and every
-                // caller must converge on the durable id.
+                // A concurrent repair may have landed its rename after ours;
+                // converge on the durable id.
                 Ok(read_install_id(&path)?.unwrap_or(installation_id))
             }
         }
     }
 }
 
+/// The stored installation id, read-only: `None` when `telemetry.json` is
+/// absent, unreadable, or invalid (status surfaces must not create one).
+#[must_use]
+pub fn existing_install_id(agent_dir: &Path) -> Option<String> {
+    read_install_id(&agent_dir.join(STATE_FILE)).ok().flatten()
+}
+
 /// Valid stored id, or `None` when the file is absent or holds invalid state.
 fn read_install_id(path: &Path) -> Result<Option<String>> {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
+    // The state is opened non-blocking (unix O_NONBLOCK): a special
+    // file swapped onto the path (a FIFO) would block a plain read
+    // forever, and no caller — including the `/telemetry` confirmation
+    // after a saved opt-out — may hang on the telemetry state. A
+    // non-blocking FIFO with no writer reads empty and parses to no id.
+    let mut file = match open_state_nonblocking(path) {
+        Ok(file) => file,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(err).with_context(|| format!("read {}", path.display())),
+        Err(err) => return Err(err).with_context(|| format!("open {}", path.display())),
     };
+    let mut bytes = Vec::new();
+    match std::io::Read::read_to_end(&mut file, &mut bytes) {
+        Ok(_) => {}
+        // A non-blocking empty read (EAGAIN on a writer-less FIFO) is
+        // no id, not an error.
+        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => return Ok(None),
+        Err(err) => return Err(err).with_context(|| format!("read {}", path.display())),
+    }
     let state: Option<State> = serde_json::from_slice(&bytes).ok();
     let valid = state
         .filter(|s| s.version == STATE_VERSION && is_uuid(&s.installation_id))
@@ -92,11 +108,31 @@ fn read_install_id(path: &Path) -> Result<Option<String>> {
     Ok(valid)
 }
 
+/// Open the state file read-only, non-blocking on unix (`O_NONBLOCK`):
+/// whatever now sits on the path — a regular state file or a swapped-in
+/// special file — opens and reads without ever parking the caller.
+#[cfg(unix)]
+fn open_state_nonblocking(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(
+            rustix::fs::OFlags::NONBLOCK
+                .bits()
+                .try_into()
+                .expect("O_NONBLOCK fits the open flags"),
+        )
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_state_nonblocking(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new().read(true).open(path)
+}
+
 /// Outcome of trying to publish a candidate state file exclusively.
 enum Publish {
-    /// The candidate is live at the target path.
     Won,
-    /// Another file already owns the path.
     Lost,
 }
 
@@ -105,8 +141,8 @@ enum Publish {
 /// written to a unique sibling temp file and hard-linked into place: `link`
 /// is an atomic exclusive create, so a loser can never observe the winner's
 /// file mid-write. Filesystems without hard links fall back to the
-/// open+write+sync exclusive create, where losers re-read after
-/// `AlreadyExists`.
+/// open+write exclusive create (unsynced, the TS posture), where losers
+/// re-read after `AlreadyExists`.
 fn publish_exclusive(path: &Path, payload: &[u8]) -> Result<Publish> {
     let tmp = unique_sibling(path);
     let linked = create_exclusive(&tmp, payload).and_then(|()| std::fs::hard_link(&tmp, path));
@@ -130,12 +166,9 @@ fn publish_exclusive(path: &Path, payload: &[u8]) -> Result<Publish> {
     }
 }
 
-/// Atomically replace invalid state (unique temp file + rename, both sides of
-/// the rename land on the same filesystem inside the agent dir, and a unique
-/// temp name keeps concurrent replacers from sharing one temp file). The
-/// rename goes through `rename_onto` so the win32 destination-busy retry
-/// applies, like the TS `writeTelemetryStateAtomically`
-/// (`writeFileAtomicSync`).
+/// Atomically replace invalid state (unique temp file + rename through
+/// `rename_onto`, so the win32 destination-busy retry applies like TS
+/// `writeTelemetryStateAtomically`).
 fn replace_invalid_state(path: &Path, payload: &[u8]) -> Result<()> {
     let tmp = unique_sibling(path);
     if let Err(err) = create_exclusive(&tmp, payload) {
@@ -150,9 +183,9 @@ fn replace_invalid_state(path: &Path, payload: &[u8]) -> Result<()> {
     renamed
 }
 
-/// Unique sibling of `path` for atomic publishes: inside the same directory
-/// (so the hard link and the rename stay on one filesystem) and unique per
-/// call, so concurrent creators and replacers never share a temp file.
+/// Unique sibling of `path`: same directory (the hard link and rename stay
+/// on one filesystem), unique per call, so concurrent replacers never share
+/// a temp file.
 fn unique_sibling(path: &Path) -> PathBuf {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(format!(".{}.tmp", uuid::Uuid::new_v4()));
@@ -166,6 +199,14 @@ fn remove_quietly(path: &Path) {
 
 /// Exclusive create with 0600 permissions on unix (Windows has no portable
 /// mode; the agent dir ACLs apply).
+///
+/// No temp-file fsync: the TS product fsyncs NEITHER install-id site — the
+/// fresh create is `writeFileSync` with flag `wx` (Node never fsyncs it) and
+/// the invalid-state replacement is `writeFileAtomicSync` WITHOUT the
+/// `fsync` option, so the port's `sync_all` here was added durability the
+/// product does not have. The crash class is unchanged: a lost create just
+/// re-creates next boot (`read_install_id` fails), and a torn or empty
+/// durable file is invalid state, replaced atomically.
 fn create_exclusive(path: &Path, payload: &[u8]) -> std::io::Result<()> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
@@ -175,8 +216,7 @@ fn create_exclusive(path: &Path, payload: &[u8]) -> std::io::Result<()> {
         options.mode(0o600);
     }
     let mut file = options.open(path)?;
-    file.write_all(payload)?;
-    file.sync_all()
+    file.write_all(payload)
 }
 
 /// TS parity validation: hex uuid whose version nibble is 1-8 and variant
@@ -208,6 +248,26 @@ fn is_uuid(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A special file on the state path (a FIFO) is the blocking-read
+    /// hazard: the id read must come back empty (no id) instead of
+    /// parking the caller — the `/telemetry` confirmation after a saved
+    /// opt-out may never hang on the telemetry state.
+    #[test]
+    #[cfg(unix)]
+    fn a_fifo_on_the_state_path_reads_as_no_id() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).expect("agent dir");
+        // A FIFO with no writer: a plain read would block forever.
+        let fifo = agent_dir.join(STATE_FILE);
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo");
+        assert!(status.success(), "mkfifo created the fifo");
+        assert_eq!(existing_install_id(&agent_dir), None);
+    }
 
     #[test]
     fn uuid_validation() {
@@ -293,9 +353,6 @@ mod tests {
         assert!(ids.iter().all(|id| id == &ids[0]));
     }
 
-    /// Concurrent creators must converge on one durable id: this loop aligns
-    /// more callers than there are cores on a fresh directory over and over,
-    /// and asserts every caller returns the same id the state file stores.
     #[test]
     fn concurrent_create_stress_converges() {
         const ROUNDS: usize = 64;

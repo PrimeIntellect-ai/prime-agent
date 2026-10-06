@@ -1,6 +1,6 @@
-//! The update plan (TS `getNativeUpdatePlan` port): decide update vs
-//! rollback vs skip before any FSM state runs, with the TS refusal
-//! messages kept verbatim so the CLI surfaces the same text.
+//! The update plan: decide update vs rollback vs skip before any FSM
+//! state runs, with the TS refusal messages kept verbatim so the CLI
+//! surfaces the same text.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -16,13 +16,12 @@ use pa_core::update::version::{
     resolve_update_channel, UpdateChannel,
 };
 
-/// The manifest fetch timeout (TS `DEFAULT_VERSION_CHECK_TIMEOUT_MS`).
+/// The manifest fetch timeout.
 const MANIFEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// One update decision.
 pub enum UpdatePlan {
-    /// Download and stage the candidate; the coordinator (the new binary)
-    /// runs the rest of the FSM.
+    /// Download and stage the candidate; the coordinator (the new binary) runs the rest of the FSM.
     Update {
         version: String,
         archive_url: String,
@@ -30,15 +29,14 @@ pub enum UpdatePlan {
         /// The base URL the manifest came from (staged as `.install-source`).
         base_url: String,
     },
-    /// The manual/direct install (`--archive`): the payload is already
-    /// staged (scratch + fsync + atomic rename) with the version probed
-    /// from the binary; nothing is downloaded.
+    /// The manual/direct install (`--archive`): the payload is already staged
+    /// with the version probed from the binary; nothing is downloaded.
     Direct {
         version: String,
         candidate_dir: PathBuf,
     },
-    /// Boot the previous release back (the coordinator IS the previous
-    /// binary; the normal FSM swaps the launcher back).
+    /// Boot the previous release back (the coordinator IS the previous binary; the normal FSM swaps
+    /// the launcher back).
     Rollback {
         version: String,
         coordinator_exe: PathBuf,
@@ -58,32 +56,24 @@ fn download_base_url(override_url: Option<&str>, install_source: &str) -> String
         .to_string()
 }
 
-/// The update baseline: the release the RUNNING binary occupies. The
-/// comparison the plan makes is against this release's version — never a
-/// launcher that can point elsewhere — and the directory's version must
-/// equal the version this binary itself reports (`--version`), so a
-/// hand-named directory (a `0.10.0-rust-<sha>` dogfood train, or a
-/// `999.0.0` directory around an older binary) is refused as a baseline:
-/// the updater never plans "from" a version its binary does not report.
+/// The update baseline: the release the RUNNING binary occupies — never a
+/// launcher that can point elsewhere — and the directory's version must equal
+/// the version this binary itself reports: the updater never plans "from" a
+/// version its binary does not report.
 fn running_release_anchor() -> Result<RunningRelease> {
     let executable = std::env::current_exe().context("resolve the running executable")?;
     running_release(&executable)
 }
 
-/// Plan one update run (TS `getNativeUpdatePlan` parity: same refusals,
-/// same messages, plus the Rust flow's staging facts; the update baseline
-/// anchors on the running binary's release directory, stricter than TS's
-/// launcher read, so an inconsistent installation is refused before any
-/// candidate is selected).
+/// Plan one update run (same refusals and messages as TS, plus the Rust
+/// flow's staging facts; the baseline anchors on the running binary's
+/// release directory, stricter than TS's launcher read — an inconsistent
+/// installation is refused before any candidate is selected).
 ///
 /// # Errors
-/// Returns an error when the compiled installation is damaged (neither the
-/// active nor the previous launcher reads), when a rollback has no valid
-/// previous release or its executable fails validation, when this binary
-/// does not run from a managed release directory or the installation is
-/// inconsistent (the release directory, the binary's own version report, or
-/// the active launcher disagree), when the release manifest cannot be
-/// fetched, or when no verified archive is available for the platform.
+/// Returns an error when the installation is damaged, a rollback has no valid
+/// previous release, the manifest cannot be fetched, or no verified archive is
+/// available.
 pub async fn plan(
     install_root: &Path,
     force: bool,
@@ -123,17 +113,14 @@ pub async fn plan(
             candidate_dir: previous.target.release_dir.clone(),
         });
     }
-    // The baseline anchor: the running binary's release. The active
-    // launcher must name the same release — a launcher pointing at a
-    // different release than the running binary is an inconsistent
-    // installation (the direct-link dogfood layout), and planning from it
-    // is how an obsolete train got selected over newer code.
+    // The baseline anchor: the running binary's release. The active launcher must
+    // name the same release (a launcher pointing elsewhere selected an obsolete
+    // train over newer code).
     let running = running_release_anchor().map_err(|error| {
         anyhow!("This binary does not run from a managed release directory: {error:#}. Update from a binary installed by the Prime Agent installer.")
     })?;
-    // The directory's version and the binary's own report must agree
-    // (`--version` prints `config::version()`): a release directory named
-    // around a binary it does not contain is an inconsistent installation.
+    // The directory's version and the binary's own report must agree:
+    // a release directory named around a binary it lacks is inconsistent.
     let reported = crate::config::version();
     if running.version != reported {
         anyhow::bail!(
@@ -172,9 +159,8 @@ pub async fn plan(
                 .to_string(),
         });
     }
-    // A tagged build is a train that was never promoted: the stable
-    // channel publishes untagged releases, and installing a tagged version
-    // over newer code is the obsolete-train incident (`--force` overrides).
+    // A tagged build is a train that was never promoted: a tagged install over
+    // newer code is the obsolete-train incident (`--force` overrides).
     let effective_channel =
         channel.unwrap_or_else(|| resolve_update_channel(running.version.as_str(), None));
     if !force && effective_channel == UpdateChannel::Stable && has_prerelease_tag(&release.version)

@@ -1,13 +1,6 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
-// by design on hot paths (boxing 130 fns is allocation-churn with zero
-// correctness gain); the fn-length threshold is a style gate, not
-// correctness (the harness fns are intentionally linear); 64-bit targets -
-// the narrowing sits at OS/protocol boundaries where the values are
-// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
-// guarded parses), and checked conversions would add panic paths where
-// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
-// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
-// dossier for the conductor).
+// large_futures: stack-resident futures on hot paths by design.
+// too_many_lines: style gate, not correctness. Casts: 64-bit targets;
+// narrowing sits at bounded OS/protocol boundaries.
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -18,13 +11,9 @@
 )]
 
 //! End-to-end verifier for the subagent panel's nested counts: a
-//! two-level spawn through the real supervisor — a root session's child
-//! that itself spawns a grandchild — must surface BOTH descendants on
-//! every count surface. The roster rows the grandchild's worker pushes
-//! carry its parent linkage, so the summary-box walk
-//! (`subagents::count_descendants`, TS `countRosterSubagentStatuses` over
-//! `collectSubagentDescendantSummaries`) counts the whole subtree at any
-//! depth, and the agents dock's `N subagents` row aggregates the tree.
+//! two-level spawn through the real supervisor (a root session's child
+//! that itself spawns a grandchild) must surface BOTH descendants on
+//! every count surface (TS `countRosterSubagentStatuses`).
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -142,10 +131,9 @@ impl Client {
             .set_read_timeout(Some(Duration::from_millis(100)))
             .expect("set timeout");
         loop {
-            line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => {}
+                Ok(_) if line.trim().is_empty() => line.clear(),
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse response line"),
                 Err(error) => {
                     assert!(
@@ -192,8 +180,7 @@ fn write_script(dir: &Path, answer: &str) -> PathBuf {
 }
 
 /// The identity of one supervisor-backed parent, keyed like the worker's
-/// own engine binds it (TS `ParentIdentity`): its live active id, its
-/// persisted session id, and its session file.
+/// own engine binds it (TS `ParentIdentity`).
 #[derive(Clone)]
 struct Parent {
     active_session_id: String,
@@ -239,6 +226,7 @@ fn spawn_request(name: &str, prompt: &str) -> RlmSpawnRequest {
         thinking: None,
         target: RlmSpawnTarget::Local,
         cell_source_code: None,
+        spawned_by_request_id: None,
     }
 }
 
@@ -277,10 +265,9 @@ fn entry_parent_keys(entry: &Value) -> Vec<String> {
     .collect()
 }
 
-/// A root session spawns a child, the child spawns a grandchild, and every
-/// count surface reports the whole subtree: the roster walk the summary
-/// box uses counts two descendants from the root (one from the child),
-/// and the grandchild's roster row links to its parent's live ids.
+/// A root session spawns a child, the child spawns a grandchild, and
+/// every count surface reports the whole subtree: the summary-box walk
+/// counts two descendants from the root (one from the child).
 #[tokio::test]
 async fn a_two_level_spawn_counts_the_whole_tree() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -295,7 +282,6 @@ async fn a_two_level_spawn_counts_the_whole_tree() {
     };
     let root_host = children_host(&supervisor.socket, &agent_dir, &script, &root, 0);
 
-    // The root spawns its child (depth 1).
     let child_handle = root_host
         .spawn(spawn_request("worker-b", "ship the lane"))
         .await
@@ -324,8 +310,7 @@ async fn a_two_level_spawn_counts_the_whole_tree() {
             .to_string(),
     };
 
-    // The child spawns its own child (the root's grandchild, depth 2),
-    // through the same supervisor-backed host bound to the child's ids.
+    // The child spawns the root's grandchild (depth 2) through the same host bound to its ids.
     let child_host = children_host(&supervisor.socket, &agent_dir, &script, &child, 1);
     let grandchild_handle = child_host
         .spawn(spawn_request("worker-c", "audit the lane"))
@@ -333,7 +318,6 @@ async fn a_two_level_spawn_counts_the_whole_tree() {
         .expect("spawn grandchild");
     child_host.notify_turn_done();
 
-    // The grandchild's roster row appears with its parent linkage.
     let grandchild_row = wait_until(Duration::from_secs(15), || {
         let roster = client.roster("rs2");
         roster
@@ -360,8 +344,7 @@ async fn a_two_level_spawn_counts_the_whole_tree() {
         "the grandchild links to its parent's session file: {grandchild_parent_keys:?}"
     );
 
-    // The summary-box walk over the live roster counts the whole subtree:
-    // the root sees both descendants, the child sees its own child.
+    // The summary-box walk counts the whole subtree from either root.
     let roster = client.roster("rs3");
     let root_identity = SessionIdentity::new(
         Some(root.active_session_id.clone()),

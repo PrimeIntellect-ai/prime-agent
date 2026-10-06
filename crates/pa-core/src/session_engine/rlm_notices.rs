@@ -1,10 +1,6 @@
-//! RLM child lifecycle notices: the durable custom rows a parent session
-//! receives when a child run ends without an explicit reply, fails, or is
-//! cancelled by the parent. The row pair mirrors the TS message factory
-//! (`createRlmChildTerminalNoticeMessage` / `createRlmChildFailureMessage`):
-//! the header label ("RLM child status") is owned by the TUI render
-//! dispatch; this module owns the wire vocabulary, the content text, and
-//! the details block.
+//! RLM child lifecycle notices: the durable custom rows a parent session receives when
+//! a child run ends without an explicit reply, fails, or is cancelled; this module owns
+//! the wire vocabulary, the content text, and the details block.
 
 use super::agent_messaging::sanitize_message_header_value;
 use pa_types::ai::UserContent;

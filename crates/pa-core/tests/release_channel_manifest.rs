@@ -1,6 +1,4 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28) - this target's own
-// crate root: the same bounded-boundary disposition as src/lib.rs
-// (large_futures/too_many_lines/the cast family; details there).
+// Pedantic-gate dispositions as src/lib.rs (large_futures/too_many_lines/casts).
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -10,21 +8,9 @@
     clippy::cast_precision_loss
 )]
 #![cfg(unix)]
-//! The release pipeline's channel-manifest producer, gated against the
-//! update reader it feeds.
-//!
-//! The read side (`pa_core::update::release::latest_release`, the TS
-//! `getLatestPiRelease` port) fetches `<download-base>/latest.json` (the
-//! stable channel) or `<download-base>/beta.json` (the nightly channel)
-//! and keeps an artifact row only when it satisfies the channel contract:
-//! a known platform, `file == prime-agent-<version>-<platform>.tar.gz`,
-//! and a 64-hex `sha256`. `.github/workflows/release.yml` is the producer
-//! that publishes those manifests; these tests pin that producer the way
-//! the TS repo pins its release workflow (`release-workflow.test.ts`):
-//! parse the workflow, run the promote job's real step code against a
-//! fixture tree, and prove the emitted manifest parses with the exact
-//! reader (`parse_channel_manifest`) while the archive files it names
-//! exist with the digests it claims.
+//! The release pipeline's channel-manifest producer, gated against the update reader it feeds: run
+//! the promote job's real step code against a fixture tree, and prove the emitted manifest parses
+//! with the exact reader while the named archives exist with the digests it claims.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -76,6 +62,8 @@ struct Step {
     run: Option<String>,
     #[serde(default)]
     with: Option<With>,
+    #[serde(default)]
+    env: Option<BTreeMap<String, String>>,
 }
 
 #[derive(serde::Deserialize)]
@@ -133,9 +121,8 @@ fn python(script: &Path, args: &[&std::ffi::OsStr]) -> std::process::Output {
         .expect("run the release script")
 }
 
-/// The platforms a fixture release carries: the four v1 installer
-/// platforms, win32-x64 (known to the reader, v2-only), and a future
-/// musl platform the reader skips.
+/// The platforms a fixture release carries: the four v1 installer platforms, win32-x64 (known to
+/// the reader, v2-only), and a future musl platform the reader skips.
 const FIXTURE_PLATFORMS: &[&str] = &[
     "darwin-arm64",
     "darwin-x64",
@@ -227,9 +214,8 @@ fn the_workflow_wires_the_channel_manifest_producer() {
         run.contains("-beta*"),
         "the tag check does not gate the channel a prerelease publishes"
     );
-    // The promote job emits the channel manifest between the manifest
-    // merge and the release attach (the manifest must exist before attach,
-    // after the merged rows exist).
+    // The promote job emits the channel manifest between the manifest merge and the release attach
+    // (the manifest must exist before attach, after the merged rows exist).
     let promote = workflow
         .jobs
         .get("promote")
@@ -250,9 +236,8 @@ fn the_workflow_wires_the_channel_manifest_producer() {
         emit_run.contains("RELEASE_VERSION"),
         "the emission decides the channel from the tag"
     );
-    // The attach list must carry the channel manifest with a glob that
-    // matches whichever name the tag published (exactly one of
-    // latest.json/beta.json exists per release).
+    // The attach list must carry the channel manifest with a glob that matches whichever name the
+    // tag published (exactly one of latest.json/beta.json exists per release).
     let attach_step = step(promote, "Attach to GitHub release");
     let files = attach_step
         .with
@@ -265,10 +250,9 @@ fn the_workflow_wires_the_channel_manifest_producer() {
         files.contains("release-out/*.json"),
         "the attach list must carry the channel manifest via a json glob"
     );
-    // A -beta* tag attaches as a GitHub PRE-RELEASE so the nightly can never
-    // take the Latest pointer; the stable channel's download base
-    // (.../releases/latest/download/) keeps serving the last stable
-    // release's latest.json (Bugbot: beta tags steal GitHub Latest).
+    // A -beta* tag attaches as a GitHub PRE-RELEASE so the nightly can never take the Latest
+    // pointer; the stable channel's download base (.../releases/latest/download/) keeps serving the
+    // last stable release's latest.json (Bugbot: beta tags steal GitHub Latest).
     let prerelease = attach_step
         .with
         .as_ref()
@@ -301,13 +285,21 @@ fn the_rolling_nightly_refresh_is_a_serialized_job() {
         .expect("the nightly-refresh job exists");
     assert_eq!(
         refresh.r#if.as_deref(),
-        Some("contains(github.ref_name, '-')"),
-        "only -beta* tags refresh the rolling nightly release"
+        Some(
+            "${{ !cancelled() && needs.promote.result == 'success' \
+&& contains(github.ref_name, '-') }}",
+        ),
+        "the refresh gate is the explicit result form (the promote precedent): \
+         an `if` without a status function is auto-prefixed with success(), and \
+         the default needs gate skips every job downstream of a skipped job in \
+         the dependency chain - on a -beta* tag the two stable-route build jobs \
+         are skipped, and as promote's needs they are the refresh's transitive \
+         needs, so the bare form skipped the refresh on every green beta \
+         promote while the payload uploaded inside the same promote"
     );
-    // The refresh is the workflow's only shared mutable state, so it alone
-    // serializes (a queued refresh superseded by a newer tag is harmless:
-    // the newest beta's refresh wins; no per-tag promotion is ever
-    // canceled).
+    // The refresh is the workflow's only shared mutable state, so it alone serializes (a queued
+    // refresh superseded by a newer tag is harmless: the newest beta's refresh wins; no per-tag
+    // promotion is ever canceled).
     assert_eq!(
         refresh
             .concurrency
@@ -317,7 +309,27 @@ fn the_rolling_nightly_refresh_is_a_serialized_job() {
         "the refresh serializes in its own group"
     );
     assert!(refresh.needs.is_some(), "the refresh needs the promote job");
-    let run = step(refresh, "Refresh the rolling nightly release")
+    // The refresh step's gh calls are repo-relative (gh release view /
+    // download / upload / create) and this job never checks out: gh resolves
+    // the repo from the git remote or GH_REPO - never from GITHUB_REPOSITORY
+    // - so the GH_REPO row is load-bearing. Probe-pinned: with the gate
+    // fixed but GH_REPO absent, the job's first gh call fails with
+    // "failed to run git: not a git repository".
+    let refresh_step = step(refresh, "Refresh the rolling nightly release");
+    let refresh_env = refresh_step
+        .env
+        .as_ref()
+        .expect("the refresh step declares env");
+    assert_eq!(
+        refresh_env.get("GH_REPO").map(String::as_str),
+        Some("${{ github.repository }}"),
+        "the refresh step pins the repo for gh (no checkout, no git remote)"
+    );
+    assert!(
+        refresh_env.contains_key("GH_TOKEN"),
+        "the refresh step carries the workflow token"
+    );
+    let run = refresh_step
         .run
         .as_deref()
         .expect("the refresh step runs a script");
@@ -326,14 +338,12 @@ fn the_rolling_nightly_refresh_is_a_serialized_job() {
     assert!(run.contains("--clobber"), "{run}");
     assert!(run.contains("--prerelease"), "{run}");
     assert!(run.contains("release-out/prime-agent-*.tar.gz"), "{run}");
-    // The newest-wins guard: re-runs of an older tag must never clobber a
-    // newer rolling beta.json; gh release download's destination flag is
-    // --dir (Bugbot: --output-dir was discarded and never wrote the guard
-    // file). The guard FAILS CLOSED: a release carrying an unreadable
-    // beta.json is never clobbered (Bugbot: a discarded download failure
-    // fell through to --clobber), while a release with NO beta.json asset
-    // (a partial earlier refresh) has nothing to protect - the clobber
-    // heals it.
+    // The newest-wins guard: re-runs of an older tag must never clobber a newer rolling beta.json;
+    // gh release download's destination flag is --dir (Bugbot: --output-dir was discarded and never
+    // wrote the guard file). The guard FAILS CLOSED: a release carrying an unreadable beta.json is
+    // never clobbered (Bugbot: a discarded download failure fell through to --clobber), while a
+    // release with NO beta.json asset (a partial earlier refresh) has nothing to protect - the
+    // clobber heals it.
     assert!(run.contains("sort -V"), "{run}");
     assert!(run.contains("skipping the refresh"), "{run}");
     assert!(run.contains(r#"--dir "$guard""#), "{run}");
@@ -457,6 +467,49 @@ fn the_producer_refuses_rows_the_reader_rejects() {
     assert!(
         !out.join("latest.json").exists(),
         "no channel manifest is published from rejected rows"
+    );
+}
+
+#[test]
+fn the_producer_refuses_a_manifest_missing_a_platform_row() {
+    let (_, workflow) = load_workflow();
+    let emit_run = channel_step_run(&workflow);
+    let fixture = tempfile::tempdir().expect("fixture dir");
+    // A merged manifest missing the Windows row (the shape a skipped
+    // build leg would produce): the completeness gate must refuse — the
+    // channel's platform list must match the built set, and a shrunken
+    // manifest would strand that platform's installs.
+    let out = stage_merged_manifest(fixture.path(), "1.2.3", false);
+    let merged: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(out.join("manifest.json")).expect("read the merged manifest"),
+    )
+    .expect("parse the merged manifest");
+    let rows: Vec<serde_json::Value> = merged["binaries"]
+        .as_array()
+        .expect("the binaries list")
+        .iter()
+        .filter(|row| row["platform"].as_str() != Some("win32-x64"))
+        .cloned()
+        .collect();
+    std::fs::write(
+        out.join("manifest.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "version": merged["version"],
+            "binaries": rows,
+        }))
+        .expect("serialize"),
+    )
+    .expect("rewrite the merged manifest without the Windows row");
+
+    let result = run_step(emit_run, fixture.path(), "v1.2.3");
+    assert!(
+        !result.status.success(),
+        "the emission must fail when a known platform's row is missing"
+    );
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        stderr.contains("missing artifact rows") && stderr.contains("win32-x64"),
+        "the failure names the missing platform: {stderr}"
     );
 }
 
@@ -615,17 +668,31 @@ fn assembled_archives_carry_the_platform_alias_the_reader_demands() {
     let archive_bytes = std::fs::read(&archive).expect("read the archive");
     assert_eq!(row["sha256"], sha256_hex(&archive_bytes));
 
-    // The full chain: the promote emission over the assembled row, then
-    // the reader over the emitted manifest.
+    // The full chain: the promote emission over the assembled row (staged
+    // into a complete five-platform merged manifest — the completeness
+    // gate refuses a manifest missing a known platform's row), then the
+    // reader over the emitted manifest.
     let out = stage_merged_manifest(fixture.path(), "1.2.3", false);
     std::fs::copy(&archive, out.join("prime-agent-1.2.3-linux-x64.tar.gz"))
-        .expect("stage the real archive");
-    let merged = serde_json::json!({"version": "v1.2.3", "binaries": [row]});
+        .expect("stage the real archive over its fixture");
+    let merged_path = out.join("manifest.json");
+    let mut merged: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&merged_path).expect("read the staged merged manifest"),
+    )
+    .expect("parse the staged merged manifest");
+    merged["binaries"]
+        .as_array_mut()
+        .expect("the staged manifest's binaries")
+        .retain(|candidate| candidate["platform"] != "linux-x64");
+    merged["binaries"]
+        .as_array_mut()
+        .expect("the staged manifest's binaries")
+        .push(row.clone());
     std::fs::write(
-        out.join("manifest.json"),
+        &merged_path,
         serde_json::to_string_pretty(&merged).expect("serialize"),
     )
-    .expect("write the merged manifest");
+    .expect("write the merged manifest with the assembled row");
     let result = run_step(emit_run, fixture.path(), "v1.2.3");
     assert!(
         result.status.success(),
@@ -636,9 +703,14 @@ fn assembled_archives_carry_the_platform_alias_the_reader_demands() {
     assert_eq!(json["version"], "v1.2.3");
     let release = parse_channel_manifest(&bytes).expect("the reader accepts the manifest");
     assert_eq!(release.version, "1.2.3");
-    assert_eq!(release.artifacts.len(), 1);
-    let artifact: &ReleaseArtifact = &release.artifacts[0];
-    assert_eq!(artifact.platform, "linux-x64");
+    // The reader keeps every known platform's row; the assembled linux-x64
+    // row is one of the five.
+    assert_eq!(release.artifacts.len(), 5);
+    let artifact: &ReleaseArtifact = release
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.platform == "linux-x64")
+        .expect("the assembled row survived the emission");
     assert_eq!(artifact.file, "prime-agent-1.2.3-linux-x64.tar.gz");
     assert_eq!(artifact.sha256, sha256_hex(&archive_bytes));
 }

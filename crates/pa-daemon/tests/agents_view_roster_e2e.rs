@@ -1,26 +1,16 @@
-//! End-to-end verifier for the agent-roster wire protocol: a subscriber's
-//! `roster_subscribe` snapshot, the live `roster_update` pushes a turn
-//! produces (running on the busy flip, idle at settle), and the removal
-//! push when the worker stops. The supervisor is the real binary driving a
-//! scripted worker, so the deltas exercise the full worker->supervisor
-//! roster push path.
-// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
-// the full rationale).
-// Stack-resident futures by design on the daemon's hot paths; boxing the
-// call sites for a lint tick is a perf regression with zero correctness gain.
+//! Agent-roster wire protocol e2e: a subscriber's `roster_subscribe` snapshot,
+//! the live `roster_update` pushes a turn produces (running on the busy flip,
+//! idle at settle), and the removal push when the worker stops — the real
+//! supervisor driving a scripted worker.
 #![allow(clippy::large_futures)]
-// 64-bit-only targets; the narrowing casts sit at OS boundaries
-// (pid/fd/time/size) where the values are bounded by the kernel - the
-// dead-guard expect()s would add panic paths where silent wrap was
-// deliberate.
+// 64-bit-only targets; the narrowing casts sit at bounded OS boundaries.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// The fn-length threshold is a style gate, not correctness; the structure
-// campaign owns the god-fn splits as a follow-up.
+// Fn length is a style gate, not correctness.
 #![allow(clippy::too_many_lines)]
 // API-shape opinions, not defects; the surfaces are deliberate.
 #![allow(
@@ -61,10 +51,8 @@ fn spawn_daemon(socket: &Path, agent_dir: &Path) -> Daemon {
         .arg(agent_dir)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        // A supervisor killed at teardown must not leak its session workers
-        // into later test binaries: the worker's supervisor-lost exit (TS
-        // `exitIfSupervisorOrphanedForTooLong`) runs on this short window
-        // instead of the 5-minute default.
+        // A supervisor killed at teardown must not leak its session workers: the worker's
+        // supervisor-lost exit runs on this short window, not the 5-minute default.
         .env(
             pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
             "15000",
@@ -134,10 +122,9 @@ impl Client {
             .set_read_timeout(Some(Duration::from_millis(100)))
             .expect("set timeout");
         loop {
-            line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => {}
+                Ok(_) if line.trim().is_empty() => line.clear(),
                 Ok(_) => {
                     return serde_json::from_str(line.trim()).expect("parse response line");
                 }
@@ -159,8 +146,8 @@ impl Client {
         }
     }
 
-    /// The first `roster_update` line that satisfies `accept` (live or
-    /// buffered through the read loop, like a subscribed view).
+    /// The first `roster_update` line that satisfies `accept` (live or buffered, like a subscribed
+    /// view).
     fn next_roster_update<F>(&mut self, accept: F) -> serde_json::Value
     where
         F: Fn(&serde_json::Value) -> bool,
@@ -189,7 +176,6 @@ fn roster_subscribe_snapshot_and_live_update_pushes() {
     let (mut client, hello) = Client::connect(&socket);
     assert_eq!(hello["type"], "daemon_hello");
 
-    // Create a scripted session; the worker joins the roster at creation.
     let script_path = dir.path().join("script.json");
     std::fs::write(
         &script_path,
@@ -218,7 +204,6 @@ fn roster_subscribe_snapshot_and_live_update_pushes() {
         .expect("session id")
         .to_string();
 
-    // Subscribe: the snapshot carries the session as an idle roster entry.
     client.send_command("r1", &serde_json::json!({ "type": "roster_subscribe" }));
     let subscribed = client.read_response("r1");
     assert_eq!(
@@ -233,16 +218,13 @@ fn roster_subscribe_snapshot_and_live_update_pushes() {
         .iter()
         .find(|entry| entry["summary"]["activeSessionId"] == session_id.as_str())
         .unwrap_or_else(|| panic!("created session in the roster snapshot: {roster:?}"));
-    // Top-level agents key by session id; the active id is the wire address.
     assert_eq!(entry["agentId"], entry["summary"]["sessionId"]);
     assert_eq!(entry["status"], "idle");
     let agent_id = entry["agentId"].as_str().expect("agent id").to_string();
 
-    // A turn flips the entry to running and back to idle, both as live
-    // pushes to subscribers. The pushes travel worker->supervisor->client
-    // while the prompt response rides the command channel, so their order
-    // is not fixed; collect all three observations in whatever order they
-    // arrive.
+    // A turn flips the entry to running and back to idle, both as live pushes; their order
+    // against the response is not fixed (worker->supervisor->client vs the command channel),
+    // so collect all three in whatever order they arrive.
     client.send_command(
         "p1",
         &serde_json::json!({
@@ -281,21 +263,17 @@ fn roster_subscribe_snapshot_and_live_update_pushes() {
     let settled = prompt_response.expect("p1 response observed");
     assert_eq!(settled["success"], true, "prompt failed: {settled}");
 
-    // Unsubscribe: no further roster pushes reach this client. A second
-    // subscriber keeps receiving them, proving the flag gates delivery.
+    // Unsubscribe: no further pushes reach this client (a second subscriber keeps
+    // receiving them, proving the flag gates delivery).
     let (mut client_b, _hello_b) = Client::connect(&socket);
     client_b.send_command("r2", &serde_json::json!({ "type": "roster_subscribe" }));
     assert_eq!(client_b.read_response("r2")["success"], true);
     client.send_command("u1", &serde_json::json!({ "type": "roster_unsubscribe" }));
     assert_eq!(client.read_response("u1")["success"], true);
 
-    // Stopping the session passivates its row (TS
-    // `flipWorkerRosterEntriesInactive`: every stopped non-ephemeral row
-    // stays visible - the operator's rows-disappear report - the push
-    // carries the passivated entry keyed by the roster agent id (TS
-    // `rosterAgentIdForSummary` = session id, not the active/worker id
-    // the commands address), with `lifecycle` still "live", the status
-    // flipped to "inactive", and the live-only fields gone.
+    // Stopping the session passivates its row (TS `flipWorkerRosterEntriesInactive`: every
+    // stopped non-ephemeral row stays visible — the operator's rows-disappear report), keyed
+    // by the roster agent id, with `lifecycle` still "live", the status "inactive".
     client.send_command(
         "k1",
         &serde_json::json!({ "type": "kill", "activeSessionId": session_id }),
@@ -317,8 +295,8 @@ fn roster_subscribe_snapshot_and_live_update_pushes() {
             || passivated_update["removed"] == serde_json::json!([]),
         "the stop settles in place, it never removes the row: {passivated_update}"
     );
-    // The snapshot keeps the passivated row: a fresh subscriber (the
-    // agents view's open) still sees the stopped session.
+    // The snapshot keeps the passivated row: a fresh subscriber still sees the
+    // stopped session.
     client_b.send_command("r3", &serde_json::json!({ "type": "roster_subscribe" }));
     let resubscribed = client_b.read_response("r3");
     assert_eq!(
@@ -360,12 +338,8 @@ fn worker_roster_delta_requires_authentication() {
     assert_eq!(rejected["error"], "Worker authentication failed");
 }
 
-/// Family-depth roster rows: a supervisor-backed RLM child (one supervised
-/// worker per child) joins the roster keyed `parentSessionPath#childId`
-/// (TS `rosterAgentIdForSummary`), carrying the subagent identity fields the
-/// agents view and ACP subagent metas consume; deleting the child pushes the
-/// removal under that same key. The parent identity mirrors the
-/// `rlm_children` e2e harness: a scripted child over the supervisor link.
+/// Family-depth roster rows: a supervisor-backed RLM child joins the roster keyed
+/// `parentSessionPath#childId` (TS `rosterAgentIdForSummary`).
 #[tokio::test]
 async fn rlm_children_key_the_roster_by_parent_path_and_child_id() {
     use pa_core::session_engine::rlm_host::{RlmSpawnRequest, RlmSpawnTarget, RlmSubagentHost};
@@ -395,10 +369,8 @@ async fn rlm_children_key_the_roster_by_parent_path_and_child_id() {
             .env("RUST_LOG", "pa_daemon=debug")
             .stdout(log)
             .stderr(Stdio::inherit())
-            // A supervisor killed at teardown must not leak its session workers
-            // into later test binaries: the worker's supervisor-lost exit (TS
-            // `exitIfSupervisorOrphanedForTooLong`) runs on this short window
-            // instead of the 5-minute default.
+            // A supervisor killed at teardown must not leak its session workers: the worker's
+            // supervisor-lost exit runs on this short window, not the 5-minute default.
             .env(
                 pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
                 "15000",
@@ -453,11 +425,11 @@ async fn rlm_children_key_the_roster_by_parent_path_and_child_id() {
             thinking: None,
             target: RlmSpawnTarget::Local,
             cell_source_code: None,
+            spawned_by_request_id: None,
         })
         .await
         .expect("spawn child");
 
-    // The roster snapshot keys the child `parentSessionPath#childId`.
     client.send_command("r1", &serde_json::json!({ "type": "roster_subscribe" }));
     let subscribed = client.read_response("r1");
     assert_eq!(
@@ -484,9 +456,8 @@ async fn rlm_children_key_the_roster_by_parent_path_and_child_id() {
     assert_eq!(summary["rlmDepth"], 1);
     assert_eq!(summary["sessionName"], "child-a");
 
-    // A second subscriber (the agents view pattern) sees the live delta of
-    // the child's next turn under the same key. The child's spawn turn runs
-    // before this subscribe, so wait for it to settle first.
+    // A second subscriber sees the live delta of the child's next turn under the
+    // same key; wait for the spawn turn to settle first.
     let child_active_id = child_entry["summary"]["activeSessionId"]
         .as_str()
         .expect("child active session id")
@@ -532,7 +503,6 @@ async fn rlm_children_key_the_roster_by_parent_path_and_child_id() {
         "live status under the family key: {changed_child}"
     );
 
-    // Deleting the child pushes the removal keyed by the same agent id.
     children
         .delete_subagent(handle.rlm_child_id.clone())
         .await

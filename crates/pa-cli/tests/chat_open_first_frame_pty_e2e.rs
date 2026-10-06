@@ -1,13 +1,6 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
-// by design on hot paths (boxing 130 fns is allocation-churn with zero
-// correctness gain); the fn-length threshold is a style gate, not
-// correctness (the harness fns are intentionally linear); 64-bit targets -
-// the narrowing sits at OS/protocol boundaries where the values are
-// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
-// guarded parses), and checked conversions would add panic paths where
-// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
-// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
-// dossier for the conductor).
+// large_futures: stack futures on hot paths by design. too_many_lines:
+// style gate only. Casts: 64-bit targets; narrowing sits at bounded
+// OS/protocol boundaries.
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -17,26 +10,10 @@
     clippy::cast_precision_loss
 )]
 
-//! Real-pty e2e for the chat-open first frame (the operator's
-//! 2026-09-26 layout-shift report: the panel and its divider under the
-//! prompt bar painted ~1s after the view opened, and the splash
-//! butterfly flashed one row under the title before scrolling out on
-//! agents-view opens): the product's terminal renderer runs on a pty in
-//! a child process group, opening an existing session directly into
-//! content over a mock supervisor that delays the dock's data
-//! responses — the loaded-daemon repro.
-//!
-//! The pinned contract: a direct open paints ONE complete frame — the
-//! transcript, the pinned title row, and the activity dock together —
-//! and never paints the brand splash at any point. A splash-first
-//! startup frame (the flash and the one-row shift under the title) or a
-//! late dock repaint (the layout shift: the transcript rows repaint two
-//! rows up when the panel pops in) both fail the byte audit.
-//!
-//! The harness reuses the cursor-visibility e2e's structure (child in
-//! its own process group inside this runner's session, mock supervisor
-//! socket, non-blocking pty master); the byte-level waits serialize
-//! through the same static lock.
+//! Real-pty e2e for the chat-open first frame (the operator's 2026-09-26
+//! layout-shift report): a direct open over a mock supervisor that delays
+//! the dock's data responses must paint ONE complete frame (transcript,
+//! pinned title row, dock) and never paint the brand splash.
 
 #![cfg(unix)]
 
@@ -56,19 +33,16 @@ use pa_tui::interactive::{
     run_interactive, InteractiveOptions, ModelSelection, SessionSelection, UiMode,
 };
 
-/// The child-mode socket: set (with the socket path) only when this very
-/// binary is re-executed as the product-under-test.
+/// The child-mode socket: set (with the socket path) only when this very binary is re-executed as
+/// the product-under-test.
 const CHILD_SOCKET_ENV: &str = "PA_CHAT_OPEN_CHILD_SOCKET";
 
-/// The loaded-daemon stand-in: the dock's data requests answer this
-/// late — far past any honest first frame, and short enough to sit
-/// well inside the attach's bounded waits.
+/// The loaded-daemon stand-in: the dock's data requests answer this late —
+/// past any honest first frame, inside the attach's bounded waits.
 const DOCK_DATA_DELAY_MS: u64 = 300;
 
-/// The child half of the e2e: runs the real interactive loop in
-/// terminal mode against the parent's mock supervisor. A plain
-/// `cargo test` run (no `CHILD_SOCKET_ENV`) passes trivially — only the
-/// parent test drives the real path.
+/// The child half: runs the real interactive loop against the parent's mock supervisor; a
+/// plain `cargo test` run passes trivially.
 #[test]
 fn chat_open_first_frame_child_mode() {
     let Ok(socket) = std::env::var(CHILD_SOCKET_ENV) else {
@@ -82,8 +56,8 @@ fn chat_open_first_frame_child_mode() {
     let _ = runtime.block_on(run_interactive(options, UiMode::Terminal));
 }
 
-/// The pty harnesses serialize: each drives a raw pty; concurrent
-/// byte-level waits flake on the shared sandbox CPUs.
+/// The pty harnesses serialize: each drives a raw pty; concurrent byte-level waits flake on the
+/// shared sandbox CPUs.
 static HARNESS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[test]
@@ -101,31 +75,26 @@ fn chat_open_first_frame_pins_the_first_paint() {
     };
     let mut harness = ChatOpenHarness::start();
 
-    // The one complete frame: the transcript content, the pinned title
-    // row, and the dock's panel row all land. Each wait is an
-    // observable-readiness barrier — the mock's delayed responses ride
-    // the attach's own round trip, so the waits measure the fold, not a
-    // wall-clock window.
+    // The one complete frame: transcript, title row, and dock row all land;
+    // each wait is an observable-readiness barrier, not a wall-clock window.
     harness.wait_from_start("settled answer", "the transcript painted");
     harness.wait_from_start("layout probe", "the pinned title row painted");
     harness.wait_from_start("\u{25f7} 1 heartbeat", "the dock panel painted");
 
-    // Let the surface settle so the audit covers every repaint the
-    // open can produce, then read the whole byte stream.
+    // Let the surface settle so the audit covers every repaint the open can produce, then read the
+    // whole byte stream.
     harness.drain_until_quiet(10);
     let collected = harness.output();
     let stream: &[u8] = &collected;
 
-    // The brand splash never paints: no splash-first startup frame (the
-    // flash), so the butterfly never shifts a row under the title bar.
+    // The brand splash never paints (no flash, no one-row shift under the title).
     assert!(
         find_subsequence(stream, b"prime agent").is_none(),
         "the brand splash never paints for a direct open into content — \
          the whole stream carries the splash bytes"
     );
 
-    // The transcript painted exactly once: a late dock repaint would
-    // shift the window two rows up and repaint every transcript row —
+    // The transcript painted exactly once: a late dock repaint would shift the window two rows up —
     // the operator's layout shift.
     let content_paints = count_occurrences(stream, b"settled answer");
     assert_eq!(
@@ -134,8 +103,8 @@ fn chat_open_first_frame_pins_the_first_paint() {
          layout shift of the dock arriving late"
     );
 
-    // The divider rule and the panel row are part of the same first
-    // paint: the dock data folded with the attach, never after it.
+    // The divider rule and the panel row are part of the same first paint: the dock data folded
+    // with the attach, never after it.
     assert!(
         find_subsequence(stream, "\u{25f7} 1 heartbeat".as_bytes()).is_some(),
         "the dock's heartbeat panel row painted"
@@ -163,8 +132,7 @@ fn session_runner() -> bool {
 /// One pty-backed product child plus the mock supervisor it attaches to.
 struct ChatOpenHarness {
     child: Child,
-    /// The mock-supervisor server thread's join handle (it exits with the
-    /// child's connection).
+    /// The mock-supervisor server thread's join handle (it exits with the child's connection).
     _server: std::thread::JoinHandle<()>,
     master: PtyReader,
 }
@@ -188,9 +156,8 @@ impl ChatOpenHarness {
         .expect("open pty");
 
         let child = spawn_child(&socket, &pty.slave);
-        // Leak the temp dir's socket path on purpose: the child needs the
-        // socket for the lifetime of the test, and the whole tree dies
-        // with the child at teardown.
+        // Leak the temp dir's socket path on purpose: the child needs it for
+        // the test's lifetime, and the whole tree dies with the child.
         std::mem::forget(dir);
         ChatOpenHarness {
             child,
@@ -218,8 +185,7 @@ impl ChatOpenHarness {
     }
 }
 
-/// Non-blocking reader over the pty master, collecting the raw byte
-/// stream the child writes.
+/// Non-blocking reader over the pty master, collecting the raw byte stream the child writes.
 struct PtyReader {
     file: std::fs::File,
     output: Vec<u8>,
@@ -235,9 +201,9 @@ impl PtyReader {
         }
     }
 
-    /// Drain the master until it goes quiet for `quiet_polls` consecutive
-    /// polls: a settle window keeps every later byte (the pty driver
-    /// drops writes that find its kernel-side buffer full).
+    /// Drain the master until it goes quiet for `quiet_polls` consecutive polls: a
+    /// settle window keeps every later byte (the pty driver drops writes that find
+    /// its kernel-side buffer full).
     fn drain_until_quiet(&mut self, quiet_polls: usize) {
         let mut quiet = 0;
         while quiet < quiet_polls {
@@ -253,8 +219,8 @@ impl PtyReader {
         }
     }
 
-    /// Drain the master until the needle appears in the output collected
-    /// since the given mark, bounded by a generous harness deadline.
+    /// Drain the master until the needle appears in the output collected since the given mark,
+    /// bounded by a generous harness deadline.
     fn wait_from(&mut self, mark: usize, needle: &str, what: &str) {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
@@ -297,12 +263,11 @@ fn count_occurrences(haystack: &[u8], needle: &[u8]) -> usize {
     count
 }
 
-/// A child process group of this very binary, re-executed in child mode
-/// with the pty slave as its terminal and no tmux (the tmux keyboard
-/// check must stay out of the way).
+/// A child process group of this very binary, re-executed in child mode with the
+/// pty slave as its terminal and no tmux.
 fn spawn_child(socket: &std::path::Path, slave: &OwnedFd) -> Child {
-    // Runs between fork and exec in the child: setpgid moves it into its
-    // own process group, inside the runner's session.
+    // Runs between fork and exec in the child: setpgid moves it into its own process group, inside
+    // the runner's session.
     fn make_process_group() -> std::io::Result<()> {
         nix::unistd::setpgid(Pid::from_raw(0), Pid::from_raw(0))?;
         Ok(())
@@ -340,8 +305,8 @@ fn child_options(socket: PathBuf) -> InteractiveOptions {
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
-        // A direct open into an existing session: the agents-view hand
-        // path (the operator's repro), not a fresh create.
+        // A direct open into an existing session: the agents-view hand path (the operator's repro),
+        // not a fresh create.
         session: SessionSelection::Attach("s1".to_string()),
         initial_message: None,
         show_images: true,
@@ -367,9 +332,8 @@ fn child_options(socket: PathBuf) -> InteractiveOptions {
     }
 }
 
-/// One attached session behind a mock supervisor socket: the attach
-/// snapshot carries a settled exchange, and the dock's data requests
-/// answer after the delay (the loaded daemon).
+/// One attached session behind a mock supervisor socket: the attach snapshot
+/// carries a settled exchange; the dock's data requests answer after the delay.
 struct MockSupervisor {
     listener: std::os::unix::net::UnixListener,
 }
@@ -491,8 +455,7 @@ fn write_json(writer: &mut std::os::unix::net::UnixStream, value: &Value) {
     writer.flush().expect("flush mock frame");
 }
 
-/// The attach result: one live session with a settled exchange — a
-/// direct open into content.
+/// The attach result: one live session with a settled exchange — a direct open into content.
 fn attach_data(id: &str) -> Value {
     json!({
         "type": "response",

@@ -1,26 +1,20 @@
 //! The runtime bootstrap code injected into each kernel right after start or
 //! restore: binds the `rlm`, `bash`, and MCP surfaces and pre-imports every
-//! Python skill (from `core/tools/ipython.ts`'s `buildRlmBootstrapCode`).
+//! Python skill.
 
 use super::KernelPythonSkill;
 
-/// Line the runtime bootstrap prints (once, after the skill import loop) when
-/// one or more pre-imported Python skills failed to import. The host scans
-/// the bootstrap cell's stdout for this marker so unavailable skills reach
-/// the model instead of failing only on first call.
+/// Line the runtime bootstrap prints when one or more pre-imported Python skills failed to import.
+/// The host scans the bootstrap cell's stdout for this marker.
 pub const PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER: &str =
     "__PRIME_AGENT_PYTHON_SKILL_IMPORT_ERRORS__";
 
-/// Failed skill imports reported by a bootstrap cell: `(import name, import
-/// error)` pairs in import order (TS `UnavailablePythonSkills =
-/// Record<string, string>`; the marker's JSON preserves insertion order,
-/// which the notice keeps).
+/// Failed skill imports reported by a bootstrap cell: `(import name, import error)` pairs in import
+/// order (TS `UnavailablePythonSkills = Record<string, string>`).
 pub type UnavailablePythonSkills = Vec<(String, String)>;
 
-/// Extract the unavailable-skill report a bootstrap cell printed, or
-/// `None` when it printed none: the marker must be followed by a JSON
-/// object of `{import name: error}` with at least one non-empty string
-/// value (TS `parseUnavailablePythonSkills`).
+/// Extract the unavailable-skill report a bootstrap cell printed, or `None` when it printed none:
+/// the marker must be followed by a JSON object with at least one non-empty string value.
 #[must_use]
 pub fn parse_unavailable_python_skills(stdout: &str) -> Option<UnavailablePythonSkills> {
     let at = stdout.find(PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER)?;
@@ -78,17 +72,12 @@ except Exception as _prime_agent_rlm_error:
         rlm._raise_missing()
 "#;
 
-/// The code the session injects right after kernel start/restore: binds the
-/// `rlm`, `bash`, and MCP surfaces, imports every Python skill (wrapping
-/// callable ones, replacing broken imports with a stub that raises), and —
-/// when any import failed — ends by printing
-/// [`PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER`] plus the errors as JSON so
-/// the host can tell the model, matching the TS `buildRlmBootstrapCode`.
+/// The code the session injects right after kernel start/restore: binds the `rlm`, `bash`, and MCP
+/// surfaces, imports every Python skill.
 #[must_use]
 pub fn build_rlm_bootstrap_code(python_skills: &[KernelPythonSkill]) -> String {
     let base_code = format!("{RLM_BOOTSTRAP_HEADER_CODE}\n\n{RLM_BOOTSTRAP_RUNTIME_CODE}");
-    // TS: `[...new Set(pythonSkills.map(...))]` — first-seen order, so the
-    // pre-import loop (and the unavailable-skills report it prints) follows
+    // TS: `[...new Set(pythonSkills.map(...))]` — first-seen order, so the pre-import loop follows
     // the session's skill discovery order.
     let mut import_names: Vec<&str> = Vec::new();
     for skill in python_skills {
@@ -209,9 +198,8 @@ mod tests {
         assert!(code.contains("_PrimeAgentUnavailableSkill"));
     }
 
-    /// The TS #2381 parser table: marker+JSON, noise-prefixed marker,
-    /// no marker, non-JSON payload, and the empty dict all land where the
-    /// host-side report decides notice vs silence.
+    /// The TS #2381 parser table: marker+JSON, noise-prefixed marker, no marker, non-JSON payload
+    /// all land where the host-side report decides notice vs silence.
     #[test]
     fn parse_unavailable_python_skills_table() {
         let cases: Vec<(String, Option<UnavailablePythonSkills>)> = vec![

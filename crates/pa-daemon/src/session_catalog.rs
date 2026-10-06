@@ -1,9 +1,7 @@
-//! Saved-session catalog resolve (port of the catalog `resolve` command in
-//! `modes/daemon/daemon-catalog-process.ts`): the selector-to-session-file
-//! lookup the supervisor uses when a client command addresses a session
-//! that is not resident. Local (cwd-scoped) matches win over global ones;
-//! an ambiguous selector fails with the TS error so callers can tell it
-//! apart from an unknown-target miss.
+//! Saved-session catalog resolve (TS catalog `resolve`): the selector-to-session-file
+//! lookup the supervisor uses when a client command addresses a session that is not
+//! resident. Local (cwd-scoped) matches win over global ones; an ambiguous selector fails
+//! with the TS error so callers can tell it apart from an unknown-target miss.
 
 use std::path::Path;
 
@@ -12,9 +10,8 @@ use anyhow::{anyhow, Context, Result};
 use crate::session_archive::restore_session;
 use crate::session_store::{list_sessions, SessionInfo};
 
-/// One selector match against saved sessions (TS
-/// `resolveCatalogSessionMatch`): the session id is addressable by prefix,
-/// the name only exactly. More than one match is ambiguous.
+/// One selector match against saved sessions: the session id is addressable
+/// by prefix, the name only exactly; more than one match is ambiguous.
 fn catalog_session_match<'a>(
     sessions: impl IntoIterator<Item = &'a SessionInfo>,
     selector: &str,
@@ -30,16 +27,10 @@ fn catalog_session_match<'a>(
     }
 }
 
-/// Resolve one selector to a saved session (TS catalog `resolve`):
-/// cwd-scoped sessions first, the whole catalog second. The returned info
-/// carries the session's own cwd for the wake create. Misses are `None`,
-/// so the caller answers with its unknown-target error, not a catalog one.
-///
-/// A miss in the live catalog falls back to the archive (session-archiving
-/// parity with the TS archived lifecycle: an archived session stays
-/// reachable via its resume selector). The archived match RESTORES first —
-/// it moves back into the sessions dir — so the wake spawns over the live
-/// path and the session is fully addressable again.
+/// Resolve one selector to a saved session: cwd-scoped sessions first, the
+/// whole catalog second; a live miss falls back to the archive, whose match
+/// RESTORES first so the wake spawns over the live path. Misses are `None`
+/// (the caller answers its unknown-target error, not a catalog one).
 pub(crate) fn resolve_saved_session(
     sessions_dir: &Path,
     archive_dir: &Path,
@@ -158,8 +149,8 @@ mod tests {
         assert_eq!(found.path, dir.join(session_file_name(&id)));
         assert!(dir.join(session_file_name(&id)).is_file(), "restored live");
         assert!(!path.is_file(), "left the archive");
-        // After the restore the live catalog serves the selector, and a
-        // second resolve does not fail (no stale archive row).
+        // After the restore the live catalog serves the selector, and a second resolve
+        // does not fail (no stale archive row).
         let again = resolve_saved_session(&dir, &archive, "alpha", "/work/a")
             .unwrap()
             .expect("live again");

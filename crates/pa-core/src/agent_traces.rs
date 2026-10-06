@@ -1,13 +1,6 @@
-//! Trace uploads (TS `packages/coding-agent/src/core/agent-traces.ts`): the
-//! session-file upload engine behind the `/traces` command family — the
-//! trace credential precedence, the session preview, the single-session
-//! upload with its durable outbox cursor, and the upload-all sweep over a
-//! session directory with the platform rate-limit gate. The daemon-side
-//! automatic upload (TS `installAgentTraceUpload`'s debounced controller,
-//! the startup catch-up, and the semantic-edges outbox kind) stays
-//! unported: this engine is the manual-command surface, and it keeps the
-//! outbox cursors the later daemon port replays.
-
+//! Trace uploads (TS `agent-traces.ts`): the `/traces` command family — credential
+//! precedence, the session preview, the single-session upload with its durable outbox
+//! cursor, and the upload-all sweep with the rate-limit gate.
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,23 +9,9 @@ use std::time::SystemTime;
 
 use serde_json::{json, Value};
 
-// The inline unit battery moved to the child module at the same tree
-// position (agent_traces::tests); its use-super glob keeps resolving
-// through the facade bindings and re-exports (the manager stage-1
-// precedent, #3039).
 #[cfg(test)]
 mod tests;
 
-// The HTTP transport concern (the response/error records, the injectable
-// TraceHttp trait + the reqwest transport, the URI-component encoding,
-// the response message, the Retry-After parse, and the retry backoff)
-// moved to the child module at the same tree position (agent_traces::http);
-// the trait impl moves whole with the trait + both types (E0119 n/a),
-// the re-exports keep the pub API paths stable (ReqwestTraceHttp: pa-cli's
-// client_traces), and the pub(super) bindings keep the upload arm's bare
-// calls in scope (trace_upload_retry_delay + is_retriable_transport_error
-// + RETRIABLE_HTTP_STATUSES: the facade's resident upload section until
-// its own cut, the upload child after).
 mod http;
 pub use http::{
     encode_uri_component, read_response_message, retry_after_delay, ReqwestTraceHttp, TraceHttp,
@@ -40,77 +19,42 @@ pub use http::{
 };
 use http::{is_retriable_transport_error, trace_upload_retry_delay, RETRIABLE_HTTP_STATUSES};
 
-// The upload-all concern (the serialized request gate, the session-file
-// find walk, and the concurrent sweep) moved to the child module at the
-// same tree position (agent_traces::upload_all); the re-exports keep
-// the pub API paths stable (upload_all_traces + TraceUploadAllOptions +
-// the TraceUploadAllProgress senders: pa-cli's client_traces;
-// session_artifacts_root + find_trace_files: the daemon's later port),
-// and the ONE pub(super) bump on TraceRequestGate::before_request keeps
-// the upload arm's fetch_with_retry gate call + the tests child's gate
-// calls in scope. find_session_files_under stays private
-// (child-internal).
 mod upload_all;
 pub use upload_all::{
     find_trace_files, session_artifacts_root, upload_all_traces, TraceRequestGate,
     TraceUploadAllOptions,
 };
 
-// The upload concern (the one-session upload options, the outcome-logged
-// upload, the gated perform arm, and the retriable fetch loop) moved to
-// the child module at the same tree position (agent_traces::upload); the
-// re-exports keep the pub API paths stable (upload_trace_file +
-// TraceUploadOptions: pa-cli's client_traces), the ONE pub(super) bump
-// on perform_agent_trace_upload keeps the upload-all child's gated call
-// in scope (the facade binding row below serves its use-super glob), and
-// fetch_with_retry + TraceUploadOptions::enabled stay private
-// (child-internal callers).
 mod upload;
 use upload::perform_agent_trace_upload;
 pub use upload::{upload_trace_file, TraceUploadOptions};
 
-/// TS `MAX_TRACE_BYTES`: the upload limit.
 pub const MAX_TRACE_BYTES: u64 = 20 * 1024 * 1024;
-/// TS `DEFAULT_REQUEST_TIMEOUT_MS`.
 pub const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 15_000;
-/// TS `TRACE_UPLOAD_RETRY_BASE_DELAY_MS`.
 const TRACE_UPLOAD_RETRY_BASE_DELAY_MS: u64 = 500;
-/// TS `TRACE_UPLOAD_RETRY_MAX_DELAY_MS`.
 const TRACE_UPLOAD_RETRY_MAX_DELAY_MS: u64 = 10_000;
-/// TS `TRACE_UPLOAD_MAX_RETRIES`: 3 retries means up to 4 requests.
+/// 3 retries means up to 4 requests.
 const TRACE_UPLOAD_MAX_RETRIES: u32 = 3;
-/// TS `TRACE_UPLOAD_RETRY_JITTER` (the uniform half-window fraction).
+/// The uniform half-window fraction.
 const TRACE_UPLOAD_RETRY_JITTER: f64 = 0.2;
-/// TS `TRACE_PREVIEW_MAX_CHARS`.
 const TRACE_PREVIEW_MAX_CHARS: usize = 8_000;
-/// TS `TRACE_UPLOAD_ALL_CONCURRENCY`.
 const TRACE_UPLOAD_ALL_CONCURRENCY: usize = 4;
-/// TS `TRACE_UPLOAD_RATE_LIMIT_REQUESTS`.
 const TRACE_UPLOAD_RATE_LIMIT_REQUESTS: u64 = 5;
-/// TS `TRACE_UPLOAD_RATE_LIMIT_WINDOW_MS`.
 const TRACE_UPLOAD_RATE_LIMIT_WINDOW_MS: u64 = 60_000;
-/// TS `TRACE_UPLOAD_RATE_LIMIT_SAFETY_MS`.
 const TRACE_UPLOAD_RATE_LIMIT_SAFETY_MS: u64 = 100;
-/// TS `MAX_TIMER_DELAY_MS`: the cap a `Retry-After` date is clamped to.
+/// The cap a `Retry-After` date is clamped to.
 const MAX_TIMER_DELAY_MS: u64 = (1_u64 << 31) - 1;
-/// TS `TRACE_UPLOAD_ALL_MIN_REQUEST_INTERVAL_MS` (the ceil of the rate
-/// window over the request count, plus the safety margin).
+/// The ceil of the rate window over the request count, plus the safety margin.
 const TRACE_UPLOAD_ALL_MIN_REQUEST_INTERVAL_MS: u64 = TRACE_UPLOAD_RATE_LIMIT_WINDOW_MS
     / TRACE_UPLOAD_RATE_LIMIT_REQUESTS
     + TRACE_UPLOAD_RATE_LIMIT_SAFETY_MS;
-/// TS `appendRotatingLog`'s `MAX_LOG_BYTES`.
 const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
 
-/// TS `PRIME_AGENT_TRACES_PROVIDER_ID` (the stored credential id).
 pub const PRIME_AGENT_TRACES_PROVIDER_ID: &str = "prime-agent-traces";
-/// TS `PRIME_INFERENCE_PROVIDER_ID` (the credential-reuse fallback).
 pub const PRIME_INFERENCE_PROVIDER_ID: &str = "prime-inference";
 
-// ---------------------------------------------------------------------------
 // Credential
-// ---------------------------------------------------------------------------
 
-/// TS `AgentTraceCredentialSource`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraceCredentialSource {
     Environment,
@@ -118,8 +62,7 @@ pub enum TraceCredentialSource {
     PrimeInference,
 }
 
-/// TS `AgentTraceCredential`: the resolved key with the label the status
-/// block shows.
+/// The resolved key with the label the status block shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraceCredential {
     pub api_key: String,
@@ -127,10 +70,6 @@ pub struct TraceCredential {
     pub label: String,
 }
 
-/// TS `getPrimeAgentTraceCredential`: the traces env key, the stored
-/// `prime-agent-traces` key, the Prime env key, then the stored
-/// prime-inference credential. The store read is fresh — the engine holds
-/// no long-lived snapshot, which is TS's post-`authStorage.reload()` view.
 #[must_use]
 pub fn trace_credential(agent_dir: &Path) -> Option<TraceCredential> {
     if let Ok(value) = std::env::var("PRIME_AGENT_TRACES_API_KEY") {
@@ -169,26 +108,19 @@ pub fn trace_credential(agent_dir: &Path) -> Option<TraceCredential> {
     None
 }
 
-/// TS `authStorage.getApiKey(providerId, { includeFallback: false })`.
 fn stored_key(auth: &mut crate::auth::AuthStorage, provider_id: &str) -> Option<String> {
     auth.get_api_key_with_source_token(provider_id, false)
         .api_key
         .filter(|key| !key.is_empty())
 }
 
-/// TS `resolvePrimeAgentTracesBaseUrl` (imported from the auth module there
-/// too): the override (or the env key) normalized, else the platform
-/// default.
 #[must_use]
 pub fn resolve_traces_base_url(base_url: Option<&str>) -> String {
     crate::auth::resolve_prime_agent_traces_base_url(base_url)
 }
 
-// ---------------------------------------------------------------------------
 // Results
-// ---------------------------------------------------------------------------
 
-/// TS `AgentTraceUploadResult`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TraceUploadResult {
     Uploaded {
@@ -216,8 +148,7 @@ pub enum TraceUploadResult {
     },
 }
 
-/// TS `AgentTracePreviewResult`'s ready payload (boxed on the enum: the
-/// ready arm dwarfs the fallback states).
+/// The ready payload, boxed because the ready arm dwarfs the fallback states.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TracePreviewData {
     pub session_file: PathBuf,
@@ -235,7 +166,6 @@ pub struct TracePreviewData {
     pub truncated: bool,
 }
 
-/// TS `AgentTracePreviewResult`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TracePreviewResult {
     Ready(Box<TracePreviewData>),
@@ -245,7 +175,6 @@ pub enum TracePreviewResult {
     Failed { message: String },
 }
 
-/// TS `AgentTraceUploadAllProgress`.
 #[derive(Debug, Clone)]
 pub struct TraceUploadAllProgress {
     pub completed: usize,
@@ -254,7 +183,6 @@ pub struct TraceUploadAllProgress {
     pub result: Option<TraceUploadResult>,
 }
 
-/// TS `AgentTraceUploadAllResult`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TraceUploadAllResult {
     pub total: usize,
@@ -265,25 +193,18 @@ pub struct TraceUploadAllResult {
     pub results: Vec<(PathBuf, TraceUploadResult)>,
 }
 
-/// TS `AgentTraceUploadDelay` (the reason an upload arm waits): the retry
-/// backoff after a failed attempt, or the upload-all batch gate holding
-/// the platform rate limit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraceUploadDelay {
     RetryBackoff(u64),
     RateLimit(u64),
 }
 
-/// A sink for the upload delays (TS `onUploadDelay`): one call per wait
-/// the arms report before their next request.
+/// One call per reported wait, before the arm's next request.
 pub type TraceUploadDelaySink = Arc<dyn Fn(TraceUploadDelay) + Send + Sync>;
 
-// ---------------------------------------------------------------------------
 // Cancellation
-// ---------------------------------------------------------------------------
 
-/// TS `AbortSignal` for the upload arms: checked between files and waited
-/// on inside sleeps and requests.
+/// Checked between files and waited on inside sleeps and requests.
 #[derive(Clone, Default)]
 pub struct TraceUploadCancel {
     flag: Arc<AtomicBool>,
@@ -296,7 +217,6 @@ impl TraceUploadCancel {
         Self::default()
     }
 
-    /// TS `abort()` (idempotent like the controller's).
     pub fn cancel(&self) {
         self.flag.store(true, Ordering::Release);
         self.notify.notify_waiters();
@@ -319,8 +239,7 @@ impl TraceUploadCancel {
     }
 }
 
-/// TS `delay(ms, signal)`: the sleep resolves early when the signal
-/// aborts.
+/// The sleep resolves early when the signal aborts.
 async fn delay(ms: u64, cancel: Option<&TraceUploadCancel>) {
     match cancel {
         None => tokio::time::sleep(std::time::Duration::from_millis(ms)).await,
@@ -333,7 +252,6 @@ async fn delay(ms: u64, cancel: Option<&TraceUploadCancel>) {
     }
 }
 
-/// Unix milliseconds now (TS `Date.now()`).
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -341,8 +259,6 @@ fn now_ms() -> u64 {
         .unwrap_or_default()
 }
 
-/// A file's signature (TS `AgentTraceUploadedSignature`): the size and the
-/// mtime in milliseconds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct TraceUploadSignature {
     size: u64,
@@ -368,12 +284,8 @@ impl TraceUploadSignature {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Session header + context
-// ---------------------------------------------------------------------------
 
-/// TS `isSessionHeader` + `readSessionHeader`: the first line must be a
-/// `type: "session"` object with the id, timestamp, and cwd strings.
 fn read_trace_session_header(path: &Path) -> Option<pa_types::session::SessionHeader> {
     use std::io::BufRead;
     let file = std::fs::File::open(path).ok()?;
@@ -423,8 +335,7 @@ fn resolve_path(path: &Path) -> PathBuf {
     resolved
 }
 
-/// TS `resolveParentSessionPath`: an absolute parent as-is, else relative
-/// to the session file's directory.
+/// An absolute parent as-is, else relative to the session file's directory.
 fn resolve_parent_session_path(session_file: &Path, parent_session: &str) -> PathBuf {
     if Path::new(parent_session).is_absolute() {
         PathBuf::from(parent_session)
@@ -436,9 +347,7 @@ fn resolve_parent_session_path(session_file: &Path, parent_session: &str) -> Pat
     }
 }
 
-/// TS `activeGitContext`: the leaf-to-root walk over the non-session
-/// entries — the first `git_state` on the active branch's chain wins over
-/// the last `git_state` in file order.
+/// Leaf-to-root walk: the first `git_state` on the active branch's chain wins.
 fn active_git_context(
     body: &str,
     header: &pa_types::session::SessionHeader,
@@ -515,9 +424,8 @@ fn active_git_context(
     )
 }
 
-/// TS `resolveTraceContext`: the trace id is the root of the parent chain
-/// (subagent sessions upload under their parent's id), with the immediate
-/// parent kept for the `X-Parent-Session` header.
+/// The trace id is the root of the parent chain (subagent sessions upload
+/// under their parent's id); the immediate parent feeds `X-Parent-Session`.
 fn resolve_trace_context(
     session_file: &Path,
     header: &pa_types::session::SessionHeader,
@@ -545,7 +453,6 @@ fn resolve_trace_context(
     (trace_id, parent_session_id)
 }
 
-/// TS `traceContentPreview`: the head/tail split around the omission marker.
 fn trace_content_preview(body: &str, max_chars: usize) -> (String, bool) {
     let chars: Vec<char> = body.chars().collect();
     if chars.len() <= max_chars {
@@ -564,17 +471,12 @@ fn trace_content_preview(body: &str, max_chars: usize) -> (String, bool) {
     )
 }
 
-// ---------------------------------------------------------------------------
 // Outbox
-// ---------------------------------------------------------------------------
 
-/// TS `getAgentTraceOutboxDir`.
 fn agent_trace_outbox_dir(agent_dir: &Path) -> PathBuf {
     agent_dir.join("agent-traces-outbox")
 }
 
-/// TS `agentTraceOutboxEntryPath`: the sha256 of the session path, first
-/// 32 hex chars, one entry file per session.
 fn agent_trace_outbox_entry_path(agent_dir: &Path, session_file: &Path) -> PathBuf {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(session_file.to_string_lossy().as_bytes());
@@ -585,7 +487,6 @@ fn agent_trace_outbox_entry_path(agent_dir: &Path, session_file: &Path) -> PathB
     agent_trace_outbox_dir(agent_dir).join(format!("{}.json", &key[..32]))
 }
 
-/// TS `parseOutboxEntry`: the session file plus the uploaded cursor.
 fn parse_outbox_entry(raw: &str) -> Option<(String, Option<TraceUploadSignature>)> {
     let parsed: Value = serde_json::from_str(raw).ok()?;
     if !parsed.is_object() {
@@ -605,9 +506,6 @@ fn parse_outbox_entry(raw: &str) -> Option<(String, Option<TraceUploadSignature>
     Some((session_file, uploaded))
 }
 
-/// TS `readAgentTraceOutboxEntry`: the entry's cursor when it belongs to
-/// this session file (no entry, a mismatched entry, or a pending-only
-/// entry all read as "no usable cursor").
 fn read_agent_trace_outbox_entry(
     agent_dir: &Path,
     session_file: &Path,
@@ -621,12 +519,10 @@ fn read_agent_trace_outbox_entry(
     uploaded
 }
 
-/// TS `signatureEquals`.
 fn signature_equals(recorded: Option<TraceUploadSignature>, current: TraceUploadSignature) -> bool {
     recorded.is_some_and(|recorded| recorded == current)
 }
 
-/// TS `recordAgentTraceOutboxUpload`: the durable cursor write.
 fn record_agent_trace_outbox_upload(
     agent_dir: &Path,
     session_file: &Path,
@@ -654,11 +550,8 @@ fn record_agent_trace_outbox_upload(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
 // Preview
-// ---------------------------------------------------------------------------
 
-/// TS `previewAgentTraceFile`.
 pub async fn preview_trace_file(
     session_file: Option<&Path>,
     base_url: Option<&str>,
@@ -733,19 +626,14 @@ pub async fn preview_trace_file(
     }))
 }
 
-// ---------------------------------------------------------------------------
 // Trace log
-// ---------------------------------------------------------------------------
 
-/// TS `getAgentTracesLogPath`.
 #[must_use]
 pub fn agent_traces_log_path(agent_dir: &Path) -> PathBuf {
     agent_dir.join("logs").join("agent-traces.log")
 }
 
-/// TS `appendRotatingLog`: the oversize log rolls to `.old`, then the
-/// line appends; every failure stays silent (a broken log dir must not
-/// break the upload).
+/// Every failure stays silent: a broken log dir must not break the upload.
 fn append_rotating_log(log_path: &Path, message: &str) {
     let write = || -> std::io::Result<()> {
         use std::io::Write;
@@ -764,7 +652,6 @@ fn append_rotating_log(log_path: &Path, message: &str) {
     let _ = write();
 }
 
-/// TS `logAgentTraceOutcome`: the outcome line the failures reference.
 pub fn log_agent_trace_outcome(
     agent_dir: &Path,
     session_file: Option<&Path>,

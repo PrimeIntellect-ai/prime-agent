@@ -1,18 +1,15 @@
 //! The catalog-driven `McpManager` surface: service-catalog resolution
 //! (compiled built-ins -> local sources -> remote snapshot), integrations
-//! over resolved descriptors with ENDPOINT PINNING (an installed record or
-//! bound credential keeps its approved endpoint even when the catalog URL
-//! moves), the static-token paste install, and demand-driven verification.
-//! Port of the catalog half of
-//! `packages/coding-agent/src/core/mcp/mcp-manager.ts` `resolveIntegrations`
-//! plus the TS `verifyMcpConnection`/static-token install flow.
+//! over resolved descriptors with ENDPOINT PINNING (an installed record keeps
+//! its approved endpoint even when the catalog URL moves), the paste install.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::catalog_plugin_views::{
-    build_connection_views, build_plugin_views, AcpServerRow, BuildViewsInputs, McpPluginView,
+    build_connection_views, build_plugin_views, AcpServerRow, BuildViewsInputs, McpCredentialView,
+    McpPluginView, API_KEY_CREDENTIALS,
 };
 use super::catalog_schema::{AuthStrategy, SetupStatus};
 use super::catalog_status_views::SnapshotCredentials;
@@ -47,10 +44,8 @@ pub struct StaticTokenInstall {
 }
 
 impl McpManager {
-    /// Resolve the service catalog now: compiled built-ins, declared local
-    /// sources plus the default `mcp-services.json`, the remote snapshot,
-    /// and the durable pins from the connection records. Visible
-    /// diagnostics never fail the resolution.
+    /// Resolve the service catalog now: compiled built-ins, declared local sources the remote
+    /// snapshot, and the durable pins. Visible diagnostics never fail the resolution.
     pub(crate) fn resolve_service_catalog(&mut self) {
         let mut sources: Vec<LocalCatalogSource> = Vec::new();
         if let Some(agent_dir) = self.agent_dir.as_deref() {
@@ -123,6 +118,24 @@ impl McpManager {
         })
     }
 
+    /// The `/mcp` view's api-key credential rows (the credential catalog
+    /// served alongside the MCP connections): one row per catalog entry,
+    /// configured when the shared auth store holds an API key at its slot.
+    pub fn api_key_credential_views(&self) -> Vec<McpCredentialView> {
+        let credentials = self.credential_snapshot();
+        API_KEY_CREDENTIALS
+            .iter()
+            .map(|(id, label)| McpCredentialView {
+                id: (*id).to_string(),
+                label: (*label).to_string(),
+                configured: credentials
+                    .credentials
+                    .get(*id)
+                    .is_some_and(|credential| matches!(credential, AuthCredential::ApiKey { .. })),
+            })
+            .collect()
+    }
+
     /// The kernel connection inventory for `mcp.list_connections` (TS
     /// `buildConnectionViews`): the resolved services plus user-declared
     /// servers plus the session-scoped ACP servers, one row per
@@ -155,18 +168,16 @@ impl McpManager {
     }
 
     /// Gather the paste-install inputs under a SHORT lock: the async install
-    /// then runs without holding the manager mutex (the probe and the auth
-    /// store await freely).
+    /// then runs without holding the manager mutex.
     ///
     /// # Errors
     ///
-    /// Returns a human-readable error when the server is not a known
-    /// service that collects exactly one pasted credential.
+    /// Returns a human-readable error when the server is not a known service
+    /// that collects exactly one pasted credential.
     ///
     /// # Panics
     ///
-    /// The `expect` on the service's endpoint is unreachable: the
-    /// pasteability filter already rejects services without an endpoint.
+    /// The `expect` on the service's endpoint is unreachable.
     pub fn paste_install_inputs(&self, server: &str) -> Result<PasteInstallInputs, String> {
         let token = String::new();
         let _ = token;
@@ -227,16 +238,14 @@ fn expand_tilde(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
-/// The TS `resolveIntegrations` catalog path: every HTTP catalog service is
-/// an integration whose config URL is the REPAIR endpoint (an installed
-/// record or bound credential) when one exists — the endpoint pin — and the
-/// catalog URL otherwise.
+/// The catalog path: every HTTP catalog service is an integration whose config URL is the REPAIR
+/// endpoint (an installed record or bound credential) when one exists and the catalog URL
+/// otherwise.
 impl McpManager {
     pub(crate) fn resolve_integrations_over_catalog(&mut self) {
         self.resolve_service_catalog();
-        // Resolution never takes the auth-store lock: construction may run
-        // on an async runtime, and the durable RECORD endpoint is the pin
-        // (credential-bound repair re-resolves at view/serve time).
+        // Resolution never takes the auth-store lock: construction may run on an async runtime, and
+        // the durable RECORD endpoint is the pin.
         let credentials = SnapshotCredentials::empty();
         let records = self.records_by_id();
         let mut integrations: HashMap<String, ResolvedIntegration> = HashMap::new();
@@ -260,10 +269,8 @@ impl McpManager {
                 false,
                 false,
             );
-            // Token services authenticate with a pasted static token
-            // credential: the marker tells the kernel where the bearer
-            // comes from, and the config is only served once credentials
-            // exist (is_authed).
+            // Token services authenticate with a pasted static token credential: the marker tells
+            // the kernel where the bearer comes from.
             let static_token = is_pasteable_token_service(&service);
             let config_url = if eligibility.repair && record.is_some() {
                 eligibility
@@ -347,9 +354,8 @@ impl McpManager {
                 },
             );
         }
-        // User-declared servers: a legacy-builtin shadow is a dead entry
-        // (disabled integration with the conflict hint); any other user
-        // entry owns its id.
+        // User-declared servers: a legacy-builtin shadow is a dead entry; any other user entry owns
+        // its id.
         let user_servers = (self.get_user_servers)().unwrap_or_default();
         for (server, config) in user_servers {
             let reserved = self
@@ -484,15 +490,14 @@ pub struct PasteInstallInputs {
     probe: McpEndpointProbe,
 }
 
-/// Install a pasted static token for a pasteable service (the inline paste
-/// flow): store the credential bound to the service endpoint (the pin),
-/// verify with a real handshake, and persist the record under the guard.
-/// Never holds a manager mutex across the probe.
+/// Install a pasted static token for a pasteable service: store the credential bound to the service
+/// endpoint (the pin), verify with a real handshake, and persist the record under the guard. Never
+/// holds a manager mutex across the probe.
 ///
 /// # Errors
 ///
-/// Returns a human-readable error when the pasted token is empty or the
-/// connection record cannot be written.
+/// Returns a human-readable error when the pasted token is empty or the connection
+/// record cannot be written.
 ///
 /// # Panics
 ///
@@ -540,9 +545,8 @@ pub async fn install_static_token(
             record.last_error = Some(category.to_string());
         }
     }
-    // The guard: the stored credential must still be exactly the token we
-    // probed, bound to exactly this endpoint — a rotation or logout between
-    // reads discards the whole result.
+    // The guard: the stored credential must still be exactly the token we probed, a rotation or
+    // logout between reads discards the whole result.
     let current = {
         let auth = inputs.auth_storage.lock().await;
         auth.get_all().get(&provider_id).cloned()
@@ -583,14 +587,12 @@ pub async fn install_static_token(
     })
 }
 
-/// Remove one connection: delete its credential and its connection record
-/// (the durable endpoint pin) in one step — the view's remove-account
-/// action. Returns whether the credential was removed.
+/// Remove one connection: delete its credential and its connection record (the
+/// durable endpoint pin) in one step. Returns whether the credential was removed.
 ///
 /// # Errors
 ///
-/// Returns a human-readable error when the connection record cannot be
-/// written.
+/// Returns a human-readable error when the connection record cannot be written.
 ///
 /// # Panics
 ///

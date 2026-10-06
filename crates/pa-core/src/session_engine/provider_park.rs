@@ -1,99 +1,69 @@
-//! Provider quota park: park quota-blocked sessions until the
-//! provider-reported usage reset and auto-resume (the TS #2375 park
-//! mechanism, adapted to this port's retry chain).
-//!
-//! The TS session enters its park from the wait-for-usage loop's
-//! `reset-too-far` abort: a quota failure whose provider-reported reset
-//! exceeds the bounded wait ends the turn cleanly and wakes at the reset.
-//! This port has no ping loop; the bounded wait is the quick-retry
-//! server-requested wait cap ([`ProviderRetryPolicy::max_retry_delay_ms`]):
-//! a quota failure whose reported reset exceeds that cap ends the chain
-//! with [`ProviderRetryDelay::ExceedsCap`], which is the park seam. A
-//! quota failure without a reported reset keeps aborting (a blind park
-//! would guess a wake time), and resets within the cap keep the
-//! quick-retry schedule (the TS wait loop waits those out in-turn; a full
-//! wait-for-usage port is its own lane).
-//!
-//! The park owner is the session engine: it holds the park state, records
-//! the park/resume transitions in the session log, and schedules the wake
-//! (a durable one-shot cron job whose prompt is
-//! [`QUOTA_RESUME_MARKER_TEXT`], fired into the session's follow-up lane
-//! by the scheduler). The decision logic here is pure and clock-free so
-//! tests stay deterministic; the engine supplies the clock at the seam.
+//! Provider quota park: park quota-blocked sessions until the provider-reported reset and
+//! auto-resume (the TS #2375 park mechanism, adapted): a quota failure whose reported reset
+//! exceeds the quick-retry wait cap ends the chain with `ExceedsCap`, the park seam; one
+//! without a reported reset keeps aborting — a blind park would guess a wake time.
 
 use pa_agent::types::AssistantMessage;
 
 use super::provider_retry::{provider_stream_failure_kind, provider_stream_failure_retry_after_ms};
 
 /// Parks wake slightly after the reported reset so the window has
-/// actually rolled over (TS `PROVIDER_RESUME_GRACE_MS`).
+/// actually rolled over.
 pub const PROVIDER_RESUME_GRACE_MS: u64 = 30_000;
 
 /// Upper clamp for the configured park bound: one week per park, so
-/// long-horizon resets still get probed (TS `MAX_PROVIDER_PAUSE_MS`).
+/// long-horizon resets still get probed.
 pub const MAX_PROVIDER_PAUSE_MS: u64 = 7 * 86_400_000;
 
 /// Session-log entry recorded when a quota-blocked session parks until
-/// the provider reset (TS `QUOTA_PARK_CUSTOM_ENTRY_TYPE`).
+/// the provider reset.
 pub const PROVIDER_QUOTA_PARK_ENTRY: &str = "provider_quota_park";
 
-/// Session-log entry recorded when a parked session resumes (or when a
-/// wake had to be dropped) (TS `QUOTA_RESUME_CUSTOM_ENTRY_TYPE`).
+/// Session-log entry recorded when a parked session resumes (or a wake
+/// had to be dropped).
 pub const PROVIDER_QUOTA_RESUME_ENTRY: &str = "provider_quota_resume";
 
-/// Label for the durable one-shot wake that resumes a parked session
-/// (TS `QUOTA_RESUME_CRON_LABEL`).
+/// Label for the durable one-shot wake that resumes a parked session.
 pub const QUOTA_RESUME_CRON_LABEL: &str = "quota-resume";
 
-/// In-context marker delivered on resume (TS `QUOTA_RESUME_MARKER_TEXT`):
-/// tells the model the pause happened and that it should continue the
-/// interrupted task. The same text is the durable wake job's prompt, so
-/// scheduler-delivered resumes read identically.
+/// In-context marker delivered on resume; the same text is the durable
+/// wake job's prompt, so scheduler-delivered resumes read identically.
 pub const QUOTA_RESUME_MARKER_TEXT: &str = "<provider_quota_resumed>\nThe provider usage limit that paused this session has been reported as reset; this resume is automatic (retry.provider.waitForUsage.pauseUntilReset). Continue the interrupted task from where it stopped.\n</provider_quota_resumed>";
 
-/// The quota-park policy (TS `ProviderWaitPolicy`'s park keys, settings
-/// `retry.provider.waitForUsage`): whether resets beyond the bounded
-/// wait park the session, the per-park ceiling, and the per-episode
-/// park budget. The wait-loop keys of the TS group (ping delays,
-/// attempt/duration bounds) stay unused here until a wait-for-usage
-/// port lands; only the park keys have a consumer.
+/// The quota-park policy (settings `retry.provider.waitForUsage`): whether resets beyond
+/// the bounded wait park the session, the per-park ceiling, and the per-episode park
+/// budget. The TS group's wait-loop keys stay unused; only the park keys have a consumer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderParkPolicy {
     /// Park sessions for provider-reported resets beyond the bounded
     /// wait. Default true; `false` restores the pre-park immediate abort.
     pub pause_until_reset: bool,
-    /// Abort bound: maximum single park duration. Default 24h; values
-    /// above [`MAX_PROVIDER_PAUSE_MS`] are clamped so long-horizon
-    /// resets still get probed.
+    /// Maximum single park duration; values above
+    /// [`MAX_PROVIDER_PAUSE_MS`] clamp.
     pub max_pause_ms: u64,
-    /// Abort bound: maximum parks per quota episode (a successful model
-    /// call while parked resets the episode). Default 8, the same anchor
-    /// as the TS `maxParks`.
+    /// Maximum parks per quota episode (a successful model call while
+    /// parked resets the episode).
     pub max_parks: u32,
 }
 
-/// Default policy (TS `DEFAULT_PROVIDER_WAIT_POLICY`'s park keys):
-/// park on, 24h per park, 8 parks per episode.
 pub const DEFAULT_PROVIDER_PARK_POLICY: ProviderParkPolicy = ProviderParkPolicy {
     pause_until_reset: true,
     max_pause_ms: 86_400_000,
     max_parks: 8,
 };
 
-/// Why no park happened (TS `ProviderParkDecision`'s `none` reasons).
+/// Why no park happened.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoParkReason {
     /// `pauseUntilReset: false`: the pre-park immediate abort.
     Disabled,
-    /// The episode's park budget is spent: abort exactly like the
-    /// bounded wait the park replaced.
+    /// The episode's park budget is spent.
     ParkBudget,
-    /// No provider-reported reset: the bounded wait keeps its abort
-    /// behavior (a blind park would guess a wake time).
+    /// No provider-reported reset (a blind park would guess a wake time).
     NoReset,
 }
 
-/// Resolution of one park decision (TS `ProviderParkDecision`).
+/// Resolution of one park decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderParkDecision {
     /// Park, then wake `resume_after_ms` from now.
@@ -102,10 +72,8 @@ pub enum ProviderParkDecision {
     None { reason: NoParkReason },
 }
 
-/// What the park owner (the session engine) reports back to the retry
-/// chain when it parks a quota-blocked turn: the status the chain
-/// surfaces as its final `auto_retry_end` (the parked sentence, or the
-/// already-parked sentence when an existing park owns the resume).
+/// What the park owner reports back when it parks a quota-blocked turn: the status
+/// surfaced as the chain's final `auto_retry_end` (the parked, or already-parked, sentence).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderParkOutcome {
     pub status_message: String,
@@ -116,17 +84,12 @@ pub struct ProviderParkOutcome {
 pub type ParkFuture =
     std::pin::Pin<Box<dyn std::future::Future<Output = Option<ProviderParkOutcome>> + Send>>;
 
-/// The park seam the retry chains consult at their give-up: called with
-/// the failed turn's assistant message and the give-up sentence (the
-/// park's abort message); `Some(outcome)` parks the session — the chain
-/// surfaces `outcome.status_message` instead of the give-up — and `None`
-/// keeps the give-up. The callback owns its state clones (the future is
-/// `'static`).
+/// The retry chains consult this at their give-up: `Some(outcome)` parks the session
+/// — the chain surfaces `outcome.status_message` instead of the give-up — and `None` keeps it.
 pub type ParkDecisionCallback<'a> = &'a mut dyn FnMut(AssistantMessage, &str) -> ParkFuture;
 
-/// Park decision after a quota failure whose provider-reported reset
-/// exceeds the bounded wait (TS `providerParkDecision`): pure and
-/// clock-free — the caller owns the clock at the seam.
+/// Park decision after a quota failure whose reported reset exceeds the
+/// bounded wait; pure, the caller owns the clock at the seam.
 #[must_use]
 pub fn provider_park_decision(
     parks_used: u32,
@@ -156,30 +119,25 @@ pub fn provider_park_decision(
     }
 }
 
-/// Whether a failed assistant message is quota-classified (the TS wait
-/// class `usage`: 429 / usage-limit rejections). This port's classifier
-/// surface is the `provider_stream_failure` diagnostic's `rate_limit` kind.
+/// Whether a failed assistant message is quota-classified: the
+/// `provider_stream_failure` diagnostic's `rate_limit` kind.
 #[must_use]
 pub fn is_quota_block_failure(message: &AssistantMessage) -> bool {
     provider_stream_failure_kind(message).as_deref() == Some("rate_limit")
 }
 
-/// One persisted park record: the `provider_quota_park` entry's data
-/// (TS `PersistedQuotaParkData`).
+/// The `provider_quota_park` entry's data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PersistedQuotaPark {
     /// Wall-clock wake time for the park (epoch ms).
     pub resume_at_ms: u64,
-    /// Parks consumed in the episode when it parked.
     pub park_count: u32,
     /// Id of the durable one-shot wake job, when the entry carries one.
     pub job_id: Option<String>,
 }
 
-/// One park scan's verdict: a newest-first entry walk distinguishes
-/// "found the branch's park" from "the episode resumed" (an older park
-/// behind a newer resume entry must not restore) and "no park entries
-/// here" (a windowed reader keeps scanning the older records).
+/// One park scan's verdict: a newest-first walk — an older park behind
+/// a newer resume entry must not restore.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BranchParkScan {
     /// The newest relevant entry is a park: restore it.
@@ -190,9 +148,8 @@ pub enum BranchParkScan {
     None,
 }
 
-/// The park this branch ended on (TS `_restoreQuotaPark`'s scan): the
-/// newest `provider_quota_park` entry not followed by a
-/// `provider_quota_resume` entry, newest first.
+/// The park this branch ended on: the newest `provider_quota_park`
+/// entry not followed by a `provider_quota_resume` entry.
 pub fn scan_quota_park_entries(entries: &[pa_types::session::FileEntry]) -> BranchParkScan {
     for entry in entries.iter().rev() {
         let pa_types::session::FileEntry::Custom { payload, .. } = entry else {
@@ -232,19 +189,17 @@ pub fn scan_quota_park_entries(entries: &[pa_types::session::FileEntry]) -> Bran
     BranchParkScan::None
 }
 
-/// The provider-reported reset of a quota failure, in milliseconds
-/// (`retryAfterMs` on the stream-failure diagnostic — the codex usage
-/// limit parse and the Retry-After header both land there).
+/// The provider-reported reset of a quota failure, in milliseconds (`retryAfterMs` on
+/// the stream-failure diagnostic; the codex usage-limit parse and Retry-After header both
+/// land there).
 #[must_use]
 pub fn quota_failure_reset_ms(message: &AssistantMessage) -> Option<u64> {
     provider_stream_failure_retry_after_ms(message)
 }
 
-/// The parked status text surfaced as the retry chain's `final_error`
-/// (TS `_parkForQuotaReset`: `"<abort>. Session parked until <time> and
-/// will resume automatically (…): <error>"`): the give-up sentence stays
-/// this port's own (the TS abort names the wait loop this port lacks),
-/// the parked sentence is the TS wording.
+/// The parked status text surfaced as the retry chain's `final_error`:
+/// the give-up sentence stays this port's own (the TS abort names the
+/// wait loop this port lacks), the parked sentence is the TS wording.
 #[must_use]
 pub fn quota_parked_final_error(abort: &str, resume_at_ms: u64, error: &str) -> String {
     format!(
@@ -393,8 +348,8 @@ mod tests {
             quota_failure_reset_ms(&quota_message(Some("rate_limit"), Some(600_000))),
             Some(600_000)
         );
-        // The details accessor stays reachable for the message shape the
-        // engine parks on.
+        // The details accessor stays reachable for the shape the engine
+        // parks on.
         assert!(
             provider_stream_failure_details(&quota_message(Some("rate_limit"), Some(600_000)))
                 .is_some()

@@ -1,14 +1,10 @@
-//! The runtime boundary: typed execution modes and options, mirroring the
-//! `resolveAppMode` / `runtimeConfigFromArgs` split in `main.ts`. Crates that
-//! provide the real runtime (pa-core session engine, pa-daemon workers,
-//! pa-tui) plug in behind [`Runtime::run`] at merge time.
+//! The runtime boundary: typed execution modes and options. Crates that provide the
+//! real runtime plug in behind [`Runtime::run`] at merge time.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::args::{Args, AutonomousConfig, Mode, UnknownFlagValue};
+use crate::args::{Args, AutonomousConfig, Mode};
 
-/// The process-level execution mode, mirroring `AppMode` in main.ts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppMode {
     Interactive,
@@ -20,8 +16,8 @@ pub enum AppMode {
 }
 
 impl AppMode {
-    /// Resolve the execution mode from parsed args and stdin TTY state,
-    /// mirroring `resolveAppMode`.
+    /// Resolve the execution mode from parsed args and stdin TTY
+    /// state.
     #[must_use]
     pub fn resolve(parsed: &Args, stdin_is_tty: bool) -> AppMode {
         match parsed.mode {
@@ -51,7 +47,6 @@ impl AppMode {
         }
     }
 
-    /// The print output mode, mirroring `toPrintOutputMode`.
     #[must_use]
     pub fn print_output_mode(&self) -> Mode {
         match self {
@@ -61,16 +56,14 @@ impl AppMode {
     }
 }
 
-/// A seeded persistent goal (`initialGoal` in the runtime config).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitialGoal {
     pub objective: String,
     pub token_budget: Option<u32>,
 }
 
-/// The typed per-session runtime configuration, mirroring
-/// `AgentSessionRuntimeConfig`. This is the API boundary the pa-core/pa-ai
-/// crates consume at merge time.
+/// The typed per-session runtime configuration: the API boundary the
+/// pa-core/pa-ai crates consume at merge time.
 #[derive(Debug, Clone, Default)]
 #[allow(clippy::struct_excessive_bools)] // the mirrored `AgentSessionRuntimeConfig` API shape is deliberate
 pub struct RuntimeConfig {
@@ -84,11 +77,6 @@ pub struct RuntimeConfig {
     pub append_system_prompt: Vec<String>,
     pub thinking: Option<pa_types::ai::ModelThinkingLevel>,
     pub models: Option<Vec<String>>,
-    pub tools: Option<Vec<String>>,
-    pub no_tools: bool,
-    pub no_builtin_tools: bool,
-    pub extensions: Vec<PathBuf>,
-    pub no_extensions: bool,
     pub skills: Vec<PathBuf>,
     pub no_skills: bool,
     pub prompt_templates: Vec<PathBuf>,
@@ -97,7 +85,6 @@ pub struct RuntimeConfig {
     pub no_themes: bool,
     pub no_context_files: bool,
     pub autonomous: Option<AutonomousConfig>,
-    pub extension_flag_values: Option<HashMap<String, String>>,
     pub execution_mode: Option<AppMode>,
     pub telemetry_disabled: bool,
     pub serialized_refine: bool,
@@ -108,23 +95,19 @@ pub struct RuntimeConfig {
 #[derive(Debug, Clone, Default)]
 #[allow(clippy::struct_excessive_bools)] // the selection's flag set is the deliberate client-side surface
 pub struct SessionOptions {
-    /// `--continue`/`-c`: the launch surfaces the newest saved session for
-    /// the cwd through the agents view (preselected, never a blind reopen)
-    /// and falls back to a fresh session without a candidate.
+    /// `--continue`/`-c`: the launch surfaces the newest saved session for the cwd
+    /// through the agents view (preselected, never a blind reopen).
     pub continue_recent: bool,
     pub resume_bare: bool,
     pub resume: Option<String>,
     pub fork: Option<String>,
     pub no_session: bool,
     pub session_dir: Option<PathBuf>,
-    /// True when `--cwd` selected the working directory; resumed sessions
-    /// then use that directory instead of the header cwd (main.ts
-    /// `explicitCwdOverride`).
+    /// True when `--cwd` selected the working directory; resumed
+    /// sessions then use that directory instead of the header cwd.
     pub cwd_from_flag: bool,
 }
 
-/// Everything the CLI hands to the runtime, mirroring what `main.ts` computes
-/// before entering the mode runners.
 #[derive(Debug, Clone)]
 pub struct RunOptions {
     pub app_mode: AppMode,
@@ -136,9 +119,8 @@ pub struct RunOptions {
     pub list_models: Option<Option<String>>,
     /// The combined first prompt (stdin + @file text + first message).
     pub initial_message: Option<String>,
-    /// The `@file` image attachments for the initial prompt (TS
-    /// `initialImages`; only the non-interactive prompt path sends them -
-    /// the interactive initial-message image arm is not yet wired).
+    /// The `@file` image attachments for the initial prompt; only the
+    /// non-interactive prompt path sends them (the interactive arm is unwired).
     pub initial_images: Vec<pa_agent::types::ImageContent>,
     pub verbose: bool,
     pub offline: bool,
@@ -182,9 +164,8 @@ impl std::fmt::Display for MissingSubsystem {
 
 impl std::error::Error for MissingSubsystem {}
 
-/// The runtime boundary. `run` executes the requested mode; the current build
-/// has only the [`UnavailableRuntime`] implementation, which produces typed
-/// [`MissingSubsystem`] errors for every mode that needs unmerged crates.
+/// The runtime boundary. `run` executes the requested mode; the current build has
+/// only [`UnavailableRuntime`] (typed [`MissingSubsystem`] errors).
 pub trait Runtime {
     /// Execute the requested mode.
     ///
@@ -209,15 +190,24 @@ impl Runtime for UnavailableRuntime {
     }
 }
 
-/// TS main.ts `telemetryDisabled = isTelemetryEnabled(settings) ? undefined
-/// : true`: env overrides first (`PI_OFFLINE` / `DO_NOT_TRACK` /
-/// `PRIME_AGENT_TELEMETRY`), then the settings AND. Returns true when
-/// telemetry is disabled for this invocation.
+/// Env overrides first (`PI_OFFLINE` / `DO_NOT_TRACK` / `PRIME_AGENT_TELEMETRY`),
+/// then the settings AND; `true` when disabled for this invocation.
 pub fn telemetry_disabled(settings: &pa_core::settings::SettingsManager) -> bool {
-    match pa_telemetry::env_telemetry_override() {
-        Some(enabled) => !enabled,
-        None => !settings.get_telemetry_enabled(),
-    }
+    !pa_core::session_engine::telemetry::telemetry_switch(settings).enabled()
+}
+
+/// The daemon session create's `telemetry_disabled` (TS `telemetryDisabled`):
+/// only an environment opt-out rides the wire. A settings opt-out stays the
+/// live switch the session's client re-reads, so `/telemetry on` resumes the
+/// running session instead of waiting for a new one.
+pub(crate) fn create_telemetry_disabled(config: &RuntimeConfig) -> Option<bool> {
+    matches!(
+        pa_core::session_engine::telemetry::telemetry_switch(
+            &pa_core::settings::SettingsManager::create(&config.cwd, &config.agent_dir)
+        ),
+        pa_core::session_engine::telemetry::TelemetrySwitch::Env { enabled: false, .. }
+    )
+    .then_some(true)
 }
 
 /// Build the runtime config from parsed args, mirroring `runtimeConfigFromArgs`.
@@ -229,8 +219,8 @@ pub fn runtime_config_from_args(
     app_mode: AppMode,
     telemetry_disabled: bool,
 ) -> RuntimeConfig {
-    // isLocalPath: only npm:/git:/github:/http(s):/ssh: sources are not local;
-    // everything else resolves against the session cwd (utils/paths.ts).
+    // Only npm:/git:/github:/http(s):/ssh: sources are not local;
+    // everything else resolves against the session cwd.
     let is_local_path = |value: &str| {
         let trimmed = value.trim();
         !(trimmed.starts_with("npm:")
@@ -256,7 +246,6 @@ pub fn runtime_config_from_args(
             })
             .collect()
     };
-    let extensions = resolve_cli_path(&parsed.extensions);
     let skills = resolve_cli_path(&parsed.skills);
     let prompt_templates = resolve_cli_path(&parsed.prompt_templates);
     let themes = resolve_cli_path(&parsed.themes);
@@ -271,11 +260,6 @@ pub fn runtime_config_from_args(
         append_system_prompt: parsed.append_system_prompt.clone(),
         thinking: parsed.thinking,
         models: parsed.models.clone(),
-        tools: parsed.tools.clone(),
-        no_tools: parsed.no_tools,
-        no_builtin_tools: parsed.no_builtin_tools,
-        extensions,
-        no_extensions: parsed.no_extensions,
         skills,
         no_skills: parsed.no_skills,
         prompt_templates,
@@ -284,21 +268,6 @@ pub fn runtime_config_from_args(
         no_themes: parsed.no_themes,
         no_context_files: parsed.no_context_files,
         autonomous: AutonomousConfig::from_args(parsed),
-        extension_flag_values: (!parsed.unknown_flags.is_empty()).then(|| {
-            parsed
-                .unknown_flags
-                .iter()
-                .map(|(name, value)| {
-                    (
-                        name.clone(),
-                        match value {
-                            UnknownFlagValue::Flag(value) => value.to_string(),
-                            UnknownFlagValue::Value(value) => value.clone(),
-                        },
-                    )
-                })
-                .collect()
-        }),
         execution_mode: (app_mode != AppMode::Daemon).then_some(app_mode),
         telemetry_disabled,
         // Serialized refine is only used by print/json/rpc clients.
@@ -311,13 +280,18 @@ pub fn runtime_config_from_args(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Run the body with the three telemetry env overrides held at a known
     /// state and restored after (an assertion panic must never leave the
     /// process env mutated, and a host-exported opt-out must not bleed in).
-    fn with_clean_telemetry_env(body: impl FnOnce() + std::panic::UnwindSafe) {
+    pub(crate) fn with_clean_telemetry_env(body: impl FnOnce() + std::panic::UnwindSafe) {
+        // The env is process-wide: tests that rewrite it take turns.
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let vars = ["PRIME_AGENT_TELEMETRY", "DO_NOT_TRACK", "PI_OFFLINE"];
         let saved: Vec<(String, Option<String>)> = vars
             .iter()
@@ -326,9 +300,8 @@ mod tests {
         for key in vars {
             std::env::remove_var(key);
         }
-        // Restore the env FIRST, then resume the panic: a failed
-        // assertion must fail the test (never swallow), and the restore
-        // must survive it.
+        // Restore the env FIRST, then resume the panic: a failed assertion must
+        // fail the test (never swallow).
         let outcome = std::panic::catch_unwind(body);
         for (key, value) in saved {
             match value {
@@ -341,10 +314,8 @@ mod tests {
         }
     }
 
-    /// The opt-out chain (the operator's explicit ask: nothing sends when
-    /// disabled): settings `telemetry.enabled=false` disables, and the env
-    /// overrides apply in the documented precedence - `DO_NOT_TRACK` and
-    /// `PI_OFFLINE` disable even against `PRIME_AGENT_TELEMETRY=1`.
+    /// The opt-out chain (the operator's explicit ask): `DO_NOT_TRACK`/`PI_OFFLINE` disable
+    /// even against `PRIME_AGENT_TELEMETRY=1`.
     #[test]
     fn telemetry_opt_out_resolves_disabled() {
         with_clean_telemetry_env(|| {
@@ -377,8 +348,7 @@ mod tests {
         });
     }
 
-    /// Default-on: a fresh install resolves enabled (telemetry stays on by
-    /// default, matching the TS posture) with the env overrides cleared.
+    /// A fresh install resolves enabled (the TS posture) with the env overrides cleared.
     #[test]
     fn telemetry_defaults_on() {
         with_clean_telemetry_env(|| {
