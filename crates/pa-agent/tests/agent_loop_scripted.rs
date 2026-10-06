@@ -32,6 +32,7 @@ fn test_model() -> Model {
         cost: pa_agent::types::UsageCost::default(),
         context_window: 100_000,
         max_tokens: 4_096,
+        max_tokens_explicit: false,
     }
 }
 
