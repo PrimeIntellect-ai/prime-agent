@@ -87,7 +87,7 @@ pub(super) async fn dispatch_loop(
                 error: Some("command request failed canonical parse".to_string()),
             },
         };
-        server.settle(&command_id, &outcome, release).await;
+        server.settle(&command_id, &outcome, release);
         if release {
             return;
         }

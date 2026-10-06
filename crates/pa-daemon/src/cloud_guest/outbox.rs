@@ -192,7 +192,7 @@ impl GuestEventOutbox {
     ///
     /// Returns an error when the log is full (the TS stall), the event is
     /// invalid or over the frame bound, or the durable append fails.
-    pub fn append(&mut self, input: GuestEventInput) -> Result<CloudEvent> {
+    pub fn append(&mut self, input: &GuestEventInput) -> Result<CloudEvent> {
         if self.events.len() >= self.max_records {
             return Err(anyhow!(
                 "Cloud event outbox reached {} records",

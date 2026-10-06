@@ -892,13 +892,13 @@ fn torn_multibyte_outbox_tail_preserves_the_fsynced_events() {
         .unwrap()
         .1;
         outbox
-            .append(GuestEventInput::CommandAccepted {
+            .append(&GuestEventInput::CommandAccepted {
                 recorded_at: crate::cloud_guest::now_iso(),
                 receipt: receipt.clone(),
             })
             .unwrap();
         outbox
-            .append(GuestEventInput::CommandState {
+            .append(&GuestEventInput::CommandState {
                 recorded_at: crate::cloud_guest::now_iso(),
                 receipt,
             })

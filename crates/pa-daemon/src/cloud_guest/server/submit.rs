@@ -50,7 +50,7 @@ impl GuestProtocolServer {
         }
         if admission == GuestAdmission::New {
             self.mark_work_admitted();
-            self.append_event(GuestEventInput::CommandAccepted {
+            self.append_event(&GuestEventInput::CommandAccepted {
                 recorded_at: now_iso(),
                 receipt: admitted_receipt.clone(),
             });
@@ -73,7 +73,7 @@ impl GuestProtocolServer {
         // current journaled state (post queue-full failure).
         write_frame(&self.command_frame(&admitted_receipt));
         let receipt = self.poll_receipt(command_id).unwrap_or(admitted_receipt);
-        self.append_event(GuestEventInput::CommandState {
+        self.append_event(&GuestEventInput::CommandState {
             recorded_at: now_iso(),
             receipt,
         });

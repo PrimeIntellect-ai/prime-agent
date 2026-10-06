@@ -269,7 +269,7 @@ impl GuestProtocolServer {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) =
                     Some(claimed.receipt.command_id.clone());
-                self.append_event(GuestEventInput::CommandState {
+                self.append_event(&GuestEventInput::CommandState {
                     recorded_at: now_iso(),
                     receipt,
                 });
@@ -291,7 +291,7 @@ impl GuestProtocolServer {
     /// walks the stopping/stopped transition and stops the server (TS
     /// `settleCommand` + `release`). A settle that cannot journal stays
     /// visible through the honest uncertain path after a restore.
-    pub async fn settle(&self, command_id: &str, outcome: &GuestDispatchOutcome, release: bool) {
+    pub fn settle(&self, command_id: &str, outcome: &GuestDispatchOutcome, release: bool) {
         let receipt = {
             let mut journal = self
                 .journal
@@ -314,7 +314,7 @@ impl GuestProtocolServer {
         };
         match receipt {
             Ok(receipt) => {
-                self.append_event(GuestEventInput::CommandState {
+                self.append_event(&GuestEventInput::CommandState {
                     recorded_at: now_iso(),
                     receipt,
                 });
@@ -370,7 +370,7 @@ impl GuestProtocolServer {
             }
         };
         if changed {
-            self.append_event(GuestEventInput::SessionStatus {
+            self.append_event(&GuestEventInput::SessionStatus {
                 recorded_at: now_iso(),
                 status,
             });
@@ -389,7 +389,7 @@ impl GuestProtocolServer {
     /// a push failure never loses the event. A full unacked log stalls
     /// honestly: the event is reported lost through the dispatch error
     /// channel, and the stall clears on the next successful append.
-    pub fn append_event(&self, input: GuestEventInput) -> Option<CloudEvent> {
+    pub fn append_event(&self, input: &GuestEventInput) -> Option<CloudEvent> {
         let appended = self
             .outbox
             .lock()
@@ -425,6 +425,7 @@ impl GuestProtocolServer {
 
     /// Record a non-fatal dispatch/delivery error for honest
     /// diagnostics (TS `onDispatchError`).
+    #[allow(clippy::unused_self)] // TS `onDispatchError` is a method of the server; the shape stays.
     pub fn record_dispatch_error(&self, message: &str) {
         eprintln!("cloud guest: {message}");
     }
