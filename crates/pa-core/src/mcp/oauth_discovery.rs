@@ -202,7 +202,7 @@ async fn discover_authorization_server(
 
 /// Protected-resource metadata (RFC 9728 shape; schema-validated,
 /// servers non-empty by policy).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct ProtectedResourceMetadata {
     /// The DECLARED resource audience, sent as the `resource` parameter
     /// (never the endpoint's own canonical string).
