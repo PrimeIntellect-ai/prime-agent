@@ -215,6 +215,34 @@ jobs:
             --catalog-assets "target/${{ matrix.target }}/catalog-assets" \
             --out-dir "target/${{ matrix.target }}/dist"
           cat "target/${{ matrix.target }}/dist/manifest.json"
+      # The homebrew-core submission candidate: the source tarball the
+      # formula pins (scripts/release/assemble_source.py — the git tree at
+      # the tag plus the validated catalog assets at the archive root). One
+      # cut per stable release: the job gate keeps this stable-only, and the
+      # step gate holds the matrix to a single leg so the artifact exists
+      # exactly once. The output goes to its own src-dist dir — the binary
+      # artifact's upload glob (dist/prime-agent-*) must not pick the src
+      # tarball up as a per-target artifact.
+      - name: Assemble the source tarball (homebrew-core candidate)
+        if: matrix.target == 'x86_64-unknown-linux-gnu' && !contains(github.ref_name, '-')
+        run: |
+          set -euo pipefail
+          python3 scripts/release/assemble_source.py \
+            --repo-root . \
+            --version "${RELEASE_VERSION#v}" \
+            --catalog-assets "target/${{ matrix.target }}/catalog-assets" \
+            --out-dir "target/${{ matrix.target }}/src-dist"
+          cat "target/${{ matrix.target }}/src-dist/manifest.json"
+      - name: Upload the source tarball artifacts
+        if: matrix.target == 'x86_64-unknown-linux-gnu' && !contains(github.ref_name, '-')
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: artifacts-source
+          path: |
+            target/${{ matrix.target }}/src-dist/prime-agent-*
+            target/${{ matrix.target }}/src-dist/SHA256SUMS
+            target/${{ matrix.target }}/src-dist/manifest.json
+          if-no-files-found: error
       - name: Upload artifacts
         # The glob carries the decoder alongside the payload files — it is
         # a workflow artifact, never a tarball member: assemble never stages
