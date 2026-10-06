@@ -276,7 +276,7 @@ pub struct AgentSessionMessageRowPayload<'a> {
     pub message: &'a str,
     pub from: &'a Value,
     pub from_relationship: Option<AgentFamilyRelationship>,
-    pub target: &'a Value,
+    pub target: Option<&'a Value>,
     /// Unix timestamp in milliseconds.
     pub timestamp: u64,
 }
@@ -293,7 +293,9 @@ pub fn create_agent_session_message_row(payload: &AgentSessionMessageRowPayload<
     if let Some(relationship) = payload.from_relationship {
         details.insert("fromRelationship".to_string(), json!(relationship.as_str()));
     }
-    details.insert("target".to_string(), payload.target.clone());
+    if let Some(target) = payload.target {
+        details.insert("target".to_string(), target.clone());
+    }
     json!({
         "role": "custom",
         "customType": AGENT_MESSAGE_CUSTOM_TYPE,

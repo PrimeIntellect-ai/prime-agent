@@ -355,7 +355,7 @@ impl Worker {
                         message,
                         from: &sender,
                         from_relationship,
-                        target: &target,
+                        target: Some(&target),
                         timestamp: crate::util::now_ms(),
                     },
                 );
