@@ -183,6 +183,37 @@ impl SocketLease {
         Ok(())
     }
 
+    /// Claim the socket file at `path` under a private name in its own
+    /// directory: a short, basename-independent name keeps the claim
+    /// probeable through the `AF_UNIX` address budget no matter how long
+    /// the original basename is, and the full-nanosecond process-unique
+    /// suffix never wraps. The claim is a no-replace rename, so a live
+    /// claimed file preserved by an earlier window (a no-replace restore
+    /// that failed because a newer holder owned the vacated path) can
+    /// never be overwritten by a later claim; a taken name regenerates
+    /// the suffix instead. Returns `None` when the path is empty or no
+    /// free claim name is found.
+    #[cfg(target_os = "linux")]
+    fn claim_under_private_name(path: &std::path::Path) -> Option<std::path::PathBuf> {
+        let parent = path.parent()?;
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |age| age.as_nanos());
+        let pid = std::process::id();
+        for attempt in 0..8 {
+            // The attempt counter de-conflicts even a monotonically
+            // stalled clock: pid + nanos + attempt is unique in-process,
+            // and the no-replace rename rejects any other collision.
+            let claim = parent.join(format!(".u{pid:x}{nanos:x}{attempt:x}"));
+            match pa_core::platform::move_without_replacing(path, &claim) {
+                Ok(()) => return Some(claim),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(_) => return None,
+            }
+        }
+        None
+    }
+
     /// Best-effort unlink of only the bound socket owned by this holder.
     /// On compromise, leave the successor's socket untouched. The socket
     /// file is first claimed under a private name with one atomic rename,
@@ -208,19 +239,16 @@ impl SocketLease {
         }
         // The claim-probe-remove choreography is Linux-only: only there
         // does the definitely-closed verdict exist, and only there can
-        // the no-replace restore move. Elsewhere the exit cleanup
-        // preserves the path and the next bind's stale-socket prepare
-        // cleans a file nothing serves.
+        // the no-replace moves run. Elsewhere the exit cleanup preserves
+        // the path and the next bind's stale-socket prepare cleans a
+        // file nothing serves.
         #[cfg(target_os = "linux")]
         {
-            // The compact claim name keeps the probeable pathname within
-            // the AF_UNIX address budget for every basename the long
-            // form could not.
-            let claim = pa_core::platform::compact_sibling_for(path, "u");
-            if std::fs::rename(path, &claim).is_err() {
-                // Nothing at the path is ours to unlink.
+            let Some(claim) = Self::claim_under_private_name(path) else {
+                // Nothing at the path is ours to unlink, or no free
+                // claim name could be found.
                 return;
-            }
+            };
             if socket_identity(&claim) == Some(expected) && self.assert_path_held(path).is_ok() {
                 // The claimed inode is this holder's own. It is removed
                 // only on a definitely-closed verdict probed through the

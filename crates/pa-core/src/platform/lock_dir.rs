@@ -62,30 +62,6 @@ pub fn private_sibling_for(path: &Path, tag: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// A compact private sibling name for socket-file claims: the claim is
-/// liveness-probed through its own pathname, and after the long-path
-/// re-anchor the probeable budget is the basename - the long form's
-/// 37-byte suffix would push a 71-byte socket basename past the
-/// `AF_UNIX` address limit and force a conservative restore, where the
-/// compact form keeps it probeable. Uniqueness keeps the same
-/// structure (process id plus nanosecond tail): the only collision
-/// window is one process re-claiming the same path within the same
-/// nanosecond tail, which the one-lease-per-path lifecycle excludes.
-#[must_use]
-#[cfg(unix)]
-pub fn compact_sibling_for(path: &Path, tag: &str) -> PathBuf {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |age| age.as_nanos());
-    let mut name = path.as_os_str().to_os_string();
-    name.push(format!(
-        ".{tag}{:x}{:x}",
-        std::process::id(),
-        (nanos & 0xff_ffff) as u64
-    ));
-    PathBuf::from(name)
-}
-
 /// The dev+ino identity at `path`, or `None` when it cannot be stat'ed.
 #[cfg(unix)]
 fn identity_at(path: &Path) -> Option<(u64, u64)> {

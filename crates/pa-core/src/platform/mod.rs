@@ -10,9 +10,9 @@ pub mod shell;
 
 #[cfg(target_os = "linux")]
 pub use lock_dir::move_without_replacing;
-pub use lock_dir::LockDir;
 #[cfg(unix)]
-pub use lock_dir::{compact_sibling_for, private_sibling_for};
+pub use lock_dir::private_sibling_for;
+pub use lock_dir::LockDir;
 pub use perms::{
     file_mode, is_executable, is_readable_writable, restrict_dir, restrict_file, set_private_mode,
 };
