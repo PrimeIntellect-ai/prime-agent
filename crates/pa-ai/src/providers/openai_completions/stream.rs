@@ -780,6 +780,10 @@ mod tests {
     #[path = "stream_pins.rs"]
     mod stream_pins;
 
+    // The #755 output-budget wire pins (the captured request bodies).
+    #[path = "stream_max_tokens.rs"]
+    mod stream_max_tokens;
+
     // The wire-level pins (the request head on the wire) live in their
     // own child module with this file's test harness.
     #[path = "stream_wire.rs"]

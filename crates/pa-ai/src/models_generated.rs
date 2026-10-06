@@ -4436,6 +4436,7 @@ fn model_from_raw(raw: &RawModel) -> Model {
         },
         context_window: raw.context_window,
         max_tokens: raw.max_tokens,
+        max_tokens_explicit: false,
         featured: raw.featured,
         headers,
         compat: raw.compat.as_ref().map(compat_from_raw),
