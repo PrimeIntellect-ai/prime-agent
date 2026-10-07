@@ -10,6 +10,39 @@ use super::{
     WorkerRegistration,
 };
 
+/// An unobservable start identity does not prove that a live pid was recycled.
+/// Only an observed mismatch proves the descriptor's process is gone.
+fn recorded_process_alive(
+    alive: Option<bool>,
+    expected: Option<&str>,
+    observed: Option<&str>,
+) -> bool {
+    alive != Some(false) && (expected.is_none() || observed.is_none() || expected == observed)
+}
+
+#[cfg(test)]
+mod recorded_process_tests {
+    use super::recorded_process_alive;
+
+    #[test]
+    fn unobservable_start_id_keeps_live_tombstone_owned_by_recorded_pid() {
+        assert!(recorded_process_alive(Some(true), Some("original"), None));
+        assert!(recorded_process_alive(None, Some("original"), None));
+        assert!(recorded_process_alive(Some(true), None, None));
+        assert!(recorded_process_alive(
+            Some(true),
+            Some("original"),
+            Some("original")
+        ));
+        assert!(!recorded_process_alive(
+            Some(true),
+            Some("original"),
+            Some("recycled")
+        ));
+        assert!(!recorded_process_alive(Some(false), Some("original"), None));
+    }
+}
+
 /// The boot the descriptor-adoption pass runs under. An update boot relaunches kept
 /// workers before the roster restore walks the rows (spec §6 step 2's create-or-adopt
 /// order). A plain startup revives only genuinely interrupted ones — no mass-revival
@@ -159,7 +192,41 @@ impl Supervisor {
             return AdoptionOutcome::AdoptedLive;
         }
         let socket_path = PathBuf::from(&descriptor.socket_path);
-        let alive = socket::can_connect(&socket_path, Duration::from_millis(500)).await;
+        // A tombstoned descriptor belongs to its recorded process, not
+        // whichever listener now owns its pathname. A dead pid (or a
+        // recycled one with a different start id) must bypass auth and
+        // finish the stop; a foreign listener can otherwise keep adoption
+        // waiting behind the worker-auth budget. TS adoptOrRecoverWorker
+        // checks the recorded pid before connecting a stopped worker.
+        // Ordinary descriptors retain the existing socket-based revival
+        // decision, which also handles descriptors without a start id.
+        // The identity probes are the tombstone's alone: an ordinary
+        // descriptor's stop term is `stop_requested_at.is_none()` and the
+        // OR never reads the probes, so running them for every descriptor
+        // pays a process spawn (`ps` on Unix platforms without /proc or
+        // sysctl) inside the async adoption task - blocking an executor
+        // worker at boot. The tombstoned path runs the probes off the
+        // runtime through `spawn_blocking`; a join failure conservatively
+        // treats the recorded process as alive (the graceful IPC leg
+        // below degrades to the same finalize a dead verdict runs).
+        let tombstoned = descriptor.stop_requested_at.is_some();
+        let recorded_process_alive = if tombstoned {
+            let pid = descriptor.pid as u32;
+            let expected = descriptor.process_start_id.clone();
+            tokio::task::spawn_blocking(move || {
+                recorded_process_alive(
+                    crate::lease::is_process_alive(pid).ok(),
+                    expected.as_deref(),
+                    crate::lease::get_process_start_id(pid).as_deref(),
+                )
+            })
+            .await
+            .unwrap_or(true)
+        } else {
+            true
+        };
+        let alive = (descriptor.stop_requested_at.is_none() || recorded_process_alive)
+            && socket::can_connect(&socket_path, Duration::from_millis(500)).await;
         let pid = descriptor.pid;
         let journal_path = PathBuf::from(&descriptor.recovery_journal_path);
         let resident = ResidentWorker::new(worker_id.clone(), descriptor, path);

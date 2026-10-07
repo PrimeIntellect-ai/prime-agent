@@ -302,7 +302,16 @@ impl SessionEngine for AgentSessionEngine {
         *self
             .own_summary
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(summary);
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(summary.clone());
+        if let Some(children) = &self.children {
+            children.set_parent_session_name(
+                summary
+                    .get("sessionName")
+                    .and_then(Value::as_str)
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_string),
+            );
+        }
     }
 
     /// The session's newest accepted progress note; `None` before the

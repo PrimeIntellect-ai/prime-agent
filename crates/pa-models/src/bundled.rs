@@ -23,7 +23,8 @@ pub struct BundledAssets {
 
 impl BundledAssets {
     /// The package directory: `PI_PACKAGE_DIR` when set (the wire-internal
-    /// identifier, kept for TS parity), else the executable's directory.
+    /// identifier, kept for TS parity), else the executable's directory
+    /// (launcher symlinks resolve through [`exe_dir_of`]).
     pub fn package_dir() -> PathBuf {
         std::env::var_os("PI_PACKAGE_DIR")
             .filter(|value| !value.is_empty())
@@ -31,7 +32,7 @@ impl BundledAssets {
                 || {
                     std::env::current_exe()
                         .ok()
-                        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+                        .and_then(|exe| exe_dir_of(&exe))
                         .unwrap_or_default()
                 },
                 PathBuf::from,
@@ -102,10 +103,42 @@ pub fn load_bundled_models(asset: &str, templates: &PinnedTemplates) -> Option<V
     Some(models)
 }
 
+/// The directory beside the binary's real file: a launcher symlink (the
+/// Homebrew formula's `bin` link) must resolve, or the assets shipped
+/// beside the real binary are invisible; a plain path stays untouched
+/// (pa-core's package-dir lookups resolve the same way).
+fn exe_dir_of(exe: &Path) -> Option<PathBuf> {
+    let is_symlink =
+        std::fs::symlink_metadata(exe).is_ok_and(|metadata| metadata.file_type().is_symlink());
+    let resolved = if is_symlink {
+        exe.canonicalize().ok()?
+    } else {
+        exe.to_path_buf()
+    };
+    resolved.parent().map(Path::to_path_buf)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_launcher_symlink_resolves_to_the_real_payload_dir() {
+        let root = tempfile::tempdir().unwrap();
+        let libexec = root.path().join("libexec");
+        let bin = root.path().join("bin");
+        std::fs::create_dir_all(&libexec).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(libexec.join("prime-agent"), b"binary").unwrap();
+        // The Homebrew formula layout: bin/prime-agent -> Cellar libexec.
+        let launcher = bin.join("prime-agent");
+        std::os::unix::fs::symlink(libexec.join("prime-agent"), &launcher).unwrap();
+        let real = libexec.join("prime-agent");
+        assert_eq!(exe_dir_of(&launcher), Some(libexec.clone()));
+        assert_eq!(exe_dir_of(&real), Some(libexec));
+    }
 
     fn asset(models: impl AsRef<[serde_json::Value]>) -> String {
         serde_json::to_string_pretty(&json!({"schemaVersion": 1, "models": models.as_ref()}))

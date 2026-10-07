@@ -106,6 +106,17 @@ pub struct Worker {
     /// D-state-survivor late-exit edge). `None` until `serve` binds
     /// (named pipes keep `None`: there is no file to stat).
     pub(crate) bound_socket_identity: std::sync::Mutex<Option<crate::socket::SocketIdentity>>,
+    /// The bound-listener close handshake (the TS graceful-shutdown
+    /// sequence, daemon-mode.ts:8011-8018: `server.close()` is awaited
+    /// FIRST, the socket cleanup runs after): an exiting path requests
+    /// the close, the accept loop drops the listener it owns, and the
+    /// exit proceeds only once the bind is provably released - which is
+    /// what makes the exit cleanup's liveness probe sound (a live
+    /// listener at the path afterwards can only be a successor's).
+    pub(crate) listener_close_requested: tokio::sync::Notify,
+    /// The accept loop's confirmation that it dropped the bound
+    /// listener; see [`Worker::listener_close_requested`].
+    pub(crate) listener_closed: tokio::sync::Notify,
     /// Supervisor self-registration handle; `None` for standalone workers.
     registration: Option<RegistrationHandle>,
     /// Live connections authenticated as the supervisor role; a non-zero
@@ -720,6 +731,8 @@ impl Worker {
         Worker {
             config,
             bound_socket_identity: std::sync::Mutex::new(None),
+            listener_close_requested: tokio::sync::Notify::new(),
+            listener_closed: tokio::sync::Notify::new(),
             registration,
             supervisor_claims,
             core,
@@ -769,26 +782,52 @@ impl Worker {
         )
     }
 
-    /// The durable tail of a successful close: the resume entry, the
-    /// worker's own socket cleanup, and the process exit. The routed
-    /// `shutdown` arm and the registration-retirement path share it
-    /// (`std::process::exit` runs no destructors, so the caller must
-    /// have settled the close first).
-    fn exit_after_close(&self) -> ! {
+    /// Close the bound listener, then clean up the socket path: the TS
+    /// graceful-shutdown sequence (daemon-mode.ts:8011-8018 awaits
+    /// `server.close()` FIRST and runs `cleanupSocketPath()` after). The
+    /// accept loop drops the listener it owns on the close request and
+    /// confirms, so the cleanup below probes the path with the owner's
+    /// listener provably closed - a live listener at the path can only
+    /// be a successor's, and even a poisoned bind-time capture (a
+    /// replacement landing in the bind->capture window) never unlinks
+    /// the successor's live socket. The still-ours direction is
+    /// unchanged: the worker's own closed file passes the probe dead and
+    /// the identity gate unlinks exactly what it captured, so a respawn
+    /// does not wait out the stale-socket path.
+    ///
+    /// The close confirmation is awaited UNCONDITIONALLY: a bound-flag
+    /// check cannot close the check-then-act window between `serve`'s
+    /// bind and the flag store (an exit landing exactly there would
+    /// skip the wait and leave this worker's own dead socket behind -
+    /// the refusal-exit variant of the stale-file bug). `serve` instead
+    /// confirms exactly once on every path: after the accept loop drops
+    /// the listener, or - with no listener - on the prepare/bind error
+    /// returns. An exit that fires before the bind therefore waits out
+    /// the whole setup and then unlinks only what the identity gate
+    /// still owns, and a booting `serve` never strands a waiting exit
+    /// path on a handshake that will not come. The parked confirmation
+    /// also orders the identity read for the exits that fire inside
+    /// `serve`'s setup (the registration-refusal exit racing the
+    /// bind->capture gap): the capture precedes the accept loop's arm,
+    /// which precedes this confirmation, so a bound listener's own
+    /// cleanup always reads a captured identity, never the gap's
+    /// `None`.
+    pub(crate) async fn close_listener_then_cleanup_socket(&self) {
+        self.listener_close_requested.notify_one();
+        self.listener_closed.notified().await;
+        let expected_identity = self.bound_socket_identity.lock().unwrap().clone();
+        crate::socket::cleanup_socket_path_after_close(&self.config.socket_path, expected_identity);
+    }
+
+    /// listener close and the worker's own socket cleanup, and the
+    /// process exit. The routed `shutdown` arm and the
+    /// registration-retirement path share it (`std::process::exit` runs
+    /// no destructors, so the caller must have settled the close first).
+    async fn exit_after_close(&self) -> ! {
         // Shutdown keeps the resume entry and exits the process (TS
         // `closeKeepsResumeEntry("shutdown")`).
         let _ = self.record_recovery(false, "shutdown");
-        // A graceful exit owns its socket file: remove it now so a respawn
-        // does not wait out the stale-socket path (a killed worker cannot
-        // clean up, but its killer relaunches through
-        // `prepare_socket_path`). The bind-time identity (captured in
-        // `serve`) is the unlink's expected identity, so a REPLACED file
-        // at the path - a successor worker's live socket - survives this
-        // exit (TS daemon-mode.ts:1078-1080).
-        crate::socket::cleanup_socket_path(
-            &self.config.socket_path,
-            self.bound_socket_identity.lock().unwrap().clone(),
-        );
+        self.close_listener_then_cleanup_socket().await;
         std::process::exit(0)
     }
 
@@ -800,7 +839,7 @@ impl Worker {
             std::process::id()
         );
         let _ = self.handle_shutdown().await;
-        self.exit_after_close();
+        self.exit_after_close().await;
     }
 }
 
