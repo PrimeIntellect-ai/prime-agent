@@ -291,12 +291,10 @@ impl AgentSessionEngine {
                         // `set_model` swaps).
                         {
                             // A routed episode keeps serving the route's
-                            // target across the failover switch.
-                            if let Some(route) = self.armed_image_route() {
-                                let mut target =
-                                    self.provider_target.write().expect("provider target lock");
-                                *target = Some(route.target);
-                            } else {
+                            // target across the failover switch — through
+                            // the fenced install (the route lock covers
+                            // the clone and the slot write together).
+                            if !self.install_armed_route_target() {
                                 let (api_key, headers) =
                                     self.resolve_request_key_and_headers(&next);
                                 let mut target =
@@ -338,11 +336,12 @@ impl AgentSessionEngine {
                         let agent_model = json_round_trip(&primary_model)
                             .ok_or_else(|| anyhow::anyhow!("model conversion failed"))?;
                         {
-                            let mut target =
-                                self.provider_target.write().expect("provider target lock");
-                            if let Some(route) = self.armed_image_route() {
-                                *target = Some(route.target);
-                            } else {
+                            // The armed-route install goes through the
+                            // fenced helper (no provider-slot lock held
+                            // across the route read).
+                            if !self.install_armed_route_target() {
+                                let mut target =
+                                    self.provider_target.write().expect("provider target lock");
                                 *target = Some(ProviderTarget {
                                     service_tier: *self
                                         .service_tier

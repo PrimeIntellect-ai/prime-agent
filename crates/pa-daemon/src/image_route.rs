@@ -179,6 +179,25 @@ impl AgentSessionEngine {
         *self.provider_target.write().expect("provider target lock") = Some(route.target);
     }
 
+    /// Install the armed route's target as the serving slot: the route
+    /// lock is held through the slot write, so the clone and its install
+    /// are one critical section — a `/reload` that refreshes the armed
+    /// route and then the slot can never be overtaken by an older clone
+    /// (the failover switch and restore install through here too).
+    /// Returns `false` when no route is armed.
+    pub(crate) fn install_armed_route_target(&self) -> bool {
+        let slot = self
+            .image_route
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(route) = slot.as_ref() else {
+            return false;
+        };
+        let target = route.target.clone();
+        *self.provider_target.write().expect("provider target lock") = Some(target);
+        true
+    }
+
     /// Clear the armed route and restore the session's serving target (a
     /// fresh resolution, so a mid-episode model switch is honored): the
     /// next dispatched batch re-evaluates the routing against it.
