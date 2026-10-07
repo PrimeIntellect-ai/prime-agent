@@ -492,12 +492,11 @@ class HarnessState:
                 if stale:
                     try:
                         recorded = owner_path.read_text(encoding="utf-8")
-                    except OSError:
+                    except (OSError, UnicodeError):
                         recorded = None
                     if recorded is None or self._owner_dead(recorded):
-                        if recorded is not None:
-                            with contextlib.suppress(FileNotFoundError):
-                                owner_path.unlink()
+                        with contextlib.suppress(FileNotFoundError):
+                            owner_path.unlink()
                         with contextlib.suppress(FileNotFoundError):
                             lock_path.rmdir()
                         continue

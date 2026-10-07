@@ -416,12 +416,10 @@ impl LockDir {
                         format!("Lock file is already being held: {}", path.display()),
                     ));
                 }
-                if recorded.is_some() {
-                    match fs::remove_file(&owner_path) {
-                        Ok(()) => {}
-                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                        Err(error) => return Err(error),
-                    }
+                match fs::remove_file(&owner_path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
                 }
                 // Stale: remove and let the caller retry.
                 match fs::remove_dir(path) {
@@ -584,6 +582,20 @@ mod tests {
         next.ensure_owned().unwrap();
         drop(next);
         assert!(!LockDir::path_for(&file).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unparseable_owned_lock_is_reclaimed_by_age() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("harness_state.json");
+        let path = LockDir::path_for(&file);
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("owner"), [0xff]).unwrap();
+        set_mtime(&path, 1, 0).unwrap();
+        let next = LockDir::acquire_owned_retrying(&file, Duration::from_secs(10), 1, MIN_STALE)
+            .unwrap();
+        next.ensure_owned().unwrap();
     }
 
     #[test]

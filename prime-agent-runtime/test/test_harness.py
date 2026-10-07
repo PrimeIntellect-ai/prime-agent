@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from rlm import harness as package_harness
 from rlm import rlm as callable_rlm
@@ -566,6 +568,29 @@ class HarnessStateTest(unittest.TestCase):
             entries = HarnessState(state_path).list("memory")
             self.assertEqual([entry.id for entry in entries], ["seed"])
 
+    def test_save_syncs_parent_after_replace(self) -> None:
+        if os.name != "posix":
+            self.skipTest("directory fsync is POSIX-only")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "harness_state.json"
+            state = HarnessState(path)
+            events: list[str] = []
+            replace, fsync = os.replace, os.fsync
+
+            def observed_replace(source: Path, destination: Path) -> None:
+                replace(source, destination)
+                events.append("replace")
+
+            def observed_fsync(fd: int) -> None:
+                fsync(fd)
+                events.append("directory sync" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file sync")
+
+            with patch.object(os, "replace", side_effect=observed_replace), patch.object(
+                os, "fsync", side_effect=observed_fsync
+            ):
+                state.create_memory("Durable", "Saved")
+            self.assertEqual(events[-2:], ["replace", "directory sync"])
+
     def test_live_stale_lock_is_not_stolen(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_path = Path(temp_dir) / "harness_state.json"
@@ -596,6 +621,19 @@ class HarnessStateTest(unittest.TestCase):
             os.utime(lock_dir, (1, 1))
             state.create_memory("Second", "Saved")
             self.assertFalse(state._owner_matches(lock_dir, owner))
+            self.assertFalse(lock_dir.exists())
+            self.assertEqual(len(HarnessState(state_path).list("memory")), 2)
+
+    def test_unparseable_stale_owner_is_reclaimed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "harness_state.json"
+            state = HarnessState(state_path)
+            state.create_memory("Seed", "Present")
+            lock_dir = Path(f"{os.path.realpath(state_path)}.lock")
+            lock_dir.mkdir()
+            (lock_dir / "owner").write_bytes(b"\xff")
+            os.utime(lock_dir, (1, 1))
+            state.create_memory("Second", "Saved")
             self.assertFalse(lock_dir.exists())
             self.assertEqual(len(HarnessState(state_path).list("memory")), 2)
 
