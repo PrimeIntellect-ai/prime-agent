@@ -274,12 +274,13 @@ impl AgentSessionEngine {
                 .expect("auto compaction abort lock") = Some(std::sync::Arc::clone(&controller));
         }
         let api_key = self.resolve_request_api_key(&model);
+        // The lock covers the clone only; the summarizer call below must not ride it.
+        let engine = self.session.blocking_lock().clone();
+        let Some(engine) = engine else {
+            self.clear_auto_compaction_abort(&controller);
+            return OverflowAttempt::None;
+        };
         let outcome = {
-            let guard = self.session.blocking_lock();
-            let Some(engine) = guard.as_deref() else {
-                self.clear_auto_compaction_abort(&controller);
-                return OverflowAttempt::None;
-            };
             let compact = async {
                 engine
                     .session
