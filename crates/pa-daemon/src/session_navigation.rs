@@ -366,11 +366,22 @@ impl Worker {
         }
         let navigation = self.navigation.clone();
         let payload = payload.clone();
-        let prepared =
-            tokio::task::spawn_blocking(move || navigation.prepare_switch_session(&payload))
-                .await
-                .map_err(|error| response_failure(None, "switch_session", &error.to_string(), None))
-                .and_then(|result| result);
+        // The blocking closure wraps the prepared result: its own error stays
+        // the empty join error (clippy::result_large_err), and the blocking
+        // pool's join unwrap lands in the match below.
+        let prepared = match tokio::task::spawn_blocking(move || {
+            Ok(navigation.prepare_switch_session(&payload))
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => Err(response_failure(
+                None,
+                "switch_session",
+                &error.to_string(),
+                None,
+            )),
+        };
         self.run_session_replacement("switch_session", prepared)
             .await
     }
@@ -382,11 +393,19 @@ impl Worker {
         }
         let navigation = self.navigation.clone();
         let payload = payload.clone();
-        let prepared =
-            tokio::task::spawn_blocking(move || navigation.prepare_import_jsonl(&payload))
-                .await
-                .map_err(|error| response_failure(None, "import_jsonl", &error.to_string(), None))
-                .and_then(|result| result);
+        let prepared = match tokio::task::spawn_blocking(move || {
+            Ok(navigation.prepare_import_jsonl(&payload))
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => Err(response_failure(
+                None,
+                "import_jsonl",
+                &error.to_string(),
+                None,
+            )),
+        };
         self.run_session_replacement("import_jsonl", prepared).await
     }
 }
