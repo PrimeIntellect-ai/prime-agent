@@ -183,15 +183,15 @@ class OperationBudgetTests(unittest.TestCase):
             fingerprint = ax._window_fingerprint(4242, timeout_seconds=0.5)
         elapsed = app.clock - 1000.0
         self.assertIsNotNone(fingerprint)
-        self.assertLessEqual(elapsed, 0.7, "the fingerprint must fit its timeout, not timeout x reads")
+        self.assertLessEqual(elapsed, 0.55, "the fingerprint must fit its timeout, not timeout x reads")
 
     def test_window_rect_shares_one_budget_between_position_and_size(self) -> None:
         app = HungAppServices()
         with app.patch():
             rect = ax._window_rect(app, app, timeout_seconds=0.5)
         elapsed = app.clock - 1000.0
-        self.assertIsNotNone(rect)
-        self.assertLessEqual(elapsed, 0.6, "position and size read within one timeout, not two")
+        self.assertIsNone(rect, "a spent budget returns no rect rather than reading past the cap")
+        self.assertLessEqual(elapsed, 0.55, "position and size read within one timeout, not two")
 
     def test_observe_post_walk_reads_share_one_budget(self) -> None:
         app = PostWalkHangServices()
@@ -200,8 +200,8 @@ class OperationBudgetTests(unittest.TestCase):
         elapsed = app.clock - 1000.0
         self.assertLessEqual(
             elapsed,
-            ax._MAX_OBSERVE_SECONDS + 0.4,
-            "the post-walk reads draw on one remaining budget, not one per read",
+            ax._MAX_OBSERVE_SECONDS + 0.05,
+            "the post-walk reads draw on one remaining budget and stop when it is spent",
         )
 
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -121,19 +122,25 @@ def _observe(pid: int) -> Observation:
     stopped: list[bool] = []
     deadline = time.monotonic() + _MAX_OBSERVE_SECONDS
     _walk(app_services, window, 1, tree, refs, deadline=deadline, stopped=stopped)
-    # Every post-walk read draws on the same deadline, computing its own
-    # slice of the remaining budget: one shared timeout here would let the
-    # title, rect, focus, and window-id reads each spend it in full.
+
+    # Every post-walk read draws on the same deadline: each computes its own
+    # slice of the remaining budget (one shared timeout would let the title,
+    # rect, focus, and window-id reads each spend it in full), and none
+    # starts once the budget is spent.
     def budget() -> float:
         return min(_MESSAGING_TIMEOUT_SECONDS, _remaining_seconds(deadline))
 
+    def read(field: Callable[[], Any]) -> Any:
+        """One guarded post-walk read, skipped once the budget is spent."""
+        return None if _budget_spent(deadline) else field()
+
     return Observation(
-        window_title=_cap(_text(_copy_value(app_services, window, "AXTitle", budget()))),
+        window_title=read(lambda: _cap(_text(_copy_value(app_services, window, "AXTitle", budget())))),
         tree=tree,
         refs=refs,
-        window_rect=_window_rect(app_services, window, budget()),
-        focused_index=_focused_index(app_services, app_element, refs, budget()),
-        window_id=_window_id(app_services, window, budget()),
+        window_rect=read(lambda: _window_rect(app_services, window, budget())),
+        focused_index=read(lambda: _focused_index(app_services, app_element, refs, budget())),
+        window_id=read(lambda: _window_id(app_services, window, budget())),
         truncated=bool(stopped) or time.monotonic() > deadline,
     )
 
@@ -222,11 +229,17 @@ def _read_attribute(app_services: Any, element: Any, attribute: str, timeout_sec
 def _remaining_seconds(deadline: float) -> float:
     """The time left before one operation's deadline, floored at 0.05.
 
-    The floor is the smallest messaging timeout a spent budget may pass:
+    The floor is the smallest messaging timeout a live budget may pass:
     AXUIElementSetMessagingTimeout treats zero as the unbounded default, so
-    an exhausted budget must still bound each remaining read.
+    a read that starts with less than 0.05 left is still bounded, never
+    unbounded. A read whose budget is already spent must not start at all.
     """
     return max(deadline - time.monotonic(), 0.05)
+
+
+def _budget_spent(deadline: float) -> bool:
+    """Whether an operation's total budget has been consumed."""
+    return time.monotonic() >= deadline
 
 
 def _window_fingerprint(pid: int, timeout_seconds: float | None = None) -> tuple[Any, ...] | None:
@@ -249,13 +262,15 @@ def _window_fingerprint(pid: int, timeout_seconds: float | None = None) -> tuple
     window = _copy_value(app_services, app_element, "AXFocusedWindow", _remaining_seconds(deadline))
     if window is None:
         return None
+    if _budget_spent(deadline):
+        return (None, 0, None, None, None)
     title = _text(_copy_value(app_services, window, "AXTitle", _remaining_seconds(deadline)))
     children = _copy_value(app_services, window, "AXChildren", _remaining_seconds(deadline))
     try:
         count = len(children) if children is not None else 0
     except TypeError:
         count = 0
-    if time.monotonic() >= deadline:
+    if _budget_spent(deadline):
         return (title, count, None, None, None)
     focused = _copy_value(app_services, app_element, "AXFocusedUIElement", _remaining_seconds(deadline))
     if focused is None:
@@ -264,6 +279,8 @@ def _window_fingerprint(pid: int, timeout_seconds: float | None = None) -> tuple
     subrole_ok, subrole = _read_attribute(app_services, focused, "AXSubrole", _remaining_seconds(deadline))
     if not role_ok or not subrole_ok or (role == _SECURE_ROLE and subrole == _SECURE_SUBROLE):
         value_head = ""  # an unverifiable or secure field's value is never read
+    elif _budget_spent(deadline):
+        return (title, count, role, subrole, None)
     else:
         value = _copy_value(app_services, focused, "AXValue", _remaining_seconds(deadline))
         value_head = _cap(_text(value)) if value is not None else None
@@ -509,12 +526,15 @@ def _window_rect(app_services: Any, window: Any, timeout_seconds: float | None =
     """Read the window's global position and size as (x, y, width, height).
 
     timeout_seconds is one total budget for both reads: the size read gets
-    whatever the position read left of it.
+    whatever the position read left, and a spent budget returns no rect
+    before the size read starts.
     """
     budget = _MESSAGING_TIMEOUT_SECONDS if timeout_seconds is None else max(timeout_seconds, 0.05)
     deadline = time.monotonic() + budget
     position = _point(app_services, _copy_value(app_services, window, "AXPosition", _remaining_seconds(deadline)))
-    size = _point(app_services, _copy_value(app_services, window, "AXSize", _remaining_seconds(deadline)))
+    size = None if _budget_spent(deadline) else _point(
+        app_services, _copy_value(app_services, window, "AXSize", _remaining_seconds(deadline))
+    )
     if position is None or size is None:
         return None
     return (position[0], position[1], size[0], size[1])
