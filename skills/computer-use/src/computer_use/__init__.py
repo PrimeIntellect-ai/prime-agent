@@ -349,24 +349,20 @@ def _clipboard_change_count() -> int | None:
         return None
 
 
-def _clipboard_unchanged(count: int | None, text: str) -> bool:
+def _clipboard_unchanged(count: int | None) -> bool:
     """Report whether the pasteboard is unchanged since this paste's write.
 
-    The change count is the primary token (it covers every type); a count
-    that cannot be read or compared falls back to comparing the written
-    payload, and an unverifiable pasteboard is treated as changed — the
-    restore is skipped rather than discarding a concurrent copy.
+    The change count is the only token that covers every pasteboard type,
+    so it alone decides: an unreadable or missing count is an unverifiable
+    pasteboard, treated as changed — the paste aborts and the restore is
+    skipped rather than pasting or discarding a concurrent copy whose
+    plain text happens to match. A string comparison never suffices:
+    rich and file types ride alongside the plain text.
     """
-    try:
-        current = _clipboard_change_count()
-        if current is not None and count is not None:
-            return current == count
-        cocoa = _require_mac().cocoa
-        pasteboard = cocoa.NSPasteboard.generalPasteboard()
-        payload = pasteboard.dataForType_(cocoa.NSPasteboardTypeString)
-        return bytes(payload) == text.encode("utf-8")
-    except Exception:
+    current = _clipboard_change_count()
+    if current is None or count is None:
         return False
+    return current == count
 
 
 class App:
@@ -817,7 +813,7 @@ class App:
                         # have moved while another paste held the lock
                         self._refuse_secure_focus()
                         self._guard()
-                        if not _clipboard_unchanged(change_count, text):
+                        if not _clipboard_unchanged(change_count):
                             # a copy made during the gate rechecks displaces
                             # the payload, a same-text copy with different
                             # rich data included: never paste unrelated data
@@ -841,7 +837,7 @@ class App:
                     # restore it. A successful write restores only when the
                     # change count has not moved, so a copy made during the
                     # paste window wins over the restore.
-                    if wrote and not _clipboard_unchanged(change_count, text):
+                    if wrote and not _clipboard_unchanged(change_count):
                         pass
                     else:
                         _restore_clipboard(saved)

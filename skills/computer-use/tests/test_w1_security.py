@@ -267,7 +267,7 @@ class ChangeCountRestoreTests(AppTestCase):
         env = self.make_env()
         app = await env.get_app()
         saved = computer_use._clipboard_unchanged
-        computer_use._clipboard_unchanged = lambda count, text: False  # the count moved: rich data changed
+        computer_use._clipboard_unchanged = lambda count: False  # the count moved: rich data changed
         try:
             with self.assertRaises(errors.ComputerUseError) as caught:
                 await app.paste("payload")
@@ -1011,6 +1011,31 @@ class DisplacedPayloadTests(AppTestCase):
                 await app.paste("payload")
         self.assertEqual(caught.exception.code, "TRANSPORT_ERROR")
         self.assertIn("clipboard changed during the paste", caught.exception.message)
+
+    async def test_an_unreadable_change_count_fails_the_paste_closed(self) -> None:
+        real_unchanged = computer_use._clipboard_unchanged  # before the fakes patch it away
+        env = self.make_env()
+        app = await env.get_app()
+        env.pasteboard_holds_payload = True
+        env.clipboard_change_count = None  # the count token is unreadable
+        pasteboard = types.SimpleNamespace(
+            dataForType_=lambda type_: b"payload",  # the string matches; rich data cannot be verified
+        )
+        fake_mac = types.SimpleNamespace(
+            cocoa=types.SimpleNamespace(
+                NSPasteboard=types.SimpleNamespace(generalPasteboard=lambda: pasteboard),
+                NSPasteboardTypeString="string",
+            )
+        )
+        with mock.patch.object(computer_use, "_clipboard_unchanged", real_unchanged), mock.patch.object(
+            computer_use, "_require_mac", lambda: fake_mac
+        ):
+            with self.assertRaises(errors.ComputerUseError) as caught:
+                await app.paste("payload")
+        self.assertEqual(caught.exception.code, "TRANSPORT_ERROR")
+        self.assertIn("clipboard changed during the paste", caught.exception.message)
+        # an unverifiable pasteboard never restores over the concurrent copy
+        self.assertNotIn(("restore", {"string": "saved"}), env.clipboard_calls)
 
 
 if __name__ == "__main__":

@@ -581,7 +581,7 @@ class AppEnvironment:
         patch(computer_use, "_write_clipboard", self._write_clipboard)
         patch(computer_use, "_restore_clipboard", self._restore_clipboard)
         patch(computer_use, "_clipboard_change_count", lambda: self.clipboard_change_count)
-        patch(computer_use, "_clipboard_unchanged", lambda count, text: self.pasteboard_holds_payload)
+        patch(computer_use, "_clipboard_unchanged", lambda count: self.pasteboard_holds_payload)
         patch(computer_use, "_clipboard_still_holds_payload", lambda text: self.pasteboard_holds_payload)
         modules = {"inject": inject, "capture": capture}
         seams = [("inject", seam) for seam in INJECT_SEAMS] + [("capture", "_screenshot_window")]
