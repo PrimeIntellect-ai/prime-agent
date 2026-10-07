@@ -253,6 +253,7 @@ impl Worker {
     /// TS dispatch handlers that call `rebindCronJobsToState` after the
     /// runtime call.
     pub(crate) async fn refresh_replaced_session_state(&self) {
+        let inputs = self.summary_inputs();
         let (rlm_depth, summary, child_script) = {
             let mut core = self
                 .core
@@ -267,7 +268,7 @@ impl Worker {
                 .unwrap_or(0);
             core.rlm_depth = rlm_depth;
             let child_script = core.child_script.clone();
-            (rlm_depth, self.summary_locked(&core), child_script)
+            (rlm_depth, self.summary_locked(&core, inputs), child_script)
         };
         // No thinking flag rides the rebind (the create command's level is
         // already resolved on the engine), and the TS replacement runtime

@@ -86,8 +86,9 @@ async fn the_attach_state_carries_the_stats_context_usage() {
     assert!(created.success, "create failed: {created:?}");
 
     let snapshot_state = {
+        let inputs = worker.connection_state_inputs();
         let core = worker.core.lock().unwrap();
-        let sealed = worker.connection_state_locked(&core);
+        let sealed = Worker::connection_state_locked(&core, inputs);
         serde_json::to_value(&sealed).unwrap()
     };
     assert_eq!(
@@ -129,8 +130,9 @@ async fn the_attach_state_carries_the_stats_context_usage() {
         )
         .await;
     let modelless = {
+        let inputs = worker.connection_state_inputs();
         let core = worker.core.lock().unwrap();
-        let sealed = worker.connection_state_locked(&core);
+        let sealed = Worker::connection_state_locked(&core, inputs);
         serde_json::to_value(&sealed).unwrap()
     };
     assert!(

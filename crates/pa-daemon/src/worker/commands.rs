@@ -404,8 +404,9 @@ impl Worker {
         if let Err(response) = self.require_created("get_state") {
             return response;
         }
+        let inputs = self.summary_inputs();
         let core = self.core.lock().unwrap();
-        let summary = self.summary_locked(&core);
+        let summary = self.summary_locked(&core, inputs);
         response_success(
             None,
             "get_state",
@@ -683,6 +684,7 @@ impl Worker {
         if name.trim().is_empty() {
             return response_failure(None, command, "Session name cannot be empty", None);
         }
+        let inputs = self.summary_inputs();
         let mut core = self.core.lock().unwrap();
         let previous = core
             .store
@@ -693,7 +695,7 @@ impl Worker {
                 return response_failure(None, command, &error.to_string(), None);
             }
         }
-        let summary = self.summary_locked(&core);
+        let summary = self.summary_locked(&core, inputs);
         // TS #2529 `applyStateSessionName`: a rename that changed an
         // existing name leaves the renamed session a displayed transcript
         // notice (" by parent" when the rename arrived from the parent

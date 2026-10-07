@@ -54,12 +54,13 @@ impl Worker {
             return response;
         }
         let summary = {
+            let inputs = self.summary_inputs();
             let core = self
                 .core
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             self.bind_store_artifact(&core);
-            self.summary_locked(&core)
+            self.summary_locked(&core, inputs)
         };
         let heartbeats: Vec<Value> = self
             .scheduled

@@ -801,6 +801,8 @@ impl Worker {
             .filter(|value| !value.is_null())
             .and_then(|value| serde_json::from_value::<DaemonResumeCursor>(value).ok());
 
+        let summary_inputs = self.summary_inputs();
+        let connection_inputs = self.connection_state_inputs();
         let mut core = self.core.lock().unwrap();
         // The connection-scoped registry (the fresh bots' release
         // findings): the attach's retention is keyed by the connection
@@ -824,7 +826,7 @@ impl Worker {
         if retained && !core.attached_client_ids.iter().any(|id| id == &client_id) {
             core.attached_client_ids.push(client_id.clone());
         }
-        let summary = self.summary_locked(&core);
+        let summary = self.summary_locked(&core, summary_inputs);
         let mut messages: Vec<Value> = core
             .store
             .as_ref()
@@ -840,7 +842,7 @@ impl Worker {
         if crate::snapshot_stream::wants_image_elision(&client_capabilities) {
             crate::snapshot_stream::elide_snapshot_image_payloads(&mut messages);
         }
-        let state = self.connection_state_locked(&core);
+        let state = Self::connection_state_locked(&core, connection_inputs);
         let last_event_sequence = core.last_event_sequence;
         let generation = core.generation.clone();
         let active_session_id = core.active_session_id.clone();

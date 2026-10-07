@@ -84,11 +84,11 @@ fn flip_summary(dir: &Path, busy: bool) -> Value {
     })
 }
 
-/// The stale-delta gate at the handler: the worker's per-request
-/// supervisor links deliver deltas unordered, so a delayed older
-/// snapshot (a lower sequence) must not overwrite a newer one — the
-/// TS worker never has this race (its roster deltas ride one ordered
-/// supervisor client socket).
+/// The stale-delta gate at the handler: a push can race a newer
+/// authoritative pull, so a delayed older snapshot (a lower
+/// sequence) must not overwrite a newer one — the TS worker never
+/// has this race (its roster deltas ride one ordered supervisor
+/// client socket).
 #[tokio::test]
 async fn worker_roster_delta_drops_stale_sequences() {
     fn summary(level: &str) -> Value {

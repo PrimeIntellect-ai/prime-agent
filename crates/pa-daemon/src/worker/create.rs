@@ -18,8 +18,9 @@ impl Worker {
         // answers with the created summary instead of racing a second init.
         let _create_gate = self.create_gate.lock().await;
         let existing_summary = {
+            let inputs = self.summary_inputs();
             let core = self.core.lock().unwrap();
-            core.created.then(|| self.summary_locked(&core))
+            core.created.then(|| self.summary_locked(&core, inputs))
         };
         if let Some(summary) = existing_summary {
             // Idempotent re-create after a supervisor restart or respawn.
@@ -477,6 +478,7 @@ impl Worker {
         // record only once the disclosure is durable (a requested record with no
         // disclosure row is vacuously durable; no requested record adds no key).
         let mut interrupted_compaction_persisted = interrupted_compaction_requested;
+        let inputs = self.summary_inputs();
         // The core lock stays inside this block: everything after it may await,
         // and a std MutexGuard must never ride an await point.
         let (summary, rlm_depth) = {
@@ -534,7 +536,7 @@ impl Worker {
             core.parent_active_session_id = parent_active_session_id;
             core.parent_session_id = parent_session_id;
             core.child_script.clone_from(&child_script);
-            (self.summary_locked(&core), rlm_depth)
+            (self.summary_locked(&core, inputs), rlm_depth)
         };
         // The engine's agent-level queues drain per the same modes the
         // worker lane delivers by.
