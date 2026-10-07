@@ -178,18 +178,17 @@ impl AgentSessionEngine {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        let auth_recovery: Option<
-            pa_core::session_engine::provider_auth::AuthRecoveryCallback,
-        > = Some(&mut move |_message: &pa_agent::types::AssistantMessage| {
-            let engine_weak = auth_recovery_engine.clone();
-            Box::pin(async move {
-                let Some(engine) = engine_weak.as_ref().and_then(std::sync::Weak::upgrade)
-                else {
-                    return pa_core::session_engine::provider_auth::AuthRecoveryOutcome::Continue;
-                };
-                engine.recover_provider_auth().await
-            })
-        });
+        let auth_recovery: Option<pa_core::session_engine::provider_auth::AuthRecoveryCallback> =
+            Some(&mut move |_message: &pa_agent::types::AssistantMessage| {
+                let engine_weak = auth_recovery_engine.clone();
+                Box::pin(async move {
+                    let Some(engine) = engine_weak.as_ref().and_then(std::sync::Weak::upgrade)
+                    else {
+                        return pa_core::session_engine::provider_auth::AuthRecoveryOutcome::Continue;
+                    };
+                    engine.recover_provider_auth().await
+                })
+            });
         let result = self.runtime.block_on(
             pa_core::session_engine::provider_failover::run_turn_with_provider_failover(
                 &policy,

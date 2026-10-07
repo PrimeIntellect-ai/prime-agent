@@ -272,10 +272,10 @@ impl AuthStorage {
                     if !refresh_token.is_empty()
             )
         });
-        let AuthCredential::Oauth {
+        let Some(AuthCredential::Oauth {
             access: loaded_access,
             ..
-        } = credential
+        }) = credential
         else {
             self.reload();
             return Err(format!(
@@ -296,7 +296,7 @@ impl AuthStorage {
             if let Some(peer) = peer.filter(|credential| {
                 matches!(
                     credential,
-                    AuthCredential::Oauth { access, .. } if access != loaded_access
+                    AuthCredential::Oauth { access, .. } if *access != loaded_access
                 )
             }) {
                 self.reload();
@@ -318,7 +318,7 @@ impl AuthStorage {
                 if let Some(credential) = self.data.credential(provider_id).filter(|credential| {
                     matches!(
                         credential,
-                        AuthCredential::Oauth { access, .. } if access != loaded_access
+                        AuthCredential::Oauth { access, .. } if *access != loaded_access
                     )
                 }) {
                     return Ok(credential);
@@ -335,7 +335,7 @@ impl AuthStorage {
             if let Some(credential) = data.credential(provider_id).filter(|credential| {
                 matches!(
                     credential,
-                    AuthCredential::Oauth { access, .. } if access != loaded_access
+                    AuthCredential::Oauth { access, .. } if *access != loaded_access
                 )
             }) {
                 outcome = Ok(credential);
@@ -353,7 +353,7 @@ impl AuthStorage {
             return match self.data.credential(provider_id).filter(|credential| {
                 matches!(
                     credential,
-                    AuthCredential::Oauth { access, .. } if access != loaded_access
+                    AuthCredential::Oauth { access, .. } if *access != loaded_access
                 )
             }) {
                 Some(credential) => Ok(credential),

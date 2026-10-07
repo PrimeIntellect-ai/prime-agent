@@ -320,6 +320,27 @@ mod tests {
         }
     }
 
+    /// One future-dated codex credential: locally valid, the revoked-session
+    /// shape (a server-side rejection before the stored expiry).
+    fn live_codex_credential() -> AuthCredential {
+        AuthCredential::Oauth {
+            access: "rejected-access".to_string(),
+            refresh: Some("r-old".to_string()),
+            expires: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(i64::MAX)
+                + 3_600_000,
+            account_id: Some("acct-1".to_string()),
+            enterprise_url: None,
+            endpoint: None,
+            token_endpoint: None,
+            client_id: None,
+            resource: None,
+            issuer: None,
+        }
+    }
+
     /// One expired subscription credential for a provider id.
     fn expired_credential(provider_id: &str) -> AuthCredential {
         match provider_id {
@@ -538,14 +559,7 @@ mod tests {
     fn a_locally_valid_credential_force_refreshes_and_resolves() {
         // The revoked-session shape: the expiry is still future-dated, so
         // only the forced refresh reaches the token endpoint.
-        let mut live = expired_codex_credential();
-        live.access = "rejected-access".to_string();
-        live.expires = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(i64::MAX)
-            + 3_600_000;
-        let mut auth = storage_with_credential(OPENAI_CODEX_PROVIDER_ID, &live);
+        let mut auth = storage_with_credential(OPENAI_CODEX_PROVIDER_ID, &live_codex_credential());
         assert_eq!(
             auth.get_api_key(OPENAI_CODEX_PROVIDER_ID).as_deref(),
             Some("rejected-access"),
@@ -567,17 +581,10 @@ mod tests {
     fn a_rejected_force_refresh_carries_the_server_reason() {
         // Nothing scripted: the exchange fails, the reason carries out,
         // and the stored credential stands untouched.
-        let mut live = expired_codex_credential();
-        live.access = "rejected-access".to_string();
-        live.expires = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(i64::MAX)
-            + 3_600_000;
         let mut auth = crate::auth::AuthStorage::in_memory_without_env(
             &{
                 let mut data = crate::auth::types::AuthStorageData::default();
-                data.insert(OPENAI_CODEX_PROVIDER_ID, &live);
+                data.insert(OPENAI_CODEX_PROVIDER_ID, &live_codex_credential());
                 data
             },
             std::sync::Arc::new(ProviderOAuth::with_transports(
@@ -603,8 +610,10 @@ mod tests {
 
     #[test]
     fn a_credential_without_a_refresh_token_has_no_forced_refresh() {
-        let mut without_refresh = expired_codex_credential();
-        without_refresh.refresh = None;
+        let without_refresh = AuthCredential::Oauth {
+            refresh: None,
+            ..expired_codex_credential()
+        };
         let mut auth = storage_with_credential(OPENAI_CODEX_PROVIDER_ID, &without_refresh);
         let outcome = auth.force_refresh_oauth(OPENAI_CODEX_PROVIDER_ID);
         assert_eq!(

@@ -126,15 +126,19 @@ async fn an_auth_failure_consults_the_recovery_seam_and_retries() {
         2,
         "the failed attempt plus one quick retry"
     );
-    let end = events.lock().unwrap().last().expect("end event");
-    assert!(matches!(
-        end,
-        AutoRetryEvent::End {
-            success: true,
-            attempt: 1,
-            ..
-        }
-    ));
+    let events_guard = events.lock().unwrap();
+    let end = events_guard.last().expect("end event");
+    assert!(
+        matches!(
+            end,
+            AutoRetryEvent::End {
+                success: true,
+                attempt: 1,
+                ..
+            }
+        ),
+        "the retry settles the turn: {end:?}"
+    );
 }
 
 /// A rejected recovery grant ends the turn with the re-login sentence: no
@@ -148,7 +152,8 @@ async fn a_rejected_recovery_ends_the_turn_with_the_re_login_sentence() {
     let mut seam = move |_message: &AssistantMessage| {
         Box::pin(async move {
             crate::session_engine::provider_auth::AuthRecoveryOutcome::ReLoginRequired(
-                "Authentication failed for \"openai-codex\".\n\nRun /login to update credentials.".to_string(),
+                "Authentication failed for \"openai-codex\".\n\nRun /login to update credentials."
+                    .to_string(),
             )
         }) as crate::session_engine::provider_auth::AuthRecoveryFuture
     };
@@ -186,16 +191,20 @@ async fn a_rejected_recovery_ends_the_turn_with_the_re_login_sentence() {
         Some("Authentication failed for \"openai-codex\".\n\nRun /login to update credentials."),
         "the final assistant message carries the re-login sentence"
     );
-    let end = events.lock().unwrap().last().expect("end event");
-    assert!(matches!(
-        end,
-        AutoRetryEvent::End {
-            success: false,
-            attempt: 0,
-            final_error: Some(sentence),
-            ..
-        } if sentence.contains("Run /login to update credentials")
-    ));
+    let events_guard = events.lock().unwrap();
+    let end = events_guard.last().expect("end event");
+    assert!(
+        matches!(
+            end,
+            AutoRetryEvent::End {
+                success: false,
+                attempt: 0,
+                final_error: Some(sentence),
+                ..
+            } if sentence.contains("Run /login to update credentials")
+        ),
+        "the re-login sentence closes the episode: {end:?}"
+    );
 }
 
 /// A second auth failure after a served recovery never re-consults the

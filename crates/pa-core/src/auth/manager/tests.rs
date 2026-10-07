@@ -747,7 +747,9 @@ fn a_rejected_force_refresh_keeps_the_stored_credential() {
     let oauth = Arc::new(CountingOAuth {
         calls: std::sync::atomic::AtomicUsize::new(0),
         delay_ms: 0,
-        forced_outcome: Some(Err("OpenAI Codex token refresh failed (401): expired".to_string())),
+        forced_outcome: Some(Err(
+            "OpenAI Codex token refresh failed (401): expired".to_string()
+        )),
     });
     let (mut auth, _backend) = storage_over_backend_with(
         oauth.clone(),
@@ -828,10 +830,13 @@ fn a_force_refresh_write_keeps_a_peer_s_fresher_credential() {
             .ok();
     });
     let refreshed = auth.force_refresh_oauth("x-force-peer");
-    assert!(matches!(
-        &refreshed,
-        Ok(AuthCredential::Oauth { access, .. }) if access == "peer-access"
-    ), "the peer's fresher credential wins over this attempt's own fetch");
+    assert!(
+        matches!(
+            &refreshed,
+            Ok(AuthCredential::Oauth { access, .. }) if access == "peer-access"
+        ),
+        "the peer's fresher credential wins over this attempt's own fetch"
+    );
     assert_eq!(
         auth.get_api_key("x-force-peer").as_deref(),
         Some("peer-access")

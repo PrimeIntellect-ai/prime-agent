@@ -25,8 +25,7 @@ pub enum AuthRecoveryOutcome {
 
 /// The boxed recovery future: the engine's force-refresh runs its
 /// blocking token exchange off the async runtime.
-pub type AuthRecoveryFuture =
-    Pin<Box<dyn Future<Output = AuthRecoveryOutcome> + Send>>;
+pub type AuthRecoveryFuture = Pin<Box<dyn Future<Output = AuthRecoveryOutcome> + Send>>;
 
 /// The retry chains consult this on an auth-class failure: `Continue` lets
 /// the quick retry proceed, `ReLoginRequired` ends the turn with the

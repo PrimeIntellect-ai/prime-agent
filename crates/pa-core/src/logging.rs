@@ -8,8 +8,8 @@
 /// entry); a write failure (closed stderr) is swallowed — logging must never
 /// throw into the caller.
 pub fn install_stderr_log_sink() {
-    pa_ai::utils::log::set_log_sink(std::sync::Arc::new(|entry| {
+    pa_ai::utils::log::set_log_sink(Some(std::sync::Arc::new(|entry| {
         let line = serde_json::to_string(entry).unwrap_or_default();
         eprintln!("{line}");
-    }));
+    })));
 }

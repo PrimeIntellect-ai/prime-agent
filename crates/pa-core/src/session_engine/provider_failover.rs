@@ -14,9 +14,9 @@ use super::provider_auth::{AuthRecoveryCallback, AuthRecoveryOutcome};
 use super::provider_park::{is_quota_block_failure, ParkDecisionCallback};
 use super::provider_retry::{
     has_provider_stream_failure, is_agent_lifecycle_failure, is_context_overflow_failure,
-    is_faux_provider_queue_exhausted, is_permanent_provider_failure_kind,
-    is_provider_auth_failure, is_unsupported_tool_failure, jittered_delay_ms,
-    provider_retry_delay, provider_stream_failure_kind, provider_stream_failure_retry_after_ms,
+    is_faux_provider_queue_exhausted, is_permanent_provider_failure_kind, is_provider_auth_failure,
+    is_unsupported_tool_failure, jittered_delay_ms, provider_retry_delay,
+    provider_stream_failure_kind, provider_stream_failure_retry_after_ms,
     provider_stream_failure_status, retry_jitter_rand01, ProviderRetryDelay, ProviderRetryPolicy,
 };
 
@@ -929,7 +929,10 @@ mod tests {
                 move || {
                     let restores = Arc::clone(&restores);
                     async move {
-                        restores.lock().unwrap().push(Some("primary/glm-5.3".to_string()));
+                        restores
+                            .lock()
+                            .unwrap()
+                            .push(Some("primary/glm-5.3".to_string()));
                         Ok(Some("primary/glm-5.3".to_string()))
                     }
                 }
