@@ -129,7 +129,7 @@ fn registry_dir() -> Result<PathBuf> {
 /// cannot produce. TS's JS has no way to spell these paths at all, so no
 /// TS/Rust cross-protocol form exists to stay compatible with.
 #[must_use]
-pub fn normalize_socket_path(socket_path: &Path) -> String {
+fn normalize_socket_path(socket_path: &Path) -> String {
     use std::path::Component;
     let joined = if socket_path.is_absolute() {
         socket_path.to_path_buf()

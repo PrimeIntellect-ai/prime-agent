@@ -53,6 +53,11 @@ pub struct CoordinatorOptions {
 struct PhaseFailure {
     message: String,
     after_stop: bool,
+    /// The successor this coordinator spawned and then refused (a
+    /// validation failure or a silent boot): still running when the
+    /// failure lands, so the rollback must stop it before it spawns onto
+    /// the socket the rejected daemon still owns (cursor's finding).
+    rejected: Option<super::successor::SpawnedSuccessor>,
 }
 
 impl PhaseFailure {
@@ -60,6 +65,7 @@ impl PhaseFailure {
         Self {
             message: error.to_string(),
             after_stop: false,
+            rejected: None,
         }
     }
 
@@ -67,6 +73,19 @@ impl PhaseFailure {
         Self {
             message: error.to_string(),
             after_stop: true,
+            rejected: None,
+        }
+    }
+
+    /// An after-stop failure that leaves the named child running.
+    fn after_stop_rejected<E: std::fmt::Display>(
+        error: E,
+        rejected: super::successor::SpawnedSuccessor,
+    ) -> Self {
+        Self {
+            message: error.to_string(),
+            after_stop: true,
+            rejected: Some(rejected),
         }
     }
 }
@@ -304,8 +323,9 @@ async fn drive(
     let successor_hello = wait_for_hello(&options.socket_path, budget.boot_ms, &spawned)
         .await
         .ok_or_else(|| {
-            PhaseFailure::after_stop(
+            PhaseFailure::after_stop_rejected(
                 "the successor supervisor did not greet within its boot budget",
+                spawned.clone(),
             )
         })?;
     // The daemon that answered must be the activated candidate, not
@@ -322,7 +342,7 @@ async fn drive(
         predecessor.as_ref(),
         &spawned,
     )
-    .map_err(PhaseFailure::after_stop)?;
+    .map_err(|error| PhaseFailure::after_stop_rejected(error, spawned))?;
     writer
         .lock()
         .await
@@ -474,6 +494,46 @@ async fn finish_failure(
         ))
         .await;
         return Ok(());
+    }
+    // The rejected successor, still running from the failed spawn, is
+    // stopped HERE - bounded and best-effort, while the admission still
+    // holds the window: the rollback child cannot bind a socket the
+    // refused daemon still owns (cursor's finding - without the stop the
+    // rollback always fails against a squatter we ourselves created). A
+    // surviving squatter after the bounded attempt surfaces as the same
+    // honest Failed as before.
+    if let Some(rejected) = &failure.rejected {
+        let identity = pa_types::daemon::update_flow::UpdateProcessIdentity {
+            pid: rejected.pid,
+            process_start_id: rejected.process_start_id.clone(),
+            supervisor_generation: None,
+            supervisor_owner_token: None,
+            rest: serde_json::Map::default(),
+        };
+        // Nothing answering the socket means the rejected child either
+        // never bound or already died - nothing to stop.
+        if let Ok((client, _events)) =
+            pa_tui::daemon_client::DaemonClient::connect(&options.socket_path).await
+        {
+            // The graceful shutdown command (`prime-agent shutdown`'s own;
+            // invariant I3 - never a kill): the refused child is asked to
+            // stop workers and exit, then bounded-waited.
+            let _ = client
+                .request_with_timeout(
+                    pa_types::daemon::DaemonCommand::Shutdown {
+                        id: None,
+                        force: Some(false),
+                        rest: serde_json::Map::default(),
+                    },
+                    options.budget.prepare_rpc_ms
+                        + options.budget.worker_stop_ms
+                        + options.budget.worker_stop_extension_ms,
+                )
+                .await;
+            client.close();
+            let _ = super::successor::wait_for_exit(&identity, options.budget.predecessor_exit_ms)
+                .await;
+        }
     }
     // Close the stop window right before the rollback child spawns,
     // exactly like the happy path's release-to-spawn choreography: the

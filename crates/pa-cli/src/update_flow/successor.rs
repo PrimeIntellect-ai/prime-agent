@@ -54,6 +54,7 @@ pub fn identity_from_hello(hello: &Value) -> UpdateProcessIdentity {
 /// matches the pid alone, and a Linux pid cannot recycle within a boot
 /// budget (the kernel allocates pids sequentially and must lap the whole
 /// pid space to reuse one), while a dead child never greets at all.
+#[derive(Clone)]
 pub struct SpawnedSuccessor {
     /// The spawned child's pid.
     pub pid: u64,

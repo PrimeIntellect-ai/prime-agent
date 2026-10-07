@@ -1491,6 +1491,15 @@ impl LockDir {
                 tracing::warn!("failed to release lock {}: {error}", self.path.display());
             }
         }
+        // A released guard no longer holds the path: the registry entry
+        // must not answer contention for a later same-process acquire that
+        // legitimately retakes the freed path while this guard object is
+        // still alive (macroscope's finding). The plain Drop unregisters
+        // again - a second `HashSet::remove` is a no-op.
+        #[cfg(unix)]
+        if let Some(key) = &self.held_key {
+            unregister_locally_held(key);
+        }
     }
 
     /// Whether the directory at the lock path is still the one this guard
