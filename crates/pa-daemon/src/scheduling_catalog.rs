@@ -18,7 +18,7 @@ use crate::backpressure::RouteAdmission;
 use crate::protocol::{
     command_type_name, response_failure, response_line, response_success, DaemonResponse,
 };
-use crate::registry::ResidentWorker;
+use crate::registry::{canonical_session_file_string, ResidentWorker};
 use crate::scheduled_jobs::session_artifact_dir;
 use crate::session_store::read_session_info;
 use crate::supervisor::{client_command_payload, Supervisor};
@@ -71,32 +71,37 @@ impl Supervisor {
     /// Jobs stored under the session-artifacts tree whose session file exists, is
     /// active, and has no live worker: the supervisor only merges what no worker can list.
     async fn collect_passive_scheduled_jobs(&self, include_inactive: bool) -> Vec<PassiveJob> {
-        let mut out = Vec::new();
-        for job in crate::update_roster::scan_scheduled_jobs(&self.options.agent_dir) {
-            if !include_inactive && !matches!(job.status, JobStatus::Active | JobStatus::Paused) {
-                continue;
+        let resident_files = self.registry.session_files().await;
+        let agent_dir = self.options.agent_dir.clone();
+        let scan = tokio::task::spawn_blocking(move || {
+            let resident_files: HashSet<String> = resident_files
+                .iter()
+                .map(|file| canonical_session_file_string(file))
+                .collect();
+            let mut out = Vec::new();
+            for job in crate::update_roster::scan_scheduled_jobs(&agent_dir) {
+                if !include_inactive && !matches!(job.status, JobStatus::Active | JobStatus::Paused)
+                {
+                    continue;
+                }
+                let session_file = Path::new(&job.session_file);
+                if !session_file.is_file() {
+                    continue;
+                }
+                if resident_files.contains(&canonical_session_file_string(&job.session_file)) {
+                    continue;
+                }
+                let Some(info) = read_session_info(session_file) else {
+                    continue;
+                };
+                if info.state.as_deref() != Some("active") {
+                    continue;
+                }
+                out.push(PassiveJob { job, info });
             }
-            let session_file = Path::new(&job.session_file);
-            if !session_file.is_file() {
-                continue;
-            }
-            if self
-                .registry
-                .find_by_session_file(&job.session_file)
-                .await
-                .is_some()
-            {
-                continue;
-            }
-            let Some(info) = read_session_info(session_file) else {
-                continue;
-            };
-            if info.state.as_deref() != Some("active") {
-                continue;
-            }
-            out.push(PassiveJob { job, info });
-        }
-        out
+            out
+        });
+        scan.await.unwrap()
     }
 
     /// The passive rows a catalog READ serves: the shared snapshot when present
