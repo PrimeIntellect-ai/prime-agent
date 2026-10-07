@@ -84,6 +84,8 @@ fn first_line_is_session_header(file_path: &Path) -> bool {
 
 /// Repair crash damage (torn tail, zero-filled append) once at open.
 pub fn repair_jsonl_damage(file_path: &Path) {
+    use std::io::{BufRead, Write};
+
     let Ok(target_path) = std::fs::canonicalize(file_path) else {
         return;
     };
@@ -94,8 +96,6 @@ pub fn repair_jsonl_damage(file_path: &Path) {
     if !first_line_is_session_header(file_path) {
         return;
     }
-    use std::io::{BufRead, Write};
-
     let temp =
         std::path::PathBuf::from(format!("{}.tmp{}", file_path.display(), std::process::id()));
     let _ = (|| -> std::io::Result<()> {

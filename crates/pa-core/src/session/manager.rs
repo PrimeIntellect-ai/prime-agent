@@ -19,7 +19,6 @@ mod tests;
 mod append;
 
 mod persist;
-use persist::atomic_write;
 
 mod queries;
 use super::{build_session_context, SessionContext};
