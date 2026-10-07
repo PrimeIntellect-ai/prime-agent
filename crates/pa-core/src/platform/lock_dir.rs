@@ -873,30 +873,55 @@ impl LockDir {
     /// recorded value is the stored one, and the compare stays exact.
     /// An owned (harness-state) create additionally writes the `owner`
     /// record (#3380's durability classes) under restrictive modes before
-    /// the probe, and a failed create unwinds BOTH files.
+    /// the probe. Every step and the failure cleanup are bound to the
+    /// creator's identity - the directory's inode, captured the instant
+    /// the mkdir lands: a stalled creator's path can be reclaimed by a
+    /// successor mid-create, and resuming must never truncate the
+    /// successor's owner record, delete its directory, or write its
+    /// probe (the reviewer's P1). A create that can no longer prove the
+    /// path is its own fails as plain collision; an unobservable
+    /// identity cleans nothing (the artifact goes to the staleness
+    /// sweep, the fail-safe).
     #[cfg(any(unix, windows))]
     fn create(path: &Path, owner: Option<&str>) -> io::Result<Option<(i64, i64)>> {
         #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         fs::create_dir(path)?;
+        let created = Self::ownership_id(path);
+        let still_ours = |occupied: io::Error| -> io::Error {
+            if created.is_some_and(|created| Self::ownership_id(path) == Some(created)) {
+                occupied
+            } else {
+                io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!("Lock file is already being held: {}", path.display()),
+                )
+            }
+        };
         let result = (|| {
             if let Some(owner) = owner {
                 #[cfg(unix)]
                 {
-                    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+                    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+                        .map_err(still_ours)?;
                 }
-                fs::write(path.join("owner"), format!("{owner}\n"))?;
+                fs::write(path.join("owner"), format!("{owner}\n")).map_err(still_ours)?;
                 #[cfg(unix)]
                 {
-                    fs::set_permissions(path.join("owner"), fs::Permissions::from_mode(0o600))?;
+                    fs::set_permissions(path.join("owner"), fs::Permissions::from_mode(0o600))
+                        .map_err(still_ours)?;
                 }
             }
             let (sec, nanos) = probe_mtime();
-            set_mtime(path, sec, nanos)?;
-            Self::read_back_probe(path)
+            set_mtime(path, sec, nanos).map_err(still_ours)?;
+            Self::read_back_probe(path).map_err(still_ours)
         })();
-        if result.is_err() {
-            // Never leave a lock artifact behind a failed create.
+        if result.is_err()
+            && created.is_some_and(|created| Self::ownership_id(path) == Some(created))
+        {
+            // Clean only the directory this create can still prove it
+            // owns - a successor's replacement is left entirely alone, and
+            // an unverified identity never touches the path.
             let _ = fs::remove_file(path.join("owner"));
             let _ = fs::remove_dir(path);
         }
@@ -1032,6 +1057,42 @@ impl LockDir {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
             Err(error) => return Err(error),
         };
+        // The owner discipline's PRE-PARK gate (#3380's durability
+        // classes, the reviewer's P1): a LIVE owned lock is never parked -
+        // the park vacates the public path for the owner-read interval,
+        // and a third acquirer could take the path under a live owner
+        // (owned locks take no flock, so the witness gate above passes
+        // for them by design). Refuse before the capture; a present but
+        // unreadable owner record fails closed.
+        let owner_path = path.join("owner");
+        match fs::read(&owner_path).and_then(|bytes| {
+            String::from_utf8(bytes)
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "unparseable owner"))
+        }) {
+            // A live owner: contention, however stale the mtime.
+            Ok(recorded) if !Self::owner_dead(&recorded) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    format!("Lock file is already being held: {}", path.display()),
+                ));
+            }
+            // A dead (or unparseable) owner: reclaimable by age, exactly
+            // like the parked-name check and #3380's owner_dead rule.
+            Ok(_) => {}
+            // No owner file: the ordinary mtime protocol.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            // An unparseable record (readable bytes, not a valid owner
+            // record - #3380's owner_dead rule): reclaimable by age.
+            Err(error) if error.kind() == io::ErrorKind::InvalidData => {}
+            // An unreadable record never parks: fail closed (a live
+            // owner's record may be present and unprovable).
+            Err(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    format!("Lock file is already being held: {}", path.display()),
+                ));
+            }
+        }
         // The stale candidate: the atomic capture - whatever the path
         // holds goes to the park, and every check runs ON THE PARKED NAME,
         // where no other process can swap the directory between a check
@@ -1749,6 +1810,14 @@ mod tests {
         let error = LockDir::acquire_owned_retrying(&file, Duration::from_secs(10), 1, MIN_STALE)
             .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        // The reviewer's P1 regression: a live owned lock is never PARKED
+        // off the public path during the takeover attempt - the owner gate
+        // refuses before any capture, so the path itself never goes vacant
+        // under the live owner.
+        assert!(
+            lock_of(&file).is_dir(),
+            "a live owned lock is never parked off the public path"
+        );
         guard.ensure_owned().unwrap();
     }
 
