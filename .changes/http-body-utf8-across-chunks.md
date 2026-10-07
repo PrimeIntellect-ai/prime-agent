@@ -1,0 +1,1 @@
+- Model output streamed over HTTP no longer shows replacement characters in place of CJK characters or emoji when a provider's chunk boundary lands inside one: the stream holds the split bytes and decodes the character once it is complete.
