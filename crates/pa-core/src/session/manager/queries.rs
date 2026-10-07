@@ -171,6 +171,40 @@ impl SessionManager {
         branch
     }
 
+    /// Whether the active branch still grows through `prefix_leaf` — the
+    /// leaf a compaction prepared against — with no compaction row between
+    /// the two. The compaction commit's structural-prefix check: a plain
+    /// append chains onto the leaf behind `prefix_leaf` and stays on the
+    /// path (it joins the retained tail behind the committed summary);
+    /// a branch switch or another compaction rebuilds the path and
+    /// invalidates the prepared cut.
+    pub(crate) fn compaction_prefix_intact(&self, prefix_leaf: Option<&str>) -> bool {
+        let Some(prefix_leaf) = prefix_leaf else {
+            return self.leaf_id.is_none();
+        };
+        let mut visited = std::collections::HashSet::new();
+        let mut id = self.leaf_id.as_deref();
+        while let Some(current) = id {
+            // A corrupt file can hold a parent cycle; the check must not hang.
+            if !visited.insert(current) {
+                return false;
+            }
+            // The prefix counts only as an entry of the active branch: a
+            // dangling parent id that left the tree is a different branch.
+            let Some(&index) = self.by_id.get(current) else {
+                return false;
+            };
+            if current == prefix_leaf {
+                return true;
+            }
+            if matches!(self.file_entries[index], FileEntry::Compaction { .. }) {
+                return false;
+            }
+            id = self.file_entries[index].parent_id();
+        }
+        false
+    }
+
     #[must_use]
     pub fn active_goal_state(&self) -> Option<crate::goals::GoalState> {
         if let Some(window) = &self.window {

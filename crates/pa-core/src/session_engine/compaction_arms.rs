@@ -174,28 +174,26 @@ impl AgentSession {
         );
         let digest_inputs = self.harness_digest_inputs().await;
         compaction_trace::trace("compact.digest_captured", &serde_json::Value::Null);
+        let started_at = std::time::Instant::now();
+        let summary_delta = self
+            .compaction_summary_sink
+            .lock()
+            .expect("compaction summary sink lock")
+            .clone();
+        let options = crate::session_engine::compact_session::CompactOptions {
+            model: model.clone(),
+            api_key,
+            custom_instructions,
+            settings: self.compaction_settings(),
+            abort,
+            harness_digest: digest_inputs,
+            auxiliary: self.auxiliary_model.as_ref(),
+            summary_delta,
+            semantic_edges: self.semantic_edges(),
+        };
         let mut outcome = {
-            let mut session = self.session.lock().await;
-            let summary_delta = self
-                .compaction_summary_sink
-                .lock()
-                .expect("compaction summary sink lock")
-                .clone();
-            crate::session_engine::compact_session::execute_compaction(
-                &mut session,
-                crate::session_engine::compact_session::CompactOptions {
-                    model: model.clone(),
-                    api_key,
-                    custom_instructions,
-                    settings: self.compaction_settings(),
-                    abort,
-                    harness_digest: digest_inputs,
-                    auxiliary: self.auxiliary_model.as_ref(),
-                    summary_delta,
-                    semantic_edges: self.semantic_edges(),
-                },
-            )
-            .await?
+            let _flight = self.compaction_flight.lock().await;
+            self.compaction_attempts(&options, started_at).await?
         };
         if matches!(outcome, CompactOutcome::Skipped(_)) {
             compaction_trace::trace("compact.skipped", &serde_json::Value::Null);
@@ -233,6 +231,55 @@ impl AgentSession {
             }),
         );
         Ok(outcome)
+    }
+
+    /// The PREPARE -> SUMMARIZE -> COMMIT loop: prepare under the session
+    /// lock, summarize with no lock held (mid-window appends chain onto
+    /// the leaf and ride the retained tail), then commit under the lock —
+    /// a structural conflict retries from PREPARE, an aborted run stops.
+    async fn compaction_attempts(
+        &self,
+        options: &crate::session_engine::compact_session::CompactOptions<'_>,
+        started_at: std::time::Instant,
+    ) -> anyhow::Result<CompactOutcome> {
+        /// The conflict-retry bound: a branch that keeps changing under
+        /// the compaction fails instead of re-summarizing forever.
+        const MAX_COMPACTION_ATTEMPTS: usize = 3;
+        for _ in 0..MAX_COMPACTION_ATTEMPTS {
+            let mut attempt = {
+                let session = self.session.lock().await;
+                match crate::session_engine::compact_session::prepare_attempt(&session, options) {
+                    Ok(attempt) => attempt,
+                    Err(skip) => return Ok(CompactOutcome::Skipped(skip.user_message())),
+                }
+            };
+            let prepared =
+                crate::session_engine::compact_session::summarize_attempt(&attempt, options)
+                    .await?;
+            let committed = {
+                let mut session = self.session.lock().await;
+                crate::session_engine::compact_session::commit_attempt(
+                    &mut session,
+                    &mut attempt,
+                    &prepared,
+                    options.abort,
+                )?
+            };
+            if committed {
+                return Ok(CompactOutcome::Ran(Box::new(
+                    crate::session_engine::compact_session::CompactRun {
+                        result: prepared.result,
+                        entry: prepared.entry,
+                        duration_ms: started_at.elapsed().as_millis() as u64,
+                        ipython_state: None,
+                    },
+                )));
+            }
+            pa_agent::abort::throw_if_aborted_signal(options.abort)?;
+        }
+        Err(anyhow::anyhow!(
+            "compaction retried {MAX_COMPACTION_ATTEMPTS} times while the branch kept changing; try again"
+        ))
     }
 
     /// Record an unsuccessful compaction outcome: append the durable
