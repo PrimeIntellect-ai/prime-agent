@@ -165,7 +165,7 @@ async fn worker_roster_delta_drops_stale_sequences() {
             .map(|entry| entry.summary["thinkingLevel"].clone())
             .expect("the roster entry")
     };
-    // A fresh worker's create/registration pull stamps the ZERO        // A fresh worker's create/registration pull stamps the ZERO
+    // A fresh worker's create/registration pull stamps the ZERO
     // counter (the worker has pushed nothing yet): it starts the
     // slot and applies — the create path's first authoritative
     // write.
@@ -261,6 +261,28 @@ async fn worker_roster_delta_drops_stale_sequences() {
         "a delayed pre-push pull never overwrites a newer delta"
     );
     assert_eq!(entry_level(), serde_json::json!("off"));
+    // The push snapshot advances the worker counter to 5. A pull at
+    // that same counter is captured afterward under the same core lock,
+    // so its content is newer even if the push arrived first.
+    let applied = delta(&supervisor, "seq-token", "high", Some(5), "i1").await;
+    assert!(applied.success, "sequence 5 applies: {applied:?}");
+    assert_eq!(entry_level(), serde_json::json!("high"));
+    let mut equal_pull = summary("medium");
+    equal_pull["rosterDeltaSequence"] = serde_json::json!(5);
+    equal_pull["workerInstanceId"] = serde_json::json!("i1");
+    assert!(
+        supervisor
+            .write_roster_summary_for_resident(&resident, &equal_pull)
+            .await
+            .is_some(),
+        "a post-push equal-counter pull has the newer content"
+    );
+    assert_eq!(entry_level(), serde_json::json!("medium"));
+    // The in-flight push at the same counter is now stale, whichever
+    // arrival order the supervisor saw. It cannot overwrite that pull.
+    let stale_equal = delta(&supervisor, "seq-token", "low", Some(5), "i1").await;
+    assert!(stale_equal.success, "stale equal delta answers: {stale_equal:?}");
+    assert_eq!(entry_level(), serde_json::json!("medium"));
     // A replacement process registers (the registration notes the
     // new generation) and its counter-restarted sequences apply —
     // never compared against the predecessor's watermark.

@@ -112,6 +112,8 @@ impl AgentRoster {
 
     /// The gate for one authoritative pull (registration, adoption, create, refresh):
     /// applies when its counter is at or above the applied watermark, dropped below it.
+    /// The worker captures the counter and state under one core lock: at equal
+    /// counters the pull follows the push snapshot and has the newer content.
     /// The caller must run this gate, the summary write, and the watermark raise in ONE
     /// roster-lock critical section. A summary without the counter stamp always applies;
     /// a STAMPED counter — zero included — orders against the slot like any other pull.

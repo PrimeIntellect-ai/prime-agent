@@ -325,15 +325,15 @@ pub(crate) async fn push_roster_delta(context: &RosterPushContext) {
     if context.worker_token.is_empty() || context.roster_link.socket_path().as_os_str().is_empty() {
         return;
     }
+    // A pull may race this push, but both read the counter with their core
+    // snapshot held: an equal-counter pull was captured after this push.
     let command = {
-        let mut summary = {
-            let (core, inputs) = SummaryInputs::lock(
-                &context.core,
-                context.engine.as_ref(),
-                &context.user_bash,
-            );
-            session_summary(&core, inputs)
-        };
+        let (core, inputs) = SummaryInputs::lock(
+            &context.core,
+            context.engine.as_ref(),
+            &context.user_bash,
+        );
+        let mut summary = session_summary(&core, inputs);
         // The embedded counter is the pre-stamp value: every sequence
         // stamped before the snapshot is at or below it.
         summary.roster_delta_sequence = Some(
