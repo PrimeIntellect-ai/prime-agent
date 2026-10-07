@@ -429,5 +429,109 @@ class LiveIsSecureTests(unittest.TestCase):
             self.assertTrue(ax._live_is_secure("ref"))
 
 
+
+
+class UnsupportedSubroleTests(unittest.TestCase):
+    """An element with no subrole attribute is ordinary, not unverifiable."""
+
+    def test_focused_control_without_a_subrole_attribute_is_not_secure(self) -> None:
+        app = FakeAxValueServices()
+        focus = object()
+        app.focused = focus
+
+        def copy(element: Any, attribute: str, unused: Any) -> Any:
+            if attribute == "AXFocusedUIElement":
+                return (app.kAXErrorSuccess, focus)
+            if attribute == "AXRole":
+                return (app.kAXErrorSuccess, "AXTextField")
+            if attribute == "AXSubrole":
+                return (-25205, None)  # kAXErrorAttributeUnsupported: no subrole attribute
+            return (app.kAXErrorSuccess, None)
+
+        app.AXUIElementCopyAttributeValue = copy
+        with mock.patch.object(ax, "_require_mac", lambda: types.SimpleNamespace(app_services=app)):
+            self.assertIs(ax._focused_is_secure(4242), False)
+
+    def test_live_control_without_a_subrole_attribute_is_not_secure(self) -> None:
+        class Services:
+            kAXErrorSuccess = 0
+
+            def AXUIElementSetMessagingTimeout(self, element: Any, seconds: Any) -> None:
+                pass
+
+            def AXUIElementCopyAttributeValue(self, element: Any, attribute: str, unused: Any) -> Any:
+                if attribute == "AXRole":
+                    return (0, "AXTextField")
+                if attribute == "AXSubrole":
+                    return (-25205, None)
+                return (0, None)
+
+        services = Services()
+        with mock.patch.object(ax, "_require_mac", lambda: types.SimpleNamespace(app_services=services)):
+            self.assertIs(ax._live_is_secure("ref"), False)
+
+    def test_described_field_without_a_subrole_attribute_reads_its_value(self) -> None:
+        class Services:
+            kAXErrorSuccess = 0
+
+            def AXUIElementSetMessagingTimeout(self, element: Any, seconds: Any) -> None:
+                pass
+
+            def AXUIElementCopyAttributeValue(self, element: Any, attribute: str, unused: Any) -> Any:
+                if attribute == "AXRole":
+                    return (0, "AXTextField")
+                if attribute == "AXSubrole":
+                    return (-25205, None)
+                if attribute == "AXValue":
+                    return (0, "hello")
+                return (0, None)
+
+        services = Services()
+        described = ax._describe(services, "element")
+        self.assertIsNone(described["subrole"])
+        self.assertEqual(described["value"], "hello")
+
+    def test_a_cannot_complete_subrole_still_fails_closed(self) -> None:
+        class Services:
+            kAXErrorSuccess = 0
+
+            def AXUIElementSetMessagingTimeout(self, element: Any, seconds: Any) -> None:
+                pass
+
+            def AXUIElementCopyAttributeValue(self, element: Any, attribute: str, unused: Any) -> Any:
+                if attribute == "AXRole":
+                    return (0, "AXTextField")
+                if attribute == "AXSubrole":
+                    return (-25204, None)  # kAXErrorCannotComplete: unverifiable
+                return (0, None)
+
+        services = Services()
+        with mock.patch.object(ax, "_require_mac", lambda: types.SimpleNamespace(app_services=services)):
+            self.assertIsNone(ax._live_is_secure("ref"))
+        described = ax._describe(services, "element")
+        self.assertEqual(described["subrole"], "AXSecureTextField")
+        self.assertIsNone(described["value"])
+
+
+class DescribeBudgetTests(unittest.TestCase):
+    def test_observe_fits_its_cap_even_when_every_read_hangs(self) -> None:
+        app = HungAppServices()
+        with app.patch():
+            observation = ax._observe(4242)
+        elapsed = app.clock - 1000.0
+        self.assertLessEqual(
+            elapsed,
+            ax._MAX_OBSERVE_SECONDS + 0.05 + 1e-6,
+            "the whole observation fits its cap, hung elements included",
+        )
+
+    def test_describe_spends_one_budget_not_one_per_read(self) -> None:
+        app = HungAppServices()
+        start = app.clock
+        with app.patch():
+            described = ax._describe(app, "element", deadline=app.clock + 1.5)
+        elapsed = app.clock - start
+        self.assertIn("role", described)
+        self.assertLessEqual(elapsed, 1.55, "one element's describe fits its budget, not budget x reads")
 if __name__ == "__main__":
     unittest.main()

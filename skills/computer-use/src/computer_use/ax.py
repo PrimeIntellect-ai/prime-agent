@@ -30,6 +30,10 @@ _SECURE_ROLE = "AXTextField"
 _SECURE_SUBROLE = "AXSecureTextField"
 _WINDOW_ID_ATTRIBUTE = "_AXWindowID"
 
+# kAXErrorAttributeUnsupported answers authoritatively: the element has no
+# such attribute, a definitive absence rather than an unverifiable read.
+_AX_ERROR_ATTRIBUTE_UNSUPPORTED = -25205
+
 _SKILL_ROOT = Path(__file__).resolve().parents[2]
 _PACKAGED_INSTRUCTIONS_DIR = Path(__file__).resolve().parent / "references" / "app-instructions"
 _SKILL_INSTRUCTIONS_DIR = _SKILL_ROOT / "references" / "app-instructions"
@@ -112,15 +116,17 @@ def _observe(pid: int) -> Observation:
     app_services = _require_mac().app_services
     app_element = app_services.AXUIElementCreateApplication(pid)
     _set_messaging_timeout(app_services, app_element)
-    window = _copy_value(app_services, app_element, "AXFocusedWindow")
-    if window is None or _text(_copy_value(app_services, window, "AXRole")) == "AXApplication":
+    deadline = time.monotonic() + _MAX_OBSERVE_SECONDS
+    window = _copy_value(app_services, app_element, "AXFocusedWindow", min(_MESSAGING_TIMEOUT_SECONDS, _remaining_seconds(deadline)))
+    if window is None or _text(
+        _copy_value(app_services, window, "AXRole", min(_MESSAGING_TIMEOUT_SECONDS, _remaining_seconds(deadline)))
+    ) == "AXApplication":
         # A windowless app reports the application element (or nothing) as its
         # focused window; there is no window tree to observe yet.
         return Observation(window_title=None, tree=[], refs=[], window_rect=None)
     tree: list[dict[str, Any]] = []
     refs: list[Any] = []
     stopped: list[bool] = []
-    deadline = time.monotonic() + _MAX_OBSERVE_SECONDS
     _walk(app_services, window, 1, tree, refs, deadline=deadline, stopped=stopped)
 
     # Every post-walk read draws on the same deadline: each computes its own
@@ -209,11 +215,14 @@ def _live_is_secure(ref: Any) -> bool | None:
 
 
 def _read_attribute(app_services: Any, element: Any, attribute: str, timeout_seconds: float | None = None) -> tuple[bool, str | None]:
-    """Copy one attribute as text, telling a failed read from a None value.
+    """Copy one attribute as text, telling a failed read from an absent value.
 
     Both surface as None through _copy_value; a failed read must be
     distinguishable so security-relevant attributes can fail closed.
-    Returns (ok, value); ok=False means the read itself failed.
+    Returns (ok, value). ok=False means the read could not complete, and
+    callers fail closed on it. An element without the attribute answers
+    authoritatively: ok=True with a None value - a control with no
+    AXSubrole is an ordinary control, not an unverifiable one.
     """
     _set_messaging_timeout(app_services, element, timeout_seconds)
     try:
@@ -222,6 +231,8 @@ def _read_attribute(app_services: Any, element: Any, attribute: str, timeout_sec
         return False, None
     error, value = _split_result(app_services, result)
     if error != app_services.kAXErrorSuccess:
+        if error == _AX_ERROR_ATTRIBUTE_UNSUPPORTED:
+            return True, None
         return False, None
     return True, _text(value)
 
@@ -389,37 +400,54 @@ def _walk(
             return
         if child is parent or any(child is ancestor for ancestor in ancestors):
             continue
-        described = _describe(app_services, child, min(_MESSAGING_TIMEOUT_SECONDS, max(deadline - time.monotonic(), 0.05)))
+        described = _describe(app_services, child, deadline=deadline)
         siblings.append(described)
         refs.append(child)
         _walk(app_services, child, depth + 1, described["children"], refs, ancestors + (child,), deadline, stopped)
 
 
-def _describe(app_services: Any, element: Any, timeout_seconds: float | None = None) -> dict[str, Any]:
+def _describe(app_services: Any, element: Any, deadline: float | None = None) -> dict[str, Any]:
     """Collect one element's contract attributes into a plain dict.
 
     Every string attribute is capped at _MAX_ATTRIBUTE_CHARS so a hostile app
     cannot flood the kernel or the model context with megabyte payloads. A
     text field whose subrole cannot be read is treated as secure and its
     value is never collected: an unreadable secure state must fail closed,
-    not leak the field's content as ordinary text.
+    not leak the field's content as ordinary text. The attribute reads share
+    one deadline: each draws the remaining budget, and none starts once the
+    budget is spent.
     """
-    role = _cap(_text(_copy_value(app_services, element, "AXRole", timeout_seconds)))
-    subrole_ok, subrole = _read_attribute(app_services, element, "AXSubrole", timeout_seconds)
+    if deadline is None:
+        deadline = time.monotonic() + _MESSAGING_TIMEOUT_SECONDS
+
+    def read(attribute: str) -> Any:
+        """One guarded describe read, skipped once the budget is spent."""
+        if _budget_spent(deadline):
+            return None
+        return _copy_value(app_services, element, attribute, _remaining_seconds(deadline))
+
+    def read_attribute(attribute: str) -> tuple[bool, str | None]:
+        """One guarded attribute read, failing closed once the budget is spent."""
+        if _budget_spent(deadline):
+            return False, None
+        return _read_attribute(app_services, element, attribute, _remaining_seconds(deadline))
+
+    role = _cap(_text(read("AXRole")))
+    subrole_ok, subrole = read_attribute("AXSubrole")
     subrole = _cap(subrole)
     if not subrole_ok and role == _SECURE_ROLE:
         subrole = _SECURE_SUBROLE
-    value = None if subrole == _SECURE_SUBROLE else _cap(_text(_copy_value(app_services, element, "AXValue", timeout_seconds)))
+    value = None if subrole == _SECURE_SUBROLE else _cap(_text(read("AXValue")))
     return {
         "role": role,
         "subrole": subrole,
-        "title": _cap(_text(_copy_value(app_services, element, "AXTitle", timeout_seconds))),
+        "title": _cap(_text(read("AXTitle"))),
         "value": value,
-        "description": _cap(_text(_copy_value(app_services, element, "AXDescription", timeout_seconds))),
-        "placeholder": _cap(_text(_copy_value(app_services, element, "AXPlaceholderValue", timeout_seconds))),
-        "actions": _actions(app_services, element, timeout_seconds),
-        "position": _point(app_services, _copy_value(app_services, element, "AXPosition", timeout_seconds)),
-        "size": _point(app_services, _copy_value(app_services, element, "AXSize", timeout_seconds)),
+        "description": _cap(_text(read("AXDescription"))),
+        "placeholder": _cap(_text(read("AXPlaceholderValue"))),
+        "actions": [] if _budget_spent(deadline) else _actions(app_services, element, _remaining_seconds(deadline)),
+        "position": _point(app_services, read("AXPosition")),
+        "size": _point(app_services, read("AXSize")),
         "children": [],
     }
 
