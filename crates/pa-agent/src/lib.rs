@@ -3,6 +3,7 @@
 //! the model call boundary.
 
 pub mod abort;
+pub mod admission;
 pub mod agent;
 pub mod agent_loop;
 pub mod proxy;

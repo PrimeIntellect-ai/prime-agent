@@ -111,6 +111,11 @@ pub struct SessionEngine {
     /// The kernel `rlm.spawn` handler registers spawn targets into it; the
     /// embedding wires the child-observation sink onto it after the build.
     pub rlm_usage: std::sync::Arc<super::rlm_usage::RlmChildUsageAttributions>,
+    /// The session's RLM host bridge: the progress-note store an
+    /// in-process children host reads for its roster rows (the child's
+    /// latest `rlm.progress.note`), shared with the kernel's own
+    /// `rlm.*` handlers.
+    pub rlm: std::sync::Arc<super::rlm_host::RlmHostBridge>,
     /// The factory host bridge (`/factory` view lane): the daemon/TUI
     /// request surface over the kernel's factory runs, built from the
     /// session facts captured in `create_session` (the #3184 capture
@@ -499,6 +504,9 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     };
     let (existing_messages, has_thinking_entry, has_service_tier_entry) = {
         let session = wiring.session.lock().await;
+        // The in-process host removes and re-admits unconsumed notices at
+        // bind. An engine not bound to that host must keep its original
+        // context instead of silently hiding durable rows.
         let messages = super::compact_session::rebuilt_context_after_compaction(&session);
         let has_thinking_entry = session.has_thinking_level();
         let has_service_tier_entry = session.has_service_tier();
@@ -757,6 +765,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         turn_boundary,
         telemetry,
         rlm_usage: wiring.rlm_usage,
+        rlm: wiring.rlm,
         factory_host,
         provisioner,
     })

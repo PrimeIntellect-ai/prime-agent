@@ -30,6 +30,7 @@ pub mod provider_retry;
 pub mod refine;
 pub mod request_timing;
 pub mod rlm_host;
+pub mod rlm_in_process;
 pub mod rlm_notices;
 pub mod rlm_usage;
 pub mod runtime;
@@ -47,6 +48,7 @@ pub mod turn_boundary;
 
 mod admission;
 mod compaction_arms;
+mod terminal_inbox;
 mod wiring;
 
 use std::sync::Arc;
@@ -158,6 +160,15 @@ pub struct AgentSession {
     /// daemon can install it after the build; `None` (the default)
     /// keeps the one-shot summarizer completion.
     compaction_summary_sink: std::sync::Mutex<Option<compaction_exec::SummaryDeltaSink>>,
+    /// Serializes notice admissions with parent input and generation close.
+    terminal_admission: tokio::sync::Mutex<TerminalAdmission>,
+    /// Agent-message reply IDs pre-synced by the parent inbox. Ordinary
+    /// custom rows retain their normal `MessageEnd` persistence rule.
+    pre_synced_reply_ids: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// Dropping the parent session stops its single coalescing queue pump.
+    terminal_pump_shutdown: tokio::sync::watch::Sender<bool>,
+    #[cfg(test)]
+    terminal_test_gate: terminal_inbox::TerminalGateSlot,
     /// The session's semantic-edge recorder (TS
     /// `AgentSession._semanticEdges`): `None` in sessions the engine
     /// built without a semantic identity (verification harnesses
@@ -177,6 +188,13 @@ pub struct AgentSession {
     /// resolves it (verification harnesses building the session directly
     /// keep `None`, which reads as the fail-closed disabled default).
     agent_dir: Option<std::path::PathBuf>,
+}
+
+#[derive(Default)]
+struct TerminalAdmission {
+    closed: bool,
+    registered: std::collections::HashSet<String>,
+    registered_replies: std::collections::HashSet<String>,
 }
 
 impl AgentSession {
@@ -214,15 +232,39 @@ impl AgentSession {
         harness_digest: Option<harness_digest::HarnessDigestContext>,
     ) -> anyhow::Result<Self> {
         let persistence = session.clone();
+        let notice_delivery = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+        let delivery_for_subscriber = Arc::clone(&notice_delivery);
+        let pre_synced_reply_ids =
+            Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+        let replies_for_subscriber = Arc::clone(&pre_synced_reply_ids);
+        #[cfg(test)]
+        let terminal_test_gate: terminal_inbox::TerminalGateSlot =
+            Arc::new(std::sync::RwLock::new(None));
+        #[cfg(test)]
+        let subscriber_test_gate = Arc::clone(&terminal_test_gate);
         agent
             .subscribe(move |event, _signal| {
                 let persistence = persistence.clone();
+                let delivery = Arc::clone(&delivery_for_subscriber);
+                let replies = Arc::clone(&replies_for_subscriber);
+                #[cfg(test)]
+                let test_gate = Arc::clone(&subscriber_test_gate);
                 Box::pin(async move {
-                    persist_event(&persistence, event).await?;
+                    persist_event(
+                        &persistence,
+                        &delivery,
+                        &replies,
+                        #[cfg(test)]
+                        &test_gate,
+                        event,
+                    )
+                    .await?;
                     Ok(())
                 })
             })
             .await;
+        let (terminal_pump_shutdown, shutdown) = tokio::sync::watch::channel(false);
+        terminal_inbox::start_pump(Arc::clone(&agent), shutdown);
         let this = Self {
             agent,
             session,
@@ -241,12 +283,32 @@ impl AgentSession {
             skill_telemetry: None,
             image_model_router: None,
             compaction_summary_sink: std::sync::Mutex::new(None),
+            terminal_admission: tokio::sync::Mutex::new(TerminalAdmission::default()),
+            pre_synced_reply_ids,
+            terminal_pump_shutdown,
+            #[cfg(test)]
+            terminal_test_gate,
             semantic_edges: std::sync::Mutex::new(None),
             side_question_stream_fn: std::sync::Mutex::new(None),
             agent_dir: None,
         };
         this.ensure_harness_digest_context().await?;
         Ok(this)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_terminal_test_gate(&self, gate: Option<terminal_inbox::TerminalTestGate>) {
+        *self
+            .terminal_test_gate
+            .write()
+            .expect("terminal test gate lock") = gate;
+    }
+
+    /// Shut the notice inbox before the owning embedding replaces a parent
+    /// generation. A later notice claim cannot target this closed engine.
+    pub async fn close_terminal_inbox(&self) {
+        self.terminal_admission.lock().await.closed = true;
+        let _ = self.terminal_pump_shutdown.send(true);
     }
 
     /// The underlying agent loop (steering, state, subscriptions).
@@ -368,6 +430,9 @@ impl AgentSession {
 
 async fn persist_event(
     session: &Arc<tokio::sync::Mutex<SessionManager>>,
+    delivered: &Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    pre_synced_replies: &Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    #[cfg(test)] gate: &terminal_inbox::TerminalGateSlot,
     event: AgentEvent,
 ) -> std::io::Result<()> {
     match event {
@@ -375,12 +440,66 @@ async fn persist_event(
             let Some(session_message) = loop_message_to_session(&message) else {
                 return Ok(());
             };
+            let successful_assistant = matches!(
+                &message,
+                AgentMessage::Standard(pa_agent::types::Message::Assistant(assistant))
+                    if !matches!(assistant.stop_reason,
+                        pa_agent::types::StopReason::Error | pa_agent::types::StopReason::Aborted)
+            );
             let mut session = session.lock().await;
+            if successful_assistant {
+                #[cfg(test)]
+                {
+                    let keys: Vec<String> = delivered
+                        .lock()
+                        .expect("notice delivery lock")
+                        .iter()
+                        .cloned()
+                        .collect();
+                    if !keys.is_empty() {
+                        terminal_inbox::pause_terminal_gate(
+                            gate,
+                            terminal_inbox::TerminalGatePoint::AssistantBeforePersist { keys },
+                        )
+                        .await;
+                    }
+                }
+            }
+            // The notice was synced before live admission. Its MessageEnd
+            // delivers it into model context but must not append a second
+            // transcript row.
             // TS `_processAgentEvent` swallows persistence failures and keeps
             // the row in memory: the loop already reduced the event into live
             // state, so a failed write retains the row too — propagating would
             // fail the run and append an error row in neither store.
             let write_error = match session_message {
+                SessionAgentMessage::Custom(custom)
+                    if rlm_notices::terminal_notice_key(&custom).is_some() =>
+                {
+                    if let Some(key) = rlm_notices::terminal_notice_key(&custom) {
+                        delivered
+                            .lock()
+                            .expect("notice delivery lock")
+                            .insert(key.to_string());
+                    }
+                    None
+                }
+                SessionAgentMessage::Custom(custom)
+                    if custom.custom_type == agent_messaging::AGENT_MESSAGE_CUSTOM_TYPE
+                        && custom
+                            .details
+                            .as_ref()
+                            .and_then(|details| details.get("id"))
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|id| {
+                                pre_synced_replies
+                                    .lock()
+                                    .expect("pre-synced reply lock")
+                                    .contains(id)
+                            }) =>
+                {
+                    None
+                }
                 SessionAgentMessage::Custom(custom) => {
                     session
                         .append_custom_message_retained(
@@ -395,6 +514,34 @@ async fn persist_event(
             };
             if let Some(error) = write_error {
                 eprintln!("pa-core: message row not persisted: {error}");
+            } else if successful_assistant {
+                let keys: Vec<String> = delivered
+                    .lock()
+                    .expect("notice delivery lock")
+                    .iter()
+                    .cloned()
+                    .collect();
+                if !keys.is_empty() {
+                    #[cfg(test)]
+                    terminal_inbox::pause_terminal_gate(
+                        gate,
+                        terminal_inbox::TerminalGatePoint::AssistantBeforeMarker {
+                            keys: keys.clone(),
+                        },
+                    )
+                    .await;
+                    match session.append_notice_consumed(&keys) {
+                        Ok(()) => {
+                            let mut pending = delivered.lock().expect("notice delivery lock");
+                            for key in &keys {
+                                pending.remove(key);
+                            }
+                        }
+                        Err(error) => {
+                            eprintln!("pa-core: notice consumption not persisted: {error}");
+                        }
+                    }
+                }
             }
         }
         // Git state is captured at both run boundaries, exactly like the
@@ -412,7 +559,16 @@ async fn persist_event(
                     .then(|| session.get_cwd().to_path_buf())
             };
             let Some(cwd) = cwd else { return Ok(()) };
-            let git = tokio::task::spawn_blocking(move || capture_git_context(&cwd)).await?;
+            // The capture runs synchronously, NOT through `spawn_blocking`:
+            // this listener executes under the agent's single-threaded
+            // event lock (TS `processEvents` awaits every listener in
+            // order), and the close cascade's `remove_listener` awaits
+            // that same lock. Off-threading the probe parks the lock
+            // across a blocking-pool await — an in-process host's
+            // current_thread runtime then wedges the close forever (the
+            // guest's close path). A sync probe keeps the lock hold
+            // bounded to the git call, exactly like the append arm.
+            let git = capture_git_context(&cwd);
             if let Some(git) = git {
                 session.lock().await.record_git_state_if_changed(git);
             }
