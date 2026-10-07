@@ -2,10 +2,11 @@
 //! handlers, the stale-id binding and rebind seam, and the saved-row
 //! builders.
 use super::{
-    anyhow, bail, json, list_sessions, mpsc, name_unavailable_error, paths, reservation_key,
-    response_failure, response_line, response_success, subscribers, Arc, DaemonCommand,
-    DaemonResponse, DaemonSessionLifecycle, NameScope, Outbound, Path, PathBuf, ResidentWorker,
-    Result, RouteAdmission, Supervisor, Value, ROUTE_TIMEOUT_MS,
+    anyhow, bail, join_all, json, list_sessions, mpsc, name_unavailable_error, paths,
+    reservation_key, response_failure, response_line, response_success, subscribers, Arc,
+    DaemonCommand, DaemonResponse, DaemonSessionLifecycle, NameScope, Outbound, Path, PathBuf,
+    ResidentWorker, Result, RouteAdmission, Supervisor, Value, ROUTE_TIMEOUT_MS,
+    SUMMARY_TIMEOUT_MS,
 };
 
 /// One spawn-name reservation held across a fresh-launch create (TS #2396): the only
@@ -406,53 +407,21 @@ impl Supervisor {
         let summaries: Vec<Value> = if let Some(true) = all {
             // TS `buildSessionList` order: saved rows (resident ones replaced in place by
             // their live summary), then passive children, then resident-only rows.
-            let mut infos = list_sessions(&dir);
-            if let Some(cwd) = cwd {
-                infos.retain(|info| info.cwd == cwd);
-            }
-            let residents = self.registry.list().await;
-            let mut resident_by_file: Vec<ResidentRoot> = Vec::new();
-            for resident in &residents {
+            let mut residents = Vec::new();
+            let mut resident_roots = Vec::new();
+            for resident in self.registry.list().await {
                 let descriptor = resident.descriptor.lock().await;
                 if let Some(session_file) = &descriptor.session_file {
-                    resident_by_file.push(ResidentRoot {
-                        session_file: crate::lease::canonical_session_path(Path::new(session_file)),
-                        resident: Arc::clone(resident),
-                        // Resident roots carry their active session id so passive children of a
-                        // resident parent report parentActiveSessionId.
-                        active_session_id: Some(descriptor.root_active_session_id.clone()),
-                    });
+                    residents.push(Arc::clone(&resident));
+                    // Resident roots carry their active session id so passive children of a
+                    // resident parent report parentActiveSessionId.
+                    resident_roots.push((
+                        session_file.clone(),
+                        descriptor.root_active_session_id.clone(),
+                    ));
                 }
             }
-            let mut summaries = Vec::new();
-            let mut roots: Vec<crate::rlm_roster::RosterWalkRoot> = Vec::new();
-            for info in &infos {
-                roots.push(crate::rlm_roster::RosterWalkRoot {
-                    session_file: info.path.clone(),
-                    active_session_id: None,
-                });
-                let canonical = crate::lease::canonical_session_path(&info.path);
-                let resident = resident_by_file
-                    .iter()
-                    .position(|root| root.session_file == canonical)
-                    .map(|at| resident_by_file.swap_remove(at));
-                match resident {
-                    Some(root) => {
-                        roots.last_mut().expect("saved root").active_session_id =
-                            root.active_session_id;
-                        summaries.push(self.worker_summary(&root.resident).await);
-                    }
-                    None => summaries.push(saved_session_summary(info)),
-                }
-            }
-            let mut resident_only = Vec::new();
-            for root in resident_by_file {
-                roots.push(crate::rlm_roster::RosterWalkRoot {
-                    session_file: root.session_file,
-                    active_session_id: root.active_session_id,
-                });
-                resident_only.push(self.worker_summary(&root.resident).await);
-            }
+            let summaries_by_resident = self.worker_summaries(&residents).await;
             let ledger = match self.rlm_spawn_ledger_for(session_dir.as_deref()).await {
                 Ok(ledger) => ledger,
                 Err(error) => {
@@ -464,28 +433,85 @@ impl Supervisor {
                     );
                 }
             };
-            match crate::rlm_roster::walk_passive_rlm_children(&ledger, &roots) {
-                Ok(children) => {
-                    for child in &children {
-                        summaries.push(crate::rlm_roster::passive_child_summary(child));
+            let scan = tokio::task::spawn_blocking(move || -> Result<Vec<Value>> {
+                let mut infos = list_sessions(&dir);
+                if let Some(cwd) = &cwd {
+                    infos.retain(|info| info.cwd == *cwd);
+                }
+                let mut resident_by_file: Vec<ResidentRoot> = Vec::new();
+                for ((session_file, active_session_id), summary) in
+                    resident_roots.into_iter().zip(summaries_by_resident)
+                {
+                    resident_by_file.push(ResidentRoot {
+                        session_file: crate::lease::canonical_session_path(Path::new(
+                            &session_file,
+                        )),
+                        summary,
+                        active_session_id: Some(active_session_id),
+                    });
+                }
+                let mut summaries = Vec::new();
+                let mut roots: Vec<crate::rlm_roster::RosterWalkRoot> = Vec::new();
+                for info in &infos {
+                    roots.push(crate::rlm_roster::RosterWalkRoot {
+                        session_file: info.path.clone(),
+                        active_session_id: None,
+                    });
+                    let canonical = crate::lease::canonical_session_path(&info.path);
+                    let resident = resident_by_file
+                        .iter()
+                        .position(|root| root.session_file == canonical)
+                        .map(|at| resident_by_file.swap_remove(at));
+                    match resident {
+                        Some(root) => {
+                            roots.last_mut().expect("saved root").active_session_id =
+                                root.active_session_id;
+                            summaries.push(root.summary);
+                        }
+                        None => summaries.push(saved_session_summary(info)),
                     }
                 }
-                Err(error) => {
-                    let message = format!("Could not walk passive RLM children: {error:#}");
+                let mut resident_only = Vec::new();
+                for root in resident_by_file {
+                    roots.push(crate::rlm_roster::RosterWalkRoot {
+                        session_file: root.session_file,
+                        active_session_id: root.active_session_id,
+                    });
+                    resident_only.push(root.summary);
+                }
+                match crate::rlm_roster::walk_passive_rlm_children(&ledger, &roots) {
+                    Ok(children) => {
+                        for child in &children {
+                            summaries.push(crate::rlm_roster::passive_child_summary(child));
+                        }
+                    }
+                    Err(error) => {
+                        return Err(anyhow!("Could not walk passive RLM children: {error:#}"));
+                    }
+                }
+                summaries.append(&mut resident_only);
+                Ok(summaries)
+            });
+            match scan.await {
+                Ok(Ok(summaries)) => summaries,
+                Ok(Err(message)) => {
+                    let message = message.to_string();
                     self.log_line(&message);
                     return response_failure(Some(&command_id), &type_name, &message, None);
                 }
+                Err(error) => {
+                    return response_failure(
+                        Some(&command_id),
+                        &type_name,
+                        &format!("the saved-session scan failed: {error}"),
+                        None,
+                    );
+                }
             }
-
-            summaries.append(&mut resident_only);
-            summaries
         } else {
             // Live residents of this supervisor.
-            let mut summaries = Vec::new();
-            for resident in self.registry.list().await {
-                summaries.push(self.worker_summary(&resident).await);
-            }
-            summaries
+            let residents = self.registry.list().await;
+            self.worker_summaries(&residents).await
         };
         response_success(
             Some(&command_id),
@@ -502,7 +528,7 @@ impl Supervisor {
                 resident,
                 "get_state",
                 json!({}),
-                ROUTE_TIMEOUT_MS,
+                SUMMARY_TIMEOUT_MS,
                 RouteAdmission::SupervisorInternal,
             )
             .await;
@@ -512,6 +538,15 @@ impl Supervisor {
                 .unwrap_or_else(|| offline_summary(&resident.worker_id)),
             _ => offline_summary(&resident.worker_id),
         }
+    }
+
+    async fn worker_summaries(self: &Arc<Self>, residents: &[Arc<ResidentWorker>]) -> Vec<Value> {
+        join_all(
+            residents
+                .iter()
+                .map(|resident| self.worker_summary(resident)),
+        )
+        .await
     }
 
     pub(crate) async fn handle_create(
@@ -608,28 +643,15 @@ impl Supervisor {
         if name.trim().is_empty() {
             return Err(anyhow!("Session name cannot be empty"));
         }
-        for resident in self.registry.list().await {
-            let response = self
-                .route_command_typed(
-                    &resident,
-                    "get_state",
-                    json!({}),
-                    ROUTE_TIMEOUT_MS,
-                    RouteAdmission::SupervisorInternal,
-                )
-                .await;
-            if let Ok(response) = response {
-                if let Some(data) = &response.data {
-                    let session_name = data
-                        .get("sessionName")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default();
-                    if session_name == name {
-                        return Err(anyhow!(
-                            "Agent name \"{name}\" is unavailable: an agent of that name already exists at depth 0 under this parent"
-                        ));
-                    }
-                }
+        for summary in self.worker_summaries(&self.registry.list().await).await {
+            let session_name = summary
+                .get("sessionName")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if session_name == name {
+                return Err(anyhow!(
+                    "Agent name \"{name}\" is unavailable: an agent of that name already exists at depth 0 under this parent"
+                ));
             }
         }
         Ok(())
@@ -692,7 +714,7 @@ impl Supervisor {
 /// One resident's roster identity for the `list --all` merge.
 struct ResidentRoot {
     session_file: PathBuf,
-    resident: Arc<ResidentWorker>,
+    summary: Value,
     active_session_id: Option<String>,
 }
 
@@ -810,4 +832,146 @@ pub(super) fn saved_session_row(info: &crate::session_store::SessionInfo) -> Val
         object.insert("thinkingLevel".to_string(), json!(level));
     }
     row
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backpressure::WORKER_INFLIGHT_CAPACITY;
+    use crate::registry::{WorkerReply, WorkerRequest};
+    use crate::supervisor::SupervisorOptions;
+    use pa_types::daemon::DaemonWorkerDescriptor;
+
+    fn resident(worker_id: &str, session_file: Option<&Path>) -> Arc<ResidentWorker> {
+        let mut descriptor = json!({
+            "version": 2,
+            "workerId": worker_id,
+            "pid": 0,
+            "socketPath": "/tmp/none.sock",
+            "recoveryJournalPath": "/tmp/none.jsonl",
+            "supervisorSocketPath": "/tmp/none.sock",
+            "authenticationToken": "test",
+            "rootActiveSessionId": "none",
+            "createdAt": "2026-09-26T00:00:00Z",
+            "updatedAt": "2026-09-26T00:00:00Z",
+            "lifecycle": "ready",
+            "createCommand": {},
+            "consecutiveFailures": 0,
+        });
+        if let Some(session_file) = session_file {
+            descriptor["sessionFile"] = json!(session_file.to_string_lossy());
+        }
+        let descriptor: DaemonWorkerDescriptor =
+            serde_json::from_value(descriptor).expect("descriptor");
+        ResidentWorker::new(
+            worker_id.to_string(),
+            descriptor,
+            PathBuf::from("/tmp/none.descriptor.json"),
+        )
+    }
+
+    async fn wedged_worker(
+        resident: &Arc<ResidentWorker>,
+    ) -> tokio::sync::mpsc::Receiver<WorkerRequest> {
+        let (cmd_tx, cmd_rx) =
+            tokio::sync::mpsc::channel::<WorkerRequest>(WORKER_INFLIGHT_CAPACITY);
+        *resident.cmd_tx.lock().await = Some(cmd_tx);
+        cmd_rx
+    }
+
+    async fn responsive_worker(resident: &Arc<ResidentWorker>, state: Value) {
+        let (cmd_tx, mut cmd_rx) =
+            tokio::sync::mpsc::channel::<WorkerRequest>(WORKER_INFLIGHT_CAPACITY);
+        *resident.cmd_tx.lock().await = Some(cmd_tx);
+        let responder = Arc::clone(resident);
+        tokio::spawn(async move {
+            while let Some(request) = cmd_rx.recv().await {
+                let reply = responder.pending.lock().await.remove(&request.request_id);
+                if let Some(reply) = reply {
+                    let _ = reply.send(WorkerReply::Typed(response_success(
+                        Some(&request.request_id),
+                        &request.command_type,
+                        Some(state.clone()),
+                    )));
+                }
+            }
+        });
+    }
+
+    fn supervisor(dir: &Path) -> Supervisor {
+        Supervisor::new(SupervisorOptions {
+            socket_path: dir.join("daemon.sock"),
+            agent_dir: dir.join("agent"),
+        })
+        .expect("supervisor")
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_wedged_resident_does_not_hold_the_all_true_list_past_the_client_deadline() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let supervisor = Arc::new(supervisor(dir.path()));
+        let wedged = resident("w-wedged", Some(&dir.path().join("w-wedged.jsonl")));
+        let _wedged_rx = wedged_worker(&wedged).await;
+        supervisor.registry.insert(Arc::clone(&wedged)).await;
+        let healthy = resident("w-healthy", Some(&dir.path().join("w-healthy.jsonl")));
+        let state =
+            json!({ "id": "w-healthy", "lifecycle": "live", "sessionName": "healthy-name" });
+        responsive_worker(&healthy, state).await;
+        supervisor.registry.insert(Arc::clone(&healthy)).await;
+
+        let start = tokio::time::Instant::now();
+        let response = supervisor
+            .handle_list("l1".to_string(), "list".to_string(), Some(true), None, None)
+            .await;
+        let elapsed = start.elapsed();
+
+        assert!(response.success);
+        let rows = response
+            .data
+            .expect("sessions data")
+            .get("sessions")
+            .and_then(Value::as_array)
+            .cloned()
+            .expect("session rows");
+        let wedged_row = rows
+            .iter()
+            .find(|row| row.get("id").and_then(Value::as_str) == Some("w-wedged"))
+            .expect("wedged row");
+        assert_eq!(
+            wedged_row.get("lifecycle").and_then(Value::as_str),
+            Some("recovering")
+        );
+        let healthy_row = rows
+            .iter()
+            .find(|row| row.get("id").and_then(Value::as_str) == Some("w-healthy"))
+            .expect("healthy row");
+        assert_eq!(
+            healthy_row.get("sessionName").and_then(Value::as_str),
+            Some("healthy-name")
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(ROUTE_TIMEOUT_MS),
+            "one wedged resident held the list for {elapsed:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_named_create_name_check_does_not_wait_out_the_client_deadline_behind_a_wedged_resident(
+    ) {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let supervisor = Arc::new(supervisor(dir.path()));
+        let wedged = resident("w-wedged", None);
+        let _wedged_rx = wedged_worker(&wedged).await;
+        supervisor.registry.insert(Arc::clone(&wedged)).await;
+
+        let start = tokio::time::Instant::now();
+        let verdict = supervisor.assert_session_name_available("fresh-name").await;
+        let elapsed = start.elapsed();
+
+        assert!(verdict.is_ok(), "an unreachable resident is skipped");
+        assert!(
+            elapsed < std::time::Duration::from_millis(ROUTE_TIMEOUT_MS),
+            "the name check waited {elapsed:?} behind one wedged resident"
+        );
+    }
 }
