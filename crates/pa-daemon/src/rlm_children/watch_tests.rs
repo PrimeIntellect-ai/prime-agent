@@ -1,5 +1,6 @@
 use super::*;
 use crate::protocol::{response_failure, response_success};
+use pa_core::kernel::rlm_runtime::RlmSpawnTarget;
 use pa_types::platform::transport::bind_transport;
 use pa_types::session::AgentMessage;
 use serde_json::{json, Value};
@@ -299,6 +300,7 @@ async fn spawn_child(sessions: &SupervisorChildSessions) -> RlmSpawnHandle {
             name: Some("f20-worker".to_string()),
             model: None,
             thinking: None,
+            target: RlmSpawnTarget::Local,
             cell_source_code: None,
             spawned_by_request_id: None,
         })

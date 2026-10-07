@@ -27,7 +27,7 @@ use serde_json::{json, Value};
 
 use pa_core::kernel::shared::{HostRequestHandlers, HostRequestPayload};
 use pa_core::session_engine::agent_messaging::register_agent_message_host_handlers;
-use pa_core::session_engine::rlm_host::{RlmSpawnRequest, RlmSubagentHost};
+use pa_core::session_engine::rlm_host::{RlmSpawnRequest, RlmSpawnTarget, RlmSubagentHost};
 use pa_daemon::agent_messaging::LinkAgentMessageController;
 use pa_daemon::rlm_children::{ParentIdentity, SupervisorChildSessions};
 use pa_daemon::supervisor_link::SupervisorLink;
@@ -293,6 +293,7 @@ async fn a_settled_child_passivates_stays_listable_and_revives_by_agent_message(
             name: Some("parked-kid".to_string()),
             model: None,
             thinking: None,
+            target: RlmSpawnTarget::Local,
             cell_source_code: None,
             spawned_by_request_id: None,
         })
@@ -611,6 +612,7 @@ async fn a_parent_rename_after_a_revival_and_second_passivation_reaches_the_chil
             name: Some("parked-kid".to_string()),
             model: None,
             thinking: None,
+            target: RlmSpawnTarget::Local,
             cell_source_code: None,
             spawned_by_request_id: None,
         })

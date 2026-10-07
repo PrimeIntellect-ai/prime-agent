@@ -173,6 +173,7 @@ async def spawn(
     name: str,
     model: str | None = None,
     thinking: str | None = None,
+    target: str | None = None,
 ) -> RLMSpawnHandle:
     """Spawn a recursive Prime Agent child and return once its task is admitted.
 
@@ -180,14 +181,23 @@ async def spawn(
     ``model`` selects a child with an exact ``provider/model`` selector.
     ``thinking`` sets the child reasoning level (e.g. 'off', 'low', 'medium', 'high');
     defaults to the parent level; levels invalid for the resolved model fail the spawn.
+    ``target`` sets the child placement: 'local' (the default when omitted)
+    or 'cloud'. 'cloud' is not supported yet — no cloud child backend exists,
+    and the spawn fails with an explicit error instead of running the child
+    locally. The kwarg is forwarded only when passed, so an omitted ``target``
+    sends the byte-identical wire payload.
     """
     if not isinstance(prompt, str):
         raise TypeError(f"prompt must be str, got {type(prompt).__name__}")
+    if target is not None and not isinstance(target, str):
+        raise TypeError(f"target must be str, got {type(target).__name__}")
     kwargs: dict[str, Any] = {"name": name}
     if model is not None:
         kwargs["model"] = model
     if thinking is not None:
         kwargs["thinking"] = thinking
+    if target is not None:
+        kwargs["target"] = target
     # Wire type stays "rlm.run" so kernels and hosts of different versions stay compatible.
     payload = await host_request("rlm.run", {"prompt": prompt, "kwargs": kwargs})
     return _spawn_handle_from_payload(payload)
@@ -629,8 +639,9 @@ class _RLMNamespace:
         name: str,
         model: str | None = None,
         thinking: str | None = None,
+        target: str | None = None,
     ) -> RLMSpawnHandle:
-        return await spawn(prompt, name=name, model=model, thinking=thinking)
+        return await spawn(prompt, name=name, model=model, thinking=thinking, target=target)
 
     async def create_session(
         self,

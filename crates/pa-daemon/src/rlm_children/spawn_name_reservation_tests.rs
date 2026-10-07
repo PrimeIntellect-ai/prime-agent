@@ -1,5 +1,6 @@
 use super::*;
 use crate::protocol::{response_failure, response_success};
+use pa_core::kernel::rlm_runtime::RlmSpawnTarget;
 use pa_types::platform::transport::bind_transport;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -159,6 +160,7 @@ fn spawn_request(name: &str, prompt: &str) -> RlmSpawnRequest {
         name: Some(name.to_string()),
         model: None,
         thinking: None,
+        target: RlmSpawnTarget::Local,
         cell_source_code: None,
         spawned_by_request_id: None,
     }
