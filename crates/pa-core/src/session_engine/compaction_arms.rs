@@ -164,39 +164,41 @@ impl AgentSession {
         api_key: Option<String>,
         abort: Option<&pa_agent::abort::AbortSignal>,
     ) -> anyhow::Result<CompactOutcome> {
-        // The digest inputs come from the live (pre-compaction) context;
-        // harness state reads fresh from disk when the snapshot renders.
         compaction_trace::trace(
             "compact.enter",
             &serde_json::json!({
                 "customInstructions": custom_instructions.is_some(),
             }),
         );
-        let digest_inputs = self.harness_digest_inputs().await;
-        compaction_trace::trace("compact.digest_captured", &serde_json::Value::Null);
-        let mut outcome = {
-            let mut session = self.session.lock().await;
-            let summary_delta = self
-                .compaction_summary_sink
-                .lock()
-                .expect("compaction summary sink lock")
-                .clone();
-            crate::session_engine::compact_session::execute_compaction(
-                &mut session,
-                crate::session_engine::compact_session::CompactOptions {
-                    model: model.clone(),
-                    api_key,
-                    custom_instructions,
-                    settings: self.compaction_settings(),
-                    abort,
-                    harness_digest: digest_inputs,
-                    auxiliary: self.auxiliary_model.as_ref(),
-                    summary_delta,
-                    semantic_edges: self.semantic_edges(),
-                },
-            )
-            .await?
+        let started_at = std::time::Instant::now();
+        let summary_delta = self
+            .compaction_summary_sink
+            .lock()
+            .expect("compaction summary sink lock")
+            .clone();
+        let options = crate::session_engine::compact_session::CompactOptions {
+            model: model.clone(),
+            api_key,
+            custom_instructions,
+            settings: self.compaction_settings(),
+            abort,
+            // Captured per attempt inside `compaction_attempts`: a
+            // conflict retry summarizes a new branch, and inputs captured
+            // here would rank the abandoned branch's terms.
+            harness_digest: None,
+            auxiliary: self.auxiliary_model.as_ref(),
+            summary_delta,
+            semantic_edges: self.semantic_edges(),
         };
+        // The flight spans the attempts, the rebuilt-context replace, and
+        // the kernel-state notice: every path here REPLACES the live loop
+        // context, and the other replacers — `refine_with_refiner`'s
+        // outcome push and `record_compaction_outcome`'s failure row —
+        // take the same flight. A row pushed onto the context must not
+        // interleave with the replace: it would duplicate in the rebuilt
+        // view or vanish under it while staying durable either way.
+        let _flight = self.compaction_flight.lock().await;
+        let mut outcome = self.compaction_attempts(&options, started_at).await?;
         if matches!(outcome, CompactOutcome::Skipped(_)) {
             compaction_trace::trace("compact.skipped", &serde_json::Value::Null);
             return Ok(outcome);
@@ -235,6 +237,75 @@ impl AgentSession {
         Ok(outcome)
     }
 
+    /// The PREPARE -> SUMMARIZE -> COMMIT loop: prepare under the session
+    /// lock, summarize with no lock held (mid-window appends chain onto
+    /// the leaf and ride the retained tail), then commit under the lock —
+    /// a structural conflict retries from PREPARE, an aborted run stops.
+    async fn compaction_attempts(
+        &self,
+        options: &crate::session_engine::compact_session::CompactOptions<'_>,
+        started_at: std::time::Instant,
+    ) -> anyhow::Result<CompactOutcome> {
+        /// The conflict-retry bound: a branch that keeps changing under
+        /// the compaction fails instead of re-summarizing forever.
+        const MAX_COMPACTION_ATTEMPTS: usize = 3;
+        for _ in 0..MAX_COMPACTION_ATTEMPTS {
+            let mut attempt = {
+                let session = self.session.lock().await;
+                match crate::session_engine::compact_session::prepare_attempt(&session, options) {
+                    Ok(attempt) => attempt,
+                    Err(skip) => return Ok(CompactOutcome::Skipped(skip.user_message())),
+                }
+            };
+            // The digest ranks the branch THIS attempt summarizes: a
+            // conflict retry prepares a new tree, and inputs captured
+            // once before the loop would rank the abandoned branch's
+            // terms. The capture takes the session lock itself, so it
+            // runs off the prepare hold.
+            let digest_inputs = self.harness_digest_inputs().await;
+            compaction_trace::trace("compact.digest_captured", &serde_json::Value::Null);
+            let attempt_options = crate::session_engine::compact_session::CompactOptions {
+                model: options.model.clone(),
+                api_key: options.api_key.clone(),
+                custom_instructions: options.custom_instructions,
+                settings: options.settings,
+                abort: options.abort,
+                harness_digest: digest_inputs,
+                auxiliary: options.auxiliary,
+                summary_delta: options.summary_delta.clone(),
+                semantic_edges: options.semantic_edges.clone(),
+            };
+            let prepared = crate::session_engine::compact_session::summarize_attempt(
+                &attempt,
+                &attempt_options,
+            )
+            .await?;
+            let committed = {
+                let mut session = self.session.lock().await;
+                crate::session_engine::compact_session::commit_attempt(
+                    &mut session,
+                    &mut attempt,
+                    &prepared,
+                    options.abort,
+                )?
+            };
+            if committed {
+                return Ok(CompactOutcome::Ran(Box::new(
+                    crate::session_engine::compact_session::CompactRun {
+                        result: prepared.result,
+                        entry: prepared.entry,
+                        duration_ms: started_at.elapsed().as_millis() as u64,
+                        ipython_state: None,
+                    },
+                )));
+            }
+            pa_agent::abort::throw_if_aborted_signal(options.abort)?;
+        }
+        Err(anyhow::anyhow!(
+            "compaction retried {MAX_COMPACTION_ATTEMPTS} times while the branch kept changing; try again"
+        ))
+    }
+
     /// Record an unsuccessful compaction outcome: append the durable
     /// `compaction_outcome` row and push it onto the live loop context. The
     /// row is a user-facing disclosure, never model context (`convert_to_llm` drops it).
@@ -249,6 +320,11 @@ impl AgentSession {
         outcome: crate::session_engine::messages::CompactionOutcomeKind,
         content: &str,
     ) -> anyhow::Result<pa_types::session::CustomMessage> {
+        // The same flight as the other live-context replacers: the push
+        // below read-modify-writes the live context, and a replace
+        // interleaving it would roll the pushed row — or the replace —
+        // back.
+        let _flight = self.compaction_flight.lock().await;
         let row = crate::session_engine::messages::create_compaction_outcome_message(
             content, reason, outcome,
         );
@@ -331,6 +407,12 @@ impl AgentSession {
         refine_call: crate::refinement::executor::RefinerFn,
         global_harness_dir: std::path::PathBuf,
     ) -> anyhow::Result<crate::refinement::RefinementResult> {
+        // The flight serializes every live-context replacer against a
+        // compaction's rebuild: this round's outcome rows persist and then
+        // push onto the context the compaction replaces, so the push must
+        // not interleave with a replace (duplicating in the rebuilt view
+        // or vanishing under it).
+        let _flight = self.compaction_flight.lock().await;
         // The transcript's consumed artifacts are extracted under this first
         // lock straight from the retained rows: no second clone of the rows.
         let parts = self.session.lock().await.refine_transcript_parts();

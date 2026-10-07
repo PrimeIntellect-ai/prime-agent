@@ -204,6 +204,7 @@ impl Worker {
                     let agent_dir = self.config.agent_dir.clone();
                     tokio::task::spawn_blocking(move || {
                         let lease = crate::lease::acquire_runtime_session_lease(&path, &agent_dir)?;
+                        pa_core::session::manager::repair_jsonl_damage(&path);
                         let mut store = SessionFile::open_windowed(&path)?;
                         store.lease = Some(Arc::new(lease));
                         Ok(store)
