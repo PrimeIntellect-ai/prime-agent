@@ -862,16 +862,9 @@ mod tests {
             "the long-named dead socket is claimed and unlinked"
         );
         drop(lease);
-        // The lock directory's release is platform-split: the Linux
-        // claim-verify choreography removes it, the no-noreplace floor
-        // leaves it to expire through the stale window.
-        #[cfg(target_os = "linux")]
+        // This test is Linux-only: the claim-verify choreography removes
+        // the lock directory with the lease.
         assert!(!pa_core::platform::LockDir::path_for(&socket).exists());
-        #[cfg(not(target_os = "linux"))]
-        assert!(
-            pa_core::platform::LockDir::path_for(&socket).exists(),
-            "the leave-expire floor keeps the lock directory for the stale window"
-        );
     }
 
     #[tokio::test]
@@ -931,7 +924,17 @@ mod tests {
             "the conservative cleanup preserves the dead successor file"
         );
         drop(lease);
+        // The lock directory's release is platform-split: the Linux
+        // claim-verify choreography removes it with the lease, the
+        // no-noreplace floor leaves it to expire through the stale
+        // window.
+        #[cfg(target_os = "linux")]
         assert!(!lock_path.exists());
+        #[cfg(not(target_os = "linux"))]
+        assert!(
+            lock_path.exists(),
+            "the leave-expire floor keeps the lock directory for the stale window"
+        );
     }
 
     #[tokio::test]
