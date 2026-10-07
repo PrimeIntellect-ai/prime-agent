@@ -55,9 +55,29 @@ fn tail_looks_damaged(target_path: &Path) -> bool {
     }
 }
 
+fn first_line_is_session_header(file_path: &Path) -> bool {
+    use std::io::BufRead;
+    let Ok(file) = std::fs::File::open(file_path) else {
+        return false;
+    };
+    let mut first_line = String::new();
+    if std::io::BufReader::new(file)
+        .read_line(&mut first_line)
+        .is_err()
+    {
+        return false;
+    }
+    parse_session_entries(&first_line)
+        .first()
+        .is_some_and(|entry| matches!(entry, FileEntry::Header { .. }))
+}
+
 /// Repair crash damage (torn tail, zero-filled append) once at open.
-pub(super) fn repair_jsonl_damage(file_path: &Path) {
+pub fn repair_jsonl_damage(file_path: &Path) {
     if !tail_looks_damaged(file_path) {
+        return;
+    }
+    if !first_line_is_session_header(file_path) {
         return;
     }
     let Ok(buffer) = std::fs::read(file_path) else {

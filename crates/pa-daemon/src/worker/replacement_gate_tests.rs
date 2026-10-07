@@ -180,3 +180,139 @@ async fn a_failed_existing_session_create_never_binds_the_engine() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test]
+async fn a_switched_session_repairs_a_torn_tail_before_its_first_append() {
+    let dir = tempfile::tempdir().unwrap();
+    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let worker = recording_worker(dir.path(), std::sync::Arc::clone(&events));
+    let created = worker
+        .dispatch("create", &json!({ "noSession": true, "cwd": "/tmp" }))
+        .await;
+    assert!(created.success, "create failed: {created:?}");
+
+    let path = dir.path().join("torn.jsonl");
+    let mut session = crate::session_store::SessionFile::create("/tmp", None, 0);
+    session.set_path(path.clone());
+    session.append_message(&json!({"role":"user","content":"before","timestamp":0}));
+    session.rewrite().unwrap();
+    {
+        use std::io::Write as _;
+        let mut torn = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        torn.write_all(
+            b"{\"type\":\"message\",\"id\":\"torn\",\"timestamp\":\"2026-10-07T00:00:00Z\",\"message\":{\"role\":\"user\",\"con\xc3",
+        )
+        .unwrap();
+    }
+
+    let switched = worker
+        .dispatch(
+            "switch_session",
+            &json!({ "sessionPath": path.to_string_lossy(), "cwdOverride": "/tmp" }),
+        )
+        .await;
+    assert!(switched.success, "switch failed: {switched:?}");
+    let appended = {
+        let mut core = worker.core.lock().unwrap();
+        let store = core.store.as_mut().expect("the switched store is live");
+        store
+            .persist_entry(
+                "message",
+                json!({"message":{"role":"user","content":"after","timestamp":1}}),
+            )
+            .unwrap()
+    };
+    let reopened = crate::session_store::SessionFile::open(&path).unwrap();
+    assert!(
+        reopened.entry(&appended).is_some(),
+        "the appended row reloads"
+    );
+    assert_eq!(reopened.leaf_id(), Some(appended.as_str()));
+    drop(reopened);
+
+    let killed = worker.dispatch("kill", &json!({})).await;
+    assert!(killed.success, "kill failed: {killed:?}");
+    drop(worker);
+}
+
+#[tokio::test]
+async fn a_switched_non_session_file_is_never_rewritten() {
+    let dir = tempfile::tempdir().unwrap();
+    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let worker = recording_worker(dir.path(), std::sync::Arc::clone(&events));
+    let created = worker
+        .dispatch("create", &json!({ "noSession": true, "cwd": "/tmp" }))
+        .await;
+    assert!(created.success, "create failed: {created:?}");
+
+    let path = dir.path().join("notes.txt");
+    std::fs::write(&path, b"hello\nworld").unwrap();
+    let switched = worker
+        .dispatch(
+            "switch_session",
+            &json!({ "sessionPath": path.to_string_lossy(), "cwdOverride": "/tmp" }),
+        )
+        .await;
+    assert!(!switched.success, "the switch must fail: {switched:?}");
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        b"hello\nworld".to_vec(),
+        "the non-session file keeps its bytes"
+    );
+    drop(worker);
+}
+
+#[tokio::test]
+async fn a_resumed_session_repairs_a_non_utf8_torn_tail_before_its_first_append() {
+    let dir = tempfile::tempdir().unwrap();
+    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let worker = recording_worker(dir.path(), std::sync::Arc::clone(&events));
+    let path = dir.path().join("resume-torn.jsonl");
+    let mut session = crate::session_store::SessionFile::create("/tmp", None, 0);
+    session.set_path(path.clone());
+    session.append_message(&json!({"role":"user","content":"before","timestamp":0}));
+    session.rewrite().unwrap();
+    {
+        use std::io::Write as _;
+        let mut torn = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        torn.write_all(
+            b"{\"type\":\"message\",\"id\":\"torn\",\"timestamp\":\"2026-10-07T00:00:00Z\",\"message\":{\"role\":\"user\",\"con\xc3",
+        )
+        .unwrap();
+    }
+
+    let created = worker
+        .dispatch(
+            "create",
+            &json!({ "sessionPath": path.to_string_lossy(), "cwd": "/tmp" }),
+        )
+        .await;
+    assert!(created.success, "create failed: {created:?}");
+    let appended = {
+        let mut core = worker.core.lock().unwrap();
+        let store = core.store.as_mut().expect("the resumed store is live");
+        store
+            .persist_entry(
+                "message",
+                json!({"message":{"role":"user","content":"after","timestamp":1}}),
+            )
+            .unwrap()
+    };
+    let reopened = crate::session_store::SessionFile::open(&path).unwrap();
+    assert!(
+        reopened.entry(&appended).is_some(),
+        "the appended row reloads"
+    );
+    assert_eq!(reopened.leaf_id(), Some(appended.as_str()));
+    drop(reopened);
+
+    let killed = worker.dispatch("kill", &json!({})).await;
+    assert!(killed.success, "kill failed: {killed:?}");
+    drop(worker);
+}

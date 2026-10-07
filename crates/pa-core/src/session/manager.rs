@@ -40,10 +40,9 @@ use header::{is_valid_rlm_depth, resolve_session_rlm_depth, root_rlm_depth_from_
 mod git;
 pub use git::capture_git_context;
 
-// The re-export has zero external callers; it keeps the pub path stable.
 mod repair;
-pub use repair::load_entries_from_file;
 use repair::serialize_entry;
+pub use repair::{load_entries_from_file, repair_jsonl_damage};
 
 /// A persist observer; must not break session writes (panics are contained).
 pub type SessionPersistListener = Box<dyn Fn(&Path) + Send + Sync>;
