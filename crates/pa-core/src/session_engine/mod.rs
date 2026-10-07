@@ -559,7 +559,16 @@ async fn persist_event(
                     .then(|| session.get_cwd().to_path_buf())
             };
             let Some(cwd) = cwd else { return Ok(()) };
-            let git = tokio::task::spawn_blocking(move || capture_git_context(&cwd)).await?;
+            // The capture runs synchronously, NOT through `spawn_blocking`:
+            // this listener executes under the agent's single-threaded
+            // event lock (TS `processEvents` awaits every listener in
+            // order), and the close cascade's `remove_listener` awaits
+            // that same lock. Off-threading the probe parks the lock
+            // across a blocking-pool await — an in-process host's
+            // current_thread runtime then wedges the close forever (the
+            // guest's close path). A sync probe keeps the lock hold
+            // bounded to the git call, exactly like the append arm.
+            let git = capture_git_context(&cwd);
             if let Some(git) = git {
                 session.lock().await.record_git_state_if_changed(git);
             }
