@@ -309,13 +309,26 @@ impl Worker {
     /// rebinds from the credential store (a `/login` from another process
     /// never reaches the running session's request path otherwise), and
     /// the MCP manager re-reads its settings and auth state. Settings and
-    /// the model catalog resolve per use and need no re-read.
-    pub(crate) fn handle_reload(&self) -> DaemonResponse {
+    /// the model catalog resolve per use and need no re-read. The reload
+    /// touches the MCP auth store, whose snapshot takes a blocking lock —
+    /// it parks on a blocking thread, the same posture as
+    /// `get_mcp_connections`.
+    pub(crate) async fn handle_reload(&self) -> DaemonResponse {
         if let Err(response) = self.require_created("reload") {
             return response;
         }
         if let Some(engine) = &self.agent_engine {
-            engine.reload_live_inputs();
+            let engine = std::sync::Arc::clone(engine);
+            if let Err(error) =
+                tokio::task::spawn_blocking(move || engine.reload_live_inputs()).await
+            {
+                return response_failure(
+                    None,
+                    "reload",
+                    &format!("session reload failed: {error}"),
+                    None,
+                );
+            }
         }
         response_success(None, "reload", None)
     }

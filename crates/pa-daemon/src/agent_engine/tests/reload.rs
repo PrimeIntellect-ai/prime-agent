@@ -3,8 +3,9 @@
 use super::*;
 use pa_core::session_engine::provider_adapter::ProviderTarget;
 
-/// A custom provider in `models.json` WITHOUT its own api key: the request
-/// auth must come from the stored credential.
+/// A custom provider whose configured key is a placeholder: the stored
+/// credential wins over it, so the request auth follows the store (the
+/// re-login scenario the reload must cover).
 fn write_credential_backed_provider(agent_dir: &std::path::Path) {
     std::fs::create_dir_all(agent_dir).unwrap();
     std::fs::write(
@@ -14,6 +15,7 @@ fn write_credential_backed_provider(agent_dir: &std::path::Path) {
                 "battery": {
                     "api": "openai-completions",
                     "baseUrl": "http://127.0.0.1:9",
+                    "apiKey": "sk-config-fallback",
                     "models": [
                         {
                             "id": "mock-1",
@@ -85,7 +87,7 @@ fn reload_rebinds_the_request_auth_from_the_credential_store() {
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ProviderTarget {
         service_tier: None,
         api_key: Some("stale-access".to_string()),
-        model: model.clone(),
+        model,
         headers: None,
     });
     // A re-login from another process replaces the stored credential.
@@ -104,10 +106,11 @@ fn reload_rebinds_the_request_auth_from_the_credential_store() {
     );
 }
 
-/// Without a resolvable model the reload keeps the slot untouched — the
-/// MCP re-read alone still runs.
+/// With nothing stored for the live model the reload keeps the slot
+/// untouched (a models.json lost mid-session loses nothing) — the MCP
+/// re-read alone still runs.
 #[test]
-fn reload_without_a_model_keeps_the_target() {
+fn reload_with_nothing_stored_keeps_the_target() {
     let dir = tempfile::TempDir::new().unwrap();
     let agent_dir = dir.path().join("agent");
     std::fs::create_dir_all(&agent_dir).unwrap();
@@ -116,18 +119,20 @@ fn reload_without_a_model_keeps_the_target() {
         engine.resolve_model().is_err(),
         "no models.json: nothing resolves"
     );
-    let model: pa_types::ai::Model = pa_core::session_engine::provider_adapter::json_round_trip(
-        &serde_json::json!({
+    let model: pa_types::ai::Model =
+        pa_core::session_engine::provider_adapter::json_round_trip(&serde_json::json!({
             "id": "mock-1",
             "name": "Mock 1",
             "api": "openai-completions",
             "provider": "battery",
+            "baseUrl": "http://127.0.0.1:9",
             "reasoning": false,
+            "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
             "contextWindow": 128_000,
             "maxTokens": 4096,
-        }),
-    )
-    .expect("the model converts");
+        }))
+        .expect("the model converts");
     *engine
         .provider_target
         .write()
@@ -148,5 +153,118 @@ fn reload_without_a_model_keeps_the_target() {
         target.api_key.as_deref(),
         Some("stale-access"),
         "an unresolvable model leaves the target untouched"
+    );
+}
+
+/// The two-model pair the retarget guard uses: the text model the
+/// selection pins and a second model standing in for a routed episode's
+/// serving target.
+fn write_two_model_provider(agent_dir: &std::path::Path) {
+    std::fs::create_dir_all(agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("models.json"),
+        serde_json::json!({
+            "providers": {
+                "battery": {
+                    "api": "openai-completions",
+                    "baseUrl": "http://127.0.0.1:9",
+                    "apiKey": "sk-config-fallback",
+                    "models": [
+                        {
+                            "id": "mock-1",
+                            "name": "Mock 1",
+                            "api": "openai-completions",
+                            "contextWindow": 128_000,
+                            "maxTokens": 4096,
+                        },
+                        {
+                            "id": "mock-vision",
+                            "name": "Mock Vision",
+                            "api": "openai-completions",
+                            "contextWindow": 128_000,
+                            "maxTokens": 4096,
+                        }
+                    ]
+                }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+}
+
+/// The live model never retargets through a reload: a routed image
+/// episode serves on its own target and an unflagged session must not
+/// follow a changed settings default — only the request auth rebinds.
+#[test]
+fn reload_keeps_the_live_model_and_rebinds_its_auth() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_two_model_provider(&agent_dir);
+    write_oauth_credential(&agent_dir, "fresh-access");
+    let engine = credential_backed_engine(dir.path());
+    // The selection pins mock-1; the slot holds a routed episode's target
+    // on a DIFFERENT model.
+    let session_model = engine.resolve_model().expect("the pinned model resolves");
+    assert_eq!(session_model.id, "mock-1");
+    let routed: pa_types::ai::Model =
+        pa_core::session_engine::provider_adapter::json_round_trip(&serde_json::json!({
+            "id": "mock-vision",
+            "name": "Mock Vision",
+            "api": "openai-completions",
+            "provider": "battery",
+            "baseUrl": "http://127.0.0.1:9",
+            "reasoning": false,
+            "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 128_000,
+            "maxTokens": 4096,
+        }))
+        .expect("the routed model converts");
+    *engine
+        .provider_target
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ProviderTarget {
+        service_tier: None,
+        api_key: Some("stale-access".to_string()),
+        model: routed,
+        headers: None,
+    });
+    engine.reload_live_inputs();
+    let target = engine
+        .provider_target
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+        .expect("the reload keeps the target set");
+    assert_eq!(
+        target.model.id, "mock-vision",
+        "the reload never retargets the live model"
+    );
+    assert_eq!(
+        target.api_key.as_deref(),
+        Some("fresh-access"),
+        "the live model's request auth rebinds from the store"
+    );
+}
+
+/// Before the session's first build there is no live target to refresh:
+/// the reload installs nothing (the build binds its own target) — the MCP
+/// re-read alone runs.
+#[test]
+fn reload_without_a_live_target_installs_nothing() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_credential_backed_provider(&agent_dir);
+    write_oauth_credential(&agent_dir, "fresh-access");
+    let engine = credential_backed_engine(dir.path());
+    engine.reload_live_inputs();
+    assert!(
+        engine
+            .provider_target
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_none(),
+        "the reload never installs a target"
     );
 }
