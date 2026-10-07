@@ -2,6 +2,27 @@
 
 use std::fs::File;
 use std::io;
+use std::path::Path;
+
+/// fsync a directory so a completed rename survives a crash on POSIX.
+///
+/// # Errors
+///
+/// Returns an error when the directory cannot be opened or synced.
+#[cfg(unix)]
+pub fn sync_directory(path: &Path) -> io::Result<()> {
+    File::open(path)?.sync_all()
+}
+
+/// Directory fsync is not exposed by the standard library on this platform.
+///
+/// # Errors
+///
+/// This implementation never fails.
+#[cfg(not(unix))]
+pub fn sync_directory(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
 
 /// Flush one file's written bytes with a plain `fsync(2)`; std's
 /// `sync_data`/`sync_all` take the `F_FULLFSYNC` barrier on Apple.

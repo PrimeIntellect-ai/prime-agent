@@ -11,21 +11,53 @@ use super::{
 use crate::types::SessionSummary;
 
 impl Worker {
-    pub(crate) fn summary_locked(&self, core: &SessionCore) -> SessionSummary {
+    pub(crate) fn summary_inputs(&self) -> (std::sync::MutexGuard<'_, SessionCore>, SummaryInputs) {
+        SummaryInputs::lock(&self.core, self.engine.as_ref(), &self.user_bash)
+    }
+
+    pub(crate) fn connection_state_inputs(
+        &self,
+    ) -> (
+        std::sync::MutexGuard<'_, SessionCore>,
+        ConnectionStateInputs,
+    ) {
+        ConnectionStateInputs::lock(&self.core, self.engine.as_ref(), &self.user_bash)
+    }
+
+    pub(crate) fn attach_inputs(
+        &self,
+    ) -> (
+        std::sync::MutexGuard<'_, SessionCore>,
+        SummaryInputs,
+        ConnectionStateInputs,
+    ) {
+        loop {
+            let details = ModelDetails::read(self.engine.as_ref(), ModelDetailScope::Connection);
+            let core = self.core.lock().unwrap();
+            if self.engine.model_identity() == details.identity {
+                let identity = details.identity.clone();
+                let summary = SummaryInputs::capture(
+                    self.engine.as_ref(),
+                    &self.user_bash,
+                    details.model.clone(),
+                );
+                let connection =
+                    ConnectionStateInputs::capture(self.engine.as_ref(), &self.user_bash, details);
+                if self.engine.model_identity() == identity {
+                    return (core, summary, connection);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn summary_locked(
+        &self,
+        core: &SessionCore,
+        inputs: SummaryInputs,
+    ) -> SessionSummary {
         // The one summary composer: the roster feed, `get_state`, and list rows
         // all serve it, so the live flags never drift between surfaces.
-        let mut summary = session_summary(
-            core,
-            &self
-                .engine
-                .effective_thinking_level()
-                .unwrap_or_else(|| "default".to_string()),
-            self.engine.model_metadata(),
-            self.engine.model_fallback_message(),
-            self.user_bash.is_running(),
-            self.engine.is_quota_parked(),
-            self.engine.has_running_subagents(),
-        );
+        let mut summary = session_summary(core, inputs);
         // The roster-delta counter at snapshot time: the pull gate orders the
         // summary against its watermark, so a delta still in flight when the pull
         // answered is dropped instead of overwriting the pull's fresher state.
@@ -49,20 +81,19 @@ impl Worker {
         self.roster_pushes.push();
     }
 
-    pub(crate) fn connection_state_locked(&self, core: &SessionCore) -> AgentConnectionState {
+    pub(crate) fn connection_state_locked(
+        core: &SessionCore,
+        inputs: ConnectionStateInputs,
+    ) -> AgentConnectionState {
         let store = core.store.as_ref();
-        let model = self.engine.model_metadata();
 
         AgentConnectionState {
             is_streaming: core.busy,
             is_compacting: core.compacting,
             active_session_id: Some(core.active_session_id.clone()),
             cwd: core.cwd.clone(),
-            model,
-            thinking_level: self
-                .engine
-                .effective_thinking_level()
-                .unwrap_or_else(|| "default".to_string()),
+            model: inputs.model,
+            thinking_level: inputs.thinking_level,
             // The ACTIVE tier: the preference clamped to the model's tier support.
             service_tier: crate::setting_switches::service_tier_wire_name(
                 core.active_service_tier
@@ -72,11 +103,8 @@ impl Worker {
             // The resolved model's supported levels (TS `getSupportedThinkingLevels`):
             // a non-reasoning model reports ["off"], which the client treats as no
             // thinking surface.
-            available_thinking_levels: self
-                .engine
-                .supported_thinking_levels()
-                .unwrap_or_else(|| vec!["off".to_string()]),
-            is_bash_running: self.user_bash.is_running(),
+            available_thinking_levels: inputs.available_thinking_levels,
+            is_bash_running: inputs.is_bash_running,
             retry_attempt: 0,
             steering_mode: core.steering_mode.clone(),
             follow_up_mode: core.follow_up_mode.clone(),
@@ -93,7 +121,7 @@ impl Worker {
             message_count: store.map_or(0, crate::session_store::SessionFile::message_count) as u32,
             session_actions: session_snapshot(core),
             compaction_count: store.map_or(0, |store| store.compaction_count() as u32),
-            goal: self.engine.goal_state_value(),
+            goal: inputs.goal,
             scoped_models: core.scoped_models.clone(),
             active_tool_names: Vec::new(),
             // TS `createAgentConnectionState` carries `contextUsage:
@@ -106,7 +134,7 @@ impl Worker {
             // attach already holds: `None` without a model context
             // window, exactly like the stats response.
             context_usage: store.and_then(|store| {
-                crate::session_stats::store_context_usage(store, self.engine.model_context_window())
+                crate::session_stats::store_context_usage(store, inputs.model_context_window)
             }),
         }
     }
@@ -277,10 +305,12 @@ pub(crate) fn emit_worker_event_with(
     events.send(OutboundFrame::session_event(payload));
 }
 
-/// The worker's roster-delta push: the fresh summary rides the supervisor link,
-/// fire-and-forget (the refresh backstops it). The link dials an independent
-/// socket per request — pushes arrive unordered — so every delta carries the
-/// worker's monotonic counter; the stale-delta gate drops the delayed snapshots.
+/// The worker's roster-delta push: the fresh summary rides the supervisor
+/// link, awaited by the single roster consumer, so at most one push request
+/// is in flight at a time. Every delta still carries the worker's monotonic
+/// counter: an authoritative pull stamps the same counter, and the
+/// stale-delta gate drops a push that raced a fresher pull (the refresh
+/// backstops both).
 pub(crate) struct RosterPushContext {
     pub(crate) core: Arc<Mutex<SessionCore>>,
     pub(crate) engine: std::sync::Arc<dyn SessionEngine>,
@@ -289,73 +319,189 @@ pub(crate) struct RosterPushContext {
     pub(crate) worker_token: String,
     pub(crate) worker_instance_id: String,
     pub(crate) roster_delta_sequence: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    pub(crate) roster_push_order: std::sync::Arc<std::sync::Mutex<()>>,
 }
 
-pub(crate) fn push_roster_delta(context: &RosterPushContext) {
+pub(crate) async fn push_roster_delta(context: &RosterPushContext) {
     if std::env::var_os("PA_WORKER_DISABLE_ROSTER_PUSH").is_some() {
         return;
     }
     if context.worker_token.is_empty() || context.roster_link.socket_path().as_os_str().is_empty() {
         return;
     }
-    // The push-order lock holds the snapshot and its sequence stamp
-    // together: an older snapshot must never carry the newer sequence
-    // (the supervisor would keep the stale row and drop the fresh one).
-    let _order = context.roster_push_order.lock().unwrap();
-    let mut summary = {
-        let core = context.core.lock().unwrap();
-        session_summary(
-            &core,
-            &context
-                .engine
-                .effective_thinking_level()
-                .unwrap_or_else(|| "default".to_string()),
-            context.engine.model_metadata(),
-            context.engine.model_fallback_message(),
-            context.user_bash.is_running(),
-            context.engine.is_quota_parked(),
-            context.engine.has_running_subagents(),
-        )
-    };
-    // The embedded counter is the pre-stamp value read under the order
-    // lock: every sequence stamped before the snapshot is at or below it.
-    summary.roster_delta_sequence = Some(
-        context
+    // A pull may race this push, but both read the counter with their core
+    // snapshot held: an equal-counter pull was captured after this push.
+    let command = {
+        let (core, inputs) =
+            SummaryInputs::lock(&context.core, context.engine.as_ref(), &context.user_bash);
+        let mut summary = session_summary(&core, inputs);
+        // The embedded counter is the pre-stamp value: every sequence
+        // stamped before the snapshot is at or below it.
+        summary.roster_delta_sequence = Some(
+            context
+                .roster_delta_sequence
+                .load(std::sync::atomic::Ordering::SeqCst),
+        );
+        let summary = serde_json::to_value(&summary).unwrap_or(serde_json::Value::Null);
+        let sequence_value = context
             .roster_delta_sequence
-            .load(std::sync::atomic::Ordering::SeqCst),
-    );
-    let summary = serde_json::to_value(&summary).unwrap_or(serde_json::Value::Null);
-    let link = std::sync::Arc::clone(&context.roster_link);
-    let worker_token = context.worker_token.clone();
-    let worker_instance_id = context.worker_instance_id.clone();
-    let sequence_value = context
-        .roster_delta_sequence
-        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-        + 1;
-    tokio::spawn(async move {
-        let command = serde_json::json!({
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        serde_json::json!({
             "type": "worker_roster_delta",
-            "workerToken": worker_token,
+            "workerToken": context.worker_token,
             "summary": summary,
             "sequence": sequence_value,
-            "workerInstanceId": worker_instance_id,
-        });
-        let _ = link
-            .request(command, std::time::Duration::from_secs(10))
-            .await;
-    });
+            "workerInstanceId": context.worker_instance_id,
+        })
+    };
+    let _ = context
+        .roster_link
+        .request(command, std::time::Duration::from_secs(10))
+        .await;
 }
 
-pub(crate) fn session_summary(
-    core: &SessionCore,
-    thinking_level: &str,
+/// Registry-derived values are resolved before taking the core lock, then
+/// checked against the cheap live selection under that lock. A model switch
+/// between the resolve and lock makes the caller retry, not ship a torn row.
+#[derive(Clone, Copy)]
+enum ModelDetailScope {
+    Summary,
+    Connection,
+}
+
+struct ModelDetails {
+    identity: (Option<String>, Option<String>),
     model: Option<Value>,
-    model_fallback_message: Option<String>,
-    bash_running: bool,
-    quota_parked: bool,
-    subagents_running: bool,
-) -> SessionSummary {
+    available_thinking_levels: Option<Vec<String>>,
+    model_context_window: Option<u64>,
+}
+
+impl ModelDetails {
+    fn read(engine: &dyn SessionEngine, scope: ModelDetailScope) -> Self {
+        loop {
+            let identity = engine.model_identity();
+            let model = engine.model_metadata();
+            let (available_thinking_levels, model_context_window) = match scope {
+                ModelDetailScope::Summary => (None, None),
+                ModelDetailScope::Connection => (
+                    engine.supported_thinking_levels(),
+                    engine.model_context_window(),
+                ),
+            };
+            // Warm the engine's cached effective level while no core guard is
+            // held: an uncached level may also resolve the model registry.
+            let _ = engine.effective_thinking_level();
+            if engine.model_identity() == identity {
+                return Self {
+                    identity,
+                    model,
+                    available_thinking_levels,
+                    model_context_window,
+                };
+            }
+        }
+    }
+}
+
+/// Engine and user-bash values captured under the same core lock as the
+/// summary, after validating the registry-derived model against its selection.
+pub(crate) struct SummaryInputs {
+    pub(crate) thinking_level: String,
+    pub(crate) model: Option<Value>,
+    pub(crate) model_fallback_message: Option<String>,
+    pub(crate) bash_running: bool,
+    pub(crate) quota_parked: bool,
+    pub(crate) subagents_running: bool,
+}
+
+impl SummaryInputs {
+    fn lock<'a>(
+        core: &'a Mutex<SessionCore>,
+        engine: &dyn SessionEngine,
+        user_bash: &crate::user_bash::UserBash,
+    ) -> (std::sync::MutexGuard<'a, SessionCore>, Self) {
+        loop {
+            let details = ModelDetails::read(engine, ModelDetailScope::Summary);
+            let core = core.lock().unwrap();
+            if engine.model_identity() == details.identity {
+                let identity = details.identity;
+                let inputs = Self::capture(engine, user_bash, details.model);
+                if engine.model_identity() == identity {
+                    return (core, inputs);
+                }
+            }
+        }
+    }
+
+    fn capture(
+        engine: &dyn SessionEngine,
+        user_bash: &crate::user_bash::UserBash,
+        model: Option<Value>,
+    ) -> Self {
+        Self {
+            thinking_level: engine
+                .effective_thinking_level()
+                .unwrap_or_else(|| "default".to_string()),
+            model,
+            model_fallback_message: engine.model_fallback_message(),
+            bash_running: user_bash.is_running(),
+            quota_parked: engine.is_quota_parked(),
+            subagents_running: engine.has_running_subagents(),
+        }
+    }
+}
+
+/// The connection state's engine/user-bash values, captured alongside its
+/// core state; registry-derived values resolve before the lock.
+pub(crate) struct ConnectionStateInputs {
+    model: Option<Value>,
+    thinking_level: String,
+    available_thinking_levels: Vec<String>,
+    is_bash_running: bool,
+    goal: Value,
+    model_context_window: Option<u64>,
+}
+
+impl ConnectionStateInputs {
+    fn lock<'a>(
+        core: &'a Mutex<SessionCore>,
+        engine: &dyn SessionEngine,
+        user_bash: &crate::user_bash::UserBash,
+    ) -> (std::sync::MutexGuard<'a, SessionCore>, Self) {
+        loop {
+            let details = ModelDetails::read(engine, ModelDetailScope::Connection);
+            let core = core.lock().unwrap();
+            if engine.model_identity() == details.identity {
+                let identity = details.identity.clone();
+                let inputs = Self::capture(engine, user_bash, details);
+                if engine.model_identity() == identity {
+                    return (core, inputs);
+                }
+            }
+        }
+    }
+
+    fn capture(
+        engine: &dyn SessionEngine,
+        user_bash: &crate::user_bash::UserBash,
+        details: ModelDetails,
+    ) -> Self {
+        Self {
+            model: details.model,
+            thinking_level: engine
+                .effective_thinking_level()
+                .unwrap_or_else(|| "default".to_string()),
+            available_thinking_levels: details
+                .available_thinking_levels
+                .unwrap_or_else(|| vec!["off".to_string()]),
+            is_bash_running: user_bash.is_running(),
+            goal: engine.goal_state_value(),
+            model_context_window: details.model_context_window,
+        }
+    }
+}
+
+pub(crate) fn session_summary(core: &SessionCore, inputs: SummaryInputs) -> SessionSummary {
     let store = core.store.as_ref();
     let streaming = core.busy;
     let compacting = core.compacting;
@@ -400,7 +546,7 @@ pub(crate) fn session_summary(
             .to_string(),
         // Running children keep the session working after its own turn
         // ended: every status surface classifies this activity.
-        activity: if streaming || compacting || subagents_running {
+        activity: if streaming || compacting || inputs.subagents_running {
             "working"
         } else {
             "idle"
@@ -417,13 +563,13 @@ pub(crate) fn session_summary(
         session_file: store.map(|s| s.path.to_string_lossy().to_string()),
         session_name: store.and_then(|s| s.session_name().map(str::to_string)),
         cwd: core.cwd.clone(),
-        thinking_level: Some(thinking_level.to_string()),
+        thinking_level: Some(inputs.thinking_level),
         is_streaming: streaming,
         is_compacting: compacting,
-        is_quota_parked: Some(quota_parked),
-        is_bash_running: Some(bash_running),
+        is_quota_parked: Some(inputs.quota_parked),
+        is_bash_running: Some(inputs.bash_running),
         is_running_tools: streaming && !core.running_tool_calls.is_empty(),
-        has_running_subagents: subagents_running,
+        has_running_subagents: inputs.subagents_running,
         attached_clients: core.attached_client_ids.len() as u32,
         message_count: store.map_or(0, crate::session_store::SessionFile::message_count) as u32,
         session_actions: session_snapshot(core),
@@ -442,8 +588,8 @@ pub(crate) fn session_summary(
         // pulls embed the live counter in `summary_locked` instead.
         roster_delta_sequence: None,
         worker_instance_id: None,
-        model,
-        model_fallback_message,
+        model: inputs.model,
+        model_fallback_message: inputs.model_fallback_message,
         runtime_kind: Some(core.runtime_kind.clone()),
         unfinished_action_count: Some(0),
         anthropic_warning_shown: store

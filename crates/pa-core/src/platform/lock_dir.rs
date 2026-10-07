@@ -1,10 +1,16 @@
 //! Cross-process directory locks, byte-compatible with the TS product's
-//! `proper-lockfile` 4.1.2 convention.
+//! `proper-lockfile` 4.1.2 convention: ordinary locks are empty directories
+//! at `{file}.lock` judged by mtime staleness alone; harness-state locks
+//! add an `owner` record so only a provably dead owner reclaims by age
+//! (#3380's durability classes).
 //!
 //! The TS product (auth.json, settings.json, cron state, session-lease
 //! guards) locks a file by creating an EMPTY DIRECTORY at `{file}.lock`,
 //! bumping its mtime, and removing the directory on release. Staleness is
 //! judged from that mtime alone - there is no pid or owner file. A regular
+//! file at the lock path is not a valid lock in this protocol; it is removed
+//! on acquisition (older Rust builds left flock files there, which broke TS
+//! startup with ENOTDIR). A regular
 //! file at the lock path is not a valid lock in this protocol; it is removed
 //! on acquisition (older Rust builds left flock files there, which broke TS
 //! startup with ENOTDIR).
@@ -367,6 +373,12 @@ type WitnessFd = ();
 #[derive(Debug)]
 pub struct LockDir {
     path: PathBuf,
+    /// The owner record this harness-state guard wrote into the lock's
+    /// `owner` file (#3380's durability classes: an owned lock is
+    /// reclaimed only when its owner is PROVABLY dead, however stale the
+    /// mtime; a plain `{file}.lock` has no owner file and keeps the pure
+    /// proper-lockfile mtime protocol). `None` for ordinary locks.
+    owner: Option<String>,
     /// Whether this guard's removal was already handled (a guarded
     /// removal or an abandonment set it): Drop's plain release runs at
     /// most once, so a successor's fresh lock at the vacated path never
@@ -425,7 +437,124 @@ impl LockDir {
     /// permissions, stale-reclaim failures) as-is.
     pub fn acquire(file: &Path, stale_after: Duration) -> io::Result<Self> {
         let path = Self::path_for(file);
-        Self::acquire_unguarded(&path, stale_after, false)
+        Self::acquire_unguarded(&path, stale_after, false, None)
+    }
+
+    /// [`Self::acquire`] with a bounded retry: only a fresh foreign lock
+    /// (`WouldBlock`) is retried, sleeping `interval` between attempts;
+    /// any other error returns immediately, and the final `WouldBlock`
+    /// is returned after the last attempt.
+    ///
+    /// # Errors
+    ///
+    /// The last [`io::ErrorKind::WouldBlock`] when all attempts contend;
+    /// other I/O errors as-is.
+    pub fn acquire_retrying(
+        file: &Path,
+        stale_after: Duration,
+        attempts: u32,
+        interval: Duration,
+    ) -> io::Result<Self> {
+        let mut attempt = 0;
+        loop {
+            match Self::acquire(file, stale_after) {
+                Ok(guard) => return Ok(guard),
+                Err(error) if error.kind() != io::ErrorKind::WouldBlock => return Err(error),
+                Err(error) => {
+                    attempt += 1;
+                    if attempt >= attempts {
+                        return Err(error);
+                    }
+                    std::thread::sleep(interval);
+                }
+            }
+        }
+    }
+
+    /// Acquire a harness-state lock with a PID and per-process token.
+    /// Only a provably dead owner can be reclaimed after `stale_after`.
+    ///
+    /// # Errors
+    ///
+    /// Returns lock contention or an I/O error from acquisition.
+    pub fn acquire_owned_retrying(
+        file: &Path,
+        stale_after: Duration,
+        attempts: u32,
+        interval: Duration,
+    ) -> io::Result<Self> {
+        static PROCESS_TOKEN: std::sync::OnceLock<uuid::Uuid> = std::sync::OnceLock::new();
+        let token = PROCESS_TOKEN.get_or_init(uuid::Uuid::new_v4);
+        let owner = format!("{} {token}.{}", std::process::id(), uuid::Uuid::new_v4());
+        let path = Self::path_for(file);
+        let mut attempt = 0;
+        loop {
+            match Self::acquire_unguarded(&path, stale_after, false, Some(&owner)) {
+                Ok(guard) => return Ok(guard),
+                Err(error) if error.kind() != io::ErrorKind::WouldBlock => return Err(error),
+                Err(error) => {
+                    attempt += 1;
+                    if attempt >= attempts {
+                        return Err(error);
+                    }
+                    std::thread::sleep(interval);
+                }
+            }
+        }
+    }
+
+    /// Check that an owned lock is still held before writing its state file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the owner file no longer matches this guard.
+    pub fn ensure_owned(&self) -> io::Result<()> {
+        if self
+            .owner
+            .as_ref()
+            .is_some_and(|owner| !Self::owner_matches(&self.path, owner))
+        {
+            return Err(io::Error::other(format!(
+                "harness state lock lost: {}",
+                self.path.display()
+            )));
+        }
+        Ok(())
+    }
+
+    fn owner_matches(path: &Path, owner: &str) -> bool {
+        fs::read_to_string(path.join("owner")).is_ok_and(|recorded| recorded.trim() == owner)
+    }
+
+    fn owner_dead(recorded: &str) -> bool {
+        let Some((pid, token)) = recorded.trim().split_once(' ') else {
+            return true;
+        };
+        if token.is_empty() {
+            return true;
+        }
+        let Ok(pid) = pid.parse::<u32>() else {
+            return true;
+        };
+        if pid == 0 || pid > i32::MAX as u32 {
+            return true;
+        }
+        #[cfg(unix)]
+        {
+            let result = unsafe { libc::kill(pid as i32, 0) };
+            result != 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        }
+        #[cfg(windows)]
+        {
+            matches!(
+                pa_types::platform::process::is_process_alive(pid),
+                Ok(false)
+            )
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            false
+        }
     }
 
     /// [`LockDir::acquire`] at an explicit lock-directory path - for
@@ -442,14 +571,19 @@ impl LockDir {
     /// another process, and any underlying I/O error (missing parent,
     /// permissions, stale-reclaim failures) as-is.
     pub fn acquire_at(path: &Path, stale_after: Duration) -> io::Result<Self> {
-        Self::acquire_unguarded(path, stale_after, true)
+        Self::acquire_unguarded(path, stale_after, true, None)
     }
 
     /// The shared acquisition core: `witnessed` decides whether the guard
     /// takes the live-holder `flock` (the registry-guard path does; the
     /// `{file}.lock` convention does not, keeping proper-lockfile's pure
     /// mtime protocol for those users).
-    fn acquire_unguarded(path: &Path, stale_after: Duration, witnessed: bool) -> io::Result<Self> {
+    fn acquire_unguarded(
+        path: &Path,
+        stale_after: Duration,
+        witnessed: bool,
+        owner: Option<&str>,
+    ) -> io::Result<Self> {
         let path = path.to_path_buf();
         let stale_after = stale_after.max(MIN_STALE);
         // Same-process contention first (unix): a witnessed guard already
@@ -466,8 +600,8 @@ impl LockDir {
                 format!("Lock file is already being held: {}", path.display()),
             ));
         }
-        match Self::create(&path) {
-            Ok(probe) => Self::acquired(path, probe, witnessed),
+        match Self::create(&path, owner) {
+            Ok(probe) => Self::acquired(path, probe, witnessed, owner),
             // Only an existing path is a lock collision; any other failure
             // (missing parent, permissions) is a real error, like the TS
             // protocol's non-EEXIST path - never masked as contention.
@@ -475,8 +609,8 @@ impl LockDir {
                 Self::judge_and_reclaim(&path, stale_after)?;
                 // The judge path removed (or raced away) the incumbent: one
                 // fresh attempt; a reappearing rival is contention.
-                match Self::create(&path) {
-                    Ok(probe) => Self::acquired(path, probe, witnessed),
+                match Self::create(&path, owner) {
+                    Ok(probe) => Self::acquired(path, probe, witnessed, owner),
                     Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                         Err(io::Error::new(
                             io::ErrorKind::WouldBlock,
@@ -514,7 +648,12 @@ impl LockDir {
     /// unstat'able directory keeps the TS `guardIno === undefined`
     /// convention (timer-driven detection only), and a platform without a
     /// probe has no value to compare.
-    fn acquired(path: PathBuf, probe: Option<(i64, i64)>, witnessed: bool) -> io::Result<Self> {
+    fn acquired(
+        path: PathBuf,
+        probe: Option<(i64, i64)>,
+        witnessed: bool,
+        owner_record: Option<&str>,
+    ) -> io::Result<Self> {
         let owned = Self::ownership_id(&path);
         let adopted = match (owned, probe) {
             // Both identity halves observable: the directory at the path
@@ -579,6 +718,7 @@ impl LockDir {
             register_locally_held(key);
         }
         Ok(LockDir {
+            owner: owner_record.map(str::to_string),
             owned,
             owned_mtime: Mutex::new(probe),
             witness,
@@ -731,35 +871,36 @@ impl LockDir {
     /// requested pair, so recording the requested value would make every
     /// acquisition self-reject on the stored-vs-recorded compare; the
     /// recorded value is the stored one, and the compare stays exact.
-    #[cfg(unix)]
-    fn create(path: &Path) -> io::Result<Option<(i64, i64)>> {
+    /// An owned (harness-state) create additionally writes the `owner`
+    /// record (#3380's durability classes) under restrictive modes before
+    /// the probe, and a failed create unwinds BOTH files.
+    #[cfg(any(unix, windows))]
+    fn create(path: &Path, owner: Option<&str>) -> io::Result<Option<(i64, i64)>> {
+        #[cfg(unix)]
+        use std::os::unix::fs::PermissionsExt;
         fs::create_dir(path)?;
-        let (sec, nanos) = probe_mtime();
-        if let Err(error) = set_mtime(path, sec, nanos) {
-            // Never leave a lock artifact behind a failed probe.
+        let result = (|| {
+            if let Some(owner) = owner {
+                #[cfg(unix)]
+                {
+                    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+                }
+                fs::write(path.join("owner"), format!("{owner}\n"))?;
+                #[cfg(unix)]
+                {
+                    fs::set_permissions(path.join("owner"), fs::Permissions::from_mode(0o600))?;
+                }
+            }
+            let (sec, nanos) = probe_mtime();
+            set_mtime(path, sec, nanos)?;
+            Self::read_back_probe(path)
+        })();
+        if result.is_err() {
+            // Never leave a lock artifact behind a failed create.
+            let _ = fs::remove_file(path.join("owner"));
             let _ = fs::remove_dir(path);
-            return Err(error);
         }
-        Self::read_back_probe(path)
-    }
-
-    /// The mkdir is the acquisition signal; the mtime probe makes the
-    /// staleness judgment meaningful on NTFS too (directory mtimes would
-    /// otherwise sit on the second, and stale takeovers would misjudge).
-    /// The probe recorded is the value the filesystem stored - the same
-    /// read-back as the unix arm, so FAT's coarse granularity (a
-    /// requested `next second + 5ms` lands on the 2s grid) does not
-    /// self-reject the acquisition it just made.
-    #[cfg(windows)]
-    fn create(path: &Path) -> io::Result<Option<(i64, i64)>> {
-        fs::create_dir(path)?;
-        let (sec, nanos) = probe_mtime();
-        if let Err(error) = set_mtime(path, sec, nanos) {
-            // Never leave a lock artifact behind a failed probe.
-            let _ = fs::remove_dir(path);
-            return Err(error);
-        }
-        Self::read_back_probe(path)
+        result
     }
 
     /// The stored mtime after the probe write - the recorded half of the
@@ -783,10 +924,16 @@ impl LockDir {
     }
 
     #[cfg(not(any(unix, windows)))]
-    fn create(path: &Path) -> io::Result<Option<(i64, i64)>> {
+    fn create(path: &Path, owner: Option<&str>) -> io::Result<Option<(i64, i64)>> {
         // No mtime probe on this platform: staleness is judged from the
         // filesystem's own directory mtime.
         fs::create_dir(path)?;
+        if let Some(owner) = owner {
+            if let Err(error) = fs::write(path.join("owner"), format!("{owner}\n")) {
+                let _ = fs::remove_dir(path);
+                return Err(error);
+            }
+        }
         Ok(None)
     }
 
@@ -912,6 +1059,29 @@ impl LockDir {
                 .duration_since(parked_modified)
                 .unwrap_or_default();
             if parked_age > stale_after {
+                // The owner discipline (#3380's durability classes): a
+                // LIVE owned lock is never reclaimed, however stale its
+                // mtime - only a provably dead (or unparseable) owner
+                // reclaims by age. The check runs on the PARKED name,
+                // where no other process can swap the directory under it.
+                let owner_path = parked.join("owner");
+                let recorded = fs::read_to_string(&owner_path).ok();
+                if recorded
+                    .as_deref()
+                    .is_some_and(|owner| !Self::owner_dead(owner))
+                {
+                    // A live owner: put it back, contention.
+                    Self::restore_parked(&parked, path)?;
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        format!("Lock file is already being held: {}", path.display()),
+                    ));
+                }
+                match fs::remove_file(&owner_path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
                 // Stale: remove the parked name and let the caller retry.
                 match fs::remove_dir(&parked) {
                     Ok(()) => return Ok(()),
@@ -1240,8 +1410,21 @@ impl LockDir {
     /// Release: remove the lock directory. A missing directory means someone
     /// else already reclaimed it (e.g. a stale takeover) - matching the TS
     /// release, which tolerates ENOENT. Other failures are surfaced to the
-    /// trace log; `Drop` cannot propagate.
+    /// trace log; `Drop` cannot propagate. An owned (harness-state) guard
+    /// removes its lock only while its `owner` record still matches - the
+    /// old guard never removes a successor's lock (#3380).
     pub fn release(&self) {
+        if let Some(owner) = &self.owner {
+            if !Self::owner_matches(&self.path, owner) {
+                return;
+            }
+            if let Err(error) = fs::remove_file(self.path.join("owner")) {
+                if error.kind() != io::ErrorKind::NotFound {
+                    tracing::warn!("failed to release lock {}: {error}", self.path.display());
+                }
+                return;
+            }
+        }
         if let Err(error) = fs::remove_dir(&self.path) {
             if error.kind() != io::ErrorKind::NotFound {
                 tracing::warn!("failed to release lock {}: {error}", self.path.display());
@@ -1553,6 +1736,57 @@ mod tests {
         );
     }
 
+    /// The owner discipline (#3380): a LIVE owned lock is never stolen
+    /// after stale age; only a provably dead owner reclaims by age.
+    #[cfg(unix)]
+    #[test]
+    fn live_owned_lock_cannot_be_stolen_after_stale_age() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("harness_state.json");
+        let guard =
+            LockDir::acquire_owned_retrying(&file, Duration::from_secs(10), 1, MIN_STALE).unwrap();
+        set_mtime(&guard.path, 1, 0).unwrap();
+        let error = LockDir::acquire_owned_retrying(&file, Duration::from_secs(10), 1, MIN_STALE)
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        guard.ensure_owned().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dead_owned_lock_is_reclaimed_and_old_guard_cannot_remove_successor() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("harness_state.json");
+        let old =
+            LockDir::acquire_owned_retrying(&file, Duration::from_secs(10), 1, MIN_STALE).unwrap();
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let dead_pid = child.id();
+        child.wait().unwrap();
+        fs::write(old.path.join("owner"), format!("{dead_pid} dead-token\n")).unwrap();
+        set_mtime(&old.path, 1, 0).unwrap();
+        let next =
+            LockDir::acquire_owned_retrying(&file, Duration::from_secs(10), 1, MIN_STALE).unwrap();
+        assert!(old.ensure_owned().is_err());
+        drop(old);
+        next.ensure_owned().unwrap();
+        drop(next);
+        assert!(!LockDir::path_for(&file).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unparseable_owned_lock_is_reclaimed_by_age() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("harness_state.json");
+        let path = LockDir::path_for(&file);
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("owner"), [0xff]).unwrap();
+        set_mtime(&path, 1, 0).unwrap();
+        let next =
+            LockDir::acquire_owned_retrying(&file, Duration::from_secs(10), 1, MIN_STALE).unwrap();
+        next.ensure_owned().unwrap();
+    }
+
     /// The recorded probe is the value the FILESYSTEM stored, not the
     /// one the write requested (macroscope's coarse-granularity finding:
     /// a rounding filesystem self-rejected every acquisition it made;
@@ -1796,14 +2030,16 @@ mod tests {
         // signal), never record the successor's inode as owned.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("auth.json.lock");
-        let probe = LockDir::create(&path).unwrap().expect("the unix probe");
+        let probe = LockDir::create(&path, None)
+            .unwrap()
+            .expect("the unix probe");
         std::fs::remove_dir(&path).unwrap();
         std::fs::create_dir(dir.path().join("successor-bumper")).unwrap();
         std::fs::create_dir(&path).unwrap();
         // The successor's own probe: a fresh ceil-second value, foreign to
         // ours by the exact-equality compare.
         set_mtime(&path, 123, 456).unwrap();
-        let error = LockDir::acquired(path.clone(), Some(probe), true)
+        let error = LockDir::acquired(path.clone(), Some(probe), true, None)
             .expect_err("a directory with a foreign probe is never adopted");
         assert_eq!(
             error.kind(),
@@ -1877,13 +2113,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("auth.json.lock");
         // OUR artifact: create's probe, still at the path -> removed.
-        let probe = LockDir::create(&path).unwrap().expect("the unix probe");
+        let probe = LockDir::create(&path, None)
+            .unwrap()
+            .expect("the unix probe");
         let owned = LockDir::ownership_id(&path);
         LockDir::remove_owned_artifact(&path, owned, Some(probe));
         assert!(!path.exists(), "the unwitnessed artifact never orphans");
         // The successor's replacement: its own probe at the path ->
         // never touched (no rename, no park), never removed.
-        let probe = LockDir::create(&path).unwrap().expect("the unix probe");
+        let probe = LockDir::create(&path, None)
+            .unwrap()
+            .expect("the unix probe");
         let owned = LockDir::ownership_id(&path);
         set_mtime(&path, 123, 456).unwrap();
         LockDir::remove_owned_artifact(&path, owned, Some(probe));
