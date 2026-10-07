@@ -160,7 +160,9 @@ async fn summary_retry_resolves_the_selection_that_owns_the_locked_core() {
             worker.summary_locked(&core, inputs)
         })
     };
-    entered_rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+    entered_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
     *engine.selection.lock().unwrap() = "new".to_string();
     resume_tx.send(()).unwrap();
     drop(core);

@@ -11,15 +11,16 @@ use super::{
 use crate::types::SessionSummary;
 
 impl Worker {
-    pub(crate) fn summary_inputs(
-        &self,
-    ) -> (std::sync::MutexGuard<'_, SessionCore>, SummaryInputs) {
+    pub(crate) fn summary_inputs(&self) -> (std::sync::MutexGuard<'_, SessionCore>, SummaryInputs) {
         SummaryInputs::lock(&self.core, self.engine.as_ref(), &self.user_bash)
     }
 
     pub(crate) fn connection_state_inputs(
         &self,
-    ) -> (std::sync::MutexGuard<'_, SessionCore>, ConnectionStateInputs) {
+    ) -> (
+        std::sync::MutexGuard<'_, SessionCore>,
+        ConnectionStateInputs,
+    ) {
         ConnectionStateInputs::lock(&self.core, self.engine.as_ref(), &self.user_bash)
     }
 
@@ -330,11 +331,8 @@ pub(crate) async fn push_roster_delta(context: &RosterPushContext) {
     // A pull may race this push, but both read the counter with their core
     // snapshot held: an equal-counter pull was captured after this push.
     let command = {
-        let (core, inputs) = SummaryInputs::lock(
-            &context.core,
-            context.engine.as_ref(),
-            &context.user_bash,
-        );
+        let (core, inputs) =
+            SummaryInputs::lock(&context.core, context.engine.as_ref(), &context.user_bash);
         let mut summary = session_summary(&core, inputs);
         // The embedded counter is the pre-stamp value: every sequence
         // stamped before the snapshot is at or below it.

@@ -281,7 +281,10 @@ async fn worker_roster_delta_drops_stale_sequences() {
     // The in-flight push at the same counter is now stale, whichever
     // arrival order the supervisor saw. It cannot overwrite that pull.
     let stale_equal = delta(&supervisor, "seq-token", "low", Some(5), "i1").await;
-    assert!(stale_equal.success, "stale equal delta answers: {stale_equal:?}");
+    assert!(
+        stale_equal.success,
+        "stale equal delta answers: {stale_equal:?}"
+    );
     assert_eq!(entry_level(), serde_json::json!("medium"));
     // A replacement process registers (the registration notes the
     // new generation) and its counter-restarted sequences apply —
