@@ -121,7 +121,13 @@ fn registry_dir() -> Result<PathBuf> {
 
 /// The lexical socket identity (TS `normalizeSocketPath`: `resolve()` -
 /// absolute, `.`/`..` folded, no symlink resolution; the registry keys and
-/// the fence records spell the socket this way).
+/// the fence records spell the socket this way). A non-UTF-8 path never
+/// rides through a lossy conversion - distinct raw paths would collapse
+/// onto one U+FFFD-laced identity (macroscope's finding: two endpoints
+/// sharing one fence file, each able to block or overwrite the other's) -
+/// so its identity is the raw bytes, hex-encoded behind a marker TS strings
+/// cannot produce. TS's JS has no way to spell these paths at all, so no
+/// TS/Rust cross-protocol form exists to stay compatible with.
 #[must_use]
 pub fn normalize_socket_path(socket_path: &Path) -> String {
     use std::path::Component;
@@ -142,7 +148,17 @@ pub fn normalize_socket_path(socket_path: &Path) -> String {
             other => out.push(other.as_os_str()),
         }
     }
-    out.to_string_lossy().to_string()
+    if let Some(utf8) = out.as_os_str().to_str() {
+        return utf8.to_string();
+    }
+    let raw = out.as_os_str().as_encoded_bytes();
+    let mut hex = String::with_capacity(raw.len() * 2 + "raw:".len());
+    hex.push_str("raw:");
+    for byte in raw {
+        use std::fmt::Write as _;
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
 }
 
 /// The fence record's path: full sha256 hex of the normalized socket path
@@ -1329,6 +1345,32 @@ mod tests {
         assert!(
             guard.is_dir(),
             "the successor's guard directory is never removed"
+        );
+    }
+
+    /// Distinct non-UTF-8 socket paths keep DISTINCT identities
+    /// (macroscope's finding: the lossy conversion collapsed them onto one
+    /// U+FFFD-laced spelling, so two endpoints shared one fence file and
+    /// each could block or overwrite the other's), while UTF-8 paths
+    /// spell exactly as before.
+    #[test]
+    #[cfg(unix)]
+    fn distinct_non_utf8_socket_paths_keep_distinct_identities() {
+        use std::os::unix::ffi::OsStrExt;
+        let one = std::ffi::OsStr::from_bytes(b"/tmp/a\xff.sock");
+        let other = std::ffi::OsStr::from_bytes(b"/tmp/b\xff.sock");
+        let first = normalize_socket_path(std::path::Path::new(one));
+        let second = normalize_socket_path(std::path::Path::new(other));
+        assert_ne!(
+            first, second,
+            "two raw paths are two identities, never one lossy collision"
+        );
+        assert!(first.starts_with("raw:"), "the raw form is hex-marked");
+        assert!(second.starts_with("raw:"));
+        assert_eq!(
+            normalize_socket_path(std::path::Path::new("/tmp/x.sock")),
+            "/tmp/x.sock",
+            "a UTF-8 path spells exactly as before"
         );
     }
 
