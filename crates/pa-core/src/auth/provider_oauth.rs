@@ -236,8 +236,7 @@ impl crate::auth::OAuthIntegration for ProviderOAuth {
     }
 }
 
-/// One structured warn line for a failed token exchange: the silent-failure
-/// class of the revoked-session outage (refresh failures kept no trace).
+/// One structured warn line for a failed token exchange.
 fn log_oauth_refresh_failure(component: &str, provider_id: &str, error: &str) {
     get_logger(component).warn(
         "oauth token refresh failed",

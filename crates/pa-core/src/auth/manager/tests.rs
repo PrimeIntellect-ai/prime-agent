@@ -869,9 +869,13 @@ fn a_concurrent_logout_wins_over_the_forced_refresh_write() {
         &oauth_credential("rejected-access", now_epoch_ms() + 3_600_000),
     );
     let peer_backend = Arc::clone(&backend);
-    std::thread::spawn(move || {
-        // Mid-fetch: the logout lands while the token exchange runs.
-        std::thread::sleep(std::time::Duration::from_millis(40));
+    let writer_oauth = Arc::clone(&oauth);
+    let writer = std::thread::spawn(move || {
+        // Mid-fetch readiness signal: wait until the token exchange is
+        // actually running, then land the logout inside its window.
+        while writer_oauth.calls.load(std::sync::atomic::Ordering::SeqCst) < 1 {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
         let logged_out = AuthStorageData::default();
         let content = serde_json::to_string_pretty(&logged_out.0).unwrap_or_default();
         peer_backend
@@ -890,6 +894,7 @@ fn a_concurrent_logout_wins_over_the_forced_refresh_write() {
         auth.get_all().credential("x-logged-out").is_none(),
         "the logout stands: the forced write never resurrects the credential"
     );
+    writer.join().expect("the logout writer settles");
     assert_eq!(
         oauth.calls.load(std::sync::atomic::Ordering::SeqCst),
         1,
@@ -912,10 +917,13 @@ fn an_api_key_replacement_wins_over_the_forced_refresh_write() {
         &oauth_credential("rejected-access", now_epoch_ms() + 3_600_000),
     );
     let peer_backend = Arc::clone(&backend);
-    std::thread::spawn(move || {
-        // Mid-fetch: the API key replacement lands while the token
-        // exchange runs.
-        std::thread::sleep(std::time::Duration::from_millis(40));
+    let writer_oauth = Arc::clone(&oauth);
+    let writer = std::thread::spawn(move || {
+        // Mid-fetch readiness signal: wait until the token exchange is
+        // actually running, then land the logout inside its window.
+        while writer_oauth.calls.load(std::sync::atomic::Ordering::SeqCst) < 1 {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
         let mut replacement = AuthStorageData::default();
         replacement.insert(
             "x-swapped",
@@ -947,6 +955,7 @@ fn an_api_key_replacement_wins_over_the_forced_refresh_write() {
         ),
         "the API key stands: the forced write never overwrites it"
     );
+    writer.join().expect("the replacement writer settles");
     assert_eq!(
         oauth.calls.load(std::sync::atomic::Ordering::SeqCst),
         1,
@@ -978,23 +987,27 @@ fn the_forced_refresh_flight_guards_the_write() {
                     // The refreshed credential is being persisted: the
                     // per-provider flight must still hold — a probe that
                     // acquires it instantly means a waiter re-spends the
-                    // same refresh token.
+                    // same refresh token. The probe flags its own start so
+                    // the held check can never read an unscheduled probe.
+                    let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
                     let acquired = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                    let probe = std::thread::spawn({
+                    std::thread::spawn({
+                        let started = Arc::clone(&started);
                         let acquired = Arc::clone(&acquired);
                         move || {
+                            started.store(true, std::sync::atomic::Ordering::SeqCst);
                             let _guard = refresh_flight("x-flight-write");
                             acquired.store(true, std::sync::atomic::Ordering::SeqCst);
                         }
                     });
+                    while !started.load(std::sync::atomic::Ordering::SeqCst) {
+                        std::thread::sleep(std::time::Duration::from_millis(2));
+                    }
                     std::thread::sleep(std::time::Duration::from_millis(150));
                     held.store(
                         !acquired.load(std::sync::atomic::Ordering::SeqCst),
                         std::sync::atomic::Ordering::SeqCst,
                     );
-                    // The probe may still be parked on the flight until
-                    // the recovery returns; it records and exits by itself.
-                    drop(probe);
                 }
                 Ok(((), next))
             };
