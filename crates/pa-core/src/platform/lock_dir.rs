@@ -46,6 +46,19 @@ fn path_pins(path: &Path, dir: &fs::File) -> bool {
     }
 }
 
+/// Remove an unpublished lock candidate completely: the owner file
+/// first (a directory containing it cannot be removed), then the
+/// directory. A missing candidate is a non-error (a racing reclaimer).
+#[cfg(unix)]
+fn remove_candidate_dir(candidate: &Path) -> io::Result<()> {
+    match fs::remove_file(candidate.join("owner")) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    fs::remove_dir(candidate)
+}
+
 /// The dev+ino identity at `path`, or `None` when it cannot be stat'ed.
 #[cfg(unix)]
 fn identity_at(path: &Path) -> Option<(u64, u64)> {
@@ -514,19 +527,33 @@ impl LockDir {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(&candidate, fs::Permissions::from_mode(0o700))?;
+                if let Err(error) =
+                    fs::set_permissions(&candidate, fs::Permissions::from_mode(0o700))
+                {
+                    // The owner record rides the publish: any failure
+                    // below abandons the candidate (handle closed, owner
+                    // file removed, directory removed), never a leaked
+                    // half-published lock.
+                    drop(dir);
+                    let _ = remove_candidate_dir(&candidate);
+                    return Err(error);
+                }
             }
             if let Err(error) = fs::write(candidate.join("owner"), format!("{owner}\n")) {
-                // The owner record rides the publish: a failed write
-                // abandons the candidate, never a half-published lock.
                 drop(dir);
-                let _ = fs::remove_dir(&candidate);
+                let _ = remove_candidate_dir(&candidate);
                 return Err(error);
             }
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(candidate.join("owner"), fs::Permissions::from_mode(0o600))?;
+                if let Err(error) =
+                    fs::set_permissions(candidate.join("owner"), fs::Permissions::from_mode(0o600))
+                {
+                    drop(dir);
+                    let _ = remove_candidate_dir(&candidate);
+                    return Err(error);
+                }
             }
         }
         match rename_noreplace::rename(&candidate, path) {
@@ -545,7 +572,7 @@ impl LockDir {
                 // on this filesystem, so the acquisition fails instead
                 // of succeeding with the candidate still present.
                 drop(dir);
-                if let Err(remove_error) = fs::remove_dir(&candidate) {
+                if let Err(remove_error) = remove_candidate_dir(&candidate) {
                     if remove_error.kind() != io::ErrorKind::NotFound {
                         return Err(remove_error);
                     }
@@ -561,13 +588,88 @@ impl LockDir {
                 if path_pins(path, &dir) {
                     return Ok(dir);
                 }
-                // A contender holds the path (or the rename failed clean):
-                // the candidate is this call's alone - remove it, never the
-                // incumbent at the public path.
-                let _ = fs::remove_dir(&candidate);
+                // A contender holds the path (EEXIST is the common
+                // case), or the rename failed clean: the candidate is
+                // this call's alone - the pinned handle closes first
+                // (EBUSY on the fallback mounts), the owner file goes
+                // before the directory, and the incumbent at the public
+                // path is never touched.
+                drop(dir);
+                let _ = remove_candidate_dir(&candidate);
                 Err(error)
             }
         }
+    }
+
+    /// Claim the stale incumbent judged at `path` under a private name
+    /// and remove it there, when the claimed inode is the snapshotted
+    /// `incumbent`. Returns `Ok(())` when the incumbent is gone (the
+    /// caller retries the acquisition), `WouldBlock` when the path no
+    /// longer holds the judged incumbent (a successor replaced it: the
+    /// claim is restored untouched and the caller treats it as
+    /// contention), any claim-unsupported error as the floor signal
+    /// (`WouldBlock` too, so the floor sequence runs), and other errors
+    /// as-is.
+    #[cfg(target_os = "linux")]
+    fn claim_stale_incumbent(path: &Path, incumbent: Option<(u64, u64)>) -> io::Result<()> {
+        let Some(parent) = path.parent() else {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "lock path has no parent",
+            ));
+        };
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |age| age.as_nanos());
+        let pid = std::process::id();
+        for attempt in 0..8 {
+            let claim = parent.join(format!(".j{pid:x}{nanos:x}{attempt:x}"));
+            match move_without_replacing(path, &claim) {
+                Ok(()) => {
+                    if identity_at(&claim) == incumbent {
+                        // The judged stale incumbent, claimed: remove it
+                        // from the private name where nothing can replace
+                        // it (owner file first, then the directory).
+                        if let Err(error) = remove_candidate_dir(&claim) {
+                            // A vanished claim cannot be restored; treat
+                            // the incumbent as reclaimed.
+                            if error.kind() != io::ErrorKind::NotFound {
+                                return Err(error);
+                            }
+                        }
+                        return Ok(());
+                    }
+                    // Not the judged incumbent: a successor holds the
+                    // claimed directory. Restore it without clobbering a
+                    // newer occupant of the vacated path; a failed restore
+                    // (a third party took the path in the microsecond
+                    // gap) leaves the claim in place - the documented
+                    // floor, the same one as the release's restore arm.
+                    match move_without_replacing(&claim, path) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                        Err(error) => return Err(error),
+                    }
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        format!("Lock file is already being held: {}", path.display()),
+                    ));
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+                Err(error) if Self::rename_noreplace_unsupported(&error) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "no no-replace rename for the stale reclaim",
+                    ));
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "all stale-reclaim claim names are taken",
+        ))
     }
 
     /// True when a no-replace rename failed because the kernel or
@@ -601,22 +703,35 @@ impl LockDir {
     #[cfg(unix)]
     fn create_by_mkdir(path: &Path, owner: Option<&str>) -> io::Result<Created> {
         fs::create_dir(path)?;
+        // Every failure below removes the fresh public lock completely -
+        // owner file first (a directory containing it cannot be removed),
+        // then the directory, and the pinned handle (when held) closes
+        // first (EBUSY on these mounts) - never leave a lock artifact
+        // behind a failed acquisition, least of all one carrying a live
+        // owner token (a live PID in the owner file protects the artifact
+        // from stale reclaim until that process dies).
         if let Some(owner) = owner {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+                if let Err(error) = fs::set_permissions(path, fs::Permissions::from_mode(0o700)) {
+                    let _ = fs::remove_dir(path);
+                    return Err(error);
+                }
             }
             if let Err(error) = fs::write(path.join("owner"), format!("{owner}\n")) {
-                // Never leave a fresh lock artifact behind a failed owner
-                // write.
-                let _ = fs::remove_dir(path);
+                let _ = remove_candidate_dir(path);
                 return Err(error);
             }
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(path.join("owner"), fs::Permissions::from_mode(0o600))?;
+                if let Err(error) =
+                    fs::set_permissions(path.join("owner"), fs::Permissions::from_mode(0o600))
+                {
+                    let _ = remove_candidate_dir(path);
+                    return Err(error);
+                }
             }
         }
         let created = identity_at(path);
@@ -630,7 +745,7 @@ impl LockDir {
                 // unstattable capture must not become one (None == None
                 // would remove without ownership).
                 if created.is_some_and(|identity| identity_at(path) == Some(identity)) {
-                    let _ = fs::remove_dir(path);
+                    let _ = remove_candidate_dir(path);
                 }
                 return Err(error);
             }
@@ -640,7 +755,8 @@ impl LockDir {
             // Never leave a lock artifact behind a failed probe - but only
             // this handle's own inode: the path may already be taken.
             if path_pins(path, &dir) {
-                let _ = fs::remove_dir(path);
+                drop(dir);
+                let _ = remove_candidate_dir(path);
             }
             return Err(error);
         }
@@ -770,6 +886,34 @@ impl LockDir {
                         format!("Lock file is already being held: {}", path.display()),
                     ));
                 }
+                #[cfg(target_os = "linux")]
+                {
+                    // Airtight reclaim where renameat2 exists: claim the
+                    // stale incumbent under a private name with one
+                    // atomic rename, and remove it from there only when
+                    // the claimed inode is the one this judge snapshotted.
+                    // A successor that replaced the incumbent between the
+                    // snapshot and the claim is restored untouched - its
+                    // owner file and directory are never removed. On the
+                    // mounts without renameat2 the claim itself reports
+                    // unsupported and the floor sequence below runs.
+                    let incumbent = {
+                        use std::os::unix::fs::MetadataExt;
+                        Some((metadata.dev(), metadata.ino()))
+                    };
+                    match Self::claim_stale_incumbent(path, incumbent) {
+                        Ok(()) => return Ok(()),
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                        Err(error) => return Err(error),
+                    }
+                }
+                // The floor reclaim (no no-replace rename): remove the
+                // owner file, then the directory, by pathname - the same
+                // residual check-then-act window proper-lockfile's own
+                // reclaim has. A successor replacing the incumbent inside
+                // this window can be removed here; unreachable on
+                // supported Linux (the claim above) and documented on the
+                // mounts and platforms without the primitive.
                 match fs::remove_file(&owner_path) {
                     Ok(()) => {}
                     Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -1074,6 +1218,33 @@ mod tests {
         assert!(std::fs::metadata(lock_of(&file)).unwrap().is_dir());
         drop(guard);
         assert!(!lock_of(&file).exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn contended_owned_acquire_leaves_no_candidate_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("harness_state.json");
+        // A live incumbent at the public path: every owned acquisition
+        // attempt loses the publish (EEXIST) and must clean its private
+        // candidate completely - owner file included.
+        let _incumbent =
+            LockDir::acquire_owned_retrying(&file, Duration::from_secs(10), 1, MIN_STALE).unwrap();
+        let error = LockDir::acquire_owned_retrying(&file, Duration::from_secs(10), 1, MIN_STALE)
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| {
+                entry.file_name().to_string_lossy().starts_with(".c")
+                    || entry.file_name().to_string_lossy().contains(".lock.c")
+            })
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "contended owned acquires must not leak candidate artifacts"
+        );
     }
 
     #[cfg(unix)]
