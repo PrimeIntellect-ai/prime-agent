@@ -73,6 +73,7 @@ fn one_real_session_engine_turn_runs_once_and_replay_never_reruns() {
             session_id,
             generation,
             Arc::clone(&first_executor) as Arc<dyn GuestExecutor>,
+            Some("faux/faux-1".to_string()),
         );
         let (mut client, _) =
             LoopbackClient::hello(&booted.hub, TEST_TOKEN, session_id, generation).await;
@@ -123,6 +124,7 @@ fn one_real_session_engine_turn_runs_once_and_replay_never_reruns() {
             session_id,
             generation,
             Arc::clone(&second_executor) as Arc<dyn GuestExecutor>,
+            Some("faux/faux-1".to_string()),
         );
         let (mut client, _) =
             LoopbackClient::hello(&booted.hub, TEST_TOKEN, session_id, generation).await;
@@ -198,6 +200,7 @@ fn a_restored_pending_prompt_runs_once_with_the_real_executor() {
             session_id,
             generation,
             Arc::clone(&executor) as Arc<dyn GuestExecutor>,
+            Some("faux/faux-1".to_string()),
         );
         // The restored open is uncertain and never re-runs; the
         // restored prompt is claimable and the engine executes it once.

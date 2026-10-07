@@ -34,6 +34,9 @@ struct ScriptedExecutor {
     prompt_count: Arc<AtomicUsize>,
     park_ids: Arc<Mutex<HashSet<String>>>,
     cwd: String,
+    /// The snapshot's model label: `None` plays the guest booted without
+    /// `PRIME_AGENT_CLOUD_MODEL`.
+    model: Option<String>,
 }
 
 /// The counting executor and its witnesses: the open and prompt
@@ -47,6 +50,16 @@ type ScriptedExecutorParts = (
 
 impl ScriptedExecutor {
     fn new(cwd: &str) -> ScriptedExecutorParts {
+        Self::with_model(cwd, Some("faux/faux-1".to_string()))
+    }
+
+    /// The model-less executor: the guest booted without
+    /// `PRIME_AGENT_CLOUD_MODEL` snapshots no model.
+    fn new_without_model(cwd: &str) -> ScriptedExecutorParts {
+        Self::with_model(cwd, None)
+    }
+
+    fn with_model(cwd: &str, model: Option<String>) -> ScriptedExecutorParts {
         let open_count = Arc::new(AtomicUsize::new(0));
         let prompt_count = Arc::new(AtomicUsize::new(0));
         let park_ids = Arc::new(Mutex::new(HashSet::new()));
@@ -56,6 +69,7 @@ impl ScriptedExecutor {
                 prompt_count: Arc::clone(&prompt_count),
                 park_ids: Arc::clone(&park_ids),
                 cwd: cwd.to_string(),
+                model,
             }),
             open_count,
             prompt_count,
@@ -108,7 +122,7 @@ impl GuestExecutor for ScriptedExecutor {
     fn snapshot(&self) -> GuestSessionSnapshot {
         GuestSessionSnapshot {
             cwd: self.cwd.clone(),
-            model: Some("faux/faux-1".to_string()),
+            model: self.model.clone(),
         }
     }
 }
@@ -124,6 +138,20 @@ struct GuestHarness {
 
 impl GuestHarness {
     fn spawn(dir: tempfile::TempDir, executor: Arc<dyn GuestExecutor>) -> Self {
+        Self::spawn_with_model(dir, executor, Some("faux/faux-1".to_string()))
+    }
+
+    /// The guest booted without `PRIME_AGENT_CLOUD_MODEL`: both the
+    /// server's boot model and the executor's snapshot carry none.
+    fn spawn_without_model(dir: tempfile::TempDir, executor: Arc<dyn GuestExecutor>) -> Self {
+        Self::spawn_with_model(dir, executor, None)
+    }
+
+    fn spawn_with_model(
+        dir: tempfile::TempDir,
+        executor: Arc<dyn GuestExecutor>,
+        model: Option<String>,
+    ) -> Self {
         let booted = boot_guest(
             &dir.path().join("guest-state"),
             &dir.path().join("daemon-status.json"),
@@ -131,6 +159,7 @@ impl GuestHarness {
             "sess_loopback",
             7,
             executor,
+            model,
         );
         Self { booted, dir }
     }
@@ -155,6 +184,7 @@ fn restart_over(dir: &tempfile::TempDir, executor: Arc<dyn GuestExecutor>) -> Bo
         "sess_loopback",
         7,
         executor,
+        Some("faux/faux-1".to_string()),
     )
 }
 
@@ -201,6 +231,45 @@ fn hello_requires_the_exact_identity_and_token() {
             snapshot.capabilities.is_none(),
             "the guest slice advertises nothing"
         );
+        harness.server().begin_shutdown();
+        harness.booted.serve.await.unwrap();
+    });
+}
+
+#[test]
+fn a_guest_booted_without_a_model_still_serves_its_snapshot() {
+    // TS `snapshotState`'s `?? "image-default"`: `PRIME_AGENT_CLOUD_MODEL`
+    // is optional, so the model-less guest must still snapshot — an empty
+    // model id fails the snapshot validation and would drop every hello.
+    let executor_dir = tempfile::TempDir::new().unwrap();
+    let cwd = executor_dir.path().display().to_string();
+    let (executor, _open, _prompts, _park) = ScriptedExecutor::new_without_model(&cwd);
+    rt().block_on(async {
+        let harness =
+            GuestHarness::spawn_without_model(tempfile::TempDir::new().unwrap(), executor);
+        let session_id = "sess_loopback";
+        let generation = 7u64;
+        let (mut client, first) =
+            LoopbackClient::hello(&harness.hub(), TEST_TOKEN, session_id, generation).await;
+        let Some(CloudMessage::Snapshot(snapshot)) = first else {
+            panic!("the model-less guest still answers hello with a snapshot");
+        };
+        assert_eq!(
+            snapshot.state.model_id, "image-default",
+            "the missing model falls back to the image default, not an empty id"
+        );
+        assert_eq!(snapshot.state.cwd, cwd);
+        client
+            .submit(session_id, generation, "cmd_open", open_request(&cwd))
+            .await;
+        client
+            .await_receipt(
+                session_id,
+                generation,
+                "cmd_open",
+                CloudCommandState::Completed,
+            )
+            .await;
         harness.server().begin_shutdown();
         harness.booted.serve.await.unwrap();
     });

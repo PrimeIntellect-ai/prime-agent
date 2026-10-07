@@ -78,6 +78,13 @@ pub(crate) mod env_keys {
 /// TS `DEFAULT_STATE_DIR`.
 pub(crate) const DEFAULT_STATE_DIR: &str = "/opt/prime-agent/daemon-state";
 
+/// The snapshot's model id when the guest carries no model (TS
+/// `snapshotState`'s `?? "image-default"` and `emptySnapshotState`):
+/// `PRIME_AGENT_CLOUD_MODEL` is optional, and the wire's snapshot state
+/// requires a non-empty `modelId`, so the model-less guest serves the
+/// image default instead of failing every hello's snapshot.
+pub(crate) const DEFAULT_MODEL_ID: &str = "image-default";
+
 /// A missing or invalid guest env coordinate (TS `CloudDaemonEnvError`).
 #[derive(Debug)]
 pub(crate) struct CloudGuestEnvError(pub String);

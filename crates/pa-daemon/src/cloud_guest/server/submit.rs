@@ -16,6 +16,7 @@ use crate::cloud_guest::journal::GuestAdmission;
 use crate::cloud_guest::now_iso;
 use crate::cloud_guest::outbox::GuestEventInput;
 use crate::cloud_guest::server::GuestProtocolServer;
+use crate::cloud_guest::DEFAULT_MODEL_ID;
 
 impl GuestProtocolServer {
     /// Admit one submit: the byte bound, the journal admission, the
@@ -109,6 +110,9 @@ impl GuestProtocolServer {
 
     /// The session-facing protocol state (TS `snapshotState`): the
     /// executor's cwd/model plus the journal's active and queued ids.
+    /// The model-less guest serves the image default (TS's
+    /// `?? "image-default"`): an empty `modelId` fails the snapshot
+    /// validation and would drop every hello.
     #[must_use]
     pub fn session_state(&self) -> CloudSessionState {
         let queued_command_ids = self
@@ -129,7 +133,9 @@ impl GuestProtocolServer {
             .clone();
         CloudSessionState {
             cwd: snapshot.cwd,
-            model_id: snapshot.model.unwrap_or_default(),
+            model_id: snapshot
+                .model
+                .unwrap_or_else(|| DEFAULT_MODEL_ID.to_string()),
             active_command_id,
             queued_command_ids,
         }

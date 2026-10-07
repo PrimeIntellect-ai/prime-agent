@@ -284,7 +284,8 @@ pub(crate) struct BootedGuest {
 
 /// Boot one guest server over the loopback listener (must run inside a
 /// live test runtime: the serve, accept, and connection tasks spawn on
-/// it).
+/// it). The model mirrors the boot env's optional
+/// `PRIME_AGENT_CLOUD_MODEL`: `None` boots the model-less guest.
 pub(crate) fn boot_guest(
     state_dir: &Path,
     status_file: &Path,
@@ -292,6 +293,7 @@ pub(crate) fn boot_guest(
     session_id: &str,
     generation: u64,
     executor: Arc<dyn GuestExecutor>,
+    model: Option<String>,
 ) -> BootedGuest {
     let server = Arc::new(
         GuestProtocolServer::open(
@@ -301,7 +303,7 @@ pub(crate) fn boot_guest(
             TEST_TOKEN,
             status_file.to_path_buf(),
             workspace.to_string(),
-            Some("faux/faux-1".to_string()),
+            model,
         )
         .expect("open guest server"),
     );
