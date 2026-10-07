@@ -95,6 +95,7 @@ pub(crate) async fn run_codex_subscription_login(
             client_id: None,
             resource: None,
             issuer: None,
+            audience_mode: None,
             enterprise_url: None,
         },
     );
