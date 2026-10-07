@@ -302,6 +302,9 @@ pub fn atomic_write_with(path: &Path, content: &str, options: AtomicWriteOptions
         }
     }
     crate::platform::rename_onto(&temp, path)?;
+    if options.fsync {
+        crate::platform::fs::sync_directory(path.parent().unwrap_or_else(|| Path::new(".")))?;
+    }
     Ok(())
 }
 

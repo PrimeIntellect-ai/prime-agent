@@ -595,6 +595,12 @@ class HarnessState:
             if existing_mode is not None:
                 os.chmod(temp_path, existing_mode)
             os.replace(temp_path, target_path)
+            if os.name == "posix":
+                directory_fd = os.open(target_path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
         finally:
             temp_path.unlink(missing_ok=True)
         self._loaded_mtime = self._disk_mtime()
