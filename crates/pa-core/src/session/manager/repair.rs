@@ -141,6 +141,7 @@ pub fn repair_jsonl_damage(file_path: &Path) {
         }
         output.sync_all()?;
         drop(output);
+        drop(reader);
         // TS repairs crash damage through `writeFileAtomicSync`: the repaired
         // file lands by rename, never as a torn in-place write.
         crate::platform::rename_onto(&temp, file_path)
