@@ -546,7 +546,10 @@ mod tests {
         let job = store
             .create(&input("tick", "every 10m", now))
             .expect("first job");
-        store.cancel(&job.id, now).unwrap().expect("cancel the only job");
+        store
+            .cancel(&job.id, now)
+            .unwrap()
+            .expect("cancel the only job");
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
         while std::time::Instant::now() < deadline {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;

@@ -299,7 +299,9 @@ mod tests {
             .unwrap();
         assert_eq!(deleted.status, JobStatus::Cancelled);
         let second = store.create_rlm_heartbeat(&rlm_input).unwrap();
-        let cancelled = store.cancel_rlm_heartbeats_for_session("live-1", now + 4).unwrap();
+        let cancelled = store
+            .cancel_rlm_heartbeats_for_session("live-1", now + 4)
+            .unwrap();
         assert_eq!(cancelled.len(), 1);
         assert_eq!(second.status, JobStatus::Active);
         assert_eq!(cancelled[0].status, JobStatus::Cancelled);

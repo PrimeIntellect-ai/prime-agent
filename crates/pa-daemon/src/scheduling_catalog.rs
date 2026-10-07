@@ -784,7 +784,9 @@ impl Supervisor {
                         vec![response_line(&response_success(
                             Some(command_id),
                             type_name,
-                            Some(json!({ "job": serde_json::to_value(&job).unwrap_or(Value::Null) })),
+                            Some(
+                                json!({ "job": serde_json::to_value(&job).unwrap_or(Value::Null) }),
+                            ),
                         ))],
                         false,
                     );
@@ -793,7 +795,10 @@ impl Supervisor {
                 Err(error) => {
                     return (
                         vec![response_line(&response_failure(
-                            Some(command_id), type_name, &error.to_string(), None,
+                            Some(command_id),
+                            type_name,
+                            &error.to_string(),
+                            None,
                         ))],
                         false,
                     );

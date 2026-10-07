@@ -292,7 +292,11 @@ impl LockDir {
     ///
     /// Returns an error if the owner file no longer matches this guard.
     pub fn ensure_owned(&self) -> io::Result<()> {
-        if self.owner.as_ref().is_some_and(|owner| !Self::owner_matches(&self.path, owner)) {
+        if self
+            .owner
+            .as_ref()
+            .is_some_and(|owner| !Self::owner_matches(&self.path, owner))
+        {
             return Err(io::Error::other(format!(
                 "harness state lock lost: {}",
                 self.path.display()
@@ -302,8 +306,7 @@ impl LockDir {
     }
 
     fn owner_matches(path: &Path, owner: &str) -> bool {
-        fs::read_to_string(path.join("owner"))
-            .is_ok_and(|recorded| recorded.trim() == owner)
+        fs::read_to_string(path.join("owner")).is_ok_and(|recorded| recorded.trim() == owner)
     }
 
     fn owner_dead(recorded: &str) -> bool {
@@ -326,7 +329,10 @@ impl LockDir {
         }
         #[cfg(windows)]
         {
-            matches!(pa_types::platform::process::is_process_alive(pid), Ok(false))
+            matches!(
+                pa_types::platform::process::is_process_alive(pid),
+                Ok(false)
+            )
         }
         #[cfg(not(any(unix, windows)))]
         {
@@ -410,7 +416,10 @@ impl LockDir {
             if age > stale_after {
                 let owner_path = path.join("owner");
                 let recorded = fs::read_to_string(&owner_path).ok();
-                if recorded.as_deref().is_some_and(|owner| !Self::owner_dead(owner)) {
+                if recorded
+                    .as_deref()
+                    .is_some_and(|owner| !Self::owner_dead(owner))
+                {
                     return Err(io::Error::new(
                         io::ErrorKind::WouldBlock,
                         format!("Lock file is already being held: {}", path.display()),
@@ -554,8 +563,8 @@ mod tests {
     fn live_owned_lock_cannot_be_stolen_after_stale_age() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("harness_state.json");
-        let guard = LockDir::acquire_owned_retrying(&file, Duration::from_secs(10), 1, MIN_STALE)
-            .unwrap();
+        let guard =
+            LockDir::acquire_owned_retrying(&file, Duration::from_secs(10), 1, MIN_STALE).unwrap();
         set_mtime(&guard.path, 1, 0).unwrap();
         let error = LockDir::acquire_owned_retrying(&file, Duration::from_secs(10), 1, MIN_STALE)
             .unwrap_err();
@@ -568,15 +577,15 @@ mod tests {
     fn dead_owned_lock_is_reclaimed_and_old_guard_cannot_remove_successor() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("harness_state.json");
-        let old = LockDir::acquire_owned_retrying(&file, Duration::from_secs(10), 1, MIN_STALE)
-            .unwrap();
+        let old =
+            LockDir::acquire_owned_retrying(&file, Duration::from_secs(10), 1, MIN_STALE).unwrap();
         let mut child = std::process::Command::new("true").spawn().unwrap();
         let dead_pid = child.id();
         child.wait().unwrap();
         fs::write(old.path.join("owner"), format!("{dead_pid} dead-token\n")).unwrap();
         set_mtime(&old.path, 1, 0).unwrap();
-        let next = LockDir::acquire_owned_retrying(&file, Duration::from_secs(10), 1, MIN_STALE)
-            .unwrap();
+        let next =
+            LockDir::acquire_owned_retrying(&file, Duration::from_secs(10), 1, MIN_STALE).unwrap();
         assert!(old.ensure_owned().is_err());
         drop(old);
         next.ensure_owned().unwrap();
@@ -593,8 +602,8 @@ mod tests {
         fs::create_dir(&path).unwrap();
         fs::write(path.join("owner"), [0xff]).unwrap();
         set_mtime(&path, 1, 0).unwrap();
-        let next = LockDir::acquire_owned_retrying(&file, Duration::from_secs(10), 1, MIN_STALE)
-            .unwrap();
+        let next =
+            LockDir::acquire_owned_retrying(&file, Duration::from_secs(10), 1, MIN_STALE).unwrap();
         next.ensure_owned().unwrap();
     }
 

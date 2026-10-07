@@ -300,13 +300,13 @@ mod tests {
         let path = dir.path().join("jobs.json");
         let store = AgentCronJobStore::new(path.clone());
         let now = 1_700_000_000_000;
-        let heartbeat = store.create_heartbeat(&input("continue", "every 5m", now)).unwrap();
+        let heartbeat = store
+            .create_heartbeat(&input("continue", "every 5m", now))
+            .unwrap();
         let before = std::fs::read(&path).unwrap();
-        let held = crate::platform::lock_dir::LockDir::acquire(
-            &path,
-            std::time::Duration::from_secs(30),
-        )
-        .unwrap();
+        let held =
+            crate::platform::lock_dir::LockDir::acquire(&path, std::time::Duration::from_secs(30))
+                .unwrap();
         assert!(store.pause_heartbeat("live-1", now + 1).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), before);
         drop(held);

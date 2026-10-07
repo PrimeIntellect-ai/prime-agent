@@ -489,11 +489,9 @@ mod tests {
         let now = 1_700_000_000_000;
         let job = store.create(&input("tick", "every 10m", now)).unwrap();
         let before = std::fs::read(&path).unwrap();
-        let held = crate::platform::lock_dir::LockDir::acquire(
-            &path,
-            std::time::Duration::from_secs(30),
-        )
-        .unwrap();
+        let held =
+            crate::platform::lock_dir::LockDir::acquire(&path, std::time::Duration::from_secs(30))
+                .unwrap();
         assert!(store.cancel(&job.id, now + 1).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), before);
         drop(held);
@@ -530,7 +528,9 @@ mod tests {
         assert!(store.get_claimed_job(&job.id).is_none());
         let second = store.claim_due(now + 1_200_000, now + 1_200_000).unwrap();
         assert_eq!(second.len(), 1);
-        let recovered = store.recover_interrupted_dispatches(now + 1_300_000).unwrap();
+        let recovered = store
+            .recover_interrupted_dispatches(now + 1_300_000)
+            .unwrap();
         assert_eq!(recovered.len(), 1);
         assert_eq!(
             recovered[0].last_error.as_deref(),
@@ -606,7 +606,10 @@ mod tests {
         let now = 1_700_000_000_000;
         let job = store.create(&input("tick", "every 10m", now)).unwrap();
         let scheduled_next = now + 600_000;
-        assert!(store.defer_next_run(&job.id, now + 60_000).unwrap().is_none());
+        assert!(store
+            .defer_next_run(&job.id, now + 60_000)
+            .unwrap()
+            .is_none());
         let current = store.list().pop().expect("job kept");
         assert_eq!(
             crate::cron::parse_iso_millis(current.next_run_at.as_deref().unwrap()),
@@ -621,7 +624,10 @@ mod tests {
             crate::cron::parse_iso_millis(updated.next_run_at.as_deref().unwrap()),
             Some(deferred)
         );
-        assert!(store.defer_next_run(&job.id, now + 120_000).unwrap().is_none());
+        assert!(store
+            .defer_next_run(&job.id, now + 120_000)
+            .unwrap()
+            .is_none());
         let current = store.list().pop().expect("job kept");
         assert_eq!(
             crate::cron::parse_iso_millis(current.next_run_at.as_deref().unwrap()),
@@ -630,6 +636,9 @@ mod tests {
         // Cancelled jobs are never deferred. Fresh clock: the jobs file merges on
         // `updatedAt` freshness, so a stale stamp would lose the cancel.
         store.cancel(&job.id, now_millis()).unwrap();
-        assert!(store.defer_next_run(&job.id, now + 2_000_000).unwrap().is_none());
+        assert!(store
+            .defer_next_run(&job.id, now + 2_000_000)
+            .unwrap()
+            .is_none());
     }
 }

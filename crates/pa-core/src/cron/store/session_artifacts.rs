@@ -58,15 +58,18 @@ impl AgentCronJobStore {
         else {
             return Ok(Vec::new());
         };
-        with_state_locks(std::slice::from_ref(&path), || -> anyhow::Result<Vec<AgentCronJob>> {
-            let mut state = read_jobs_state(&path);
-            let mut recovered = Vec::new();
-            if !state.dispatches.is_empty() {
-                recover_interrupted_in_state(&mut state, now, &mut recovered, None);
-                write_jobs_state(&path, &state)?;
-            }
-            Ok(recovered)
-        })
+        with_state_locks(
+            std::slice::from_ref(&path),
+            || -> anyhow::Result<Vec<AgentCronJob>> {
+                let mut state = read_jobs_state(&path);
+                let mut recovered = Vec::new();
+                if !state.dispatches.is_empty() {
+                    recover_interrupted_in_state(&mut state, now, &mut recovered, None);
+                    write_jobs_state(&path, &state)?;
+                }
+                Ok(recovered)
+            },
+        )
         .ok_or_else(|| anyhow::anyhow!("cron jobs state lock not acquired; skipped"))?
     }
     pub(crate) fn write_jobs_session_artifacts(&self, jobs: &[AgentCronJob]) -> anyhow::Result<()> {
@@ -79,7 +82,10 @@ impl AgentCronJobStore {
             artifact_files.keys().cloned().collect();
         for job in jobs {
             if !registered.contains(&job.session_id) {
-                anyhow::bail!("cron job session artifact not registered: {}", job.session_id);
+                anyhow::bail!(
+                    "cron job session artifact not registered: {}",
+                    job.session_id
+                );
             }
         }
         let paths: Vec<PathBuf> = artifact_files.values().cloned().collect();
@@ -187,23 +193,25 @@ mod tests {
         assert_eq!(state_a.jobs[0].prompt, "job a");
         let state_b = read_jobs_state(&artifacts_b.join(SESSION_SCHEDULED_JOBS_FILENAME));
         assert_eq!(state_b.jobs.len(), 1);
-        let rebound = store.rebind_session_jobs(&SessionBinding {
-            active_session_id: "live-2".to_string(),
-            session_id: "session-1".to_string(),
-            session_file: "/w/session.jsonl".to_string(),
-            cwd: "/w".to_string(),
-        })
-        .unwrap();
+        let rebound = store
+            .rebind_session_jobs(&SessionBinding {
+                active_session_id: "live-2".to_string(),
+                session_id: "session-1".to_string(),
+                session_file: "/w/session.jsonl".to_string(),
+                cwd: "/w".to_string(),
+            })
+            .unwrap();
         assert_eq!(rebound.len(), 2);
         assert!(rebound.iter().all(|job| job.active_session_id == "live-2"));
-        let cancelled = store.cancel_jobs_for_session(
-            &CancelJobsFilter {
-                session_file: Some("/w/session.jsonl".to_string()),
-                ..Default::default()
-            },
-            now + 1,
-        )
-        .unwrap();
+        let cancelled = store
+            .cancel_jobs_for_session(
+                &CancelJobsFilter {
+                    session_file: Some("/w/session.jsonl".to_string()),
+                    ..Default::default()
+                },
+                now + 1,
+            )
+            .unwrap();
         // Both jobs share the session file (the rebind moved both), so both cancel.
         assert_eq!(cancelled.len(), 2);
     }
