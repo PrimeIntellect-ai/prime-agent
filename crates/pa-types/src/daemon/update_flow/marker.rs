@@ -8,8 +8,7 @@ use crate::JsonMap;
 use super::artifact::UpdateId;
 
 /// The supervisor identity recorded in update artifacts: `{pid,
-/// process_start_id, generation}`. Shared by the prepared marker and the
-/// roster snapshot (spec §7, §8).
+/// process_start_id, generation}` (spec §7, §8).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpdateSupervisorIdentity {
     pub pid: u64,
@@ -18,12 +17,11 @@ pub struct UpdateSupervisorIdentity {
     pub generation: String,
 }
 
-/// `prepared/<update-id>/marker.json` (spec §7): written in the same durable
-/// write as `roster.json` at `Snapshotted`. `expires_at` is what makes the
-/// `Prepared` state self-expiring — the supervisor arms a timer against it and
-/// re-checks it on any later command, and the coordinator reads it before
-/// consuming the roster: an expired marker is a refusal, never a restore of
-/// stale snapshots.
+/// `prepared/<update-id>/marker.json` (spec §7): written with `roster.json` at `Snapshotted`.
+/// `expires_at` makes `Prepared` self-expiring - the supervisor arms a timer against it and the
+/// coordinator reads it before consuming the roster; an expired marker is a refusal, never a
+/// restore
+/// of stale snapshots.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpdatePreparedMarker {
     pub update_id: UpdateId,
@@ -34,28 +32,23 @@ pub struct UpdatePreparedMarker {
     pub rest: JsonMap,
 }
 
-/// The verdict of checking a marker's `expires_at` against the current time.
-///
-/// Both sides of the comparison come from RFC 3339 strings (the marker is
-/// durable across process death, so wall-clock text is the contract), parsed
-/// here without a date-time dependency: TS `new Date().toISOString()` output
-/// (UTC, millisecond precision) and offset forms both parse.
+/// The verdict of a marker's `expires_at` against the current time. Both
+/// sides are RFC 3339 strings (durable across process death, so wall-clock
+/// text is the contract), parsed here without a date-time dependency.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreparedMarkerExpiry {
-    /// `expires_at` is still in the future: the prepared directory authorizes
-    /// the `Prepared -> Stopping` consumption.
+    /// `expires_at` is still in the future: the prepared directory
+    /// authorizes the `Prepared -> Stopping` consumption.
     Active,
-    /// The deadline passed: the prepared directory is garbage — the
-    /// supervisor returns to `Serving`, the coordinator moves to `Aborted`.
+    /// The deadline passed: the prepared directory is garbage (supervisor
+    /// back to `Serving`, coordinator `Aborted`).
     Expired,
-    /// Either timestamp is malformed, so the verdict cannot be trusted: the
-    /// prepared directory is treated as garbage and restore is refused.
+    /// Either timestamp is malformed: treated as garbage; restore is refused.
     Malformed,
 }
 
-/// Decide whether a prepared marker still authorizes consumption at `now`.
-/// A marker at exactly its deadline is expired: any command arriving after
-/// expiry (inclusive) treats the prepared directory as garbage (spec §5).
+/// Decide whether a prepared marker still authorizes consumption at `now`;
+/// a marker at exactly its deadline is expired (spec §5).
 #[must_use]
 pub fn prepared_marker_expiry(expires_at: &str, now: &str) -> PreparedMarkerExpiry {
     match (rfc3339_nanos(expires_at), rfc3339_nanos(now)) {
@@ -234,7 +227,7 @@ mod tests {
             Expired
         );
         // Fractional-vs-plain seconds compare temporally, not lexically
-        // (`.123Z` vs `Z` would sort the wrong way as raw strings).
+        // (`.123Z` vs `Z` sorts the wrong way as strings).
         assert_eq!(
             prepared_marker_expiry("2026-10-01T12:00:00.123Z", "2026-10-01T12:00:00Z"),
             Active
@@ -283,8 +276,7 @@ mod tests {
             rfc3339_nanos("2026-10-01T13:00:00+01"),
             rfc3339_nanos("2026-10-01T12:00:00Z")
         );
-        // Year boundary through an offset form: same instant, one nanosecond
-        // apart by construction of the strings.
+        // Year boundary through an offset form.
         assert_eq!(
             rfc3339_nanos("2026-12-31T23:59:59Z"),
             rfc3339_nanos("2027-01-01T00:59:59+0100")

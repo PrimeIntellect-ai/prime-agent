@@ -1,14 +1,13 @@
-//! CLI argument parsing, a faithful port of `cli/args.ts` from the TypeScript
-//! product. The parser is intentionally hand-written: `--resume`/`--print`
-//! optionally consume the next token and diagnostics carry their own
-//! formatting, none of which a stock derive-based parser can express.
+//! CLI argument parsing, a faithful port of `cli/args.ts`. The parser is
+//! intentionally hand-written: `--resume`/`--print` optionally consume the
+//! next token and diagnostics carry their own formatting, none of which a
+//! stock derive-based parser can express.
 
 use pa_types::ai::ModelThinkingLevel;
 
-/// Supported reasoning-effort levels (`THINKING_LEVELS` in the TS product).
+/// Supported reasoning-effort levels.
 pub const THINKING_LEVELS: [&str; 7] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
-/// Parse a thinking level value into the shared pa-types enum.
 pub fn parse_thinking_level(value: &str) -> Option<ModelThinkingLevel> {
     match value {
         "off" => Some(ModelThinkingLevel::Off),
@@ -22,10 +21,6 @@ pub fn parse_thinking_level(value: &str) -> Option<ModelThinkingLevel> {
     }
 }
 
-/// Removed built-in tool names that used to exist and now produce an error.
-const REMOVED_BUILTIN_TOOL_NAMES: [&str; 5] = ["read", "write", "grep", "find", "ls"];
-/// Current built-in tool names reported in tool validation errors.
-const BUILTIN_TOOL_NAMES: [&str; 1] = ["ipython"];
 /// Value flags whose free-form text may legitimately start with a dash.
 const FREEFORM_VALUE_FLAGS: [&str; 2] = ["--goal", "--autonomous-gate"];
 /// Prompt value flags whose text may look like a long option (YAML frontmatter).
@@ -84,7 +79,6 @@ impl Diagnostic {
     }
 }
 
-/// Autonomous gate options, mirroring `runtimeAutonomousConfigFromArgs`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AutonomousGates {
     pub commands: Vec<String>,
@@ -134,7 +128,6 @@ impl AutonomousConfig {
     }
 }
 
-/// Parsed CLI arguments, mirroring `Args` in `cli/args.ts`.
 #[derive(Debug, Clone, Default)]
 #[allow(clippy::struct_excessive_bools)] // the TS `Args` surface mirrored verbatim
 pub struct Args {
@@ -148,7 +141,6 @@ pub struct Args {
     pub continue_: bool,
     /// `true` when `--resume` was given without a selector.
     pub resume_bare: bool,
-    /// The `--resume <selector>` value.
     pub resume: Option<String>,
     pub help: bool,
     pub version: bool,
@@ -158,9 +150,6 @@ pub struct Args {
     pub fork: Option<String>,
     pub session_dir: Option<String>,
     pub models: Option<Vec<String>>,
-    pub tools: Option<Vec<String>>,
-    pub no_tools: bool,
-    pub no_builtin_tools: bool,
     pub print: bool,
     pub export: Option<String>,
     pub no_skills: bool,
@@ -201,10 +190,8 @@ impl Args {
 }
 
 fn parse_positive_u32(value: &str, flag: &str, diagnostics: &mut Vec<Diagnostic>) -> Option<u32> {
-    // Number() accepts arbitrary precision, so parse as i128 to cover the
-    // full accepted range before the integer/positivity/range checks. The
-    // u32::MAX bound is the point of the function: a value past it is a
-    // user error, never a silent truncation into the flag's u32 field.
+    // Number() accepts arbitrary precision, so parse as i128; a value past
+    // u32::MAX is a user error, never a silent truncation.
     match value.trim().parse::<i128>() {
         Ok(parsed) if parsed > 0 && parsed <= i128::from(u32::MAX) => u32::try_from(parsed).ok(),
         _ => {
@@ -230,7 +217,6 @@ fn parse_positive_u64(value: &str, flag: &str, diagnostics: &mut Vec<Diagnostic>
     }
 }
 
-/// Parse the CLI arguments the same way `parseArgs` in `cli/args.ts` does.
 pub fn parse_args(args: &[String]) -> Args {
     let mut result = Args::default();
     let internal_runtime_command =
@@ -319,30 +305,6 @@ pub fn parse_args(args: &[String]) -> Args {
                         .map(str::to_string)
                         .collect(),
                 );
-            }
-            "--no-tools" | "-nt" => result.no_tools = true,
-            "--no-builtin-tools" | "-nbt" => result.no_builtin_tools = true,
-            "--tools" | "-t" => {
-                let value = require_value!(arg);
-                let tools: Vec<String> = value
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|name| !name.is_empty())
-                    .map(str::to_string)
-                    .collect();
-                let removed: Vec<&str> = tools
-                    .iter()
-                    .filter(|name| REMOVED_BUILTIN_TOOL_NAMES.contains(&name.as_str()))
-                    .map(String::as_str)
-                    .collect();
-                if !removed.is_empty() {
-                    result.diagnostics.push(Diagnostic::error(format!(
-                        "Unknown built-in tool(s): {}. Available built-in tools: {}",
-                        removed.join(", "),
-                        BUILTIN_TOOL_NAMES.join(", ")
-                    )));
-                }
-                result.tools = Some(tools);
             }
             "--thinking" => {
                 let level = require_value!(arg);
@@ -519,8 +481,8 @@ pub fn parse_args(args: &[String]) -> Args {
     result
 }
 
-/// `hasRequiredOptionValue` from args.ts: the value flag either consumes the
-/// next token or records a "requires a value" error.
+/// The value flag either consumes the next token or records a
+/// "requires a value" error.
 fn take_required_value(
     args: &[String],
     index: usize,

@@ -1,12 +1,6 @@
-//! `OpenAI` Chat Completions streaming provider.
-//!
-//! Full port of `packages/ai/src/providers/openai-completions.ts`, split
-//! across submodules: compat detection and options here, message/tool/usage
-//! conversion in [`convert`], params and header assembly in [`params`], the
-//! SDK-shaped user-facing error surface in [`errors`], and the chunk-driven
-//! streaming core in [`stream`]. Compat detection
-//! (provider/baseUrl heuristics plus explicit `model.compat`) and reasoning
-//! effort mapping live here.
+//! `OpenAI` Chat Completions streaming provider: compat detection and options here,
+//! message/tool/usage conversion in [`convert`], params and header assembly in [`params`], the
+//! SDK-shaped error surface in [`errors`], and the chunk-driven streaming core in [`stream`].
 
 use serde_json::{json, Map, Value};
 
@@ -58,7 +52,7 @@ impl ToolChoice {
     }
 }
 
-/// Provider-native options (`OpenAICompletionsOptions` in the TS reference).
+/// Provider-native options.
 #[derive(Clone, Default)]
 pub struct OpenAICompletionsOptions {
     pub base: StreamOptions,
@@ -199,8 +193,7 @@ pub fn detect_compat(model: &Model) -> ResolvedCompat {
     }
 }
 
-/// Resolve compat for a model: explicit `model.compat` fields override the
-/// detected defaults.
+/// Resolve compat for a model: explicit `model.compat` fields override the detected defaults.
 pub fn get_compat(model: &Model) -> ResolvedCompat {
     let detected = detect_compat(model);
     let Some(compat) = model.compat_kind() else {
@@ -305,10 +298,6 @@ pub(crate) fn has_tool_history(messages: &[crate::types::Message]) -> bool {
     false
 }
 
-// ---------------------------------------------------------------------------
-// Reasoning details signatures
-// ---------------------------------------------------------------------------
-
 pub(crate) fn encode_reasoning_details(details: &[Value]) -> String {
     json!({
         "type": REASONING_DETAILS_SIGNATURE_TYPE,
@@ -335,7 +324,6 @@ pub(crate) fn decode_reasoning_details(signature: Option<&str>) -> Option<Vec<Va
     Some(details.clone())
 }
 
-/// Port of `streamSimpleOpenAICompletions`.
 pub fn stream_simple_openai_completions(
     model: &Model,
     context: &Context,

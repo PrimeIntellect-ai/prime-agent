@@ -1,10 +1,8 @@
 //! The interactive MCP OAuth login flow and its refresh path.
 //!
 //! One login: discover the server's OAuth metadata, register (or take) a
-//! client, run the PKCE authorization-code flow against a local callback
-//! server while racing a manual paste, exchange the code for tokens, and
-//! hand back endpoint-bound credentials for `auth.json`. Refresh validates
-//! every binding before asking the stored token endpoint again.
+//! client, run the PKCE flow against a local callback server while racing a
+//! manual paste, and hand back endpoint-bound credentials.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -18,7 +16,8 @@ use crate::auth::types::AuthCredential;
 use super::oauth_callback::{CallbackCode, CallbackServer};
 use super::oauth_discovery::{
     canonical_resource, discover, exchange_token, generate_pkce, parse_redirect_input,
-    random_state, register_client, validated_https_url, TokenResponse, TOKEN_EXPIRY_BUFFER_MS,
+    random_state, register_client, validated_https_url, AudienceMode, TokenResponse,
+    TOKEN_EXPIRY_BUFFER_MS,
 };
 use super::oauth_http::OAuthHttp;
 use url::Url;
@@ -46,8 +45,7 @@ pub trait McpLoginUi: Send + Sync {
     /// The authorization URL to open in a browser, plus instructions.
     fn on_auth(&self, url: &str, instructions: &str);
     /// Ask the user for one line of input (the callback fallback when no
-    /// manual-paste surface exists). An error means the login was
-    /// cancelled or the surface went away.
+    /// manual-paste surface exists). An error means the login was cancelled.
     fn on_prompt(
         &self,
         message: &str,
@@ -65,16 +63,24 @@ fn now_ms() -> i64 {
         .map_or(i64::MAX, |elapsed| elapsed.as_millis() as i64)
 }
 
-/// Build the credential the flow persists. A missing `expires_in` defaults
-/// to one hour; some servers omit `refresh_token` on refresh, so the prior
-/// one is kept.
+/// The audience binding a login persists with the credential (the TS
+/// `Discovery` trio): the declared resource, the PRM-selected issuer, and
+/// how the resource associates with the configured endpoint.
+#[derive(Debug, Clone, Default)]
+struct ResourceBinding {
+    resource: Option<String>,
+    issuer: Option<String>,
+    audience_mode: Option<String>,
+}
+
+/// Build the credential the flow persists. A missing `expires_in` defaults to one hour; some
+/// servers omit `refresh_token`, so the prior one is kept.
 fn to_credentials(
     token: TokenResponse,
     token_endpoint: &str,
     client_id: &str,
     endpoint: Option<&str>,
-    resource: Option<&str>,
-    issuer: Option<&str>,
+    binding: &ResourceBinding,
     previous_refresh: Option<&str>,
 ) -> AuthCredential {
     AuthCredential::Oauth {
@@ -91,8 +97,9 @@ fn to_credentials(
         endpoint: endpoint.map(str::to_string),
         token_endpoint: Some(token_endpoint.to_string()),
         client_id: (!client_id.is_empty()).then(|| client_id.to_string()),
-        resource: resource.map(str::to_string),
-        issuer: issuer.map(str::to_string),
+        resource: binding.resource.clone(),
+        issuer: binding.issuer.clone(),
+        audience_mode: binding.audience_mode.clone(),
         enterprise_url: None,
     }
 }
@@ -117,16 +124,12 @@ enum ManualOutcome {
     Failed(anyhow::Error),
 }
 
-/// Run one interactive login for a server; the returned credential is
-/// ready to persist under `mcp:<server>`.
+/// Run one interactive login; the returned credential is ready to persist under `mcp:<server>`.
 ///
 /// # Errors
 ///
-/// Returns an error when the discovery document cannot be fetched, the
-/// server supports neither dynamic client registration nor a configured
-/// client id, client registration fails, the callback server cannot start,
-/// the authorization URL cannot be built, the pasted redirect is invalid or
-/// its state mismatches, or the token exchange fails.
+/// Returns an error when discovery, registration, the callback server, the
+/// paste validation, or the token exchange fails.
 pub async fn mcp_login(
     http: &dyn OAuthHttp,
     config: &McpOAuthConfig,
@@ -141,6 +144,20 @@ pub async fn mcp_login(
             .unwrap_or(discovery.metadata.issuer.as_str())
     ));
 
+    // SEP-835: configured scopes, then the protected-resource metadata's
+    // scopes; never a blind AS-wide join.
+    let scope = config
+        .scopes
+        .clone()
+        .or_else(|| {
+            discovery
+                .protected_resource
+                .as_ref()
+                .and_then(|protected| protected.scopes_supported.as_ref())
+                .map(|scopes| scopes.join(" "))
+        })
+        .unwrap_or_default();
+
     let client_id = if let Some(client_id) = &config.client_id {
         client_id.clone()
     } else {
@@ -152,7 +169,13 @@ pub async fn mcp_login(
             );
         };
         ui.on_progress("Registering OAuth client…");
-        register_client(http, registration_endpoint, &config.label).await?
+        register_client(
+            http,
+            registration_endpoint,
+            &config.label,
+            (!scope.is_empty()).then_some(scope.as_str()),
+        )
+        .await?
     };
 
     let (verifier, challenge) = generate_pkce();
@@ -161,18 +184,6 @@ pub async fn mcp_login(
     let state = random_state();
     let callback = Arc::new(CallbackServer::start(&config.label).await?);
     let redirect_uri = callback.redirect_uri();
-
-    let scope = config
-        .scopes
-        .clone()
-        .or_else(|| {
-            discovery
-                .metadata
-                .scopes_supported
-                .as_ref()
-                .map(|scopes| scopes.join(" "))
-        })
-        .unwrap_or_default();
     let mut auth_params: Vec<(String, String)> = vec![
         ("client_id".to_string(), client_id.clone()),
         ("response_type".to_string(), "code".to_string()),
@@ -194,10 +205,9 @@ pub async fn mcp_login(
          final redirect URL here.",
     );
 
-    // Race the local callback server against a manual paste (a browser on
-    // another machine). A real paste cancels the callback waiter; manual
-    // cancellation settles it after a short grace so an in-flight browser
-    // redirect can win first.
+    // Race the local callback server against a manual paste. A real paste cancels the callback
+    // waiter; manual cancellation settles it after a short grace so an in-flight browser redirect
+    // can win first.
     let mut manual_task = ui.on_manual_code_input().map(|manual| {
         let callback = Arc::clone(&callback);
         let state = state.clone();
@@ -213,9 +223,8 @@ pub async fn mcp_login(
                     ManualOutcome::Code(CallbackCode { code, state })
                 }
                 Err(error) => {
-                    // A validation error on a real paste (bad state, no
-                    // code) is a genuine failure the caller surfaces; a
-                    // cancelled surface is not.
+                    // A validation error on a real paste is a genuine failure the caller surfaces;
+                    // a cancelled surface is not.
                     let genuine = error.to_string().contains("state mismatch")
                         || error.to_string().contains("authorization code");
                     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -282,8 +291,14 @@ pub async fn mcp_login(
         &discovery.metadata.token_endpoint,
         &client_id,
         Some(&config.url),
-        discovery.resource.as_deref(),
-        discovery.issuer.as_deref(),
+        &ResourceBinding {
+            resource: discovery.resource.clone(),
+            issuer: discovery.issuer.clone(),
+            audience_mode: discovery
+                .audience_mode
+                .map(AudienceMode::as_str)
+                .map(str::to_string),
+        },
         None,
     ))
 }
@@ -294,14 +309,15 @@ pub async fn mcp_login(
 /// # Errors
 ///
 /// Returns an error when the stored credential is not OAuth, is no longer
-/// bound to the same endpoint, resource, issuer, or token endpoint, carries
-/// no refresh token, when discovery fails or changed modes, or when the
-/// token exchange fails.
+/// bound to the same endpoint, resource audience (exact grants pin to the
+/// canonical endpoint, origin-mode grants to the endpoint's origin),
+/// issuer, or token endpoint, carries an unknown audience mode, no refresh
+/// token, when discovery fails or changed modes, or when the token exchange
+/// fails.
 ///
 /// # Panics
 ///
-/// The `expect` on the discovery resource is unreachable: the discovery-mode
-/// check above it already rejects a mode mismatch.
+/// The `expect` on the discovery resource is unreachable.
 pub async fn mcp_refresh_token(
     http: &dyn OAuthHttp,
     config: &McpOAuthConfig,
@@ -314,6 +330,7 @@ pub async fn mcp_refresh_token(
         client_id,
         resource,
         issuer,
+        audience_mode,
         ..
     } = credentials
     else {
@@ -330,11 +347,26 @@ pub async fn mcp_refresh_token(
             config.server
         );
     }
+    let endpoint_url = validated_https_url(&config.url, "MCP endpoint")?;
+    let configured_resource = canonical_resource(&endpoint_url);
     if let Some(stored_resource) = resource {
-        let configured = canonical_resource(&validated_https_url(&config.url, "MCP endpoint")?);
-        if stored_resource != &configured {
+        // Audience-aware binding (TS parity): exact grants (and legacy
+        // grants, which were only ever issued under exact matching) pin to
+        // the canonical endpoint; origin-mode grants pin to the endpoint's
+        // exact origin. Anything else fails closed.
+        let stored_audience = canonical_resource(&validated_https_url(
+            stored_resource,
+            "Stored resource audience",
+        )?);
+        let allowed_audience = if audience_mode.as_deref() == Some("origin") {
+            endpoint_url.origin().ascii_serialization()
+        } else {
+            configured_resource.clone()
+        };
+        if stored_audience != allowed_audience {
             bail!(
-                "Stored OAuth credentials are not bound to {configured}; re-run /mcp login {}",
+                "Stored OAuth credentials are not bound to {allowed_audience}; re-run /mcp \
+                 login {}",
                 config.server
             );
         }
@@ -348,6 +380,24 @@ pub async fn mcp_refresh_token(
             config.server
         ),
     }
+    // Stored audience modes are JSON-sourced; unknown values require
+    // re-login.
+    if resource.is_some()
+        && audience_mode.is_some()
+        && audience_mode.as_deref() != Some("exact")
+        && audience_mode.as_deref() != Some("origin")
+    {
+        bail!(
+            "Stored OAuth credentials for {} have an unknown audience mode; re-run /mcp \
+             login {}",
+            config.label,
+            config.server
+        );
+    }
+    // Legacy credentials predate audience modes: they were only ever
+    // issued under exact resource matching, so only "exact" re-discovery
+    // may serve them.
+    let legacy_audience = resource.is_some() && audience_mode.is_none();
     if let Some(issuer) = issuer {
         validated_https_url(issuer, "Stored authorization server issuer")?;
     }
@@ -377,6 +427,23 @@ pub async fn mcp_refresh_token(
                 "Stored OAuth credentials do not match current protected-resource metadata \
                  for {}",
                 config.url
+            );
+        }
+        let current_mode = discovery.audience_mode;
+        if legacy_audience && current_mode != Some(AudienceMode::Exact) {
+            bail!(
+                "Stored OAuth credentials for {} predate origin-level resource audiences and \
+                 may not be refreshed against them; re-run /mcp login {}",
+                config.label,
+                config.server
+            );
+        }
+        if !legacy_audience && current_mode.map(AudienceMode::as_str) != audience_mode.as_deref() {
+            bail!(
+                "Stored OAuth credentials do not match current resource audience for {}; \
+                 re-run /mcp login {}",
+                config.url,
+                config.server
             );
         }
     }
@@ -420,8 +487,11 @@ pub async fn mcp_refresh_token(
         &token_endpoint,
         &client_id,
         endpoint.as_deref(),
-        resource.as_deref(),
-        issuer.as_deref(),
+        &ResourceBinding {
+            resource: resource.clone(),
+            issuer: issuer.clone(),
+            audience_mode: audience_mode.clone(),
+        },
         refresh.as_deref(),
     ))
 }
@@ -489,9 +559,8 @@ mod tests {
         body.to_string()
     }
 
-    /// A login UI with a manual-paste surface: the paste is derived from
-    /// the authorization URL the way a user would (their own redirect URL
-    /// plus the code), or a fixed input when set.
+    /// A login UI with a manual-paste surface: the paste is derived from the authorization URL the
+    /// way a user would, or a fixed input when set.
     struct TestUi {
         auth_url: Mutex<String>,
         manual: Mutex<Option<String>>,
@@ -602,8 +671,8 @@ mod tests {
         }
     }
 
-    /// PRM metadata, its issuer's metadata, DCR, and the token endpoint —
-    /// the full Plane-style login through a manual paste.
+    /// The full Plane-style login through a manual paste: PRM, issuer
+    /// metadata, DCR, and the token endpoint.
     #[tokio::test]
     async fn discovers_protected_resource_metadata_and_external_issuer() {
         let http = ScriptedHttp::new(vec![
@@ -615,6 +684,7 @@ mod tests {
                 &json_response(&serde_json::json!({
                     "resource": RESOURCE,
                     "authorization_servers": [PLANE_ISSUER],
+                    "scopes_supported": ["read", "write"],
                 })),
             ),
             (PLANE_META_URL, 200, None, &json_response(&plane_meta())),
@@ -648,6 +718,7 @@ mod tests {
                 client_id,
                 resource,
                 issuer,
+                audience_mode,
                 ..
             } => {
                 assert_eq!(access, "access-1");
@@ -657,9 +728,25 @@ mod tests {
                 assert_eq!(client_id.as_deref(), Some("plane-client"));
                 assert_eq!(resource.as_deref(), Some(RESOURCE));
                 assert_eq!(issuer.as_deref(), Some(PLANE_ISSUER));
+                assert_eq!(audience_mode.as_deref(), Some("exact"));
             }
             other => panic!("oauth credential expected, got {other:?}"),
         }
+        // The registration request carried the resolved scope.
+        let registration_request = http
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(url, _)| url == PLANE_REGISTER)
+            .cloned()
+            .unwrap();
+        let registration_body =
+            serde_json::from_str::<serde_json::Value>(&registration_request.1.unwrap()).unwrap();
+        assert_eq!(
+            registration_body.get("scope").and_then(|v| v.as_str()),
+            Some("read write")
+        );
         // The authorization URL carries the client, the resource, and the
         // server's advertised scopes.
         let auth_url = Url::parse(&ui.auth_url.lock().unwrap()).unwrap();
@@ -690,7 +777,6 @@ mod tests {
         assert!(body.contains(&encoded_resource));
     }
 
-    /// Origin-level discovery when the server serves no RFC 9728 metadata.
     #[tokio::test]
     async fn origin_level_metadata_without_protected_resource() {
         let origin_prm = "https://srv.test/.well-known/oauth-protected-resource/mcp";
@@ -750,7 +836,6 @@ mod tests {
         );
     }
 
-    /// A `WWW-Authenticate` resource pointer wins over the derived location.
     #[tokio::test]
     async fn www_authenticate_pointer_preferred() {
         let pointer = "https://metadata.example/resources/plane";
@@ -814,7 +899,6 @@ mod tests {
         assert!(!urls.contains(&PLANE_PRM_URL.to_string()));
     }
 
-    /// Metadata for a different resource fails closed.
     #[tokio::test]
     async fn protected_resource_mismatch_fails() {
         let http = ScriptedHttp::new(vec![
@@ -833,10 +917,12 @@ mod tests {
             .await
             .unwrap_err()
             .to_string();
-        assert!(error.contains("resource does not exactly match"), "{error}");
+        assert!(
+            error.contains("resource does not match the configured endpoint"),
+            "{error}"
+        );
     }
 
-    /// An issuer that does not exactly match the PRM-selected one fails.
     #[tokio::test]
     async fn prm_selected_issuer_must_match_exactly() {
         let http = ScriptedHttp::new(vec![
@@ -931,7 +1017,6 @@ mod tests {
         }
     }
 
-    /// Servers without a registration endpoint need a pre-registered id.
     #[tokio::test]
     async fn dynamic_registration_unavailable_fails_clearly() {
         let meta = serde_json::json!({
@@ -952,7 +1037,6 @@ mod tests {
         assert!(error.contains("dynamic client registration"), "{error}");
     }
 
-    /// A redirected token POST fails instead of following the redirect.
     #[tokio::test]
     async fn redirected_token_post_rejected() {
         let credentials = AuthCredential::Oauth {
@@ -965,6 +1049,7 @@ mod tests {
             client_id: Some("c".to_string()),
             resource: None,
             issuer: None,
+            audience_mode: None,
             enterprise_url: None,
         };
         let origin_prm = "https://srv.test/.well-known/oauth-protected-resource/mcp";
@@ -981,8 +1066,8 @@ mod tests {
         assert!(error.contains("Token request to"), "{error}");
     }
 
-    /// Refresh keeps the stored bindings and the resource indicator, and
-    /// keeps the prior refresh token when the server omits a new one.
+    /// Refresh keeps the stored bindings, the resource indicator, and the
+    /// prior refresh token when the server omits a new one.
     #[tokio::test]
     async fn refresh_validates_bindings() {
         let credentials = AuthCredential::Oauth {
@@ -995,6 +1080,7 @@ mod tests {
             client_id: Some("client-xyz".to_string()),
             resource: Some(RESOURCE.to_string()),
             issuer: Some(PLANE_ISSUER.to_string()),
+            audience_mode: None,
             enterprise_url: None,
         };
         let http = ScriptedHttp::new(vec![
@@ -1068,6 +1154,7 @@ mod tests {
             client_id: None,
             resource: None,
             issuer: None,
+            audience_mode: None,
             enterprise_url: None,
         };
         let error = mcp_refresh_token(&http, &config("plane", RESOURCE), &retargeted)
@@ -1088,6 +1175,7 @@ mod tests {
             client_id: Some("client-xyz".to_string()),
             resource: Some(RESOURCE.to_string()),
             issuer: Some(PLANE_ISSUER.to_string()),
+            audience_mode: None,
             enterprise_url: None,
         };
         let error = mcp_refresh_token(&http, &config("plane", RESOURCE), &drifted)
@@ -1119,6 +1207,7 @@ mod tests {
             client_id: Some("origin-client".to_string()),
             resource: None,
             issuer: None,
+            audience_mode: None,
             enterprise_url: None,
         };
         let http = ScriptedHttp::new(vec![
@@ -1149,9 +1238,8 @@ mod tests {
         assert!(!urls.contains(&PLANE_TOKEN.to_string()));
     }
 
-    /// A genuine paste validation error surfaces; a cancelled paste keeps
-    /// the browser path alive for a grace period, then reports a missing
-    /// code.
+    /// A genuine paste validation error surfaces; a cancelled paste keeps the browser path alive,
+    /// then reports a missing code.
     #[tokio::test]
     async fn manual_paste_state_mismatch_surfaces() {
         let http = ScriptedHttp::new(vec![
@@ -1170,7 +1258,6 @@ mod tests {
                 &json_response(&serde_json::json!({ "client_id": "c" })),
             ),
         ]);
-        // The paste carries someone else's state.
         let ui = std::sync::Arc::new(TestUi::with_manual_input(
             "http://localhost:53700/callback?code=stolen&state=other",
         ));
@@ -1181,7 +1268,6 @@ mod tests {
         assert!(error.contains("OAuth state mismatch"), "{error}");
     }
 
-    /// A pre-registered client id skips dynamic registration.
     #[tokio::test]
     async fn pre_registered_client_skips_registration() {
         let http = ScriptedHttp::new(vec![
@@ -1221,5 +1307,317 @@ mod tests {
             .map(|(url, _)| url.clone())
             .collect();
         assert!(!urls.contains(&ORIGIN_REGISTER.to_string()));
+    }
+
+    /// The Vercel shape (TS parity): a root endpoint whose declared
+    /// resource keeps the trailing slash is component-equal, never a
+    /// string-equal, match — the declared resource is the stored and sent
+    /// audience.
+    #[tokio::test]
+    async fn root_endpoint_trailing_slash_resource_audience() {
+        const ROOT: &str = "https://root.example";
+        const ROOT_PRM: &str = "https://root.example/.well-known/oauth-protected-resource";
+        const ROOT_AS: &str = "https://root.example/.well-known/oauth-authorization-server";
+        let http = ScriptedHttp::new(vec![
+            (ROOT, 401, None, ""),
+            (
+                ROOT_PRM,
+                200,
+                None,
+                &json_response(&serde_json::json!({
+                    "resource": "https://root.example/",
+                    "authorization_servers": [ROOT],
+                    "scopes_supported": ["openid"],
+                })),
+            ),
+            (
+                ROOT_AS,
+                200,
+                None,
+                &json_response(&serde_json::json!({
+                    "issuer": ROOT,
+                    "authorization_endpoint": "https://root.example/authorize",
+                    "token_endpoint": "https://root.example/token",
+                    "scopes_supported": ["openid"],
+                })),
+            ),
+            (
+                "https://root.example/token",
+                200,
+                None,
+                &json_response(&serde_json::json!({
+                    "access_token": "root-access",
+                    "refresh_token": "root-refresh",
+                })),
+            ),
+        ]);
+        let ui = test_ui();
+        let mut login_config = config("root", ROOT);
+        login_config.client_id = Some("root-client".to_string());
+        let credentials = mcp_login(&http, &login_config, &ui).await.unwrap();
+        match &credentials {
+            AuthCredential::Oauth {
+                access,
+                endpoint,
+                resource,
+                issuer,
+                audience_mode,
+                ..
+            } => {
+                assert_eq!(access, "root-access");
+                assert_eq!(endpoint.as_deref(), Some(ROOT));
+                assert_eq!(resource.as_deref(), Some("https://root.example/"));
+                assert_eq!(issuer.as_deref(), Some(ROOT));
+                assert_eq!(audience_mode.as_deref(), Some("exact"));
+            }
+            other => panic!("oauth credential expected, got {other:?}"),
+        }
+        // The declared resource and the PRM-advertised scope went out on
+        // the authorization URL.
+        let auth_url = Url::parse(&ui.auth_url.lock().unwrap()).unwrap();
+        let param = |name: &str| {
+            auth_url
+                .query_pairs()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.to_string())
+        };
+        assert_eq!(param("resource").as_deref(), Some("https://root.example/"));
+        assert_eq!(param("scope").as_deref(), Some("openid"));
+        // The token request carried the declared resource.
+        let token_request = http
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(url, _)| url == "https://root.example/token")
+            .cloned()
+            .unwrap();
+        let body = token_request.1.unwrap();
+        let encoded_resource = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("resource", "https://root.example/")
+            .finish();
+        assert!(body.contains(&encoded_resource));
+    }
+
+    /// The Notion/Slack shape (TS parity): an origin-level declared
+    /// resource serves a pathful endpoint as an "origin" audience.
+    #[tokio::test]
+    async fn origin_level_resource_audience_serves_pathful_endpoint() {
+        const NOTION_PRM: &str = "https://srv.test/.well-known/oauth-protected-resource/mcp";
+        let http = ScriptedHttp::new(vec![
+            (ORIGIN_URL, 401, None, ""),
+            (
+                NOTION_PRM,
+                200,
+                None,
+                &json_response(&serde_json::json!({
+                    "resource": "https://srv.test",
+                    "authorization_servers": ["https://srv.test/tenant"],
+                    "scopes_supported": ["default"],
+                })),
+            ),
+            (
+                "https://srv.test/.well-known/oauth-authorization-server/tenant",
+                200,
+                None,
+                &json_response(&serde_json::json!({
+                    "issuer": "https://srv.test/tenant",
+                    "authorization_endpoint": ORIGIN_AUTHORIZE,
+                    "token_endpoint": ORIGIN_TOKEN,
+                    "registration_endpoint": ORIGIN_REGISTER,
+                })),
+            ),
+            (
+                ORIGIN_REGISTER,
+                200,
+                None,
+                &json_response(&serde_json::json!({ "client_id": "origin-client" })),
+            ),
+            (
+                ORIGIN_TOKEN,
+                200,
+                None,
+                &json_response(&serde_json::json!({ "access_token": "origin-access" })),
+            ),
+        ]);
+        let ui = test_ui();
+        let credentials = mcp_login(&http, &config("origin", ORIGIN_URL), &ui)
+            .await
+            .unwrap();
+        match &credentials {
+            AuthCredential::Oauth {
+                access,
+                resource,
+                issuer,
+                audience_mode,
+                ..
+            } => {
+                assert_eq!(access, "origin-access");
+                assert_eq!(resource.as_deref(), Some("https://srv.test"));
+                assert_eq!(issuer.as_deref(), Some("https://srv.test/tenant"));
+                assert_eq!(audience_mode.as_deref(), Some("origin"));
+            }
+            other => panic!("oauth credential expected, got {other:?}"),
+        }
+        // The declared origin-level audience went out on the authorization
+        // URL.
+        let auth_url = Url::parse(&ui.auth_url.lock().unwrap()).unwrap();
+        let resource = auth_url
+            .query_pairs()
+            .find(|(key, _)| key == "resource")
+            .map(|(_, value)| value.to_string());
+        assert_eq!(resource.as_deref(), Some("https://srv.test"));
+    }
+
+    /// Origin-mode credentials refresh against the origin-level binding;
+    /// an audience-mode drift against current discovery requires re-login.
+    #[tokio::test]
+    async fn refresh_validates_audience_modes() {
+        const NOTION_PRM: &str = "https://srv.test/.well-known/oauth-protected-resource/mcp";
+        const DECLARED: &str = "https://srv.test";
+        // A credential factory: the enum is not a struct, so variant
+        // rebuilds spell every field.
+        let reissued_oauth =
+            |resource: Option<&str>, audience_mode: Option<&str>| AuthCredential::Oauth {
+                access: "origin-access".to_string(),
+                refresh: Some("origin-refresh".to_string()),
+                expires: 0,
+                account_id: None,
+                endpoint: Some(ORIGIN_URL.to_string()),
+                token_endpoint: Some(ORIGIN_TOKEN.to_string()),
+                client_id: Some("origin-client".to_string()),
+                resource: resource.map(str::to_string),
+                issuer: Some("https://srv.test/tenant".to_string()),
+                audience_mode: audience_mode.map(str::to_string),
+                enterprise_url: None,
+            };
+        let credentials = reissued_oauth(Some(DECLARED), Some("origin"));
+        let http = ScriptedHttp::new(vec![
+            (ORIGIN_URL, 401, None, ""),
+            (
+                NOTION_PRM,
+                200,
+                None,
+                &json_response(&serde_json::json!({
+                    "resource": DECLARED,
+                    "authorization_servers": ["https://srv.test/tenant"],
+                })),
+            ),
+            (
+                "https://srv.test/.well-known/oauth-authorization-server/tenant",
+                200,
+                None,
+                &json_response(&serde_json::json!({
+                    "issuer": "https://srv.test/tenant",
+                    "authorization_endpoint": ORIGIN_AUTHORIZE,
+                    "token_endpoint": ORIGIN_TOKEN,
+                })),
+            ),
+            (
+                ORIGIN_TOKEN,
+                200,
+                None,
+                &json_response(&serde_json::json!({
+                    "access_token": "origin-access-2",
+                    "expires_in": 1800,
+                })),
+            ),
+        ]);
+        // The origin-mode grant refreshes through the origin-level binding.
+        let refreshed = mcp_refresh_token(&http, &config("origin", ORIGIN_URL), &credentials)
+            .await
+            .unwrap();
+        match &refreshed {
+            AuthCredential::Oauth {
+                access,
+                resource,
+                audience_mode,
+                ..
+            } => {
+                assert_eq!(access, "origin-access-2");
+                assert_eq!(resource.as_deref(), Some(DECLARED));
+                assert_eq!(audience_mode.as_deref(), Some("origin"));
+            }
+            other => panic!("oauth credential expected, got {other:?}"),
+        }
+        // The refresh request carried the stored origin-level audience.
+        let token_request = http
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(url, _)| url == ORIGIN_TOKEN)
+            .cloned()
+            .unwrap();
+        assert!(token_request
+            .1
+            .unwrap()
+            .contains("resource=https%3A%2F%2Fsrv.test"));
+
+        // (The TS audience-mode equality fences on re-discovery — legacy
+        // must re-discover as "exact", non-legacy modes must match — are
+        // migration fences: classification is a pure function of the
+        // endpoint and the declared resource, so a well-formed discovery
+        // can never drift modes for the same stored binding. They stay
+        // ported, unreachable by construction.)
+
+        // Legacy credentials (no stored audience mode) pin to the canonical
+        // endpoint: an origin-level stored resource is refused at the
+        // binding check before any request leaves.
+        let legacy = reissued_oauth(Some(DECLARED), None);
+        let error = mcp_refresh_token(&http, &config("origin", ORIGIN_URL), &legacy)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("not bound to https://srv.test/mcp"),
+            "{error}"
+        );
+
+        // Legacy credentials whose stored resource is the canonical
+        // endpoint refresh under "exact" re-discovery.
+        let http = ScriptedHttp::new(vec![
+            (ORIGIN_URL, 401, None, ""),
+            (
+                NOTION_PRM,
+                200,
+                None,
+                &json_response(&serde_json::json!({
+                    "resource": ORIGIN_URL,
+                    "authorization_servers": ["https://srv.test/tenant"],
+                })),
+            ),
+            (
+                "https://srv.test/.well-known/oauth-authorization-server/tenant",
+                200,
+                None,
+                &json_response(&serde_json::json!({
+                    "issuer": "https://srv.test/tenant",
+                    "authorization_endpoint": ORIGIN_AUTHORIZE,
+                    "token_endpoint": ORIGIN_TOKEN,
+                })),
+            ),
+            (
+                ORIGIN_TOKEN,
+                200,
+                None,
+                &json_response(&serde_json::json!({ "access_token": "exact-access" })),
+            ),
+        ]);
+        let legacy_exact = reissued_oauth(Some(ORIGIN_URL), None);
+        let refreshed = mcp_refresh_token(&http, &config("origin", ORIGIN_URL), &legacy_exact)
+            .await
+            .unwrap();
+        match &refreshed {
+            AuthCredential::Oauth {
+                access,
+                audience_mode,
+                ..
+            } => {
+                assert_eq!(access, "exact-access");
+                assert!(audience_mode.is_none());
+            }
+            other => panic!("oauth credential expected, got {other:?}"),
+        }
     }
 }

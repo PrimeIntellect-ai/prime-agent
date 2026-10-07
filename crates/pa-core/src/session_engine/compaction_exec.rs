@@ -1,6 +1,5 @@
-//! The compaction executor: assemble and run the summarization request.
-//! Port of `compact()` in core/compaction/compaction.ts (summarizer call via
-//! pa-ai's completion facade).
+//! The compaction executor: assemble and run the summarization request
+//! (via pa-ai's completion facade).
 
 use super::compaction::{build_summarization_prompt, CutPointResult};
 use super::compaction_utils::{
@@ -39,12 +38,8 @@ pub type SummarizerFn = Box<
 >;
 
 /// Assemble the summarization messages for the conversation slice.
-/// `recent_state_anchor` (TS #2385) is the newest retained assistant text:
-/// it rides the request as a `<recent-state-anchor>` block after the
-/// previous summary, marking the retained tail — not the summarized
-/// conversation above — as the current state, so the update summary cannot
-/// lag behind the kept tail. The turn-prefix request never carries one
-/// (its slice is summarized away).
+/// `recent_state_anchor` is the newest retained assistant text: it rides after
+/// the previous summary, so the update summary cannot lag behind the kept tail.
 #[must_use]
 pub fn build_summarization_request(
     messages: &[AgentMessage],
@@ -83,29 +78,26 @@ pub fn build_summarization_request(
     })]
 }
 
-/// One resolved summarizer wire call (TS `SummarySlice`): the summary text
-/// and what the call billed. The no-history split arm has no wire call, so
-/// its slice carries `usage: None`.
+/// One resolved summarizer wire call: the summary text and what it
+/// billed; the no-history split arm has no wire call (`usage: None`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SummarySlice {
     pub summary: String,
     pub usage: Option<pa_types::ai::Usage>,
 }
 
-/// The literal history stand-in for a split turn whose kept cut leaves no
-/// history to summarize (TS `Promise.resolve({ summary: "No prior history." })`
-/// — no wire call).
+/// The literal history stand-in for a split turn whose kept cut leaves
+/// no history to summarize (no wire call).
 pub const NO_PRIOR_HISTORY: &str = "No prior history.";
 
-/// The merged summary of a split turn (TS `compact`'s split join): the
-/// history summary, the split marker, then the turn-prefix summary.
+/// The merged summary of a split turn: history summary, split marker,
+/// then turn-prefix summary.
 #[must_use]
 pub fn split_summary(history: &str, turn_prefix: &str) -> String {
     format!("{history}\n\n---\n\n**Turn Context (split turn):**\n\n{turn_prefix}")
 }
 
-/// The turn-prefix summarization request (TS `generateTurnPrefixSummary`):
-/// the serialized prefix conversation under the turn-prefix instruction —
+/// The serialized prefix conversation under the turn-prefix instruction —
 /// no custom instructions, no previous summary, no kernel note.
 #[must_use]
 pub fn build_turn_prefix_request(messages: &[AgentMessage]) -> Vec<AgentMessage> {
@@ -126,30 +118,14 @@ pub fn build_turn_prefix_request(messages: &[AgentMessage]) -> Vec<AgentMessage>
     })]
 }
 
-/// The live summary-delta sink (the daemon's `compaction_summary_delta`
-/// broadcast seam): called with every text delta the summarizer model
-/// streams, in arrival order, while the summary is being generated. The
-/// compaction itself is unaffected — the sink is fire-and-forget, its
-/// emissions never gate the run — and the final summary still comes
-/// from the terminal assistant message, never from the sink's
-/// accumulated text. A caller whose run assembles several calls into one
-/// summary keeps the sink's stream in the summary's final order itself
-/// (see `execute_compaction`'s split-turn flush).
+/// The live summary-delta sink: called with every text delta the summarizer
+/// streams, in arrival order. Fire-and-forget (emissions never gate the run);
+/// the final summary comes from the terminal assistant message.
 pub type SummaryDeltaSink = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
 
-/// Run one summarizer wire call through `pa_ai::complete_simple` (TS
-/// `completeSimple` under `SUMMARIZATION_SYSTEM_PROMPT`). `headers` are
-/// the routed model's merged request headers (TS `_resolveAuxiliaryModel`
-/// returns `headers` alongside the model and key); the session-model
-/// fallback passes None — its path never wired them.
-/// `on_delta` is the live summary sink ([`SummaryDeltaSink`]): `Some`
-/// consumes the provider stream event-by-event and forwards every text
-/// delta (the live compaction block the expanded TUI renders); `None`
-/// keeps the one-shot `complete_simple` completion, byte-identical to the
-/// pre-streaming path.
-/// `failure` labels the error-stop bail exactly like the TS throw sites:
-/// "Summarization failed" for the history call, "Turn prefix
-/// summarization failed" for the turn-prefix call.
+/// Run one summarizer wire call through `pa_ai::complete_simple`: `headers`
+/// are the routed model's merged request headers; `on_delta` is the live sink
+/// ([`SummaryDeltaSink`]); `failure` labels the error-stop bail.
 ///
 /// # Errors
 ///
@@ -187,12 +163,9 @@ pub async fn complete_summary_call(
     let assistant = match on_delta {
         None => pa_ai::complete_simple(model, &context, Some(stream_options)).await?,
         Some(on_delta) => {
-            // The live path rides the same provider stream
-            // `complete_simple` awaits the end of: every text delta is
-            // forwarded to the sink as it arrives, and the terminal
-            // event's message is the summary exactly like the one-shot
-            // arm. Thinking deltas stay off the sink — the final summary
-            // carries only the text blocks.
+            // The live path rides the same provider stream: every text delta
+            // forwards to the sink, and the terminal event's message is the
+            // summary; thinking deltas stay off the sink.
             let mut stream = pa_ai::stream_simple(model, &context, Some(stream_options))?;
             while let Some(event) = stream.next_event().await {
                 if let pa_types::ai::AssistantMessageEvent::TextDelta { delta, .. } = &event {
@@ -226,10 +199,9 @@ pub async fn complete_summary_call(
     })
 }
 
-/// Sum one wire call's billed usage into a total (TS `addAssistantUsage`).
-/// Token fields saturate at `u64::MAX`: JS numbers saturate to `Infinity`
-/// rather than wrapping, and one overflowing persisted record must never
-/// panic a whole-file reader.
+/// Sum one wire call's billed usage into a total. Token fields saturate
+/// at `u64::MAX`: JS numbers saturate to `Infinity`, and one overflowing
+/// record must never panic a whole-file reader.
 pub fn add_assistant_usage(total: &mut pa_types::ai::Usage, usage: &pa_types::ai::Usage) {
     total.input = total.input.saturating_add(usage.input);
     total.output = total.output.saturating_add(usage.output);
@@ -246,9 +218,8 @@ pub fn add_assistant_usage(total: &mut pa_types::ai::Usage, usage: &pa_types::ai
     total.cost.total = add_cost(total.cost.total, usage.cost.total);
 }
 
-/// Remove one usage block from a total, clamping every field at zero (TS
-/// `subtractAssistantUsage`: "Remove a previously added usage, clamping at
-/// zero to absorb attribution drift").
+/// Remove one usage block from a total, clamping every field at zero
+/// (absorbs attribution drift).
 pub fn subtract_assistant_usage(total: &mut pa_types::ai::Usage, usage: &pa_types::ai::Usage) {
     total.input = total.input.saturating_sub(usage.input);
     total.output = total.output.saturating_sub(usage.output);
@@ -265,9 +236,8 @@ pub fn subtract_assistant_usage(total: &mut pa_types::ai::Usage, usage: &pa_type
     total.cost.total = sub_cost(total.cost.total, usage.cost.total);
 }
 
-/// The compaction's billed usage summed over its wire calls (TS `compact`'s
-/// slice loop: `usage ??= emptyUsage(); addAssistantUsage(...)`). A run with
-/// no wire calls (the no-history split arm) records no usage.
+/// The compaction's billed usage summed over its wire calls; a run with
+/// no wire calls records no usage.
 pub fn summed_usage(slices: &[SummarySlice]) -> Option<pa_types::ai::Usage> {
     let mut total: Option<pa_types::ai::Usage> = None;
     for slice in slices {
@@ -306,24 +276,18 @@ fn extract_file_operations(
 
 /// Inputs to a compaction run.
 pub struct CompactRequest<'a> {
-    /// Conversation messages (whole context, in order).
     pub messages: &'a [AgentMessage],
-    /// The chosen cut point.
     pub cut: &'a CutPointResult,
-    /// Id of the first kept entry.
     pub first_kept_entry_id: &'a str,
-    /// Context tokens before compaction.
     pub tokens_before: u64,
     /// `/compact <instructions>` guidance.
     pub custom_instructions: Option<&'a str>,
     /// Previous summary for update-mode summarization.
     pub previous_summary: Option<&'a str>,
     /// Newest retained assistant text anchoring the summary to the
-    /// kept-tail state (TS #2385 `recentStateAnchor`).
+    /// kept-tail state.
     pub recent_state_anchor: Option<&'a str>,
-    /// Budget for the summary output.
     pub reserve_tokens: u64,
-    /// Model for the summarizer call.
     pub model: pa_types::ai::Model,
 }
 
@@ -348,7 +312,6 @@ pub async fn compact_with(
         reserve_tokens,
         model,
     } = request;
-    // Messages to summarize: everything before the cut.
     let summarized = &messages[..cut.first_kept_entry_index.min(messages.len())];
     let request_messages = build_summarization_request(
         summarized,
@@ -376,12 +339,8 @@ pub async fn compact_with(
     })
 }
 
-/// The compaction entry to persist for a result.
-///
-/// `fromHook` carries the compaction origin (TS `agent-session.ts` passes
-/// its producing path's flag into `appendCompaction`). Every Rust compaction
-/// records `fromHook: false`, the exact durable value TS writes for its
-/// built-in path — never a missing key.
+/// The compaction entry to persist for a result. Every Rust compaction
+/// records `fromHook: false` — the TS durable value, never a missing key.
 pub fn compaction_entry_for(
     result: &CompactionResult,
     details: &CompactionDetails,
@@ -458,8 +417,6 @@ mod tests {
         }
     }
 
-    /// Token sums saturate at `u64::MAX` (JS `Infinity`): an overflowing
-    /// record must never panic the whole-file readers that fold totals.
     #[test]
     fn add_assistant_usage_saturates_token_totals() {
         let mut total = pa_types::ai::Usage {
@@ -478,9 +435,6 @@ mod tests {
         assert_eq!(total.output, 1);
     }
 
-    /// The entry records the TS wire record: `fromHook: false` (the
-    /// built-in origin), the file-operation
-    /// details, the summarizer usage, and the custom instructions.
     #[test]
     fn compaction_entry_records_the_ts_wire_fields() {
         let usage = pa_types::ai::Usage {
@@ -521,9 +475,7 @@ mod tests {
     }
 
     /// The history request carries the recency anchor after the previous
-    /// summary (TS #2385), marking the retained tail — not the summarized
-    /// conversation above — as the current state; a missing anchor adds no
-    /// block, and the turn-prefix request has no anchor parameter at all.
+    /// summary; a missing anchor adds no block.
     #[test]
     fn summarization_request_carries_the_recent_state_anchor() {
         let request = build_summarization_request(
@@ -544,7 +496,6 @@ mod tests {
         assert!(text.contains(
             "<recent-state-anchor>\nNewest assistant message that stays retained below the summary. The conversation to summarize is older than this anchor; the retained messages below are authoritative, so treat this anchor, not the conversation above, as the current state.\n\nthe newest kept-tail text\n</recent-state-anchor>\n\n"
         ));
-        // Without an anchor the request carries no anchor block.
         let request = build_summarization_request(
             std::slice::from_ref(&user("the conversation")),
             None,
@@ -558,10 +509,8 @@ mod tests {
         assert!(!prompt.content.text().contains("<recent-state-anchor>"));
     }
 
-    /// The serialized `details` block byte-matches the TS literal order:
-    /// `{"readFiles":[...],"modifiedFiles":[...]}` (TS `summaryDetails` in
-    /// `agent-session.ts` builds `readFiles` first). The JSON map preserves
-    /// insertion order, so the struct field order is the wire byte order.
+    /// The serialized `details` block byte-matches the TS literal order
+    /// (`readFiles` first): struct field order is the wire byte order.
     #[test]
     fn details_serialize_in_the_ts_key_order() {
         let details = CompactionDetails {
@@ -636,16 +585,14 @@ mod tests {
         assert!(result.summary.starts_with("## Goal"));
         assert_eq!(result.first_kept_entry_id, "e1");
         assert_eq!(result.tokens_before, 1_000);
-        // The persisted entry carries the summary + details.
         let details = details_for(&messages, &entries, None);
         let entry = compaction_entry_for(&result, &details, Some("focus"), None, None);
         assert_eq!(entry.summary, "## Goal\nship it");
         assert_eq!(entry.custom_instructions.as_deref(), Some("focus"));
     }
 
-    /// The turn-prefix request (TS `generateTurnPrefixSummary`): the
-    /// serialized prefix under the turn-prefix instruction — never the
-    /// checkpoint prompt, a previous summary, or the kernel note.
+    /// The turn-prefix request never carries the checkpoint prompt, a
+    /// previous summary, or the kernel note.
     #[test]
     fn turn_prefix_request_shape() {
         let messages = vec![user("big turn"), user("more of the turn")];
@@ -664,8 +611,6 @@ mod tests {
         assert!(!text.contains("the Python kernel keeps running"));
     }
 
-    /// The split join (TS `compact`'s merged summary) and the no-history
-    /// literal stand-in.
     #[test]
     fn split_summary_marker_format() {
         assert_eq!(
@@ -675,9 +620,8 @@ mod tests {
         assert_eq!(NO_PRIOR_HISTORY, "No prior history.");
     }
 
-    /// Usage sums across the compaction's wire calls (TS `compact`'s slice
-    /// loop with `addAssistantUsage`): a call without usage (the no-history
-    /// arm) contributes nothing, and no calls means no recorded usage.
+    /// A call without usage contributes nothing; no calls means no
+    /// recorded usage.
     #[test]
     fn usage_summing_over_slices() {
         let usage = |input: u64, output: u64, cost: f64| pa_types::ai::Usage {
@@ -700,7 +644,6 @@ mod tests {
             summary: summary.to_string(),
             usage,
         };
-        // Two billed calls sum (tokens and cost).
         let summed = summed_usage(&[
             slice("a", Some(usage(10, 5, first_cost))),
             slice("b", Some(usage(3, 2, second_cost))),
@@ -711,11 +654,9 @@ mod tests {
         assert_eq!(summed.total_tokens, 20);
         assert_eq!(summed.cost.input.as_f64(), 0.75);
         assert_eq!(summed.cost.total.as_f64(), 0.75);
-        // A no-usage slice (the no-history arm) contributes nothing.
         let mixed = summed_usage(&[slice("a", None), slice("b", Some(usage(3, 2, 0.0)))])
             .expect("usage recorded");
         assert_eq!(mixed.total_tokens, 5);
-        // No wire calls at all means no recorded usage.
         assert_eq!(summed_usage(&[slice("a", None)]), None);
     }
 

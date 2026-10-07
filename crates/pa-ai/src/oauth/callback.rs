@@ -1,27 +1,20 @@
-//! The Codex login's localhost callback server (TS
-//! `openai-codex.ts`'s `startLocalOAuthServer` + `oauth-page.ts`): one
-//! listener on the app registration's redirect port serving the
-//! callback route with the product's success/error pages. Only a
-//! matching redirect settles the login — a state mismatch, a missing
-//! code, or an unknown route answers its error page and keeps waiting
-//! (TS calls `settleWait` on success only). A bind failure is not an
-//! error: TS resolves a server whose wait settles empty, so the login
-//! continues on the manual paste.
+//! The Codex login's localhost callback server on the app
+//! registration's redirect port. Only a matching redirect settles the
+//! login. A bind failure is not an error: the dead server's wait
+//! settles empty and the login continues on the manual paste.
 
 use std::sync::Arc;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-/// `PI_OAUTH_CALLBACK_HOST` (TS `CALLBACK_HOST`, default `127.0.0.1`).
 pub(crate) const CALLBACK_HOST_ENV: &str = "PI_OAUTH_CALLBACK_HOST";
 
-/// The app registration's redirect: `http://localhost:1455/auth/callback`
-/// (TS `REDIRECT_URI`; the port is the registration's, not a scan range).
+/// The registered redirect port (the registration's, not a scan
+/// range).
 const CALLBACK_PORT: u16 = 1455;
 const CALLBACK_PATH: &str = "/auth/callback";
 
-/// The authorization code the browser redirect carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallbackCode {
     pub code: String,
@@ -42,21 +35,19 @@ impl CallbackShared {
         if slot.is_none() {
             *slot = Some(result);
             drop(slot);
-            // `notify_one` stores a permit when no waiter is registered
-            // yet, so a wait that checked the empty slot just before the
-            // settle still wakes on its first poll — `notify_waiters`
-            // would miss that window and hang the wait forever.
+            // `notify_one` stores a permit when no waiter is registered yet, so a wait that checked
+            // the empty slot just before the settle still wakes on its first poll —
+            // `notify_waiters` would miss that window and hang the wait forever.
             self.notify.notify_one();
         }
     }
 }
 
-/// A running callback server. A `None` slot is the never-bound server
-/// (TS's bind-error branch): its wait settles empty immediately.
+/// A running callback server; the `None` slot is the never-bound
+/// server, whose wait settles empty immediately.
 ///
-/// Dropping the server aborts its accept loop, releasing the listener's
-/// port — a settled or cancelled login never wedges the registered
-/// redirect port for the next one.
+/// Dropping aborts the accept loop, releasing the port — a settled
+/// or cancelled login never wedges the registered port.
 pub struct CodexCallbackServer {
     shared: Option<Arc<CallbackShared>>,
     port: Option<u16>,
@@ -72,9 +63,8 @@ impl Drop for CodexCallbackServer {
 }
 
 impl CodexCallbackServer {
-    /// Bind the registered redirect port on the callback host (TS
-    /// `server.listen(1455, CALLBACK_HOST)`); a bind failure leaves the
-    /// dead server (TS's error branch resolves the same shape).
+    /// Bind the registered redirect port; a bind failure leaves the
+    /// dead server.
     pub async fn start(state: &str) -> Self {
         let host = std::env::var(CALLBACK_HOST_ENV).unwrap_or_else(|_| "127.0.0.1".to_string());
         Self::bind(&host, CALLBACK_PORT, state)
@@ -82,8 +72,7 @@ impl CodexCallbackServer {
             .unwrap_or_else(|_| CodexCallbackServer::dead())
     }
 
-    /// Bind one exact host and port; the caller owns the failure (tests
-    /// and embedded hosts pick free ports).
+    /// Bind one exact host and port; the caller owns the failure.
     ///
     /// # Errors
     ///
@@ -115,8 +104,8 @@ impl CodexCallbackServer {
         })
     }
 
-    /// The never-bound server: its wait settles empty (the login's
-    /// manual paste is the remaining path).
+    /// The never-bound server: its wait settles empty (the manual
+    /// paste is the remaining path).
     #[must_use]
     pub fn dead() -> Self {
         CodexCallbackServer {
@@ -132,8 +121,7 @@ impl CodexCallbackServer {
         self.port
     }
 
-    /// Wait for the browser redirect to settle: the code, or `None`
-    /// when the wait was cancelled.
+    /// The code, or `None` when the wait was cancelled.
     pub async fn wait_for_code(&self) -> Option<CallbackCode> {
         let shared = self.shared.as_ref()?;
         loop {
@@ -144,7 +132,7 @@ impl CodexCallbackServer {
         }
     }
 
-    /// Cancel: settle the waiter with `None` (TS `cancelWait`).
+    /// Settle the waiter with `None`.
     pub async fn cancel(&self) {
         if let Some(shared) = &self.shared {
             shared.settle(None).await;
@@ -152,9 +140,8 @@ impl CodexCallbackServer {
     }
 }
 
-/// One browser request: read it, answer it, settle the login only on a
-/// matching redirect (TS the callback handler's validation order —
-/// route, state, code).
+/// One browser request: read it, answer it, settle the login only on
+/// a matching redirect.
 async fn serve_callback(mut stream: tokio::net::TcpStream, shared: &CallbackShared, state: &str) {
     let Some(request) = read_request_head(&mut stream).await else {
         let _ = write_response(
@@ -214,9 +201,8 @@ async fn serve_callback(mut stream: tokio::net::TcpStream, shared: &CallbackShar
     }
 }
 
-/// Read one request head: accumulate until the head's closing blank
-/// line (a request split across TCP reads stays complete; the callback
-/// browser request carries no body worth parsing).
+/// Read one request head, accumulating until the closing blank line
+/// (a request split across reads stays complete).
 async fn read_request_head(stream: &mut tokio::net::TcpStream) -> Option<String> {
     let mut head = Vec::with_capacity(1024);
     let mut buffer = [0u8; 8192];
@@ -225,8 +211,8 @@ async fn read_request_head(stream: &mut tokio::net::TcpStream) -> Option<String>
             return Some(String::from_utf8_lossy(&head).to_string());
         }
         if head.len() >= buffer.len() {
-            // An oversized head: parse what arrived (the handler's route
-            // checks reject it).
+            // An oversized head: parse what arrived; the route checks
+            // reject it.
             return Some(String::from_utf8_lossy(&head).to_string());
         }
         let read = stream.read(&mut buffer).await.ok()?;
@@ -271,10 +257,8 @@ fn percent_decode(value: &str) -> String {
     let mut index = 0;
     while index < bytes.len() {
         if bytes[index] == b'%' && index + 2 < bytes.len() {
-            // The two bytes after `%` are decoded as bytes — a slice of
-            // the UTF-8 string there could split a multi-byte character
-            // and panic, so malformed escapes fall through to the
-            // literal byte instead.
+            // The two bytes after `%` are decoded as bytes — a string slice there could split a
+            // multi-byte character, so malformed escapes fall through to the literal byte.
             if let Ok(hex) = std::str::from_utf8(&bytes[index + 1..index + 3]) {
                 if let Ok(byte) = u8::from_str_radix(hex, 16) {
                     out.push(byte);
@@ -304,9 +288,8 @@ fn escape_html(value: &str) -> String {
     out
 }
 
-/// The callback pages: a dark minimal page carrying the login's outcome
-/// (the port's page shape; the TS flow's own wording rides the
-/// messages).
+/// The callback pages: a dark minimal page carrying the login's
+/// outcome; the TS flow's wording rides the messages.
 fn render_page(title: &str, message: &str) -> String {
     format!(
         r#"<!doctype html>
@@ -349,7 +332,6 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    /// One live server on a free loopback port, with its port.
     async fn live(state: &str) -> (CodexCallbackServer, u16) {
         let server = CodexCallbackServer::bind("127.0.0.1", 0, state)
             .await
@@ -358,7 +340,6 @@ mod tests {
         (server, port)
     }
 
-    /// One raw browser request and its whole response.
     async fn request(port: u16, target: &str) -> String {
         use tokio::io::AsyncReadExt as _;
         let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
@@ -383,11 +364,9 @@ mod tests {
         response
     }
 
-    /// The missed-notification regression: a settle landing between the
-    /// wait's empty-slot check and its `notified` registration still
-    /// wakes — the settle's stored permit (`notify_one`) completes the
-    /// future's first poll. With a `notify_waiters` settle this wait
-    /// would hang and the bound fails the test.
+    /// The missed-notification regression: a settle landing between the wait's empty-slot check and
+    /// its `notified` registration still wakes (the `notify_one` permit). A `notify_waiters` settle
+    /// would hang here.
     #[tokio::test]
     async fn a_settle_in_the_registration_window_still_wakes() {
         let server = CodexCallbackServer::bind("127.0.0.1", 0, "the-state")
@@ -397,9 +376,8 @@ mod tests {
             .shared
             .as_ref()
             .expect("a bound server carries its shared slot");
-        // The wait's shape, with the race window staged exactly: the
-        // slot check ran (empty), the `notified` future exists but has
-        // not registered yet, and the settle lands in that window.
+        // The race window staged exactly: the slot check ran (empty), the `notified` future exists
+        // but has not registered, and the settle lands in that window.
         let notified = shared.notify.notified();
         assert!(
             shared.result.lock().await.is_none(),
@@ -413,8 +391,8 @@ mod tests {
         assert_eq!(settled, Some(None));
     }
 
-    /// The fragmentation regression: a request split across reads stays
-    /// complete (the head accumulates until the closing blank line).
+    /// The fragmentation regression: a request split across reads
+    /// stays complete.
     #[tokio::test]
     async fn a_request_split_across_reads_parses() {
         let (server, port) = live("the-state").await;
@@ -431,8 +409,6 @@ mod tests {
             .write_all(b"back?code=split-code&state=the-state HTTP/1.1\r\nHost: localhost\r\n\r\n")
             .await
             .expect("the rest of the request writes");
-        // The settle is the observable readiness: the split request
-        // still settles its code.
         let code = tokio::time::timeout(Duration::from_secs(2), server.wait_for_code())
             .await
             .expect("the split request settles")
@@ -518,8 +494,7 @@ mod tests {
         assert_eq!(percent_decode("a%20b"), "a b");
         assert_eq!(percent_decode("bad%2"), "bad%2");
         // A `%` escape that would split a multi-byte character decodes
-        // as the literal bytes (the regression for the panicking
-        // string slice).
+        // as the literal bytes.
         assert_eq!(percent_decode("%9\u{e9}"), "%9\u{e9}");
         assert_eq!(
             query_param("code=1&state=2", "state"),
@@ -532,8 +507,8 @@ mod tests {
     #[test]
     fn the_pages_escape_their_text() {
         let page = error_page("<script>&\"'</script>");
-        // The angle brackets escape too: the payload renders fully
-        // entity-encoded, never as raw markup.
+        // The payload renders fully entity-encoded, never as raw
+        // markup.
         assert!(
             page.contains("&lt;script&gt;&amp;&quot;&#39;&lt;/script&gt;"),
             "{page}"

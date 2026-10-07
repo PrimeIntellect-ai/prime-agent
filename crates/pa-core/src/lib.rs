@@ -1,12 +1,6 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
-// by design on hot paths (boxing the 27 flagged fns is allocation-churn
-// with zero correctness gain); the fn-length threshold is a style gate,
-// not correctness (the session-engine fns are intentionally linear); 64-bit
-// targets - the narrowing sits at OS/protocol boundaries where the values
-// are bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
-// guarded parses), and checked conversions would add panic paths where
-// silent wrap was deliberate (the per-site triage found NO genuinely
-// suspect family in this crate - the lane dossier records the read).
+// large_futures: stack futures on hot paths by design. too_many_lines:
+// style gate only. Casts: 64-bit targets; narrowing sits at bounded
+// OS/protocol boundaries.
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -15,20 +9,15 @@
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// Test-only: the exact-float `assert_eq!`s assert parsed fixture values
-// (the byte-identity contract - values written as JSON literals); an
+// Test-only: exact-float `assert_eq!`s assert parsed fixture values; an
 // epsilon compare would weaken the assertions, not fix a lint.
 #![cfg_attr(test, allow(clippy::float_cmp))]
 
 //! Session engine: tools, skills, prompts, compaction, refinement, kernel/RLM
 //! manager, subagents, session manager, settings.
 //!
-//! Public API (crate facade): the tool-definition contract for the
-//! model-facing surface. All subsystem internals are `pub(crate)`;
-//! `SessionEngine` (message in -> events out) is the future facade per the
-//! crate README. This lane ports the tools subsystem; its only public
-//! surface is what other layers legitimately consume: the tool definitions
-//! (name, schema, executor) and the pluggable operation seams.
+//! Public API: the tool-definition contract; subsystem internals are `pub(crate)`.
+//! `SessionEngine` (message in -> events out) is the future facade.
 
 pub(crate) mod tools;
 
@@ -42,10 +31,8 @@ pub use tools::tool_definition::{
 // tools (cwd-relative resolve with the macOS filename variants).
 pub use tools::path_utils::resolve_read_path;
 
-// Result-rendering helpers: the image metadata pair (the bounded-prefix
-// dimension read) the daemon's snapshot elision consumes alongside the
-// tool renderers. The narrow re-export keeps the rest of the module's
-// surface crate-private.
+// Result-rendering helpers: the image metadata pair the daemon's snapshot
+// elision consumes alongside the tool renderers (narrow re-export).
 pub use tools::render_utils::{get_image_dimensions_prefix, IMAGE_DIMENSIONS_PREFIX_BYTES};
 
 // bash tool: definition + local/remote execution seam.
@@ -61,9 +48,10 @@ pub use tools::edit::{
 
 // ipython tool: definition + kernel lifecycle seam (RLM bootstrap included).
 pub use tools::ipython::{
-    create_ipython_tool_definition, ExecuteResult, ExecuteStatus, IpythonKernelProvisioner,
-    IpythonToolOptions, IpythonToolUi, KernelAttachment, KernelBusyAfterInterruptError,
-    KernelErrorInfo, KernelExecError, KernelExecutor,
+    create_ipython_tool_definition, sent_agent_message_json, ExecuteResult, ExecuteStatus,
+    IpythonKernelProvisioner, IpythonToolOptions, IpythonToolUi, KernelAttachment,
+    KernelBusyAfterInterruptError, KernelErrorInfo, KernelExecError, KernelExecutor,
+    LateSentAgentMessageHandler,
 };
 pub use tools::rlm_bootstrap::{build_rlm_bootstrap_code, PythonSkillRuntimeInfo};
 // RLM kernel subsystem: persistent IPython kernel lifecycle.
@@ -87,4 +75,5 @@ pub mod settings;
 pub mod skills;
 pub mod slash_command_args;
 pub mod update;
+pub mod workspace_snapshot;
 pub use kernel::ReplKernelManager;

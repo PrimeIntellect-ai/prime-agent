@@ -1,6 +1,4 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28) - this target's own
-// crate root: the same bounded-boundary disposition as src/lib.rs
-// (large_futures/too_many_lines/the cast family; details there).
+// Pedantic-gate dispositions as src/lib.rs (large_futures/too_many_lines/casts).
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -10,15 +8,9 @@
     clippy::cast_precision_loss
 )]
 
-//! Verifier: an abort during a running kernel cell must settle the turn
-//! at once (dogfood P0): Ctrl+C must kill the in-flight tool execution -
-//! interrupt the cell, force-abort the execution after the grace window,
-//! and return the loop to ready - instead of waiting the cell out or
-//! wedging in an aborting state while the spinner burns.
-//!
-//! The cell writes a `started` marker before sleeping, so the test aborts
-//! strictly mid-cell, and a `finished` marker after the sleep, so the test
-//! proves the cell actually died (the interrupted cell never completes).
+//! Verifier: an abort during a running kernel cell must settle the turn at once: Ctrl+C interrupts
+//! the cell, force-aborts the execution after the grace window, and returns the loop to ready. The
+//! cell writes `started` and `finished` markers around its sleep, so the abort lands mid-cell.
 #![cfg(unix)]
 
 use std::path::{Path, PathBuf};
@@ -55,38 +47,6 @@ fn kernel_python() -> Option<PathBuf> {
     None
 }
 
-/// The installed release directory (ships `prime-agent-runtime/`): the same
-/// resolution the sibling live-kernel verifier uses.
-fn release_dir() -> Option<PathBuf> {
-    if let Some(explicit) = std::env::var_os("PI_PACKAGE_DIR") {
-        let explicit = PathBuf::from(explicit);
-        assert!(
-            explicit.join("prime-agent-runtime").exists(),
-            "PI_PACKAGE_DIR {} has no prime-agent-runtime",
-            explicit.display()
-        );
-        return Some(explicit);
-    }
-    let releases = PathBuf::from(std::env::var("HOME").map_or_else(
-        |_| "/home/ubuntu/.local/share/prime-agent/releases".to_string(),
-        |home| format!("{home}/.local/share/prime-agent/releases"),
-    ));
-    let Ok(entries) = std::fs::read_dir(&releases) else {
-        eprintln!(
-            "no releases dir at {}; skipping live kernel test",
-            releases.display()
-        );
-        return None;
-    };
-    let mut candidates: Vec<PathBuf> = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.join("prime-agent-runtime").is_dir())
-        .collect();
-    candidates.sort();
-    candidates.pop()
-}
-
 /// Scoped process-env overrides: applied on construction, restored on drop.
 struct EnvOverride {
     saved: Vec<(String, Option<String>)>,
@@ -119,9 +79,8 @@ impl Drop for EnvOverride {
     }
 }
 
-/// The wedge cell: writes the `started` marker (the test aborts strictly
-/// after it), sleeps far beyond the abort budget, then writes `finished`
-/// (must never exist after the abort settled).
+/// The wedge cell: writes the `started` marker (the test aborts strictly after it), sleeps far
+/// beyond the abort budget, then writes `finished` (must never exist after the abort settled).
 fn wedge_cell(started: &Path, finished: &Path) -> String {
     format!(
         "open({started:?}, \"w\").write(\"started\")\nimport time\ntime.sleep(120)\nopen({finished:?}, \"w\").write(\"finished\")\nprint(\"cell completed\")",
@@ -140,16 +99,11 @@ fn scripted_model() -> pa_agent::types::Model {
     .expect("faux loop model")
 }
 
-/// An abort mid-cell settles the whole turn at once: the loop returns, the
-/// cell dies (no `finished` marker), and the agent is ready for the next
-/// prompt. The abort budget is generous for CI but far below the cell's
-/// 120s sleep: a wedge waits the sleep out (or forever).
+/// The abort budget is generous for CI but far below the cell's 120s
+/// sleep: a wedge waits the sleep out (or forever).
 #[tokio::test]
 async fn abort_during_a_kernel_cell_settles_the_turn_immediately() {
     let Some(kernel_python) = kernel_python() else {
-        return;
-    };
-    let Some(release) = release_dir() else {
         return;
     };
     let dir = tempfile::tempdir().expect("temp dir");
@@ -166,7 +120,6 @@ async fn abort_during_a_kernel_cell_settles_the_turn_immediately() {
             "PRIME_AGENT_KERNEL_PYTHON",
             Some(kernel_python.display().to_string()),
         ),
-        ("PI_PACKAGE_DIR", Some(release.display().to_string())),
         ("PRIME_AGENT_CODING_AGENT_DIR", None),
         ("PRIME_API_KEY", None),
     ]);
@@ -189,6 +142,8 @@ async fn abort_during_a_kernel_cell_settles_the_turn_immediately() {
     provider.push_text_turn("the cell completed");
 
     let engine = create_session(SessionEngineConfig {
+        on_late_sent_agent_message: None,
+        semantic_edges: None,
         cron_store: None,
         steering_mode: None,
         follow_up_mode: None,
@@ -280,8 +235,7 @@ async fn abort_during_a_kernel_cell_settles_the_turn_immediately() {
     // Abort strictly mid-cell.
     agent.abort();
 
-    // The turn settles at once: an abort wedge hangs here for the rest of
-    // the cell (or forever).
+    // The turn settles at once: an abort wedge hangs here for the rest of the cell (or forever).
     let settled = tokio::time::timeout(std::time::Duration::from_secs(30), prompt)
         .await
         .expect("the aborted turn must settle within 30s")
@@ -289,8 +243,7 @@ async fn abort_during_a_kernel_cell_settles_the_turn_immediately() {
     // Either the abort surfaces as an error or the turn outcome settles;
     // both mean the loop returned.
     let _ = settled;
-    // The cell itself died: no `finished` marker, even after a grace wait
-    // past the abort settle.
+    // The cell itself died: no `finished` marker, even after a grace wait past the abort settle.
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     assert!(
         !finished.exists(),

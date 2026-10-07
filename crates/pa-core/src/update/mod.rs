@@ -4,13 +4,15 @@
 //! driver lives in pa-cli; everything here is the mechanism it drives, kept
 //! daemon-free so pa-core stays the shared client/service layer. The
 //! `installer` module is the other update body: the installer-takeover
-//! funnel `prime-agent update` and the TUI's `/update` run — the official
-//! domain's installer (never a GitHub raw or workflow URL) owns the whole
+//! funnel `prime-agent update` and the TUI's `/update` run — the update
+//! channel's installer (never a GitHub raw or workflow URL) owns the whole
 //! move, exec'd through the trusted absolute `/bin/sh` (never a
 //! `PATH`-resolved interpreter), kept beside the staged flow the
-//! `package update` self target still serves.
+//! `package update` self target still serves. The `homebrew` detector
+//! lets CLI and TUI refuse package-manager installs before that funnel.
 
 pub mod download;
+pub mod homebrew;
 pub mod install;
 pub mod installer;
 pub mod release;

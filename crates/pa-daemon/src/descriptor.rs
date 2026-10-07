@@ -1,6 +1,5 @@
 //! Durable worker descriptors on disk (fs layer over the pa-types
-//! `DaemonWorkerDescriptor` contract, port of daemon-worker-protocol.ts
-//! persistence). A descriptor persisted under
+//! `DaemonWorkerDescriptor` contract). A descriptor persisted under
 //! `<agent-dir>/daemon-workers/<socket-key>/<workerId>.json` lets a
 //! replacement supervisor adopt or relaunch the worker's session.
 
@@ -40,15 +39,9 @@ pub fn durable_create_command(payload: &Value) -> DurableDaemonCreateCommand {
     }
 }
 
-/// The environment the supervisor spawns a worker with (spec §8's roster
-/// `launch_env`: "env snapshot to respawn the worker identically"). One
-/// definition shared by the spawn path and the update roster, so the
-/// snapshot cannot drift from the real spawn env. `instance_id` is
-/// per-spawn (a fresh uuid at every relaunch; the roster row pins the
-/// current one as the snapshot). The session-lease owner id is stamped
-/// per worker (TS `daemon-supervisor.ts` mints it at launch): a lease the
-/// worker acquires must name its own active session, never an id the
-/// supervisor inherited from an ancestor environment.
+/// The environment the supervisor spawns a worker with (spec §8's roster `launch_env`). One
+/// definition shared by the spawn path and the update roster, so the snapshot cannot drift.
+/// The session-lease owner id is stamped per worker: the lease must name its own session.
 pub fn worker_launch_env(
     agent_dir: &Path,
     supervisor_socket: &str,
@@ -123,9 +116,8 @@ pub fn worker_launch_env(
 ///
 /// # Panics
 ///
-/// Panics only on an internal invariant violation: the freshly built
-/// payload not being a JSON object (the `json!` literal always is, so the
-/// panic is not reachable in practice).
+/// Panics only on an internal invariant violation (the `json!` literal
+/// always is an object).
 #[must_use]
 pub fn create_command_payload(durable: &DurableDaemonCreateCommand) -> Value {
     let mut payload = json!({ "type": "create" });
@@ -146,10 +138,8 @@ pub fn create_command_payload(durable: &DurableDaemonCreateCommand) -> Value {
 ///
 /// # Errors
 ///
-/// Returns an error when the descriptor has an unsupported version,
-/// belongs to another supervisor socket, or is missing required fields
-/// (worker id, pid, socket path, authentication token, or root active
-/// session id).
+/// Errors on an unsupported version, another supervisor's socket, or
+/// missing required fields.
 pub fn validate_descriptor(
     descriptor: &WorkerDescriptor,
     supervisor_socket_path: &Path,
@@ -211,15 +201,46 @@ pub fn descriptor_dir(agent_dir: &Path, socket_path: &Path) -> PathBuf {
         .join(crate::paths::hash_key(&socket_path.to_string_lossy(), 12))
 }
 
-/// Write a file atomically with 0600 permissions (port of writeFileAtomicSync).
+/// The temp file's durability posture before the rename: the port of TS
+/// `writeFileAtomicSync`'s per-call-site `fsync` option (the same
+/// per-site variance the worker journal's `Finalize` enum models for its
+/// own writes).
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum TempSync {
+    /// `fsync: true` — sync the temp file before the rename (the durable
+    /// surfaces: worker descriptors, the identity-pending record).
+    Synced,
+    /// The TS default at the call sites that pass no `fsync` option: the
+    /// temp data rides the rename unsynced. A crash may lose the write;
+    /// the atomic rename keeps every state a reader can see parseable.
+    Unsynced,
+}
+
+/// Write a file atomically with 0600 permissions (port of
+/// `writeFileAtomicSync` at its `fsync: true` call sites).
+///
+/// # Errors
+///
+/// Returns an error when the parent directory cannot be created or the temp file's
+/// create/write/sync/rename fails (the 0600 restriction is best effort).
+pub fn write_file_atomic(path: &Path, content: &str) -> Result<()> {
+    write_file_atomic_at(path, content, TempSync::Synced)
+}
+
+/// [`write_file_atomic`] without the temp-file sync — the TS
+/// `writeFileAtomicSync` call sites that pass no `fsync` option.
 ///
 /// # Errors
 ///
 /// Returns an error when the parent directory cannot be created, or when
-/// creating, writing, flushing, or syncing the temp file fails, or when
-/// the final rename onto `path` fails; the 0600 restriction is best
-/// effort and never fails the call.
-pub fn write_file_atomic(path: &Path, content: &str) -> Result<()> {
+/// creating, writing, or flushing the temp file fails, or when the final
+/// rename onto `path` fails; the 0600 restriction is best effort and
+/// never fails the call.
+pub(crate) fn write_file_atomic_unsynced(path: &Path, content: &str) -> Result<()> {
+    write_file_atomic_at(path, content, TempSync::Unsynced)
+}
+
+fn write_file_atomic_at(path: &Path, content: &str, sync: TempSync) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -230,12 +251,51 @@ pub fn write_file_atomic(path: &Path, content: &str) -> Result<()> {
         let mut writer = std::io::BufWriter::new(file);
         writer.write_all(content.as_bytes())?;
         writer.flush()?;
-        writer.get_ref().sync_all()?;
+        if matches!(sync, TempSync::Synced) {
+            writer.get_ref().sync_all()?;
+        }
     }
     let _ = pa_core::platform::perms::restrict_file(&temp);
     pa_core::platform::rename_onto(&temp, path)
         .with_context(|| format!("persist {}", path.display()))?;
+    #[cfg(test)]
+    atomic_write_probe::record(path, sync);
     Ok(())
+}
+
+/// Test-only served-path witness for the atomic writes: the durability
+/// class of a write is not observable in the persisted bytes (the
+/// temp-file sync differs, not the content), so the supervision oracles
+/// take the recorded classes here and assert the intended writer
+/// actually served a launch.
+#[cfg(test)]
+pub(crate) mod atomic_write_probe {
+    use super::{PathBuf, TempSync};
+    use std::sync::Mutex;
+
+    static RECORDED: Mutex<Vec<(PathBuf, TempSync)>> = Mutex::new(Vec::new());
+
+    /// Record one successful atomic write's path and durability class.
+    pub(crate) fn record(path: &std::path::Path, sync: TempSync) {
+        RECORDED
+            .lock()
+            .expect("atomic write probe")
+            .push((path.to_path_buf(), sync));
+    }
+
+    /// Drain the recorded writes under one root (an oracle's descriptor
+    /// path or its directory), leaving every other record in place:
+    /// cargo runs tests in parallel, so a process-wide drain would
+    /// steal a parallel oracle's records and fail its durability
+    /// assertions.
+    pub(crate) fn take_under(root: &std::path::Path) -> Vec<(PathBuf, TempSync)> {
+        let mut recorded = RECORDED.lock().expect("atomic write probe");
+        let (under, rest): (Vec<_>, Vec<_>) = recorded
+            .drain(..)
+            .partition(|(path, _)| path.starts_with(root));
+        *recorded = rest;
+        under
+    }
 }
 
 /// Persist the worker descriptor atomically with a fresh `updated_at`
@@ -243,31 +303,40 @@ pub fn write_file_atomic(path: &Path, content: &str) -> Result<()> {
 ///
 /// # Errors
 ///
+/// Returns an error when serialization or the atomic write to `path` fails.
+pub fn persist_worker(path: &Path, descriptor: &WorkerDescriptor) -> Result<()> {
+    persist_worker_at(path, descriptor, TempSync::Synced)
+}
+
+/// The one persist body behind both durability classes: the same fresh
+/// `updated_at` stamp and atomic rename, differing only in the
+/// temp-file sync — `TempSync`, the single optional-fsync source of
+/// truth the write family already dispatches on.
+///
+/// # Errors
+///
 /// Returns an error when the descriptor cannot be serialized or the
 /// atomic write to `path` fails.
-pub fn persist_worker(path: &Path, descriptor: &WorkerDescriptor) -> Result<()> {
+pub(crate) fn persist_worker_at(
+    path: &Path,
+    descriptor: &WorkerDescriptor,
+    sync: TempSync,
+) -> Result<()> {
     let mut descriptor = descriptor.clone();
     descriptor.updated_at = crate::util::now_iso();
     let content = serde_json::to_string_pretty(&descriptor)?;
-    write_file_atomic(path, &content)
+    write_file_atomic_at(path, &content, sync)
 }
 
-/// The identity-pending side record (the descriptor store's own
-/// durability marker for the root-identity follow): written beside the
-/// descriptor when a moved identity's persist failed on both attempts,
-/// carrying the moved-to identity AND the moment of the move so a
-/// restart never serves the superseded session from the stale record —
-/// and never rolls a NEWER persisted identity back onto an older move
-/// (the boot applies the pending only while it is fresher than the
-/// record's `updated_at`). Removed by the repair — the first persist
-/// that lands the repaired record.
+/// The identity-pending side record: written beside the descriptor when a moved identity's
+/// persist failed on both attempts, carrying the moved-to identity AND the move's moment,
+/// so a restart never serves the superseded session (applied only while fresher than `updated_at`).
 pub(crate) fn identity_pending_path(descriptor_path: &Path) -> PathBuf {
     descriptor_path.with_extension("identity-pending")
 }
 
-/// Record the moved-to identity durably (the follow's fallback when the
-/// descriptor write failed: the boot reads this and applies the moved
-/// identity to the resident before any routing or relaunch).
+/// Record the moved-to identity durably (the follow's fallback when the descriptor write
+/// failed: the boot applies it to the resident before any routing or relaunch).
 ///
 /// # Errors
 ///
@@ -310,9 +379,8 @@ pub(crate) fn read_identity_pending(descriptor_path: &Path) -> Option<(String, S
 ///
 /// # Errors
 ///
-/// Returns an error when the removal fails — a stale side record left
-/// behind could roll a later boot back onto this move, so the callers
-/// surface the failure and the next repair retries the removal.
+/// Returns an error when the removal fails (a stale record could roll a
+/// later boot back onto this move).
 pub(crate) fn clear_identity_pending(descriptor_path: &Path) -> Result<()> {
     match std::fs::remove_file(identity_pending_path(descriptor_path)) {
         Ok(()) => Ok(()),
@@ -368,14 +436,16 @@ pub fn load_supervisor_config(
     Some(config)
 }
 
-/// Persist the supervisor config atomically.
+/// Persist the supervisor config atomically (TS `persistSupervisorConfig`
+/// — `writeFileAtomicSync` passes no `fsync` option at this call site,
+/// so the unsynced rename is the daemon's own posture for this write: a
+/// crash losing it only costs the mirror this boot rewrote anyway).
 ///
 /// # Errors
 ///
-/// Returns an error when the config cannot be serialized or the atomic
-/// write to `path` fails.
+/// Returns an error when the config cannot be serialized or written.
 pub fn persist_supervisor_config(path: &Path, config: &PersistedSupervisorConfig) -> Result<()> {
-    write_file_atomic(path, &serde_json::to_string_pretty(config)?)
+    write_file_atomic_unsynced(path, &serde_json::to_string_pretty(config)?)
 }
 
 use std::io::Write as _;
@@ -395,6 +465,89 @@ mod tests {
         assert!(
             std::fs::read_dir(dir.path()).unwrap().count() == 1,
             "the temp file must not survive the rename"
+        );
+    }
+
+    #[test]
+    fn unsynced_atomic_write_replaces_an_existing_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("supervisor.config.json");
+        std::fs::write(&path, "stale").unwrap();
+        write_file_atomic_unsynced(&path, "next").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "next");
+        assert!(
+            std::fs::read_dir(dir.path()).unwrap().count() == 1,
+            "the temp file must not survive the unsynced rename"
+        );
+    }
+
+    #[test]
+    fn persist_worker_at_unsynced_stamps_and_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("w.json");
+        let descriptor: WorkerDescriptor = serde_json::from_value(json!({
+            "version": 2,
+            "workerId": "wspawn",
+            "pid": 4242,
+            "socketPath": "/tmp/w.sock",
+            "recoveryJournalPath": "/tmp/w.recovery.jsonl",
+            "supervisorSocketPath": "/tmp/d.sock",
+            "authenticationToken": "tok",
+            "rootActiveSessionId": "wspawn",
+            "createdAt": "2026-10-01T00:00:00Z",
+            "updatedAt": "2026-10-01T00:00:00Z",
+            "lifecycle": "starting",
+            "createCommand": {},
+            "consecutiveFailures": 0,
+        }))
+        .expect("descriptor");
+        persist_worker_at(&path, &descriptor, TempSync::Unsynced).expect("persist");
+        let persisted: WorkerDescriptor =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).expect("parse");
+        // The spawn record carries the same content the durable persist
+        // would (the stamp included) — only the pre-rename fsync differs.
+        assert_eq!(persisted.worker_id, "wspawn");
+        assert_eq!(persisted.pid, 4242);
+        assert_eq!(persisted.lifecycle, WorkerLifecycle::Starting);
+        assert_ne!(
+            persisted.updated_at, descriptor.updated_at,
+            "the fresh updated_at stamp rides the spawn record"
+        );
+        assert!(
+            std::fs::read_dir(dir.path()).unwrap().count() == 1,
+            "the temp file must not survive the rename"
+        );
+    }
+
+    #[test]
+    fn persisted_supervisor_config_round_trips_through_the_unsynced_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("d.sock");
+        let path = dir.path().join("supervisor.config.json");
+        let default_session_dir = dir.path().join("sessions");
+        persist_supervisor_config(
+            &path,
+            &PersistedSupervisorConfig {
+                version: 1,
+                socket_path: socket.to_string_lossy().to_string(),
+                default_session_dir: Some(default_session_dir.to_string_lossy().to_string()),
+            },
+        )
+        .unwrap();
+        let loaded =
+            load_supervisor_config(&path, &socket).expect("the unsynced persist stays parseable");
+        assert_eq!(
+            (
+                loaded.version,
+                loaded.socket_path,
+                loaded.default_session_dir
+            ),
+            (
+                1,
+                socket.to_string_lossy().to_string(),
+                Some(default_session_dir.to_string_lossy().to_string())
+            ),
+            "the loaded config matches the unsynced write and belongs to its socket"
         );
     }
 

@@ -1,11 +1,7 @@
-//! Attach/snapshot reconstruction: wire data from the daemon (slim attach
-//! results, streamed session events) folded into UI transcript items.
-//!
-//! Daemon message payloads are raw JSON (`Value`): the session engine owns
-//! their evolution, and the TUI renders what arrives. Message decoding is
-//! therefore lenient — it accepts plain-string content and content-block
-//! arrays, with or without explicit block `type` tags, covering the shapes
-//! the scripted harness and the real engine both emit.
+//! Attach/snapshot reconstruction: wire data from the daemon (slim
+//! attach results, streamed session events) folded into UI transcript
+//! items. Decoding is lenient — plain-string or block content, with or
+//! without `type` tags — because the harness and the real engine both emit.
 
 use crate::chat::{AssistantMessage, ChatEntry, MessageBlock, ToolCallCard, ToolResultView};
 use pa_types::daemon::{DaemonEventCursor, DaemonReplayInfo};
@@ -46,45 +42,38 @@ pub struct Reconstructed {
     pub chat: Vec<ChatEntry>,
     /// Current model id (`state.model.id`), when the session reports one.
     pub model_id: Option<String>,
-    /// The current model's provider (`state.model.provider`), when the
-    /// session reports one: the picker resolves the current-model catalog
-    /// entry by provider plus id, so a same-id entry under another
-    /// provider never wins (older daemons report no provider).
+    /// The current model's provider (`state.model.provider`): the
+    /// picker matches by provider plus id.
     pub model_provider: Option<String>,
-    /// The tray effort suffix for that model (TS `getModelContextLabel`),
-    /// when the state's model carries its reasoning level.
+    /// The tray effort suffix for that model, when the state's model
+    /// carries its reasoning level.
     pub thinking_suffix: Option<String>,
-    /// Session display name.
+    /// The tray's context usage (`state.contextUsage`): the snapshot
+    /// feeds the first frame's tray row without a stats round-trip.
+    /// `None` clears the tray display.
+    pub context_usage: Option<crate::chrome::ContextUsage>,
     pub session_name: Option<String>,
     /// Session id of the persisted session file.
     pub session_id: String,
-    /// The worker generation of the attach's event cursor (the resume
-    /// protocol's generation): disambiguates event-sequence values
-    /// across worker restarts for the cross-view layout handoff's key
-    /// (`view::handoff`) — a restarted worker's sequence restarts, so the
-    /// generation must match too.
+    /// The attach cursor's worker generation (`view::handoff` key): a
+    /// restarted worker's sequence restarts, so the generation must match.
     pub event_generation: String,
-    /// The session's goal state (`state.goal`), when the snapshot reports
-    /// one (TS `snapshot.ts: goal: session.goalState`).
+    /// The session's goal state (`state.goal`), when the snapshot
+    /// reports one.
     pub goal: Option<pa_types::goal::GoalState>,
     pub last_event_sequence: u64,
-    /// Whether the attach supplied the resume cursor (the event
-    /// sequence AND the generation): the reconstruction collapses an
-    /// absent cursor to default key values, and the layout handoff
-    /// refuses to key on those (`view::handoff`).
+    /// Whether the attach supplied the resume cursor (sequence AND
+    /// generation): the handoff refuses to key on the collapsed
+    /// defaults of an absent cursor (`view::handoff`).
     pub cursor_present: bool,
-    /// The queued input parked behind the run (`state.sessionActions`) so an
-    /// attach re-syncs the queue strip (TS re-reads the queue after
-    /// subscribe because a `session_action_update` in the gap is lost).
+    /// The queued input parked behind the run (`state.sessionActions`);
+    /// TS re-reads after subscribe because a `session_action_update`
+    /// in the gap is lost.
     pub queued: crate::queued::QueuedMessages,
     /// The LAST HUMAN PROMPT's wall-clock time (unix ms): the newest
-    /// user message's `timestamp` in fold order. The rebuilt loader
-    /// anchors its elapsed clock here (the operator's 2026-09-28
-    /// rule: the waiting/executing timer counts since the last human
-    /// prompt and never resets on a view transition — an agents-view
-    /// round trip re-attaches mid-turn and the clock keeps its
-    /// anchor). `None` when no user message carries a timestamp (an
-    /// old snapshot or a seeded replay) — the loader then keeps its
+    /// user message's `timestamp`; the rebuilt loader anchors its
+    /// elapsed clock here (the operator's 2026-09-28 rule: the timer
+    /// never resets on a view transition). `None` keeps the
     /// re-attach-instant anchor.
     pub last_user_prompt_ms: Option<u64>,
     /// The session's effective service tier (`state.serviceTier`), the
@@ -93,13 +82,9 @@ pub struct Reconstructed {
 }
 
 impl Reconstructed {
-    /// Fold one raw message into the chat entries. A `toolResult` message
-    /// does not add a row WHEN it completes the pending tool card its
-    /// `toolCallId` refers to (the TS transcript replay updates the
-    /// pending tool component instead of rendering a new row); a result
-    /// that matches no pending card keeps its standalone card exactly
-    /// like the live `AgentView::push` path (the orphan never
-    /// disappears from the rebuilt transcript).
+    /// Fold one raw message into the chat entries: a `toolResult` that
+    /// completes a pending card adds no row; an unmatched one keeps its
+    /// standalone orphan card.
     pub fn push_message(&mut self, message: &Value) {
         if let Some(result) = tool_result_message_view(message) {
             if let Some(view) = apply_tool_result(&mut self.chat, result) {
@@ -161,11 +146,8 @@ fn tool_result_message_view(message: &Value) -> Option<ToolResultReplay> {
     })
 }
 
-/// Complete the first pending tool card matching `result`'s tool call
-/// id (the TS `renderedPendingTools` replay: results land on the card,
-/// never as a new transcript row). A result that matches no pending
-/// card comes back whole: the caller keeps its standalone orphan card
-/// (the live `AgentView::push` path's twin).
+/// Complete the first pending card matching the result's tool call id;
+/// an unmatched result comes back whole for the caller's orphan card.
 fn apply_tool_result(chat: &mut [ChatEntry], result: ToolResultReplay) -> Option<OrphanResult> {
     let ToolResultReplay {
         tool_call_id,
@@ -202,16 +184,10 @@ struct OrphanResult {
     view: crate::chat::ToolResultView,
 }
 
-/// Replay a whole transcript: map every message to its rows, then fold
-/// `toolResult` messages onto the pending tool cards their ids refer to.
-/// Card ids are unique, so one id-to-index map replaces the per-result
-/// card scan (a replay-scale fold stays linear).
-/// TS `orderMessagesForTranscript`: the wire context is summary-first for
-/// the model, but the transcript presents the compaction summary at its
-/// chronological boundary — after the retained messages
-/// (`retainedMessageCount`), before anything appended after the
-/// compaction. A missing count falls back to the timestamp split (TS
-/// compatibility for pre-count summaries).
+/// The wire context is summary-first for the model, but the transcript
+/// presents the compaction summary at its chronological boundary — after
+/// the retained messages (`retainedMessageCount`). A missing count falls
+/// back to the timestamp split (pre-count summaries).
 fn order_messages_for_transcript(messages: &[Value]) -> Vec<&Value> {
     let Some(summary_index) = messages.iter().position(|message| {
         message.get("role").and_then(Value::as_str) == Some("compactionSummary")
@@ -241,6 +217,8 @@ fn order_messages_for_transcript(messages: &[Value]) -> Vec<&Value> {
     rest
 }
 
+/// Replay a whole transcript, folding `toolResult` messages onto their
+/// pending cards; one id-to-index map keeps the fold linear.
 pub fn transcript_to_entries(messages: &[Value]) -> Vec<ChatEntry> {
     let ordered = order_messages_for_transcript(messages);
     let mut chat: Vec<ChatEntry> = Vec::new();
@@ -253,22 +231,17 @@ pub fn transcript_to_entries(messages: &[Value]) -> Vec<ChatEntry> {
                 card_index.get(&tool_call_id).map(Vec::as_slice),
                 result,
             ) {
-                // No pending card took the result (a true orphan, or a
-                // leftover settle): it keeps its standalone card AT ITS
-                // OWN WIRE POSITION - exactly the live push path's
-                // semantics (the result never crosses a later reused
-                // invocation, and condensation never spans it).
+                // No pending card took the result (a true orphan or a
+                // leftover settle): it keeps a standalone card at its
+                // own wire position, like the live path.
                 chat.push(orphan_card(result));
             }
             continue;
         }
         // The retry-episode collapse (SANCTIONED DIVERGENCE, operator
-        // ruling 2026-09-23): a `provider_retry_outcome` row replaces the
-        // failed attempts its episode superseded, so the rebuilt chat
-        // shows ONE line per episode instead of the per-attempt error
-        // rows TS renders. The superseded rows sit at the tail (attempts
-        // are appended in order), and the collapse never touches tool
-        // cards (their failures ride the cards, not error-only rows).
+        // ruling 2026-09-23): a `provider_retry_outcome` row replaces
+        // the per-attempt error rows TS renders; the superseded rows sit
+        // at the tail, and the collapse never touches tool cards.
         if message.get("role").and_then(Value::as_str) == Some("custom")
             && message.get("customType").and_then(Value::as_str)
                 == Some(crate::custom_message::PROVIDER_RETRY_OUTCOME_CUSTOM_TYPE)
@@ -292,9 +265,7 @@ pub fn transcript_to_entries(messages: &[Value]) -> Vec<ChatEntry> {
 }
 
 /// Settle one result onto the LAST pending card among `indices` (the
-/// live `rposition` semantics). `Some(result)` hands the result back
-/// whole for the caller's deferral or orphan handling; `None` settled
-/// it.
+/// live `rposition`); `Some(result)` hands it back for orphan handling.
 fn settle_last_pending(
     chat: &mut [ChatEntry],
     indices: Option<&[usize]>,
@@ -316,9 +287,6 @@ fn settle_last_pending(
     } = result;
     if let Some(ChatEntry::Tool(card)) = chat.get_mut(index) {
         card.started = true;
-        // Replayed cards never saw the live execution: the timing
-        // collapses to the rebuild instant, so the bash `Took` row
-        // renders the same `0.0s` the TS component does on replay.
         let now = std::time::Instant::now();
         card.started_at = Some(now);
         card.ended_at = Some(now);
@@ -346,7 +314,6 @@ fn orphan_card(result: ToolResultReplay) -> ChatEntry {
     }))
 }
 
-/// Reconstruct the view state from slim attach data.
 pub fn reconstruct(attach: &AttachData) -> Reconstructed {
     let snapshot = &attach.snapshot;
     let messages = snapshot
@@ -360,6 +327,9 @@ pub fn reconstruct(attach: &AttachData) -> Reconstructed {
         .and_then(model_identity_value)
         .map_or((None, None), |(id, provider)| (Some(id), provider));
     let thinking_suffix = state.and_then(crate::chrome::tray_thinking_suffix);
+    let context_usage = state
+        .and_then(|state| state.get("contextUsage"))
+        .and_then(crate::chrome::ContextUsage::from_wire);
     let session_name = state
         .and_then(|state| state.get("sessionName"))
         .and_then(Value::as_str)
@@ -385,11 +355,6 @@ pub fn reconstruct(attach: &AttachData) -> Reconstructed {
                 .map(str::to_string)
         })
         .unwrap_or_default();
-    // The cursor-presence gate (`view::handoff`): the handoff's key
-    // collapses absent cursor fields to default values, which could
-    // alias across cursor-less attaches of the same entry count — the
-    // layout handoff refuses to key on a collapsed identity (the
-    // sequence supplied, a non-empty generation, a non-empty session).
     let cursor_present = (snapshot_sequence.is_some() || attach.last_event_sequence.is_some())
         && !event_generation.is_empty()
         && !session_id.is_empty();
@@ -440,6 +405,7 @@ pub fn reconstruct(attach: &AttachData) -> Reconstructed {
         model_id,
         model_provider,
         thinking_suffix,
+        context_usage,
         session_name,
         session_id,
         event_generation,
@@ -472,11 +438,8 @@ fn message_timestamp_ms(message: &Value) -> Option<u64> {
 }
 
 /// The preparing-turn label of a `sessionActions` wire value, or `None`
-/// when no picked-up prompt is preparing (TS #2063
-/// `connectionState.sessionActions.active`: the interactive strip renders
-/// the "Starting" row exactly while the active action is a turn in its
-/// `preparing` phase — the prompt left its lane at pickup, so the strip is
-/// the only place it shows until the turn renders it).
+/// when none is preparing (TS #2063): the prompt left its lane at
+/// pickup, so the strip shows it until the turn renders it.
 fn starting_from_actions(actions: &Value) -> Option<String> {
     let active = actions.get("active")?;
     let is_preparing_turn = active.get("kind").and_then(Value::as_str) == Some("turn")
@@ -490,12 +453,10 @@ fn starting_from_actions(actions: &Value) -> Option<String> {
     })
 }
 
-/// One typed-provenance rider of a `sessionActions` wire value (the
-/// parked lane indices it marks — Rust-native provenance with no TS
-/// counterpart; the strip folds exactly the marked rows): `rlmChildStatus`
-/// for the parked child-status notices, `injectedPrompts` for the
-/// engine-minted continuations. A projection without parked marks omits
-/// the rider entirely.
+/// One typed-provenance rider of a `sessionActions` wire value
+/// (Rust-native, no TS counterpart): `rlmChildStatus` marks the parked
+/// child-status notices, `injectedPrompts` the engine-minted
+/// continuations; a projection without marks omits the rider.
 fn queue_lane_indices(actions: &Value, rider: &str) -> crate::queued::QueueLaneIndices {
     let indices = |lane: &str| {
         actions
@@ -532,11 +493,9 @@ fn queue_lane(actions: &Value, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// The model id and provider from a `state.model` wire value
-/// (`{id, provider}` or a display string): the provider is `None` for the
-/// display-string form and the object form that omits it (older daemons),
-/// and the whole identity is `None` when no id parses — a provider
-/// without an id matches nothing in the catalog.
+/// The model id and provider from a `state.model` wire value (`{id,
+/// provider}` or a display string); the provider is `None` for the
+/// display-string form and an object that omits it.
 fn model_identity_value(model: &Value) -> Option<(String, Option<String>)> {
     match model {
         Value::String(label) => Some((label.clone(), None)),
@@ -556,8 +515,7 @@ fn model_identity_value(model: &Value) -> Option<(String, Option<String>)> {
 ///
 /// # Errors
 ///
-/// Returns `Err` when the payload does not decode into `AttachData`
-/// (an unrecognizable daemon attach result).
+/// Returns `Err` when the payload does not decode into `AttachData`.
 pub fn attach_data_from_response(data: Value) -> anyhow::Result<AttachData> {
     serde_json::from_value(data).map_err(|error| {
         anyhow::anyhow!("the daemon returned an unrecognizable attach result: {error}")

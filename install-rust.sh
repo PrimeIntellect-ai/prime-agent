@@ -22,9 +22,10 @@
 #
 # THE TYPESCRIPT TAKEOVER (this script is also the uninstall path for the
 # TS product — one installer owns the keyword's lifecycle):
-#   1. BOTH DAEMONS ARE STOPPED CLEANLY, NEVER KILLED, but only AFTER the
-#      new payload and launcher are published — the retirement steps
-#      (daemon stops, npm uninstall) never leave the machine without a
+#   1. BOTH DAEMONS ARE STOPPED CLEANLY, NEVER KILLED (--force alone may
+#      signal one that will not stop), but only AFTER the new payload and
+#      launcher are published — the retirement steps (daemon stops, npm
+#      uninstall) never leave the machine without a
 #      working prime-agent if the install aborts mid-way. The probed
 #      candidates: the TS daemon's default socket
 #      (${TMPDIR:-/tmp}/prime-agent-$(id -u)/daemon.sock),
@@ -48,12 +49,13 @@
 #      variable a daemon exports to its workers) is never probed at all
 #      — the suite that killed the fleet daemon twice ran exactly that
 #      shape — unless PRIME_AGENT_STOP_LIVE_DAEMON=1 overrides for a
-#      deliberate in-daemon update; an operator shell never carries the
-#      internal variable, so the field contract is unchanged. Every
-#      daemon so identified is shut down REGARDLESS of busy-ness (the
+#      deliberate in-daemon update (--force does not); an operator shell
+#      never carries the internal variable, so the field contract is
+#      unchanged.
+#      Every daemon so identified is shut down REGARDLESS of busy-ness (the
 #      field ruling: an install that leaves the old daemon up is the
-#      takeover bug), by an ESCALATING ladder that never sends a signal
-#      to any pid: the graceful `shutdown` request (force:false), a 5s
+#      takeover bug), by an ESCALATING ladder that sends no signal to any
+#      pid without --force: the graceful `shutdown` request (force:false), a 5s
 #      confirm poll, then the forced request (force:true) and a
 #      DRAIN-SCALED second poll (2s per reported session over a 5s
 #      floor — the field measured a 46-worker drain at ~49s, and a fixed
@@ -120,6 +122,7 @@
 #   PRIME_AGENT_RUST_PREFIX       install prefix (default: ~/.local; the
 #                                  launcher lands at $PREFIX/bin/prime-agent,
 #                                  the payload at $PREFIX/share/prime-agent/)
+#   PRIME_AGENT_UV_BIN_DIR         uv install dir (default: ~/.local/bin)
 #
 # THE CHANNEL (the R2 form, the TS install.sh parity): the script reads
 # the channel pointer (<base>/stable or <base>/beta) for the version,
@@ -134,6 +137,10 @@
 # channel's current version; the script is idempotent (a re-run replaces
 # the payload, keeps one .old rollback generation, and re-runs the
 # takeover steps as no-ops when there is nothing left to take over).
+# install-rust.sh --rollback republishes that kept generation, and
+# install-rust.sh --archive <path> publishes a local release archive
+# instead of a channel download (`prime-agent update --rollback` and
+# `--archive` run the copy of this script bundled into the binary).
 #
 # PREREQUISITES: curl + sh (+ the network for the download). The installer
 # needs a Python for its own scripting steps (the store guard's realpath,
@@ -151,7 +158,7 @@ set -eu
 # vars.R2_PUBLIC_BASE_URL, and to <base>/install-beta.sh with the channel
 # default set to beta — the repo-file default IS the official domain, so
 # the raw repo copy installs out of the box too.
-DOWNLOAD_BASE_URL_DEFAULT="https://app.primeintellect.ai/prime-agent"
+DOWNLOAD_BASE_URL_DEFAULT="https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev"
 RELEASE_CHANNEL_DEFAULT="stable"
 BASE_URL="${PRIME_AGENT_DOWNLOAD_BASE_URL:-$DOWNLOAD_BASE_URL_DEFAULT}"
 CHANNEL="${PRIME_AGENT_RELEASE_CHANNEL:-$RELEASE_CHANNEL_DEFAULT}"
@@ -165,11 +172,10 @@ install-rust.sh — install the Rust build of Prime Agent under the prime-agent 
 
 The launcher lands at $PRIME_AGENT_RUST_PREFIX/bin/prime-agent and the payload at
 $PRIME_AGENT_RUST_PREFIX/share/prime-agent/ (default prefix ~/.local). The installed
-TypeScript product is taken over: its daemon is stopped cleanly when idle, its native
-install is preserved under share/prime-agent-legacy, and its npm package is uninstalled
-(the restore command is printed). ~/.prime/agent (the shared session store) is never
-touched. Both the default and --update install the newest successful `continuous`
-workflow run on the `rust` branch.
+TypeScript product is taken over: its daemon is stopped with its own shutdown request,
+its native install is preserved under share/prime-agent-legacy, and its npm package is
+uninstalled (the restore command is printed). ~/.prime/agent (the shared session store)
+is never touched. Both the default and --update install the channel's current version.
 
 Needs curl + sh (+ the network): the installer bootstraps its own Python via
 uv — no system python3 required. It also pre-warms the Python kernel (uv +
@@ -179,13 +185,24 @@ network once.
 
 Options:
   --update    the documented alias the update entry points exec (identical run)
-  --verbose   the progress detail also goes to stdout, not just fd 3
+  --force     if a Prime Agent daemon (TypeScript or Rust) is still up after the
+              shutdown requests and the drain wait, send it SIGTERM, then SIGKILL.
+              Never applies to the daemon this install runs under.
+              (from a pipe: curl -fsSL <url>/install.sh | sh -s -- --force)
+  --verbose   the detail also goes to stdout, not just fd 3 (no animation)
+  --rollback  restore the previous version the last install kept
+              (share/prime-agent.old.*); the replaced version is kept in
+              its place, so a second --rollback undoes the first
+  --archive <path>
+              install a local prime-agent-<version>-<platform>.tar.gz
+              release archive instead of downloading from the channel
 Output:
-  stdout      the essentials (the success block, the actionable takeover
-              facts, the PATH warning when it applies, the next-step line)
-  fd 3        the progress detail — a wrapper captures it by opening fd 3;
-              a bare run leaves it closed and stays quiet
-  stderr      warnings and diagnostics (a curl | sh run keeps them)
+  stderr      the title, one line per step, warnings with the command that
+              fixes them, and the ending; on a terminal an animated banner,
+              a spinner, and a download bar (NO_COLOR or TERM=dumb: plain)
+  stdout      nothing by default; --verbose prints the detail here
+  fd 3        the detail — a wrapper captures it by opening fd 3; a bare run
+              leaves it closed
 
 Environment:
   PRIME_AGENT_DOWNLOAD_BASE_URL  the R2-backed download base (the official
@@ -195,7 +212,16 @@ Environment:
                                  pointer read; the manifest + SHA256SUMS
                                  checks still run)
   PRIME_AGENT_RUST_PREFIX        install prefix (~/.local by default)
+  PRIME_AGENT_UV_BIN_DIR         uv install dir (~/.local/bin by default)
   PRIME_AGENT_RUST_VERBOSE       1 = the --verbose output mode
+  PRIME_AGENT_ROLLBACK_CHECK     1 = with --rollback, print the resolved
+                                 rollback source and exit without touching
+                                 the payload (the update command's
+                                 synchronous pre-flight)
+  PRIME_AGENT_ARCHIVE_CHECK      1 = with --archive, validate the archive
+                                 (its name, tar, payload, and version) and
+                                 exit without publishing (the same
+                                 pre-flight for the archive route)
 USAGE
 }
 
@@ -204,26 +230,84 @@ USAGE
 # points (`prime-agent update`, the TUI /update) exec — identical to the default
 # run because the flow is idempotent by construction. --verbose folds the fd-3
 # progress detail onto stdout (PRIME_AGENT_RUST_VERBOSE=1 does the same).
+# --rollback and --archive pick the payload source (MODE); the default is the
+# channel download.
 VERBOSE="${PRIME_AGENT_RUST_VERBOSE:-0}"
+FORCE=0
+MODE="channel"
+ARCHIVE=""
+# THE TRUSTED TASKLIST: the liveness question goes to Windows's own
+# tasklist, never through the inherited PATH — this script runs with the
+# updater's environment (the funnel's own shell is trusted-rooted for
+# exactly that reason), and a repo- or user-planted lookup would run
+# BEFORE the publish with the credentials that hardening guards.
+# System32 alone answers: the machine's own SystemRoot spelling first,
+# the MSYS C: mount second. A machine offering neither (every unix; a
+# stripped Windows env) simply has no answerable liveness question, and
+# both callers treat the empty TASKLIST as "cannot ask" — the parent wait
+# proceeds, the publication lock refuses with its manual-recovery
+# message instead of trusting a miss.
+TASKLIST=""
+if [ -n "${SystemRoot:-}" ] && [ -x "${SystemRoot}/System32/tasklist.exe" ]; then
+  TASKLIST="${SystemRoot}/System32/tasklist.exe"
+elif [ -x /c/Windows/System32/tasklist.exe ]; then
+  TASKLIST=/c/Windows/System32/tasklist.exe
+fi
+# THE HANDOFF PARENT WAIT: the Windows update command spawns THIS script
+# and exits precisely so its own payload image stops locking
+# <prefix>/share/prime-agent for the publish below — but a fast child
+# could reach that rename while the parent still lives. The handoff sets
+# the parent's pid here; the payload touch happens many steps below, and
+# this bounded wait (the parent is normally gone in milliseconds) makes
+# the release-before-publish ordering explicit instead of incidental.
+# tasklist carries the liveness question to Windows the same way the
+# publication lock does (the MSYS kill cannot see a native pid).
+if [ -n "${PRIME_AGENT_INSTALLER_PARENT_PID:-}" ] && [ -n "$TASKLIST" ]; then
+  parent_waits=0
+  while MSYS2_ARG_CONV_EXCL='*' "$TASKLIST" \
+          /FI "PID eq ${PRIME_AGENT_INSTALLER_PARENT_PID}" 2>/dev/null \
+        | grep -qw "${PRIME_AGENT_INSTALLER_PARENT_PID}"; do
+    parent_waits=$((parent_waits + 1))
+    [ "$parent_waits" -gt 300 ] && die "the prime-agent process that started this installer (pid ${PRIME_AGENT_INSTALLER_PARENT_PID}) is still running after 30s; the payload it holds cannot be replaced while it lives — stop that process and re-run"
+    sleep 0.1 2>/dev/null || sleep 1
+  done
+fi
 # Every argument is scanned (no positionals exist): the flags compose, so
 # `--update --verbose` sets both effects instead of silently dropping one.
-for arg in "$@"; do
-  case "$arg" in
+while [ $# -gt 0 ]; do
+  case "$1" in
     --update) ;;
+    --rollback)
+      [ "$MODE" = archive ] && die "--rollback and --archive are exclusive"
+      MODE="rollback" ;;
+    --archive)
+      [ "$MODE" = rollback ] && die "--rollback and --archive are exclusive"
+      [ $# -ge 2 ] || { usage >&2; die "--archive needs the path of a release archive"; }
+      MODE="archive"
+      ARCHIVE="$2"
+      shift ;;
     --verbose|-v) VERBOSE=1 ;;
+    --force) FORCE=1 ;;
     -h|--help) usage; exit 0 ;;
-    *) usage >&2; die "unknown argument: ${arg}" ;;
+    *) usage >&2; die "unknown argument: $1" ;;
   esac
+  shift
 done
 
 # --- the output contract ------------------------------------------------------
-# Minimal by default (the curl|sh reference class): stdout carries the
-# essentials only — the success block, the actionable takeover facts, the
-# conditional PATH warning, the next-step line — which is exactly what a
-# wrapper like `prime-agent update` reports onward. Progress detail rides
-# fd 3: a wrapper opens it to capture the trace, a bare run leaves it
-# closed (the detail drops silently), and --verbose folds it onto stdout.
-# Warnings and diagnostics go to stderr, which a `curl | sh` run keeps.
+# Everything a person reads goes to stderr, kept short: a title, one line
+# per step that did something ("✓ Installed"), warnings with the exact
+# command that fixes them, and a short ending. On a terminal one renderer
+# owns the screen while the install runs: an awk loop (below) that draws
+# the TUI's animated brand mark, the title, the finished steps, and the
+# active step's spinner (and the download bar), rewriting only the rows
+# that changed each 120ms tick; it freezes on its last frame when the
+# install ends. The install itself only writes the step state to files the
+# renderer reads. Captured output (CI, pipes, the TUI's /update) gets the
+# same lines with no colors, no animation, and no carriage returns, and a
+# failure's error stays the last stderr line (the update reports that
+# tail). The extra detail rides fd 3: a wrapper captures it by opening
+# fd 3, a bare run leaves it closed, and --verbose folds it onto stdout.
 if [ "$VERBOSE" = 1 ]; then
   exec 3>&1
 elif ( : >&3 ) 2>/dev/null; then
@@ -234,8 +318,628 @@ elif ( : >&3 ) 2>/dev/null; then
 else
   exec 3>/dev/null
 fi
-say() { printf '%s\n' "$*" >&3; }
-note() { printf '%s\n' "$*" >&2; }
+UI_TTY=0
+if [ -t 2 ] && [ "${TERM:-}" != dumb ]; then UI_TTY=1; fi
+# The renderer redraws rows in place, so it stays off when --verbose
+# interleaves detail lines on the same terminal.
+UI_ANIM=0
+if [ "$UI_TTY" = 1 ] && [ "$VERBOSE" != 1 ]; then UI_ANIM=1; fi
+UI_COLOR=0
+if [ "$UI_TTY" = 1 ] && [ -z "${NO_COLOR:-}" ]; then UI_COLOR=1; fi
+# The prime theme's palette (crates/pa-types/themes/prime.json), 24-bit.
+C_BOLD="" C_DIM="" C_ACCENT="" C_WARN="" C_RESET=""
+if [ "$UI_COLOR" = 1 ]; then
+  esc="$(printf '\033')"
+  C_BOLD="${esc}[1m"
+  C_DIM="${esc}[38;2;113;113;122m"
+  C_ACCENT="${esc}[38;2;124;111;175m"
+  C_WARN="${esc}[38;2;245;158;11m"
+  C_RESET="${esc}[0m"
+fi
+SAY_DIM="" SAY_RESET=""
+if [ "$VERBOSE" = 1 ] && [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+  SAY_DIM="$(printf '\033')[38;2;113;113;122m" SAY_RESET="$(printf '\033')[0m"
+fi
+say() { printf '%s%s%s\n' "$SAY_DIM" "$*" "$SAY_RESET" >&3; }
+
+# The program text is awk, not shell: its "$PRIME_AGENT_UI_DIR" expands later.
+# shellcheck disable=SC2016
+banner_awk='# BANNER_AWK_BEGIN
+# The installer banner: the TUI first-run splash (crates/pa-tui/src/
+# onboarding.rs mark_rows + draw_field), ported cell for cell so the same
+# frame at the same width draws the same canvas; the parity test in that
+# file runs this program (-v parity=1) against the Rust renderer.
+function remeu(a, m) { a = a % m; if (a < 0) a += m; return a }
+function absv(a) { return a < 0 ? -a : a }
+function put(x, y, ch, tone, pri,   k) {
+  if (y < 0 || y >= MH || x < 0 || x >= W) return
+  k = y * W + x
+  if (CP[k] > pri) return
+  CC[k] = ch; CT[k] = tone; CP[k] = pri
+}
+function field(frame,   x, y, k, hash, cx, cy, contour, hy, si, seg, t, base, wave, ty, i, n, parts, eq) {
+  for (k = 0; k < W * MH; k++) { CC[k] = " "; CT[k] = "D"; CP[k] = 0 }
+  cx = int(W * 36 / 100); cy = int(MH * 54 / 100); hy = int(MH * 58 / 100)
+  for (y = 0; y < MH; y++) for (x = 0; x < W; x++) {
+    hash = (x * 37 + y * 53 + frame * 11 + x * y * 3) % 101
+    if (hash < 3) put(x, y, "·", "D", 1)
+    contour = absv(x - cx) + absv(y - cy) * 4 + int(x / 6) - frame
+    if (x < int(W * 82 / 100) && remeu(contour, 24) == 12) put(x, y, ((x + y) % 5 == 0) ? "╌" : "·", "B", 2)
+    if (y == hy && x % 2 == 0 && (x + frame) % 13 < 2) put(x, y, "─", ((x + frame) % 3 == 0) ? "A" : "D", 3)
+    if (x >= QX0 && !(x <= QX1 && y <= MH - 1) && x % 4 == 0) {
+      si = int(x / 4); seg = (y + si * 2 + int(frame / 2)) % 6
+      if (y > 0 && y < MH - 1 && seg < 2) put(x, y, ((si + y) % 4 == 0) ? "┃" : "▎", "L", 4)
+    }
+  }
+  for (t = 0; t < 3; t++) {
+    base = (t == 0) ? int(MH * 30 / 100) : (t == 1) ? int(MH * 49 / 100) : int(MH * 72 / 100)
+    for (x = 0; x < W; x++) {
+      wave = (x * 2 + frame + t * 7) % 16
+      if (wave > 7) wave = 15 - wave
+      ty = base + int((wave - 3) / 2)
+      if (ty < 0) ty = 0
+      if ((x + frame + t * 13) % 41 == 0) put(x, ty, "◆", "W", 6)
+      else if ((x + frame) % 12 == 0) put(x, ty, "•", "A", 6)
+      else put(x, ty, "·", "A", 3)
+    }
+  }
+  for (y = 0; y < MH; y++) {
+    n = split(LOGO[y], parts, "|")
+    for (i = 1; i <= n; i++) {
+      eq = index(parts[i], "=")
+      put(LI + substr(parts[i], 1, eq - 1), y, substr(parts[i], eq + 1), "T", 8)
+    }
+  }
+}
+function mark_row(y,   x, k, s, cur) {
+  s = ""; cur = ""
+  for (x = 0; x < W; x++) {
+    k = y * W + x
+    if (CT[k] != cur) { cur = CT[k]; s = s TONE[cur] }
+    s = s CC[k]
+  }
+  return s RESET
+}
+function mb(b) { return sprintf("%.1f MB", b / 1000000) }
+# Move the cursor to region row i (row 0 is the line the renderer started
+# on); rows past the bottom are created with newlines.
+function go(i) {
+  if (i >= existing) {
+    go(existing - 1)
+    while (existing <= i) { printf "\n"; existing++; cur = existing - 1 }
+    return
+  }
+  if (i < cur) printf "%s[%dA", ESC, cur - i
+  else if (i > cur) printf "%s[%dB", ESC, i - cur
+  cur = i
+}
+function compose(   n, line, label, detail, ppath, total, got, cmd, filled, bar, c) {
+  n = 0
+  if (banner == 1) {
+    field(frame)
+    R[n++] = ""
+    for (y = 0; y < MH; y++) R[n++] = mark_row(y)
+    R[n++] = ""
+  }
+  line = ""
+  if ((getline line < brandf) < 0) line = ""
+  close(brandf)
+  R[n++] = " " TX "Installing " BOLD "PRIME" RESET TX ITAL " Agent" RESET (line == "" ? "" : "  " DIM line RESET)
+  R[n++] = ""
+  while ((getline line < logf) > 0) R[n++] = line
+  close(logf)
+  label = ""; detail = ""; ppath = ""; total = ""
+  if ((getline label < activef) > 0) {
+    getline detail < activef; getline ppath < activef; getline total < activef
+  }
+  close(activef)
+  if (label != "") {
+    if (ppath != "") {
+      # The path never enters the command text: the shell expands the
+      # environment variable itself (a TMPDIR with shell syntax stays data).
+      got = 0; cmd = "{ wc -c < \"$PRIME_AGENT_UI_DIR/ui-progress\"; } 2>/dev/null"
+      cmd | getline got; close(cmd); got += 0
+      if (total + 0 > 0) {
+        filled = int(got * 20 / total); if (filled > 20) filled = 20
+        bar = ""
+        for (c = 0; c < 20; c++) bar = bar (c < filled ? "█" : "░")
+        detail = AC bar RESET DIM "  " mb(got) " / " mb(total) (detail == "" ? "" : "  · " detail)
+      } else detail = mb(got) (detail == "" ? "" : "  · " detail)
+    }
+    R[n++] = " " AC SPIN[frame % 10 + 1] RESET " " label (detail == "" ? "" : "  " DIM detail RESET)
+  }
+  return n
+}
+function draw(n,   i) {
+  for (i = 0; i < n; i++) {
+    if ((i in PREV) && PREV[i] == R[i]) continue
+    PREV[i] = R[i]
+    # A row scrolled off the top can no longer be reached: leave it.
+    if (i < existing - TH) continue
+    go(i); printf "\r%s[2K%s", ESC, R[i]
+  }
+  for (i = n; i < pn; i++) { if (i >= existing - TH) { go(i); printf "\r%s[2K", ESC }; delete PREV[i] }
+  pn = n
+  fflush()
+}
+BEGIN {
+  ESC = "\033"
+  MH = 7; LI = 5; QX0 = 5; QX1 = 26
+  LOGO[0] = "17=▗|18=▄|19=▄|20=█|21=▀"
+  LOGO[1] = "3=█|4=█|5=█|6=▄|14=▗|15=▄|16=█|17=█|18=█|19=▀"
+  LOGO[2] = "2=▗|3=█|4=▛|5=▐|6=█|7=▙|11=▗|12=▄|13=█|14=▀|15=▗|16=█|17=▀"
+  LOGO[3] = "1=▗|2=█|3=▛|5=▟|6=█|7=█|8=▙|9=▄|10=█|11=█|12=▛|14=▟|15=▛"
+  LOGO[4] = "1=▗|2=▟|3=▌|5=▐|6=█|7=█|8=█|9=▛|10=▘|11=▗|12=▄|13=█|14=▖"
+  LOGO[5] = "0=▟|1=█|2=█|3=█|4=▄|7=▄|8=▄|9=▟|10=█|11=█|12=█|13=▀"
+  LOGO[6] = "0=▜|1=█|2=▛|3=▀|4=▘|7=▜|8=█|9=▛|10=▀|11=▘"
+  if (color == 1) {
+    RESET = ESC "[0m"; BOLD = ESC "[1m"; ITAL = ESC "[3m"; TX = ESC "[39m"
+    DIM = ESC "[38;2;113;113;122m"; AC = ESC "[38;2;124;111;175m"
+    TONE["T"] = ESC "[39m"; TONE["D"] = DIM; TONE["B"] = ESC "[38;2;82;82;91m"
+    TONE["A"] = AC; TONE["L"] = ESC "[38;2;56;189;248m"; TONE["W"] = ESC "[38;2;245;158;11m"
+  }
+  W = width + 0
+  if (parity == 1) {
+    field(frame + 0)
+    for (y = 0; y < MH; y++) {
+      chars = ""; tones = ""
+      for (x = 0; x < W; x++) { chars = chars CC[y * W + x]; tones = tones CT[y * W + x] }
+      print chars "\t" tones
+    }
+    exit
+  }
+  split("⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏", SPIN, " ")
+  uidir = ENVIRON["PRIME_AGENT_UI_DIR"]
+  activef = uidir "/ui-active"; logf = uidir "/ui-log"; brandf = uidir "/ui-brand"; stopf = uidir "/ui-stop"
+  TH = height + 0; if (TH < 5) TH = 24
+  frame = 0; existing = 1; cur = 0; pn = 0
+  printf "%s[?25l%s[?7l", ESC, ESC
+  while (1) {
+    stopping = ((getline tmp < stopf) >= 0); close(stopf)
+    n = compose()
+    draw(n)
+    if (stopping) break
+    if (system("kill -0 " ppid " 2>/dev/null && { sleep 0.12 2>/dev/null || sleep 1; }") != 0) break
+    frame++
+  }
+  go(n - 1)
+  printf "\n%s[?7h%s[?25h", ESC, ESC
+  fflush()
+}
+# BANNER_AWK_END
+'
+
+dl="$(mktemp -d "${TMPDIR:-/tmp}/prime-agent-download.XXXXXX")"
+# The renderer's inputs: the active step (label, detail, the file being
+# downloaded, its size), the finished lines, the title's version text, and
+# the stop flag. Warnings wait in ui_notes and print in full once the
+# renderer has stopped (a frozen frame never clips them).
+ui_active="${dl}/ui-active"
+ui_log="${dl}/ui-log"
+ui_brand="${dl}/ui-brand"
+ui_stopf="${dl}/ui-stop"
+ui_notes="${dl}/ui-notes"
+: > "$ui_log"
+: > "$ui_brand"
+: > "$ui_notes"
+ui_pid=""
+ui_step=""
+ui_progress_path=""
+ui_progress_total=""
+ui_size() {
+  stty size < /dev/tty 2>/dev/null || true
+}
+if [ "$UI_ANIM" = 1 ]; then
+  ui_dims="$(ui_size)"
+  ui_rows="${ui_dims%% *}"
+  ui_cols="${ui_dims##* }"
+  case "$ui_cols" in ""|0|*[!0-9]*) ui_cols="${COLUMNS:-80}" ;; esac
+  case "$ui_rows" in ""|0|*[!0-9]*) ui_rows="${LINES:-24}" ;; esac
+  case "$ui_cols" in ""|*[!0-9]*) ui_cols=80 ;; esac
+  # The mark needs its indent + width (27 columns); the canvas spans the
+  # terminal (one column short of the edge, so a full row never wraps),
+  # capped at 120 columns.
+  ui_width=$((ui_cols - 1))
+  [ "$ui_width" -le 120 ] || ui_width=120
+  ui_banner=0
+  if [ "$UI_COLOR" = 1 ] && [ "$ui_width" -ge 40 ]; then ui_banner=1; fi
+  # The paths ride the environment, never -v (which rewrites backslashes)
+  # and never a command string.
+  PRIME_AGENT_UI_DIR="$dl" awk -v banner="$ui_banner" -v color="$UI_COLOR" \
+    -v width="$ui_width" -v height="$ui_rows" -v ppid="$$" "$banner_awk" >&2 &
+  ui_pid=$!
+fi
+# ui_stop: freeze the renderer on its last frame, then print the waiting
+# warnings in full.
+ui_stop() {
+  if [ -n "$ui_pid" ]; then
+    rm -f "$ui_active"
+    : > "$ui_stopf"
+    wait "$ui_pid" 2>/dev/null || true
+    ui_pid=""
+    if [ -s "$ui_notes" ]; then
+      printf '\n' >&2
+      cat "$ui_notes" >&2
+      : > "$ui_notes"
+    fi
+  fi
+}
+# ui_set_active <label> [detail]: the renderer's active row (written whole,
+# then renamed, so a tick never reads half a file).
+ui_set_active() {
+  printf '%s\n%s\n%s\n%s\n' "$1" "${2:-}" "$ui_progress_path" "$ui_progress_total" > "${ui_active}.tmp"
+  mv -f "${ui_active}.tmp" "$ui_active"
+}
+# A compact size: 19855079 -> "19.9 MB".
+ui_mb() {
+  ui_tenths=$((($1 + 50000) / 100000))
+  printf '%d.%d MB' "$((ui_tenths / 10))" "$((ui_tenths % 10))"
+}
+# ui_line <text>: one finished line (the renderer's list, or stderr).
+ui_line() {
+  if [ -n "$ui_pid" ]; then
+    printf '%s\n' "$1" >> "$ui_log"
+  else
+    printf '%s\n' "$1" >&2
+  fi
+}
+# title <version text>: the title line's version (the renderer shows the
+# brand line from the start; captured output prints it once here).
+title() {
+  if [ -n "$ui_pid" ]; then
+    printf '%s\n' "$1" > "$ui_brand"
+  else
+    printf ' %sInstalling PRIME Agent%s  %s%s%s\n\n' "$C_BOLD" "$C_RESET" "$C_DIM" "$1" "$C_RESET" >&2
+  fi
+}
+# step_start <label>: the step is running (the spinner row on a terminal;
+# nothing in captured output, where only the result line prints).
+step_start() {
+  ui_step="$1"
+  if [ -n "$ui_pid" ]; then ui_set_active "$1"; fi
+}
+# step_detail <text>: the active step's current detail (the spinner row on
+# a terminal; an indented line in captured output).
+step_detail() {
+  if [ -n "$ui_pid" ]; then
+    ui_set_active "$ui_step" "$1"
+  else
+    printf '   %s\n' "$1" >&2
+  fi
+}
+step_end() {
+  ui_step=""
+  ui_progress_path=""
+  ui_progress_total=""
+  if [ -n "$ui_pid" ]; then rm -f "$ui_active"; fi
+}
+# step_ok <text> [detail]: the step's result line.
+step_ok() {
+  step_end
+  ui_line " ${C_ACCENT}✓${C_RESET} $1${2:+  ${C_DIM}($2)${C_RESET}}"
+}
+# step_fail <text> [reason]: a failed step's result line.
+step_fail() {
+  step_end
+  ui_line " ${C_WARN}✗ $1${2:+  ($2)}${C_RESET}"
+}
+# step_clear: the step finished with nothing worth a line.
+step_clear() {
+  step_end
+}
+# note: a warning, in full, in amber; todo: the exact command that fixes
+# it, uncolored so it copies cleanly. On a terminal both wait for the
+# renderer to stop.
+note() {
+  if [ -n "$ui_pid" ]; then
+    printf '%s%s%s\n' "$C_WARN" "$*" "$C_RESET" >> "$ui_notes"
+  else
+    printf '%s%s%s\n' "$C_WARN" "$*" "$C_RESET" >&2
+  fi
+}
+todo() {
+  if [ -n "$ui_pid" ]; then
+    printf '    %s\n' "$*" >> "$ui_notes"
+  else
+    printf '    %s\n' "$*" >&2
+  fi
+}
+dim() {
+  printf ' %s%s%s\n' "$C_DIM" "$*" "$C_RESET" >&2
+}
+die() {
+  if [ -n "$ui_step" ]; then step_fail "$ui_step"; fi
+  ui_stop
+  printf '%sinstall-rust.sh: %s%s\n' "$C_WARN" "$1" "$C_RESET" >&2
+  exit 1
+}
+# A path with the home directory spelled as ~ (display only).
+tilde() {
+  case "$1" in
+    "$HOME"/*) printf '~%s' "${1#"$HOME"}" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+ts_takeover_from=""
+ts_takeover_undo=""
+migrated_note=""
+# The renderer always restores the cursor and line wrap when it stops; the
+# trap stops it on every exit path (an INT/TERM exits through it too).
+# The pre-flights' exits sit far from the run's own success-path sweep
+# below, and a refused check dies before the full trap is armed — so with
+# either check knob set this run's every exit also cleans the staging.
+if [ "${PRIME_AGENT_ROLLBACK_CHECK:-}" = "1" ] || [ "${PRIME_AGENT_ARCHIVE_CHECK:-}" = "1" ]; then
+  # The stage rides too (an abort during the archive check's extraction
+  # must leave no staged tree under the prefix); `stage` is initialized
+  # before the traps, so the sweep targets only what THIS script assigns.
+  trap 'ui_stop; rm -rf "${dl:-}" "${stage:-}"' EXIT
+else
+  trap 'ui_stop; rm -rf "$dl"' EXIT
+fi
+stage=""
+publish_parked=""
+# THE PUBLISH-WINDOW RESTORE (the interrupt handler's discipline, shared
+# by the cleanup trap): the publish parks the incoming live tree at its
+# rollback slot and only then moves the new stage in — between those two
+# renames an interrupt would otherwise delete the staged payload (this
+# run's own trash, the sweep's rule) while the parked tree stays aside,
+# leaving share_dir with NOTHING live in it (the bots' finding: the
+# machine's launcher breaks until a manual rollback). The restore mirrors
+# the publish's own mv-failure branch: the parked tree goes back to the
+# live path, and the generation record's entry for the vacated slot then
+# simply names a path that no longer exists — the rollback's record read
+# skips absent entries by design. Defined before the traps that call it;
+# before the publish window it is a no-op (publish_parked stays empty).
+publish_window_restore() {
+  # share_dir ABSENT is the window's own signature: once the new stage has
+  # landed there, the publish is done, the parked tree is exactly the
+  # rollback generation it should be, and no signal may un-publish it.
+  if [ -n "${publish_parked:-}" ] && [ -d "${publish_parked}" ] \
+     && [ ! -e "${share_dir:-}" ]; then
+    if mv "${publish_parked}" "${share_dir}" 2>/dev/null; then
+      publish_parked=""
+    else
+      echo "warning: could not restore the previous prime-agent payload from ${publish_parked}; restore it with: mv '${publish_parked}' '${share_dir}'" >&2
+    fi
+  fi
+}
+ui_interrupted() {
+  # The failed-step line prints FIRST: it writes the renderer's files
+  # under the download staging, and removing that mid-write would fail
+  # the UI's own teardown. Then the interrupted install leaves nothing
+  # behind it would not own — the download staging always, and the
+  # extraction stage when THIS run created it (a rollback's stage is the
+  # KEPT generation itself, never this run's trash to delete; the guard
+  # matches the cleanup trap's). `stage` is INITIALIZED to empty above —
+  # before any trap can fire — so a caller-exported `stage` in this run's
+  # environment is never the removal's target.
+  if [ -n "$ui_step" ]; then step_fail "$ui_step" "interrupted"; fi
+  ui_stop
+  publish_window_restore
+  rm -rf "$dl"
+  if [ -z "${rollback_from:-}" ] && [ -n "${stage:-}" ]; then
+    rm -rf "$stage"
+  fi
+}
+trap 'ui_interrupted; exit 130' INT
+trap 'ui_interrupted; exit 143' HUP TERM
+
+# Every network read goes through fetch: a connect timeout, a whole-call
+# cap, a stall cutoff (under 1 KB/s for 30s), and 3 attempts — a stalled
+# connection fails with the URL named instead of hanging forever. The loop
+# replaces curl's --retry-all-errors, which older curls (macOS) lack; a
+# retry resumes the partial file (-C -) instead of starting over. The last
+# curl error lands in fetch_error for the caller's message.
+# Usage: fetch <url> <output file> <max seconds> [bar]
+fetch() {
+  fetch_attempt=1
+  fetch_error=""
+  rm -f "$2"
+  if [ "${4:-}" = bar ] && [ -n "$ui_pid" ]; then
+    ui_progress_total="$(curl -fsSIL --connect-timeout 10 --max-time 15 "$1" 2>/dev/null \
+      | tr -d '\r' | awk 'tolower($1) == "content-length:" { size = $2 } END { print size }')"
+    case "$ui_progress_total" in ""|*[!0-9]*) ui_progress_total="" ;; esac
+    # The renderer reads the size through a fixed link in its own dir. Git
+    # Bash's default ln -s deep-copies and refuses a missing target, so
+    # there the step keeps its spinner without the bar.
+    if ln -sf "$2" "${dl}/ui-progress" 2>/dev/null; then
+      ui_progress_path="1"
+    fi
+    ui_set_active "$ui_step"
+  fi
+  while :; do
+    if curl -fsSL -C - --connect-timeout 10 --max-time "$3" \
+         --speed-limit 1024 --speed-time 30 "$1" -o "$2" 2>"$2.err"; then
+      rm -f "$2.err"
+      return 0
+    fi
+    fetch_error="$(sed -n 's/^curl: ([0-9]*) //p' "$2.err" | tail -n 1)"
+    [ "$fetch_attempt" -lt 3 ] || return 1
+    fetch_attempt=$((fetch_attempt + 1))
+    if [ "${4:-}" = bar ]; then
+      step_detail "retrying (${fetch_attempt} of 3)${fetch_error:+: $fetch_error}"
+    fi
+    sleep 1
+  done
+}
+
+# --- platform detection ----------------------------------------------------
+# uname -m maps directly to the built target: an Apple-Silicon Mac whose
+# shell (and therefore binaries) run under Rosetta 2 reports x86_64 and
+# gets the x86_64 build, which is the correct build for that runtime.
+# Windows runs this script only from a POSIX shell (Git Bash / MSYS2 /
+# Cygwin): uname -s reports MINGW*_NT-*, MSYS_NT-*, or CYGWIN_NT-*, and
+# the x86_64 build is the MSVC target. The Windows-native route is
+# install.ps1 (irm | iex); this arm keeps the sh one-liner working for
+# Git Bash users. Every later section reads WINDOWS / BINARY_NAME (the
+# path spellings, the payload check, the launcher, the takeover gates).
+OS="$(uname -s)"
+ARCH="$(uname -m)"
+WINDOWS="no"
+# CHANNEL_PLATFORM is the channel manifest's platform alias (the TS
+# NATIVE_PLATFORMS spelling pa-core::update::install::current_platform_alias
+# reads); TARGET stays the rust triple the payload names its targets by.
+case "$OS:$ARCH" in
+  Darwin:arm64) TARGET=aarch64-apple-darwin; CHANNEL_PLATFORM=darwin-arm64 ;;
+  Darwin:x86_64) TARGET=x86_64-apple-darwin; CHANNEL_PLATFORM=darwin-x64 ;;
+  Linux:x86_64) TARGET=x86_64-unknown-linux-gnu; CHANNEL_PLATFORM=linux-x64 ;;
+  Linux:aarch64) TARGET=aarch64-unknown-linux-gnu; CHANNEL_PLATFORM=linux-arm64 ;;
+  MINGW64_NT*:x86_64|MINGW_NT*:x86_64|MSYS_NT*:x86_64|CYGWIN_NT*:x86_64)
+    TARGET=x86_64-pc-windows-msvc; CHANNEL_PLATFORM=win32-x64; WINDOWS=yes ;;
+  *)
+    die "no rust build is published for ${OS} ${ARCH} (detected via uname);
+the release channel builds aarch64-apple-darwin, x86_64-apple-darwin,
+aarch64-unknown-linux-gnu, x86_64-unknown-linux-gnu, and
+x86_64-pc-windows-msvc (the Windows build installs through this script
+under Git Bash/MSYS2/Cygwin — uname MINGW*_NT*/MSYS_NT*/CYGWIN_NT* — or
+through install.ps1 in PowerShell)"
+    ;;
+esac
+# The staged binary name: the MSVC build ships prime-agent.exe; the
+# extraction check, the launcher, and the manifest row all name it.
+if [ "$WINDOWS" = "yes" ]; then
+  BINARY_NAME="prime-agent.exe"
+else
+  BINARY_NAME="prime-agent"
+fi
+
+# --- glibc floor (Linux) ------------------------------------------------------
+# The continuous workflow builds the GNU/Linux targets inside an
+# ubuntu:22.04 (glibc 2.35) container, so the published Linux binaries
+# require glibc symbols no newer than 2.35. Refuse installs on older
+# glibc (or non-glibc) systems up front with the exact floor instead of
+# installing a payload the dynamic loader will refuse to start.
+if [ "$OS" = "Linux" ]; then
+  ldd_line="$(ldd --version 2>&1 | head -n 1)"
+  case "$ldd_line" in
+    *musl*) die "musl libc is not supported: the Linux builds are GNU (glibc >= 2.35, Ubuntu 22.04 or newer) binaries" ;;
+  esac
+  glibc="${ldd_line##* }"
+  case "$glibc" in
+    [0-9]*.[0-9]*) ;;
+    *) die "could not determine the glibc version from: ${ldd_line}
+the Linux builds require glibc >= 2.35 (Ubuntu 22.04 or newer)" ;;
+  esac
+  glibc_major="$(printf '%s' "${glibc%%.*}" | tr -cd '0-9')"
+  glibc_minor="$(printf '%s' "${glibc#*.}" | sed 's/\..*//' | tr -cd '0-9')"
+  if [ -z "$glibc_major" ] || [ -z "$glibc_minor" ] \
+     || [ "$glibc_major" -lt 2 ] \
+     || { [ "$glibc_major" -eq 2 ] && [ "$glibc_minor" -lt 35 ]; }; then
+    die "glibc ${glibc} is below the supported floor: the Linux builds are
+compiled against glibc 2.35 (Ubuntu 22.04) and will not start here"
+  fi
+  say "glibc ${glibc} >= 2.35: supported"
+fi
+say "platform: ${CHANNEL_PLATFORM}"
+
+# --- the R2 channel (the user path never touches GitHub) --------------------
+# THE CHANNEL RESOLUTION (the TS install.sh parity): the channel pointer
+# file gives the version, the channel manifest gives this platform's
+# artifact row, and the versioned release prefix serves the tarball +
+# SHA256SUMS. No gh, no GITHUB_TOKEN, no workflow-artifact API — the
+# download base is the R2-backed domain and everything comes from it.
+case "$CHANNEL" in
+  stable) CHANNEL_MANIFEST="latest.json" ;;
+  beta) CHANNEL_MANIFEST="beta.json" ;;
+  *) die "unknown release channel: ${CHANNEL} (stable or beta)" ;;
+esac
+# THE HTTPS RULE: a plaintext download base would let a network attacker
+# swap the payload the checksum then "verifies" into place. The one escape
+# hatch is the explicitly-named knob for a local channel or e2e run
+# (install.ps1 carries the same rule + knob); it warns when it is active.
+# The local modes (--rollback, --archive) download nothing, so the rule
+# guards the channel install only.
+if [ "$MODE" = channel ]; then
+case "$BASE_URL" in
+  https://*) ;;
+  *)
+    if [ "${PRIME_AGENT_ALLOW_HTTP:-}" = "1" ]; then
+      note "! PRIME_AGENT_ALLOW_HTTP=1: the download base ${BASE_URL} is not https,"
+      note "  so the download is plaintext. Use it only for a local channel you control."
+    else
+      die "the download base URL must be an https URL: ${BASE_URL}"
+    fi
+    ;;
+esac
+fi
+BASE_URL="${BASE_URL%/}"
+
+# The channel pointer's one-line body (empty when the read fails).
+read_channel_version() {
+  if fetch "${BASE_URL}/${CHANNEL}" "$dl/channel-pointer" 30; then
+    tr -d '[:space:]' < "$dl/channel-pointer"
+  fi
+}
+# The local modes (--rollback, --archive) already have their payload: the
+# channel resolution here and the manifest, download, and checksum steps
+# below run only for the channel install (the blocks are not re-indented).
+# A rollback reads its version from the kept generation once the prefix is
+# resolved (below the Python bootstrap).
+if [ "$MODE" = channel ]; then
+VERSION_PINNED="no"
+if [ -n "${PRIME_AGENT_VERSION:-}" ]; then
+  VERSION="${PRIME_AGENT_VERSION#v}"
+  VERSION_PINNED="yes"
+else
+  # THE RETRY (the publish's consistency window): the channel pointers
+  # flip one after the other (the manifest, then the version pointer), so
+  # a read landing between them sees the old pointer with the new
+  # manifest — a transient mismatch, not a broken channel. One re-read of
+  # the PAIR resolves it; a second refusal is a real error.
+  step_start "Checking the latest ${CHANNEL} version"
+  version_attempt=1
+  while :; do
+    VERSION="$(read_channel_version)"
+    [ -n "$VERSION" ] && break
+    version_attempt=$((version_attempt + 1))
+    [ "$version_attempt" -le 2 ] || break
+    sleep 1
+  done
+fi
+case "$VERSION" in
+  ""|v)
+    die "could not resolve the latest ${CHANNEL} version from ${BASE_URL}/${CHANNEL}
+(set PRIME_AGENT_VERSION to pin an exact version, or check the network)"
+    ;;
+  *[!0-9A-Za-z.-]*)
+    die "invalid version from the ${CHANNEL} channel pointer: ${VERSION}"
+    ;;
+esac
+step_clear
+say "installing prime-agent ${VERSION} from the ${CHANNEL} channel (${CHANNEL_PLATFORM})"
+title "${VERSION} (${CHANNEL})"
+elif [ "$MODE" = archive ]; then
+# --- --archive: a local release archive ------------------------------------------
+# The archive must carry the channel naming for this platform; the version
+# comes from the name. The channel download and its checksum checks are
+# skipped: the operator named the payload (the tarball must still contain an
+# executable payload binary, checked at extraction). On Windows a drive-letter
+# path (the C:\... form `prime-agent update --archive` passes) goes to the
+# POSIX form first: the name below splits on /, and tar reads C: as a host.
+  if [ "$WINDOWS" = "yes" ] && command -v cygpath >/dev/null 2>&1; then
+    archive_posix="$(cygpath -u "$ARCHIVE")" || die "could not resolve the archive path ${ARCHIVE}"
+    ARCHIVE="$archive_posix"
+  fi
+  [ -f "$ARCHIVE" ] || die "the release archive ${ARCHIVE} does not exist"
+  archive_name="${ARCHIVE##*/}"
+  case "$archive_name" in
+    prime-agent-?*-"${CHANNEL_PLATFORM}".tar.gz) ;;
+    *) die "${archive_name} is not a ${CHANNEL_PLATFORM} release archive (expected prime-agent-<version>-${CHANNEL_PLATFORM}.tar.gz)" ;;
+  esac
+  VERSION="${archive_name#prime-agent-}"
+  VERSION="${VERSION%-"${CHANNEL_PLATFORM}".tar.gz}"
+  # A leading v is the pin's accepted spelling too (`--rollback`'s marker
+  # versions carry none; the exact payload match below compares the bare
+  # version the binary reports).
+  VERSION="${VERSION#v}"
+  case "$VERSION" in
+    *[!0-9A-Za-z.-]*) die "invalid version in the archive name ${archive_name}: ${VERSION}" ;;
+  esac
+  asset="$ARCHIVE"
+  say "installing prime-agent ${VERSION} from the local archive ${ARCHIVE}"
+  title "${VERSION} (local archive)"
+  step_ok "Using the local archive" "$(tilde "$ARCHIVE")"
+fi
 
 # --- the Python bootstrap: the installer must not depend on system python3 ----
 # Every scripting step below (the store guard's realpath, the artifact's
@@ -289,15 +993,78 @@ physical_path() {
 }
 uv_store_root="$(physical_path "${HOME}/.prime/agent")"
 uv_default_root="$(physical_path "${HOME}/.local")"
-uv_bin_dir="${HOME}/.local/bin"
+# The store-alias detection runs FIRST so the discovery guards below can
+# read it in every branch (a uv found INSIDE the shared store must never
+# carry uv's own python writes back into it).
 uv_under_store="no"
 case "${uv_default_root}/" in
   "${uv_store_root}/"*) uv_under_store="yes" ;;
 esac
-if [ "$uv_under_store" = "yes" ]; then
-  uv_bin_dir="${PREFIX}/bin"
-  say "uv target: ${HOME}/.local resolves inside the shared session store;"
-  say "  uv installs payload-adjacent at ${uv_bin_dir} instead"
+# THE PLATFORM EXECUTABLE NAME (the reviewer's finding): the Git Bash
+# route probes real Windows files - uv.exe, not uv.
+uv_name="uv"
+if [ "$WINDOWS" = "yes" ]; then uv_name="uv.exe"; fi
+# The PATH scan's candidate names match the child's own executable
+# search (ensure_uv): the bare name first, then on Windows the SUPPORTED
+# PATHEXT entries in PATHEXT order - the defaults only when PATHEXT
+# names none.
+uv_path_candidates="uv"
+if [ "$WINDOWS" = "yes" ]; then
+  # PATHEXT entries are parsed as literal semicolon-delimited strings with
+  # END-ONLY trimming (the child's own parse: whitespace inside an entry
+  # keeps it unsupported), lowercased, filtered to the supported set in
+  # PATHEXT order; the defaults apply only when PATHEXT names none.
+  uv_path_exts=""
+  uv_pathtext_rest="${PATHEXT:-}"
+  while [ -n "$uv_pathtext_rest" ]; do
+    uv_pathtext_entry="${uv_pathtext_rest%%;*}"
+    if [ "$uv_pathtext_entry" = "$uv_pathtext_rest" ]; then
+      uv_pathtext_rest=""
+    else
+      uv_pathtext_rest="${uv_pathtext_rest#*;}"
+    fi
+    uv_pathtext_entry="${uv_pathtext_entry#"${uv_pathtext_entry%%[![:space:]]*}"}"
+    uv_pathtext_entry="${uv_pathtext_entry%"${uv_pathtext_entry##*[![:space:]]}"}"
+    uv_pathtext_entry="$(printf '%s' "$uv_pathtext_entry" | tr 'A-Z' 'a-z')"
+    case "$uv_pathtext_entry" in
+      .com|.exe|.bat|.cmd) uv_path_exts="$uv_path_exts $uv_pathtext_entry" ;;
+    esac
+  done
+  [ -n "$uv_path_exts" ] || uv_path_exts=" .com .exe .bat .cmd"
+  for uv_path_ext in $uv_path_exts; do
+    uv_path_candidates="$uv_path_candidates uv$uv_path_ext"
+  done
+fi
+# THE UV TARGET KNOB (the ps1's own PRIME_AGENT_UV_BIN_DIR): an operator-
+# set dir wins (a packaged install keeps uv inside its own tree, the e2e
+# harnesses point it at their scratch dir so a run never touches the
+# shared ~/.local/bin). The Windows C:\ spelling reaches this script
+# through the env - it normalizes exactly like PRIME_AGENT_RUST_PREFIX
+# (cygpath); a POSIX spelling passes through untouched. A RELATIVE knob
+# is refused (the reviewer's finding): a relative target would ride PATH
+# guidance into every later shell, which resolves it from its own working
+# directory - an absolute target is the only honest contract.
+if [ -n "${PRIME_AGENT_UV_BIN_DIR:-}" ]; then
+  uv_bin_dir="${PRIME_AGENT_UV_BIN_DIR}"
+  if [ "$WINDOWS" = "yes" ] && command -v cygpath >/dev/null 2>&1; then
+    uv_bin_dir="$(cygpath -u "$uv_bin_dir")" || die "PRIME_AGENT_UV_BIN_DIR could not be resolved to a POSIX path: ${PRIME_AGENT_UV_BIN_DIR}"
+  fi
+  case "$uv_bin_dir" in
+    /*) ;;
+    *) die "PRIME_AGENT_UV_BIN_DIR must be an absolute path: ${PRIME_AGENT_UV_BIN_DIR}" ;;
+  esac
+  # THE PATH SEPARATOR (the reviewer's finding): a target containing a
+  # colon would corrupt every PATH export and prepend that carries it.
+  case "$uv_bin_dir" in
+    *:*) die "PRIME_AGENT_UV_BIN_DIR must not contain a colon: ${PRIME_AGENT_UV_BIN_DIR}" ;;
+  esac
+else
+  uv_bin_dir="${HOME}/.local/bin"
+  if [ "$uv_under_store" = "yes" ]; then
+    uv_bin_dir="${PREFIX}/bin"
+    say "uv target: ${HOME}/.local resolves inside the shared session store;"
+    say "  uv installs payload-adjacent at ${uv_bin_dir} instead"
+  fi
 fi
 # THE FALLBACK'S OWN GUARD (the store guard cannot cover this write: the
 # astral install runs BEFORE the guard does): the computed target must
@@ -320,11 +1087,64 @@ if [ "$uv_target_unsafe" = "yes" ]; then
   note "  here — the store is never written by this installer"
   uv_bin_dir=""
 fi
+# A REAL EXECUTABLE ON PATH (the reviewer's findings): a bare command -v
+# also reports exported shell FUNCTIONS (BASH_FUNC-style imports), and its
+# bare-name output can even hit a non-executable decoy file in the cwd -
+# neither is resolvable by a child process. So the check scans the PATH
+# entries itself for an EXECUTABLE file (with the platform's uv_name) and
+# never consults the shell's own function/alias resolution.
+uv_on_path() {
+  # The PATH split is PARAMETER EXPANSION ALONE (the reviewer's finding):
+  # an unquoted for-loop word-split GLOB-expands a PATH entry like
+  # /tmp/glob-* into a different directory the child never searches - a
+  # literal split cannot glob.
+  # An UNSET PATH is distinct from a SET-EMPTY one: the child resolves
+  # NOTHING without a PATH (no match, and no set -u abort - the uv
+  # download/system-Python fallback below continues), while a set-empty
+  # PATH resolves the cwd. The trailing sentinel colon then guarantees
+  # EVERY component its own iteration - a trailing or sole EMPTY
+  # component resolves as the cwd for the child.
+  if [ -z "${PATH+x}" ]; then
+    return 1
+  fi
+  uv_on_path_rest="${PATH}:"
+  while [ -n "$uv_on_path_rest" ]; do
+    uv_on_path_entry="${uv_on_path_rest%%:*}"
+    if [ "$uv_on_path_entry" = "$uv_on_path_rest" ]; then
+      uv_on_path_rest=""
+    else
+      uv_on_path_rest="${uv_on_path_rest#*:}"
+    fi
+    # An EMPTY component means the CURRENT DIRECTORY in the child's PATH
+    # resolution semantics - the scan searches it, never skips it.
+    [ -n "$uv_on_path_entry" ] || uv_on_path_entry="."
+    # Within one PATH entry the scan iterates the candidate names in the
+    # child's own order; an executable regular FILE wins.
+    for uv_on_path_name in $uv_path_candidates; do
+      [ -f "${uv_on_path_entry}/${uv_on_path_name}" ] || continue
+      [ -x "${uv_on_path_entry}/${uv_on_path_name}" ] || continue
+      uv_on_path_bin="${uv_on_path_entry}/${uv_on_path_name}"
+      return 0
+    done
+  done
+  return 1
+}
 uv_bin=""
-if command -v uv >/dev/null 2>&1; then
-  uv_bin="$(command -v uv)"
-elif [ -x "${uv_bin_dir}/uv" ]; then
-  uv_bin="${uv_bin_dir}/uv"
+python_step="no"
+if uv_on_path; then
+  uv_bin="$uv_on_path_bin"
+elif [ -x "${uv_bin_dir}/${uv_name}" ]; then
+  uv_bin="${uv_bin_dir}/${uv_name}"
+elif [ -x "${HOME}/.local/bin/${uv_name}" ] && [ "$uv_under_store" = "no" ]; then
+  # THE CANONICAL-LOCATION FALLBACK (the reviewer's finding): the knob
+  # redirects the INSTALL target, not the discovery - a usable uv at the
+  # canonical ~/.local/bin still serves this install (no duplicate
+  # download into the knob's dir). THE STORE-ALIAS GUARD (the reviewer's
+  # finding): under the ~/.local-alias-into-the-store shape that uv IS
+  # inside the shared store - selecting it would carry uv's own python
+  # writes back into the store, so the fallback refuses it and the flow
+  # installs payload-adjacent instead.
+  uv_bin="${HOME}/.local/bin/${uv_name}"
 else
   # The fetch and the script run are checked SEPARATELY: a plain
   # `curl | sh` pipeline reports the script's status, so a dead network
@@ -335,12 +1155,27 @@ else
   # alias — which also overrides any inherited value pointing into the
   # shared session store (it would place uv there BEFORE the store guard
   # runs).
+  # The download attempt is CHANNEL-install machinery on Windows: the
+  # rollback and the archive never reach a UVPY consumer there — every
+  # path they take resolves through physical_path (the store guard, the
+  # prefix), and the daemon ladder and the TS uninstall are unix-only —
+  # so a ps1-installed machine with no Python and no network can still
+  # restore its previous generation or install a local archive (the
+  # modes are local BY DESIGN; the channel manifest's JSON parsing is
+  # Python's one Windows use).
   if [ -n "$uv_bin_dir" ] \
-     && uv_install_out="$(curl -fsSLsS https://astral.sh/uv/install.sh)" \
-     && printf '%s\n' "$uv_install_out" \
-        | env -u UV_UNMANAGED_INSTALL UV_INSTALL_DIR="$uv_bin_dir" sh >/dev/null 2>&1 \
-     && [ -x "${uv_bin_dir}/uv" ]; then
-    uv_bin="${uv_bin_dir}/uv"
+     && { [ "$WINDOWS" != "yes" ] || [ "$MODE" = "channel" ]; }; then
+    step_start "Setting up Python (one-time)"
+    python_step="yes"
+    if uv_install_out="$(curl -fsSL --connect-timeout 10 --max-time 60 --retry 2 \
+          https://astral.sh/uv/install.sh)" \
+       && printf '%s\n' "$uv_install_out" \
+          | env -u UV_UNMANAGED_INSTALL UV_INSTALL_DIR="$uv_bin_dir" sh >/dev/null 2>&1 \
+       && [ -x "${uv_bin_dir}/${uv_name}" ]; then
+      uv_bin="${uv_bin_dir}/${uv_name}"
+    else
+      say "the uv install failed; falling back to a system python3"
+    fi
   fi
 fi
 
@@ -368,6 +1203,10 @@ if [ -n "$uv_bin" ]; then
   # just-installed interpreter would never be found.
   UVPY="$(env -u UV_PYTHON_INSTALL_DIR "$uv_bin" python find --system 3.11 2>/dev/null || true)"
   if [ -z "$UVPY" ]; then
+    if [ "$python_step" = no ]; then
+      step_start "Setting up Python (one-time)"
+      python_step="yes"
+    fi
     if env -u UV_PYTHON_INSTALL_DIR "$uv_bin" python install 3.11 >/dev/null 2>&1; then
       UVPY="$(env -u UV_PYTHON_INSTALL_DIR "$uv_bin" python find --system 3.11 2>/dev/null || true)"
     fi
@@ -376,13 +1215,22 @@ fi
 if [ -z "$UVPY" ] && command -v python3 >/dev/null 2>&1; then
   UVPY="python3"
 fi
-[ -n "$UVPY" ] \
-  || die "the installer could not obtain a Python runtime, which it needs
+if [ "$python_step" = yes ] && [ -n "$UVPY" ]; then
+  step_ok "Python ready"
+fi
+# The interpreter gate rides the same Windows-local exemption: on every
+# other path the machine is missing the one prerequisite the installer
+# cannot provide for itself, but the Windows rollback and archive run
+# entirely without one (see the download attempt's gate above).
+if [ -z "$UVPY" ] \
+   && { [ "$WINDOWS" != "yes" ] || [ "$MODE" = "channel" ]; }; then
+  die "the installer could not obtain a Python runtime, which it needs
 for its scripting steps (the store guard, the artifact handling). Install
 uv with:
   curl -LsSf https://astral.sh/uv/install.sh | sh
 (the installer then provisions its own Python through uv — no system
 python3 required), or install python3 yourself and re-run"
+fi
 
 # --- the preserve invariant: guard the shared store ---------------------------
 # ~/.prime/agent is shared by both products BY DESIGN (sessions, leases,
@@ -392,7 +1240,15 @@ python3 required), or install python3 yourself and re-run"
 # Resolved like PREFIX below: when $HOME is a symlink, a PREFIX spelled in the
 # physical form must still compare equal to the store, or the guard would
 # pass two different spellings of the same directory.
-PRESERVED_STORE="$("$UVPY" -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "${HOME}/.prime/agent")"
+# Windows/MSYS resolves in the POSIX (MSYS) spelling: a native python
+# round-trips the path through Windows form (realpath answers C:\...),
+# which would make every later MSYS-form comparison miss; the sh-native
+# physical_path() keeps the guard's spellings consistent end to end.
+if [ "$WINDOWS" = "yes" ]; then
+  PRESERVED_STORE="$(physical_path "${HOME}/.prime/agent")"
+else
+  PRESERVED_STORE="$("$UVPY" -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "${HOME}/.prime/agent")"
+fi
 guard_preserved() {
   for guarded_path in "$@"; do
     case "$guarded_path" in
@@ -421,21 +1277,66 @@ fresh_slot() { # base name without suffix
 
 case "$PREFIX" in
   /*) ;;
-  *) die "PRIME_AGENT_RUST_PREFIX must be an absolute path: ${PREFIX}" ;;
+  *)
+    # Windows accepts the Windows drive-letter spelling too (a user passing
+    # C:\... in Git Bash): cygpath - the MSYS2/Cygwin core tool - rewrites
+    # it to the POSIX form every later step compares in.
+    if [ "$WINDOWS" = "yes" ] && command -v cygpath >/dev/null 2>&1; then
+      PREFIX="$(cygpath -u "$PREFIX" 2>/dev/null)"         || die "PRIME_AGENT_RUST_PREFIX must be an absolute path: ${PRIME_AGENT_RUST_PREFIX}"
+      case "$PREFIX" in
+        /*) ;;
+        *) die "PRIME_AGENT_RUST_PREFIX must be an absolute path: ${PRIME_AGENT_RUST_PREFIX}" ;;
+      esac
+    else
+      die "PRIME_AGENT_RUST_PREFIX must be an absolute path: ${PREFIX}"
+    fi
+    ;;
 esac
 # Resolve PREFIX FULLY (symlinks included) BEFORE creating anything under
 # it: a prefix whose spelling hides a symlink into the shared store must
-# abort before mkdir -p ever writes there, not after.
-PREFIX="$("$UVPY" -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$PREFIX")"
+# abort before mkdir -p ever writes there, not after. Windows resolves in
+# the MSYS form (the guard's ruling above).
+# The sentinel X rides both resolvers: a resolved path that ENDS in a
+# newline would have it stripped by the command substitution's trailing
+# newline trim (the newline guard below would then never see it), and
+# the stripped spelling would target a DIFFERENT directory. The sentinel
+# is appended before the substitution and removed after — ${out%X}
+# strips exactly the one appended X, so a path ending in X (or in X then
+# a newline) comes through byte-true.
+if [ "$WINDOWS" = "yes" ]; then
+  PREFIX="$(physical_path "$PREFIX")X"
+else
+  PREFIX="$("$UVPY" -c 'import os, sys; print(os.path.realpath(sys.argv[1]) + "X")' "$PREFIX")"
+fi
+PREFIX="${PREFIX%X}"
+# The rollback's generations record is newline-delimited (one path per
+# line), so a prefix containing a newline can never be recorded or read
+# back — the rollback would silently misreport "nothing to roll back".
+# The check rides AFTER the full resolution above: a clean lexical
+# spelling through a symlinked ancestor can resolve to a real path that
+# contains a newline, and the record stores the RESOLVED path — the
+# refusal names the resolved spelling, before anything is created under
+# it (the same boundary discipline as the absolute-path check).
+case "$PREFIX" in
+  *'
+'*) die "PRIME_AGENT_RUST_PREFIX must not contain a newline: the rollback record is newline-delimited (resolved: ${PREFIX})" ;;
+esac
 guard_preserved "$PREFIX" "${PREFIX}/share" "${PREFIX}/bin"
 mkdir -p "${PREFIX}/share" "${PREFIX}/bin"
 # The guard must also see THROUGH symlinked child roots: a ${PREFIX}/share or
 # ${PREFIX}/bin that is a symlink into the shared store would otherwise let
 # the publish write under it while every lexical check passes. Resolving the
 # children (not refusing them) keeps legitimate out-of-store symlinked roots
-# installable while the resolved paths go through the same guard.
+# installable while the resolved paths go through the same guard. Windows
+# resolves in the MSYS form (physical_path) — a native python round-trips
+# through C:\... spelling the MSYS-form comparison can never match, which
+# would silently disarm this child-root guard (the bots' finding).
 for install_root in "${PREFIX}/share" "${PREFIX}/bin"; do
-  guard_preserved "$("$UVPY" -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$install_root")"
+  if [ "$WINDOWS" = "yes" ]; then
+    guard_preserved "$(physical_path "$install_root")"
+  else
+    guard_preserved "$("$UVPY" -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$install_root")"
+  fi
 done
 
 share_dir="${PREFIX}/share/prime-agent"
@@ -445,104 +1346,106 @@ old_layout_dir="${PREFIX}/share/prime-agent-rust"
 legacy_dir="${PREFIX}/share/prime-agent-legacy"
 lock_link="${PREFIX}/share/.prime-agent-install.lock"
 legacy_lock="${PREFIX}/share/.prime-agent-rust-install.lock"
+generations_record="${PREFIX}/share/.prime-agent-install-generations"
 guard_preserved "$share_dir" "$launcher" "$old_layout_dir" "$legacy_dir" "$lock_link"
 
-# --- platform detection ----------------------------------------------------
-# uname -m maps directly to the built target: an Apple-Silicon Mac whose
-# shell (and therefore binaries) run under Rosetta 2 reports x86_64 and
-# gets the x86_64 build, which is the correct build for that runtime.
-OS="$(uname -s)"
-ARCH="$(uname -m)"
-# CHANNEL_PLATFORM is the channel manifest's platform alias (the TS
-# NATIVE_PLATFORMS spelling pa-core::update::install::current_platform_alias
-# reads); TARGET stays the rust triple the payload names its targets by.
-case "$OS:$ARCH" in
-  Darwin:arm64) TARGET=aarch64-apple-darwin; CHANNEL_PLATFORM=darwin-arm64 ;;
-  Darwin:x86_64) TARGET=x86_64-apple-darwin; CHANNEL_PLATFORM=darwin-x64 ;;
-  Linux:x86_64) TARGET=x86_64-unknown-linux-gnu; CHANNEL_PLATFORM=linux-x64 ;;
-  Linux:aarch64) TARGET=aarch64-unknown-linux-gnu; CHANNEL_PLATFORM=linux-arm64 ;;
-  *)
-    die "no rust build is published for ${OS} ${ARCH} (detected via uname);
-the release channel builds aarch64-apple-darwin, x86_64-apple-darwin,
-aarch64-unknown-linux-gnu, and x86_64-unknown-linux-gnu"
-    ;;
-esac
-
-# --- glibc floor (Linux) ------------------------------------------------------
-# The continuous workflow builds the GNU/Linux targets inside an
-# ubuntu:22.04 (glibc 2.35) container, so the published Linux binaries
-# require glibc symbols no newer than 2.35. Refuse installs on older
-# glibc (or non-glibc) systems up front with the exact floor instead of
-# installing a payload the dynamic loader will refuse to start.
-if [ "$OS" = "Linux" ]; then
-  ldd_line="$(ldd --version 2>&1 | head -n 1)"
-  case "$ldd_line" in
-    *musl*) die "musl libc is not supported: the Linux builds are GNU (glibc >= 2.35, Ubuntu 22.04 or newer) binaries" ;;
-  esac
-  glibc="${ldd_line##* }"
-  case "$glibc" in
-    [0-9]*.[0-9]*) ;;
-    *) die "could not determine the glibc version from: ${ldd_line}
-the Linux builds require glibc >= 2.35 (Ubuntu 22.04 or newer)" ;;
-  esac
-  glibc_major="$(printf '%s' "${glibc%%.*}" | tr -cd '0-9')"
-  glibc_minor="$(printf '%s' "${glibc#*.}" | sed 's/\..*//' | tr -cd '0-9')"
-  if [ -z "$glibc_major" ] || [ -z "$glibc_minor" ] \
-     || [ "$glibc_major" -lt 2 ] \
-     || { [ "$glibc_major" -eq 2 ] && [ "$glibc_minor" -lt 35 ]; }; then
-    die "glibc ${glibc} is below the supported floor: the Linux builds are
-compiled against glibc 2.35 (Ubuntu 22.04) and will not start here"
+# --- --rollback: the newest kept generation ------------------------------------
+# The rollback source is the newest generation in the generations record (the
+# record is append-only, so the last usable line is the newest) that still
+# exists, carries this installer's marker, and holds a payload binary. Its
+# marker supplies the channel and version; the publish below moves it back
+# into place and keeps the replaced payload as the new generation.
+rollback_from=""
+if [ "$MODE" = rollback ]; then
+  # The marker as this script's ASCII text: this script writes plain bytes,
+  # but install.ps1's Set-Content follows $PSDefaultParameters
+  # ['*:Encoding'] — an existing ps1-published payload's marker can be
+  # UTF-16 (NUL-interleaved) or BOM-prefixed. The read flattens the NULs
+  # and strips a leading BOM (UTF-8 and both UTF-16 orders); a plain
+  # marker passes through byte-identical. Only the ps1 slot's marker needs
+  # it — the record's entries are always this script's own ASCII writes.
+  marker_text() {
+    text="$(tr -d '\0' < "$1" 2>/dev/null || true)"
+    case "$text" in
+      "$(printf '\357\273\277')"*) text="${text#"$(printf '\357\273\277')"}" ;;
+      "$(printf '\377\376')"*) text="${text#"$(printf '\377\376')"}" ;;
+      "$(printf '\376\377')"*) text="${text#"$(printf '\376\377')"}" ;;
+    esac
+    printf '%s' "$text"
+  }
+  if [ -f "$generations_record" ]; then
+    while IFS= read -r recorded; do
+      case "$recorded" in
+        "${PREFIX}/share/prime-agent.old."*) ;;
+        *) continue ;;
+      esac
+      [ -d "$recorded" ] && [ -x "${recorded}/${BINARY_NAME}" ] || continue
+      # The normalized marker read covers recorded entries too: a ps1-
+      # marked live tree this script moved aside in a ROLLBACK becomes a
+      # recorded generation, and its encoding rides with it.
+      case "$(marker_text "${recorded}/.prime-agent-install" \
+                 | head -n 1)" in
+        "install-rust.sh channel "*) ;;
+        *) continue ;;
+      esac
+      rollback_from="$recorded"
+    done < "$generations_record"
   fi
-  say "glibc ${glibc} >= 2.35: supported"
+  # The Windows-native installer's slot: install.ps1 keeps ITS replaced
+  # payload at the un-suffixed `prime-agent.old` and never writes the
+  # generations record (its own one-generation bookkeeping; its recovery
+  # is a printed manual Move-Item), so a ps1-updated machine has no
+  # recorded entry — but the CLI still sees an installer-owned payload,
+  # and `update --rollback` runs THIS script: install.ps1 has no rollback
+  # mode, so this fallback is that machine's only automated rollback. The
+  # slot takes the same three checks a recorded generation takes.
+  # THE CONFLICT POLICY: when a usable recorded entry AND the slot both
+  # exist, the RECORD wins — deliberately. No ordering signal separates
+  # the two bookkeeping systems (the asides' mtimes are publish times
+  # only until a rollback publishes a kept tree back into place with its
+  # OLD mtime, so a newer ps1 aside of a rolled-back tree compares as
+  # older than a stale record entry), and the marker check cannot tell
+  # install.ps1's slot from a user's own copy of the payload at that
+  # name — the record's entries are exactly the slots this script wrote
+  # and swept, so it stays authoritative whenever it answers. The slot
+  # serves the machines the record never covered.
+  ps1_slot="${PREFIX}/share/prime-agent.old"
+  if [ -z "$rollback_from" ] \
+     && [ -d "$ps1_slot" ] && [ -x "${ps1_slot}/${BINARY_NAME}" ] \
+     && case "$(marker_text "${ps1_slot}/.prime-agent-install" \
+                 | head -n 1)" in
+          "install-rust.sh channel "*) true ;;
+          *) false ;;
+        esac; then
+    rollback_from="$ps1_slot"
+  fi
+  [ -n "$rollback_from" ] || die "nothing to roll back: no previous version is kept under ${PREFIX}/share
+(each update keeps the version it replaced; a fresh install has none)"
+  # THE ROLLBACK PRE-FLIGHT: with the knob set the resolved source is the
+  # whole answer — printed on stdout and the run stops here (no channel
+  # read, no staging, no lock, no payload touch; the install prologue's
+  # own temp staging still ran, so its sweep rides the exit too — the
+  # trap is not armed yet at this point), so a caller can ask
+  # synchronously whether a rollback CAN run before handing the real
+  # run off (the Windows update command's handoff: this process must
+  # exit for the publish to happen, so its exit code can only report the
+  # pre-flight's answer honestly).
+  if [ "${PRIME_AGENT_ROLLBACK_CHECK:-}" = "1" ]; then
+    printf '%s\n' "$rollback_from"
+    exit 0
+  fi
+  # The channel/version lines come from the normalized marker: the slot's
+  # marker can be a ps1-encoded write (see marker_text); a record entry's
+  # marker is this script's own ASCII, so the normalization is a no-op.
+  marker="$(marker_text "${rollback_from}/.prime-agent-install")"
+  CHANNEL="$(printf '%s\n' "$marker" | sed -n '1s/^install-rust.sh channel //p')"
+  VERSION="$(printf '%s\n' "$marker" | sed -n '2s/^version //p')"
+  say "rolling back to prime-agent ${VERSION} (${rollback_from})"
+  title "${VERSION} (rollback)"
+  step_ok "Found the previous version" "${VERSION}"
 fi
 
-# --- the R2 channel (the user path never touches GitHub) --------------------
-# THE CHANNEL RESOLUTION (the TS install.sh parity): the channel pointer
-# file gives the version, the channel manifest gives this platform's
-# artifact row, and the versioned release prefix serves the tarball +
-# SHA256SUMS. No gh, no GITHUB_TOKEN, no workflow-artifact API — the
-# download base is the R2-backed domain and everything comes from it.
-case "$CHANNEL" in
-  stable) CHANNEL_MANIFEST="latest.json" ;;
-  beta) CHANNEL_MANIFEST="beta.json" ;;
-  *) die "unknown release channel: ${CHANNEL} (stable or beta)" ;;
-esac
-case "$BASE_URL" in
-  https://*) ;;
-  *) die "the download base URL must be an https URL: ${BASE_URL}" ;;
-esac
-BASE_URL="${BASE_URL%/}"
-
-VERSION_PINNED="no"
-if [ -n "${PRIME_AGENT_VERSION:-}" ]; then
-  VERSION="${PRIME_AGENT_VERSION#v}"
-  VERSION_PINNED="yes"
-else
-  # THE RETRY (the publish's consistency window): the channel pointers
-  # flip one after the other (the manifest, then the version pointer), so
-  # a read landing between them sees the old pointer with the new
-  # manifest — a transient mismatch, not a broken channel. One re-read of
-  # the PAIR resolves it; a second refusal is a real error.
-  version_attempt=1
-  while :; do
-    VERSION="$(curl -fsSL "${BASE_URL}/${CHANNEL}" 2>/dev/null || true)"
-    [ -n "$VERSION" ] && break
-    version_attempt=$((version_attempt + 1))
-    [ "$version_attempt" -le 2 ] || break
-    sleep 1
-  done
-fi
-case "$VERSION" in
-  ""|v)
-    die "could not resolve the latest ${CHANNEL} version from ${BASE_URL}/${CHANNEL}
-(set PRIME_AGENT_VERSION to pin an exact version, or check the network)"
-    ;;
-  *[!0-9A-Za-z.-]*)
-    die "invalid version from the ${CHANNEL} channel pointer: ${VERSION}"
-    ;;
-esac
-say "installing prime-agent ${VERSION} from the ${CHANNEL} channel (${CHANNEL_PLATFORM})"
-
+if [ "$MODE" = channel ]; then
 # --- the channel manifest: this platform's artifact row ---------------------
 # The manifest carries the version plus the per-platform rows; the row's
 # file must be the exact channel naming and its sha256 the 64-hex shape —
@@ -556,15 +1459,14 @@ say "installing prime-agent ${VERSION} from the ${CHANNEL} channel (${CHANNEL_PL
 # The row reader rides a FILE, not a heredoc inside a command substitution
 # (the probe-py pattern: macOS ships bash 3.2 as /bin/sh, and its
 # POSIX-mode parser cannot close a $( ) that spans a heredoc body).
-dl="$(mktemp -d "${TMPDIR:-/tmp}/prime-agent-download.XXXXXX")"
 if [ "$VERSION_PINNED" = "yes" ]; then
   asset_name="prime-agent-${VERSION}-${CHANNEL_PLATFORM}.tar.gz"
   manifest_sha=""
 else
 manifest_attempt=1
 while :; do
-  curl -fsSL "${BASE_URL}/${CHANNEL_MANIFEST}" -o "$dl/${CHANNEL_MANIFEST}" \
-    || die "could not read the ${CHANNEL} channel manifest: ${BASE_URL}/${CHANNEL_MANIFEST}"
+  fetch "${BASE_URL}/${CHANNEL_MANIFEST}" "$dl/${CHANNEL_MANIFEST}" 30 \
+    || die "could not read the ${CHANNEL} channel manifest: ${BASE_URL}/${CHANNEL_MANIFEST} (3 attempts)"
   row_py="$dl/channel_row.py"
   cat > "$row_py" <<'ROW_PY'
 import json, sys
@@ -593,7 +1495,7 @@ ROW_PY
            # pointer (the publish writes the manifest first) — re-read the
            # PAIR once before refusing.
            sleep 1
-           VERSION="$(curl -fsSL "${BASE_URL}/${CHANNEL}" 2>/dev/null || true)"
+           VERSION="$(read_channel_version)"
            [ -n "$VERSION" ] || die "could not resolve the latest ${CHANNEL} version from ${BASE_URL}/${CHANNEL}"
            say "installing prime-agent ${VERSION} from the ${CHANNEL} channel (${CHANNEL_PLATFORM})"
            continue
@@ -610,11 +1512,13 @@ fi
 
 # --- the tarball + SHA256SUMS from the versioned release prefix -------------
 RELEASE_PREFIX="releases/v${VERSION#v}"
-curl -fsSL "${BASE_URL}/${RELEASE_PREFIX}/${asset_name}" -o "$dl/${asset_name}" \
-  || die "could not download ${asset_name} from ${BASE_URL}/${RELEASE_PREFIX}/"
-curl -fsSL "${BASE_URL}/${RELEASE_PREFIX}/SHA256SUMS" -o "$dl/SHA256SUMS" \
-  || die "could not download SHA256SUMS from ${BASE_URL}/${RELEASE_PREFIX}/"
+step_start "Downloading"
+fetch "${BASE_URL}/${RELEASE_PREFIX}/${asset_name}" "$dl/${asset_name}" 1800 bar \
+  || die "could not download ${BASE_URL}/${RELEASE_PREFIX}/${asset_name} (3 attempts${fetch_error:+, last error: $fetch_error}; check the network and re-run)"
+fetch "${BASE_URL}/${RELEASE_PREFIX}/SHA256SUMS" "$dl/SHA256SUMS" 30 \
+  || die "could not download ${BASE_URL}/${RELEASE_PREFIX}/SHA256SUMS (3 attempts${fetch_error:+, last error: $fetch_error}; check the network and re-run)"
 asset="$dl/${asset_name}"
+step_ok "Downloaded" "$(ui_mb "$(wc -c < "$asset" | tr -d ' ')")"
 
 # --- verify the checksum -------------------------------------------------------
 # The release prefix's SHA256SUMS covers the tarball; the verification
@@ -625,6 +1529,7 @@ asset="$dl/${asset_name}"
 # a corrupt tarball. (The checksum rides the same channel as the tarball —
 # the known same-channel limitation; the signed-asset design is the
 # graduation path in RELEASE_SECURITY.md.)
+step_start "Verifying"
 line="$(grep "  ${asset_name}\$" "$dl/SHA256SUMS" || true)"
 [ -n "$line" ] || die "SHA256SUMS in ${RELEASE_PREFIX} has no line for ${asset_name}"
 sums_sha="${line%% *}"
@@ -643,6 +1548,8 @@ else
   die "no sha256 tool found (sha256sum or shasum is required to verify the download)"
 fi
 say "checksum verified: ${asset_name} (${VERSION}, the ${CHANNEL} channel)"
+step_ok "Verified"
+fi
 
 # --- the TypeScript takeover, step 1: stop BOTH daemons ALWAYS ----------------
 # THE ALWAYS-STOP CONTRACT (PR1's field ruling, hardened + the second
@@ -656,9 +1563,13 @@ say "checksum verified: ${asset_name} (${VERSION}, the ${CHANNEL} channel)"
 # The stop is ESCALATING but still clean: the graceful `shutdown`
 # request first (force:false — the daemon's own stop path), a confirm
 # poll, then a forced `shutdown` request (force:true) if the graceful
-# one did not settle, and a second confirm poll. NOTHING IS EVER KILLED
-# from here: no signal is sent to any pid at any step — even the forced
-# request is the daemon's own shutdown request over its socket. An
+# one did not settle, and a second confirm poll. Without --force NOTHING
+# IS EVER KILLED from here: no signal is sent to any pid at any step —
+# even the forced request is the daemon's own shutdown request over its
+# socket. With --force, a daemon still up after the full drain wait
+# gets SIGTERM, then SIGKILL, sent to the supervisor pid its hello names,
+# and only after that pid's command line proves it is a Prime Agent
+# daemon (a stale or fake responder never gets another process killed). An
 # unreadable session count never skips the stop (the ladder runs with
 # the count unknown).
 # THE CLASSIFICATION (the second field install's evidence: the friend's
@@ -680,10 +1591,19 @@ say "checksum verified: ${asset_name} (${VERSION}, the ${CHANNEL} channel)"
 # socket stops answering).
 # ts_stop_summary accumulates the summary line(s); the success block
 # prints them with the other takeover facts.
+# WINDOWS (uname MINGW*/MSYS/CYGWIN): the TypeScript product never shipped a
+# Windows build, so no TS daemon, native install, or npm package can exist
+# here - the whole TS-takeover ladder below is a no-op by construction, and
+# this product's daemon runs a NAMED PIPE the unix-socket probe cannot see.
+# The Windows daemon stop is the product's own `shutdown` command, run in
+# the install section BEFORE the publish (a Windows process holds its
+# binary open - the payload swap needs the daemon down first; the unix
+# flow stops daemons after the publish, which a Windows file lock refuses).
 ts_stop_summary=""
 ts_stop_found_any=""
 ts_stop_refused=""
 ts_stop_rust_stopped=""
+windows_stop_summary=""
 ts_socket="${TMPDIR:-/tmp}/prime-agent-$(id -u)/daemon.sock"
 rust_socket="${TMPDIR:-/tmp}/prime-agent-rust-$(id -u)/daemon.sock"
 env_socket="${PRIME_AGENT_DAEMON_SOCKET:-}"
@@ -703,10 +1623,10 @@ esac
 # its workers (TS parity), with the worker-role marker + the public
 # socket as the belt. A stop candidate equal to it is NEVER probed at
 # all — not even the hello — unless PRIME_AGENT_STOP_LIVE_DAEMON=1
-# explicitly overrides for a deliberate in-daemon update. An operator
-# shell never carries the internal variables (a profile-exported
-# PRIME_AGENT_DAEMON_SOCKET alone does not trigger the refusal), so the
-# field contract is unchanged.
+# explicitly overrides for a deliberate in-daemon update (never
+# --force). An operator shell never carries the internal variables (a
+# profile-exported PRIME_AGENT_DAEMON_SOCKET alone does not trigger the
+# refusal), so the field contract is unchanged.
 live_daemon_socket="${PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_SOCKET:-}"
 if [ -z "$live_daemon_socket" ] && [ "${PRIME_AGENT_INTERNAL_DAEMON_WORKER:-}" = "1" ]; then
   live_daemon_socket="${PRIME_AGENT_DAEMON_SOCKET:-}"
@@ -744,16 +1664,44 @@ fi
 # holds a plain call.
 probe_py="${dl}/daemon-stop.py"
 cat > "$probe_py" <<'PROBE_PY'
-import json, select, socket, sys, time
+import json, os, select, signal, socket, sys, time
 
 path = sys.argv[-1]
 kind = "ts"
 listening_only = False
+force = False
 for flag in sys.argv[1:-1]:
     if flag == "--listening":
         listening_only = True
     if flag.startswith("--kind="):
         kind = flag[len("--kind="):]
+    if flag == "--force=1":
+        force = True
+
+# The visible progress: on a terminal the installer's renderer reads the
+# active step from PRIME_AGENT_INSTALL_UI_FILE (label, detail); otherwise
+# plain lines go to fd 4 (the installer points it at its stderr). stdout
+# stays the one-word verdict the shell parses.
+ui_file = os.environ.get("PRIME_AGENT_INSTALL_UI_FILE", "")
+ui_label = ""
+try:
+    progress_out = None if ui_file else os.fdopen(4, "w", buffering=1)
+except OSError:
+    progress_out = None
+
+def progress(detail, label=None):
+    global ui_label
+    if label is not None:
+        ui_label = label
+    if ui_file:
+        try:
+            with open(ui_file + ".tmp", "w") as handle:
+                handle.write("%s\n%s\n\n\n" % (ui_label, detail))
+            os.replace(ui_file + ".tmp", ui_file)
+        except OSError:
+            pass
+    elif progress_out is not None:
+        progress_out.write((" %s  (%s)" % (label, detail) if label is not None else "   " + detail) + "\n")
 
 # The classification ladder, identity before schema: a hello whose
 # runtime build id is this product's ("pa-daemon-rs-<version>", carried by
@@ -783,6 +1731,8 @@ STOP_DRAIN_MINIMUM_S = 5.0
 STOP_DRAIN_PER_SESSION_S = 2.0
 STOP_DRAIN_UNKNOWN_S = 30.0
 STOP_DRAIN_CAP_S = 120.0
+FORCE_TERM_WAIT_S = 5.0
+FORCE_KILL_WAIT_S = 3.0
 
 def read_line(sock, deadline, buf):
     # One persistent buffer per connection: a daemon that answers
@@ -980,8 +1930,8 @@ if request_replaced:
     print("%s:replaced:%s" % (owner, count_label))
     sys.exit(0)
 
-# THE ESCALATING LADDER (the always-stop contract, for BOTH daemons —
-# still no signal to any pid at any step):
+# THE ESCALATING LADDER (the always-stop contract, for BOTH daemons — no
+# signal to any pid at any step unless --force, see kill_supervisor):
 #   1. the graceful shutdown request (force:false) — the clean stop an
 #      idle daemon settles on immediately;
 #   2. a confirm poll (the socket stops answering within 5s);
@@ -995,8 +1945,17 @@ if request_replaced:
 #      instead of reporting a stop.
 def drain_confirm_timeout_s():
     if count is None:
-        return STOP_DRAIN_UNKNOWN_S
-    return min(STOP_DRAIN_MINIMUM_S + STOP_DRAIN_PER_SESSION_S * count, STOP_DRAIN_CAP_S)
+        drain = STOP_DRAIN_UNKNOWN_S
+    else:
+        drain = min(STOP_DRAIN_MINIMUM_S + STOP_DRAIN_PER_SESSION_S * count, STOP_DRAIN_CAP_S)
+    return drain
+
+owner_label = "Rust" if owner == "rust" else "TypeScript"
+sessions_label = "unknown sessions" if count is None else "%d session%s" % (count, "" if count == 1 else "s")
+bound_s = STOP_CONFIRM_TIMEOUT_S + drain_confirm_timeout_s()
+if force:
+    bound_s += FORCE_TERM_WAIT_S + FORCE_KILL_WAIT_S
+progress("up to %ds" % bound_s, label="Stopping the %s daemon (%s)" % (owner_label, sessions_label))
 
 request({"type": "shutdown", "force": False})
 if request_replaced:
@@ -1005,12 +1964,108 @@ if request_replaced:
 if stopped_within(STOP_CONFIRM_TIMEOUT_S):
     print("%s:stopped:%s" % (owner, count_label))
     sys.exit(0)
+progress("forcing the shutdown, up to %ds" % drain_confirm_timeout_s())
 request({"type": "shutdown", "force": True})
 if request_replaced:
     print("%s:replaced:%s" % (owner, count_label))
     sys.exit(0)
 if stopped_within(drain_confirm_timeout_s()):
     print("%s:stopped-forced:%s" % (owner, count_label))
+    sys.exit(0)
+
+# --force only: signal the supervisor pid the daemon's own hello named.
+# The pid is re-read from a fresh hello on the same socket, and it is
+# signalled only when its command line is a Prime Agent daemon (the Rust
+# and TS shapes are both `<...prime-agent...> --mode daemon`, the npm
+# build runs `node <...prime-agent...> --mode daemon`): a stale or fake
+# responder advertising some other pid never gets that process killed.
+# Only the supervisor is signalled. Both products start each worker in
+# its own process group, and a signal that lands mid-shutdown is a forced
+# exit in both, so workers the drain has not stopped yet are left behind.
+# The next Rust daemon on the pinned socket finishes, adopts, or retires
+# a Rust daemon's leftovers, which is why the signal waits out the full
+# drain window. A TS daemon still up here never acted on the forced
+# request (one already shutting down exits at once on it); its leftover
+# workers fall to their own supervisor-lost exit.
+def command_line(pid):
+    try:
+        with open("/proc/%d/cmdline" % pid, "rb") as handle:
+            return [part.decode("utf-8", "replace") for part in handle.read().split(b"\0") if part]
+    except OSError:
+        pass
+    # Python 3.3+ spelling (the installer may run a system python3); any
+    # failure means "not a Prime Agent daemon", never a crash.
+    try:
+        import subprocess
+        out = subprocess.check_output(["ps", "-p", str(pid), "-o", "command="],
+                                      stderr=subprocess.DEVNULL,
+                                      universal_newlines=True, timeout=5)
+    except Exception:
+        return []
+    return out.split()
+
+def is_prime_agent_daemon(args):
+    named = any("prime-agent" in arg for arg in args[:2])
+    daemon_mode = "--mode=daemon" in args or any(
+        args[i] == "--mode" and args[i + 1] == "daemon" for i in range(len(args) - 1))
+    return named and daemon_mode
+
+# The --force outcomes, each with its own report text:
+#   killed       a signal brought the daemon down;
+#   gone         the daemon went down on its own before any signal;
+#   unverified   no signal was sent: the daemon could not be re-identified
+#                on a fresh connection;
+#   undelivered  no signal was sent: os.kill refused (e.g. permission);
+#   no-pid       no signal was sent: the hello named no usable pid;
+#   not-daemon   no signal was sent: the named pid is not a Prime Agent daemon;
+#   failed       SIGTERM and SIGKILL were sent and the daemon stayed up.
+def kill_supervisor():
+    try:
+        sock = connect()
+    except OSError:
+        if not listening_flag():
+            return "gone"
+        progress("could not reconnect to identify the daemon; not signalled")
+        return "unverified"
+    current = wait_hello(sock)
+    sock.close()
+    if current is None or (kind == "ts" and classify_hello(current) != owner):
+        progress("could not re-identify the daemon on its socket; not signalled")
+        return "unverified"
+    pid = current.get("supervisorPid")
+    if not isinstance(pid, int) or pid <= 1 or pid in (os.getpid(), os.getppid()):
+        progress("the daemon names no usable pid; not signalled")
+        return "no-pid"
+    if not is_prime_agent_daemon(command_line(pid)):
+        progress("pid %d is not a Prime Agent daemon; not signalled" % pid)
+        return "not-daemon"
+    signalled = False
+    for sig, wait_s, name in ((signal.SIGTERM, FORCE_TERM_WAIT_S, "SIGTERM"),
+                              (signal.SIGKILL, FORCE_KILL_WAIT_S, "SIGKILL")):
+        progress("sending %s to pid %d" % (name, pid))
+        try:
+            os.kill(pid, sig)
+        except OSError as error:
+            if stopped_within(1.0):
+                return "killed" if signalled else "gone"
+            if signalled:
+                break
+            progress("could not signal pid %d (%s); not signalled" % (pid, error.strerror or error))
+            return "undelivered"
+        signalled = True
+        if stopped_within(wait_s):
+            return "killed"
+    progress("still running after SIGTERM and SIGKILL")
+    return "failed"
+
+if force:
+    kill_result = kill_supervisor()
+    if kill_result == "gone":
+        print("%s:stopped-forced:%s" % (owner, count_label))
+    elif kill_result == "killed":
+        print("%s:stopped-killed:%s" % (owner, count_label))
+    else:
+        print("%s:kill-%s:%s" % (owner, kill_result, count_label))
     sys.exit(0)
 print("%s:stop-failed:%s" % (owner, count_label))
 
@@ -1031,10 +2086,13 @@ stop_daemon_candidate() {
   last_stop_recorded="no"
   last_stop_was_rust="no"
   # THE SELF-SOCKET REFUSAL: the candidate that is the daemon DRIVING this
-  # very install is never probed — not even the hello — unless the
-  # explicit override is set (a deliberate in-daemon update). The refusal
-  # is loud and lands in the summary: a skipped live daemon is a fact the
-  # operator must see, never a silent skip.
+  # very install is never probed — not even the hello — unless
+  # PRIME_AGENT_STOP_LIVE_DAEMON=1 is set (a deliberate in-daemon update).
+  # --force never lifts it: only processes inside a daemon session ever
+  # reach this branch, so a --force hint would steer agents into stopping
+  # their own daemon. The refusal is loud and lands in the summary: a
+  # skipped live daemon is a fact the operator must see, never a silent
+  # skip.
   # The equivalence goes BEYOND the raw string: a socket reached through
   # a symlinked spelling is still the driving daemon (macOS /tmp ->
   # /private/tmp is the canonical field case), so the same-file test
@@ -1043,128 +2101,127 @@ stop_daemon_candidate() {
      && { [ "$socket_path" = "$live_daemon_socket" ] \
           || [ "$socket_path" -ef "$live_daemon_socket" ]; } \
      && [ "${PRIME_AGENT_STOP_LIVE_DAEMON:-}" != "1" ]; then
-    note "note: ${socket_path} is the daemon this install runs under — it is"
-    note "  never probed (stopping it would cut the branch this installer"
-    note "  sits on). Set PRIME_AGENT_STOP_LIVE_DAEMON=1 to stop it for a"
-    note "  deliberate in-daemon update."
+    note "! Left the daemon this install runs under running (${socket_path}):"
+    note "  stopping it would also end this install and every session it runs."
+    note "  Set PRIME_AGENT_STOP_LIVE_DAEMON=1 to stop it on purpose."
     ts_stop_summary="${ts_stop_summary}daemon: skipped the live daemon socket ${socket_path} (this install runs under it; PRIME_AGENT_STOP_LIVE_DAEMON=1 stops it)
 "
     ts_stop_refused="yes"
     return 0
   fi
   if [ -e "$socket_path" ]; then
-    verdict="$("$UVPY" "$probe_py" "--kind=${candidate_kind}" "$socket_path" 2>/dev/null)" || verdict="probe-error"
+    # The probe reports its own progress ("Stopping the TypeScript daemon
+    # (2 sessions)" + "up to 14s") before each wait, so a long drain is
+    # never silent: into the spinner's file on a terminal, as plain lines
+    # on fd 4 (stderr) otherwise.
+    step_start "Checking for a running daemon"
+    probe_ui_file=""
+    if [ -n "$ui_pid" ]; then probe_ui_file="$ui_active"; fi
+    verdict="$(PRIME_AGENT_INSTALL_UI_FILE="$probe_ui_file" "$UVPY" "$probe_py" "--kind=${candidate_kind}" "--force=${FORCE}" "$socket_path" 4>&2 2>/dev/null)" || verdict="probe-error"
   else
     verdict="absent"
   fi
   case "$verdict" in
-    ts:stopped:0)
+    ts:*:*|rust:*:*) ;;
+    *) step_clear ;;
+  esac
+  daemon_owner="${verdict%%:*}"
+  daemon_name="the TypeScript daemon"
+  daemon_title="TypeScript daemon"
+  if [ "$daemon_owner" = rust ]; then
+    daemon_name="the Rust daemon"
+    daemon_title="previous Rust daemon"
+  fi
+  sessions="${verdict##*:}"
+  case "$sessions" in
+    1) sessions_label="1 session" ;;
+    \?) sessions_label="unknown sessions" ;;
+    *) sessions_label="${sessions} sessions" ;;
+  esac
+  case "$verdict" in
+    ts:stopped:*|ts:stopped-forced:*|ts:stopped-killed:*|rust:stopped:*|rust:stopped-forced:*|rust:stopped-killed:*)
       ts_stop_found_any="yes"
       last_stop_recorded="yes"
-      say "the TypeScript daemon on ${socket_path} stopped cleanly (idle; no signal sent)"
-      ts_stop_summary="${ts_stop_summary}ts daemon: stopped cleanly on ${socket_path} (idle; no signal sent; verified down)
-"
-      ;;
-    ts:stopped:*)
-      sessions="${verdict##*:}"
-      ts_stop_found_any="yes"
-      last_stop_recorded="yes"
-      say "the TypeScript daemon on ${socket_path} stopped (${sessions} session(s) were live;"
-      say "  the graceful request settled it; no signal sent)"
-      ts_stop_summary="${ts_stop_summary}ts daemon: stopped on ${socket_path} (serving ${sessions} session(s); the graceful request settled it; verified down)
-"
-      ;;
-    ts:stopped-forced:*)
-      sessions="${verdict##*:}"
-      ts_stop_found_any="yes"
-      last_stop_recorded="yes"
-      say "the TypeScript daemon on ${socket_path} stopped (${sessions} session(s) were live;"
-      say "  forced after the graceful request; no signal sent)"
-      ts_stop_summary="${ts_stop_summary}ts daemon: stopped on ${socket_path} (serving ${sessions} session(s); forced after the graceful request; verified down)
-"
-      ;;
-    rust:stopped:0)
-      ts_stop_found_any="yes"
-      last_stop_recorded="yes"
-      last_stop_was_rust="yes"
-      ts_stop_rust_stopped="yes"
-      say "the Rust daemon on ${socket_path} stopped for the update (idle; no signal sent)"
-      ts_stop_summary="${ts_stop_summary}rust daemon: stopped for the update on ${socket_path} (idle; no signal sent; verified down)
-"
-      ;;
-    rust:stopped:*)
-      sessions="${verdict##*:}"
-      ts_stop_found_any="yes"
-      last_stop_recorded="yes"
-      last_stop_was_rust="yes"
-      ts_stop_rust_stopped="yes"
-      say "the Rust daemon on ${socket_path} stopped for the update (${sessions} session(s)"
-      say "  were live; the graceful request settled it; no signal sent)"
-      ts_stop_summary="${ts_stop_summary}rust daemon: stopped for the update on ${socket_path} (serving ${sessions} session(s); the graceful request settled it; verified down)
-"
-      ;;
-    rust:stopped-forced:*)
-      sessions="${verdict##*:}"
-      ts_stop_found_any="yes"
-      last_stop_recorded="yes"
-      last_stop_was_rust="yes"
-      ts_stop_rust_stopped="yes"
-      say "the Rust daemon on ${socket_path} stopped for the update (${sessions} session(s)"
-      say "  were live; forced after the graceful request; no signal sent)"
-      ts_stop_summary="${ts_stop_summary}rust daemon: stopped for the update on ${socket_path} (serving ${sessions} session(s); forced after the graceful request; verified down)
+      if [ "$daemon_owner" = rust ]; then
+        last_stop_was_rust="yes"
+        ts_stop_rust_stopped="yes"
+      fi
+      case "$verdict" in
+        *:stopped-forced:*) how="forced"; how_long="forced after the graceful request; no signal sent" ;;
+        *:stopped-killed:*) how="killed"; how_long="--force killed it after the shutdown requests failed" ;;
+        *) how=""; how_long="the graceful request settled it; no signal sent" ;;
+      esac
+      if [ "$sessions" = 0 ]; then
+        step_ok "Stopped the ${daemon_title}" "${how}"
+      else
+        step_ok "Stopped the ${daemon_title}" "${sessions_label}${how:+, $how}"
+      fi
+      ts_stop_summary="${ts_stop_summary}${daemon_owner} daemon: stopped on ${socket_path} (${sessions_label}; ${how_long}; verified down)
 "
       ;;
     ts:replaced:*|rust:replaced:*)
-      sessions="${verdict##*:}"
-      owner="the TypeScript daemon"
-      case "$verdict" in rust:*) owner="the Rust daemon" ;; esac
       ts_stop_found_any="yes"
-      note "WARNING: a DIFFERENT daemon took ${socket_path} between the"
-      note "  classification and the stop (${owner} was classified there;"
-      note "  the new one was never identified): nothing was stopped, and no"
-      note "  command was sent to the replacement. Stop it by hand:"
-      note "  prime-agent shutdown --force"
-      ts_stop_summary="${ts_stop_summary}daemon: WARNING replaced on ${socket_path} (the classified ${owner} was swapped mid-stop; the replacement was never commanded; stop it by hand: prime-agent shutdown --force)
+      step_fail "Stopping the ${daemon_title}" "a different daemon took its socket"
+      note "! A different daemon took ${socket_path} mid-stop (${daemon_name} was"
+      note "  identified there); nothing was stopped and the newcomer was never"
+      note "  commanded. Stop it with:"
+      todo "prime-agent shutdown --force"
+      ts_stop_summary="${ts_stop_summary}daemon: WARNING replaced on ${socket_path} (the classified ${daemon_name} was swapped mid-stop; the replacement was never commanded; stop it by hand: prime-agent shutdown --force)
 "
       ;;
-    ts:stop-failed:*|rust:stop-failed:*)
-      sessions="${verdict##*:}"
-      owner="the TypeScript daemon"
-      case "$verdict" in rust:*) owner="the Rust daemon" ;; esac
+    ts:stop-failed:*|rust:stop-failed:*|ts:kill-*:*|rust:kill-*:*)
       ts_stop_found_any="yes"
-      note "WARNING: ${owner} on ${socket_path} is STILL RUNNING after this install"
-      note "  (it was serving ${sessions} session(s); the graceful and the forced shutdown"
-      note "  requests both failed to bring it down, and no signal was ever sent)."
-      note "  Stop it by hand: prime-agent shutdown --force"
-      ts_stop_summary="${ts_stop_summary}daemon: WARNING still running on ${socket_path} (${owner}, ${sessions} session(s); the graceful and forced requests did not bring it down; stop it by hand: prime-agent shutdown --force)
+      case "$verdict" in
+        *:kill-failed:*) stop_failed_reason="--force sent SIGTERM and SIGKILL and it stayed up" ;;
+        *:kill-not-daemon:*) stop_failed_reason="--force sent no signal: the pid it names is not a Prime Agent daemon" ;;
+        *:kill-no-pid:*) stop_failed_reason="--force sent no signal: its hello names no usable pid" ;;
+        *:kill-undelivered:*) stop_failed_reason="--force could not deliver a signal to its pid" ;;
+        *:kill-*) stop_failed_reason="--force sent no signal: it could not re-identify the daemon on its socket" ;;
+        *) stop_failed_reason="No signal was sent" ;;
+      esac
+      step_fail "Stopping the ${daemon_title}" "still running"
+      say "${daemon_name} on ${socket_path}: the shutdown requests did not bring it down"
+      note "! The ${daemon_title} is still running (${sessions_label})."
+      note "  ${stop_failed_reason}."
+      case "$verdict" in
+        *:kill-*)
+          note "  Stop it with this, or kill the process on ${socket_path}:"
+          manual_stop="stop it by hand: prime-agent shutdown --force, or kill the process listening on ${socket_path}"
+          ;;
+        *)
+          note "  Re-run the installer with --force to kill it, or stop it with:"
+          manual_stop="re-run the installer with --force to kill it, or stop it by hand: prime-agent shutdown --force"
+          ;;
+      esac
+      todo "prime-agent shutdown --force"
+      ts_stop_summary="${ts_stop_summary}daemon: WARNING still running on ${socket_path} (${daemon_name}, ${sessions_label}; the graceful and forced requests did not bring it down; ${stop_failed_reason}; ${manual_stop})
 "
       ;;
     unrecognized:*)
       schema_id="${verdict#unrecognized:}"
       ts_stop_found_any="yes"
-      note "WARNING: a daemon is listening on ${socket_path} but its hello schema"
-      note "  (${schema_id}) identifies as neither the TypeScript family"
-      note "  (protocol-7-schema-*) nor this product's daemon; nothing was stopped."
-      note "  Stop it by hand: prime-agent shutdown --force"
+      note "! An unknown daemon is listening on ${socket_path} (schema ${schema_id});"
+      note "  nothing was stopped. Stop it with:"
+      todo "prime-agent shutdown --force"
       ts_stop_summary="${ts_stop_summary}daemon: WARNING unrecognized on ${socket_path} (schema ${schema_id}; left running; stop it by hand: prime-agent shutdown --force)
 "
       ;;
     no-hello|no-schema)
       ts_stop_found_any="yes"
-      note "WARNING: something is listening on ${socket_path} but did not greet"
-      note "  with a daemon hello; nothing was stopped (never killed blind)."
-      note "  Stop it by hand: prime-agent shutdown --force"
+      note "! Something is listening on ${socket_path} but did not greet as a"
+      note "  daemon; nothing was stopped. Stop it with:"
+      todo "prime-agent shutdown --force"
       ts_stop_summary="${ts_stop_summary}daemon: WARNING unidentified on ${socket_path} (no daemon hello; left running; stop it by hand: prime-agent shutdown --force)
 "
       ;;
     stale)
-      note "note: no daemon answers on ${socket_path} (a stale socket file was left alone)"
+      say "no daemon answers on ${socket_path} (a stale socket file was left alone)"
       ;;
     probe-error|"")
       ts_stop_found_any="yes"
-      note "WARNING: could not probe ${socket_path}; nothing was stopped"
-      note "  (never killed blind). Stop it by hand if one is running there:"
-      note "  prime-agent shutdown --force"
+      note "! Could not check ${socket_path} for a running daemon; nothing was"
+      note "  stopped. If one is running there, stop it with:"
+      todo "prime-agent shutdown --force"
       ts_stop_summary="${ts_stop_summary}daemon: WARNING unprobed on ${socket_path} (nothing was stopped; stop it by hand: prime-agent shutdown --force)
 "
       ;;
@@ -1217,11 +2274,166 @@ fi
 # new stage is in place, so the live tree is never rm'd while the launcher
 # still points into it. The renamed-aside tree is KEPT as a one-generation
 # rollback (prime-agent.old.<pid>); the next successful install sweeps it.
+# A rollback publishes the kept generation itself as the stage: it already
+# carries its payload and its marker.
+if [ -n "$rollback_from" ]; then
+  step_start "Restoring the previous version"
+  stage="$rollback_from"
+else
+step_start "Installing"
 stage="$(mktemp -d "${PREFIX}/share/prime-agent.stage.XXXXXX")"
 guard_preserved "$stage"
-tar -xzf "$asset" -C "$stage"
-[ -x "${stage}/prime-agent" ] \
-  || die "the tarball did not contain an executable prime-agent payload"
+# A bad tarball (a malformed --archive is the realistic one) leaves no
+# stage behind: the cleanup trap is not armed yet.
+if ! tar -xzf "$asset" -C "$stage"; then
+  rm -rf "$stage"
+  die "could not extract ${asset}"
+fi
+if [ ! -x "${stage}/${BINARY_NAME}" ]; then
+  rm -rf "$stage"
+  die "the tarball did not contain an executable ${BINARY_NAME} payload"
+fi
+# --ARCHIVE ONLY: the archive's name is the version contract (the marker
+# records it and the rollback later reports it), so the payload's own
+# --version must agree — a mis-named archive would publish a marker that
+# lies about its payload. The CHANNEL install is out of scope by design:
+# its tarball already passed the manifest's sha256 gate (the row's exact
+# checksum for this exact version), so the channel's integrity needs no
+# second opinion — and a probe there would add a new failure mode (a
+# cold-start binary slower than the bound) the pre-existing flow never
+# had. The probe is BOUNDED by a portable watchdog — NOT the `timeout`
+# command: on Windows `timeout` on PATH is timeout.exe, which waits
+# instead of running a command and would refuse every probe, and macOS
+# ships no GNU timeout at all. A payload whose --version blocks is
+# killed at the bound and reports nothing (the refusal below, not a
+# hang).
+# The probe's files ride the run's OWN download staging, never the
+# payload-writable stage: an extracted archive could forge a done marker
+# where the loop looks and hang past the bound (the trailing wait would
+# block on the hanging payload forever).
+if [ "$MODE" != "archive" ]; then
+  # The channel install publishes without the name probe (see the block
+  # comment above); the stage continues to the marker write.
+  :
+else
+probe_out="$dl/.version-probe.out"
+probe_done="$dl/.version-probe.done"
+probe_pid_file="$dl/.version-probe.pid"
+probe_status="$dl/.version-probe.status"
+rm -f "$probe_out" "$probe_done" "$probe_pid_file"
+# The runner: the payload is ITS child (a sibling's `wait` cannot reap
+# another shell's child), and `kill -0` keeps succeeding on a ZOMBIE, so
+# the pid alone cannot tell a finished probe from a hanging one — the
+# runner publishes the payload's pid, reaps it, and writes the done
+# marker; the loop below polls the MARKER (a fast probe costs one tick,
+# not the whole bound).
+(
+  # The probe must read the STAGED tree's own package.json: a caller's
+  # PI_PACKAGE_DIR would point the packaged-version lookup at another
+  # tree and the probe would then refuse a good archive or pass a
+  # mismatched one.
+  unset PI_PACKAGE_DIR || true
+  # The probe's redirected output is bounded (64 blocks = 32 KB, ample
+  # for a version line): a payload that continuously emits would
+  # otherwise fill the filesystem for the whole watchdog window, and the
+  # limit kills it — the invocation-status verdict refuses the probe
+  # then. The ulimit itself is GUARDED: under set -e a platform refusing
+  # the limit would take the runner down before the done marker and
+  # every --archive install would then fail at the bound.
+  ulimit -f 64 2>/dev/null || true
+  "${stage}/${BINARY_NAME}" --version >"$probe_out" 2>/dev/null &
+  printf '%s\n' "$!" >"$probe_pid_file"
+  # The probe's OWN status rides a file (set -e would take the wait's
+  # nonzero as an abort): the version line AND a successful exit are the
+  # answer — a payload that prints the right version then fails its own
+  # --version invocation is not a working launcher.
+  probe_status_val=0
+  wait "$!" || probe_status_val=$?
+  printf '%s\n' "$probe_status_val" >"$probe_status"
+  printf 'done\n' >"$probe_done"
+) &
+probe_runner=$!
+probe_waited=0
+probe_timed_out=""
+while [ ! -f "$probe_done" ]; do
+  probe_waited=$((probe_waited + 1))
+  if [ "$probe_waited" -gt 10 ]; then
+    # The bound: SIGTERM, then SIGKILL — a payload that ignores the
+    # first still dies, its runner then exits (its own wait returns),
+    # and nothing of the probe outlives this install. The timeout flag
+    # decides the verdict: a payload that printed its version BEFORE
+    # hanging was still unresponsive, and the captured stdout must not
+    # pass for an answer.
+    probe_timed_out="yes"
+    probe_pid="$(cat "$probe_pid_file" 2>/dev/null || true)"
+    if [ -n "$probe_pid" ]; then
+      kill "$probe_pid" 2>/dev/null || true
+      sleep 1
+      kill -9 "$probe_pid" 2>/dev/null || true
+    else
+      kill -9 "$probe_runner" 2>/dev/null || true
+    fi
+    break
+  fi
+  sleep 1
+done
+# A nonzero-exiting payload still answers --version (its first line is
+# already captured): the runner's reap happens inside it, and neither
+# wait's status aborts the installer under set -e.
+wait "$probe_runner" 2>/dev/null || true
+if [ -n "$probe_timed_out" ]; then
+  rm -f "$probe_out" "$probe_done" "$probe_pid_file" "$probe_status"
+  # The stage goes too: this die predates the full cleanup trap's arming
+  # (the mismatch refusal below sweeps its own stage the same way), so a
+  # hung payload on a normal install leaves no staging tree behind.
+  rm -rf "$stage"
+  die "the archive names ${VERSION} but its payload did not answer --version within 10s; refusing an unresponsive payload"
+fi
+# tr -d '\r' strips the trailing CR Git Bash text-mode redirection can
+# append (the lock-pid reader's precedent): a CR would make every exact
+# case arm miss and refuse a correctly named archive.
+reported_version="$(head -n 1 "$probe_out" 2>/dev/null | tr -d '\r')"
+probe_exit_status="$(cat "$probe_status" 2>/dev/null || true)"
+rm -f "$probe_out" "$probe_done" "$probe_pid_file" "$probe_status"
+if [ "$probe_exit_status" != "0" ]; then
+  rm -rf "$stage"
+  die "the archive names ${VERSION} but its payload's --version invocation failed (exit ${probe_exit_status}); refusing an unusable launcher"
+fi
+# The continuous-build stamp rides the reported version, not the name
+# (assemble_artifacts.py stages a package.json reporting
+# <version>-continuous.<sha> while the archive name keeps the bare
+# <version> so rolling releases overwrite assets): the exact name or its
+# documented continuous stamp both publish honestly.
+case "$reported_version" in
+  "$VERSION") ;;
+  "$VERSION-continuous."*)
+    # The stamp is exactly a 40-hex commit SHA (assemble_artifacts.py's
+    # --sha contract): a wrong-length or non-hex tail is a malformed
+    # stamp, not the built commit.
+    stamp="${reported_version#"$VERSION"-continuous.}"
+    if ! printf '%s\n' "$stamp" | grep -qE '^[0-9a-f]{40}$'; then
+      rm -rf "$stage"
+      die "the archive names ${VERSION} but its payload reports ${reported_version}; rename the archive or publish it under its real version"
+    fi
+    ;;
+  *)
+    rm -rf "$stage"
+    die "the archive names ${VERSION} but its payload reports ${reported_version:-nothing}; rename the archive or publish it under its real version"
+    ;;
+esac
+fi
+# THE ARCHIVE PRE-FLIGHT (the rollback pre-flight's sibling): with the knob
+# set, the validated stage is the whole answer — every extraction check
+# (the tar, the payload, the version) passed — so the run stops here, the
+# stage never becomes anything the caller owns, and a caller can ask
+# synchronously whether an archive CAN install before handing the real run
+# off (the Windows update handoff: this process must exit for the publish
+# to happen, so its exit code can only report the pre-flight's answer
+# honestly).
+if [ "${PRIME_AGENT_ARCHIVE_CHECK:-}" = "1" ]; then
+  rm -rf "$stage"
+  exit 0
+fi
 # The ownership marker: the share tree this script publishes carries it, so
 # later installs recognize the tree as theirs BY MARKER, not by shape — an
 # unrelated directory that happens to contain a `prime-agent` entry is never
@@ -1229,6 +2441,7 @@ tar -xzf "$asset" -C "$stage"
 # user instead).
 printf 'install-rust.sh channel %s\nversion %s\n' "$CHANNEL" "$VERSION" \
   > "${stage}/.prime-agent-install"
+fi
 
 # A lock left by the pre-takeover installer (name .prime-agent-rust-install.lock):
 # a live holder still owns the publish, a dead one can never publish again —
@@ -1239,28 +2452,127 @@ printf 'install-rust.sh channel %s\nversion %s\n' "$CHANNEL" "$VERSION" \
 if [ -e "$legacy_lock" ] || [ -L "$legacy_lock" ]; then
   held_by="$(readlink "$legacy_lock" 2>/dev/null || true)"
   if [ -n "$held_by" ] && kill -0 "$held_by" 2>/dev/null; then
-    die "an older prime-agent-rust installer (pid ${held_by}) is publishing to ${PREFIX}; retry when it finishes"
+    # The lock refusals below die with the stage already built, before the EXIT
+    # trap that would sweep it: a fresh install's stage is this run's own scratch,
+    # so it never outlives the refused install — a rollback's stage is the kept
+    # generation itself, never this run's trash to delete.
+    { [ -z "${rollback_from:-}" ] && rm -rf "$stage"; die "an older prime-agent-rust installer (pid ${held_by}) is publishing to ${PREFIX}; retry when it finishes"; }
   fi
   rm -f "$legacy_lock"
 fi
-until ln -s $$ "$lock_link" 2>/dev/null; do
-  held_by="$(readlink "$lock_link" 2>/dev/null || true)"
-  if [ -n "$held_by" ] && kill -0 "$held_by" 2>/dev/null; then
-    die "another install-rust.sh (pid ${held_by}) is publishing to ${PREFIX}; retry when it finishes"
+# THE WINDOWS LOCK: MSYS `ln -s` deep-copies by default (a real symlink
+# needs Developer Mode + winsymlinks), so the symlink claim is not atomic
+# on Windows - a lock DIRECTORY is: `mkdir` is the single-winner claim and
+# the holder's pid rides a file inside it. install.ps1 claims the SAME
+# directory, so the pid is always the WINDOWS pid (the MSYS/Cygwin $$ is a
+# different namespace: /proc/$$/winpid maps it) and liveness is asked of
+# Windows (tasklist), never `kill -0`. The EXIT trap sweeps the directory;
+# a lock is never auto-stolen, and when the holder does not show as live
+# the message stays conditional (the manual-recovery contract of the link).
+if [ "$WINDOWS" = "yes" ]; then
+  lock_dir="${PREFIX}/share/.prime-agent-install.lock.d"
+  pid_waits=0
+  until mkdir "$lock_dir" 2>/dev/null; do
+    # Digits only: install.ps1's Set-Content ends the pid line with CRLF.
+    held_by="$(tr -dc '0-9' 2>/dev/null < "$lock_dir/pid" || true)"
+    # The holder writes its pid just after the mkdir claim: an empty pid is
+    # (for a few seconds) a claim in progress, not a stale lock.
+    if [ -z "$held_by" ] && [ "$pid_waits" -lt 5 ]; then
+      pid_waits=$((pid_waits + 1))
+      sleep 1
+      continue
+    fi
+    if [ -n "$held_by" ] && [ -n "$TASKLIST" ] \
+       && MSYS2_ARG_CONV_EXCL='*' "$TASKLIST" /FI "PID eq ${held_by}" /NH 2>/dev/null \
+          | grep -qw "$held_by"; then
+      { [ -z "${rollback_from:-}" ] && rm -rf "$stage"; die "another prime-agent installer (Windows pid ${held_by}) is publishing to ${PREFIX}; retry when it finishes"; }
+    fi
+    { [ -z "${rollback_from:-}" ] && rm -rf "$stage"; die "a publication lock (Windows pid ${held_by:-unknown}) is held at ${lock_dir}. If no prime-agent installer (install-rust.sh or install.ps1) is running, it is stale (a crashed install); remove it and retry:
+  rm -rf \"${lock_dir}\""; }
+  done
+  printf '%s\n' "$(cat "/proc/$$/winpid" 2>/dev/null || echo $$)" > "$lock_dir/pid"
+else
+  until ln -s $$ "$lock_link" 2>/dev/null; do
+    held_by="$(readlink "$lock_link" 2>/dev/null || true)"
+    if [ -n "$held_by" ] && kill -0 "$held_by" 2>/dev/null; then
+      { [ -z "${rollback_from:-}" ] && rm -rf "$stage"; die "another install-rust.sh (pid ${held_by}) is publishing to ${PREFIX}; retry when it finishes"; }
+    fi
+    { [ -z "${rollback_from:-}" ] && rm -rf "$stage"; die "a previous install-rust.sh (pid ${held_by:-unknown}) left a stale publication lock (a crashed install; its cleanup trap cannot have run). Remove it and retry:
+  rm -f \"${lock_link}\""; }
+  done
+fi
+
+# THE WINDOWS DAEMON STOP, after the lock, before the publish (a Windows
+# process holds its own binary open, so the old-tree rename-aside below
+# fails while a daemon runs). THE TRUSTED STOP: the previous payload's OWN
+# BINARY (the marked share tree's prime-agent.exe), never the launcher - an
+# unowned regular file at ${launcher} is precisely the untrusted-execution
+# shape (the ownership check that later preserves it has not run yet), and
+# exec'ing it would hand a foreign command the installer's inherited
+# environment. The share tree's ownership marker gates the stop; a machine
+# with no marked payload yet (a fresh install) has no daemon the stop could
+# reach - that absence is the normal fresh-install path.
+if [ "$WINDOWS" = "yes" ] \
+   && [ -f "${share_dir}/.prime-agent-install" ] \
+   && [ -f "${share_dir}/${BINARY_NAME}" ]; then
+  say "stopping the running Rust daemon before the publish (a Windows"
+  say "  process holds its binary open - the payload swap needs it down)"
+  # THE SCRIPTED FORM: the CLI's bare `shutdown` prompts for confirmation
+  # in an interactive terminal and REFUSES a non-interactive one ("Shutdown
+  # requires confirmation in an interactive terminal. Use prime-agent
+  # shutdown --force") - the installer's context is the scripted one, so
+  # --force is the documented non-interactive stop (the daemon's own forced
+  # shutdown drains its workers with its internal budgets).
+  if "${share_dir}/${BINARY_NAME}" shutdown --force >/dev/null 2>&1; then
+    windows_stop_summary="daemon: stopped cleanly for this update (the forced shutdown request, the scripted non-interactive form)"
+    say "the running daemon was shut down (the next invocation boots the new one)"
+  else
+    windows_stop_summary="daemon: WARNING no shutdown answer (if a daemon is running, stop it by hand: prime-agent shutdown --force)"
+    note "! No daemon answered the shutdown request. If one is running, stop it and re-run:"
+    todo "prime-agent shutdown --force"
   fi
-  die "a previous install-rust.sh (pid ${held_by:-unknown}) left a stale publication lock (a crashed install; its cleanup trap cannot have run). Remove it and retry:
-  rm -f ${lock_link}"
-done
+fi
 launcher_tmp=""
+cmd_tmp=""
+preserved_cmd_file=""
+windows_installed=""
 displaced_ts_root=""
 preserved_launcher=""
 migrated_old_layout=""
 migrated_old_layout=""
+# Defined before the EXIT trap is armed: on_exit calls it.
+restore_ts_root() {
+  if [ -n "$displaced_ts_root" ]; then
+    if [ -d "$share_dir" ]; then
+      # The half-installed Rust payload occupies the TS root's old path: it
+      # is disposable (a re-download restores it); the TS tree is not.
+      rm -rf "$share_dir"
+    fi
+    if mv "$displaced_ts_root" "$share_dir" 2>/dev/null; then
+      echo "note: the TypeScript install was restored to ${share_dir} — the install did not complete" >&2
+    else
+      echo "warning: could not restore the TypeScript install from ${displaced_ts_root}; restore it with: mv '${displaced_ts_root}' '${share_dir}'" >&2
+    fi
+    displaced_ts_root=""
+  fi
+}
 on_exit() {
+  # The renderer stops first, so the restore notes print below its frame.
+  ui_stop
   # Restores FIRST, lock release LAST: a second installer must not be able
   # to publish into share_dir while this one still restores state — the
   # restore would delete that fresh payload (cross-installer data loss).
+  publish_window_restore
   [ -n "$launcher_tmp" ] && rm -f "$launcher_tmp" 2>/dev/null || true
+  [ -n "${cmd_tmp:-}" ] && rm -f "$cmd_tmp" 2>/dev/null || true
+  # The extraction stage is disposable on every failed path: a successful
+  # publish renamed the stage into ${share_dir}, so the stale path no longer
+  # exists and the removal is a no-op there; a rollback publishes the kept
+  # generation itself (stage == rollback_from), which is never this run's
+  # trash to delete.
+  if [ -z "${rollback_from:-}" ] && [ -n "${stage:-}" ]; then
+    rm -rf "$stage" 2>/dev/null || true
+  fi
   # The user's unowned command file goes home if the Rust launcher never
   # went live (the same restore discipline as the displaced TS tree): a
   # failed launcher write must not leave the machine without ANY
@@ -1270,6 +2582,24 @@ on_exit() {
       echo "note: the existing prime-agent command was restored to ${launcher} — the install did not complete" >&2
     fi
     preserved_launcher=""
+  fi
+  # The Windows .cmd twin's own preserve slot rides the same restore
+  # discipline (a failed install returns the user's unowned command).
+  if [ -n "${preserved_cmd_file:-}" ]; then
+    if mv "$preserved_cmd_file" "${bin_dir}/prime-agent.cmd" 2>/dev/null; then
+      echo "note: the existing prime-agent.cmd was restored to ${bin_dir}/prime-agent.cmd — the install did not complete" >&2
+    fi
+    preserved_cmd_file=""
+  fi
+  # THE FAILED-INSTALL DAEMON NOTE (the Windows stop-before-publish ruling):
+  # a failed install has restored every FILE it displaced, but a daemon
+  # stopped for the swap stays stopped — the sessions' state is on disk and
+  # the next prime-agent invocation boots the old payload's daemon again;
+  # the note names that recovery so the summary never leaves the user
+  # guessing (the bots' finding).
+  if [ "$WINDOWS" = "yes" ] && [ -n "$windows_stop_summary" ] && [ "${windows_installed:-}" != "yes" ]; then
+    echo "note: the daemon stopped for this failed install stays down until the next" >&2
+    echo "  prime-agent invocation boots it from the restored payload" >&2
   fi
   # A migrated old-layout tree goes home the same way: the pre-takeover
   # launcher (bin/prime-agent-rust) still points at the old name until this
@@ -1283,8 +2613,21 @@ on_exit() {
   fi
   restore_ts_root
   rm -f "$lock_link"
+  # The Windows lock arm (the mkdir lock directory): the link removal is a
+  # no-op there, the directory removal is the release.
+  if [ "$WINDOWS" = "yes" ]; then
+    rm -rf "${PREFIX}/share/.prime-agent-install.lock.d"
+  fi
+  rm -rf "$dl"
 }
 trap on_exit EXIT
+
+# The rollback source was chosen before the lock: another installer may have
+# swept it since. Re-check under the lock, before the sweep and before
+# anything moves.
+if [ -n "$rollback_from" ] && [ ! -x "${rollback_from}/${BINARY_NAME}" ]; then
+  die "the kept previous version ${rollback_from} was removed by another install while this one ran; nothing was changed"
+fi
 
 # Sweep rollback generations from PREVIOUS installs (both name eras) before
 # this run creates its own — exactly one .old generation survives each install.
@@ -1295,10 +2638,11 @@ trap on_exit EXIT
 # payload, not that the SLOT is a rollback generation: a user who COPIES the
 # payload into the namespace (marker and all) keeps their copy. Pre-takeover-era
 # crash leftovers (prime-agent-rust.old.*, never stamped) are left in place —
-# harmless, and the user's to remove.
-generations_record="${PREFIX}/share/.prime-agent-install-generations"
+# harmless, and the user's to remove. A rollback's source generation is the
+# payload being published, never swept.
 for sweep_dir in "${PREFIX}"/share/prime-agent.old.* "${PREFIX}"/share/prime-agent-rust.old.*; do
   [ -d "$sweep_dir" ] || continue
+  [ "$sweep_dir" != "$rollback_from" ] || continue
   [ -f "${sweep_dir}/.prime-agent-install" ] || continue
   grep -qxF -- "$sweep_dir" "$generations_record" 2>/dev/null || continue
   # Best-effort: an un-sweepable generation (a mounted dir, a permission
@@ -1319,21 +2663,6 @@ done
 # the EXIT trap), so a half-finished install never leaves the machine with
 # no working prime-agent — the TS public symlink keeps resolving the whole
 # time and the TS tree returns to its original path if this install dies.
-restore_ts_root() {
-  if [ -n "$displaced_ts_root" ]; then
-    if [ -d "$share_dir" ]; then
-      # The half-installed Rust payload occupies the TS root's old path: it
-      # is disposable (a re-download restores it); the TS tree is not.
-      rm -rf "$share_dir"
-    fi
-    if mv "$displaced_ts_root" "$share_dir" 2>/dev/null; then
-      echo "note: the TypeScript install was restored to ${share_dir} — the install did not complete" >&2
-    else
-      echo "warning: could not restore the TypeScript install from ${displaced_ts_root}; restore it with: mv '${displaced_ts_root}' '${share_dir}'" >&2
-    fi
-    displaced_ts_root=""
-  fi
-}
 if [ -d "$share_dir" ] && ts_managed "$share_dir"; then
   preserved_to="$legacy_dir"
   if [ -e "$preserved_to" ]; then preserved_to="$(fresh_slot "$legacy_dir")"; fi
@@ -1341,10 +2670,16 @@ if [ -d "$share_dir" ] && ts_managed "$share_dir"; then
   mv "$share_dir" "$preserved_to" \
     || die "could not preserve the TypeScript install at ${share_dir}; nothing was deleted — resolve and re-run"
   displaced_ts_root="$preserved_to"
-  echo "the TypeScript native install at ${share_dir} was preserved at:"
-  echo "  ${preserved_to}"
-  echo "  rollback: mv '${preserved_to}' '${share_dir}' &&"
-  echo "            ln -snf '${share_dir}/bin/prime-agent' '${launcher}'"
+  say "the TypeScript native install at ${share_dir} was preserved at:"
+  say "  ${preserved_to}"
+  # The rollback runs AFTER this install, when ${share_dir} holds the
+  # Rust payload: it moves that payload aside first (a plain mv onto an
+  # existing directory would nest the TS tree inside it), and it stays one
+  # copy-pasteable line.
+  rust_aside="$(fresh_slot "${share_dir}.rust-rollback")"
+  ts_takeover_from="$preserved_to"
+  ts_takeover_undo="mv '${share_dir}' '${rust_aside}' && mv '${preserved_to}' '${share_dir}' && ln -snf '${share_dir}/bin/prime-agent' '${launcher}'"
+  say "  rollback: ${ts_takeover_undo}"
 fi
 
 # Refuse to take ownership of a share dir that is neither this installer's
@@ -1386,13 +2721,22 @@ if [ -d "$old_layout_dir" ] && [ ! -d "$share_dir" ]; then
   else
     mv "$old_layout_dir" "$old"
     migrated_old_layout="$old"
-    echo "the old prime-agent-rust install migrated to the rollback slot ${old}"
-    echo "  (it is kept — the sweep only removes marker-stamped generations; remove"
-    echo "   the slot by hand once you no longer need the rollback)"
+    migrated_note="moved the old prime-agent-rust install to $(tilde "$old") (kept for rollback; remove it by hand when done)"
+    say "the old prime-agent-rust install migrated to the rollback slot ${old}"
+    say "  (it is kept — the sweep only removes marker-stamped generations; remove"
+    say "   the slot by hand once you no longer need the rollback)"
   fi
 fi
 if [ -d "$share_dir" ]; then
   had_share_dir=1
+  # THE PUBLISH WINDOW opens with the parking rename, and the marker is
+  # set BEFORE the mv: a signal that lands while the mv runs is only
+  # handled at the mv's completion — the trap fires at that command
+  # boundary, before any assignment after the mv could run. Set-then-move
+  # lets the trap-side restore see the parked tree from the first
+  # boundary of the window; the slot's record entry is skipped by every
+  # reader while the slot is vacant (and stays if the restore cannot).
+  publish_parked="$old"
   mv "$share_dir" "$old"
   # The slot is a rollback generation this installer created: record its
   # exact path so the next install's sweep can tell it from a user-made
@@ -1407,6 +2751,8 @@ if ! mv "$stage" "$share_dir"; then
   # (a failed migration restore is the EXIT trap's job: it holds the lock
   # until the tree is back, so no second installer can slip in between)
 fi
+publish_parked=""
+windows_installed="yes"
 # A leftover old-layout tree when a new-layout tree also existed: it is
 # superseded by the fresh publish. The ownership rule is EXACTLY the
 # migration's (the pre-takeover payload always shipped the binary beside
@@ -1452,7 +2798,21 @@ if [ -e "$launcher" ] || [ -L "$launcher" ]; then
   fi
 fi
 launcher_tmp="$(mktemp "${bin_dir}/.prime-agent.XXXXXX")"
-cat > "$launcher_tmp" <<'EOF'
+if [ "$WINDOWS" = "yes" ]; then
+  # The Git Bash launcher: execs the payload's prime-agent.exe. NO daemon
+  # socket pin — this product's Windows daemon endpoint is the fixed named
+  # pipe (pa-daemon platform/paths), which is rust-only by construction:
+  # the TypeScript product never shipped a Windows build, so the unix
+  # cohabitation pin (a rust-only socket path that never collides with a
+  # TS daemon) has no TS daemon to avoid here.
+  cat > "$launcher_tmp" <<'EOF'
+#!/bin/sh
+# prime-agent — launcher written by install-rust.sh.
+export PRIME_AGENT_CODING_AGENT_DIR="${PRIME_AGENT_CODING_AGENT_DIR:-$HOME/.prime/agent}"
+exec "$(dirname "$0")/../share/prime-agent/prime-agent.exe" "$@"
+EOF
+else
+  cat > "$launcher_tmp" <<'EOF'
 #!/bin/sh
 # prime-agent — launcher written by install-rust.sh.
 # The session store is shared with the TypeScript product BY DESIGN: both
@@ -1470,9 +2830,39 @@ export PRIME_AGENT_CODING_AGENT_DIR="${PRIME_AGENT_CODING_AGENT_DIR:-$HOME/.prim
 export PRIME_AGENT_DAEMON_SOCKET="${PRIME_AGENT_DAEMON_SOCKET:-${TMPDIR:-/tmp}/prime-agent-rust-$(id -u)/daemon.sock}"
 exec "$(dirname "$0")/../share/prime-agent/prime-agent" "$@"
 EOF
+fi
 chmod 0755 "$launcher_tmp"
 mv -f "$launcher_tmp" "$launcher"
 launcher_tmp=""
+# The cmd/PowerShell launcher twin (Windows only): the same
+# ../share/prime-agent payload, resolved from the .cmd's own location, so
+# `prime-agent` answers from cmd.exe and PowerShell too (the sh launcher
+# above serves Git Bash). The same unowned-file discipline as the sh
+# launcher: a foreign .cmd is preserved aside, never destroyed.
+if [ "$WINDOWS" = "yes" ]; then
+  cmd_launcher="${bin_dir}/prime-agent.cmd"
+  if [ -f "$cmd_launcher" ] \
+     && ! grep -q 'launcher written by install-rust.sh' "$cmd_launcher" 2>/dev/null; then
+    preserved_cmd_path="$(fresh_slot "${bin_dir}/prime-agent.cmd.pre-takeover")"
+    mv "$cmd_launcher" "$preserved_cmd_path" \
+      || die "could not preserve the existing file at ${cmd_launcher}; resolve it and re-run"
+    preserved_cmd_file="$preserved_cmd_path"
+    note "note: an unrelated ${cmd_launcher} existed; it was preserved at ${preserved_cmd_path}"
+  fi
+  cmd_tmp="$(mktemp "${bin_dir}/.prime-agent-cmd.XXXXXX")"
+  cat > "$cmd_tmp" <<'EOF'
+@echo off
+rem prime-agent - launcher written by install-rust.sh.
+if not defined PRIME_AGENT_CODING_AGENT_DIR set "PRIME_AGENT_CODING_AGENT_DIR=%USERPROFILE%\.prime\agent"
+"%~dp0..\share\prime-agent\prime-agent.exe" %*
+EOF
+  mv -f "$cmd_tmp" "$cmd_launcher"
+  # The takeover stands for the .cmd twin too: the preserved aside slot is
+  # NOT restored on the success path (the EXIT trap restores only what a
+  # failed install displaced - the bots' finding: the stale slot would
+  # clobber the fresh .cmd at exit).
+  preserved_cmd_file=""
+fi
 # The Rust launcher is live: the takeover stands — the displaced TS tree
 # stays in its legacy slot (with the printed rollback commands) and the
 # preserved command file stays in its aside slot.
@@ -1486,6 +2876,11 @@ old_launcher="${bin_dir}/prime-agent-rust"
 if [ -f "$old_launcher" ] && grep -q 'launcher written by install-rust.sh' "$old_launcher" 2>/dev/null; then
   rm -f "$old_launcher"
   say "removed the old ${old_launcher} launcher (the keyword is prime-agent now)"
+fi
+if [ -n "$rollback_from" ]; then
+  step_ok "Restored the previous version" "${VERSION}"
+else
+  step_ok "Installed"
 fi
 
 # --- the TypeScript takeover completes AFTER the publish ----------------------
@@ -1508,18 +2903,24 @@ fi
 # invocation boots the new daemon).
 last_stop_recorded=""
 last_stop_was_rust=""
-stop_daemon_candidate "$ts_socket" ts
-ts_stop_stopped_ts="$last_stop_recorded"
-ts_stop_was_rust_ts="$last_stop_was_rust"
-if [ "$env_socket_probe" = "yes" ]; then
-  stop_daemon_candidate "$env_socket" ts
-  ts_stop_stopped_env="$last_stop_recorded"
-  ts_stop_was_rust_env="$last_stop_was_rust"
-fi
-if [ "$rust_socket_probe" = "yes" ]; then
-  stop_daemon_candidate "$rust_socket" ours
-  ts_stop_stopped_rust="$last_stop_recorded"
-  ts_stop_was_rust_rust="$last_stop_was_rust"
+# WINDOWS: no TS daemon can exist (the TS product never shipped a Windows
+# build) and this product's daemon runs a named pipe - the unix-socket
+# ladder below never applies. The Windows daemon stop already ran, before
+# the publish (the file-lock ruling).
+if [ "$WINDOWS" != "yes" ]; then
+  stop_daemon_candidate "$ts_socket" ts
+  ts_stop_stopped_ts="$last_stop_recorded"
+  ts_stop_was_rust_ts="$last_stop_was_rust"
+  if [ "$env_socket_probe" = "yes" ]; then
+    stop_daemon_candidate "$env_socket" ts
+    ts_stop_stopped_env="$last_stop_recorded"
+    ts_stop_was_rust_env="$last_stop_was_rust"
+  fi
+  if [ "$rust_socket_probe" = "yes" ]; then
+    stop_daemon_candidate "$rust_socket" ours
+    ts_stop_stopped_rust="$last_stop_recorded"
+    ts_stop_was_rust_rust="$last_stop_was_rust"
+  fi
 fi
 
 # THE VERIFY (the field contract: the TS daemon is DOWN before the install
@@ -1537,26 +2938,30 @@ verify_stopped_socket() {
     if [ "$2" = "yes" ]; then
       rust_leftover="yes"
     fi
-    note "WARNING: the daemon on $1 answered the post-stop verification;"
-    note "  it is treated as still running (see the install summary)"
+    note "! The daemon on $1 came back after it was stopped. Stop it with:"
+    todo "prime-agent shutdown --force"
     ts_stop_summary="${ts_stop_summary}daemon: WARNING still running on $1 (it answered the post-stop verification — the earlier stop line for this socket is superseded; stop it by hand: prime-agent shutdown --force)
 "
   fi
 }
-if [ "${ts_stop_stopped_ts:-}" = "yes" ]; then
-  verify_stopped_socket "$ts_socket" "$ts_stop_was_rust_ts"
-fi
-if [ "${ts_stop_stopped_env:-}" = "yes" ]; then
-  verify_stopped_socket "$env_socket" "$ts_stop_was_rust_env"
-fi
-if [ "${ts_stop_stopped_rust:-}" = "yes" ]; then
-  verify_stopped_socket "$rust_socket" "$ts_stop_was_rust_rust"
+if [ "$WINDOWS" != "yes" ]; then
+  if [ "${ts_stop_stopped_ts:-}" = "yes" ]; then
+    verify_stopped_socket "$ts_socket" "$ts_stop_was_rust_ts"
+  fi
+  if [ "${ts_stop_stopped_env:-}" = "yes" ]; then
+    verify_stopped_socket "$env_socket" "$ts_stop_was_rust_env"
+  fi
+  if [ "${ts_stop_stopped_rust:-}" = "yes" ]; then
+    verify_stopped_socket "$rust_socket" "$ts_stop_was_rust_rust"
+  fi
 fi
 
 # The TS npm package: uninstalled (operator directive — the Rust port owns the
 # keyword), with the restore command printed. Exact package `prime-agent`
-# only; best-effort — an npm failure warns and moves on.
-if command -v npm >/dev/null 2>&1; then
+# only; best-effort — an npm failure warns and moves on. Windows never had
+# a TS npm install (the TS product shipped darwin/linux only), so the whole
+# step is darwin/linux.
+if [ "$WINDOWS" != "yes" ] && command -v npm >/dev/null 2>&1; then
   npm_root="$(npm root -g 2>/dev/null || true)"
   if [ -n "$npm_root" ] && [ -f "${npm_root}/prime-agent/package.json" ]; then
     ts_version="$("$UVPY" -c 'import json, sys
@@ -1567,12 +2972,13 @@ try:
 except Exception:
     print("")' "${npm_root}/prime-agent/package.json")"
     if [ -n "$ts_version" ]; then
+      step_start "Removing the TypeScript npm package"
       if npm uninstall -g prime-agent >/dev/null 2>&1; then
-        echo "the TypeScript npm package prime-agent@${ts_version} was uninstalled"
-        echo "  restore with: npm install -g prime-agent@${ts_version}"
+        step_ok "Removed the TypeScript npm package" "restore: npm install -g prime-agent@${ts_version}"
       else
-        note "warning: npm uninstall -g prime-agent failed; run it by hand — the"
-        note "  npm-installed TS command can shadow ${launcher} on PATH"
+        step_fail "Removing the TypeScript npm package"
+        note "! The TypeScript npm command can shadow ${launcher} on PATH. Remove it:"
+        todo "npm uninstall -g prime-agent"
       fi
     fi
   fi
@@ -1592,15 +2998,32 @@ fi
 # store-alias fallback) is invisible to the launcher unless the prefix's
 # bin dir rides PATH — the pre-warm's child inherits this PATH, and the
 # profile note below tells the user to make it permanent.
-if [ -n "$uv_bin_dir" ] && [ "$uv_bin_dir" != "${HOME}/.local/bin" ]; then
-  PATH="${uv_bin_dir}:${PATH}"
+# THE INCOMING PATH (the reviewer's finding): the persistent-PATH guidance
+# near the end of this script must describe the user's NEXT session, never
+# this process's temporary prepend - so the pre-warm fix below captures the
+# incoming PATH first and the guidance compares against that.
+incoming_path="${PATH:-}"
+# THE GUARD (the reviewer's finding): the prepend runs only when no uv
+# already answers on PATH - a working PATH uv is never shadowed by a stale
+# target file - and it serves the uv at the target (the product's ensure_uv
+# does not know the knob's dir).
+if ! uv_on_path && [ -n "$uv_bin_dir" ] && [ "$uv_bin_dir" != "${HOME}/.local/bin" ]; then
+  # An unset PATH must not become a trailing colon (that would expose the
+  # cwd to the child's PATH search): the prepend sets the PATH outright.
+  if [ -z "${PATH+x}" ]; then
+    PATH="$uv_bin_dir"
+  else
+    PATH="${uv_bin_dir}:${PATH}"
+  fi
   export PATH
 fi
-if command -v uv >/dev/null 2>&1 \
-   || { [ -n "$uv_bin_dir" ] && [ -x "${uv_bin_dir}/uv" ]; }; then
+if uv_on_path \
+   || { [ -n "$uv_bin_dir" ] && [ -x "${uv_bin_dir}/${uv_name}" ]; } \
+   || { [ "$uv_under_store" = "no" ] && [ -x "${HOME}/.local/bin/${uv_name}" ]; }; then
   say "uv found (the kernel venv's package manager)"
 else
   if [ -n "$uv_bin_dir" ]; then
+    step_start "Installing uv"
     say "installing uv (the kernel venv's package manager — the command the"
     say "product's own error message names):"
   else
@@ -1615,81 +3038,183 @@ else
   # alias — the store-alias fallback above), which also overrides any
   # inherited value pointing into the shared session store.
   if [ -n "$uv_bin_dir" ] \
-     && curl_out="$(curl -LsSf https://astral.sh/uv/install.sh)" \
+     && curl_out="$(curl -LsSf --connect-timeout 10 --max-time 60 --retry 2 \
+          https://astral.sh/uv/install.sh)" \
      && printf '%s\n' "$curl_out" \
-        | env -u UV_UNMANAGED_INSTALL UV_INSTALL_DIR="$uv_bin_dir" sh; then
-    [ -x "${uv_bin_dir}/uv" ] \
-      || note "warning: the uv installer reported success but ${uv_bin_dir}/uv is missing; the first session may need to install uv itself"
+        | env -u UV_UNMANAGED_INSTALL UV_INSTALL_DIR="$uv_bin_dir" sh >&3 2>&1; then
+    if [ -x "${uv_bin_dir}/${uv_name}" ]; then
+      step_ok "uv installed"
+    else
+      step_fail "Installing uv"
+      note "! The uv installer reported success but ${uv_bin_dir}/${uv_name} is missing; the"
+      note "  first session may need to install uv itself."
+    fi
   else
-    note "warning: could not install uv; the kernel pre-warm was skipped."
-    note "  The first session needs uv — install it with:"
-    note "  curl -LsSf https://astral.sh/uv/install.sh | sh"
+    if [ -n "$ui_step" ]; then step_fail "Installing uv"; fi
+    note "! Could not install uv; the kernel pre-warm was skipped. The first"
+    note "  session needs uv. Install it with:"
+    todo "curl -LsSf https://astral.sh/uv/install.sh | sh"
   fi
 fi
-if command -v uv >/dev/null 2>&1 \
-   || { [ -n "$uv_bin_dir" ] && [ -x "${uv_bin_dir}/uv" ]; }; then
+# THE PRE-WARM GATE (the reviewer's finding): it must agree with the
+# 'uv found' gate above - a default-location uv must actually WARM the
+# kernel, not only be reported found (the product's ensure_uv finds
+# ~/.local/bin/uv by itself), and never in the store-alias shape (the
+# store is never written from this installer).
+if uv_on_path \
+   || { [ -n "$uv_bin_dir" ] && [ -x "${uv_bin_dir}/${uv_name}" ]; } \
+   || { [ "$uv_under_store" = "no" ] && [ -x "${HOME}/.local/bin/${uv_name}" ]; }; then
+  step_start "Preparing the Python kernel"
   if bootstrap_out="$("$launcher" --prime-agent-bootstrap 2>&1)"; then
+    step_ok "Kernel ready"
     say "kernel pre-warmed: the first session's Python kernel is ready"
     say "$bootstrap_out"
   else
-    note "warning: the kernel pre-warm failed (the install stands; the first"
-    note "  session will retry it online):"
+    step_fail "Preparing the Python kernel" "the first session retries it"
+    note "! The kernel pre-warm failed; the install stands and the first session"
+    note "  retries it online:"
     note "$bootstrap_out"
   fi
 else
-  note "note: kernel pre-warm skipped (no uv); the first session bootstraps"
-  note "  the kernel itself and needs the network once"
+  note "! The kernel pre-warm was skipped (no uv); the first session sets the"
+  note "  kernel up itself and needs the network once."
 fi
-
-# --- PATH check (warn, not fail) ---------------------------------------------------
-case ":$PATH:" in
-  *":${bin_dir}:"*) ;;
-  *)
-    echo "note: ${bin_dir} is not on your PATH; add it to your shell profile:"
-    printf "  export PATH=\"%s:\$PATH\"\n" "$bin_dir"
-    ;;
-esac
 
 # --- verify: the launcher must answer --version -----------------------------------
 # Tried once. The common failure on a fresh install is the first-run kernel
 # venv bootstrap (the sidecar provisions itself on first launch), so the
 # failure prints the output plus a re-run hint instead of failing the
 # install over it.
+version_ok="yes"
 if version_out="$("$launcher" --version 2>&1)"; then
-  echo "installed: ${version_out}"
+  say "installed: ${version_out}"
 else
-  echo "warning: the first --version run failed (output below); the first run"
-  echo "bootstraps the kernel venv — re-run it:"
-  printf '%s\n' "$version_out"
-  echo "  ${launcher} --version"
+  version_ok="no"
 fi
-echo "launcher:  ${launcher}"
-echo "payload:   ${share_dir}"
+
+# --- the summary ---------------------------------------------------------------------
+# The renderer freezes on its last frame; the ending prints below it: the
+# result, one dim line of where things went, the takeover's undo line, and
+# every must-do next step as an amber line plus the exact command.
+ui_stop
+say "launcher:  ${launcher}"
+say "payload:   ${share_dir}"
 if [ -d "$old" ] && grep -qxF -- "$old" "$generations_record" 2>/dev/null; then
-  echo "rollback:  ${old} (the previous payload, one generation; swept on the next install)"
+  say "rollback:  ${old} (the previous payload, one generation; swept on the next install)"
+  say "           restore it with: prime-agent update --rollback (the live"
+  say "            build must carry the update rollback; an older payload may not)"
 elif [ -d "$old" ]; then
-  echo "rollback:  ${old} (the migrated pre-takeover tree; kept — remove it by hand"
-  echo "            once you no longer need the rollback)"
+  say "rollback:  ${old} (the migrated pre-takeover tree; kept — remove it by hand"
+  say "            once you no longer need the rollback)"
 fi
-echo "source:    the ${CHANNEL} channel at ${BASE_URL} (prime-agent ${VERSION})"
-if [ -n "$ts_stop_summary" ]; then
-  printf '%s' "$ts_stop_summary"
+case "$MODE" in
+  rollback) say "source:    the kept previous version (prime-agent ${VERSION}, the ${CHANNEL} channel)" ;;
+  archive) say "source:    the local archive ${ARCHIVE} (prime-agent ${VERSION})" ;;
+  *) say "source:    the ${CHANNEL} channel at ${BASE_URL} (prime-agent ${VERSION})" ;;
+esac
+if [ "$WINDOWS" = "yes" ]; then
+  # The Windows stop ran before the publish (a Windows process holds its
+  # binary open); its summary rides here. A fresh install prints nothing:
+  # there was no daemon to stop.
+  if [ -n "$windows_stop_summary" ]; then
+    say "$windows_stop_summary"
+  fi
+elif [ -n "$ts_stop_summary" ]; then
+  printf '%s' "$ts_stop_summary" | while IFS= read -r summary_line; do say "$summary_line"; done
 elif [ -z "$ts_stop_found_any" ] && [ -z "$ts_stop_refused" ]; then
   # No silent skips: a machine with no daemon anywhere says so, naming
   # every candidate that was probed.
-  echo "daemon: none found (no daemon answered on: ${ts_candidate_report})"
+  say "daemon: none found (no daemon answered on: ${ts_candidate_report})"
 fi
-
-echo "next steps: the README's Install section ships inside the payload"
-echo "  ${share_dir}/README.md"
+say "next steps: the README's Install section ships inside the payload"
+say "  ${share_dir}/README.md"
 if [ "$ts_stop_rust_stopped" = "yes" ] && [ "$rust_leftover" != "yes" ]; then
   # The update flow's half: the stopped daemon was OURS — the next
   # invocation boots the fresh payload this install just published. A
   # rust daemon that answered the post-stop verification is NOT "stopped
   # for the update": the warning line says so, and this line stays silent
   # (the bots' finding — the summary must never claim both).
-  echo "  the previous Rust daemon was stopped for this update — the next"
-  echo "  prime-agent invocation boots the new daemon"
+  say "  the previous Rust daemon was stopped for this update — the next"
+  say "  prime-agent invocation boots the new daemon"
 fi
 
-rm -rf "$dl"
+printf '\n' >&2
+if [ "$version_ok" = yes ]; then
+  printf ' %sDone.%s Run %sprime-agent%s to start.\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET" >&2
+else
+  note "! Installed, but the first prime-agent --version run failed (it sets up"
+  note "  the kernel on first launch). Its output:"
+  printf '%s\n' "$version_out" >&2
+  note "  Run it again:"
+  todo "${launcher} --version"
+fi
+dim "installed to $(tilde "$share_dir") · launcher $(tilde "$launcher")"
+if [ -n "$ts_takeover_from" ]; then
+  dim "moved the TypeScript install to $(tilde "$ts_takeover_from") · undo:"
+  dim "  ${ts_takeover_undo}"
+fi
+if [ -n "$migrated_note" ]; then
+  dim "$migrated_note"
+fi
+
+# --- PATH check (warn, not fail) ---------------------------------------------------
+# The installer never edits a shell profile: it prints the one line that
+# does it for the user's shell (from $SHELL) and reloads it. THE CUSTOM UV
+# TARGET joins the check (the reviewer's finding: a documented install
+# target must stay discoverable once the installer exits - the product's
+# own ensure_uv searches PATH and ~/.local/bin only; the store-alias
+# fallback already points at the launcher's own bin dir, which the first
+# check covers).
+path_check_note() {
+  # The guidance compares against the INCOMING PATH (a fresh session's
+  # view): this script's own temporary pre-warm prepend must never
+  # suppress the persistent-PATH guidance for a dir the user still needs.
+  case ":$incoming_path:" in
+    *":$1:"*) return 0 ;;
+  esac
+  case "$1" in
+    "$HOME"/*) path_expr="\$HOME${1#"$HOME"}" ;;
+    *) path_expr="$1" ;;
+  esac
+  printf '\n' >&2
+  case "${SHELL:-}" in
+    */zsh)
+      note "! $(tilde "$1") is not on your PATH. Add it and reload your shell:"
+      todo "echo 'export PATH=\"${path_expr}:\$PATH\"' >> ~/.zshrc && source ~/.zshrc"
+      ;;
+    */bash)
+      # The tilde is printed for the user's shell to expand.
+      # shellcheck disable=SC2088
+      bash_profile="~/.bashrc"
+      # shellcheck disable=SC2088
+      if [ "$OS" = Darwin ]; then bash_profile="~/.bash_profile"; fi
+      note "! $(tilde "$1") is not on your PATH. Add it and reload your shell:"
+      todo "echo 'export PATH=\"${path_expr}:\$PATH\"' >> ${bash_profile} && source ${bash_profile}"
+      ;;
+    */fish)
+      note "! $(tilde "$1") is not on your PATH. Add it:"
+      todo "fish_add_path $(tilde "$1")"
+      ;;
+    *)
+      note "! $(tilde "$1") is not on your PATH. Add this line to your shell profile"
+      note "  and open a new terminal:"
+      todo "export PATH=\"${path_expr}:\$PATH\""
+      ;;
+  esac
+  if [ "$WINDOWS" = "yes" ]; then
+    # The user PATH takes the Windows spelling (C:\...), not the MSYS one.
+    win_bin_dir="$1"
+    if command -v cygpath >/dev/null 2>&1; then
+      win_bin_dir="$(cygpath -w "$1" 2>/dev/null)" || win_bin_dir="$1"
+    fi
+    note "! For PowerShell and cmd, add it to your user PATH and open a new terminal:"
+    todo "[Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path','User') + ';${win_bin_dir}', 'User')"
+  fi
+}
+path_check_note "${bin_dir}"
+if [ -n "${PRIME_AGENT_UV_BIN_DIR:-}" ] \
+   && [ -n "$uv_bin_dir" ] \
+   && [ "$uv_bin_dir" != "${bin_dir}" ] \
+   && [ "$uv_bin_dir" != "${HOME}/.local/bin" ]; then
+  path_check_note "${uv_bin_dir}"
+fi

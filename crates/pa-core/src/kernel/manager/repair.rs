@@ -7,10 +7,6 @@ use super::{
     Signal, REPAIR_STEP_TIMEOUT_MS,
 };
 
-// ---------------------------------------------------------------------------
-// Protocol repair
-// ---------------------------------------------------------------------------
-
 impl Inner {
     /// A JSON object that was not a valid protocol frame: fail the in-flight
     /// request and replace the child, since its stream framing is corrupted.
@@ -44,11 +40,8 @@ impl Inner {
                 "replacement kernel corrupted during protocol repair; giving up",
             );
             existing.owner.superseded.store(true, Ordering::SeqCst);
-            // performRestore clears pendingRestore, so it still being set
-            // means the corruption struck at or before the restore phase: the
-            // snapshot stays the prime suspect (ambiguous attribution,
-            // loop-safe). Corruption strictly after a successful restore never
-            // implicates the snapshot.
+            // performRestore clears pendingRestore, so it still being set means the corruption
+            // struck at or before the restore phase: the snapshot stays the prime suspect.
             let snapshot_suspect = lock(&self.guarded).pending_restore;
             self.kill_child_to_idle();
             if snapshot_suspect {
@@ -119,26 +112,16 @@ impl Inner {
             }
             self.append_diagnostic("protocol repair restore failed; discarding replacement kernel");
             self.kill_child_to_idle();
-            // The snapshot is the declared suspect, never the proven
-            // culprit: the restore may have failed transiently (a
-            // transport hiccup in the replacement kernel, the repair step
-            // timeout) with the on-disk payload perfectly good. Only the
-            // retry guard drops — the lazy path must not spin on it. The
-            // dispose-flush protection is ARMED: the namespace the
-            // replacement kernel carries was never restored from the
-            // payload, so the next shutdown must not overwrite the
-            // fresher on-disk payload with it (Macroscope PR #2744:
-            // a failed repair restore must keep the guard, and ARM it
-            // even after a successful earlier restore — the payload is
-            // still the fresher copy the next boot needs).
+            // The snapshot is the declared suspect, never the proven culprit: the restore may have
+            // failed transiently with the on-disk payload perfectly good. Only the retry guard
+            // drops; the dispose-flush protection is ARMED.
             lock(&self.guarded).pending_restore = false;
             lock(&self.guarded).restore_incomplete = true;
             return;
         }
 
-        // Restore revives only the user namespace; live handles (rlm, bash,
-        // skills) come from the runtime bootstrap, so a repaired kernel must
-        // re-run it.
+        // Restore revives only the user namespace; live handles (rlm, bash, skills) come
+        // from the runtime bootstrap, so a repaired kernel must re-run it.
         let Some(code) = self.options.bootstrap_code.clone() else {
             return;
         };
@@ -203,9 +186,9 @@ impl Inner {
         }
     }
 
-    /// A fresh kernel started after a discarded repair has none of the runtime
-    /// bootstrap's live handles (rlm, bash, skills) and an empty namespace:
-    /// reprovision (restore, then bootstrap) before any user request.
+    /// A fresh kernel started after a discarded repair has none of the runtime bootstrap's live
+    /// handles and an empty namespace: reprovision (restore, then bootstrap) before any user
+    /// request.
     pub(crate) async fn ensure_kernel_rebootstrapped(
         self: &Arc<Self>,
         signal: Option<&AbortSignal>,

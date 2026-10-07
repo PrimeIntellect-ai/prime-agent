@@ -1,9 +1,6 @@
-//! Tool-call card rendering, the TUI side of the TS `tool-execution.ts` /
-//! `tool-panel.ts` / `ipython-cell.ts` / `bash.ts` renderer stack. The card
-//! model mirrors the TS component state (args, execution start, partial
-//! results, live timing); each tool renders through its own shell
-//! (`ipython` self-renders, `bash` and the generic fallback render the
-//! `ToolPanel` on the panel background).
+//! Tool-call card rendering: the card model mirrors the TS component
+//! state; each tool renders through its own shell (ipython self-renders;
+//! bash and the generic fallback use `ToolPanel`).
 
 pub mod bash;
 pub mod generic;
@@ -20,17 +17,16 @@ use crate::chat::Detail;
 use crate::theme::{Theme, ThemeColor};
 use crate::{Line, Span};
 
-/// One tool call and its execution state (TS `ToolExecutionComponent`
-/// state minus the renderer caches).
+/// One tool call and its execution state, minus the renderer caches.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ToolCallCard {
     pub id: String,
     pub name: String,
     pub args: Value,
-    /// `tool_execution_start` seen (live only; replayed cards infer it from
-    /// the result).
+    /// `tool_execution_start` seen (replayed cards infer it from the
+    /// result).
     pub started: bool,
-    /// When the execution started, when seen live (drives `Took`/`Elapsed`).
+    /// When the execution started, when seen live (drives `Took`).
     pub started_at: Option<Instant>,
     /// When the final result landed (replay sets start and end together).
     pub ended_at: Option<Instant>,
@@ -38,14 +34,12 @@ pub struct ToolCallCard {
     pub result: Option<ToolResultView>,
     /// `result` is a partial streaming frame.
     pub result_partial: bool,
-    /// The run's failed final frame (an abort or a provider error) settled
-    /// this still-pending card with the run's error text; the tool's late
-    /// result frames are dropped (TS `resetPendingToolState` removed the
-    /// component from the pending map the same way).
+    /// A failed final frame settled this still-pending card with the
+    /// run's error text; late result frames are dropped.
     pub aborted: bool,
 }
 
-/// One (partial or final) tool result (TS `AgentToolResult` view).
+/// One (partial or final) tool result.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ToolResultView {
     pub content: Vec<Value>,
@@ -55,10 +49,7 @@ pub struct ToolResultView {
 
 impl ToolResultView {
     /// The joined text of the result's text blocks, ANSI stripped, with
-    /// hidden image blocks appended as `[Image: ...]` fallback text (TS
-    /// `render-utils.getTextOutput` with `showImages` false: each image
-    /// contributes its mime type and, when the payload parses, its
-    /// dimensions).
+    /// hidden image blocks appended as `[Image: ...]` fallback text.
     pub fn text_output(&self, show_images: bool) -> String {
         let mut parts: Vec<String> = Vec::new();
         for block in &self.content {
@@ -81,11 +72,8 @@ impl ToolResultView {
 }
 
 /// The `[Image: ...]` text standing in for one hidden image block (TS
-/// `imageFallback(mimeType, dims)` with `includeImageDimensions: false` —
-/// the interactive transcript's two mount sites pass the knob off, so the
-/// hidden text never parses image dimensions; the export renderer is the
-/// dims-including consumer). The payload is never decoded: the text is
-/// the mime alone, for live payloads and elided markers alike.
+/// `imageFallback` with `includeImageDimensions: false`); the payload
+/// is never decoded: the text is the mime alone.
 fn hidden_image_text(block: &Value) -> String {
     let mime = block
         .get("mimeType")
@@ -94,16 +82,15 @@ fn hidden_image_text(block: &Value) -> String {
     crate::terminal_image::image_fallback(mime, None, None)
 }
 
-/// The image block's rendered size segment: `140.1KB` — the elided payload's
-/// byte count when the transcript load replaced the data, the payload's own
-/// length otherwise. Never touches the payload beyond its length.
+/// The image block's rendered size segment: the elided payload's byte
+/// count when the transcript load replaced the data, the payload's own
+/// length otherwise.
 pub(crate) fn image_block_size_text(block: &Value) -> String {
     format_size(image_block_bytes(block))
 }
 
-/// The payload's size in bytes, from the elision marker when present (the
-/// transcript load's [`crate::snapshot`] marker shape: `elidedBytes`),
-/// from the payload's own character length otherwise.
+/// The payload's size in bytes, from the elision marker when present
+/// (the transcript load's `elidedBytes`), else the payload's own length.
 pub(crate) fn image_block_bytes(block: &Value) -> usize {
     block
         .get("elidedBytes")
@@ -119,16 +106,15 @@ pub(crate) fn image_block_bytes(block: &Value) -> usize {
         )
 }
 
-/// The animated working icon glyph (TS `working-icon.ts`).
+/// The animated working icon glyph.
 #[must_use]
 pub fn working_icon(frame: usize) -> &'static str {
     crate::chat::working_icon_frame(frame)
 }
 
-/// Render one tool-call card through its tool shell. `show_images` is the
-/// `terminal.showImages` setting (TS `showImages` on the tool component):
-/// image blocks render their metadata rows when set, their
-/// `[Image: ...]` text placeholders otherwise.
+/// Render one tool-call card through its tool shell. `show_images` (the
+/// `terminal.showImages` setting) renders metadata rows or `[Image: ...]`
+/// placeholders.
 #[must_use]
 pub fn render_tool_card(
     card: &ToolCallCard,
@@ -145,9 +131,8 @@ pub fn render_tool_card(
     }
 }
 
-/// The generic panel status (TS `ToolExecutionComponent.panelStatus`):
-/// the last non-partial result settles the card; error wins even while
-/// streaming; `running` animates until then.
+/// The generic panel status: error wins even while streaming; `running`
+/// animates until then.
 pub(crate) enum PanelStatus {
     Queued,
     Running,
@@ -175,7 +160,7 @@ pub(crate) fn panel_status(card: &ToolCallCard) -> PanelStatus {
     }
 }
 
-/// The panel header row: `label · status` (TS `panelHeader`).
+/// The panel header row: `label · status`.
 pub(crate) fn panel_header(card: &ToolCallCard, frame: usize, theme: &Theme) -> Line {
     use crate::theme::ThemeColor::{BashMode, Dim, Error, Muted, Success};
     let muted = theme.fg_style(Muted);
@@ -195,8 +180,8 @@ pub(crate) fn panel_header(card: &ToolCallCard, frame: usize, theme: &Theme) -> 
     header
 }
 
-/// One tool-panel row: content indented by 2, padded to the full width on
-/// the panel background (TS `toolPanelLine`).
+/// One tool-panel row: content indented by 2, padded to the full width
+/// on the panel background.
 pub(crate) fn panel_line(content: Line, bg: ratatui::style::Style, width: usize) -> Line {
     let padding = 2usize;
     let content_width = layout::panel_content_width(width);
@@ -216,16 +201,16 @@ pub(crate) fn panel_line(content: Line, bg: ratatui::style::Style, width: usize)
     line
 }
 
-/// `formatDuration` for the bash panel: tenths of a second.
+/// The bash panel duration: tenths of a second.
 pub(crate) fn format_bash_duration(ms: u128) -> String {
     format!("{:.1}s", ms as f64 / 1000.0)
 }
 
-/// The bash tool's output byte budget (TS `DEFAULT_MAX_BYTES`), used in the
-/// truncation warning when the spill carries no `maxBytes`.
+/// The bash tool's output byte budget, used when the spill carries no
+/// `maxBytes`.
 pub const DEFAULT_MAX_BYTES: usize = 50 * 1024;
 
-/// `formatSize` (TS `truncate.ts`): `512B`, `50.0KB`, `1.2MB`.
+/// `formatSize`: `512B`, `50.0KB`, `1.2MB`.
 #[must_use]
 pub fn format_size(bytes: usize) -> String {
     if bytes < 1024 {
@@ -237,25 +222,11 @@ pub fn format_size(bytes: usize) -> String {
     }
 }
 
-/// Image result blocks render their metadata row below the card (TS
-/// `tool-execution.ts` adds one `Image` component per result image
-/// block, with `fallbackOnly` and the `\u{2570}\u{2500}` prefix, in the
-/// toolOutput fallback color). Blocks without data or a mime type, and
-/// every image while `show_images` is false, render nothing here — the
-/// hidden ones contribute their `[Image: ...]` text through
-/// [`ToolResultView::text_output`] instead.
-///
-/// The row is built from the block's metadata only (the render-path skip,
-/// the image-heavy session-open fix): the TS component decoded the whole
-/// base64 string for its dimensions, and a tool result carrying megabytes
-/// of image payload paid that decode on every visited card. The
-/// dimensions now come from [`get_image_dimensions_prefix`]'s bounded
-/// prefix read, and a payload whose header does not parse from the
-/// prefix renders its size instead — `[image/jpeg · 140.1KB omitted]` —
-/// so the base64 is never cloned or decoded in full.
-///
-/// [`get_image_dimensions_prefix`]:
-/// crate::terminal_image::get_image_dimensions_prefix
+/// Image result blocks render their metadata row below the card;
+/// blocks without data or a mime type, and every image while
+/// `show_images` is false, render nothing here. The row is built from
+/// the block's metadata only (a bounded prefix read supplies the
+/// dimensions; a header that does not parse renders the size instead).
 pub(crate) fn image_rows(
     result: Option<&ToolResultView>,
     show_images: bool,
@@ -272,13 +243,8 @@ pub(crate) fn image_rows(
     rows
 }
 
-/// The metadata-row text for one shown image block: the TS `Image`
-/// component's fallback-only shape `[mime · WxH]`, or the size-only
-/// placeholder `[mime · 140.1KB omitted]` when the dimensions are not
-/// available. The dimensions come from the elision marker's
-/// `widthPx`/`heightPx` when the transcript load elided the payload, and
-/// from the payload's bounded prefix otherwise (never a full decode).
-/// Computed without cloning the payload.
+/// The metadata-row text for one shown image block: `[mime · WxH]`, or
+/// `[mime · 140.1KB omitted]` when the dimensions are not available.
 pub(crate) fn image_block_row_text(block: &Value) -> String {
     let mime = block
         .get("mimeType")
@@ -295,9 +261,7 @@ pub(crate) fn image_block_row_text(block: &Value) -> String {
 }
 
 /// The image block's pixel dimensions, without a payload decode: the
-/// elision marker's `widthPx`/`heightPx` when the transcript load elided
-/// the data (the marker the daemon's attach snapshot writes), else the
-/// bounded-prefix read of the payload.
+/// elision marker's `widthPx`/`heightPx`, else the bounded-prefix read.
 pub(crate) fn image_block_dimensions(
     block: &Value,
 ) -> Option<crate::terminal_image::ImageDimensions> {
@@ -332,9 +296,8 @@ fn eligible_image_blocks(
         .flat_map(|result| result.content.iter())
         .filter(move |block| {
             // The paint eligibility mirrors the geometry count's
-            // (`eligible_images`): a block whose `data` is not a string
-            // renders no row on either path, so a `data: null` block can
-            // never make the cached card heights diverge from rendering.
+            // (`eligible_images`): a `data: null` block renders no row on
+            // either path, so cached card heights cannot diverge.
             show_images
                 && block.get("type").and_then(Value::as_str) == Some("image")
                 && block.get("data").and_then(Value::as_str).is_some()
@@ -411,10 +374,9 @@ mod tests {
 
     #[test]
     fn shown_image_rows_render_metadata_without_materializing_the_payload() {
-        // A payload whose header parses but whose tail (past the bounded
-        // prefix) is invalid base64: the row still renders its dimensions,
-        // proving the payload was never decoded in full — a full decode
-        // would have failed and rendered the size placeholder instead.
+        // The tail past the bounded prefix is invalid base64: the row
+        // still renders dimensions, proving the payload was never decoded
+        // in full.
         let payload = format!("{}{}{}", tiny_png(64, 32), "A".repeat(4096), "!".repeat(64));
         let result = image_result(&payload, "image/png");
         let rows = image_rows(result.as_ref(), true, &theme());
@@ -423,14 +385,11 @@ mod tests {
             flat,
             vec!["    \u{2570}\u{2500} [image/png \u{b7} 64\u{d7}32]".to_string()]
         );
-        // The render never emits any of the payload's tail bytes.
         assert!(flat.iter().all(|row| !row.contains("AAAA")));
     }
 
     #[test]
     fn shown_image_rows_render_the_size_placeholder_when_the_header_does_not_parse() {
-        // A payload whose dimensions do not parse from the bounded prefix
-        // renders its size instead (the honest omission marker).
         let payload = "x".repeat(186_328);
         let result = image_result(&payload, "image/jpeg");
         let rows = image_rows(result.as_ref(), true, &theme());
@@ -443,8 +402,6 @@ mod tests {
 
     #[test]
     fn elided_payloads_render_the_size_placeholder_from_the_marker() {
-        // The transcript load's elision marker (data emptied, the byte
-        // count in elidedBytes): the row renders from the marker alone.
         let result = Some(ToolResultView {
             content: vec![serde_json::json!({
                 "type": "image",
@@ -489,9 +446,6 @@ mod tests {
 
     #[test]
     fn non_string_data_blocks_render_no_rows_on_either_path() {
-        // A `data: null` image block is not an image row: the paint
-        // eligibility mirrors the geometry count's, so the cached card
-        // heights cannot diverge from rendering (the Macroscope finding).
         let result = Some(ToolResultView {
             content: vec![serde_json::json!({
                 "type": "image",
@@ -503,7 +457,6 @@ mod tests {
         });
         assert!(image_rows(result.as_ref(), true, &theme()).is_empty());
         assert_eq!(eligible_images(result.as_ref(), true).count(), 0);
-        // The elided marker (data: "") stays a real row on both paths.
         let elided = Some(ToolResultView {
             content: vec![serde_json::json!({
                 "type": "image",

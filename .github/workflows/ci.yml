@@ -1,12 +1,14 @@
 # CI gates for the prime-agent Rust port: the tip-compiles-tests guarantee
 # plus PR gating, in one workflow (the shape of the TS product's ci.yml).
-#
+# `.github/workflows/` is the one home for workflow files; the
+# windows-cross/windows/deny jobs run live in this file alongside the unix
+# gates.
 # Two triggers, one
 # gate set mirroring `make check` exactly (fmt --all --check, clippy --workspace
 # --all-targets -- -D warnings, cargo test --workspace) on the pinned
 # toolchain (1.98.1) and runner image the continuous/release builds use:
 #
-#   push to main/rust — every merge is a push. continuous.yml proves the
+#   push to main — every merge is a push. continuous.yml proves the
 #   release binaries link; THIS workflow proves the tip's test/bench/example
 #   targets compile (`cargo check --workspace --all-targets`) and the test
 #   suites pass (the test suite sharded below; the count is the SHARD_COUNT
@@ -17,8 +19,28 @@
 #   #2627's fork_from test-target errors land as latent compile breaks, and
 #   #2635's login-recovery test land red — none noticed by CI.
 #
-#   pull_request against main/rust — the same gates on the merge candidate,
+#   pull_request against main — the same gates on the merge candidate,
 #   so the merge bar stops relying solely on review bots.
+#
+#   merge_group — full workspace tests on the queued merge candidate,
+#   not the PR's narrowed selection. Branch protection must separately
+#   enable merge queue and require the final gates.
+#
+# THE PR SMOKE MODEL (the touched-crate path filter): the PR wave narrows
+# the TEST phase to touched crates and their reverse dependents' units
+# (the `changes` job maps the PR's changed files to crates; any path
+# outside crates/<pkg>/** fails safe
+# to the full selection — CI/scripts/vendor/runtime changes affect the
+# whole suite, and docs-only waste is cheaper than a silent hole). The
+# stable crc32 shard assignment is untouched — only the unit selection
+# narrows — and the push wave keeps running the full union, so main is the
+# authority: the PR proves the touched crates' runtime behavior fast, the
+# merge proves the whole workspace. fmt + check/clippy stay full-scope on
+# PRs (the compile authority); reverse-dep selection also runs tests of
+# crates affected by a dependency's behavior change. The shard manifests
+# record the selection scope and the summary job audits the union against it, so a
+# narrowed run can never masquerade as a full one and coverage can never
+# silently regress.
 #
 # The test phase is sharded: `cargo test --workspace` ran every test binary
 # serially in one job (~13 minutes; the per-PR wall-clock floor). It is now
@@ -37,9 +59,15 @@
 # assigned unit executed — and merges the failure reports into one table
 # naming the failing binaries; the gate is green only when all shards are.
 #
-# Strictly read-only: contents: read, persist-credentials: false, no secrets.
-# Windows coverage runs via the on-demand windows-runtime-triage.yml battery
-# (any ref); there is no windows or deny job in this workflow.
+# Strictly read-only: contents: read, persist-credentials: false, no secrets
+# (the trust job's vouch step reads the GitHub API with the ambient
+# GITHUB_TOKEN). The contributor-trust gate (the `trust` job, ported from
+# main's ci.yml — the vouch mechanism) precedes every job: push events are
+# always allowed; PR authors must be a bot, a collaborator with write
+# access, or a vouched contributor (mitchellh/vouch; the vouched list
+# resolves from the repo's default branch — `.github/VOUCHED.td` on main,
+# nothing local on this branch), so unvouched PR authors never bill a
+# runner minute. The auto-close enforcement lives in contribution-gate.yml.
 #
 name: ci
 
@@ -49,15 +77,17 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     branches: [main]
+  merge_group:
+    types: [checks_requested]
 
 permissions:
   contents: read
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  # PRs: a newer push supersedes the stale gates. Pushes: the newest tip
-  # supersedes the older run — under this fleet's merge cadence a queued
-  # (non-canceling) push run would lag hours behind and bill stale tips.
+  # PRs: a newer push supersedes stale gates. Queue entries use their own
+  # merge-group ref; a superseded entry's gates can be cancelled. Pushes:
+  # the newest tip supersedes the older run instead of billing stale tips.
   cancel-in-progress: true
 
 env:
@@ -82,35 +112,111 @@ env:
   SHARD_COUNT: "8"
 
 jobs:
-  fmt:
-    name: fmt
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    # Draft PRs do not gate (no billing on work-in-progress pushes); the
-    # ready_for_review trigger runs the gates once a draft is marked ready.
-    if: github.event_name == 'push' || !github.event.pull_request.draft
+  # The touched-crate path filter (the PR smoke's selection). Push and queue
+  # runs use the full selection; PR runs select crates plus reverse deps,
+  # failing safe to the full selection on any non-crate path. The output
+  # feeds test shards' --crates; empty means "the full union".
+  changes:
+    name: touched crates (PR) / full selection (push + queue)
+    needs: trust
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: needs.trust.result == 'success' && needs.trust.outputs.allowed == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
+    outputs:
+      crates: ${{ steps.select.outputs.crates }}
+      scope: ${{ steps.select.outputs.scope }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1 action pin; toolchain pinned below
+      - name: Select the touched crates
+        id: select
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "${{ github.event_name }} wave: the full selection"
+            echo "crates=" >> "${GITHUB_OUTPUT}"
+            echo "scope=all" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          # The PR's exact change set: the pulls files API (merge-base
+          # semantics, renames carrying both sides), fully paginated —
+          # `gh pr view --json files` caps at 100 rows and would silently
+          # under-map a large PR, and its field names differ from the REST
+          # rows (`path` vs `filename`). The mapping itself is fail-safe
+          # by construction (scripts/ci_pr_crates.py + its battery): any
+          # non-crate path, a rename's removed side, an empty column, or
+          # the API's 3000-file ceiling means the FULL selection runs.
+          gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" \
+            --paginate --jq '.[] | [.filename, .previous_filename // ""] | @tsv' \
+            > "${RUNNER_TEMP}/pr-files.tsv"
+          python3 scripts/ci_pr_crates.py "${RUNNER_TEMP}/pr-files.tsv"
+      - name: Report the selection
+        run: |
+          set -euo pipefail
+          echo "wave selection: ${{ steps.select.outputs.scope }}"
+          if [ -n "${{ steps.select.outputs.crates }}" ]; then
+            echo "crates under test: ${{ steps.select.outputs.crates }}"
+          fi
+
+  # The contributor-trust gate (this PR's port from main's TS-era ci.yml):
+  # the `allowed` output every job below keys on — push events are always
+  # allowed, PR authors must be a bot, a collaborator with write access,
+  # or vouched. allow-fail keeps this job green: the gate is the output,
+  # not the step.
+  trust:
+    name: contributor trust
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      # merge_group auto-allows: the queued candidate already passed the
+      # vouch-gated pull_request wave (the queue only takes vouched PRs);
+      # the merge-group run is the full-selection validation of the
+      # already-vouched candidate.
+      allowed: ${{ github.event_name == 'push' || github.event_name == 'merge_group' || steps.vouch.outputs.vouched == 'true' }}
+    steps:
+      - name: Check pull request author
+        id: vouch
+        if: github.event_name == 'pull_request'
+        uses: mitchellh/vouch/action/check-user@d66fa29a64600490892131ad87597c30c91fcac4 # v1
         with:
-          toolchain: "1.98.1"
+          user: ${{ github.event.pull_request.user.login }}
+          allow-fail: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  fmt:
+    name: fmt
+    needs: trust
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # Draft PRs do not gate (no billing on work-in-progress pushes); the
+    # ready_for_review trigger runs the gates once a draft is marked ready.
+    if: needs.trust.result == 'success' && needs.trust.outputs.allowed == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1 action pin; the SHA selects the toolchain
+        with:
           components: rustfmt
       - run: cargo fmt --all --check
 
   clippy-test:
     name: check + clippy (workspace)
+    needs: trust
     runs-on: ubuntu-24.04
     timeout-minutes: 45
-    if: github.event_name == 'push' || !github.event.pull_request.draft
+    if: needs.trust.result == 'success' && needs.trust.outputs.allowed == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1 action pin; toolchain pinned below
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1 action pin; the SHA selects the toolchain
         with:
-          toolchain: "1.98.1"
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
@@ -135,12 +241,16 @@ jobs:
   # ONLY its test subset. The union of the shards is exactly the old serial
   # `cargo test --workspace`.
   test-shard:
+    # The shard legs need the wave's selection (the changes job's crates
+    # output) before they can decide what to run — and whether the
+    # sibling-binary build is needed at all.
+    needs: [changes, trust]
     # strategy.job-total (the matrix leg count) auto-derives the displayed
     # total; the env context is not reachable from a job name.
     name: test shard ${{ matrix.shard }}/${{ strategy.job-total }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
-    if: github.event_name == 'push' || !github.event.pull_request.draft
+    if: needs.trust.result == 'success' && needs.trust.outputs.allowed == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
     strategy:
       # One red shard must not cancel the others: their own conclusions are
       # the per-shard signal the summary merges.
@@ -154,32 +264,59 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1 action pin; toolchain pinned below
-        with:
-          toolchain: "1.98.1"
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1 action pin; the SHA selects the toolchain
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           cache-on-failure: true
-          # Per-shard caches (the default key carries the job id, which is
-          # identical for all matrix legs); parallel legs would otherwise
-          # race onto one cache entry and only the first save would stick.
-          shared-key: shard-${{ matrix.shard }}
-      - name: Install uv (the kernel tests bootstrap the Python kernel venv with it)
+          # One shared dependency cache for all legs: per-shard keys held
+          # 8x ~500 MB per ref and evicted the release-build caches (the
+          # repo sits at the 10 GB Actions-cache quota; the shards were 83%
+          # of it). The shards' dev-dependencies differ, and whichever leg
+          # saves first defines the shared entry, so other legs get a
+          # partial hit and compile the rest. Slower hits, no correctness
+          # issue.
+          shared-key: test-shards
+          # Only the push wave writes the entry: PR and merge-queue legs
+          # restore (the restore key falls back to the push wave's entry)
+          # and save nothing - a PR's save would land under the PR's own
+          # ref, and PR-ref entries are the eviction pressure on the
+          # release-build caches.
+          save-if: ${{ github.event_name == 'push' }}
+      - name: Install uv (the kernel venv bootstrap below uses it)
         run: |
           python3 -m pip install --user uv
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      # The wave's selection, resolved once per leg before anything builds:
+      # the narrowed selection's unit list decides whether the bins build
+      # below has any work to do (an empty selection runs no units and needs
+      # no sibling binaries).
+      - name: Resolve this shard's selection
+        id: selection
+        run: |
+          set -euo pipefail
+          python3 scripts/ci_test_shard.py --shard ${{ matrix.shard }} --total ${{ env.SHARD_COUNT }}             --crates "${{ needs.changes.outputs.crates }}" --print-selection
       # Sibling-binary parity: the serial `cargo test --workspace` built every
       # workspace bin into the shared profile dir as a side effect, and the
       # e2e suites look each other's binaries up there (pa-cli's
       # daemon_commands_e2e spawns pa-daemon this way). A shard builds its
       # test subset only, so the bins are built explicitly once up front —
       # first measured on run 36085993711, where the missing pa-daemon bin
-      # failed exactly this suite.
+      # failed exactly this suite. A leg with no selected units skips this
+      # (and runs nothing below); the push wave always selects units, so its
+      # behavior is unchanged.
       - name: Build the workspace bins (sibling-binary parity for the e2e suites)
+        if: steps.selection.outputs.units != '0'
         run: cargo build --locked --workspace --bins
+      # The kernel e2e suites resolve the ambient kernel venv; left to
+      # bootstrap lazily, the first session prewarm starts it mid-shard and
+      # the next kernel unit fails against the half-built venv (run
+      # 36764911023). The installer's bootstrap handoff readies it first.
+      - name: Bootstrap the kernel venv (ready before the kernel e2e units)
+        if: steps.selection.outputs.units != '0'
+        run: ./target/debug/prime-agent --prime-agent-bootstrap
       - name: Run this shard's test subset
         run: |
-          python3 scripts/ci_test_shard.py --shard ${{ matrix.shard }} --total ${{ env.SHARD_COUNT }} --manifest "$RUNNER_TEMP/shard-manifest-${{ matrix.shard }}.json"
+          python3 scripts/ci_test_shard.py --shard ${{ matrix.shard }} --total ${{ env.SHARD_COUNT }}             --crates "${{ needs.changes.outputs.crates }}"             --manifest "$RUNNER_TEMP/shard-manifest-${{ matrix.shard }}.json"
       - name: Upload the shard manifest (always — the summary audits it)
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -195,8 +332,8 @@ jobs:
     name: test summary
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    needs: [test-shard]
-    if: always() && (github.event_name == 'push' || !github.event.pull_request.draft)
+    needs: [trust, test-shard]
+    if: always() && needs.trust.result == 'success' && needs.trust.outputs.allowed == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -209,5 +346,90 @@ jobs:
       - name: Audit the shards and merge their failure reports
         run: python3 scripts/ci_test_shard_summary.py --total ${{ env.SHARD_COUNT }} --dir manifests
 
-  # Windows coverage: the on-demand windows-runtime-triage.yml battery (any
-  # ref); no windows job runs in this workflow.
+  # The Windows job set + the supply-chain deny gate:
+  #
+  #   windows-cross — the cfg-hygiene cross-target gate, the CI mirror of
+  #   `make windows-cross`. The Sep-23..25
+  #   unix-only test regressions that broke it were fixed by #2833, so it
+  #   type-checks every crate (including the cfg(windows) implementations
+  #   and the Windows-only tests) for x86_64-pc-windows-gnu; ring's C needs
+  #   the mingw cross compiler even for check builds.
+  #
+  #   windows-latest — NOT in this promotion set. The full MSVC battery
+  #   surfaced tip-side windows product debt the trunk has carried invisibly
+  #   (the on-demand windows-runtime-triage.yml battery never ran on main;
+  #   its first dispatches read deep red across crates, and the ACP
+  #   daemon-attach e2e deadlocks on the named-pipe transport). The
+  #   windows-latest promotion lands with the windows-readiness lane's
+  #   product fixes; windows-cross below stays this PR's windows authority
+  #   (the compile + clippy proof for the whole workspace incl. the
+  #   cfg(windows) implementations).
+  #
+  #   deny — cargo-deny advisories + licenses, the CI mirror of `make deny`,
+  #   the same check continuous.yml's deny job runs on every push.
+  #   Promoted on the operator's 2026-09-28 policy decision: the advisory
+  #   DB drifts daily, so a drifted advisory can gate PRs — that is the
+  #   accepted trade.
+  windows-cross:
+    name: windows cross-check + clippy (x86_64-pc-windows-gnu)
+    needs: trust
+    if: needs.trust.result == 'success' && needs.trust.outputs.allowed == 'true' && (github.event_name == 'push' || !github.event.pull_request.draft)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # the ref IS the 1.98.1 toolchain; the action ignores the toolchain input
+        with:
+          targets: x86_64-pc-windows-gnu
+          components: clippy
+      - name: Install the mingw-w64 cross toolchain (ring C for the target)
+        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: windows-cross
+      - run: cargo check --locked --workspace --target x86_64-pc-windows-gnu --all-targets
+      - run: cargo clippy --locked --workspace --target x86_64-pc-windows-gnu --all-targets -- -D warnings
+
+  deny:
+    name: deny (cargo-deny advisories + licenses)
+    needs: trust
+    if: needs.trust.result == 'success' && needs.trust.outputs.allowed == 'true' && (github.event_name == 'push' || !github.event.pull_request.draft)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Dependency audit (cargo-deny advisories + licenses)
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+          arguments: --all-features --workspace
+          command-arguments: advisories licenses
+
+  # The trust gate's own failure made visible: a vouch-step error (the
+  # action's setup, the runner) would otherwise leave every dependent job
+  # skipped, and skipped required checks read as passing to branch
+  # protection - a green-looking wave with no gates run. This audit runs
+  # unconditionally (always()) and fails the required-check set when the
+  # trust job itself did not conclude success. The deliberate not-vouched
+  # path is unaffected: there the trust job SUCCEEDS with allowed=false,
+  # the dependents skip by design, and the contribution-gate auto-close
+  # enforces.
+  trust-audit:
+    name: trust gate audit
+    needs: [trust, changes, fmt, clippy-test, test-shard, test-summary, windows-cross, deny]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Audit the contributor-trust gate's own outcome
+        run: |
+          set -euo pipefail
+          if [ "${{ needs.trust.result }}" != "success" ]; then
+            echo "::error::the contributor-trust gate did not conclude cleanly (result: ${{ needs.trust.result }}) - the wave is NOT trustworthy: every gate below it skipped"
+            exit 1
+          fi
+          echo "trust gate concluded cleanly (the allowed verdict: ${{ needs.trust.outputs.allowed }})"

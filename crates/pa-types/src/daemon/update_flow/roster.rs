@@ -1,13 +1,7 @@
-//! `roster.json` — the update flow's session/worker/subagent/heartbeat
-//! snapshot (spec §8).
-//!
-//! The roster is a *projection*: written once, durably, at `Snapshotted`
-//! (fsync before the `Prepared` ack), consumed exactly once by the
-//! `Prepared -> Stopping` transition, and used to restore identical
-//! supervision. The durable truth for every row stays where it lives
-//! (`sessions/*.jsonl`, `session-artifacts/<id>/scheduled-jobs.json`,
-//! `rlm-ledger/`) — the update flow never writes, moves, or archives those,
-//! and restore is create-or-adopt in place.
+//! `roster.json` — the update flow's session/worker/subagent/heartbeat snapshot (spec §8): a
+//! *projection*, written once durably at `Snapshotted`, consumed exactly once by `Prepared ->
+//! Stopping`. The durable truth for every row stays where it lives (`sessions/*.jsonl`, session
+//! artifacts, `rlm-ledger/`); restore is create-or-adopt in place.
 
 use std::collections::BTreeMap;
 
@@ -38,9 +32,8 @@ pub enum UpdateRosterSessionKind {
     Subagent,
 }
 
-/// Queued work that must be restored before any continuation prompt (spec §8):
-/// `next_turn` carries the pending custom messages; `actions` is the
-/// session-action recovery snapshot owned by the session engine (pa-core).
+/// Queued work that must be restored before any continuation prompt (spec §8): `next_turn` custom
+/// messages plus the session engine's session-action recovery snapshot (`actions`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UpdateRosterQueue {
     #[serde(default)]
@@ -48,11 +41,9 @@ pub struct UpdateRosterQueue {
     pub actions: Value,
 }
 
-/// What one rostered session was doing when the snapshot was taken; the
-/// restore pass uses these to decide continuation treatment (the TS-parity
-/// update marker + continuation prompt for a session that was mid-turn).
-// Wire/API contract: the six state flags serialize as-is; reshaping them
-// into enums changes the snapshot schema.
+/// What one rostered session was doing when the snapshot was taken; the restore pass uses these to
+/// decide continuation treatment. Wire/API contract: the flags serialize as-is; enum reshaping
+/// changes the snapshot schema.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct UpdateRosterInFlight {
@@ -64,12 +55,9 @@ pub struct UpdateRosterInFlight {
     pub prompt_in_flight: bool,
 }
 
-/// One session row. `session_id` is the durable id (== session file id, stable
-/// across restore); `active_session_id` is the transient id, preserved on
-/// restore so attached clients resume by the same handle. `parent_session_id`
-/// is the durable parent id for subagents. `runtime_config` and
-/// `queue.actions` are opaque here — their schema belongs to the session
-/// engine (pa-core).
+/// One session row: durable `session_id` (stable across restore), transient `active_session_id`
+/// (preserved so clients resume by the same handle), durable `parent_session_id` for subagents.
+/// `runtime_config` and `queue.actions` are opaque (session-engine schema).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UpdateRosterSession {
     pub session_id: String,
@@ -104,10 +92,9 @@ pub struct UpdateRosterWorker {
     pub rest: JsonMap,
 }
 
-/// Whether a rostered subagent was running or already completed at snapshot
-/// time. Restore re-creates subagent sessions bottom-up (deepest first) so
-/// parents attach to existing children; a completed subagent restores as a
-/// passive entry only (no worker spawned until its parent addresses it).
+/// Whether a rostered subagent was running or already completed. Restore
+/// re-creates subagent sessions bottom-up; a completed subagent restores
+/// as a passive entry only (no worker until its parent addresses it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum UpdateRosterSubagentStatus {
@@ -115,8 +102,8 @@ pub enum UpdateRosterSubagentStatus {
     Completed,
 }
 
-/// One subagent topology row — a projection for reporting; the durable truth
-/// stays the `rlm-ledger/` files, which the update flow never rewrites.
+/// One subagent topology row — a projection for reporting; the durable
+/// truth stays in the `rlm-ledger/` files.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpdateRosterSubagent {
     pub child_id: String,
@@ -131,9 +118,8 @@ pub struct UpdateRosterSubagent {
     pub rest: JsonMap,
 }
 
-/// How a scheduled heartbeat prompt is delivered when the session is busy
-/// (TS `AgentHeartbeatDeliveryMode`): `"steer"` interrupts the current turn,
-/// `"follow_up"` waits for it to finish.
+/// How a heartbeat prompt is delivered when the session is busy (TS
+/// `AgentHeartbeatDeliveryMode`): `"steer"` interrupts, `"follow_up"` waits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum UpdateHeartbeatDeliveryMode {
@@ -150,12 +136,9 @@ pub enum UpdateHeartbeatStatus {
     Paused,
 }
 
-/// One heartbeat row — a projection for UX reporting and re-arm only, never a
-/// restore input: `scheduled-jobs.json` in the session artifacts is the only
-/// write path for heartbeat jobs, and re-arm rescans it after restore (spec
-/// §6 step 3). The row carries exactly the re-arm fields (`status`,
-/// `next_run_at`) — deliberately no archive flag: a heartbeat is never moved
-/// or archived by the update flow.
+/// One heartbeat row — a projection for UX reporting and re-arm only, never a restore input:
+/// `scheduled-jobs.json` is the only write path, and re-arm rescans it after restore (spec §6 step
+/// 3). No archive flag: heartbeats are never archived by the update flow.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpdateRosterHeartbeat {
     pub job_id: String,
@@ -206,9 +189,8 @@ mod tests {
         assert_eq!(original, reparsed, "round trip changed the value: {out}");
     }
 
-    /// A full roster in the spec §8 shape, exercised as the golden round-trip
-    /// fixture (also mirrored in `tests/update_flow_artifacts.rs` with the
-    /// full spec example).
+    /// A full roster in the spec §8 shape (mirrored in
+    /// `tests/update_flow_artifacts.rs` with the full spec example).
     const ROSTER_JSON: &str = r#"{
         "format_version": 1,
         "update_id": "018f1234-abcd-7abc-8def-0123456789ab",
@@ -317,9 +299,6 @@ mod tests {
             UpdateHeartbeatDeliveryMode::FollowUp
         );
         assert_eq!(roster.heartbeats[1].status, UpdateHeartbeatStatus::Paused);
-        // The heartbeat projection carries re-arm fields only: there is no
-        // archive flag on the type (compile-level guarantee, asserted by
-        // serialization shape here).
         let encoded = serde_json::to_value(&roster.heartbeats[0]).unwrap();
         assert!(!encoded.as_object().unwrap().contains_key("archived"));
         assert!(encoded.as_object().unwrap().contains_key("next_run_at"));
@@ -327,8 +306,8 @@ mod tests {
 
     #[test]
     fn empty_collections_default_to_absent() {
-        // A minimal roster with no sessions still parses, and serializes back
-        // without the collection keys (spec: rows only appear when present).
+        // A minimal roster serializes back without the collection keys
+        // (rows only appear when present).
         rt::<UpdateRoster>(
             r#"{"format_version":1,"update_id":"u","socket_path":"/s","created_at":"t","supervisor":{"pid":1,"generation":"g"},"binary":{"from_version":"a","to_version":"b"}}"#,
         );

@@ -1,15 +1,7 @@
-//! The user bash surface (protocol breadth wave b5): the worker arms for
-//! `execute_bash`, `execute_bash_and_wait`, and `abort_bash` (TS
-//! daemon-mode cases over `AgentSession.runUserBash` / `executeBash` /
-//! `abortBash`, with `bash_start`/`bash_output`/`bash_end` session events
-//! and the `bashExecution` durable row).
-//!
-//! The execution port follows the TS stack: the local bash operations
-//! (shell config, cwd guard, merged stdout+stderr streaming, kill on
-//! abort), the executor (ANSI/binary sanitization, the 50KB streaming
-//! window with the tail kept, the 2000-line/50KB tail truncation, the
-//! spill file), and the user-bash wrapper (the already-running guard, the
-//! identity echoed on start/end, transient rows staying unrecorded).
+//! The user bash surface: the worker arms for `execute_bash`,
+//! `execute_bash_and_wait`, and `abort_bash`, with
+//! `bash_start`/`bash_output`/`bash_end` events and the `bashExecution`
+//! durable row. A TS-stack port: sanitization, the 50KB window, the spill.
 
 use std::io::Write;
 use std::process::Stdio;
@@ -32,20 +24,17 @@ const DEFAULT_MAX_LINES: usize = 2000;
 /// The TS spill prefix (temp file names in `$TMPDIR`).
 const SPILL_PREFIX: &str = "pa-bash";
 
-/// The user-bash slot: one command runs at a time (TS `_userBashRunning`
-/// plus the per-invocation abort controllers), with a kill switch the
-/// `abort_bash` command pulls.
+/// The user-bash slot: one command runs at a time (TS `_userBashRunning`),
+/// with a kill switch `abort_bash` pulls.
 pub(crate) struct UserBash {
     /// The user-bash claim (`execute_bash` only; TS `runUserBash` guard).
     running: AtomicBool,
-    /// Awaited bash runs in flight (TS `_bashAbortControllers.size`:
-    /// `execute_bash_and_wait` runs count toward `isBashRunning` without
-    /// claiming the exclusive user slot).
+    /// Awaited bash runs in flight (TS `_bashAbortControllers.size`):
+    /// they count toward `isBashRunning` without claiming the slot.
     awaited: AtomicUsize,
     /// An abort was requested: the settled result reports cancelled.
     abort_requested: AtomicBool,
-    /// The in-flight process (user bash or an awaited run): `abort_bash`
-    /// kills it.
+    /// The in-flight process (user bash or an awaited run): `abort_bash` kills it.
     child: Mutex<Option<tokio::process::Child>>,
 }
 
@@ -59,10 +48,8 @@ impl UserBash {
         }
     }
 
-    /// Claim the slot; `false` when a user command is already running.
-    /// A fresh claim clears any stale abort request (TS clears
-    /// `_userBashAbortRequested` at each start, so a leftover flag cannot
-    /// cancel an unrelated later run).
+    /// Claim the slot; `false` when a user command is already running. A fresh claim clears a stale
+    /// abort request (TS clears at each start), so a leftover flag cannot cancel a later run.
     fn claim(&self) -> bool {
         let claimed = self
             .running
@@ -78,17 +65,13 @@ impl UserBash {
         self.running.store(false, Ordering::SeqCst);
     }
 
-    /// Whether a user bash or an awaited bash run is in flight (TS
-    /// `isBashRunning`: `_bashAbortControllers.size > 0 ||
-    /// _userBashRunning`).
+    /// Whether a user bash or an awaited bash run is in flight (TS `isBashRunning`).
     pub(crate) fn is_running(&self) -> bool {
         self.running.load(Ordering::SeqCst) || self.awaited.load(Ordering::SeqCst) > 0
     }
 
-    /// Count one awaited run (`execute_bash_and_wait`) toward
-    /// [`Self::is_running`]; the awaited path owns no exclusive slot. The
-    /// returned bracket decrements on drop, so a run future dropped
-    /// mid-await (a task teardown) cannot leave the count stuck on.
+    /// Count one awaited run (`execute_bash_and_wait`) toward [`Self::is_running`]; the returned
+    /// bracket decrements on drop, so a dropped future cannot leave the count stuck on.
     pub(crate) fn begin_awaited(&self) -> AwaitedRun<'_> {
         self.awaited.fetch_add(1, Ordering::SeqCst);
         AwaitedRun { user_bash: self }
@@ -166,10 +149,9 @@ impl Worker {
     }
 
     /// `execute_bash { command, excludeFromContext?, transient?, runId? }`
-    /// (TS `runUserBash`): the already-running guard rejects a second
-    /// command, the response goes out before the run completes, output
-    /// streams as `bash_output` events, and the settled `bash_end` (plus
-    /// the durable `bashExecution` row, unless transient) follows.
+    /// (TS `runUserBash`): the running guard rejects a second command;
+    /// the response goes out before completion, output streams as
+    /// `bash_output`, and the settled `bash_end` (plus the durable row) follows.
     pub(crate) fn handle_execute_bash(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("execute_bash") {
             return response;
@@ -275,9 +257,8 @@ impl Worker {
         response_success(None, "execute_bash", None)
     }
 
-    /// `execute_bash_and_wait { command }` (TS `executeBash` over the
-    /// awaited path): run to completion, record the row, and answer the
-    /// `BashResult` wire shape.
+    /// `execute_bash_and_wait { command }` (TS `executeBash`): run to
+    /// completion, record the row, answer the `BashResult` wire shape.
     pub(crate) async fn handle_execute_bash_and_wait(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("execute_bash_and_wait") {
             return response;
@@ -308,11 +289,8 @@ impl Worker {
         };
         let user_bash = Arc::clone(&self.user_bash);
         let command = command.to_string();
-        // The awaited run counts toward the session's `isBashRunning` (TS's
-        // `executeBash` registers an abort controller, so the flag is true
-        // for its whole duration); it owns no exclusive slot, so a streamed
-        // user bash is not blocked by it. The bracket releases the count on
-        // drop, so a dropped run future cannot leave the flag stuck on.
+        // The awaited run counts toward `isBashRunning` without
+        // blocking a streamed user bash.
         let awaited = user_bash.begin_awaited();
         let end = run_bash(RunBash {
             command: &command,
@@ -325,11 +303,8 @@ impl Worker {
         })
         .await;
         drop(awaited);
-        // The awaited path emits no session events, so the live roster
-        // feed has no trigger of its own — TS's `execute_bash_and_wait`
-        // flushes in the command's `finally`; the port enqueues the same
-        // flush here (the summary composes fresh, so the settled run reads
-        // idle on the roster).
+        // The awaited path emits no session events, so the port enqueues
+        // the roster flush TS's `execute_bash_and_wait` does in `finally`.
         self.roster_pushes.push();
         if let Some(error) = &end.error_message {
             return response_failure(None, "execute_bash_and_wait", error, None);
@@ -381,9 +356,8 @@ fn merge_identity(mut event: Value, identity: &Value) -> Value {
     event
 }
 
-/// The drop-bracket [`UserBash::begin_awaited`] returns: one awaited run's
-/// contribution to the `isBashRunning` flag, released even when the run's
-/// future is dropped mid-await.
+/// The drop-bracket [`UserBash::begin_awaited`] returns: one awaited run's contribution to the
+/// `isBashRunning` flag, released even when the run's future is dropped mid-await.
 pub(crate) struct AwaitedRun<'a> {
     user_bash: &'a UserBash,
 }
@@ -426,9 +400,8 @@ struct RunBash<'a> {
     prefix: Option<&'a str>,
     shell_path: Option<&'a str>,
     user_bash: &'a UserBash,
-    /// The streaming emit target for each sanitized chunk (the
-    /// executor's `onChunk`; `None` on the awaited path, which emits
-    /// nothing).
+    /// The streaming emit target for each sanitized chunk; `None` on
+    /// the awaited path, which emits nothing.
     on_chunk: Option<(
         Arc<std::sync::Mutex<crate::worker::SessionCore>>,
         Arc<crate::worker::EventPump>,
@@ -535,8 +508,7 @@ async fn run_bash(run: RunBash<'_>) -> BashEnd {
     {
         let mut slot = run.user_bash.child.lock().await;
         // A late abort that arrived before the process spawned kills it
-        // immediately (TS honors `_userBashAbortRequested` before
-        // executing); the flag still settles the run cancelled.
+        // immediately; the flag still settles the run cancelled.
         if run.user_bash.abort_requested.load(Ordering::SeqCst) {
             let _ = child.start_kill();
         }
@@ -550,8 +522,7 @@ async fn run_bash(run: RunBash<'_>) -> BashEnd {
         on_chunk: run.on_chunk,
     }));
     // stdout and stderr merge into one stream (TS wires both pipes to the
-    // same `onData`); order between them is arrival order. The shared
-    // accumulator keeps the merged order the interleaved reads produce.
+    // same `onData`); the shared accumulator keeps the arrival order.
     let pump = |mut reader: Box<dyn AsyncRead + Unpin + Send>| {
         let stream = Arc::clone(&stream);
         async move {
@@ -602,10 +573,8 @@ async fn run_bash(run: RunBash<'_>) -> BashEnd {
     };
     let full_output = stream.chunks.join("");
     let (output, truncated) = truncate_tail(&full_output);
-    // A line-truncated run spills at settle even under the byte budget
-    // (TS bash-executor: `if (truncationResult.truncated)
-    // spill.open(outputChunks)`), so the truncation notice can always
-    // name a full-output file.
+    // A line-truncated run spills at settle even under the byte budget,
+    // so the truncation notice can always name a full-output file.
     if truncated {
         stream.spill.open(&stream.chunks);
     }
@@ -621,8 +590,7 @@ async fn run_bash(run: RunBash<'_>) -> BashEnd {
 }
 
 /// Record one bash outcome as the durable `bashExecution` row (TS
-/// `recordBashResult`; the row renders as a user turn and joins the model
-/// context unless excluded).
+/// `recordBashResult`); it joins the model context unless excluded.
 fn record_bash_result(
     core: &Arc<std::sync::Mutex<crate::worker::SessionCore>>,
     command: &str,
@@ -666,7 +634,7 @@ fn sanitize_output(text: &str) -> String {
             continue;
         }
         // Control characters and the format characters that break width
-        // rendering drop (TS `sanitizeBinaryOutput`).
+        // rendering drop.
         if code <= 0x1f || (0xfff9..=0xfffb).contains(&code) {
             continue;
         }
@@ -686,8 +654,7 @@ fn strip_ansi(text: &str) -> String {
             continue;
         }
         match chars.next() {
-            // CSI: parameters and intermediates run to the final byte
-            // (0x40-0x7e).
+            // CSI: parameters and intermediates run to the final byte (0x40-0x7e).
             Some('[') => {
                 for next in chars.by_ref() {
                     if ('\u{40}'..='\u{7e}').contains(&next) {
@@ -704,9 +671,8 @@ fn strip_ansi(text: &str) -> String {
     out
 }
 
-/// The output spill (TS `OutputSpill`): opened once when the output
-/// outgrows the streaming window, written progressively, finalized to the
-/// complete file's path. A degraded spill never advertises a path.
+/// The output spill (TS `OutputSpill`): opened once the output outgrows
+/// the window; a degraded spill never advertises a path.
 struct OutputSpill {
     file: Option<std::fs::File>,
     path: Option<String>,
@@ -771,8 +737,7 @@ impl OutputSpill {
 }
 
 /// Tail truncation (TS `truncateTail`): the last 2000 lines within 50KB
-/// win; an oversized last line keeps its tail, blank trailing lines
-/// permitting.
+/// win; an oversized last line keeps its tail, blank trailing lines permitting.
 fn truncate_tail(content: &str) -> (String, bool) {
     let total_bytes = content.len();
     let lines: Vec<&str> = content.split('\n').collect();
@@ -790,7 +755,7 @@ fn truncate_tail(content: &str) -> (String, bool) {
         if output_bytes + line_bytes > DEFAULT_MAX_BYTES {
             // The oversized-line rescue: trailing blanks must not defeat
             // the rescue, so keep as many as the budget allows and unshift
-            // the line's own tail (TS keeps the last `maxBytes` bytes).
+            // the line's own tail.
             if collected.iter().all(|collected| collected.is_empty()) {
                 let kept_blanks = collected.len().min(DEFAULT_MAX_BYTES.saturating_sub(1));
                 let budget = DEFAULT_MAX_BYTES.saturating_sub(kept_blanks);
@@ -811,8 +776,7 @@ fn truncate_tail(content: &str) -> (String, bool) {
     (collected.join("\n"), true)
 }
 
-/// The tail `maxBytes` of one string, on char boundaries (TS
-/// `truncateStringToBytesFromEnd`).
+/// The tail `maxBytes` of one string, on char boundaries (TS `truncateStringToBytesFromEnd`).
 fn truncate_string_to_bytes_from_end(text: &str, max_bytes: usize) -> String {
     let mut end = text.len().min(max_bytes);
     while end > 0 && !text.is_char_boundary(end) {
@@ -902,8 +866,6 @@ mod tests {
             .unwrap_or_default()
     }
 
-    /// `execute_bash_and_wait` answers the TS `BashResult` wire shape and
-    /// records the durable `bashExecution` row.
     #[tokio::test]
     async fn execute_bash_and_wait_matches_the_ts_result_shape() {
         let cwd = tempfile::tempdir().expect("tempdir");
@@ -954,9 +916,6 @@ mod tests {
         );
     }
 
-    /// The awaited-run bracket releases its count on drop even when the
-    /// run's future never completes (a task teardown mid-await must not
-    /// leave `isBashRunning` stuck on).
     #[test]
     fn an_abandoned_awaited_run_releases_the_flag() {
         let user_bash = UserBash::new();
@@ -971,10 +930,6 @@ mod tests {
         );
     }
 
-    /// The awaited run counts toward the session's `isBashRunning` (TS's
-    /// `executeBash` registers an abort controller for the run's
-    /// duration): the flag reads true while it runs and false once it
-    /// settles — without claiming the exclusive user slot.
     #[tokio::test]
     async fn an_awaited_bash_run_reports_running_to_the_connection_state() {
         let cwd = tempfile::tempdir().expect("tempdir");
@@ -1021,10 +976,6 @@ mod tests {
         );
     }
 
-    /// `execute_bash` responds before completion (no data), claims the
-    /// slot (a second command answers the TS already-running refusal),
-    /// `abort_bash` kills the run, and the excluded row carries the
-    /// `excludeFromContext` flag.
     #[tokio::test]
     async fn execute_bash_claims_the_slot_and_aborts() {
         let cwd = tempfile::tempdir().expect("tempdir");
@@ -1042,7 +993,6 @@ mod tests {
         assert!(response.success, "failed: {response:?}");
         assert!(response.data.is_none(), "responds before completion");
 
-        // The slot is claimed while the command runs.
         let state = worker
             .dispatch(
                 "get_connection_state",
@@ -1062,8 +1012,6 @@ mod tests {
             Some("A bash command is already running")
         );
 
-        // Abort settles the run; the durable row records the cancelled
-        // outcome with the context-exclusion flag.
         let aborted = worker
             .dispatch("abort_bash", &json!({ "activeSessionId": "bash-session" }))
             .await;
@@ -1095,7 +1043,6 @@ mod tests {
         );
     }
 
-    /// Transient runs stay unrecorded (they live only in their pane).
     #[tokio::test]
     async fn transient_execute_bash_records_nothing() {
         let cwd = tempfile::tempdir().expect("tempdir");
@@ -1131,7 +1078,6 @@ mod tests {
         assert_eq!(bash_rows(&worker).len(), 0, "transient runs record nothing");
     }
 
-    /// A missing cwd answers the TS local-operations refusal.
     #[tokio::test]
     async fn execute_bash_and_wait_refuses_a_missing_cwd() {
         let cwd = tempfile::tempdir().expect("tempdir");
@@ -1155,8 +1101,6 @@ mod tests {
         );
     }
 
-    /// The sanitizer matches the TS chain: ANSI escapes, control
-    /// characters, and carriage returns drop; tab and newline stay.
     #[test]
     fn sanitize_output_matches_the_ts_chain() {
         assert_eq!(sanitize_output("clean\r\noutput"), "clean\noutput");
@@ -1171,8 +1115,6 @@ mod tests {
         assert_eq!(sanitize_output("format\u{fff9}gone"), "formatgone");
     }
 
-    /// Tail truncation keeps the last lines within the byte budget, and
-    /// the oversized-line rescue keeps the line's own tail.
     #[test]
     fn truncate_tail_keeps_the_tail_budget() {
         let (content, truncated) = truncate_tail("one\ntwo\nthree\n");

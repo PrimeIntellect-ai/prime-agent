@@ -1,20 +1,6 @@
 //! The goal tests (recovery, continuation minting, the goal loop's turn-end accounting).
 use super::*;
 
-/// The post-compaction goal-continue mint (TS `compact()`'s
-/// `didCompact` + active-goal branch -> `resumeQueuedWork()` ->
-/// `_maybeResumeGoalContinuationAfterRlmWork`): an active goal's
-/// mint consumes one continuation slot, persists the state change
-/// (the wire state read reflects it), and returns the queued
-/// follow-up turn — the continuation prompt text carrying the durable
-/// goal-context row — plus the `goal_update` payload of the state
-/// change. A goal that is not active mints nothing.
-/// A recovery rebuild rehydrates the goal driver from the worker-owned
-/// session file (TS constructor `_loadPersistedGoalState`): the fresh
-/// engine continues the persisted objective and counts, the rehydrated
-/// state never announces itself (the published baseline is seeded),
-/// and later state changes (usage accounting) announce from the
-/// rehydrated base, not from zero.
 #[test]
 fn recovery_rebuild_rehydrates_the_goal_from_the_session_file() {
     let _faux = FAUX_TEST_LOCK
@@ -65,22 +51,16 @@ fn recovery_rebuild_rehydrates_the_goal_from_the_session_file() {
     // The turn-end seam: the engine has no worker, so a collector
     // stands in for the queue-lane admission sink.
     let goal_work = goal_admission_collector(&engine);
-    // The first turn builds the session; the adoption rehydrates the
-    // driver from the session file.
     let mut events: Vec<EngineEvent> = Vec::new();
     admit(&engine, "keep working".to_string(), &mut events);
     let goal = engine.goal_state_value();
     assert_eq!(goal["status"], "active");
     assert_eq!(goal["objective"], "ship the port");
     assert_eq!(goal["goalId"], "goal-1");
-    // The rehydrated count continues the pursuit: the turn's natural
-    // end minted the next continuation (the TS goal loop).
     assert_eq!(goal["continuationsUsed"], 3);
     assert!(goal["tokensUsed"].as_u64().unwrap() >= 340);
-    // Usage accounting announced from the rehydrated base (TS
-    // `_accountGoalUsageForAssistantMessage` -> `_emitGoalUpdate`): one
-    // `goal_update` through the run's emit, carrying the continued
-    // objective and the rehydrated count (the turn-end mint's update
+    // Usage accounting announced from the rehydrated base: one
+    // `goal_update` through the run's emit (the turn-end mint's update
     // surfaces through the admission sink, not the run's emit).
     let goal_updates: Vec<&EngineEvent> = events
         .iter()
@@ -92,8 +72,6 @@ fn recovery_rebuild_rehydrates_the_goal_from_the_session_file() {
     };
     assert_eq!(goal["objective"], "ship the port");
     assert_eq!(goal["continuationsUsed"], 2);
-    // The turn-end continuation minted at the natural boundary: one
-    // admitted follow-up whose `goal_update` continues the count.
     let work = goal_work.lock().unwrap();
     let [crate::engine::GoalTurnEndWork::Continuation(minted)] = work.as_slice() else {
         panic!("unexpected goal work: {work:?}");
@@ -107,7 +85,6 @@ fn recovery_rebuild_rehydrates_the_goal_from_the_session_file() {
         3
     );
     drop(work);
-    // A post-compaction mint continues the pursuit's count further.
     let minted = engine
         .mint_post_compaction_goal_continuation()
         .expect("the rehydrated goal mints");
@@ -157,15 +134,9 @@ fn wire_assistant_message(text: String) -> Value {
     .expect("assistant message serializes")
 }
 
-/// The recovered engine's compaction walk sees the durable history (TS
-/// one-store recovery: the owned-session worker respawns with
-/// `--resume <sessionFile>`, so the rebuilt session's branch carries
-/// the pre-crash history and a post-recovery compact runs over it —
-/// never a skip on the fresh engine's empty branch). The daemon worker
-/// owns the file writes while the engine keeps an in-memory manager,
-/// so the recovery build adopts the durable branch and the walk
-/// (prepareCompaction over the branch) reads the same history TS's
-/// single store holds.
+/// One-store recovery: the worker respawns with `--resume <sessionFile>`,
+/// so the rebuilt session's branch carries the pre-crash history and a
+/// post-recovery compact runs over it — never a skip on the empty branch.
 #[test]
 fn recovered_engine_compaction_walk_sees_the_durable_history() {
     let _faux = FAUX_TEST_LOCK
@@ -203,8 +174,6 @@ fn recovered_engine_compaction_walk_sees_the_durable_history() {
         queued_steering_probe: None,
     })
     .unwrap();
-    // The recovery turn builds the session; the build adopts the
-    // durable branch (TS `--resume`: one store).
     let mut events: Vec<EngineEvent> = Vec::new();
     admit(
         &engine,
@@ -222,8 +191,6 @@ fn recovered_engine_compaction_walk_sees_the_durable_history() {
         }),
         "the recovery build adopted the durable history: {entries:?}"
     );
-    // The compact runs over the durable history instead of skipping
-    // "too short" on the fresh branch.
     let controller = std::sync::Arc::new(pa_agent::abort::AbortController::new());
     let signal = controller.signal();
     let outcome = engine.run_compaction(
@@ -242,8 +209,6 @@ fn recovered_engine_compaction_walk_sees_the_durable_history() {
         }
         other => panic!("the recovered compact did not run: {other:?}"),
     }
-    // The post-compaction branch summary stands in for the durable
-    // prefix: the compaction entry landed in the engine branch.
     assert!(compaction_entry_in_entries(&engine));
 }
 
@@ -257,8 +222,6 @@ fn post_compaction_goal_continuation_mint() {
         1,
     );
     let engine = std::sync::Arc::new(engine);
-    // The turn-end seam: the engine has no worker, so a collector
-    // stands in for the queue-lane admission sink.
     let goal_work = goal_admission_collector(&engine);
     let mut events: Vec<EngineEvent> = Vec::new();
     admit(
@@ -266,10 +229,8 @@ fn post_compaction_goal_continuation_mint() {
         "/goal ship the post-compact continue".to_string(),
         &mut events,
     );
-    // The goal-start continuation turn ran (TS `/goal` start does not
-    // consume a continuation slot), the goal active; the turn's
-    // natural end then minted the goal loop's next continuation (the
-    // TS `_getGoalContinuationMessages` hook).
+    // The goal-start turn ran (TS `/goal` start consumes no
+    // continuation slot), and its natural end minted the next one.
     assert_eq!(engine.goal_state_value()["status"], "active");
     assert_eq!(engine.goal_state_value()["continuationsUsed"], 1);
     let work = goal_work.lock().unwrap();
@@ -303,20 +264,16 @@ fn post_compaction_goal_continuation_mint() {
     assert_eq!(row["content"], json!(message));
     assert_eq!(row["details"]["kind"], "continuation");
     assert_eq!(row["details"]["continuationsUsed"], 2);
-    // The state change persisted (TS `_setGoalState`): the wire state
-    // read reflects the mint, and the `goal_update` payload carries
-    // the same state.
     assert_eq!(engine.goal_state_value()["continuationsUsed"], 2);
     let goal_update = minted.goal_update.expect("the mint moved the state");
     assert_eq!(goal_update["status"], "active");
     assert_eq!(goal_update["continuationsUsed"], 2);
-    // The minted continuation's admission releases the driver's pending
-    // guard (the worker's queue push is the admission on the live path):
-    // the item's OWN handle, never the mutable mirror.
+    // Admission releases the pending guard: the item's OWN handle,
+    // never the mutable mirror.
     AgentSessionEngine::release_goal_continuation_handle(minted.pending_handle.as_ref());
     // TS #2465: a live background bash handle holds the post-compaction
-    // mint the same way (the TS resume site's gate): the mint defers
-    // (owed, not consumed) until the handle settles.
+    // mint the same way: the mint defers (owed, not consumed) until the
+    // handle settles.
     let live_probe: std::sync::Arc<dyn Fn() -> bool + Send + Sync> = std::sync::Arc::new(|| true);
     *engine.background_bash_probe.lock().unwrap() = Some(live_probe);
     assert!(
@@ -344,8 +301,7 @@ fn post_compaction_goal_continuation_mint() {
         engine.mint_post_compaction_goal_continuation().is_some(),
         "the settled handle releases the post-compaction mint"
     );
-    // A mint over a paused goal produces nothing (TS checks the
-    // active status at the resume site).
+    // A mint over a paused goal produces nothing.
     let mut pause_events: Vec<EngineEvent> = Vec::new();
     admit(&engine, "/goal pause".to_string(), &mut pause_events);
     assert_eq!(engine.goal_state_value()["status"], "paused");
@@ -357,10 +313,8 @@ fn post_compaction_goal_continuation_mint() {
 
 /// The operator's continuation-spam regression (2026-09-28): a
 /// post-compaction mint over an ALREADY-armed deferral delivers the
-/// OWED continuation exactly once (TS `compact()`'s `||= ` +
-/// `resumeQueuedWork()` — arm, then deliver the one token). The
-/// pre-fix fresh mint left the armed flag behind and the settle sites
-/// delivered a SECOND continuation for the same owed boundary.
+/// OWED continuation exactly once; a fresh mint would leave the
+/// armed flag behind and the settle sites deliver a second one.
 #[test]
 fn post_compaction_mint_delivers_the_armed_deferral_once() {
     let _faux = FAUX_TEST_LOCK
@@ -379,10 +333,7 @@ fn post_compaction_mint_delivers_the_armed_deferral_once() {
         &mut events,
     );
     assert_eq!(engine.goal_state_value()["status"], "active");
-    // The natural turn end minted (and the collector admitted) slot 1.
     assert_eq!(engine.goal_state_value()["continuationsUsed"], 1);
-    // A live deferral arms behind unsettled descendant work (the natural
-    // boundary's quiescence arm).
     let handles = engine
         .goal_runtime
         .lock()
@@ -392,8 +343,6 @@ fn post_compaction_mint_delivers_the_armed_deferral_once() {
     engine
         .runtime
         .block_on(async { handles.driver.lock().await.mark_continuation_owed() });
-    // The post-compaction mint is the OWED delivery — slot 2, and the
-    // armed flag is consumed with it.
     let minted = engine
         .mint_post_compaction_goal_continuation()
         .expect("the armed deferral mints");
@@ -411,10 +360,6 @@ fn post_compaction_mint_delivers_the_armed_deferral_once() {
             .block_on(async { handles.driver.lock().await.owes_continuation() }),
         "the post-compaction delivery consumed the armed deferral"
     );
-    // The settle-site retry (a child settling, a resume site) delivers
-    // nothing more: the boundary's one owed continuation delivered
-    // exactly once, and the mint's own admission consumed the pending
-    // guard on the worker's path.
     engine.retry_owed_goal_continuation();
     for _ in 0..200 {
         if goal_work.lock().unwrap().len() > 1 {
@@ -435,8 +380,7 @@ fn post_compaction_mint_delivers_the_armed_deferral_once() {
     );
 }
 
-/// Admit one full turn request (the minted continuation's injected
-/// goal-context row), collecting its events.
+/// Admit one full turn request, collecting its events.
 pub(crate) fn admit_request(
     engine: &AgentSessionEngine,
     request: crate::engine::PromptRequest,
@@ -448,11 +392,6 @@ pub(crate) fn admit_request(
     });
 }
 
-/// TS `_getGoalContinuationMessages` at the natural turn end: an
-/// active goal mints one continuation per settled turn, the minted
-/// follow-up carries the continuation context (objective, count, and
-/// the durable goal-context row), and a completed goal stops the loop
-/// (no mint at the boundary after the completion).
 #[test]
 fn goal_turn_end_mints_the_loop_until_the_goal_completes() {
     let _faux = FAUX_TEST_LOCK
@@ -488,13 +427,8 @@ fn goal_turn_end_mints_the_loop_until_the_goal_completes() {
     let goal_work = goal_admission_collector(&engine);
     let mut events: Vec<EngineEvent> = Vec::new();
     admit(&engine, "/goal ship the goal loop".to_string(), &mut events);
-    // The goal-start turn's natural end minted the first continuation.
     assert_eq!(engine.goal_state_value()["status"], "active");
     assert_eq!(engine.goal_state_value()["continuationsUsed"], 1);
-    // The worker queue would drive the minted turn: admit it like the
-    // runner does, twice — each settled turn mints the next
-    // continuation (the TS loop keeps prompting the model), the minted
-    // row carrying the incremented count.
     let mut request = {
         let mut work = goal_work.lock().unwrap();
         let crate::engine::GoalTurnEndWork::Continuation(follow_up) =
@@ -540,8 +474,6 @@ fn goal_turn_end_mints_the_loop_until_the_goal_completes() {
             serde_json::json!(expected_count)
         );
     }
-    // The goal completes (the kernel host request's driver path):
-    // the queued continuation's boundary mints nothing more.
     let handles = engine
         .goal_runtime
         .lock()
@@ -564,9 +496,6 @@ fn goal_turn_end_mints_the_loop_until_the_goal_completes() {
     assert!(goal_work.lock().unwrap().is_empty());
 }
 
-/// The TS gate ladder's inactive arms: a paused goal (and a cleared
-/// one) mints nothing at the natural turn end, and no continuation
-/// slot is consumed.
 #[test]
 fn paused_goal_mints_no_turn_end_continuation() {
     let _faux = FAUX_TEST_LOCK
@@ -583,8 +512,6 @@ fn paused_goal_mints_no_turn_end_continuation() {
     let goal_work = goal_admission_collector(&engine);
     let mut events: Vec<EngineEvent> = Vec::new();
     admit(&engine, "/goal ship while paused".to_string(), &mut events);
-    // The start turn's boundary minted one continuation; pause the
-    // goal, then drive that minted turn: its boundary mints nothing.
     let request = {
         let mut work = goal_work.lock().unwrap();
         let crate::engine::GoalTurnEndWork::Continuation(follow_up) =
@@ -600,11 +527,9 @@ fn paused_goal_mints_no_turn_end_continuation() {
     assert_eq!(engine.goal_state_value()["status"], "paused");
     let mut turn_events: Vec<EngineEvent> = Vec::new();
     admit_request(&engine, request, &mut turn_events);
-    // No mint: the paused goal consumed no slot at the boundary.
     assert!(goal_work.lock().unwrap().is_empty());
     assert_eq!(engine.goal_state_value()["continuationsUsed"], count_before);
     assert_eq!(turn_events.last(), Some(&EngineEvent::Done(Ok(()))));
-    // A cleared goal behaves the same.
     admit(&engine, "/goal clear".to_string(), &mut Vec::new());
     let mut after_clear: Vec<EngineEvent> = Vec::new();
     admit(&engine, "plain turn".to_string(), &mut after_clear);
@@ -612,11 +537,6 @@ fn paused_goal_mints_no_turn_end_continuation() {
     assert_eq!(engine.goal_state_value()["status"], "idle");
 }
 
-/// The budget-exhausted gate (TS `_accountGoalUsageForAssistantMessage`
-/// returning true -> the `budget_limit` context steer): the crossing
-/// turn ends the run, the wrap-up steer queues on the steering surface,
-/// the goal moves to `budget_limited` with the TS reason, and no
-/// continuation mints at that boundary.
 #[test]
 fn budget_exhausted_stops_with_the_ts_budget_steer() {
     let _faux = FAUX_TEST_LOCK
@@ -629,8 +549,8 @@ fn budget_exhausted_stops_with_the_ts_budget_steer() {
     let engine = std::sync::Arc::new(engine);
     let goal_work = goal_admission_collector(&engine);
     let mut events: Vec<EngineEvent> = Vec::new();
-    // A tiny budget: the goal-start turn's usage crosses it (the faux
-    // provider estimates usage from the context).
+    // A tiny budget: the goal-start turn's usage crosses it (faux
+    // usage is estimated from the context).
     admit(
         &engine,
         "/goal --budget 10 budget the runaway turn".to_string(),
@@ -642,8 +562,6 @@ fn budget_exhausted_stops_with_the_ts_budget_steer() {
         goal["lastReason"],
         serde_json::json!("Reached 10 token goal budget")
     );
-    // The crossing turn's boundary minted the budget-limit steer, not
-    // a continuation.
     let work = goal_work.lock().unwrap();
     let [crate::engine::GoalTurnEndWork::BudgetLimitSteer(steer)] = work.as_slice() else {
         panic!("expected exactly the budget steer: {work:?}");
@@ -663,8 +581,6 @@ fn budget_exhausted_stops_with_the_ts_budget_steer() {
         .expect("the row rides");
     assert_eq!(row["customType"], "goal_context");
     assert_eq!(row["details"]["kind"], "budget_limit");
-    // The steer carries no goal_update: the budget transition was
-    // announced through the run's own `goal_update` event.
     assert!(steer.goal_update.is_none());
     drop(work);
     let goal_updates: Vec<&EngineEvent> = events
@@ -678,14 +594,9 @@ fn budget_exhausted_stops_with_the_ts_budget_steer() {
                 if goal["status"] == serde_json::json!("budget_limited"))),
         "the budget transition never announced: {events:?}"
     );
-    // The run stopped at the crossing turn (TS: queued steer owns the
-    // next turn, `resumeIfIdle`).
     assert_eq!(events.last(), Some(&EngineEvent::Done(Ok(()))));
 }
 
-/// The queued-input gate (TS `queuedActionCount > 0`): queued session
-/// input owns the turn boundary, the mint defers without consuming a
-/// slot, and the boundary after the queued work drains re-mints.
 #[test]
 fn queued_input_defers_the_turn_end_mint() {
     let _faux = FAUX_TEST_LOCK
@@ -714,11 +625,9 @@ fn queued_input_defers_the_turn_end_mint() {
         "/goal ship past the queue".to_string(),
         &mut events,
     );
-    // Queued input owns the boundary: no mint, no slot consumed.
     assert!(goal_work.lock().unwrap().is_empty());
     assert_eq!(engine.goal_state_value()["continuationsUsed"], 0);
     assert_eq!(engine.goal_state_value()["status"], "active");
-    // The queue drains: the next boundary mints the continuation.
     queued.store(false, std::sync::atomic::Ordering::SeqCst);
     let mut after_drain: Vec<EngineEvent> = Vec::new();
     admit(&engine, "the queued work ran".to_string(), &mut after_drain);
@@ -733,12 +642,6 @@ fn queued_input_defers_the_turn_end_mint() {
     assert_eq!(engine.goal_state_value()["continuationsUsed"], 1);
 }
 
-/// The quiescence gate (TS `_getGoalContinuationMessages`'s
-/// `_hasUnsettledRlmQuiescenceWork` arm and
-/// `_maybeResumeGoalContinuationAfterRlmWork`): the natural turn end
-/// defers the continuation behind a running child (owed, not
-/// consumed), and the child's settle delivers it once through the
-/// admission sink.
 #[test]
 fn running_children_owe_the_continuation_and_settle_delivers_it() {
     let _faux = FAUX_TEST_LOCK
@@ -788,9 +691,6 @@ fn running_children_owe_the_continuation_and_settle_delivers_it() {
         "/goal ship behind the children".to_string(),
         &mut events,
     );
-    // No mint while the child runs; the deferral is owed, not consumed,
-    // and the run still settles normally (the TS goal holds the
-    // continuation instead of re-prompting a waiting parent).
     assert!(goal_work.lock().unwrap().is_empty(), "events: {events:?}");
     assert_eq!(events.last(), Some(&EngineEvent::Done(Ok(()))));
     assert_eq!(engine.goal_state_value()["status"], "active");
@@ -804,8 +704,6 @@ fn running_children_owe_the_continuation_and_settle_delivers_it() {
     assert!(engine
         .runtime
         .block_on(async { handles.driver.lock().await.owes_continuation() }));
-    // The child settles (the cancel walk): the settle hook delivers the
-    // owed continuation exactly once through the admission sink.
     engine
         .runtime
         .block_on(async { children.cancel_child_run("child-1").await });
@@ -829,7 +727,6 @@ fn running_children_owe_the_continuation_and_settle_delivers_it() {
         serde_json::json!(1)
     );
     drop(work);
-    // The deferral cleared and the slot was consumed exactly once.
     assert!(!engine
         .runtime
         .block_on(async { handles.driver.lock().await.owes_continuation() }));
@@ -848,13 +745,6 @@ fn engine_session_entries(engine: &AgentSessionEngine) -> Vec<pa_types::session:
     })
 }
 
-/// An injected custom turn (wire `customMessage`, the RLM child
-/// terminal-notice path) holds ONE representation in the engine
-/// branch: the accepted custom row persists and renders as itself
-/// (the wire pair, exactly once), the engine session's transcript
-/// gains the custom row and NO user row with the same text, and the
-/// model turn still runs on the notice text (TS
-/// `_promptInjectedMessage` -> `agent.prompt([customMessage])`).
 #[test]
 fn injected_custom_turn_holds_one_representation() {
     let _faux = FAUX_TEST_LOCK
@@ -894,8 +784,6 @@ fn injected_custom_turn_holds_one_representation() {
             true
         },
     );
-    // The wire: the accepted custom row's pair, no user row, the
-    // model turn settled on the notice text.
     let custom_rows: Vec<&Value> = events
         .iter()
         .filter_map(|event| match event {
@@ -917,8 +805,6 @@ fn injected_custom_turn_holds_one_representation() {
         vec!["notice acknowledged".to_string()],
         "the model turn ran on the notice text: {events:?}"
     );
-    // The engine session's transcript: one custom row, no duplicate
-    // user row with the notice text, the assistant settled.
     let entries = engine_session_entries(&engine);
     let notice_rows = entries
         .iter()
@@ -957,11 +843,6 @@ fn injected_custom_turn_holds_one_representation() {
     assert_eq!(assistant_rows, 1, "entries: {entries:?}");
 }
 
-/// A `/goal` start schedules its continuation as an injected custom
-/// row (TS `_runOrQueueGoalContext` -> the prepared-turn primary
-/// record): the engine session's transcript holds the goal-context
-/// row once and NO user row carrying the goal-context prompt — the
-/// pre-fix double representation that shifted the compaction walk.
 #[test]
 fn goal_start_continuation_holds_one_representation() {
     let _faux = FAUX_TEST_LOCK
@@ -1004,8 +885,6 @@ fn goal_start_continuation_holds_one_representation() {
         user_rows, 0,
         "the goal continuation must not persist a duplicate user row: {entries:?}"
     );
-    // The wire: the goal-context row's message pair goes out with
-    // the command rows, before the turn's assistant.
     let goal_pair_index = events
         .iter()
         .position(|event| {
@@ -1024,15 +903,6 @@ fn goal_start_continuation_holds_one_representation() {
     );
 }
 
-/// The aborted turn's goal accounting (TS
-/// `_accountGoalUsageForAssistantMessage`'s aborted guard): an active
-/// goal's turn aborted mid-provider-wait settles on its aborted row —
-/// broadcast through the engine's stream as the `message_start`/
-/// `message_end` pair (the row's own start frame plus the settled row,
-/// `createAbortedAssistantMessage`'s shape: empty content, the abort
-/// error, EMPTY usage) — and the row persists, yet the goal accounting
-/// skips it: the goal state the goal-start turn left is the state the
-/// abort returns (same status, same tokens, same continuation count).
 #[test]
 fn active_goal_aborted_turn_row_broadcasts_and_goal_accounting_skips_it() {
     let _faux = FAUX_TEST_LOCK
@@ -1074,8 +944,7 @@ fn active_goal_aborted_turn_row_broadcasts_and_goal_accounting_skips_it() {
         "/goal land the aborted row accounting".to_string(),
         &mut events,
     );
-    // The goal-start continuation turn ran inside the command's prompt and
-    // its usage was accounted (faux usage is nonzero).
+    // The goal-start turn ran inside the command's prompt; its usage was accounted.
     let before = engine.goal_state_value();
     assert_eq!(before["status"], json!("active"), "state: {before:?}");
     assert!(
@@ -1122,8 +991,6 @@ fn active_goal_aborted_turn_row_broadcasts_and_goal_accounting_skips_it() {
     }
     engine.abort_in_flight_turn();
     turn.join().expect("the aborted turn settles");
-    // The aborted row broadcast as a pair: the row's own start frame (the
-    // no-partial abort begins a new message) plus the settled end row.
     let events = turn_events.lock().unwrap();
     let aborted_start = events
         .iter()
@@ -1177,10 +1044,6 @@ fn active_goal_aborted_turn_row_broadcasts_and_goal_accounting_skips_it() {
     assert_eq!(after["continuationsUsed"], before["continuationsUsed"]);
 }
 
-/// The shared window's goal seed must equal the reference goal reader
-/// over the windowed and fallback classes, including the off-branch
-/// row both readers must skip (the window walk's on-path gate and the
-/// fallback's active-branch scan agree).
 #[test]
 fn shared_window_goal_seed_matches_persisted_goal_state() {
     let header = || {
@@ -1189,10 +1052,9 @@ fn shared_window_goal_seed_matches_persisted_goal_state() {
             "timestamp": "2026-01-01T00:00:00.000Z", "cwd": "/w",
         })
     };
-    // A message row: `parent: Some(_)` links it into the branch
-    // chain; `None` terminates the ancestry at this row (the window
-    // walk's `expected` must resolve to `None` before the header or
-    // the open reads as ambiguous ancestry and falls back).
+    // A message row: `parent: Some(_)` links it into the branch chain;
+    // `None` terminates the ancestry at this row (the window walk
+    // requires a `None` before the header or the open falls back).
     let message = |id: &str, parent: Option<&str>, role: &str| {
         let mut row = json!({
             "type": "message", "id": id, "parentId": parent,
@@ -1202,9 +1064,8 @@ fn shared_window_goal_seed_matches_persisted_goal_state() {
         if parent.is_none() {
             row.as_object_mut().unwrap().remove("parentId");
         }
-        // The window walk requires the assistant message's provider/model
-        // pair (the leaf's model fold): an assistant row without them
-        // reads as ambiguous ancestry and the open falls back.
+        // The window walk requires the assistant message's
+        // provider/model pair: an assistant row without them falls back.
         if role == "assistant" {
             let message = row["message"].as_object_mut().unwrap();
             message.insert("provider".into(), json!("faux"));
@@ -1224,13 +1085,9 @@ fn shared_window_goal_seed_matches_persisted_goal_state() {
             },
         })
     };
-    // (name, rows, terminated tail, the window MUST serve): an
-    // unterminated row forces the ordinary full-reader fallback for
-    // both readers. The `window_serves` flag is the anti-vacuity gate:
-    // the windowed classes must genuinely take the WINDOW path (the
-    // exact surface the shared-open changes) — a fixture regression
-    // that silently falls back fails the open-outcome assertion, not
-    // just the (trivially equal) goal comparison.
+    // (name, rows, terminated tail, the window MUST serve): the `window_serves`
+    // flag is the anti-vacuity gate — a fixture regression that silently falls
+    // back fails the open-outcome assertion, not just the goal comparison.
     let classes: Vec<(&str, Vec<serde_json::Value>, bool, bool)> = [
         (
             "windowed_with_goal",
@@ -1248,10 +1105,9 @@ fn shared_window_goal_seed_matches_persisted_goal_state() {
             "windowed_off_branch_goal",
             vec![
                 header(),
-                // The goal links to a row no chain reaches: the active
-                // branch (leaf m2 -> m1 -> header) never visits it, so
-                // the window's on-path capture skips it exactly like
-                // the reference reader does.
+                // The goal links to a row no chain reaches: the
+                // active branch never visits it, so the window's
+                // on-path capture skips it exactly like the reference.
                 goal_row("g1", "ghost-id"),
                 message("m1", None, "user"),
                 message("m2", Some("m1"), "assistant"),
@@ -1291,9 +1147,8 @@ fn shared_window_goal_seed_matches_persisted_goal_state() {
             window_served, window_serves,
             "goal class {name}: the window-served outcome must match the class (the windowed classes must exercise the WINDOW path, the fallback classes the full reader)"
         );
-        // The shared open's extraction (adopt_built_session's block):
-        // the window's snapshot goal when the window serves, else the
-        // loaded store's active-branch scan.
+        // The shared open's extraction: the window's snapshot goal when
+        // the window serves, else the loaded store's active-branch scan.
         let shared = match opened {
             Ok(Some(window)) => window.goal_state().cloned(),
             _ => crate::session_store::SessionFile::open(&path)

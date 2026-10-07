@@ -167,9 +167,8 @@ pub fn build_groups(resolved: &ResolvedPaths) -> Vec<ResourceGroup> {
     for resource in &resolved.themes {
         add(resource, ResourceType::Themes);
     }
-    // Groups: packages first, then user before project, then source label.
-    // Enum declaration order gives the TS ordering: packages before
-    // top-level sources, user before project.
+    // Groups: packages first, then user before project, then source label
+    // (enum declaration order gives the TS ordering).
     groups.sort_by(|a, b| {
         a.origin
             .cmp(&b.origin)
@@ -191,13 +190,11 @@ pub fn build_groups(resolved: &ResolvedPaths) -> Vec<ResourceGroup> {
 
 /// Flip one resource's enablement in the settings store (TS
 /// `toggleResource`): top-level resources get `+pattern`/`-pattern`
-/// entries in their scope's resource array, package resources get filter
-/// entries on their package's object form. Returns the written pattern.
+/// entries, package resources get filter entries. Returns the written pattern.
 ///
 /// # Errors
 ///
-/// Never fails: both delegated toggle paths write through infallible
-/// settings setters and always return `Ok`.
+/// Never fails: both delegated paths write through infallible setters.
 pub fn toggle_resource(
     settings: &mut SettingsManager,
     cwd: &Path,
@@ -354,7 +351,6 @@ fn resource_array_key(resource_type: ResourceType) -> &'static str {
     }
 }
 
-/// Replace one scope's resource-path array in the settings store.
 fn write_resource_array(
     settings: &mut SettingsManager,
     project: bool,
@@ -369,7 +365,6 @@ fn write_resource_array(
     }
 }
 
-/// Strip the enable/disable marker from one settings pattern entry.
 fn strip_pattern_marker(entry: &str) -> &str {
     entry
         .strip_prefix('!')
@@ -515,7 +510,6 @@ mod tests {
             "pack-skill"
         );
         let project_group = groups.last().unwrap();
-        // Subgroups order by kind; items by display name.
         let kinds: Vec<&str> = project_group
             .subgroups
             .iter()
@@ -586,7 +580,6 @@ mod tests {
             settings.global_settings().skills,
             Some(vec!["-skills/my-skill/SKILL.md".to_string()])
         );
-        // Toggling back replaces the disable pattern with the enable one.
         let written = toggle_resource(&mut settings, &cwd, &agent_dir, &item, true).unwrap();
         assert_eq!(written, "+skills/my-skill/SKILL.md");
         assert_eq!(

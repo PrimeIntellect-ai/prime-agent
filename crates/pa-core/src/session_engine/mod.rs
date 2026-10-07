@@ -1,11 +1,6 @@
-//! `AgentSession`: the turn admission layer over the pa-agent loop.
-//! First slice of core/agent-session.ts: prompt normalization (templates),
-//! busy-admission rules (steer/follow-up), and `SessionManager` persistence.
-//!
-//! Design note: the TS class runs an internal action-store with admission
-//! epochs/tickets. The Rust port keeps the observable contract instead: the
-//! pa-agent Agent owns the loop and its steer/follow-up queues; this layer
-//! decides admission and persists what the loop produces.
+//! `AgentSession`: the turn admission layer over the pa-agent loop
+//! (prompt normalization, busy-admission rules, `SessionManager`
+//! persistence); the Agent owns the loop, this layer decides admission.
 
 pub mod agent_messaging;
 pub mod auto_refine_trigger;
@@ -19,6 +14,7 @@ pub mod compaction_trace;
 pub mod compaction_utils;
 pub mod engine;
 pub mod error_classify;
+pub mod factory_host;
 pub mod goal_boundary;
 pub mod goal_driver;
 pub mod harness_digest;
@@ -38,6 +34,7 @@ pub mod rlm_notices;
 pub mod rlm_usage;
 pub mod runtime;
 pub mod runtime_wiring;
+pub mod semantic_edges;
 pub mod session_commands;
 pub mod session_events;
 pub mod side_question;
@@ -47,8 +44,6 @@ pub mod state_restore_notice;
 pub mod telemetry;
 pub mod tool_bridge;
 pub mod turn_boundary;
-
-// The concern children split out of this composition root:
 
 mod admission;
 mod compaction_arms;
@@ -61,48 +56,38 @@ use pa_agent::types::{AgentEvent, AgentMessage, ThinkingLevel};
 use pa_types::session::AgentMessage as SessionAgentMessage;
 use pa_types::session::FileEntry;
 
-use crate::session::manager::SessionManager;
+use crate::session::manager::{capture_git_context, SessionManager};
 use crate::skills::PromptTemplate;
 use slash_commands::{SessionSlashCommand, SlashCommandRegistry};
 
 /// How a prompt submitted while the agent streams is scheduled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamingBehavior {
-    /// Interrupt the current turn and inject the message (queue mode "steer").
     Steer,
-    /// Queue the message for after the current turn (queue mode "followUp").
     FollowUp,
 }
 
 /// What `prompt` did with the input.
 #[derive(Debug, PartialEq)]
 pub enum PromptOutcome {
-    /// Input admitted to the model loop.
     Prompt,
-    /// Input recognized as a session command (compact/refine/goal/autonomous).
-    /// Execution is the session engine's job; the caller observes it here.
+    /// Input recognized as a session command; execution is the session
+    /// engine's job.
     SessionCommand(SessionSlashCommand),
 }
 
-/// Options for `AgentSession::prompt`. Port of `PromptOptions` (used fields).
+/// Options for `AgentSession::prompt`.
 #[derive(Debug, Default)]
 pub struct PromptOptions {
     pub streaming_behavior: Option<StreamingBehavior>,
     pub expand_prompt_templates: Option<bool>,
     /// Queue instead of erroring when the session is busy (agent messages).
     pub queue_if_busy: bool,
-    /// Co-delivered user rows of a batched turn (TS
-    /// `_startPreparedTurnActions`: same-lane, same-policy queued
-    /// actions delivered as ONE run under queue mode "all" or a forced
-    /// steering batch). Each row rides the turn after the primary, with
-    /// its own text and images, like the primary.
+    /// Co-delivered user rows of a batched turn, riding after the
+    /// primary.
     pub batch: Vec<PromptBatchRow>,
-    /// TS `returnAfterAccepted: true`: the admitted model turn runs
-    /// detached and the admission returns once its run registers (the TS
-    /// in-process connection's prompt shape: `preflightResult` fires at
-    /// the delivered ticket, the run settles on its own and its events
-    /// follow on the session stream) instead of awaiting the run's
-    /// completion.
+    /// TS `returnAfterAccepted: true`: the turn runs detached, admission
+    /// returns once its run registers.
     pub return_after_accepted: bool,
 }
 
@@ -117,15 +102,12 @@ pub struct PromptBatchRow {
 /// removes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrailingAssistantFilter {
-    /// Any trailing assistant message (the TS overflow arm's pre-compaction
-    /// drop).
+    /// The TS overflow arm's pre-compaction drop.
     Any,
-    /// Only an error assistant message (the TS will-retry branch's drop
-    /// after the compaction rebuild).
+    /// The TS will-retry branch's post-rebuild drop.
     ErrorOnly,
 }
 
-/// The standard message inside an agent message, when it is one.
 fn standard_message(message: &pa_agent::types::AgentMessage) -> Option<&pa_agent::types::Message> {
     let pa_agent::types::AgentMessage::Standard(message) = message else {
         return None;
@@ -139,71 +121,62 @@ pub struct AgentSession {
     session: Arc<tokio::sync::Mutex<SessionManager>>,
     prompt_templates: Vec<PromptTemplate>,
     slash_commands: SlashCommandRegistry,
-    /// Harness digest inputs; `None` in sessions without harness state
-    /// (verification harnesses building the loop directly).
+    /// Harness digest inputs; `None` without harness state.
     harness_digest: Option<harness_digest::HarnessDigestContext>,
-    /// The first-turn digest rides the turn's admission (fresh sessions defer
-    /// delivery so untouched sessions stay empty, TS `_harnessDigestPending`).
+    /// Fresh sessions defer the first-turn digest so untouched sessions
+    /// stay empty.
     digest_pending: std::sync::atomic::AtomicBool,
-    /// Compaction settings from the session's settings.json (TS
-    /// `_performCompaction` reads `getCompactionSettings()` on every
-    /// compaction path, `/compact` included); defaults until the engine
-    /// wiring resolves them.
+    /// Compaction settings; defaults until the engine wiring resolves
+    /// them.
     compaction: std::sync::RwLock<compaction::CompactionSettings>,
-    /// The auxiliary-model routing context (TS `_resolveAuxiliaryModel`'s
-    /// settings/registry access): compaction summaries resolve their model
-    /// through the `auxiliaryModel` setting, falling back to the session
-    /// model. `None` keeps every summarizer on the session model
-    /// (verification harnesses building the session directly).
+    /// Auxiliary-model routing for compaction summaries; `None` keeps
+    /// every summarizer on the session model.
     auxiliary_model: Option<auxiliary_model::AuxiliaryModelContext>,
-    /// Whether the session may run auto-refinement at all (TS
-    /// `_autoRefineAllowedForSession`: depth 0 with a local harness state
-    /// dir — the same gate that registers the `refine.*` host requests).
-    /// Defaults off; the engine wiring resolves it once the session is
-    /// assembled.
+    /// Whether this session may auto-refine; defaults off until the
+    /// engine wiring resolves it.
     auto_refine_allowed: bool,
-    /// The resolved auto-refine gates (TS `getAutoRefineSettings`); the
-    /// turn-boundary compact trigger reads them.
+    /// The resolved auto-refine gates; the compact trigger reads them.
     auto_refine: refine::AutoRefineGates,
-    /// The compact-trigger auto-refine machine (TS
-    /// `_compactAutoRefinePending` / `_lastAutoRefineReviewAt` /
-    /// `_assistantTurnsSinceAutoRefine`): the session-side state the
-    /// transport surfaces arm and consume through
-    /// [`AgentSession::mark_compact_auto_refine_pending`] and
-    /// [`AgentSession::consume_compact_auto_refine`].
+    /// Session-side auto-refine state the transport surfaces arm and
+    /// consume.
     compact_auto_refine: std::sync::Mutex<auto_refine_trigger::CompactAutoRefineState>,
-    /// The kernel-state probe behind the post-compaction `ipython_state`
-    /// notice (TS `_ipythonKernelProvisioner`): `None` in sessions without
-    /// a kernel (verification harnesses) — no notice lands.
+    /// The kernel-state probe behind the post-compaction
+    /// `ipython_state` notice; `None` without a kernel.
     kernel_state: Option<std::sync::Arc<dyn ipython_state::CompactionKernelProbe>>,
-    /// TS `_pendingNextTurnMessages`: custom rows the NEXT admitted turn
-    /// carries ahead of its own prompt row (the CLI `--goal` seed's
-    /// continuation context, pushed at construction; taken by the next
-    /// prompt or injected turn, exactly like the TS prepared-messages take).
+    /// TS `_pendingNextTurnMessages`: custom rows the NEXT admitted
+    /// turn carries ahead of its own prompt row.
     pending_next_turn_rows: std::sync::Arc<std::sync::Mutex<Vec<pa_types::session::CustomMessage>>>,
-    /// The skill inventory `/skill:<name>` submissions expand against (TS
-    /// reads `resourceLoader.getSkills()` at expansion time; the engine
-    /// wiring installs the loaded list once the session is assembled).
+    /// The skill inventory `/skill:<name>` submissions expand against.
     skills: Vec<crate::skills::Skill>,
-    /// The telemetry handle for the `skill used` adoption event the
-    /// prompt path owns (`None` in sessions without telemetry).
+    /// The telemetry handle for the `skill_use_count` counter the prompt
+    /// path owns (`None` in sessions without telemetry).
     skill_telemetry: Option<std::sync::Arc<telemetry::SessionTelemetry>>,
-    /// The image-model routing host seam (`None` keeps the session model on
-    /// image turns: verification harnesses, and the daemon worker whose
-    /// turn dispatch owns routing itself).
+    /// The image-model routing host seam; `None` keeps the session
+    /// model on image turns.
     image_model_router: Option<image_model_routing::ImageModelRouter>,
-    /// The live compaction summary-delta sink
-    /// ([`compaction_exec::SummaryDeltaSink`]): every summarizer text
-    /// delta the session's compactions stream reaches it, in arrival
-    /// order — the daemon's `compaction_summary_delta` broadcast seam for
-    /// the expanded TUI's live block. Interior-mutable so the embedding
-    /// can install it on the assembled session (`&self`, not the
-    /// `&mut self` the build-time setters take: the daemon wires it after
-    /// the build from the worker's event pump). `None` (the default,
-    /// including every non-daemon embedding) keeps the one-shot
-    /// summarizer completion — no deltas, no broadcast, no behavior
-    /// change.
+    /// The live compaction summary-delta sink. Interior-mutable so the
+    /// daemon can install it after the build; `None` (the default)
+    /// keeps the one-shot summarizer completion.
     compaction_summary_sink: std::sync::Mutex<Option<compaction_exec::SummaryDeltaSink>>,
+    /// The session's semantic-edge recorder (TS
+    /// `AgentSession._semanticEdges`): `None` in sessions the engine
+    /// built without a semantic identity (verification harnesses
+    /// building the loop directly).
+    semantic_edges: std::sync::Mutex<Option<std::sync::Arc<semantic_edges::SemanticEdgeRecorder>>>,
+    /// TS `unwrapSemanticEdgeStreamFn(streamFn)`: the timing-instrumented,
+    /// pre-semantic stream fn calls outside session history run on (a side
+    /// question carries no request id). `None` until the engine wires it;
+    /// a side question on an unwired session fails with the model-selection
+    /// error (no fallback to the agent's id-carrying fn).
+    side_question_stream_fn: std::sync::Mutex<Option<pa_agent::stream::StreamFn>>,
+    /// The session's agent dir (the settings root): the refine flow
+    /// resolves the `factory.enabled` opt-in from its settings.json on
+    /// every run, immediately before the plan applies, mirroring the
+    /// kernel-side factory gate that reads the same file through
+    /// `PRIME_AGENT_CODING_AGENT_DIR`. `None` until the engine wiring
+    /// resolves it (verification harnesses building the session directly
+    /// keep `None`, which reads as the fail-closed disabled default).
+    agent_dir: Option<std::path::PathBuf>,
 }
 
 impl AgentSession {
@@ -211,8 +184,7 @@ impl AgentSession {
     ///
     /// # Errors
     ///
-    /// Returns the underlying session-assembly error (see
-    /// [`AgentSession::from_session_arc`]).
+    /// Returns the underlying session-assembly error (see [`AgentSession::from_session_arc`]).
     pub async fn new(
         agent: Arc<Agent>,
         session: SessionManager,
@@ -269,6 +241,9 @@ impl AgentSession {
             skill_telemetry: None,
             image_model_router: None,
             compaction_summary_sink: std::sync::Mutex::new(None),
+            semantic_edges: std::sync::Mutex::new(None),
+            side_question_stream_fn: std::sync::Mutex::new(None),
+            agent_dir: None,
         };
         this.ensure_harness_digest_context().await?;
         Ok(this)
@@ -279,15 +254,14 @@ impl AgentSession {
         &self.agent
     }
 
-    /// The shared persistence handle: the kernel host handlers and the
-    /// session-command executor reach the same session state as the loop.
+    /// The kernel host handlers and the command executor reach the same
+    /// session state as the loop.
     pub(crate) fn session_handle(&self) -> &Arc<tokio::sync::Mutex<SessionManager>> {
         &self.session
     }
 
-    /// The shared persistence handle for host runtimes in other crates (the
-    /// daemon's ACP transport records goal usage into the same session
-    /// state as the loop).
+    /// The persistence handle for host runtimes in other crates (the
+    /// daemon's ACP transport records goal usage into it).
     pub fn shared_persistence(&self) -> Arc<tokio::sync::Mutex<SessionManager>> {
         self.session.clone()
     }
@@ -329,9 +303,8 @@ impl AgentSession {
             .collect()
     }
 
-    /// Model change bookkeeping (mirrors appendModelChange). The resolved
-    /// model is forwarded to the loop; pa-agent and pa-types serialize to the
-    /// same camelCase wire shape, so the boundary converts through JSON.
+    /// Model change bookkeeping (mirrors appendModelChange); the model
+    /// forwards to the loop through the shared wire shape.
     ///
     /// # Errors
     ///
@@ -353,12 +326,9 @@ impl AgentSession {
         Ok(())
     }
 
-    /// The atomic model-and-level switch: one agent-lock acquisition
-    /// updates both fields (the loop snapshots them together), so a
-    /// concurrently admitted turn never observes the new model with the
-    /// old level mid-switch. The durable `model_change` row is the same
-    /// bookkeeping as [`AgentSession::set_model`]; the thinking level's
-    /// intent row belongs to the explicit `/thinking` path.
+    /// The atomic model-and-level switch: one agent-lock acquisition updates both, so
+    /// a concurrently admitted turn never observes the new model with the old level
+    /// mid-switch; the thinking level's intent row belongs to the explicit `/thinking` path.
     ///
     /// # Errors
     ///
@@ -387,8 +357,7 @@ impl AgentSession {
     ///
     /// # Errors
     ///
-    /// Returns an error when the thinking-level change row cannot be
-    /// persisted.
+    /// Returns an error when the thinking-level change row cannot be persisted.
     pub async fn set_thinking_level(&self, level: ThinkingLevel) -> anyhow::Result<()> {
         self.agent.set_thinking_level(level).await;
         let mut session = self.session.lock().await;
@@ -407,14 +376,10 @@ async fn persist_event(
                 return Ok(());
             };
             let mut session = session.lock().await;
-            // TS `_processAgentEvent` runs on `_agentEventQueue`, whose
-            // `.catch(() => {})` swallows persistence failures, and its
-            // `_appendEntry` keeps the row in the in-memory session when the
-            // disk write throws. The loop has already reduced this event into
-            // live agent state, so a failed write must retain the row here
-            // too: propagating would fail the run, append an error assistant
-            // row that exists in neither store, and leave live context that
-            // disappears on reopen.
+            // TS `_processAgentEvent` swallows persistence failures and keeps
+            // the row in memory: the loop already reduced the event into live
+            // state, so a failed write retains the row too — propagating would
+            // fail the run and append an error row in neither store.
             let write_error = match session_message {
                 SessionAgentMessage::Custom(custom) => {
                     session
@@ -435,19 +400,29 @@ async fn persist_event(
         // Git state is captured at both run boundaries, exactly like the
         // TS run-boundary event path: a commit or branch switch made during the run
         // (e.g. via the bash tool) lands in the session file at `agent_end`.
-        // The persist check lives inside `record_git_state_if_changed`.
+        // The git probes block, so they run on the blocking pool with the
+        // session lock released. A session's captures are sequential (the loop
+        // awaits every listener), the cwd never changes, and no other lock
+        // holder appends `git_state`, so re-taking the lock cannot race.
         AgentEvent::AgentStart | AgentEvent::AgentEnd { .. } => {
-            let mut session = session.lock().await;
-            session.record_git_state_if_changed();
+            let cwd = {
+                let session = session.lock().await;
+                session
+                    .is_persisted()
+                    .then(|| session.get_cwd().to_path_buf())
+            };
+            let Some(cwd) = cwd else { return Ok(()) };
+            let git = tokio::task::spawn_blocking(move || capture_git_context(&cwd)).await?;
+            if let Some(git) = git {
+                session.lock().await.record_git_state_if_changed(git);
+            }
         }
         _ => {}
     }
     Ok(())
 }
 
-/// Convert a loop message to its persisted form via the shared wire shape.
-/// Custom rows persist as session custom messages (TS `_processAgentEvent`:
-/// `message_end` of a `custom` row appends the custom-message entry).
+/// Custom rows persist as session custom messages.
 fn loop_message_to_session(message: &AgentMessage) -> Option<SessionAgentMessage> {
     match message {
         AgentMessage::Standard(inner) => {
@@ -457,9 +432,8 @@ fn loop_message_to_session(message: &AgentMessage) -> Option<SessionAgentMessage
     }
 }
 
-/// The user prompt message in the loop's own normalized shape (text part
-/// first, image parts after — identical to the loop's text-prompt input), so
-/// a queued message matches a directly admitted one token for token.
+/// Text first, images after, so a queued message matches a directly
+/// admitted one token for token.
 fn user_prompt_message(text: &str, images: &[pa_agent::types::ImageContent]) -> AgentMessage {
     let mut parts = vec![pa_agent::types::UserPart::Text(
         pa_agent::types::TextContent {
@@ -478,17 +452,13 @@ fn user_prompt_message(text: &str, images: &[pa_agent::types::ImageContent]) -> 
     ))
 }
 
-/// Convert a session message to its loop form via the shared wire shape
-/// (custom rows ride the loop's custom variant; its converter filters them
-/// out of the provider request).
+/// Custom rows ride the loop's custom variant and are filtered out of
+/// the provider request.
 pub(crate) fn session_message_to_loop(message: &SessionAgentMessage) -> Option<AgentMessage> {
     serde_json::from_value(serde_json::to_value(message).ok()?).ok()
 }
 
-/// The live-context rebuild's conversion half: the rebuilt session
-/// messages converted to the loop's shape row by row through the shared
-/// wire shape (rows that fail the shared-shape conversion drop, exactly
-/// like the inline closures this replaced).
+/// Rows that fail the conversion drop.
 pub(crate) fn rebuilt_loop_messages(rebuilt: Vec<SessionAgentMessage>) -> Vec<AgentMessage> {
     rebuilt
         .into_iter()

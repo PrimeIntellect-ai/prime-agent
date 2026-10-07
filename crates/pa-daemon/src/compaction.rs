@@ -1,12 +1,7 @@
-//! The worker's compaction runs.
-//!
-//! Port of the TS daemon-mode compaction surface: the `compact` /
-//! `abort_compaction` handlers, the `compaction_start`/`compaction_end`
-//! `session_event` frames with their exact TS shapes, the `isCompacting`
-//! state flag, and the durable compaction entry the worker appends to the
-//! session store. The summarizer call itself is one
-//! [`SessionEngine::run_compaction`]; this module owns everything around it
-//! (abort registry, events, store persistence, state flags).
+//! The worker's compaction runs: the `compact`/`abort_compaction`
+//! handlers, the `compaction_start`/`compaction_end` event frames with
+//! their exact TS shapes, the `isCompacting` state flag, and the durable
+//! compaction entry the worker appends to the session store.
 
 use std::sync::{Arc, Mutex};
 
@@ -19,8 +14,7 @@ use pa_agent::abort::AbortController;
 use pa_core::session_engine::messages::{CompactionOutcomeKind, CompactionOutcomeReason};
 
 /// The worker's compaction machinery: the live-run abort slot plus the
-/// compaction flow. One slot per session, replaced by each new run, mirroring
-/// the TS `_compactionAbortController`.
+/// compaction flow. One slot per session, replaced by each new run.
 pub(crate) struct CompactionManager {
     engine: Arc<dyn SessionEngine>,
     events: Arc<EventPump>,
@@ -48,12 +42,8 @@ impl CompactionManager {
         }
     }
 
-    /// `abort_compaction` (TS `abortCompaction`): abort the live
-    /// compaction — the manual run's controller (TS
-    /// `_compactionAbortController`) and the automatic threshold /
-    /// requested run (TS `_autoCompactionAbortController`, owned by the
-    /// engine). Succeeds whether or not a run is in flight; the TS handler
-    /// always replies success.
+    /// `abort_compaction`: abort the manual run's controller and the automatic run.
+    /// Succeeds whether or not a run is in flight (the TS handler always replies success).
     pub(crate) fn abort(&self) {
         let controller = self.abort.lock().unwrap().clone();
         if let Some(controller) = controller {
@@ -63,25 +53,20 @@ impl CompactionManager {
     }
 
     /// Run one compaction (`compact` command): emits the TS event pair,
-    /// keeps `isCompacting` set for the run, and appends the durable
-    /// compaction entry on success. The caller translates the outcome into
-    /// the command response.
+    /// keeps `isCompacting` set for the run, appends the durable entry.
     pub(crate) async fn run(
         &self,
         custom_instructions: Option<String>,
         idle_notify: &tokio::sync::Notify,
     ) -> CompactionOutcome {
-        // A compaction interrupts the running turn first (TS `compact()`
-        // aborts the agent before summarizing): request the abort and wait
-        // for the turn to settle.
+        // A compaction interrupts the running turn first (TS `compact()` aborts the agent).
         self.wait_for_turn_end(idle_notify).await;
 
         let controller = Arc::new(AbortController::new());
         let signal = controller.signal();
         {
-            // Each run replaces the live slot, mirroring the TS
-            // `_compactionAbortController` assignment; aborts hit the newest
-            // run, and only its own run clears the slot.
+            // Each run replaces the live slot; aborts hit the newest run, and only its own
+            // run clears the slot.
             *self.abort.lock().unwrap() = Some(Arc::clone(&controller));
         }
         {
@@ -122,11 +107,8 @@ impl CompactionManager {
                     "micros": persist_started.elapsed().as_micros(),
                 }),
             );
-            // The post-compaction kernel notice (TS
-            // `_syncKernelStateAfterCompaction` runs inside
-            // `_performCompaction`, so its `message_start`/`message_end`
-            // pair precedes `compaction_end` on the wire): persist the
-            // durable row and broadcast the pair.
+            // The post-compaction kernel notice's `message_start`/`message_end` pair precedes
+            // `compaction_end` on the wire (TS `_performCompaction` order).
             if let Some(message) = &run.ipython_state {
                 self.persist_and_emit_ipython_state(message);
             }
@@ -137,28 +119,15 @@ impl CompactionManager {
             "manual.end_emitted",
             &serde_json::Value::Null,
         );
-        // TS clears `_compactionAbortController` in `compact()`'s
-        // `finally` - AFTER the durable entry (appended inside
-        // `_performCompaction`) and the `compaction_end` emit - so
-        // `isCompacting` spans the whole window the summarizer's context
-        // rebuild and its durable commit own. Clearing earlier would
-        // open a sliver where the runner admits a racing turn between
-        // the summarizer's return and the compaction entry's durable
-        // append, interleaving the file (a user row durable before the
-        // compaction entry that summarizes it).
+        // `isCompacting` spans the durable entry and the `compaction_end` emit
+        // (the TS `finally` clear): clearing earlier would admit a racing
+        // turn, interleaving the file (a user row before its compaction entry).
         {
             let mut core = self.core.lock().unwrap();
             core.compacting = false;
         }
-        // Every settle-waiting flag clear must wake the waits parked on
-        // it: `await_session_work_settled` and the replacement teardown
-        // register their `idle_notify` permit BEFORE checking the flags,
-        // so a clear without a `notify_waiters` parks them forever. A
-        // shutdown arriving mid-compaction (the refused-registration
-        // self-heal's graceful close aborts the live run) would
-        // otherwise never observe the cleared `compacting` and the
-        // worker stays alive as the invisible lease-holder this PR
-        // exists to retire.
+        // Every settle-waiting flag clear must wake the waits parked on it: the waits
+        // register their `idle_notify` permit BEFORE checking the flags, or a clear parks them.
         idle_notify.notify_waiters();
         {
             let mut slot = self.abort.lock().unwrap();
@@ -172,9 +141,8 @@ impl CompactionManager {
         outcome
     }
 
-    /// `set_auto_compaction`: update the connection-state flag. The
-    /// settings write that persists the toggle lives in the
-    /// `set_auto_compaction` handler (`setting_switches`).
+    /// `set_auto_compaction`: update the connection-state flag (the
+    /// persistent write lives in the `set_auto_compaction` handler).
     pub(crate) fn set_auto_compaction(&self, enabled: bool) {
         let mut core = self.core.lock().unwrap();
         core.auto_compaction_enabled = enabled;
@@ -187,12 +155,8 @@ impl CompactionManager {
                 let mut core = self.core.lock().unwrap();
                 if core.busy {
                     core.abort_requested = true;
-                    // TS `compact()` detaches from agent events
-                    // (`_disconnectFromAgent()`) before the abort, so the
-                    // interrupted turn's aborted assistant row never
-                    // reaches the wire or the session file on the compact
-                    // path — the gate's aborted-row exception stays closed
-                    // for this turn.
+                    // TS `compact()` detaches from agent events before the abort, so the
+                    // interrupted turn's aborted row never reaches the wire or the session file.
                     core.suppress_aborted_row = true;
                     true
                 } else {
@@ -202,15 +166,11 @@ impl CompactionManager {
             if !busy {
                 break;
             }
-            // The parked flag gates the turn's events; the engine abort
-            // cancels the in-flight provider fetch immediately (TS
-            // `compact()` -> `abort()` -> `requestAbort()` ->
-            // `agent.abort()`), so the interrupt does not wait out a
-            // pending provider response and the aborted turn settles on
-            // its zero-usage aborted message.
+            // The parked flag gates the turn's events; the engine abort cancels the in-flight
+            // fetch immediately, so the interrupt never waits out a pending response.
             self.engine.abort_in_flight_turn();
-            // The turn runner notifies when the queue drains; the timeout is
-            // a backstop so a missed notification cannot hang a compact.
+            // The turn runner notifies when the queue drains; the timeout backstops a missed
+            // notification.
             let _ =
                 tokio::time::timeout(std::time::Duration::from_millis(50), idle_notify.notified())
                     .await;
@@ -220,14 +180,9 @@ impl CompactionManager {
         self.core.lock().unwrap().suppress_aborted_row = false;
     }
 
-    /// Append the durable compaction entry to the worker's session store
-    /// (TS `appendCompaction`). A real engine hands over its full durable
-    /// record, so `details`, `fromHook`, `customInstructions`, `usage`, and
-    /// the `harnessDigest` snapshot persist verbatim; a scripted engine (a
-    /// test seam with no real entry) builds the record from the scripted
-    /// wire result. An empty `firstKeptEntryId` (the scripted default)
-    /// keeps from the first branch entry, so the compacted read retains
-    /// the transcript.
+    /// Append the durable compaction entry (TS `appendCompaction`). A real
+    /// engine hands over its full durable record; a scripted engine (a test
+    /// seam) builds it from the wire result.
     fn persist_compaction(
         &self,
         run: &crate::engine::CompactionRun,
@@ -261,11 +216,8 @@ impl CompactionManager {
             }
             fields
         };
-        // The engine's id references its in-memory entry list, a separate
-        // id space from the session file: re-pin the boundary to the
-        // durable cut so the file read retains the kept tail (TS: one
-        // store, ids match by construction). An unreadable durable cut
-        // keeps the engine id rather than dropping the boundary entirely.
+        // The engine's id references its in-memory entry list: re-pin the boundary to the
+        // durable cut.
         let first_kept_entry_id = fields
             .get("firstKeptEntryId")
             .and_then(Value::as_str)
@@ -294,11 +246,8 @@ impl CompactionManager {
         let _ = store.persist_entry("compaction", fields);
     }
 
-    /// Persist the post-compaction `ipython_state` row to the session store
-    /// and broadcast its `message_start`/`message_end` pair (TS
-    /// `appendCustomMessageEntry` + the `_emit` pair inside
-    /// `_performCompaction`). The engine's in-memory session already holds
-    /// the row; the worker's store owns the durable file.
+    /// Persist the post-compaction `ipython_state` row and broadcast its `message_start`/
+    /// `message_end` pair (TS `appendCustomMessageEntry`).
     fn persist_and_emit_ipython_state(&self, message: &Value) {
         {
             let mut core = self.core.lock().unwrap();
@@ -347,10 +296,7 @@ impl CompactionManager {
 }
 
 /// The `compaction_start` event payload (TS `AgentSessionEvent`). Shared by
-/// every compaction surface: the `compact` RPC, the `/compact` session
-/// command, and the automatic threshold compaction all emit the same shape
-/// with their own `reason` (`manual` / `threshold`; TS
-/// `CompactionOutcomeReason`).
+/// every compaction surface, each with its own `reason`.
 pub(crate) fn compaction_start_event(reason: &str, custom_instructions: Option<&str>) -> Value {
     let mut event = json!({ "type": "compaction_start", "reason": reason });
     if let Some(custom_instructions) = custom_instructions {
@@ -359,25 +305,15 @@ pub(crate) fn compaction_start_event(reason: &str, custom_instructions: Option<&
     event
 }
 
-/// The `compaction_summary_delta` event payload (the live compaction
-/// block, the operator's "stream the compacted summary" feature): one
-/// frame per summarizer text delta, between the owning
-/// `compaction_start` and the settling `compaction_end`. The frames are
-/// ephemeral — never persisted, never replayed, absent from the roster
-/// triggers — and the `compaction_end` result stays the summary's only
-/// durable source: a client that missed deltas (a late attach, a lost
-/// frame) still resolves the same final summary row.
+/// The `compaction_summary_delta` event payload: one frame per summarizer text delta. The
+/// frames are ephemeral — never persisted, never replayed.
 pub(crate) fn compaction_summary_delta_event(delta: &str) -> Value {
     json!({ "type": "compaction_summary_delta", "delta": delta })
 }
 
-/// The client-facing `CompactionResult` of a successful compaction (TS
-/// `_performCompaction`'s return, the `data` of the `compact` response and
-/// the `result` of the settled `compaction_end` event): summary,
-/// firstKeptEntryId, tokensBefore, and the durable entry's file-op
-/// `details` verbatim. `usage` never rides the wire result (TS keeps it on
-/// the persisted entry), and a run whose entry carries no `details` drops
-/// the key exactly like TS's `undefined` under JSON serialization.
+/// The client-facing `CompactionResult` of a successful compaction (TS `_performCompaction`'s
+/// return): summary, firstKeptEntryId, tokensBefore, and the entry's file-op `details` verbatim.
+/// `usage` never rides the wire result.
 pub(crate) fn compaction_result_value(
     result: &pa_core::session_engine::compaction_exec::CompactionResult,
     entry: &pa_types::session::CompactionEntry,
@@ -393,12 +329,8 @@ pub(crate) fn compaction_result_value(
     value
 }
 
-/// The `compaction_end` event payload of a successful compaction (TS
-/// `AgentSessionEvent`): the client-facing `CompactionResult` plus whether
-/// the session retries the failed turn on the compacted context (the
-/// overflow compact-and-retry arm is the only `willRetry: true` source).
-/// `reason` is the TS `CompactionOutcomeReason` (`manual` for user-initiated
-/// runs, `requested` for model-requested boundary compactions).
+/// The `compaction_end` payload of a successful compaction (TS `AgentSessionEvent`): the
+/// client-facing `CompactionResult` plus the failed-turn retry flag.
 pub(crate) fn compaction_end_success(
     reason: &str,
     result: &Value,
@@ -418,10 +350,8 @@ pub(crate) fn compaction_end_success(
     event
 }
 
-/// The `compaction_end` event payload of an unsuccessful compaction (TS
-/// `_endCompactionUnsuccessfully`'s event shape): `aborted` marks a
-/// cancelled run; a skip or failure carries its `errorMessage` with the
-/// matching `errorSeverity`.
+/// The `compaction_end` payload of an unsuccessful compaction: `aborted` marks a cancelled
+/// run; a skip or failure carries `errorMessage` with the matching `errorSeverity`.
 pub(crate) fn compaction_end_unsuccessful(
     reason: &str,
     aborted: bool,
@@ -447,25 +377,16 @@ pub(crate) fn compaction_end_unsuccessful(
     event
 }
 
-/// The durable disclosure of a compaction the supervisor declared aborted
-/// (the abort supervision's create replay): the same `compaction_outcome`
-/// row the worker's own auto-abort arms persist — `cancelled` with the
-/// run's reason, in the wire custom-message field shape the store
-/// persists — plus the declaration's timestamp. A manual run has no row
-/// (TS `compact()`'s abort arm writes none), and any other reason never
-/// invents one. The declaration timestamp is the row's stable identity:
-/// it rides the create payload as `declaredAt` and stamps the persisted
-/// entry, so a replacement that died between persisting the disclosure
-/// and the supervisor consuming the record replays it again and the
-/// create handler recognizes its own row instead of duplicating it.
+/// The durable disclosure of a compaction the supervisor declared aborted: the same
+/// `compaction_outcome` row the worker's own auto-abort arms persist, plus the declaration's
+/// timestamp — so the create handler recognizes its own row. A manual run has no row.
 pub(crate) struct InterruptedCompactionDisclosure {
     pub(crate) row: Value,
     pub(crate) declared_at: String,
 }
 
-/// Rebuild the [`InterruptedCompactionDisclosure`] from the create
-/// payload's `interruptedCompaction` record, or `None` for a run that
-/// persists no row.
+/// Rebuild the [`InterruptedCompactionDisclosure`] from the create payload's
+/// `interruptedCompaction` record, or `None` for a run that persists no row.
 pub(crate) fn interrupted_compaction_disclosure(
     payload: &Value,
 ) -> Option<InterruptedCompactionDisclosure> {
@@ -497,9 +418,7 @@ pub(crate) fn interrupted_compaction_disclosure(
 }
 
 /// The `compaction_end` event payload (TS `AgentSessionEvent`), per outcome:
-/// success carries `result`; a skip carries `errorMessage` with warning
-/// severity; a failure carries `Compaction failed: <message>` with error
-/// severity; an abort carries `aborted` with error severity and no message.
+/// success carries `result`; the rest carry `errorMessage`/`errorSeverity`.
 fn compaction_end_event(outcome: &CompactionOutcome, custom_instructions: Option<&str>) -> Value {
     match outcome {
         CompactionOutcome::Compacted { run } => {
@@ -561,10 +480,8 @@ mod tests {
                 "details": { "readFiles": ["a.rs"], "modifiedFiles": ["b.rs"] },
             })
         );
-        // Byte order: the TS `compact` response dataKeys are summary,
-        // firstKeptEntryId, tokensBefore, details (the JSON map preserves
-        // insertion order), and the `details` block keeps the TS
-        // readFiles-first literal order.
+        // Byte order: the JSON map preserves the TS dataKeys' insertion
+        // order (readFiles first inside `details`).
         assert_eq!(
             serde_json::to_string(&compaction_result_value(&result, &entry)).unwrap(),
             "{\"summary\":\"the story so far\",\"firstKeptEntryId\":\"abcd1234\",\"tokensBefore\":1234,\"details\":{\"readFiles\":[\"a.rs\"],\"modifiedFiles\":[\"b.rs\"]}}"
@@ -610,9 +527,6 @@ mod tests {
             compaction_start_event("manual", None),
             json!({ "type": "compaction_start", "reason": "manual" })
         );
-        // The live streamed-summary delta (the operator's "stream the
-        // compacted summary" feature): one frame per summarizer text
-        // delta, verbatim, nothing else on the frame.
         assert_eq!(
             compaction_summary_delta_event("one chunk of the summary"),
             json!({ "type": "compaction_summary_delta", "delta": "one chunk of the summary" })
@@ -681,10 +595,6 @@ mod tests {
         );
     }
 
-    /// The replay disclosure mirrors the worker's own auto-abort row and
-    /// carries the declaration's identity; a manual run (or any reason
-    /// outside the auto arms) persists nothing, like TS `compact()`'s
-    /// abort arm.
     #[test]
     fn interrupted_disclosure_is_the_auto_abort_row_stamped_with_the_declaration() {
         let disclosure = interrupted_compaction_disclosure(&json!({

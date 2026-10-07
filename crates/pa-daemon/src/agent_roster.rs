@@ -1,18 +1,16 @@
-//! The supervisor's agent roster (port of `agent-roster.ts`'s `AgentRoster`
-//! store): per-agent entries keyed by roster agent id, with active-session
-//! and canonical-session-file indexes so lookups converge across worker
-//! restarts and re-registrations. Classification uses the shared formula in
-//! `pa_types::daemon::agent_roster`; this store owns persistence of the
-//! classification and its indexes, and the supervisor wires mutations to
-//! `roster_update` pushes.
+//! The supervisor's agent roster: per-agent entries keyed by roster agent
+//! id, with active-session and canonical-session-file indexes so lookups
+//! converge across worker restarts and re-registrations. Classification
+//! uses the shared formula in `pa_types::daemon::agent_roster`.
 
 use std::collections::HashMap;
 use std::path::Path;
 
+use crate::session_usage::SessionUsageSummary;
 use pa_types::daemon::agent_roster::{
     classify_summary_value, roster_agent_id_for_summary, slim_roster_summary, AgentRosterEntry,
 };
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 
 /// The supervisor-owned roster. `Write()` classifies once and its file index
 /// converges seed and worker keys.
@@ -20,6 +18,21 @@ pub(crate) struct AgentRoster {
     entries: HashMap<String, AgentRosterEntry>,
     agent_id_by_active_session_id: HashMap<String, String>,
     agent_id_by_session_file: HashMap<String, String>,
+    /// The deleted-descendant spend bucket keyed by canonical parent
+    /// session path (the spawn ledger's fold): the bucket changes only at
+    /// ledger events and when a root appears, never on a worker delta, so
+    /// the store holds the current map and [`AgentRoster::store`] attaches
+    /// the value on every write - a delta costs one map lookup on the key
+    /// `store` already computes, and no delta path reads the ledger.
+    deleted_descendant_usage: HashMap<String, SessionUsageSummary>,
+    /// The bucket folds' ordering tickets, the delta watermark's rule for
+    /// the ledger fold: a fold takes its ticket before it reads the
+    /// ledger, and an apply with an older ticket than the last applied
+    /// one never overwrites it (the folds run on independent tasks, so
+    /// an older read can otherwise finish after a newer apply and hide a
+    /// deleted child's spend until the next event).
+    bucket_fold_ticket: u64,
+    bucket_applied_ticket: u64,
     /// The stale-delta gate of one worker: a single bounded slot naming
     /// the worker's CURRENT process generation (`instance`) and the
     /// newest sequence applied from it. The Rust supervisor link dials
@@ -49,20 +62,16 @@ impl AgentRoster {
             entries: HashMap::new(),
             agent_id_by_active_session_id: HashMap::new(),
             agent_id_by_session_file: HashMap::new(),
+            deleted_descendant_usage: HashMap::new(),
+            bucket_fold_ticket: 0,
+            bucket_applied_ticket: 0,
             delta_watermarks: HashMap::new(),
         }
     }
 
-    /// The stale-delta gate for one worker's `worker_roster_delta`: a
-    /// sequence below or equal to the newest applied one is stale (a
-    /// newer delta already reached the store) and must not write. A
-    /// frame from a generation the slot no longer names — a replaced
-    /// process's delayed delivery — is stale by construction whatever
-    /// its sequence: the replacement restarts its counter under the new
-    /// instance and the registration's authoritative pull already wrote
-    /// the replacement's state, so the answer is still success (the
-    /// delta was delivered, just superseded). `0` means unsequenced
-    /// (the caller did not stamp one) and always applies.
+    /// The stale-delta gate for one worker's `worker_roster_delta`: a sequence at or below
+    /// the newest applied one must not write; a frame from a generation the slot no longer
+    /// names is stale (the answer is still success). `0` means unsequenced and always applies.
     pub(crate) fn accept_delta_sequence(
         &mut self,
         worker_id: &str,
@@ -70,11 +79,8 @@ impl AgentRoster {
         sequence: u64,
     ) -> bool {
         if sequence == 0 {
-            // Unsequenced frames (a caller that stamped nothing) apply
-            // only from the slot's own generation: a replaced process's
-            // delayed unsequenced frame must not overwrite the
-            // replacement, whose registration pull already wrote its
-            // state. No slot (an unstamped resident) accepts.
+            // Unsequenced frames apply only from the slot's own generation: a replaced
+            // process's delayed frame must not overwrite the replacement.
             return self
                 .delta_watermarks
                 .get(worker_id)
@@ -89,9 +95,6 @@ impl AgentRoster {
                     true
                 }
             }
-            // The slot names the current generation (only the
-            // registration path flips it), so any other generation is a
-            // predecessor's delayed frame.
             Some(_) => false,
             None => {
                 self.delta_watermarks.insert(
@@ -106,28 +109,11 @@ impl AgentRoster {
         }
     }
 
-    /// The gate for one authoritative pull (registration, adoption,
-    /// create, refresh): the pulled summary embeds the counter its
-    /// stamping process read at snapshot time, so the caller runs this
-    /// gate, the summary write, and the watermark raise in ONE
-    /// roster-lock critical section — a delta still in flight
-    /// (sequence below the counter) can never slip between the write
-    /// and the raise, and a delta stamped after the pull's snapshot
-    /// (sequence above the counter) stays fresher and still applies.
-    /// The pull applies when its counter is at or above the applied
-    /// watermark: the snapshot the counter orders is at least as fresh
-    /// as every delta the watermark names (equal means the pull
-    /// snapshotted after that delta stamped, so it carries the delta's
-    /// change and possibly more). A pull from a generation the slot no
-    /// longer names is a replaced process's delayed answer — stale by
-    /// construction, dropped. A summary WITHOUT the counter stamp is an
-    /// unsequenced authoritative write (a legacy build predating the
-    /// sequence wire field) and always applies without touching the
-    /// slot; a STAMPED counter — zero included, the worker's counter
-    /// before its first push — orders against the slot exactly like any
-    /// other pull, so a delayed zero-counter snapshot never overwrites
-    /// a newer delta's state and a predecessor's zero-counter answer
-    /// never overwrites the replacement's row.
+    /// The gate for one authoritative pull (registration, adoption, create, refresh):
+    /// applies when its counter is at or above the applied watermark, dropped below it.
+    /// The caller must run this gate, the summary write, and the watermark raise in ONE
+    /// roster-lock critical section. A summary without the counter stamp always applies;
+    /// a STAMPED counter — zero included — orders against the slot like any other pull.
     pub(crate) fn accept_roster_pull(
         &mut self,
         worker_id: &str,
@@ -162,21 +148,14 @@ impl AgentRoster {
         }
     }
 
-    /// Record the worker's current process generation (the registration
-    /// path is the single writer): a replacement registers a new
-    /// instance and restarts its counter, so the slot flips to the
-    /// replacement with a fresh watermark — the predecessor's delayed
-    /// frames and pulls then drop on the generation mismatch, and no
-    /// per-generation entry ever accumulates. A same-generation
-    /// re-register (a dropped link, a create replay) keeps the slot
-    /// untouched.
+    /// Record the worker's current process generation: a replacement flips the slot to a
+    /// fresh watermark and the predecessor's delayed frames drop; a same-generation
+    /// re-register keeps the slot.
     pub(crate) fn note_worker_generation(&mut self, worker_id: &str, instance: &str) {
         let generation_flipped = match self.delta_watermarks.get(worker_id) {
             Some(slot) => slot.instance != instance,
-            // A first registration (or a stop-and-restart cycle) starts
-            // the slot: the pull that follows the registration may never
-            // land (a timed-out route), and the slot alone must already
-            // gate the predecessor generation's in-flight frames.
+            // A first registration starts the slot: the pull that follows may never land, so
+            // the slot alone must already gate the predecessor's frames.
             None => true,
         };
         if generation_flipped {
@@ -190,16 +169,13 @@ impl AgentRoster {
         }
     }
 
-    /// Forget the stale-delta slot of one stopped worker (the stop path
-    /// keeps the map bounded; the worker's token no longer
-    /// authenticates, so its deltas cannot reach the gate anyway).
+    /// Forget the stopped worker's stale-delta slot (keeps the map bounded).
     pub(crate) fn forget_worker_sequences(&mut self, worker_id: &str) {
         self.delta_watermarks.remove(worker_id);
     }
 
-    /// Classify and store one entry from a worker's slim summary. Returns
-    /// the stored entry. A session file that changed agent ownership evicts
-    /// the previous owner (TS `write` index convergence).
+    /// Classify and store one entry from a worker's slim summary: a session file that changed
+    /// agent ownership evicts the previous owner (TS `write` index convergence).
     pub(crate) fn write_summary(
         &mut self,
         summary: Value,
@@ -219,20 +195,19 @@ impl AgentRoster {
         )
     }
 
-    /// Store one ledger-seeded entry (TS `write` of a boot-seed
-    /// `WorkerRosterEntry`): no worker owner, no status label, and the
-    /// `seededCwd` marker carried when the child's cwd could not be
-    /// hydrated. Returns the classified entry.
+    /// Store one ledger-seeded entry (TS `write` of a boot-seed `WorkerRosterEntry`): no
+    /// worker owner, no status label, `seededCwd` when the cwd could not be hydrated.
     pub(crate) fn write_seeded(&mut self, summary: Value, seeded_cwd: bool) -> AgentRosterEntry {
         self.store(summary, None, None, None, seeded_cwd.then_some(true))
     }
 
     /// The shared write path behind [`AgentRoster::write_summary`] and
-    /// [`AgentRoster::write_seeded`]: classify once, converge the indexes,
-    /// and evict a previous owner of the same session file.
+    /// [`AgentRoster::write_seeded`]: classify once, attach the
+    /// deleted-descendant bucket, converge the indexes, and evict a
+    /// previous owner of the same session file.
     fn store(
         &mut self,
-        summary: Value,
+        mut summary: Value,
         queued_child: Option<bool>,
         worker_id: Option<&str>,
         status_label: Option<&str>,
@@ -240,6 +215,20 @@ impl AgentRoster {
     ) -> AgentRosterEntry {
         let queued = queued_child.unwrap_or(false);
         let agent_id = roster_agent_id_for_summary(&summary);
+        let file = summary
+            .get("sessionFile")
+            .and_then(Value::as_str)
+            .filter(|file| !file.is_empty())
+            .map(canonical_roster_path);
+        // The bucket rides the row under the same canonical session-file
+        // key the index converges on (a summary rewritten for another
+        // worker keeps its family's deleted spend, and a rewrite whose
+        // family no longer has any sheds the stale value).
+        attach_deleted_descendant_usage(
+            &mut summary,
+            file.as_deref()
+                .and_then(|key| self.deleted_descendant_usage.get(key)),
+        );
         let stored = AgentRosterEntry {
             agent_id: agent_id.clone(),
             queued_child,
@@ -258,13 +247,7 @@ impl AgentRoster {
         if let Some(previous) = self.entries.get(&agent_id).cloned() {
             self.drop_indexes(&previous);
         }
-        if let Some(file) = stored
-            .summary
-            .get("sessionFile")
-            .and_then(Value::as_str)
-            .filter(|file| !file.is_empty())
-        {
-            let file = canonical_roster_path(file);
+        if let Some(file) = file {
             if let Some(existing) = self.agent_id_by_session_file.get(&file) {
                 if existing != &agent_id {
                     let existing = existing.clone();
@@ -286,6 +269,50 @@ impl AgentRoster {
         stored
     }
 
+    /// Take the next fold ticket: a bucket fold reads it before it
+    /// reads the ledger, so a fold that started earlier can never
+    /// overwrite a bucket applied by a newer one.
+    pub(crate) fn begin_bucket_fold(&mut self) -> u64 {
+        self.bucket_fold_ticket += 1;
+        self.bucket_fold_ticket
+    }
+
+    /// Replace the deleted-descendant bucket (the ledger fold keyed by
+    /// canonical parent session path) and rewrite in place every row
+    /// whose attached value differs, returning those rows for the
+    /// caller's push. Rows are visited by their store-time canonical key
+    /// (the session-file index). The bucket changes only at ledger
+    /// events and when a root appears, so the event's one fold rewrites
+    /// the rows that did not re-store (a passivated parent, a live
+    /// worker's row); a row whose value did not change never ships. An
+    /// older fold's ticket never overwrites a newer applied bucket (the
+    /// delta watermark's rule) - the newer apply already rewrote and
+    /// pushed its rows, so skipping the older one loses nothing.
+    pub(crate) fn set_deleted_descendant_usage(
+        &mut self,
+        ticket: u64,
+        bucket: HashMap<String, SessionUsageSummary>,
+    ) -> Vec<AgentRosterEntry> {
+        if ticket < self.bucket_applied_ticket {
+            return Vec::new();
+        }
+        self.bucket_applied_ticket = ticket;
+        self.deleted_descendant_usage = bucket;
+        let mut changed = Vec::new();
+        for (file, agent_id) in &self.agent_id_by_session_file {
+            let Some(entry) = self.entries.get_mut(agent_id) else {
+                continue;
+            };
+            if attach_deleted_descendant_usage(
+                &mut entry.summary,
+                self.deleted_descendant_usage.get(file),
+            ) {
+                changed.push(entry.clone());
+            }
+        }
+        changed
+    }
+
     pub(crate) fn delete(&mut self, agent_id: &str) {
         let Some(entry) = self.entries.remove(agent_id) else {
             return;
@@ -297,14 +324,12 @@ impl AgentRoster {
         self.entries.get(agent_id)
     }
 
-    /// The session-file index has a row (TS `hasSessionFile`): a seeded
-    /// edge whose child file is already rostered never writes a second
-    /// row, whatever agent id it would key under.
+    /// The session-file index has a row (TS `hasSessionFile`): never a second seeded row.
     pub(crate) fn has_session_file(&self, canonical_file: &str) -> bool {
         self.agent_id_by_session_file.contains_key(canonical_file)
     }
 
-    /// The entry owning one canonical session file (TS `bySessionFile`).
+    /// The entry owning one canonical session file.
     pub(crate) fn by_session_file(&self, canonical_file: &str) -> Option<&AgentRosterEntry> {
         self.agent_id_by_session_file
             .get(canonical_file)
@@ -328,17 +353,9 @@ impl AgentRoster {
             .collect()
     }
 
-    /// The rows a worker's root-slot swap retires (TS `flushRoster`'s
-    /// "swapped in place: also a removal" class): a whole-session
+    /// The rows a worker's root-slot swap retires: a whole-session
     /// replacement (`new_session`/`switch_session`/`import_jsonl`/`fork`)
-    /// serves a NEW durable session under the SAME active session id, so
-    /// the row the worker previously owned for that active id describes a
-    /// session it no longer serves. The roster must not keep presenting
-    /// the superseded session as this worker's live root: the agents view
-    /// would show a session nobody serves, and a roster wake by address
-    /// would resolve the id against the wrong file. Only the worker's own
-    /// rows for the fresh entry's active id match — its subagent children
-    /// key under their own active ids and never ride a root swap.
+    /// serves a NEW durable session under the SAME active session id.
     pub(crate) fn swapped_out_root_rows(
         &self,
         worker_id: &str,
@@ -400,14 +417,38 @@ impl AgentRoster {
     }
 }
 
-/// The canonical key for a session file (TS canonicalizes paths before
-/// indexing): lexically normalized, falling back to the raw path when the
-/// file does not exist yet.
+/// The canonical key for a session file: lexically normalized, falling back to the raw path.
 fn canonical_roster_path(path: &str) -> String {
     Path::new(path).canonicalize().map_or_else(
         |_| path.to_string(),
         |canonical| canonical.to_string_lossy().to_string(),
     )
+}
+
+/// Set or clear the row's `deletedDescendantUsage`; `true` when it
+/// changed. One rule for both writers: the store attach and the event
+/// refresh rewrite the same key the same way, so a re-stored row and a
+/// refreshed one can never disagree.
+fn attach_deleted_descendant_usage(
+    summary: &mut Value,
+    usage: Option<&SessionUsageSummary>,
+) -> bool {
+    let Value::Object(object) = summary else {
+        return false;
+    };
+    let next = usage.map(|usage| json!(usage));
+    if object.get("deletedDescendantUsage") == next.as_ref() {
+        return false;
+    }
+    match next {
+        Some(value) => {
+            object.insert("deletedDescendantUsage".to_string(), value);
+        }
+        None => {
+            object.remove("deletedDescendantUsage");
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -443,7 +484,6 @@ mod tests {
         );
         assert_eq!(entry.status, AgentRosterStatus::Idle);
         assert_eq!(entry.agent_id, "s1");
-        // A working activity reclassifies to running.
         let mut working = summary("s1", Some("a1"), Some("/tmp/s1.jsonl"));
         working["activity"] = json!("working");
         let entry = roster.write_summary(working, Some("w1"), None);
@@ -459,7 +499,6 @@ mod tests {
             Some("w1"),
             None,
         );
-        // A new agent claiming the same session file evicts the old owner.
         roster.write_summary(
             summary("s2", Some("a2"), Some("/tmp/shared.jsonl")),
             Some("w2"),
@@ -477,7 +516,6 @@ mod tests {
         roster.write_summary(summary("s1", Some("a1"), None), Some("w1"), None);
         roster.delete("s1");
         assert!(roster.get("s1").is_none());
-        // Deleting an absent id is a no-op.
         roster.delete("s1");
     }
 
@@ -511,11 +549,9 @@ mod tests {
         assert_eq!(seeded.seeded_cwd, Some(true));
         assert_eq!(seeded.worker_id, None);
         assert_eq!(seeded.agent_id, "/tmp/parent.jsonl#sub-1");
-        // The session-file index answers the seed's duplicate guard
-        // (a nonexistent file keys by its raw path).
+        // The session-file index answers the seed's duplicate guard (a nonexistent file keys raw).
         assert!(roster.has_session_file("/tmp/artifacts/sub-1.jsonl"));
         assert!(!roster.has_session_file("/tmp/other.jsonl"));
-        // A hydrated seed loses the marker on rewrite.
         let hydrated = roster.write_seeded(
             json!({
                 "sessionId": "sub-1",
@@ -547,34 +583,25 @@ mod tests {
     fn delta_sequence_gate_drops_stale_snapshots() {
         let roster = locked();
         let mut roster = roster.lock().unwrap();
-        // In order: applied.
         assert!(roster.accept_delta_sequence("w1", "i1", 1));
         assert!(roster.accept_delta_sequence("w1", "i1", 2));
-        // A delayed older snapshot (delivered after a newer one) is stale:
-        // equal or lower sequences never overwrite the newer state.
+        // A delayed older snapshot is stale: lower sequences never overwrite the newer state.
         assert!(!roster.accept_delta_sequence("w1", "i1", 1));
         assert!(!roster.accept_delta_sequence("w1", "i1", 2));
-        // Unsequenced (0 / absent) always applies.
         assert!(roster.accept_delta_sequence("w1", "i1", 0));
         // Another worker's slot is independent.
         assert!(roster.accept_delta_sequence("w2", "i1", 1));
 
-        // The replacement flow: a new generation registers (the
-        // registration path is the single writer of the slot's instance)
-        // and restarts its counter, so the slot flips with a fresh
-        // watermark and the PREDECESSOR's delayed frames drop on the
-        // generation mismatch whatever their sequence.
+        // A new generation restarts its counter: the slot flips, the predecessor's frames drop.
         roster.note_worker_generation("w1", "i2");
         assert!(!roster.accept_delta_sequence("w1", "i1", 9_000_000));
         assert!(roster.accept_delta_sequence("w1", "i2", 1));
         assert!(roster.accept_delta_sequence("w1", "i2", 2));
         assert!(!roster.accept_delta_sequence("w1", "i2", 1));
-        // A same-generation re-register keeps the slot untouched (the
-        // counter never restarted, so the applied watermark still gates).
+        // A same-generation re-register keeps the slot untouched.
         roster.note_worker_generation("w1", "i2");
         assert!(!roster.accept_delta_sequence("w1", "i2", 1));
-        // The stop cleanup forgets the worker's slot: the next frame
-        // starts a fresh slot (its generation becomes the named one).
+        // The stop cleanup forgets the slot: the next frame starts a fresh one.
         roster.forget_worker_sequences("w1");
         assert!(roster.accept_delta_sequence("w1", "i1", 1));
         assert!(!roster.accept_delta_sequence("w1", "i2", 1));
@@ -584,47 +611,34 @@ mod tests {
     fn pull_gate_orders_authoritative_writes_by_the_snapshot_counter() {
         let roster = locked();
         let mut roster = roster.lock().unwrap();
-        // A stamped ZERO counter (the worker's counter before its first
-        // push — the create/registration pull of a fresh worker) starts
-        // the slot and applies.
+        // A stamped ZERO counter (before the first push) starts the slot and applies.
         assert!(roster.accept_roster_pull("w1", "i1", Some(0)));
         assert!(roster.accept_delta_sequence("w1", "i1", 1));
-        // An unsequenced summary (no embedded counter at all — a legacy
-        // build) is an authoritative write and applies without touching
-        // the slot.
+        // An unsequenced summary (a legacy build) applies without touching the slot.
         assert!(roster.accept_roster_pull("w1", "i1", None));
-        // The pull with the snapshot's counter applies and raises the
-        // watermark: a delta still in flight when the pull answered
-        // (sequence at or below the counter) never overwrites the pull.
+        // The pull applies and raises the watermark: a delta still in
+        // flight when the pull answered never overwrites the pull.
         assert!(roster.accept_roster_pull("w1", "i1", Some(5)));
         assert!(!roster.accept_delta_sequence("w1", "i1", 5));
         assert!(!roster.accept_delta_sequence("w1", "i1", 4));
         assert!(roster.accept_delta_sequence("w1", "i1", 6));
         // The raise never lowers the watermark.
         assert!(!roster.accept_roster_pull("w1", "i1", Some(3)));
-        // A pull AT the applied watermark still applies: its snapshot
-        // was taken after that delta stamped, so it carries the delta's
-        // change and possibly more (a rename the deltas never push).
+        // A pull AT the applied watermark still applies: its snapshot was taken after that
+        // delta stamped, so it carries the delta's change and possibly more.
         assert!(roster.accept_roster_pull("w1", "i1", Some(6)));
-        // A pull whose counter is below the applied watermark is stale:
-        // a delta stamped after the pull's snapshot already applied.
+        // A pull below the applied watermark is stale: a delta stamped after already applied.
         assert!(roster.accept_delta_sequence("w1", "i1", 8));
         assert!(!roster.accept_roster_pull("w1", "i1", Some(7)));
-        // The stamped-zero pull is sequenced like any other: after the
-        // first delta applied, a DELAYED zero-counter snapshot (taken
-        // before the first push) is the stale one and drops instead of
-        // overwriting the newer delta's state.
+        // The stamped-zero pull is sequenced like any other: a DELAYED
+        // zero-counter snapshot drops instead of overwriting the newer
+        // delta's state.
         assert!(!roster.accept_roster_pull("w1", "i1", Some(0)));
-        // A pull from a replaced process's delayed answer drops on the
-        // generation mismatch (the registration noted the replacement)
-        // — at any counter, the stamped zero included.
+        // A replaced process's delayed answer drops on the generation mismatch, at any counter.
         roster.note_worker_generation("w1", "i2");
         assert!(!roster.accept_roster_pull("w1", "i1", Some(9_000_000)));
         assert!(!roster.accept_roster_pull("w1", "i1", Some(0)));
-        // The replacement's own pull is authoritative for the new
-        // generation: it applies from the fresh watermark, and its own
-        // stamped zero (a replacement that pushed nothing yet) refreshes
-        // at the noted watermark.
+        // The replacement's own pull applies from the fresh watermark.
         assert!(roster.accept_roster_pull("w1", "i2", Some(0)));
         assert!(roster.accept_roster_pull("w1", "i2", Some(3)));
         assert!(!roster.accept_delta_sequence("w1", "i2", 3));
@@ -635,8 +649,7 @@ mod tests {
     fn replacement_watermarks_stay_bounded() {
         let roster = locked();
         let mut roster = roster.lock().unwrap();
-        // Repeated replacements never grow the store: one slot per
-        // worker, flipped by the registration note, dropped on stop.
+        // Repeated replacements never grow the store: one slot per worker.
         for generation in 1..=64 {
             roster.note_worker_generation("w1", &format!("i{generation}"));
             assert!(roster.accept_delta_sequence("w1", &format!("i{generation}"), 1));
@@ -648,5 +661,52 @@ mod tests {
         }
         roster.forget_worker_sequences("w1");
         assert!(roster.delta_watermarks.is_empty());
+    }
+
+    /// The bucket folds' ordering rule (the delta watermark's twin): a
+    /// fold that started earlier never overwrites a bucket applied by a
+    /// newer one, whatever order the two folds FINISH in.
+    #[test]
+    fn an_older_bucket_fold_never_overwrites_a_newer_one() {
+        let roster = locked();
+        let mut roster = roster.lock().unwrap();
+        let parent = roster.write_summary(
+            summary("s1", Some("a1"), Some("/tmp/s1.jsonl")),
+            Some("w1"),
+            None,
+        );
+        let file = canonical_roster_path("/tmp/s1.jsonl");
+        let older = HashMap::from([(
+            file.clone(),
+            SessionUsageSummary {
+                input_tokens: 1_000,
+                output_tokens: 100,
+                cost: 0.30,
+            },
+        )]);
+        let newer = HashMap::from([(
+            file,
+            SessionUsageSummary {
+                input_tokens: 2_000,
+                output_tokens: 200,
+                cost: 0.55,
+            },
+        )]);
+        // Two folds read the ledger; the newer one applies first (the
+        // older fold's blocking read finished last).
+        let older_ticket = roster.begin_bucket_fold();
+        let newer_ticket = roster.begin_bucket_fold();
+        let applied = roster.set_deleted_descendant_usage(newer_ticket, newer);
+        assert_eq!(applied.len(), 1, "the newer fold rewrites the parent's row");
+        assert_eq!(
+            roster.set_deleted_descendant_usage(older_ticket, older),
+            Vec::<AgentRosterEntry>::new(),
+            "the older fold never overwrites the newer applied bucket"
+        );
+        assert_eq!(
+            roster.get(&parent.agent_id),
+            applied.first(),
+            "the newer bucket stays on the row"
+        );
     }
 }

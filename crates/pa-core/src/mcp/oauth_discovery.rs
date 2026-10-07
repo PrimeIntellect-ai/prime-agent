@@ -1,10 +1,7 @@
-//! OAuth discovery for MCP servers: RFC 9728 protected-resource metadata
-//! before the origin-level authorization-server fallback, RFC 8414/OIDC
-//! metadata, dynamic client registration, PKCE, and token exchange.
-//!
-//! Every request goes through the [`OAuthHttp`] transport seam so the flow
-//! is hermetically testable; validation errors carry the TS wording
-//! (they surface in login dialogs).
+//! OAuth discovery for MCP servers: RFC 9728 protected-resource metadata before the
+//! origin-level authorization-server fallback, RFC 8414/OIDC metadata, dynamic client
+//! registration, PKCE, and token exchange. Every request goes through the [`OAuthHttp`]
+//! seam; validation errors carry the TS wording.
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine as _;
@@ -200,23 +197,72 @@ async fn discover_authorization_server(
     )
 }
 
-/// Protected-resource metadata (RFC 9728 shape).
-#[derive(Debug)]
-struct ProtectedResourceMetadata {
-    resource: String,
-    authorization_servers: Vec<String>,
+/// Protected-resource metadata (RFC 9728 shape; schema-validated,
+/// servers non-empty by policy).
+#[derive(Debug, Clone)]
+pub(crate) struct ProtectedResourceMetadata {
+    /// The DECLARED resource audience, sent as the `resource` parameter
+    /// (never the endpoint's own canonical string).
+    pub resource: String,
+    pub authorization_servers: Vec<String>,
+    /// SEP-835: the default scope source when the config has no scopes.
+    pub scopes_supported: Option<Vec<String>>,
+}
+
+/// How the resource declared by protected-resource metadata associates with
+/// the configured endpoint (the TS `AudienceMode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AudienceMode {
+    /// Component-equal to the configured endpoint (origin, path, query).
+    Exact,
+    /// The endpoint's bare HTTPS origin.
+    Origin,
+}
+
+impl AudienceMode {
+    /// The TS storage shape ("exact" | "origin").
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            AudienceMode::Exact => "exact",
+            AudienceMode::Origin => "origin",
+        }
+    }
+}
+
+/// Narrow audience policy (the TS `resourceAudienceMode`): the resource
+/// declared by protected-resource metadata must be the exact configured
+/// endpoint or the endpoint's exact HTTPS origin — component-compared,
+/// never a string prefix. Anything else fails closed.
+fn resource_audience_mode(endpoint: &Url, declared: &str) -> Result<AudienceMode> {
+    let resource = validated_https_url(declared, "Protected-resource resource")?;
+    let same_origin = resource.origin() == endpoint.origin();
+    if same_origin && resource.path() == endpoint.path() && resource.query() == endpoint.query() {
+        return Ok(AudienceMode::Exact);
+    }
+    // The TS check also allows an empty pathname; a parsed `Url` always
+    // normalizes the root path to "/".
+    let origin_level = same_origin
+        && (resource.path() == "/" || resource.path().is_empty())
+        && resource.query().is_none();
+    if origin_level {
+        return Ok(AudienceMode::Origin);
+    }
+    bail!(
+        "Protected-resource metadata resource does not match the configured endpoint {} or its origin",
+        canonical_resource(endpoint)
+    );
 }
 
 fn resource_metadata(
     value: &serde_json::Value,
-    resource: &str,
+    endpoint: &Url,
 ) -> Result<ProtectedResourceMetadata> {
     let Some(object) = value.as_object() else {
         bail!("Protected-resource metadata is invalid");
     };
-    if object.get("resource").and_then(|v| v.as_str()) != Some(resource) {
-        bail!("Protected-resource metadata resource does not exactly match {resource}");
-    }
+    let Some(declared) = object.get("resource").and_then(|v| v.as_str()) else {
+        bail!("Protected-resource metadata is invalid");
+    };
     let Some(servers) = object
         .get("authorization_servers")
         .and_then(|value| value.as_array())
@@ -234,9 +280,20 @@ fn resource_metadata(
         validated_https_url(issuer, "Authorization server issuer")?;
         issuers.push(issuer.to_string());
     }
+    let scopes_supported = object
+        .get("scopes_supported")
+        .and_then(|value| value.as_array())
+        .map(|scopes| {
+            scopes
+                .iter()
+                .filter_map(|scope| scope.as_str().map(str::to_string))
+                .collect::<Vec<String>>()
+        });
+    resource_audience_mode(endpoint, declared)?;
     Ok(ProtectedResourceMetadata {
-        resource: resource.to_string(),
+        resource: declared.to_string(),
         authorization_servers: issuers,
+        scopes_supported,
     })
 }
 
@@ -286,10 +343,17 @@ fn header_resource_metadata(value: Option<&str>) -> Option<String> {
 /// What discovery resolved for one MCP endpoint.
 pub(crate) struct Discovery {
     pub metadata: AuthServerMetadata,
-    /// The RFC 9728 resource indicator when the login is PRM-based.
+    /// RFC 9728 metadata when present; the source of default scopes
+    /// (SEP-835).
+    pub protected_resource: Option<ProtectedResourceMetadata>,
+    /// The RFC 9728 resource audience declared by the protected resource,
+    /// sent as the `resource` parameter when the login is PRM-based.
     pub resource: Option<String>,
     /// The RFC 8414/OIDC issuer a PRM-based login selected.
     pub issuer: Option<String>,
+    /// How the declared resource associates with the configured endpoint;
+    /// present exactly when `protected_resource` is.
+    pub audience_mode: Option<AudienceMode>,
 }
 
 /// Discover RFC 9728 protected-resource metadata before the origin-level
@@ -297,11 +361,15 @@ pub(crate) struct Discovery {
 pub(crate) async fn discover(http: &dyn OAuthHttp, url: &str) -> Result<Discovery> {
     let resource_url = validated_https_url(url, ENDPOINT_LABEL)?;
     let protected = try_protected_resource_metadata(http, &resource_url).await?;
-    if let Some((metadata, resource, issuer)) = protected {
+    if let Some(metadata) = protected {
+        let issuer = metadata.authorization_servers[0].clone();
+        let audience_mode = resource_audience_mode(&resource_url, &metadata.resource)?;
         return Ok(Discovery {
-            metadata,
-            resource: Some(resource),
+            metadata: discover_authorization_server(http, &issuer, true).await?,
+            protected_resource: Some(metadata.clone()),
+            resource: Some(metadata.resource),
             issuer: Some(issuer),
+            audience_mode: Some(audience_mode),
         });
     }
     Ok(Discovery {
@@ -311,23 +379,23 @@ pub(crate) async fn discover(http: &dyn OAuthHttp, url: &str) -> Result<Discover
             false,
         )
         .await?,
+        protected_resource: None,
         resource: None,
         issuer: None,
+        audience_mode: None,
     })
 }
 
-type ProtectedDiscovery = Option<(AuthServerMetadata, String, String)>;
+type ProtectedDiscovery = Option<ProtectedResourceMetadata>;
 
-/// Probe protected-resource metadata: the `WWW-Authenticate`
-/// `resource_metadata` pointer first, then the RFC well-known location.
-/// `None` when the server serves no RFC 9728 metadata.
+/// Probe protected-resource metadata:`resource_metadata` pointer first, then the RFC well-known
+/// location. `None` when the server serves no RFC 9728 metadata.
 async fn try_protected_resource_metadata(
     http: &dyn OAuthHttp,
     resource_url: &Url,
 ) -> Result<ProtectedDiscovery> {
-    // This probe deliberately has no Authorization header; it must never
-    // leak an existing token. A failing probe is not an error (the server
-    // need not support a GET probe).
+    // This probe deliberately has no Authorization header; it must never leak an existing token. A
+    // failing probe is not an error.
     let probe = OAuthHttpRequest {
         method: OAuthHttpMethod::Get,
         url: resource_url.to_string(),
@@ -352,11 +420,8 @@ async fn try_protected_resource_metadata(
     if response.status == 404 && header_url.is_none() {
         return Ok(None);
     }
-    let resource = canonical_resource(resource_url);
-    let metadata = resource_metadata(&json_metadata(&response, &candidate)?, &resource)?;
-    let issuer = metadata.authorization_servers[0].clone();
-    let server = discover_authorization_server(http, &issuer, true).await?;
-    Ok(Some((server, metadata.resource, issuer)))
+    let metadata = resource_metadata(&json_metadata(&response, &candidate)?, resource_url)?;
+    Ok(Some(metadata))
 }
 
 /// RFC 7591 dynamic client registration.
@@ -364,15 +429,19 @@ pub(crate) async fn register_client(
     http: &dyn OAuthHttp,
     registration_endpoint: &str,
     label: &str,
+    scope: Option<&str>,
 ) -> Result<String> {
     validated_https_url(registration_endpoint, "Registration endpoint")?;
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "client_name": format!("Prime Agent ({label})"),
         "redirect_uris": super::oauth_callback::all_redirect_uris(),
         "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],
         "token_endpoint_auth_method": "none",
     });
+    if let Some(scope) = scope.filter(|scope| !scope.is_empty()) {
+        body["scope"] = serde_json::Value::String(scope.to_string());
+    }
     let request = OAuthHttpRequest {
         method: OAuthHttpMethod::Post,
         url: registration_endpoint.to_string(),
@@ -641,26 +710,79 @@ mod tests {
     }
 
     #[test]
-    fn protected_resource_metadata_validation() {
+    fn protected_resource_metadata_audience_policy() {
+        let endpoint = Url::parse("https://mcp.example/mcp").unwrap();
+        // A cross-origin declared resource fails closed.
         let error = resource_metadata(
-            &serde_json::json!({ "resource": "https://other/mcp" }),
-            "https://mcp.example/mcp",
+            &serde_json::json!({
+                "resource": "https://other/mcp",
+                "authorization_servers": ["https://issuer.example"],
+            }),
+            &endpoint,
         )
         .unwrap_err()
         .to_string();
         assert_eq!(
             error,
-            "Protected-resource metadata resource does not exactly match https://mcp.example/mcp"
+            "Protected-resource metadata resource does not match the configured endpoint \
+             https://mcp.example/mcp or its origin"
+        );
+        // A same-origin resource with a different path fails closed too.
+        let error = resource_metadata(
+            &serde_json::json!({
+                "resource": "https://mcp.example/other",
+                "authorization_servers": ["https://issuer.example"],
+            }),
+            &endpoint,
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(
+            error,
+            "Protected-resource metadata resource does not match the configured endpoint \
+             https://mcp.example/mcp or its origin"
         );
         let error = resource_metadata(
             &serde_json::json!({ "resource": "https://mcp.example/mcp" }),
-            "https://mcp.example/mcp",
+            &endpoint,
         )
         .unwrap_err()
         .to_string();
         assert_eq!(
             error,
             "Protected-resource metadata has no authorization_servers"
+        );
+        // The Vercel shape: a root endpoint whose declared resource keeps
+        // the trailing slash — component-equal, not string-equal.
+        let root = Url::parse("https://mcp.example").unwrap();
+        let metadata = resource_metadata(
+            &serde_json::json!({
+                "resource": "https://mcp.example/",
+                "authorization_servers": ["https://vercel.example"],
+                "scopes_supported": ["openid"],
+            }),
+            &root,
+        )
+        .unwrap();
+        assert_eq!(metadata.resource, "https://mcp.example/");
+        assert_eq!(
+            metadata.authorization_servers,
+            vec!["https://vercel.example".to_string()]
+        );
+        assert_eq!(metadata.scopes_supported, Some(vec!["openid".to_string()]));
+        assert_eq!(
+            resource_audience_mode(&root, "https://mcp.example/").unwrap(),
+            AudienceMode::Exact
+        );
+        // The Notion/Slack shape: an origin-level declared resource serves
+        // a pathful endpoint.
+        assert_eq!(
+            resource_audience_mode(&endpoint, "https://mcp.example").unwrap(),
+            AudienceMode::Origin
+        );
+        assert_eq!(
+            resource_audience_mode(&root, "https://mcp.example").unwrap(),
+            AudienceMode::Exact
         );
     }
 

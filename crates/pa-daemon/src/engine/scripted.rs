@@ -1,6 +1,6 @@
-//! The scripted faux session (moved with its concern): the deterministic
-//! replay engine for the integration harness, its script records, the
-//! `SessionEngine` impl, and the abortable delay helper.
+//! The scripted faux session: the deterministic replay engine for the
+//! integration harness, its script records, the `SessionEngine` impl, and
+//! the abortable delay helper.
 use super::{
     json, AbortSignal, AssistantSnapshot, BranchSummaryOutcome, BranchSummaryRequest,
     BranchSummaryRun, CompactionOutcome, CompactionRequest, CompactionRun, EngineEvent,
@@ -16,26 +16,14 @@ use super::{
 /// A scripted tool call (the roster-activity fixture):
 /// `{"toolCallId": "call-1", "toolName": "bash", "args": {...},
 /// "result": "listing", "isError": false, "delayMs": 250}` emits the real
-/// loop's tool-call lifecycle around the response's final assistant
-/// message — `tool_execution_start`, the scripted hold,
-/// `tool_execution_end`, the `toolResult` message — so worker tests drive
-/// the in-flight tool-call tracking (the hold lets the roster feed
-/// publish the mid-tool state before the tool settles).
+/// loop's tool-call lifecycle around the final assistant message.
 ///
-/// The `compaction` seam scripts compaction results, one scripted result
-/// per run (replayed from the top each run):
-/// `{"summary": "...", "firstKeptEntryId": "...", "tokensBefore": 123,
-/// "details": {"readFiles": [], "modifiedFiles": []}, "usage": {...},
-/// "delayMs": 250}` compacts; `{"error": "...", "skipped": true}` reports
-/// nothing-to-compact; `{"error": "..."}` fails the run; `delayMs` holds the
-/// run in flight so aborts and mid-run state reads are observable.
-///
-/// The `sideQuestion` seam scripts the side-question provider calls, one
-/// scripted result per attempt: `{"text": "...", "delayMs": 250}` answers,
-/// `{"error": "...", "kind": "server_error", "status": 500,
-/// "retryAfterMs": 100}` fails that attempt (retried per `retry`, which is
-/// the shared provider policy with test-friendly delays). Verification
-/// harness only; never set by the product.
+/// The `compaction` seam scripts results, one per run (replayed from the
+/// top): `{"summary": ...}` compacts, `{"error": ..., "skipped": true}`
+/// skips, `{"error": "..."}` fails. The `sideQuestion` seam scripts
+/// provider calls, one per attempt: `{"text": ...}` answers,
+/// `{"error": ..., "retryAfterMs": 100}` fails (retried per `retry`).
+/// Verification harness only.
 #[derive(Debug, Default)]
 pub struct ScriptedEngine {
     responses: Vec<Value>,
@@ -43,22 +31,24 @@ pub struct ScriptedEngine {
     compaction: CompactionScript,
     branch_summary: CompactionScript,
     goal: Option<ScriptedGoal>,
+    /// The script's resolved-model fixture (`{"model": {"id": ...,
+    /// "provider": ..., "reasoning": ...}}`, the connection-state wire
+    /// shape `model_metadata` serves): the harness reports NO model
+    /// unless the script scripts one, so the roster/list surfaces stay
+    /// empty for plain scripts exactly like before (an e2e that needs a
+    /// model-dependent client behavior — the Anthropic subscription
+    /// warning's provider gate — opts in).
+    model: Option<Value>,
 }
 
 /// A scripted thread goal (the post-compaction goal-continue fixture):
 /// `{"goal": {"status": "active", "objective": "...", "message": "..."}}`.
-/// The scripted state answers `goal_state_value`; the mint returns the
-/// follow-up turn (`message` is the continuation prompt text, defaulting
-/// to the objective) with the goal-context custom row as the injected
-/// message.
 #[derive(Debug)]
 struct ScriptedGoal {
     state: Value,
     message: String,
-    /// Verification fixture only: emit the scripted state as a
-    /// `goal_update` engine event during a turn (the real engine's
-    /// announcement path), so worker tests drive the durable
-    /// `thread_goal_state` mirror.
+    /// Verification fixture only: emit the scripted state as a `goal_update`
+    /// event during a turn, driving the durable mirror.
     emit_update_on_prompt: bool,
 }
 
@@ -85,9 +75,7 @@ impl ScriptedEngine {
     ///
     /// # Errors
     ///
-    /// Never errors (the script shape is total and every field defaults);
-    /// the `Result` return keeps the constructor uniform with the other
-    /// builders.
+    /// Never errors; the `Result` return keeps the constructor uniform.
     pub fn from_value(script: &Value) -> Result<Self> {
         let responses = script
             .get("responses")
@@ -169,12 +157,17 @@ impl ScriptedEngine {
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
             });
+        let model = script
+            .get("model")
+            .filter(|model| !model.is_null())
+            .cloned();
         Ok(ScriptedEngine {
             responses,
             side_question,
             compaction,
             branch_summary,
             goal,
+            model,
         })
     }
 
@@ -183,8 +176,7 @@ impl ScriptedEngine {
     /// # Errors
     ///
     /// Returns an error when the file cannot be read or its JSON cannot
-    /// be parsed; the parsed value itself never errors (see
-    /// [`ScriptedEngine::from_value`]).
+    /// be parsed.
     pub fn from_file(path: &std::path::Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)?;
         Self::from_value(&serde_json::from_str(&content)?)
@@ -222,13 +214,16 @@ fn scripted_usage() -> Value {
 }
 
 impl SessionEngine for ScriptedEngine {
-    /// No model metadata: the TS scripted harness reports no resolved
-    /// model on the session summary (`summaryForActiveSession` reads the
-    /// agent's model, unset in the harness), so the roster summary and the
-    /// CLI `list` table stay empty for scripted sessions — the `faux-1`
-    /// id rides on the message rows only.
+    /// The script's model fixture, when one is scripted (`{"model":
+    /// {"id": ..., "provider": ..., "reasoning": ...}}`): absent (the
+    /// plain harness scripts), no model is reported — the TS scripted
+    /// harness reports no resolved model on the session summary
+    /// (`summaryForActiveSession` reads the agent's model, unset in the
+    /// harness), so the roster summary and the CLI `list` table stay
+    /// empty for scripted sessions and the `faux-1` id rides on the
+    /// message rows only.
     fn model_metadata(&self) -> Option<Value> {
-        None
+        self.model.clone()
     }
 
     /// The scripted thread goal's state, or the empty state (no goal
@@ -280,9 +275,8 @@ impl SessionEngine for ScriptedEngine {
         let scripted = self.responses.get(prompt_index).cloned();
         let text = match &scripted {
             Some(response) => {
-                // The scripted hold honors the worker's cancel probe: a
-                // close on a held scripted child settles at the abort,
-                // not at the hold's end.
+                // The scripted hold honors the cancel probe: a close on a held child
+                // settles at the abort, not at the hold's end.
                 let delay = std::time::Duration::from_millis(Self::response_delay_ms(response));
                 if !abortable_sleep(delay, aborted) {
                     emit(cancelled());
@@ -292,10 +286,8 @@ impl SessionEngine for ScriptedEngine {
             }
             None => format!("echo: {}", request.message),
         };
-        // An injected custom row replaces the accepted user message: the
-        // turn persists and renders the row, then runs on `message` (the
-        // real engine's injected-prompt contract, mirrored here so the
-        // scripted harness exercises the same worker path).
+        // An injected custom row replaces the accepted user message (the
+        // real engine's injected-prompt contract, mirrored here).
         let accepted_row = match &request.custom_message {
             Some(custom) => custom.clone(),
             None => json!({
@@ -312,10 +304,8 @@ impl SessionEngine for ScriptedEngine {
             emit(cancelled());
             return;
         }
-        // The batched co-delivery rows (the real engine's one-run batch):
-        // one accepted user row per batched message, in delivery order —
-        // images ride as multimodal content blocks after the text, like
-        // the primary — ahead of the single scripted reply.
+        // The batched co-delivery rows: one accepted user row per batched
+        // message, in delivery order — images ride after the text.
         let mut batch_rows = Vec::new();
         for row in &request.batch {
             let mut content = vec![json!({ "type": "text", "text": row.text })];
@@ -341,8 +331,7 @@ impl SessionEngine for ScriptedEngine {
             }
         }
         // The fixture's mid-turn goal announcement (the real engine's
-        // `goal_update` emission path, TS `_setGoalState` ->
-        // `_emitGoalUpdate`).
+        // `goal_update` path).
         if let Some(goal) = self.goal.as_ref().filter(|goal| goal.emit_update_on_prompt) {
             if !emit(EngineEvent::GoalUpdate {
                 goal: goal.state.clone(),
@@ -368,9 +357,7 @@ impl SessionEngine for ScriptedEngine {
             .cloned()
             .unwrap_or_default();
         // The real engine's assistant message carries its tool calls as
-        // `toolCall` content blocks (session stats count calls from them
-        // and results from the `toolResult` rows); a plain response keeps
-        // the text content unchanged.
+        // `toolCall` content blocks (session stats count calls from them).
         let final_message = if scripted_tools.is_empty() {
             json!({"role": "assistant", "content": text, "provider": "scripted", "model": "faux-1", "usage": usage, "timestamp": crate::util::now_ms()})
         } else {
@@ -391,11 +378,7 @@ impl SessionEngine for ScriptedEngine {
             emit(cancelled());
             return;
         }
-        // The scripted tool calls (the real loop's tool-call lifecycle, in
-        // event order): each entry emits `tool_execution_start`, then
-        // `tool_execution_end` with its settled result, then the
-        // `toolResult` message the session file records (the roster
-        // activity feed keys its `isRunningTools` flag on these frames).
+        // The scripted tool calls, in the real loop's event order.
         let mut tool_results = Vec::with_capacity(scripted_tools.len());
         for call in scripted_tools {
             let Some(tool_call_id) = call.get("toolCallId").and_then(Value::as_str) else {
@@ -421,9 +404,8 @@ impl SessionEngine for ScriptedEngine {
                 return;
             }
             // A running tool holds the turn for its scripted duration (the
-            // real loop waits on the tool): the roster activity feed
-            // composes and ships a delta while the tool executes, so the
-            // gap must outlast the feed's round trip.
+            // real loop waits on the tool): the roster activity feed ships a
+            // delta while the tool executes, so the gap must outlast it.
             if let Some(delay) = call.get("delayMs").and_then(Value::as_u64) {
                 if delay > 0 {
                     std::thread::sleep(std::time::Duration::from_millis(delay));
@@ -455,8 +437,7 @@ impl SessionEngine for ScriptedEngine {
             }
             tool_results.push(result_message);
         }
-        // The loop's terminal frame (TS `turn_end`): the final assistant
-        // message as the payload, the scripted tool results riding it.
+        // The loop's terminal frame (`turn_end`).
         if !emit(EngineEvent::TurnEnd {
             message: final_message.clone(),
             tool_results: tool_results.clone(),
@@ -464,10 +445,7 @@ impl SessionEngine for ScriptedEngine {
             emit(cancelled());
             return;
         }
-        // The loop's run-end frame (TS `agent_end`): the run's
-        // accumulated message set — the accepted rows (the primary plus
-        // every batched row), the final assistant message, and every tool
-        // result in the scripted shape.
+        // The loop's run-end frame (`agent_end`).
         let mut run_messages = vec![accepted_row];
         run_messages.extend(batch_rows);
         run_messages.push(final_message);
@@ -507,8 +485,7 @@ impl SessionEngine for ScriptedEngine {
             .retry
             .clone()
             .unwrap_or(DEFAULT_PROVIDER_RETRY_POLICY);
-        // Every scripted side-question run replays its results from the top,
-        // like a fresh side conversation per run.
+        // Every scripted side-question run replays its results from the top.
         let responses = StdArc::new(self.side_question.responses.clone());
         let attempt_index = StdArc::new(AtomicUsize::new(0));
         let sink = StdArc::clone(sink);
@@ -566,9 +543,8 @@ impl SessionEngine for ScriptedEngine {
         _request: CompactionRequest,
         signal: &AbortSignal,
     ) -> CompactionOutcome {
-        // Unscripted compactions produce a deterministic result, like the
-        // prompt echo fallback. Scripted runs consume entries in order and
-        // replay from the top once exhausted.
+        // Unscripted compactions produce a deterministic result; scripted
+        // runs consume entries in order, replaying from the top.
         let Some(entry) = (|| {
             let index = self
                 .compaction
@@ -646,9 +622,8 @@ impl SessionEngine for ScriptedEngine {
         _request: BranchSummaryRequest,
         signal: &AbortSignal,
     ) -> BranchSummaryOutcome {
-        // Unscripted branch summaries produce a deterministic result, like
-        // the compaction fallback. Scripted runs consume entries in order
-        // and replay from the top once exhausted.
+        // Unscripted branch summaries produce a deterministic result;
+        // scripted runs consume entries in order and replay from the top.
         let Some(entry) = (|| {
             let index = self
                 .branch_summary

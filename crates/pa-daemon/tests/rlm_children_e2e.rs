@@ -1,26 +1,17 @@
-//! End-to-end RLM child machinery against the real `pa-daemon` supervisor:
-//! supervisor-backed child sessions spawn through the supervisor link, run
-//! in their own worker processes, appear in the supervisor roster, settle
-//! with an answer the parent roster surfaces, and die on delete
-//! (`rlm.spawn` / `rlm.list_subagents` / `rlm.collect` /
-//! `rlm.delete_subagent` / `rlm.create_session` host surface).
-// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
-// the full rationale).
-// Stack-resident futures by design on the daemon's hot paths; boxing the
-// call sites for a lint tick is a perf regression with zero correctness gain.
+//! End-to-end RLM child machinery against the real `pa-daemon` supervisor: child sessions
+//! spawn through the supervisor link, run in their own worker processes, appear in the
+//! supervisor roster, settle with an answer, and die on delete (`rlm.spawn`/
+//! `list_subagents`/`collect`/`delete_subagent`/`create_session`).
+// Stack-resident futures by design; boxing for a lint tick is a perf regression.
 #![allow(clippy::large_futures)]
-// 64-bit-only targets; the narrowing casts sit at OS boundaries
-// (pid/fd/time/size) where the values are bounded by the kernel - the
-// dead-guard expect()s would add panic paths where silent wrap was
-// deliberate.
+// 64-bit-only targets; narrowing casts sit at bounded OS/protocol boundaries.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// The fn-length threshold is a style gate, not correctness; the structure
-// campaign owns the god-fn splits as a follow-up.
+// Fn length is a style gate, not correctness.
 #![allow(clippy::too_many_lines)]
 // API-shape opinions, not defects; the surfaces are deliberate.
 #![allow(
@@ -58,8 +49,7 @@ impl Drop for Daemon {
     }
 }
 
-// The timeout panic path cannot wait on the child; the test process exits
-// immediately afterwards, reaping it.
+// The timeout panic path cannot wait on the child; the test exits and reaps it.
 #[allow(clippy::zombie_processes)]
 fn spawn_daemon(socket: &Path, agent_dir: &Path) -> Daemon {
     let binary = env!("CARGO_BIN_EXE_pa-daemon");
@@ -71,10 +61,8 @@ fn spawn_daemon(socket: &Path, agent_dir: &Path) -> Daemon {
         .arg(agent_dir)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        // A supervisor killed at teardown must not leak its session workers
-        // into later test binaries: the worker's supervisor-lost exit (TS
-        // `exitIfSupervisorOrphanedForTooLong`) runs on this short window
-        // instead of the 5-minute default.
+        // A supervisor killed at teardown must not leak its session workers into later
+        // test binaries: the supervisor-lost exit runs here.
         .env(
             pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
             "15000",
@@ -138,11 +126,8 @@ impl Client {
         self.read_line_with_budget(Duration::from_secs(15))
     }
 
-    /// `read_line` with a caller-chosen budget: a raw `create` that
-    /// launches a worker answers after the worker's connect budget (TS
-    /// `WORKER_CONNECT_TIMEOUT_MS`: up to 30s), which the shared 15s line
-    /// budget turns into a false timeout under the binary's
-    /// parallel-test load.
+    /// `read_line` with a caller-chosen budget: a raw `create` that launches a worker answers
+    /// after the worker's connect budget (up to 30s, past the shared 15s line budget).
     fn read_line_with_budget(&mut self, budget: Duration) -> Value {
         let mut line = String::new();
         let deadline = Instant::now() + budget;
@@ -151,10 +136,9 @@ impl Client {
             .set_read_timeout(Some(Duration::from_millis(100)))
             .expect("set timeout");
         loop {
-            line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => {}
+                Ok(_) if line.trim().is_empty() => line.clear(),
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse response line"),
                 Err(error) => {
                     assert!(
@@ -177,10 +161,8 @@ impl Client {
         }
     }
 
-    /// `read_response` with a worker-boot budget (the raw-create path's
-    /// reader): every line waits on the remaining wall budget, so a
-    /// worker-launching create answers inside the same window the host's
-    /// `CREATE_TIMEOUT_MS` covers.
+    /// `read_response` with a worker-boot budget (the raw-create path's reader): every
+    /// line waits on the remaining wall budget, covering the host's `CREATE_TIMEOUT_MS`.
     fn read_response_slow(&mut self, id: &str) -> Value {
         let deadline = Instant::now() + Duration::from_secs(90);
         loop {
@@ -205,8 +187,7 @@ fn write_script(dir: &Path, answer: &str) -> PathBuf {
     script
 }
 
-/// Children registry bound to the running supervisor, with a parent identity
-/// rooted at `agent_dir`.
+/// Children registry bound to the running supervisor, with a parent identity rooted at `agent_dir`.
 fn children(socket: &Path, agent_dir: &Path, script: &Path, depth: u32) -> SupervisorChildSessions {
     let sessions = SupervisorChildSessions::new(
         Arc::new(SupervisorLink::new(socket.to_path_buf())),
@@ -228,6 +209,7 @@ fn children(socket: &Path, agent_dir: &Path, script: &Path, depth: u32) -> Super
         thinking: None,
         child_script: Some(script.to_string_lossy().to_string()),
     });
+    sessions.set_parent_session_name(Some("parent-name".to_string()));
     sessions
 }
 
@@ -250,11 +232,12 @@ fn spawn_request(name: &str, prompt: &str) -> RlmSpawnRequest {
         model: None,
         thinking: None,
         cell_source_code: None,
+        spawned_by_request_id: None,
     }
 }
 
-/// Spawn a child through the supervisor, observe it in both rosters, collect
-/// its answer, then delete it and watch the supervisor roster drop it.
+/// Spawn a child through the supervisor, observe it in both rosters, collect its answer,
+/// then delete it (both rosters drop it).
 #[tokio::test]
 async fn rlm_children_spawn_roster_collect_delete_end_to_end() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -285,9 +268,7 @@ async fn rlm_children_spawn_roster_collect_delete_end_to_end() {
         .join("parent-session-uuid")
         .join(&handle.rlm_child_id);
     assert_eq!(handle.session_dir, expected_dir.to_string_lossy());
-    // TS child-session layout: the child persists inside its per-child
-    // directory under the parent's session-artifacts tree, alongside the
-    // per-child display file the passive roster reads for hydration.
+    // Same layout, alongside the per-child display file the passive roster reads.
     let child_files: Vec<std::fs::DirEntry> = std::fs::read_dir(&expected_dir)
         .expect("child session dir")
         .filter_map(std::result::Result::ok)
@@ -314,7 +295,7 @@ async fn rlm_children_spawn_roster_collect_delete_end_to_end() {
         json!({ "provider": "scripted", "modelId": "faux-1" })
     );
     // The child session header records the recursion identity (TS parity:
-    // parentSession + rlmDepth on child sessions).
+    // parentSession + rlmDepth).
     let header: Value = {
         let content =
             std::fs::read_to_string(child_files[0].path()).expect("read child session file");
@@ -366,6 +347,45 @@ async fn rlm_children_spawn_roster_collect_delete_end_to_end() {
     assert_eq!(entry.session_name, "worker-a");
     assert_eq!(entry.label.as_deref(), Some("ship the lane"));
     assert!(entry.session_dir.ends_with(&handle.rlm_child_id));
+
+    // The kickoff row (TS `spawnMessage`): the task prompt lands as the
+    // parent-attributed `agent_message` custom row — never a user row —
+    // carrying the promised `[task from parent]` label, the raw prompt as
+    // `details.message`, `details.id "spawn:<child id>"`, and the
+    // delivery's parent/child endpoints.
+    let rows: Vec<Value> = std::fs::read_to_string(child_files[0].path())
+        .expect("read child session file")
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .collect();
+    let Some(kickoff) = rows
+        .iter()
+        .find(|row| row.get("type").and_then(Value::as_str) == Some("custom_message"))
+    else {
+        panic!("no custom_message row in the child file: {rows:?}");
+    };
+    assert_eq!(kickoff["customType"], "agent_message");
+    assert_eq!(kickoff["content"], "[task from parent]\n\nship the lane");
+    assert_eq!(
+        kickoff["details"],
+        json!({
+            "id": format!("spawn:{}", handle.rlm_child_id),
+            "message": "ship the lane",
+            "from": {
+                "activeSessionId": "parent-active-id",
+                "sessionId": "parent-session-uuid",
+                "sessionName": "parent-name",
+            },
+            "fromRelationship": "parent",
+        }),
+    );
+    // The kickoff is the child's only prompt: no user row exists.
+    assert!(
+        rows.iter()
+            .filter(|row| row.get("type").and_then(Value::as_str) == Some("message"))
+            .all(|row| row.pointer("/message/role").and_then(Value::as_str) != Some("user")),
+        "the kickoff left a user row: {rows:?}"
+    );
 
     // Collect: settled snapshot of the child, and the selector errors.
     let results = children
@@ -425,9 +445,8 @@ async fn rlm_children_spawn_roster_collect_delete_end_to_end() {
         "No direct RLM subagent matches \"worker-a\" in the current parent session"
     );
 
-    // TS #2388 F4: a just-deleted target resolves immediately to the
-    // settled cancelled envelope its delete receipt promised - by child id
-    // and by session name - without spending the timeout budget.
+    // TS #2388 F4: a just-deleted target resolves immediately to the settled cancelled
+    // envelope its delete receipt promised (by child id or name), without the timeout budget.
     let cancelled = children
         .collect(vec![handle.rlm_child_id.clone()], 0)
         .await
@@ -463,8 +482,7 @@ async fn rlm_children_spawn_roster_collect_delete_end_to_end() {
         "No direct RLM child matches \"ghost\" in the current parent session"
     );
 
-    // A reused name owns the selector again: the live respawn answers
-    // collect, never the deleted generation's cancelled envelope.
+    // A reused name owns the selector again: the live respawn answers, never the tombstone.
     let replacement = children
         .spawn(spawn_request("worker-a", "second shard"))
         .await
@@ -477,15 +495,10 @@ async fn rlm_children_spawn_roster_collect_delete_end_to_end() {
     assert_eq!(live.len(), 1);
     assert_eq!(live[0].rlm_child_id, replacement.rlm_child_id);
     assert_ne!(live[0].rlm_child_id, handle.rlm_child_id);
-    // The live respawn answers, never the deleted generation's envelope
-    // (the replacement may settle at any moment, but it is never the
-    // tombstone's cancellation).
+    // The live respawn answers, never the deleted generation's envelope.
     assert_ne!(live[0].status, "cancelled");
 }
 
-/// `rlm.create_session`: a resident depth-0 daemon session over the link,
-/// prompted, answering through its worker, and not part of the subagent
-/// roster.
 #[tokio::test]
 async fn rlm_create_session_spawns_a_prompted_depth_zero_session() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -559,8 +572,6 @@ async fn rlm_create_session_spawns_a_prompted_depth_zero_session() {
     });
 }
 
-/// The recursion bound: a parent at its depth limit fails spawns with the
-/// TS error, and depth-0-only `create_session` refuses from deeper sessions.
 #[tokio::test]
 async fn rlm_recursion_bound_is_enforced() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -595,13 +606,9 @@ async fn rlm_recursion_bound_is_enforced() {
     );
 }
 
-/// TS #2396's daemon-wide half (`createRlmSubagentRuntime`): the
-/// supervisor holds a subagent spawn's name under a reservation for the
-/// whole fresh-launch admission, so parallel same-name same-parent creates
-/// cannot both admit - exactly one create lands and the rest fail closed
-/// with the TS unavailability error before the durable ledger edge is
-/// appended. The reservation releases with the admission: once the winner
-/// is gone, the same name admits again.
+/// TS #2396's daemon-wide half: the supervisor holds a subagent spawn's name under a
+/// reservation for the whole fresh-launch admission; once the winner is gone, the name
+/// admits again.
 #[tokio::test]
 async fn parallel_same_name_subagent_creates_admit_exactly_one() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -614,8 +621,7 @@ async fn parallel_same_name_subagent_creates_admit_exactly_one() {
     let parent_file = agent_dir.join("parent.jsonl");
     let parent_file = parent_file.to_string_lossy().to_string();
 
-    // The raw create a worker's `rlm.spawn` routes: a scripted subagent
-    // child of one parent scope, with the name the reservations key on.
+    // The raw create a worker's `rlm.spawn` routes: a scripted subagent with the reserved name.
     let subagent_create = |child_id: &str| {
         let session_dir = agent_dir
             .join("session-artifacts")
@@ -649,12 +655,8 @@ async fn parallel_same_name_subagent_creates_admit_exactly_one() {
         })
     };
 
-    // Four parallel same-name creates of the same parent scope: commands
-    // on one connection are dispatched concurrently, so their responses
-    // arrive out of order (the losers fail at the reservation in
-    // milliseconds, the winner answers after its worker launch) - drain
-    // the connection until every id is answered instead of reading ids
-    // in sequence.
+    // Four parallel same-name creates of the same parent scope: responses arrive out of order
+    // (the losers fail in milliseconds) - drain until every id is answered.
     let ids = ["c1", "c2", "c3", "c4"];
     for id in ids {
         client.send_command(id, &subagent_create(&format!("sub-{id}")));
@@ -687,8 +689,6 @@ async fn parallel_same_name_subagent_creates_admit_exactly_one() {
     assert_eq!(successes.len(), 1, "exactly one same-name create admits");
     assert_eq!(failures, 3, "every racing create fails closed");
 
-    // The reservation released with the admission: once the winner is
-    // gone, the same name admits again.
     let winner = &successes[0];
     let active_id = winner["data"]["activeSessionId"]
         .as_str()
