@@ -316,7 +316,9 @@ def spawn_in_job(job: int, argv: list[str], cwd: str, env: dict[str, str]) -> Jo
         startup.StartupInfo.hStdOutput = startup.StartupInfo.hStdError = write_handle
         startup.lpAttributeList = ctypes.cast(attr_list, wintypes.LPVOID)
         # CreateProcessW may rewrite lpCommandLine in place: a writable buffer is mandatory.
-        cmdline = ctypes.create_unicode_buffer(subprocess.list2cmdline(argv))
+        # list2cmdline() only formats a string here; CreateProcessW below is invoked with
+        # shell=False semantics (no cmd.exe), so argv entries are never shell-interpreted.
+        cmdline = ctypes.create_unicode_buffer(subprocess.list2cmdline(argv))  # nosec B603
         # Sorted case-insensitively per CreateProcessW; the implicit terminator is the second NUL.
         env_block = ctypes.create_unicode_buffer(
             "\0".join(
