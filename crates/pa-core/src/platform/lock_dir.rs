@@ -40,6 +40,29 @@ fn held_by_this_process() -> &'static Mutex<std::collections::HashSet<PathBuf>> 
     HELD.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
 }
 
+/// The `flock`-unwitnessable signature: errnos that mean "this
+/// filesystem cannot carry a directory `flock` at all" - the NFS
+/// emulation's permission answer, the writable-fd requirement's
+/// directory/bad-descriptor answers, and the no-lock-support family.
+/// Each is an infrastructure answer, never a contention signal, so both
+/// witness sites degrade to the mtime-only protocol (proper-lockfile's
+/// own: it never flocks) instead of failing the acquisition.
+#[cfg(unix)]
+fn flock_unwitnessable(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::PermissionDenied
+        || matches!(
+            error.raw_os_error(),
+            Some(
+                libc::EISDIR
+                    | libc::EBADF
+                    | libc::EINVAL
+                    | libc::EOPNOTSUPP
+                    | libc::ENOSYS
+                    | libc::ENOTTY
+            )
+        )
+}
+
 /// The canonical registry key for a lock path: equivalent spellings of
 /// one directory (a symlinked component, macOS `/tmp` vs
 /// `/private/tmp`, a case-folded name) resolve to one key, so an aliased
@@ -625,18 +648,23 @@ impl LockDir {
                         io::ErrorKind::WouldBlock,
                         format!("Lock file is already being held: {}", path.display()),
                     )),
-                    // The NFS emulation signature: exclusive flock on
-                    // NFS is a client-side fcntl lock, and a fcntl write
-                    // lock needs a WRITABLE descriptor - a directory can
-                    // never be opened writable (EISDIR everywhere), so an
-                    // NFS-mounted registry cannot carry the witness at
-                    // all. Degrade to the witness-less protocol
-                    // (proper-lockfile's own: it never flocks, and its
-                    // mtime-only guard works on NFS) instead of failing
-                    // the whole acquisition.
-                    io::ErrorKind::PermissionDenied => {
+                    // The unwitnessable signature: an NFS-style
+                    // filesystem (exclusive flock is a client-side fcntl
+                    // lock there, and a fcntl write lock needs a WRITABLE
+                    // descriptor - a directory can never be opened
+                    // writable), or one that rejects directory flocks
+                    // outright (EISDIR/EBADF from the writable-fd
+                    // requirement, EINVAL/EOPNOTSUPP/ENOSYS/ENOTTY from
+                    // no-lock-support implementations) cannot carry the
+                    // witness at all. Degrade to the witness-less
+                    // protocol (proper-lockfile's own: it never flocks,
+                    // and its mtime-only guard works everywhere the stat
+                    // reads do) instead of failing the whole acquisition -
+                    // every supervisor boot, shutdown admission, and
+                    // update restart takes this registry guard.
+                    _ if flock_unwitnessable(&error) => {
                         tracing::warn!(
-                            "the directory lock cannot take an exclusive flock at {} (an NFS-style filesystem: the witness degrades to the mtime-only protocol)",
+                            "the directory lock cannot take an exclusive flock at {} (an unwitnessable filesystem: the witness degrades to the mtime-only protocol)",
                             path.display()
                         );
                         Ok(None)
@@ -1123,19 +1151,19 @@ impl LockDir {
                             format!("Lock file is already being held: {}", path.display()),
                         ));
                     }
-                    // The NFS emulation signature (an unwitnessable
-                    // filesystem - see [`LockDir::witness_fd`]): the flock
-                    // pin is impossible here, but the mtime-only claim
-                    // still runs its FULL re-validation below - the
+                    // The unwitnessable signature (see
+                    // [`LockDir::witness_fd`]): the flock pin is
+                    // impossible here, but the mtime-only claim still
+                    // runs its FULL re-validation below - the
                     // fd-vs-occupant identity check and the fd's own
                     // staleness re-judge are plain stat/mtime reads that
-                    // work on NFS (proper-lockfile's own re-validate is
-                    // the mtime check) - so the degraded claim is
-                    // re-validated exactly like the flocked one, only
-                    // unpinned.
-                    io::ErrorKind::PermissionDenied => {
+                    // work wherever the filesystem answers them
+                    // (proper-lockfile's own re-validate is the mtime
+                    // check) - so the degraded claim is re-validated
+                    // exactly like the flocked one, only unpinned.
+                    _ if flock_unwitnessable(&error) => {
                         tracing::warn!(
-                            "the directory lock cannot take an exclusive flock at {} (an NFS-style filesystem: the takeover claim degrades to the unpinned mtime-only re-validation)",
+                            "the directory lock cannot take an exclusive flock at {} (an unwitnessable filesystem: the takeover claim degrades to the unpinned mtime-only re-validation)",
                             path.display()
                         );
                     }
@@ -1570,6 +1598,37 @@ mod tests {
         drop(first);
         let _second = LockDir::acquire_at(&aliased, MIN_STALE)
             .expect("the dropped guard's path acquires cleanly through the alias");
+    }
+
+    /// The degrade set: every unwitnessable errno degrades the witness
+    /// to the mtime-only protocol (macroscope's finding: only EACCES did,
+    /// so an EISDIR/EBADF-style answer failed every registry-guarded boot
+    /// on such a filesystem outright), while contention (EWOULDBLOCK)
+    /// and genuine I/O errors never degrade.
+    #[test]
+    #[cfg(unix)]
+    fn the_unwitnessable_flock_errnos_degrade_but_contention_does_not() {
+        for code in [
+            libc::EACCES,
+            libc::EISDIR,
+            libc::EBADF,
+            libc::EINVAL,
+            libc::EOPNOTSUPP,
+            libc::ENOSYS,
+            libc::ENOTTY,
+        ] {
+            let error = io::Error::from_raw_os_error(code);
+            assert!(
+                flock_unwitnessable(&error),
+                "{code} must degrade to the mtime-only witness"
+            );
+        }
+        assert!(!flock_unwitnessable(&io::Error::from_raw_os_error(
+            libc::EWOULDBLOCK
+        )));
+        assert!(!flock_unwitnessable(&io::Error::from_raw_os_error(
+            libc::EIO
+        )));
     }
 
     #[test]
