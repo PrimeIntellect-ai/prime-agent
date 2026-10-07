@@ -242,11 +242,32 @@ async fn drive(
         // coordinator still never parses the roster. Removed at the end
         // of the run.
         if let Some(roster_path) = &roster_path {
+            // The backup is published ATOMICALLY (write beside, then
+            // rename) and its failure ABORTS the update before the stop:
+            // a partial backup could win over the intact original and the
+            // rollback would report completion without restoring sessions
+            // (macroscope's finding), and an update that cannot secure
+            // its own rollback insurance must not stop the daemon.
             let backup = rollback_roster_path(&options.status_path);
-            if let (Ok(bytes), Some(parent)) = (std::fs::read(roster_path), backup.parent()) {
-                let _ = std::fs::create_dir_all(parent);
-                let _ = std::fs::write(&backup, bytes);
-            }
+            let partial = {
+                let mut name = backup.file_name().unwrap_or_default().to_os_string();
+                name.push(".partial");
+                backup.with_file_name(name)
+            };
+            let insured = (|| -> Result<()> {
+                let bytes = std::fs::read(roster_path)?;
+                if let Some(parent) = backup.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(&partial, &bytes)?;
+                std::fs::rename(&partial, &backup)?;
+                Ok(())
+            })();
+            insured.map_err(|error| {
+                PhaseFailure::before_stop(format!(
+                    "the rollback's roster insurance could not be written: {error}"
+                ))
+            })?;
         }
         writer
             .lock()

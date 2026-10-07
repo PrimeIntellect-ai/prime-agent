@@ -394,6 +394,58 @@ mod tests {
         assert!(force_kill_daemon(pid));
     }
 
+    /// The crash-oracle rollback kill (cursor's finding: the contract was
+    /// untested): a matching start id confirms the death, a MISMATCHED
+    /// start id never signals (a reused pid is never killed), and a dead
+    /// pid is reported dead without a signal.
+    #[test]
+    fn force_kill_identity_crash_kills_only_the_pinned_identity() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn a sleep child");
+        let pid = child.id();
+        let start_id = process_start_id(pid);
+        // A wrong start id is a reused pid: never signaled, the child
+        // lives.
+        assert!(
+            !force_kill_identity_crash(pid, Some("bogus-start-id")),
+            "a mismatched start id is never killed"
+        );
+        let alive = child.try_wait().expect("the child is not reaped").is_none();
+        assert!(alive, "the un-killable-identity child survives");
+        // The pinned identity dies.
+        assert!(
+            force_kill_identity_crash(pid, start_id.as_deref()),
+            "the pinned identity is killed and its death confirmed"
+        );
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn force_kill_identity_crash_signals_nothing_for_a_dead_pid() {
+        let mut child = std::process::Command::new("true")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn a true child");
+        let pid = child.id();
+        let start_id = process_start_id(pid);
+        let _ = child.wait();
+        // An already-dead pid is not ours to kill: false, never signaled -
+        // the caller proceeds without the redundant exit wait.
+        assert!(
+            !force_kill_identity_crash(pid, start_id.as_deref()),
+            "a dead pid is nothing to kill, never signaled"
+        );
+        assert!(
+            !force_kill_identity_crash(pid, Some("whatever")),
+            "the stale start id matches nothing"
+        );
+    }
+
     #[test]
     fn terminate_verified_listener_confirms_the_death_of_a_live_listener() {
         let mut child = std::process::Command::new("sleep")
