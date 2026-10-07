@@ -79,9 +79,7 @@ Every failure raises `computer_use.errors.ComputerUseError` with a `code`:
 |---|---|---|
 | `APP_NOT_ALLOWED` | App absent from the allowlist, blocked, or system-denied — the reason text says which. | Absent: tell the user to add the bundle id to `apps.allowed` in `~/.prime/agent/settings/computer-use.toml` (never edit it yourself). Blocked: adding it to `apps.allowed` does NOT help — the user must remove it from `apps.blocked` first. System-denied (loginwindow, screensaver, OS-auth dialogs): always refused, there is no user override. |
 | `PERMISSIONS_NOT_GRANTED` | A required macOS grant is missing, or the Accessibility grant was revoked mid-session. | Run `permissions_status()`, relay the `help` lines, wait for the user to grant (see [permissions.md](permissions.md)); a mid-session revoke needs the user to re-grant and Prime Agent restarted, then re-bind with `get_app`. |
-| `PERMISSIONS_PENDING` | A grant is mid-flight. | Ask the user to finish granting, then re-check with `permissions_status()`. |
 | `SCREEN_LOCKED` | The screen is locked. | Stop and ask the user to unlock — the skill never unlocks. After unlocking, re-observe; indices are stale. |
-| `USER_STOPPED` | The user stopped or intervened. | Stop the task and ask how to proceed; do not immediately retry. |
 | `ELEMENT_STALE` | The index belongs to an old snapshot. | Call `get_ax_state()` and act on fresh indices; never retry the same index. |
 | `AMBIGUOUS_APP` | The name matches several apps. | Call `list_apps()` and bind by the exact bundle id. |
 | `APP_NOT_RUNNING` | The target is not running and could not be attached. | Check the `running` flag via `list_apps()`; have the user start the app, or bind by bundle id or path. |
@@ -90,6 +88,11 @@ Every failure raises `computer_use.errors.ComputerUseError` with a `code`:
 | `INJECTION_FAILED` | Posting the input event failed. | Re-observe, then retry once with fresh targeting; if it repeats, report it. |
 | `TRANSPORT_ERROR` | Backend or transport failure — including no backend on this platform. | Confirm the platform is supported; re-observe; report persistent failures to the user. |
 | `INVALID_ARGUMENT` | Malformed argument: bad chord, unknown direction, bad coordinates, wrong index type. | Fix the call to match the signatures above. |
+
+`PERMISSIONS_PENDING` and `USER_STOPPED` stay frozen in the code table for
+contract stability, but this version never raises them: the grant probes
+never prompt (so no grant is observed mid-flight) and there is no
+user-stop detection to report. Do not wait on either.
 
 ## Policy files
 

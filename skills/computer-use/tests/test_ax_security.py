@@ -8,6 +8,7 @@ display, TCC grant, real app, or live framework is touched.
 
 from __future__ import annotations
 
+import contextlib
 import time
 import types
 import unittest
@@ -119,6 +120,89 @@ class MessagingTimeoutTests(unittest.TestCase):
         with mock.patch.object(ax, "_require_mac", lambda: types.SimpleNamespace(app_services=app)):
             self.assertEqual(ax._window_fingerprint(4242)[:2], ("Main", 1))
         self.assertTrue(app.timeout_refs)
+
+
+class HungAppServices(FakeAxValueServices):
+    """A hung app: every AX read burns its whole messaging timeout.
+
+    A fake clock replaces ax.time, so the burns advance time instead of
+    wall time and the budget math stays deterministic.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.clock = 1000.0
+        self.last_timeout: float | None = None
+        self.focused = object()
+
+    def AXUIElementSetMessagingTimeout(self, element: Any, seconds: float) -> None:
+        self.timeout_refs.append(element)
+        self.last_timeout = seconds
+
+    def AXUIElementCopyAttributeValue(self, element: Any, attribute: str, unused: Any) -> Any:
+        if self.last_timeout is not None:
+            self.clock += self.last_timeout
+        self.last_timeout = None
+        return super().AXUIElementCopyAttributeValue(element, attribute, unused)
+
+    def patch(self, extra: list[tuple[Any, Any, Any]] | None = None) -> contextlib.ExitStack:
+        stack = contextlib.ExitStack()
+        stack.enter_context(
+            mock.patch.object(ax, "_require_mac", lambda: types.SimpleNamespace(app_services=self))
+        )
+        stack.enter_context(mock.patch.object(ax, "time", types.SimpleNamespace(monotonic=lambda: self.clock)))
+        for module, name, value in extra or []:
+            stack.enter_context(mock.patch.object(module, name, value))
+        return stack
+
+
+class PostWalkHangServices(HungAppServices):
+    """A responsive walk whose window-level post-walk reads hang.
+
+    Only the observe tail's window reads burn: the title, geometry,
+    focused-element, and window-id reads of the window itself.
+    """
+
+    _HANG_ATTRIBUTES = frozenset({"AXTitle", "AXPosition", "AXSize", "AXFocusedUIElement", "_AXWindowID"})
+
+    def AXUIElementCopyAttributeValue(self, element: Any, attribute: str, unused: Any) -> Any:
+        if element is self and attribute in self._HANG_ATTRIBUTES:
+            if self.last_timeout is not None:
+                self.clock += self.last_timeout
+            self.last_timeout = None
+            return super().AXUIElementCopyAttributeValue(element, attribute, unused)
+        return super(HungAppServices, self).AXUIElementCopyAttributeValue(element, attribute, unused)
+
+
+class OperationBudgetTests(unittest.TestCase):
+    """One operation's timeout is one total budget, not a per-read timeout."""
+
+    def test_fingerprint_spends_one_budget_not_one_per_read(self) -> None:
+        app = HungAppServices()
+        with app.patch():
+            fingerprint = ax._window_fingerprint(4242, timeout_seconds=0.5)
+        elapsed = app.clock - 1000.0
+        self.assertIsNotNone(fingerprint)
+        self.assertLessEqual(elapsed, 0.7, "the fingerprint must fit its timeout, not timeout x reads")
+
+    def test_window_rect_shares_one_budget_between_position_and_size(self) -> None:
+        app = HungAppServices()
+        with app.patch():
+            rect = ax._window_rect(app, app, timeout_seconds=0.5)
+        elapsed = app.clock - 1000.0
+        self.assertIsNotNone(rect)
+        self.assertLessEqual(elapsed, 0.6, "position and size read within one timeout, not two")
+
+    def test_observe_post_walk_reads_share_one_budget(self) -> None:
+        app = PostWalkHangServices()
+        with app.patch():
+            observation = ax._observe(4242)
+        elapsed = app.clock - 1000.0
+        self.assertLessEqual(
+            elapsed,
+            ax._MAX_OBSERVE_SECONDS + 0.4,
+            "the post-walk reads draw on one remaining budget, not one per read",
+        )
 
 
 class ObserveDeadlineTests(unittest.TestCase):

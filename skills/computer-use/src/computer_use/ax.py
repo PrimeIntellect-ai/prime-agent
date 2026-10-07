@@ -121,14 +121,19 @@ def _observe(pid: int) -> Observation:
     stopped: list[bool] = []
     deadline = time.monotonic() + _MAX_OBSERVE_SECONDS
     _walk(app_services, window, 1, tree, refs, deadline=deadline, stopped=stopped)
-    remaining = min(_MESSAGING_TIMEOUT_SECONDS, max(deadline - time.monotonic(), 0.05))
+    # Every post-walk read draws on the same deadline, computing its own
+    # slice of the remaining budget: one shared timeout here would let the
+    # title, rect, focus, and window-id reads each spend it in full.
+    def budget() -> float:
+        return min(_MESSAGING_TIMEOUT_SECONDS, _remaining_seconds(deadline))
+
     return Observation(
-        window_title=_cap(_text(_copy_value(app_services, window, "AXTitle", remaining))),
+        window_title=_cap(_text(_copy_value(app_services, window, "AXTitle", budget()))),
         tree=tree,
         refs=refs,
-        window_rect=_window_rect(app_services, window, remaining),
-        focused_index=_focused_index(app_services, app_element, refs, remaining),
-        window_id=_window_id(app_services, window, remaining),
+        window_rect=_window_rect(app_services, window, budget()),
+        focused_index=_focused_index(app_services, app_element, refs, budget()),
+        window_id=_window_id(app_services, window, budget()),
         truncated=bool(stopped) or time.monotonic() > deadline,
     )
 
@@ -214,6 +219,16 @@ def _read_attribute(app_services: Any, element: Any, attribute: str, timeout_sec
     return True, _text(value)
 
 
+def _remaining_seconds(deadline: float) -> float:
+    """The time left before one operation's deadline, floored at 0.05.
+
+    The floor is the smallest messaging timeout a spent budget may pass:
+    AXUIElementSetMessagingTimeout treats zero as the unbounded default, so
+    an exhausted budget must still bound each remaining read.
+    """
+    return max(deadline - time.monotonic(), 0.05)
+
+
 def _window_fingerprint(pid: int, timeout_seconds: float | None = None) -> tuple[Any, ...] | None:
     """Read a cheap live identity of the focused window and its focused element.
 
@@ -221,32 +236,36 @@ def _window_fingerprint(pid: int, timeout_seconds: float | None = None) -> tuple
     the app processes events and stops changing once the UI is settled. The
     focused element's role, subrole, and (for non-secure fields) value head
     ride along so ordinary edits inside one control settle too, and a value
-    is never read from a secure field. timeout_seconds bounds each AX read
-    so a hung app cannot outlast the settle budget. Returns None when the
-    focused window cannot be read.
+    is never read from a secure field. timeout_seconds is one total budget:
+    every read shrinks it, and the read sequence stops once the budget is
+    spent, so a hung app cannot spend reads x timeout and outlast the settle
+    cap. Returns None when the focused window cannot be read.
     """
     app_services = _require_mac().app_services
     timeout = _MESSAGING_TIMEOUT_SECONDS if timeout_seconds is None else max(timeout_seconds, 0.05)
+    deadline = time.monotonic() + timeout
     app_element = app_services.AXUIElementCreateApplication(pid)
     _set_messaging_timeout(app_services, app_element, timeout)
-    window = _copy_value(app_services, app_element, "AXFocusedWindow", timeout)
+    window = _copy_value(app_services, app_element, "AXFocusedWindow", _remaining_seconds(deadline))
     if window is None:
         return None
-    title = _text(_copy_value(app_services, window, "AXTitle", timeout))
-    children = _copy_value(app_services, window, "AXChildren", timeout)
+    title = _text(_copy_value(app_services, window, "AXTitle", _remaining_seconds(deadline)))
+    children = _copy_value(app_services, window, "AXChildren", _remaining_seconds(deadline))
     try:
         count = len(children) if children is not None else 0
     except TypeError:
         count = 0
-    focused = _copy_value(app_services, app_element, "AXFocusedUIElement", timeout)
+    if time.monotonic() >= deadline:
+        return (title, count, None, None, None)
+    focused = _copy_value(app_services, app_element, "AXFocusedUIElement", _remaining_seconds(deadline))
     if focused is None:
         return (title, count, None, None, None)
-    role_ok, role = _read_attribute(app_services, focused, "AXRole", timeout)
-    subrole_ok, subrole = _read_attribute(app_services, focused, "AXSubrole", timeout)
+    role_ok, role = _read_attribute(app_services, focused, "AXRole", _remaining_seconds(deadline))
+    subrole_ok, subrole = _read_attribute(app_services, focused, "AXSubrole", _remaining_seconds(deadline))
     if not role_ok or not subrole_ok or (role == _SECURE_ROLE and subrole == _SECURE_SUBROLE):
         value_head = ""  # an unverifiable or secure field's value is never read
     else:
-        value = _copy_value(app_services, focused, "AXValue", timeout)
+        value = _copy_value(app_services, focused, "AXValue", _remaining_seconds(deadline))
         value_head = _cap(_text(value)) if value is not None else None
         if value_head is not None:
             value_head = value_head[:_FINGERPRINT_VALUE_CHARS]
@@ -487,9 +506,15 @@ def _window_id(app_services: Any, window: Any, timeout_seconds: float | None = N
 
 
 def _window_rect(app_services: Any, window: Any, timeout_seconds: float | None = None) -> tuple[float, float, float, float] | None:
-    """Read the window's global position and size as (x, y, width, height)."""
-    position = _point(app_services, _copy_value(app_services, window, "AXPosition", timeout_seconds))
-    size = _point(app_services, _copy_value(app_services, window, "AXSize", timeout_seconds))
+    """Read the window's global position and size as (x, y, width, height).
+
+    timeout_seconds is one total budget for both reads: the size read gets
+    whatever the position read left of it.
+    """
+    budget = _MESSAGING_TIMEOUT_SECONDS if timeout_seconds is None else max(timeout_seconds, 0.05)
+    deadline = time.monotonic() + budget
+    position = _point(app_services, _copy_value(app_services, window, "AXPosition", _remaining_seconds(deadline)))
+    size = _point(app_services, _copy_value(app_services, window, "AXSize", _remaining_seconds(deadline)))
     if position is None or size is None:
         return None
     return (position[0], position[1], size[0], size[1])
