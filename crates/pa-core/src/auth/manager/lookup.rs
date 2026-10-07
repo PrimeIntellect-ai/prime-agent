@@ -310,7 +310,19 @@ impl AuthStorage {
                 return Err(format!("{provider_id} has no forced-refresh support"));
             }
             Some(Err(reason)) => {
+                // A peer's forced refresh may have won the single-use
+                // token race and landed a credential this load never
+                // saw: it settles the recovery without surfacing the
+                // rejection this attempt got.
                 self.reload();
+                if let Some(credential) = self.data.credential(provider_id).filter(|credential| {
+                    matches!(
+                        credential,
+                        AuthCredential::Oauth { access, .. } if access != loaded_access
+                    )
+                }) {
+                    return Ok(credential);
+                }
                 return Err(reason);
             }
             Some(Ok(new_credential)) => new_credential,
