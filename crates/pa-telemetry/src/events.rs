@@ -212,6 +212,23 @@ impl AgentInstallationStage {
     }
 }
 
+/// `update_homebrew_refusal`: an installer update rejected because Homebrew
+/// owns the executable. Only the fixed formula/cask layout kind is recorded.
+#[derive(Debug, Clone, Copy)]
+pub struct UpdateHomebrewRefusal {
+    /// `formula` or `cask`; never the executable path.
+    pub kind: &'static str,
+}
+
+impl UpdateHomebrewRefusal {
+    /// Record this refusal on the shared lifecycle telemetry client.
+    pub fn track(&self, client: &TelemetryClient) {
+        let mut properties = Properties::new();
+        properties.set("kind", Value::from(self.kind));
+        client.track("update_homebrew_refusal", properties);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

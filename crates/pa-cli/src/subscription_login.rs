@@ -151,6 +151,7 @@ fn store_anthropic_login(
             client_id: None,
             resource: None,
             issuer: None,
+            audience_mode: None,
         },
     );
     if let Some(error) = auth.drain_errors().pop() {
@@ -197,6 +198,7 @@ pub(crate) async fn run_github_copilot_login(
             client_id: None,
             resource: None,
             issuer: None,
+            audience_mode: None,
         },
     );
     if let Some(error) = auth.drain_errors().pop() {
@@ -241,6 +243,7 @@ pub(crate) async fn run_xai_login(
             client_id: None,
             resource: None,
             issuer: None,
+            audience_mode: None,
         },
     );
     if let Some(error) = auth.drain_errors().pop() {

@@ -122,6 +122,7 @@
 #   PRIME_AGENT_RUST_PREFIX       install prefix (default: ~/.local; the
 #                                  launcher lands at $PREFIX/bin/prime-agent,
 #                                  the payload at $PREFIX/share/prime-agent/)
+#   PRIME_AGENT_UV_BIN_DIR         uv install dir (default: ~/.local/bin)
 #
 # THE CHANNEL (the R2 form, the TS install.sh parity): the script reads
 # the channel pointer (<base>/stable or <base>/beta) for the version,
@@ -211,6 +212,7 @@ Environment:
                                  pointer read; the manifest + SHA256SUMS
                                  checks still run)
   PRIME_AGENT_RUST_PREFIX        install prefix (~/.local by default)
+  PRIME_AGENT_UV_BIN_DIR         uv install dir (~/.local/bin by default)
   PRIME_AGENT_RUST_VERBOSE       1 = the --verbose output mode
   PRIME_AGENT_ROLLBACK_CHECK     1 = with --rollback, print the resolved
                                  rollback source and exit without touching
@@ -991,15 +993,78 @@ physical_path() {
 }
 uv_store_root="$(physical_path "${HOME}/.prime/agent")"
 uv_default_root="$(physical_path "${HOME}/.local")"
-uv_bin_dir="${HOME}/.local/bin"
+# The store-alias detection runs FIRST so the discovery guards below can
+# read it in every branch (a uv found INSIDE the shared store must never
+# carry uv's own python writes back into it).
 uv_under_store="no"
 case "${uv_default_root}/" in
   "${uv_store_root}/"*) uv_under_store="yes" ;;
 esac
-if [ "$uv_under_store" = "yes" ]; then
-  uv_bin_dir="${PREFIX}/bin"
-  say "uv target: ${HOME}/.local resolves inside the shared session store;"
-  say "  uv installs payload-adjacent at ${uv_bin_dir} instead"
+# THE PLATFORM EXECUTABLE NAME (the reviewer's finding): the Git Bash
+# route probes real Windows files - uv.exe, not uv.
+uv_name="uv"
+if [ "$WINDOWS" = "yes" ]; then uv_name="uv.exe"; fi
+# The PATH scan's candidate names match the child's own executable
+# search (ensure_uv): the bare name first, then on Windows the SUPPORTED
+# PATHEXT entries in PATHEXT order - the defaults only when PATHEXT
+# names none.
+uv_path_candidates="uv"
+if [ "$WINDOWS" = "yes" ]; then
+  # PATHEXT entries are parsed as literal semicolon-delimited strings with
+  # END-ONLY trimming (the child's own parse: whitespace inside an entry
+  # keeps it unsupported), lowercased, filtered to the supported set in
+  # PATHEXT order; the defaults apply only when PATHEXT names none.
+  uv_path_exts=""
+  uv_pathtext_rest="${PATHEXT:-}"
+  while [ -n "$uv_pathtext_rest" ]; do
+    uv_pathtext_entry="${uv_pathtext_rest%%;*}"
+    if [ "$uv_pathtext_entry" = "$uv_pathtext_rest" ]; then
+      uv_pathtext_rest=""
+    else
+      uv_pathtext_rest="${uv_pathtext_rest#*;}"
+    fi
+    uv_pathtext_entry="${uv_pathtext_entry#"${uv_pathtext_entry%%[![:space:]]*}"}"
+    uv_pathtext_entry="${uv_pathtext_entry%"${uv_pathtext_entry##*[![:space:]]}"}"
+    uv_pathtext_entry="$(printf '%s' "$uv_pathtext_entry" | tr 'A-Z' 'a-z')"
+    case "$uv_pathtext_entry" in
+      .com|.exe|.bat|.cmd) uv_path_exts="$uv_path_exts $uv_pathtext_entry" ;;
+    esac
+  done
+  [ -n "$uv_path_exts" ] || uv_path_exts=" .com .exe .bat .cmd"
+  for uv_path_ext in $uv_path_exts; do
+    uv_path_candidates="$uv_path_candidates uv$uv_path_ext"
+  done
+fi
+# THE UV TARGET KNOB (the ps1's own PRIME_AGENT_UV_BIN_DIR): an operator-
+# set dir wins (a packaged install keeps uv inside its own tree, the e2e
+# harnesses point it at their scratch dir so a run never touches the
+# shared ~/.local/bin). The Windows C:\ spelling reaches this script
+# through the env - it normalizes exactly like PRIME_AGENT_RUST_PREFIX
+# (cygpath); a POSIX spelling passes through untouched. A RELATIVE knob
+# is refused (the reviewer's finding): a relative target would ride PATH
+# guidance into every later shell, which resolves it from its own working
+# directory - an absolute target is the only honest contract.
+if [ -n "${PRIME_AGENT_UV_BIN_DIR:-}" ]; then
+  uv_bin_dir="${PRIME_AGENT_UV_BIN_DIR}"
+  if [ "$WINDOWS" = "yes" ] && command -v cygpath >/dev/null 2>&1; then
+    uv_bin_dir="$(cygpath -u "$uv_bin_dir")" || die "PRIME_AGENT_UV_BIN_DIR could not be resolved to a POSIX path: ${PRIME_AGENT_UV_BIN_DIR}"
+  fi
+  case "$uv_bin_dir" in
+    /*) ;;
+    *) die "PRIME_AGENT_UV_BIN_DIR must be an absolute path: ${PRIME_AGENT_UV_BIN_DIR}" ;;
+  esac
+  # THE PATH SEPARATOR (the reviewer's finding): a target containing a
+  # colon would corrupt every PATH export and prepend that carries it.
+  case "$uv_bin_dir" in
+    *:*) die "PRIME_AGENT_UV_BIN_DIR must not contain a colon: ${PRIME_AGENT_UV_BIN_DIR}" ;;
+  esac
+else
+  uv_bin_dir="${HOME}/.local/bin"
+  if [ "$uv_under_store" = "yes" ]; then
+    uv_bin_dir="${PREFIX}/bin"
+    say "uv target: ${HOME}/.local resolves inside the shared session store;"
+    say "  uv installs payload-adjacent at ${uv_bin_dir} instead"
+  fi
 fi
 # THE FALLBACK'S OWN GUARD (the store guard cannot cover this write: the
 # astral install runs BEFORE the guard does): the computed target must
@@ -1022,12 +1087,64 @@ if [ "$uv_target_unsafe" = "yes" ]; then
   note "  here — the store is never written by this installer"
   uv_bin_dir=""
 fi
+# A REAL EXECUTABLE ON PATH (the reviewer's findings): a bare command -v
+# also reports exported shell FUNCTIONS (BASH_FUNC-style imports), and its
+# bare-name output can even hit a non-executable decoy file in the cwd -
+# neither is resolvable by a child process. So the check scans the PATH
+# entries itself for an EXECUTABLE file (with the platform's uv_name) and
+# never consults the shell's own function/alias resolution.
+uv_on_path() {
+  # The PATH split is PARAMETER EXPANSION ALONE (the reviewer's finding):
+  # an unquoted for-loop word-split GLOB-expands a PATH entry like
+  # /tmp/glob-* into a different directory the child never searches - a
+  # literal split cannot glob.
+  # An UNSET PATH is distinct from a SET-EMPTY one: the child resolves
+  # NOTHING without a PATH (no match, and no set -u abort - the uv
+  # download/system-Python fallback below continues), while a set-empty
+  # PATH resolves the cwd. The trailing sentinel colon then guarantees
+  # EVERY component its own iteration - a trailing or sole EMPTY
+  # component resolves as the cwd for the child.
+  if [ -z "${PATH+x}" ]; then
+    return 1
+  fi
+  uv_on_path_rest="${PATH}:"
+  while [ -n "$uv_on_path_rest" ]; do
+    uv_on_path_entry="${uv_on_path_rest%%:*}"
+    if [ "$uv_on_path_entry" = "$uv_on_path_rest" ]; then
+      uv_on_path_rest=""
+    else
+      uv_on_path_rest="${uv_on_path_rest#*:}"
+    fi
+    # An EMPTY component means the CURRENT DIRECTORY in the child's PATH
+    # resolution semantics - the scan searches it, never skips it.
+    [ -n "$uv_on_path_entry" ] || uv_on_path_entry="."
+    # Within one PATH entry the scan iterates the candidate names in the
+    # child's own order; an executable regular FILE wins.
+    for uv_on_path_name in $uv_path_candidates; do
+      [ -f "${uv_on_path_entry}/${uv_on_path_name}" ] || continue
+      [ -x "${uv_on_path_entry}/${uv_on_path_name}" ] || continue
+      uv_on_path_bin="${uv_on_path_entry}/${uv_on_path_name}"
+      return 0
+    done
+  done
+  return 1
+}
 uv_bin=""
 python_step="no"
-if command -v uv >/dev/null 2>&1; then
-  uv_bin="$(command -v uv)"
-elif [ -x "${uv_bin_dir}/uv" ]; then
-  uv_bin="${uv_bin_dir}/uv"
+if uv_on_path; then
+  uv_bin="$uv_on_path_bin"
+elif [ -x "${uv_bin_dir}/${uv_name}" ]; then
+  uv_bin="${uv_bin_dir}/${uv_name}"
+elif [ -x "${HOME}/.local/bin/${uv_name}" ] && [ "$uv_under_store" = "no" ]; then
+  # THE CANONICAL-LOCATION FALLBACK (the reviewer's finding): the knob
+  # redirects the INSTALL target, not the discovery - a usable uv at the
+  # canonical ~/.local/bin still serves this install (no duplicate
+  # download into the knob's dir). THE STORE-ALIAS GUARD (the reviewer's
+  # finding): under the ~/.local-alias-into-the-store shape that uv IS
+  # inside the shared store - selecting it would carry uv's own python
+  # writes back into the store, so the fallback refuses it and the flow
+  # installs payload-adjacent instead.
+  uv_bin="${HOME}/.local/bin/${uv_name}"
 else
   # The fetch and the script run are checked SEPARATELY: a plain
   # `curl | sh` pipeline reports the script's status, so a dead network
@@ -1054,8 +1171,8 @@ else
           https://astral.sh/uv/install.sh)" \
        && printf '%s\n' "$uv_install_out" \
           | env -u UV_UNMANAGED_INSTALL UV_INSTALL_DIR="$uv_bin_dir" sh >/dev/null 2>&1 \
-       && [ -x "${uv_bin_dir}/uv" ]; then
-      uv_bin="${uv_bin_dir}/uv"
+       && [ -x "${uv_bin_dir}/${uv_name}" ]; then
+      uv_bin="${uv_bin_dir}/${uv_name}"
     else
       say "the uv install failed; falling back to a system python3"
     fi
@@ -2881,12 +2998,28 @@ fi
 # store-alias fallback) is invisible to the launcher unless the prefix's
 # bin dir rides PATH — the pre-warm's child inherits this PATH, and the
 # profile note below tells the user to make it permanent.
-if [ -n "$uv_bin_dir" ] && [ "$uv_bin_dir" != "${HOME}/.local/bin" ]; then
-  PATH="${uv_bin_dir}:${PATH}"
+# THE INCOMING PATH (the reviewer's finding): the persistent-PATH guidance
+# near the end of this script must describe the user's NEXT session, never
+# this process's temporary prepend - so the pre-warm fix below captures the
+# incoming PATH first and the guidance compares against that.
+incoming_path="${PATH:-}"
+# THE GUARD (the reviewer's finding): the prepend runs only when no uv
+# already answers on PATH - a working PATH uv is never shadowed by a stale
+# target file - and it serves the uv at the target (the product's ensure_uv
+# does not know the knob's dir).
+if ! uv_on_path && [ -n "$uv_bin_dir" ] && [ "$uv_bin_dir" != "${HOME}/.local/bin" ]; then
+  # An unset PATH must not become a trailing colon (that would expose the
+  # cwd to the child's PATH search): the prepend sets the PATH outright.
+  if [ -z "${PATH+x}" ]; then
+    PATH="$uv_bin_dir"
+  else
+    PATH="${uv_bin_dir}:${PATH}"
+  fi
   export PATH
 fi
-if command -v uv >/dev/null 2>&1 \
-   || { [ -n "$uv_bin_dir" ] && [ -x "${uv_bin_dir}/uv" ]; }; then
+if uv_on_path \
+   || { [ -n "$uv_bin_dir" ] && [ -x "${uv_bin_dir}/${uv_name}" ]; } \
+   || { [ "$uv_under_store" = "no" ] && [ -x "${HOME}/.local/bin/${uv_name}" ]; }; then
   say "uv found (the kernel venv's package manager)"
 else
   if [ -n "$uv_bin_dir" ]; then
@@ -2909,11 +3042,11 @@ else
           https://astral.sh/uv/install.sh)" \
      && printf '%s\n' "$curl_out" \
         | env -u UV_UNMANAGED_INSTALL UV_INSTALL_DIR="$uv_bin_dir" sh >&3 2>&1; then
-    if [ -x "${uv_bin_dir}/uv" ]; then
+    if [ -x "${uv_bin_dir}/${uv_name}" ]; then
       step_ok "uv installed"
     else
       step_fail "Installing uv"
-      note "! The uv installer reported success but ${uv_bin_dir}/uv is missing; the"
+      note "! The uv installer reported success but ${uv_bin_dir}/${uv_name} is missing; the"
       note "  first session may need to install uv itself."
     fi
   else
@@ -2923,8 +3056,14 @@ else
     todo "curl -LsSf https://astral.sh/uv/install.sh | sh"
   fi
 fi
-if command -v uv >/dev/null 2>&1 \
-   || { [ -n "$uv_bin_dir" ] && [ -x "${uv_bin_dir}/uv" ]; }; then
+# THE PRE-WARM GATE (the reviewer's finding): it must agree with the
+# 'uv found' gate above - a default-location uv must actually WARM the
+# kernel, not only be reported found (the product's ensure_uv finds
+# ~/.local/bin/uv by itself), and never in the store-alias shape (the
+# store is never written from this installer).
+if uv_on_path \
+   || { [ -n "$uv_bin_dir" ] && [ -x "${uv_bin_dir}/${uv_name}" ]; } \
+   || { [ "$uv_under_store" = "no" ] && [ -x "${HOME}/.local/bin/${uv_name}" ]; }; then
   step_start "Preparing the Python kernel"
   if bootstrap_out="$("$launcher" --prime-agent-bootstrap 2>&1)"; then
     step_ok "Kernel ready"
@@ -3020,47 +3159,62 @@ fi
 
 # --- PATH check (warn, not fail) ---------------------------------------------------
 # The installer never edits a shell profile: it prints the one line that
-# does it for the user's shell (from $SHELL) and reloads it.
-case ":$PATH:" in
-  *":${bin_dir}:"*) ;;
-  *)
-    case "$bin_dir" in
-      "$HOME"/*) path_expr="\$HOME${bin_dir#"$HOME"}" ;;
-      *) path_expr="$bin_dir" ;;
-    esac
-    printf '\n' >&2
-    case "${SHELL:-}" in
-      */zsh)
-        note "! $(tilde "$bin_dir") is not on your PATH. Add it and reload your shell:"
-        todo "echo 'export PATH=\"${path_expr}:\$PATH\"' >> ~/.zshrc && source ~/.zshrc"
-        ;;
-      */bash)
-        # The tilde is printed for the user's shell to expand.
-        # shellcheck disable=SC2088
-        bash_profile="~/.bashrc"
-        # shellcheck disable=SC2088
-        if [ "$OS" = Darwin ]; then bash_profile="~/.bash_profile"; fi
-        note "! $(tilde "$bin_dir") is not on your PATH. Add it and reload your shell:"
-        todo "echo 'export PATH=\"${path_expr}:\$PATH\"' >> ${bash_profile} && source ${bash_profile}"
-        ;;
-      */fish)
-        note "! $(tilde "$bin_dir") is not on your PATH. Add it:"
-        todo "fish_add_path $(tilde "$bin_dir")"
-        ;;
-      *)
-        note "! $(tilde "$bin_dir") is not on your PATH. Add this line to your shell profile"
-        note "  and open a new terminal:"
-        todo "export PATH=\"${path_expr}:\$PATH\""
-        ;;
-    esac
-    if [ "$WINDOWS" = "yes" ]; then
-      # The user PATH takes the Windows spelling (C:\...), not the MSYS one.
-      win_bin_dir="$bin_dir"
-      if command -v cygpath >/dev/null 2>&1; then
-        win_bin_dir="$(cygpath -w "$bin_dir" 2>/dev/null)" || win_bin_dir="$bin_dir"
-      fi
-      note "! For PowerShell and cmd, add it to your user PATH and open a new terminal:"
-      todo "[Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path','User') + ';${win_bin_dir}', 'User')"
+# does it for the user's shell (from $SHELL) and reloads it. THE CUSTOM UV
+# TARGET joins the check (the reviewer's finding: a documented install
+# target must stay discoverable once the installer exits - the product's
+# own ensure_uv searches PATH and ~/.local/bin only; the store-alias
+# fallback already points at the launcher's own bin dir, which the first
+# check covers).
+path_check_note() {
+  # The guidance compares against the INCOMING PATH (a fresh session's
+  # view): this script's own temporary pre-warm prepend must never
+  # suppress the persistent-PATH guidance for a dir the user still needs.
+  case ":$incoming_path:" in
+    *":$1:"*) return 0 ;;
+  esac
+  case "$1" in
+    "$HOME"/*) path_expr="\$HOME${1#"$HOME"}" ;;
+    *) path_expr="$1" ;;
+  esac
+  printf '\n' >&2
+  case "${SHELL:-}" in
+    */zsh)
+      note "! $(tilde "$1") is not on your PATH. Add it and reload your shell:"
+      todo "echo 'export PATH=\"${path_expr}:\$PATH\"' >> ~/.zshrc && source ~/.zshrc"
+      ;;
+    */bash)
+      # The tilde is printed for the user's shell to expand.
+      # shellcheck disable=SC2088
+      bash_profile="~/.bashrc"
+      # shellcheck disable=SC2088
+      if [ "$OS" = Darwin ]; then bash_profile="~/.bash_profile"; fi
+      note "! $(tilde "$1") is not on your PATH. Add it and reload your shell:"
+      todo "echo 'export PATH=\"${path_expr}:\$PATH\"' >> ${bash_profile} && source ${bash_profile}"
+      ;;
+    */fish)
+      note "! $(tilde "$1") is not on your PATH. Add it:"
+      todo "fish_add_path $(tilde "$1")"
+      ;;
+    *)
+      note "! $(tilde "$1") is not on your PATH. Add this line to your shell profile"
+      note "  and open a new terminal:"
+      todo "export PATH=\"${path_expr}:\$PATH\""
+      ;;
+  esac
+  if [ "$WINDOWS" = "yes" ]; then
+    # The user PATH takes the Windows spelling (C:\...), not the MSYS one.
+    win_bin_dir="$1"
+    if command -v cygpath >/dev/null 2>&1; then
+      win_bin_dir="$(cygpath -w "$1" 2>/dev/null)" || win_bin_dir="$1"
     fi
-    ;;
-esac
+    note "! For PowerShell and cmd, add it to your user PATH and open a new terminal:"
+    todo "[Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path','User') + ';${win_bin_dir}', 'User')"
+  fi
+}
+path_check_note "${bin_dir}"
+if [ -n "${PRIME_AGENT_UV_BIN_DIR:-}" ] \
+   && [ -n "$uv_bin_dir" ] \
+   && [ "$uv_bin_dir" != "${bin_dir}" ] \
+   && [ "$uv_bin_dir" != "${HOME}/.local/bin" ]; then
+  path_check_note "${uv_bin_dir}"
+fi
