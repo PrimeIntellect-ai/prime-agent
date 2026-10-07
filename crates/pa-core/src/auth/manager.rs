@@ -44,18 +44,28 @@ fn now_epoch_ms() -> i64 {
 /// One OAuth refresh in flight per provider: the token fetch runs outside every
 /// lock, so TS's single-threaded single-flight needs its own gate.
 fn refresh_flight(provider: &str) -> std::sync::MutexGuard<'static, ()> {
+    refresh_flight_mutex(provider)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn refresh_flight_mutex(provider: &str) -> &'static std::sync::Mutex<()> {
     static FLIGHTS: std::sync::OnceLock<
         std::sync::Mutex<std::collections::HashMap<String, &'static std::sync::Mutex<()>>>,
     > = std::sync::OnceLock::new();
     let registry = FLIGHTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
-    let lock = {
-        let mut registry = registry.lock().expect("auth refresh-flight registry");
-        *registry
-            .entry(provider.to_string())
-            .or_insert_with(|| Box::leak(Box::new(std::sync::Mutex::new(()))))
-    };
-    lock.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    let mut registry = registry.lock().expect("auth refresh-flight registry");
+    registry
+        .entry(provider.to_string())
+        .or_insert_with(|| Box::leak(Box::new(std::sync::Mutex::new(()))))
+}
+
+/// Whether the provider's refresh flight is currently held (the querying
+/// thread's own hold counts — `try_lock` on a same-thread lock reports
+/// contention).
+#[cfg(test)]
+pub(crate) fn refresh_flight_is_held(provider: &str) -> bool {
+    refresh_flight_mutex(provider).try_lock().is_err()
 }
 
 #[derive(Clone)]

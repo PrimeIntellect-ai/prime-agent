@@ -579,7 +579,7 @@ fn expired_oauth(access: &str) -> AuthCredential {
 }
 
 fn storage_over_backend_with(
-    oauth: Arc<CountingOAuth>,
+    oauth: Arc<dyn OAuthIntegration>,
     provider: &str,
     credential: &AuthCredential,
 ) -> (AuthStorage, Arc<dyn AuthStorageBackend>) {
@@ -853,29 +853,67 @@ fn a_force_refresh_write_keeps_a_peer_s_fresher_credential() {
     );
 }
 
+/// A mock whose token exchange hands control to the test: the fetch
+/// signals it started, waits for the peer's mutation, and only then
+/// returns — the peer write lands strictly between the fetch and the
+/// locked write, no timing involved.
+struct SignaledOAuth {
+    fetch_started_tx: std::sync::mpsc::Sender<()>,
+    writer_done_rx: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    forced_outcome: Option<Result<AuthCredential, String>>,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl OAuthIntegration for SignaledOAuth {
+    fn api_key_for(&self, _provider: &str, credential: &AuthCredential) -> Option<String> {
+        match credential {
+            AuthCredential::Oauth { access, .. } => Some(access.clone()),
+            _ => None,
+        }
+    }
+
+    fn refresh(&self, _provider: &str, _credentials: &AuthStorageData) -> Option<AuthCredential> {
+        None
+    }
+
+    fn refresh_forced(
+        &self,
+        _provider: &str,
+        _credentials: &AuthStorageData,
+    ) -> Option<Result<AuthCredential, String>> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.fetch_started_tx.send(()).expect("the writer waits");
+        let writer_done_rx = self.writer_done_rx.lock().expect("writer channel lock");
+        writer_done_rx
+            .recv()
+            .expect("the peer completes its mutation before the fetch returns");
+        self.forced_outcome.clone()
+    }
+}
+
 /// A concurrent logout (the credential vanishes while the fetch runs) must
 /// stand: the locked write never resurrects the credential this refresh
 /// loaded. A deletion is not "no fresher peer credential".
 #[test]
 fn a_concurrent_logout_wins_over_the_forced_refresh_write() {
-    let oauth = Arc::new(CountingOAuth {
-        calls: std::sync::atomic::AtomicUsize::new(0),
-        delay_ms: 80,
+    let (fetch_started_tx, fetch_started_rx) = std::sync::mpsc::channel::<()>();
+    let (writer_done_tx, writer_done_rx) = std::sync::mpsc::channel::<()>();
+    let oauth = Arc::new(SignaledOAuth {
+        fetch_started_tx,
+        writer_done_rx: std::sync::Mutex::new(writer_done_rx),
         forced_outcome: Some(Ok(CountingOAuth::fetched_credential())),
+        calls: std::sync::atomic::AtomicUsize::new(0),
     });
     let (mut auth, backend) = storage_over_backend_with(
-        oauth.clone(),
+        Arc::clone(&oauth) as Arc<dyn OAuthIntegration>,
         "x-logged-out",
         &oauth_credential("rejected-access", now_epoch_ms() + 3_600_000),
     );
     let peer_backend = Arc::clone(&backend);
-    let writer_oauth = Arc::clone(&oauth);
     let writer = std::thread::spawn(move || {
-        // Mid-fetch readiness signal: wait until the token exchange is
-        // actually running, then land the logout inside its window.
-        while writer_oauth.calls.load(std::sync::atomic::Ordering::SeqCst) < 1 {
-            std::thread::sleep(std::time::Duration::from_millis(2));
-        }
+        fetch_started_rx
+            .recv()
+            .expect("the fetch signals the writer");
         let logged_out = AuthStorageData::default();
         let content = serde_json::to_string_pretty(&logged_out.0).unwrap_or_default();
         peer_backend
@@ -884,8 +922,12 @@ fn a_concurrent_logout_wins_over_the_forced_refresh_write() {
                 Ok(((), Some(content.clone())))
             })
             .ok();
+        writer_done_tx
+            .send(())
+            .expect("the writer reports its write");
     });
     let outcome = auth.force_refresh_oauth("x-logged-out");
+    writer.join().expect("the writer settles");
     assert!(
         outcome.is_err(),
         "a concurrent logout fails the recovery: no usable credential remains"
@@ -894,7 +936,6 @@ fn a_concurrent_logout_wins_over_the_forced_refresh_write() {
         auth.get_all().credential("x-logged-out").is_none(),
         "the logout stands: the forced write never resurrects the credential"
     );
-    writer.join().expect("the logout writer settles");
     assert_eq!(
         oauth.calls.load(std::sync::atomic::Ordering::SeqCst),
         1,
@@ -906,24 +947,24 @@ fn a_concurrent_logout_wins_over_the_forced_refresh_write() {
 /// write never overwrites the replacement with the refreshed OAuth grant.
 #[test]
 fn an_api_key_replacement_wins_over_the_forced_refresh_write() {
-    let oauth = Arc::new(CountingOAuth {
-        calls: std::sync::atomic::AtomicUsize::new(0),
-        delay_ms: 80,
+    let (fetch_started_tx, fetch_started_rx) = std::sync::mpsc::channel::<()>();
+    let (writer_done_tx, writer_done_rx) = std::sync::mpsc::channel::<()>();
+    let oauth = Arc::new(SignaledOAuth {
+        fetch_started_tx,
+        writer_done_rx: std::sync::Mutex::new(writer_done_rx),
         forced_outcome: Some(Ok(CountingOAuth::fetched_credential())),
+        calls: std::sync::atomic::AtomicUsize::new(0),
     });
     let (mut auth, backend) = storage_over_backend_with(
-        oauth.clone(),
+        Arc::clone(&oauth) as Arc<dyn OAuthIntegration>,
         "x-swapped",
         &oauth_credential("rejected-access", now_epoch_ms() + 3_600_000),
     );
     let peer_backend = Arc::clone(&backend);
-    let writer_oauth = Arc::clone(&oauth);
     let writer = std::thread::spawn(move || {
-        // Mid-fetch readiness signal: wait until the token exchange is
-        // actually running, then land the logout inside its window.
-        while writer_oauth.calls.load(std::sync::atomic::Ordering::SeqCst) < 1 {
-            std::thread::sleep(std::time::Duration::from_millis(2));
-        }
+        fetch_started_rx
+            .recv()
+            .expect("the fetch signals the writer");
         let mut replacement = AuthStorageData::default();
         replacement.insert(
             "x-swapped",
@@ -939,8 +980,12 @@ fn an_api_key_replacement_wins_over_the_forced_refresh_write() {
                 Ok(((), Some(content.clone())))
             })
             .ok();
+        writer_done_tx
+            .send(())
+            .expect("the writer reports its write");
     });
     let outcome = auth.force_refresh_oauth("x-swapped");
+    writer.join().expect("the writer settles");
     assert!(
         matches!(
             &outcome,
@@ -955,7 +1000,6 @@ fn an_api_key_replacement_wins_over_the_forced_refresh_write() {
         ),
         "the API key stands: the forced write never overwrites it"
     );
-    writer.join().expect("the replacement writer settles");
     assert_eq!(
         oauth.calls.load(std::sync::atomic::Ordering::SeqCst),
         1,
@@ -965,7 +1009,9 @@ fn an_api_key_replacement_wins_over_the_forced_refresh_write() {
 
 /// The forced-refresh single-flight guard must still be held while the
 /// refreshed credential persists: a waiter released between the fetch and
-/// the write re-spends the same single-use refresh token.
+/// the write re-spends the same single-use refresh token. The write
+/// callback probes the flight synchronously on the persisting thread —
+/// the querying thread's own hold reports as contention.
 #[test]
 fn the_forced_refresh_flight_guards_the_write() {
     struct WriteProbingBackend {
@@ -984,28 +1030,11 @@ fn the_forced_refresh_flight_guards_the_write() {
             let mut wrapped = |current: Option<String>| -> anyhow::Result<((), Option<String>)> {
                 let ((), next) = update(current)?;
                 if next.is_some() && !probed.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                    // The refreshed credential is being persisted: the
-                    // per-provider flight must still hold — a probe that
-                    // acquires it instantly means a waiter re-spends the
-                    // same refresh token. The probe flags its own start so
-                    // the held check can never read an unscheduled probe.
-                    let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                    let acquired = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                    std::thread::spawn({
-                        let started = Arc::clone(&started);
-                        let acquired = Arc::clone(&acquired);
-                        move || {
-                            started.store(true, std::sync::atomic::Ordering::SeqCst);
-                            let _guard = refresh_flight("x-flight-write");
-                            acquired.store(true, std::sync::atomic::Ordering::SeqCst);
-                        }
-                    });
-                    while !started.load(std::sync::atomic::Ordering::SeqCst) {
-                        std::thread::sleep(std::time::Duration::from_millis(2));
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(150));
+                    // The refreshed credential is being persisted on the
+                    // flight-holding thread: a held flight reports as
+                    // contention here, a released one locks instantly.
                     held.store(
-                        !acquired.load(std::sync::atomic::Ordering::SeqCst),
+                        refresh_flight_is_held("x-flight-write"),
                         std::sync::atomic::Ordering::SeqCst,
                     );
                 }

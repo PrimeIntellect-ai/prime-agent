@@ -169,7 +169,46 @@ impl ProviderOAuth {
             .map_err(|error| format!("the refresh thread could not be spawned: {error}"))?
             .join()
             .map_err(|_| "the refresh thread panicked".to_string())?
+            .map_err(|reason| sanitize_refresh_reason(&reason))
     }
+}
+
+/// Credential-shaped material never reaches the log line or the re-login
+/// sentence: a provider error body can echo the rejected token back. The
+/// `body=` tail is dropped, and any word carrying a long credential-shaped
+/// run (an opaque token, a JWT) is redacted; short provider phrases like
+/// "expired" survive.
+fn sanitize_refresh_reason(reason: &str) -> String {
+    const SECRET_MIN_CHARS: usize = 16;
+    let truncated = match reason.find("body=") {
+        Some(start) => &reason[..start],
+        None => reason,
+    };
+    let carries_secret = |word: &str| {
+        let mut run = 0usize;
+        for character in word.chars() {
+            if character.is_ascii_alphanumeric() || "_-./+=~".contains(character) {
+                run += 1;
+                if run >= SECRET_MIN_CHARS {
+                    return true;
+                }
+            } else {
+                run = 0;
+            }
+        }
+        false
+    };
+    truncated
+        .split_whitespace()
+        .map(|word| {
+            if carries_secret(word) {
+                "[redacted]"
+            } else {
+                word
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 impl crate::auth::OAuthIntegration for ProviderOAuth {
     fn api_key_for(&self, _provider: &str, credential: &AuthCredential) -> Option<String> {
@@ -632,6 +671,81 @@ mod tests {
         assert_eq!(
             outcome.unwrap_err(),
             "the stored credential for openai-codex carries no refresh token"
+        );
+    }
+
+    /// A 401 body echoing the rejected token back never reaches the log
+    /// line or the re-login reason: the boundary redacts credential-shaped
+    /// material and drops `body=` tails.
+    #[test]
+    fn a_rejected_exchange_never_leaks_the_echoed_token() {
+        let echoed_token = "sk-ant-o01-echoed-caller-secret-credential";
+        let logged = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let sink_logged = Arc::clone(&logged);
+        pa_ai::utils::log::set_log_sink(Some(Arc::new(
+            move |entry: &pa_ai::utils::log::LogEntry| {
+                sink_logged
+                    .lock()
+                    .expect("log capture lock")
+                    .push(serde_json::to_string(entry).unwrap_or_default());
+            },
+        )));
+        let mut codex = HashMap::new();
+        codex.insert(
+            "https://auth.openai.com/oauth/token".to_string(),
+            CodexHttpResponse {
+                status: 401,
+                body: format!("the token {echoed_token} was revoked"),
+            },
+        );
+        let mut auth = crate::auth::AuthStorage::in_memory_without_env(
+            &{
+                let mut data = crate::auth::types::AuthStorageData::default();
+                data.insert(OPENAI_CODEX_PROVIDER_ID, &live_codex_credential());
+                data
+            },
+            std::sync::Arc::new(ProviderOAuth::with_transports(
+                std::sync::Arc::new(ScriptedHttp(codex)),
+                std::sync::Arc::new(ScriptedProviderHttp(HashMap::new())),
+            )),
+        );
+        let outcome = auth.force_refresh_oauth(OPENAI_CODEX_PROVIDER_ID);
+        pa_ai::utils::log::set_log_sink(None);
+        let reason = outcome.expect_err("the rejected exchange carries its reason");
+        assert!(
+            !reason.contains(echoed_token),
+            "the re-login reason never carries the echoed token: {reason}"
+        );
+        let logged = logged.lock().expect("log capture lock").join(" ");
+        assert!(
+            !logged.contains(echoed_token),
+            "the structured warn line never carries the echoed token: {logged}"
+        );
+        assert!(
+            logged.contains("oauth token refresh failed"),
+            "the failure still logs: {logged}"
+        );
+    }
+
+    #[test]
+    fn the_reason_scrubber_keeps_provider_phrases_and_drops_secret_shapes() {
+        assert_eq!(
+            sanitize_refresh_reason("OpenAI Codex token refresh failed (401): expired"),
+            "OpenAI Codex token refresh failed (401): expired"
+        );
+        assert_eq!(
+            sanitize_refresh_reason(
+                "Anthropic token refresh request failed. url=https://platform.claude.com/v1/oauth/token; details=Error: HTTP request failed. status=401; url=https://platform.claude.com/v1/oauth/token; body=secret-tail"
+            ),
+            "Anthropic token refresh request failed. [redacted] details=Error: HTTP request failed. status=401; [redacted]"
+        );
+        assert_eq!(
+            sanitize_refresh_reason("rejected: sk-ant-o01-echoed-caller-secret-credential"),
+            "rejected: [redacted]"
+        );
+        assert_eq!(
+            sanitize_refresh_reason("rejected: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payload.sig"),
+            "rejected: [redacted]"
         );
     }
 
