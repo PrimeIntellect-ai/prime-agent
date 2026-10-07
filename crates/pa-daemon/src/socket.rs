@@ -308,14 +308,16 @@ impl Drop for SocketLease {
         // The pinned fd prevents inode reuse while this lease is alive.
         // A successor that reclaimed a stale lock must never be released
         // by us. Linux runs the claim-verify-release choreography;
-        // elsewhere the identity check below removes only this lease's
-        // own directory. That check-then-act remove carries
-        // proper-lockfile's own residual window: after a suspension
-        // longer than the staleness threshold, a contender may reclaim
-        // the stale lock between the check and the remove, and the old
-        // holder then deletes the successor's directory - the documented
-        // floor on platforms without a portable no-replace rename
-        // (macOS's renameatx_np is not used here).
+        // elsewhere the guarded release below (`release_fresh_lock_dir`)
+        // removes only a directory the path still pins to this lease
+        // AND whose mtime is fresh - a fresh lock cannot be legally
+        // stale-reclaimed, so no reclaim can interleave with the remove,
+        // and a stale-at-exit lock (a suspended exit) is left to expire
+        // through the stale window instead, where a reclaiming
+        // successor's directory is never touched. The residual
+        // check-then-act window on these platforms is confined to fresh
+        // locks with no legal reclaim in flight. macOS's renameatx_np is
+        // not used here.
         if !self.compromised() {
             self.release_lock_dir();
         }
@@ -342,17 +344,34 @@ impl SocketLease {
 
     #[cfg(not(target_os = "linux"))]
     fn release_lock_dir(&self) {
-        // The identity check is the whole guard: only a directory whose
-        // path still pins this lease's inode is removed, so a successor
-        // that displaced it before the check keeps theirs. The residual
-        // window between the check and the remove is proper-lockfile's
-        // own floor (see the Drop comment above): a stale reclaim that
-        // lands inside it can be deleted by this holder. The refresh
-        // join in Drop does not guarantee a current mtime - a longer
-        // suspension leaves the lock stale and reclaimable here.
-        if lock_identity_matches(&self.lock_path, &self.identity) {
-            let _ = std::fs::remove_dir(&self.lock_path);
-        }
+        release_fresh_lock_dir(&self.lock_path, &self.identity);
+    }
+}
+
+/// The guarded release for platforms and mounts without a no-replace
+/// rename: remove the lock directory only when the path still pins this
+/// lease's inode AND the directory's mtime is fresh - well inside the
+/// staleness threshold. A fresh lock cannot be legally stale-reclaimed,
+/// so no successor's reclaim can be in flight across this check-then-act
+/// remove; a lock already past the threshold (a suspended exit) is left
+/// to expire through the stale window instead, where a reclaiming
+/// successor's directory is never touched. The identity check is the
+/// same one the claim-verify choreography uses; the freshness margin
+/// keeps any reclaim decision strictly after this remove completes.
+#[cfg(unix)]
+fn release_fresh_lock_dir(lock_path: &Path, identity: &SocketIdentity) {
+    if !lock_identity_matches(lock_path, identity) {
+        return;
+    }
+    let fresh = std::fs::symlink_metadata(lock_path).is_ok_and(|metadata| {
+        metadata
+            .modified()
+            .ok()
+            .and_then(|mtime| mtime.elapsed().ok())
+            .is_some_and(|age| age < LOCK_STALE_AFTER / 2)
+    });
+    if fresh {
+        let _ = std::fs::remove_dir(lock_path);
     }
 }
 
@@ -370,13 +389,10 @@ fn release_lock_dir_identity(lock_path: &Path, identity: &SocketIdentity) {
         Err(error) if pa_core::platform::LockDir::rename_noreplace_unsupported(&error) => {
             // The filesystem has no no-replace rename (NFS, FUSE and
             // similar - the same mounts where the acquisition fell back
-            // to the mkdir protocol): fall back to the identity-checked
-            // release, with proper-lockfile's residual check-then-act
-            // window as the floor, instead of silently leaving the fresh
-            // lock behind a clean shutdown.
-            if lock_identity_matches(lock_path, identity) {
-                let _ = std::fs::remove_dir(lock_path);
-            }
+            // to the mkdir protocol): fall back to the guarded release
+            // below instead of silently leaving the fresh lock behind a
+            // clean shutdown.
+            release_fresh_lock_dir(lock_path, identity);
             return;
         }
         Err(_) => return,
