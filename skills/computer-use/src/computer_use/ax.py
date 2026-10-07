@@ -259,30 +259,37 @@ def _window_fingerprint(pid: int, timeout_seconds: float | None = None) -> tuple
     deadline = time.monotonic() + timeout
     app_element = app_services.AXUIElementCreateApplication(pid)
     _set_messaging_timeout(app_services, app_element, timeout)
-    window = _copy_value(app_services, app_element, "AXFocusedWindow", _remaining_seconds(deadline))
+
+    def read(element: Any, attribute: str) -> Any:
+        """One bounded fingerprint read, skipped once the budget is spent."""
+        if _budget_spent(deadline):
+            return None
+        return _copy_value(app_services, element, attribute, _remaining_seconds(deadline))
+
+    def read_attribute(element: Any, attribute: str) -> tuple[bool, str | None]:
+        """One bounded attribute read, failing closed once the budget is spent."""
+        if _budget_spent(deadline):
+            return False, None
+        return _read_attribute(app_services, element, attribute, _remaining_seconds(deadline))
+
+    window = read(app_element, "AXFocusedWindow")
     if window is None:
         return None
-    if _budget_spent(deadline):
-        return (None, 0, None, None, None)
-    title = _text(_copy_value(app_services, window, "AXTitle", _remaining_seconds(deadline)))
-    children = _copy_value(app_services, window, "AXChildren", _remaining_seconds(deadline))
+    title = _text(read(window, "AXTitle"))
+    children = read(window, "AXChildren")
     try:
         count = len(children) if children is not None else 0
     except TypeError:
         count = 0
-    if _budget_spent(deadline):
-        return (title, count, None, None, None)
-    focused = _copy_value(app_services, app_element, "AXFocusedUIElement", _remaining_seconds(deadline))
+    focused = read(app_element, "AXFocusedUIElement")
     if focused is None:
         return (title, count, None, None, None)
-    role_ok, role = _read_attribute(app_services, focused, "AXRole", _remaining_seconds(deadline))
-    subrole_ok, subrole = _read_attribute(app_services, focused, "AXSubrole", _remaining_seconds(deadline))
+    role_ok, role = read_attribute(focused, "AXRole")
+    subrole_ok, subrole = read_attribute(focused, "AXSubrole")
     if not role_ok or not subrole_ok or (role == _SECURE_ROLE and subrole == _SECURE_SUBROLE):
         value_head = ""  # an unverifiable or secure field's value is never read
-    elif _budget_spent(deadline):
-        return (title, count, role, subrole, None)
     else:
-        value = _copy_value(app_services, focused, "AXValue", _remaining_seconds(deadline))
+        value = read(focused, "AXValue")
         value_head = _cap(_text(value)) if value is not None else None
         if value_head is not None:
             value_head = value_head[:_FINGERPRINT_VALUE_CHARS]

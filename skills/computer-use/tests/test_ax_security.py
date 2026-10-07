@@ -174,6 +174,17 @@ class PostWalkHangServices(HungAppServices):
         return super(HungAppServices, self).AXUIElementCopyAttributeValue(element, attribute, unused)
 
 
+class FocusHangServices(HungAppServices):
+    """A responsive app whose focused-element read burns the settle budget."""
+
+    def AXUIElementCopyAttributeValue(self, element: Any, attribute: str, unused: Any) -> Any:
+        if attribute == "AXFocusedUIElement" and self.last_timeout is not None:
+            self.clock += self.last_timeout
+            self.last_timeout = None
+            return super().AXUIElementCopyAttributeValue(element, attribute, unused)
+        return super(HungAppServices, self).AXUIElementCopyAttributeValue(element, attribute, unused)
+
+
 class OperationBudgetTests(unittest.TestCase):
     """One operation's timeout is one total budget, not a per-read timeout."""
 
@@ -192,6 +203,14 @@ class OperationBudgetTests(unittest.TestCase):
         elapsed = app.clock - 1000.0
         self.assertIsNone(rect, "a spent budget returns no rect rather than reading past the cap")
         self.assertLessEqual(elapsed, 0.55, "position and size read within one timeout, not two")
+
+    def test_fingerprint_stops_mid_read_sequence_when_the_budget_spends_late(self) -> None:
+        app = FocusHangServices()
+        with app.patch():
+            fingerprint = ax._window_fingerprint(4242, timeout_seconds=0.5)
+        elapsed = app.clock - 1000.0
+        self.assertEqual(fingerprint, ("Main", 1, None, None, ""), "the skipped reads fail closed")
+        self.assertLessEqual(elapsed, 0.55, "no read after the focused read may buy floor time")
 
     def test_observe_post_walk_reads_share_one_budget(self) -> None:
         app = PostWalkHangServices()
