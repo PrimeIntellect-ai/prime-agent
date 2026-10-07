@@ -613,9 +613,16 @@ fn retire_trial_dir(trial_root: &Path, session_name: &str, settled: bool) -> Str
 /// The cleanup kill. Unlike a scored command, a transport failure here
 /// leaves the session's fate unknown — the daemon can be alive with the
 /// orchestrator still mid-turn — so the kill is retried once over a fresh
-/// connection before the failure propagates into the trial. A response
-/// envelope (even `success: false`, e.g. an unknown session) is the
-/// daemon's authoritative answer and settles the cleanup.
+/// connection before the failure propagates into the trial.
+///
+/// A success envelope settles the cleanup, and so does the daemon's
+/// nothing-to-kill answer (an unknown session): the session is not among
+/// its residents, so nothing is left to kill. Every other `success:
+/// false` envelope is an unsettled kill — the daemon was reached but the
+/// stop did not happen (a stop-tombstone persist failure rejects the kill
+/// before the worker is ever told), so it errors and the caller keeps the
+/// trial dir and reports the possibly live session instead of deleting
+/// its identity out from under it.
 fn kill_session(client: &mut Client, socket: &Path, session_id: &str) -> Result<Value, String> {
     let command = json!({ "type": "kill", "activeSessionId": session_id });
     let response = match client.command(&command, Duration::from_secs(30)) {
@@ -632,7 +639,26 @@ fn kill_session(client: &mut Client, socket: &Path, session_id: &str) -> Result<
             })?
         }
     };
-    Ok(response)
+    match response.get("success").and_then(Value::as_bool) {
+        Some(true) => Ok(response),
+        Some(false) if nothing_to_kill(&response) => Ok(response),
+        Some(false) | None => Err(format!("kill rejected: {response}")),
+    }
+}
+
+/// The daemon's settled nothing-to-kill answers (supervisor/routing.rs):
+/// the session is not one of its live residents — never created, already
+/// stopped, or a restore that settled in failure. Matching fails closed:
+/// any other wording reads as an unsettled rejection and keeps the trial
+/// dir.
+fn nothing_to_kill(response: &Value) -> bool {
+    response
+        .get("error")
+        .and_then(Value::as_str)
+        .is_some_and(|error| {
+            error.starts_with("Unknown active session")
+                || (error.starts_with("Session ") && error.contains("failed to restore"))
+        })
 }
 
 /// The post-create trial body: prompt, poll, verify, and score. Cleanup is
@@ -2387,6 +2413,191 @@ mod tests {
         assert!(
             trial_root.exists(),
             "the trial dir must stay for a cleanup retry"
+        );
+    }
+
+    #[test]
+    fn a_rejected_cleanup_kill_keeps_the_trial_dir() {
+        // The daemon REJECTED the cleanup kill with a settled `success:
+        // false` envelope (a stop-tombstone persist failure rejects the
+        // kill before the worker is ever told), so the orchestrator is
+        // still live: treating the answer as settled cleanup would remove
+        // the session's dir out from under it. The row must fail with the
+        // rejection, keep the dir, and retain the session's name.
+        let (seed, size, trial) = (1, 1, 1);
+        let secret = seeded_secrets(seed + 31 * size + trial, 1)[0];
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let socket = dir.path().join("rejecting.sock");
+        let listener = UnixListener::bind(&socket).expect("bind");
+        thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut writer = stream.try_clone().expect("clone");
+            let mut reader = BufReader::new(stream);
+            let _ = writeln!(writer, r#"{{"type":"daemon_hello"}}"#);
+            let script = [
+                ("create", json!({ "activeSessionId": "s-eval" })),
+                ("prompt", json!({})),
+                (
+                    "get_last_assistant_text",
+                    json!({ "text": format!("ANSWER: {secret}") }),
+                ),
+                ("get_rlm_children", json!({ "children": [] })),
+                ("get_messages", json!({ "messages": [] })),
+                (
+                    "get_session_stats",
+                    json!({ "contextUsage": { "tokens": 1_000 } }),
+                ),
+            ];
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(_) => continue,
+                }
+                let envelope: Value = serde_json::from_str(line.trim()).expect("envelope");
+                let command = envelope.get("command").cloned().unwrap_or(Value::Null);
+                let kind = command.get("type").and_then(Value::as_str).unwrap_or("");
+                let mut response = json!({
+                    "id": envelope.get("id").cloned().unwrap_or(Value::Null),
+                    "type": "response"
+                });
+                if kind == "kill" {
+                    // The daemon answers but the stop never happened: the
+                    // supervisor's tombstone persist failure rejects the
+                    // kill before the worker is told.
+                    response["success"] = json!(false);
+                    response["error"] =
+                        json!("Failed to persist the session stop: disk quota exceeded");
+                } else if let Some((_, data)) = script.iter().find(|(kind_, _)| *kind_ == kind) {
+                    response["success"] = json!(true);
+                    response["data"] = data.clone();
+                } else {
+                    response["success"] = json!(false);
+                    response["error"] = json!(format!("no script for {kind}"));
+                }
+                let _ = writeln!(writer, "{response}");
+            }
+        });
+        let out_dir = tempfile::TempDir::new().expect("out dir");
+        let config = test_config(out_dir.path(), 1, 15.0);
+        let runs_root = dir.path().join("runs");
+        let tag = "77-990";
+        let mut client = Client::connect(&socket).expect("connect");
+        let result = run_trial(&mut client, &socket, &config, 1, 1, &runs_root, tag)
+            .expect("the scored trial is a row");
+        let trial_root = runs_root.join("size-1-trial-1");
+        // The row fails on the unsettled cleanup: the daemon was reached
+        // but the kill did not happen.
+        assert_eq!(result.verdict, DefenseVerdict::Fail, "{result:?}");
+        let instant_fail = result
+            .instant_fail
+            .expect("the rejected cleanup kill is reported");
+        assert!(
+            instant_fail.starts_with("cleanup failed: kill rejected:"),
+            "{instant_fail}"
+        );
+        assert!(
+            instant_fail.contains("Failed to persist the session stop"),
+            "{instant_fail}"
+        );
+        assert!(
+            instant_fail.contains(&trial_root.display().to_string()),
+            "{instant_fail}"
+        );
+        assert!(
+            trial_root.exists(),
+            "the trial dir must stay for a cleanup retry"
+        );
+    }
+
+    #[test]
+    fn an_unknown_session_cleanup_kill_stays_settled() {
+        // The daemon answered the cleanup kill with its settled
+        // nothing-to-kill error (the session is not among its residents),
+        // so the cleanup IS settled: the dir goes and the scored row keeps
+        // its verdict instead of reporting a phantom live session.
+        let (seed, size, trial) = (1, 1, 1);
+        let secret = seeded_secrets(seed + 31 * size + trial, 1)[0];
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let socket = dir.path().join("unknown.sock");
+        let listener = UnixListener::bind(&socket).expect("bind");
+        thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut writer = stream.try_clone().expect("clone");
+            let mut reader = BufReader::new(stream);
+            let _ = writeln!(writer, r#"{{"type":"daemon_hello"}}"#);
+            let script = [
+                ("create", json!({ "activeSessionId": "s-eval" })),
+                ("prompt", json!({})),
+                (
+                    "get_last_assistant_text",
+                    json!({ "text": format!("ANSWER: {secret}") }),
+                ),
+                ("get_rlm_children", json!({ "children": [] })),
+                (
+                    "get_messages",
+                    json!({ "messages": [
+                        json!({ "role": "assistant", "usage": { "input": 1000, "output": 500 } }),
+                        json!({ "role": "assistant", "usage": { "input": 1000, "output": 500 } }),
+                        json!({
+                            "role": "custom",
+                            "customType": "agent_message",
+                            "content": "[agent-message from child]\n\nREPORT",
+                            "details": { "from": { "activeSessionId": "child-a" } },
+                        }),
+                        json!({ "role": "assistant", "usage": { "input": 10, "output": 5 } }),
+                    ] }),
+                ),
+                (
+                    "get_session_stats",
+                    json!({ "contextUsage": { "tokens": 1_000 } }),
+                ),
+            ];
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(_) => continue,
+                }
+                let envelope: Value = serde_json::from_str(line.trim()).expect("envelope");
+                let command = envelope.get("command").cloned().unwrap_or(Value::Null);
+                let kind = command.get("type").and_then(Value::as_str).unwrap_or("");
+                let mut response = json!({
+                    "id": envelope.get("id").cloned().unwrap_or(Value::Null),
+                    "type": "response"
+                });
+                if kind == "kill" {
+                    // Nothing to kill: the session is not among the
+                    // daemon's residents.
+                    response["success"] = json!(false);
+                    response["error"] = json!("Unknown active session: s-eval");
+                } else if let Some((_, data)) = script.iter().find(|(kind_, _)| *kind_ == kind) {
+                    response["success"] = json!(true);
+                    response["data"] = data.clone();
+                } else {
+                    response["success"] = json!(false);
+                    response["error"] = json!(format!("no script for {kind}"));
+                }
+                let _ = writeln!(writer, "{response}");
+            }
+        });
+        let out_dir = tempfile::TempDir::new().expect("out dir");
+        let config = test_config(out_dir.path(), 1, 15.0);
+        let runs_root = dir.path().join("runs");
+        let tag = "77-991";
+        let mut client = Client::connect(&socket).expect("connect");
+        let result = run_trial(&mut client, &socket, &config, 1, 1, &runs_root, tag)
+            .expect("the scored trial is a row");
+        let trial_root = runs_root.join("size-1-trial-1");
+        // The nothing-to-kill answer settles the cleanup: the row keeps
+        // its scored verdict and the dir is removed.
+        assert_eq!(result.verdict, DefenseVerdict::Pass, "{result:?}");
+        assert_eq!(result.instant_fail, None, "{result:?}");
+        assert!(
+            !trial_root.exists(),
+            "a settled cleanup removes the trial dir"
         );
     }
 
