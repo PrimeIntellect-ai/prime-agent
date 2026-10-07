@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const SESSION_LEASES_ENABLED_ENV: &str = "PRIME_AGENT_INTERNAL_SESSION_LEASES";
 pub const SESSION_LEASE_OWNER_ID_ENV: &str = "PRIME_AGENT_INTERNAL_SESSION_LEASE_OWNER_ID";
@@ -225,6 +225,11 @@ const FAST_GUARD_ATTEMPTS: u32 = 100;
 /// stale reclaim and the next acquisition attempt.
 const THROUGH_STALE_SLACK: Duration = Duration::from_millis(500);
 
+/// How long `release` drains an append already inside its write before the
+/// lease directory is removed anyway: appends are file writes at most, so
+/// this bounds a wedged device, not a normal turn.
+const APPEND_DRAIN_AFTER: Duration = Duration::from_secs(10);
+
 /// How long a guard acquisition waits for a foreign holder.
 #[derive(Clone, Copy)]
 enum GuardWait {
@@ -314,6 +319,10 @@ pub struct SessionLease {
     directory: PathBuf,
     token: String,
     released: std::sync::atomic::AtomicBool,
+    /// Appends between `append`'s released-check and its write: `release`
+    /// drains this before removing the lease directory, so no row lands
+    /// behind a successor's acquire.
+    append_in_flight: std::sync::atomic::AtomicUsize,
 }
 
 impl SessionLease {
@@ -323,6 +332,18 @@ impl SessionLease {
             .swap(true, std::sync::atomic::Ordering::SeqCst)
         {
             return;
+        }
+        // Fence against a concurrent append: one already past its
+        // released-check must land before the lease directory is removed,
+        // or its row reaches the file after a successor acquires and the
+        // window cache certifies a generation the new owner never saw.
+        // New appends are refused from the swap above; this only drains
+        // writes already in flight.
+        let drain_deadline = Instant::now() + APPEND_DRAIN_AFTER;
+        while self.append_in_flight.load(std::sync::atomic::Ordering::SeqCst) > 0
+            && Instant::now() < drain_deadline
+        {
+            std::thread::yield_now();
         }
         let _ = pa_core::session::window::flush_cache(&self.opened_path);
         // The usage-scan sidecar persists beside the window snapshot, in
@@ -358,17 +379,24 @@ impl SessionLease {
     }
 
     pub(crate) fn append(&self, path: &Path, bytes: &[u8]) -> Result<()> {
-        anyhow::ensure!(
-            !self.released.load(std::sync::atomic::Ordering::SeqCst)
-                && canonical_session_path(path) == self.session_path,
-            "session lease does not own append target"
-        );
-        pa_core::session::window::append_cached(
-            path,
-            bytes,
-            pa_core::session::window::AppendOwnership::SessionLeaseHeld,
-        )?;
-        Ok(())
+        self.append_in_flight
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let result = (|| {
+            anyhow::ensure!(
+                !self.released.load(std::sync::atomic::Ordering::SeqCst)
+                    && canonical_session_path(path) == self.session_path,
+                "session lease does not own append target"
+            );
+            pa_core::session::window::append_cached(
+                path,
+                bytes,
+                pa_core::session::window::AppendOwnership::SessionLeaseHeld,
+            )?;
+            Ok(())
+        })();
+        self.append_in_flight
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        result
     }
 }
 
@@ -466,6 +494,7 @@ pub fn acquire_runtime_session_lease(
                         directory: directory.clone(),
                         token,
                         released: std::sync::atomic::AtomicBool::new(false),
+                        append_in_flight: std::sync::atomic::AtomicUsize::new(0),
                     });
                 }
                 Err(error) => {
@@ -764,5 +793,35 @@ mod tests {
         }
         let unrelated = std::io::Error::from(std::io::ErrorKind::NotFound);
         assert_eq!(reclaim_retry_delay_ms(true, &unrelated, 1), None);
+    }
+
+    #[test]
+    fn release_drains_an_append_still_in_flight() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(&path, "{}").unwrap();
+        let lease = std::sync::Arc::new(acquire_runtime_session_lease(&path, dir.path()).unwrap());
+        // An append past its released-check, still inside its write.
+        lease
+            .append_in_flight
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let directory = lease.directory.clone();
+        let releaser = {
+            let lease = std::sync::Arc::clone(&lease);
+            std::thread::spawn(move || lease.release())
+        };
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            directory.exists(),
+            "release must wait for the append still in flight"
+        );
+        lease
+            .append_in_flight
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        releaser.join().unwrap();
+        assert!(
+            !directory.exists(),
+            "release reclaims the lease once the append lands"
+        );
     }
 }
