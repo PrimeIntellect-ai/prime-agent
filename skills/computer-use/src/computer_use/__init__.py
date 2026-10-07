@@ -800,6 +800,10 @@ class App:
                     try:
                         _write_clipboard(text, format)
                         wrote = True
+                        # the count captured right after the write is the
+                        # token compared before the press: any copy in the
+                        # paste window, same text included, moves it
+                        change_count = _clipboard_change_count()
                         if not _clipboard_still_holds_payload(text):
                             # a concurrent copy displaced the payload: never
                             # paste it, never restore over it
@@ -808,15 +812,15 @@ class App:
                                 "the clipboard changed during the paste; the payload was not pasted",
                                 {},
                             )
-                        change_count = _clipboard_change_count()
                         # a queued paste rechecks the gates the moment it
                         # holds the lock: the focus and the app state may
                         # have moved while another paste held the lock
                         self._refuse_secure_focus()
                         self._guard()
-                        if not _clipboard_still_holds_payload(text):
+                        if not _clipboard_unchanged(change_count, text):
                             # a copy made during the gate rechecks displaces
-                            # the payload: never paste unrelated data
+                            # the payload, a same-text copy with different
+                            # rich data included: never paste unrelated data
                             raise ComputerUseError(
                                 "TRANSPORT_ERROR",
                                 "the clipboard changed during the paste; the payload was not pasted",

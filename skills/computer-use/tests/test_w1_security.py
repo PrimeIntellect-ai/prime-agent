@@ -269,9 +269,14 @@ class ChangeCountRestoreTests(AppTestCase):
         saved = computer_use._clipboard_unchanged
         computer_use._clipboard_unchanged = lambda count, text: False  # the count moved: rich data changed
         try:
-            await app.paste("payload")
+            with self.assertRaises(errors.ComputerUseError) as caught:
+                await app.paste("payload")
         finally:
             computer_use._clipboard_unchanged = saved
+        # the replacement rich data is never pasted, and the copy is kept:
+        # the restore never lands over it
+        self.assertEqual(caught.exception.code, "TRANSPORT_ERROR")
+        self.assertIn("clipboard changed during the paste", caught.exception.message)
         self.assertNotIn(("restore", {"string": "saved"}), env.clipboard_calls)
 
 
@@ -977,6 +982,31 @@ class DisplacedPayloadTests(AppTestCase):
             real_refuse()
 
         with mock.patch.object(app, "_refuse_secure_focus", copying_refuse):
+            with self.assertRaises(errors.ComputerUseError) as caught:
+                await app.paste("payload")
+        self.assertEqual(caught.exception.code, "TRANSPORT_ERROR")
+        self.assertIn("clipboard changed during the paste", caught.exception.message)
+
+    async def test_a_same_text_copy_during_the_gate_rechecks_aborts_the_paste(self) -> None:
+        real_unchanged = computer_use._clipboard_unchanged  # before the fakes patch it away
+        env = self.make_env()
+        app = await env.get_app()
+        env.pasteboard_holds_payload = True
+        env.clipboard_change_count = 3
+        real_refuse = app._refuse_secure_focus
+        refuse_calls: list[int] = []
+
+        def copying_refuse() -> None:
+            refuse_calls.append(1)
+            if len(refuse_calls) >= 2:
+                # a same-text copy carrying different rich data moves the
+                # change count while the payload string still matches
+                env.clipboard_change_count = 4
+            real_refuse()
+
+        with mock.patch.object(app, "_refuse_secure_focus", copying_refuse), mock.patch.object(
+            computer_use, "_clipboard_unchanged", real_unchanged
+        ):
             with self.assertRaises(errors.ComputerUseError) as caught:
                 await app.paste("payload")
         self.assertEqual(caught.exception.code, "TRANSPORT_ERROR")
