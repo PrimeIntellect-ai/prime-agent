@@ -732,3 +732,30 @@ fn a_plain_user_message_resets_the_ingestion_trigger() {
     assert_eq!(snapshot.model_steps.total, 1);
     assert_eq!(snapshot.ingestion_steps.total, 0);
 }
+
+#[test]
+fn a_non_agent_custom_row_resets_the_ingestion_trigger() {
+    // A non-agent custom row (an injected notice, TS `_promptInjectedMessage`)
+    // starts a turn whose primary is not an agent message: #2352's tag
+    // follows the last delivered primary, so the steps of that turn are not
+    // ingestion — the trailing trigger from the previous agent message must
+    // not leak across the notice row.
+    let messages = vec![
+        json!({ "role": "custom", "customType": "agent_message", "content": "REPORT 411" }),
+        json!({
+            "role": "custom",
+            "customType": "rlm_child_terminal_notice",
+            "content": "[child-exited: no-reply child:lane]",
+        }),
+        json!({ "role": "assistant", "usage": { "totalTokens": 50 }, "stopReason": "stop" }),
+        // The next agent message re-arms the trigger for its own turn.
+        json!({ "role": "custom", "customType": "agent_message", "content": "REPORT 733" }),
+        json!({ "role": "assistant", "usage": { "totalTokens": 70 }, "stopReason": "stop" }),
+    ];
+    let snapshot = snapshot_from_transcript(&messages, Some(1_000));
+    assert_eq!(snapshot.arrivals.total, 2);
+    assert_eq!(snapshot.model_steps.total, 2);
+    // Only the step of the second agent-triggered turn counts as ingestion.
+    assert_eq!(snapshot.ingestion_steps.total, 1);
+    assert_eq!(snapshot.ingestion_steps.tokens, 70);
+}

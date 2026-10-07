@@ -16,7 +16,8 @@
 //!   `aborted`/`error` stop) and their usage tokens.
 //! - `ingestion_steps`: the same steps when the turn's primary input was an
 //!   agent message (the trigger is sticky across a turn's tool results and
-//!   resets on the next plain user message).
+//!   resets on the next non-agent turn input — a plain user message or a
+//!   non-agent custom row; #2352's tag follows the last delivered primary).
 //! - `context`: the chars/4 estimate over the agent-message rows over the
 //!   working-context tokens.
 //!
@@ -47,7 +48,12 @@ pub fn snapshot_from_transcript(
     let mut ingestion_steps = 0u64;
     let mut ingestion_tokens = 0u64;
     // The turn's primary input: sticky across tool results, reset by the
-    // next plain user message.
+    // next non-agent turn input. A plain user row and a non-agent custom
+    // row both start turns whose primary is not an agent message (an
+    // injected notice rides the transcript as its own turn's primary, TS
+    // `_promptInjectedMessage`), so both clear the trigger — #2352's tag
+    // follows the last delivered primary and a non-agent primary is not an
+    // ingestion run.
     let mut trigger_is_agent = false;
     for message in messages {
         match message.get("role").and_then(Value::as_str) {
@@ -56,7 +62,7 @@ pub fn snapshot_from_transcript(
                 estimated_agent_message_tokens += estimate_tokens(message);
                 trigger_is_agent = true;
             }
-            Some("user") => trigger_is_agent = false,
+            Some("user" | "custom") => trigger_is_agent = false,
             Some("assistant") => {
                 if let Some(usage) = valid_assistant_usage(message) {
                     let tokens = calculate_context_tokens(&usage);
