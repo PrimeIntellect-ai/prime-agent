@@ -602,32 +602,33 @@ impl Supervisor {
             .find(|passive| {
                 passive.job.id == *job_id && passive.job.active_session_id == *active_session_id
             });
-        if let Some(passive) = passive
-            && !self
+        if let Some(passive) = passive {
+            let owned_elsewhere = self
                 .registry
                 .owns_session_file_path(&passive.job.session_file, &passive.canonical_session_file)
-                .await
-        {
-            let store = Self::passive_job_store(&passive.info);
-            // A passive row that cannot be managed falls through to the live-worker route.
-            if let Ok(Some(heartbeat)) = store.manage_heartbeat(
-                active_session_id,
-                job_id,
-                heartbeat_manage_action(action),
-                crate::util::now_ms(),
-            ) {
-                self.broadcast_heartbeats_changed();
-                return (
-                    vec![response_line(&response_success(
-                        Some(command_id),
-                        type_name,
-                        Some(json!({
-                            "heartbeat": serde_json::to_value(&heartbeat)
-                                .unwrap_or(Value::Null),
-                        })),
-                    ))],
-                    false,
-                );
+                .await;
+            if !owned_elsewhere {
+                let store = Self::passive_job_store(&passive.info);
+                // A passive row that cannot be managed falls through to the live-worker route.
+                if let Ok(Some(heartbeat)) = store.manage_heartbeat(
+                    active_session_id,
+                    job_id,
+                    heartbeat_manage_action(action),
+                    crate::util::now_ms(),
+                ) {
+                    self.broadcast_heartbeats_changed();
+                    return (
+                        vec![response_line(&response_success(
+                            Some(command_id),
+                            type_name,
+                            Some(json!({
+                                "heartbeat": serde_json::to_value(&heartbeat)
+                                    .unwrap_or(Value::Null),
+                            })),
+                        ))],
+                        false,
+                    );
+                }
             }
         }
         // No passive job managed: the live worker owns the heartbeat.
@@ -962,7 +963,9 @@ mod tests {
         let responder = Arc::clone(&worker);
         tokio::spawn(async move {
             let request = cmd_rx.recv().await.expect("forwarded heartbeat_manage");
-            seen_tx.send(request.command_type.clone()).expect("forward observed");
+            seen_tx
+                .send(request.command_type.clone())
+                .expect("forward observed");
             let reply = responder.pending.lock().await.remove(&request.request_id);
             assert!(
                 reply
@@ -1000,7 +1003,10 @@ mod tests {
             "heartbeat_manage"
         );
         assert_eq!(response[0]["success"], true);
-        assert_eq!(std::fs::read_to_string(job_file).expect("read artifact"), artifact);
+        assert_eq!(
+            std::fs::read_to_string(job_file).expect("read artifact"),
+            artifact
+        );
     }
 
     /// The passive-catalog warmup (the input-latency lane): the boot's
