@@ -191,7 +191,7 @@ pub fn append_cached(path: &Path, bytes: &[u8], ownership: AppendOwnership) -> i
     let mut file = std::fs::OpenOptions::new().append(true).open(path)?;
     file.write_all(bytes)?;
     file.flush()?;
-    file.sync_data()?;
+    crate::platform::fsync(&file)?;
     if ownership != AppendOwnership::SessionLeaseHeld || !bytes.ends_with(b"\n") {
         if let Ok(mut snapshots) = live_snapshots().lock() {
             snapshots.remove(path);
