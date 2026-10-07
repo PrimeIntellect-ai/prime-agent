@@ -268,3 +268,66 @@ fn reload_without_a_live_target_installs_nothing() {
         "the reload never installs a target"
     );
 }
+
+/// A routed image episode re-applies its armed target on every model-turn
+/// attempt (overflow retries, failover restores): the reload must refresh
+/// the armed route's auth too, or the next attempt reinstalls the stale
+/// credentials a re-login just replaced.
+#[test]
+fn reload_refreshes_the_armed_image_route_target_auth() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_two_model_provider(&agent_dir);
+    write_oauth_credential(&agent_dir, "fresh-access");
+    let engine = credential_backed_engine(dir.path());
+    let routed: pa_types::ai::Model =
+        pa_core::session_engine::provider_adapter::json_round_trip(&serde_json::json!({
+            "id": "mock-vision",
+            "name": "Mock Vision",
+            "api": "openai-completions",
+            "provider": "battery",
+            "baseUrl": "http://127.0.0.1:9",
+            "reasoning": false,
+            "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 128_000,
+            "maxTokens": 4096,
+        }))
+        .expect("the routed model converts");
+    let override_model: pa_agent::types::Model =
+        pa_core::session_engine::provider_adapter::json_round_trip(&routed)
+            .expect("the override model converts");
+    *engine
+        .image_route
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+        Some(crate::image_route::ImageRoute {
+            target: ProviderTarget {
+                service_tier: None,
+                api_key: Some("stale-access".to_string()),
+                model: routed,
+                headers: None,
+            },
+            agent_override: pa_agent::agent::AgentModelOverride {
+                model: override_model,
+                thinking_level: pa_agent::types::ThinkingLevel::default(),
+            },
+            session_target: None,
+        });
+    engine.reload_live_inputs();
+    let armed = engine
+        .image_route
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+        .expect("the reload keeps the armed route");
+    assert_eq!(
+        armed.target.model.id, "mock-vision",
+        "the armed route keeps its routed model"
+    );
+    assert_eq!(
+        armed.target.api_key.as_deref(),
+        Some("fresh-access"),
+        "the armed route's request auth rebinds from the store"
+    );
+}

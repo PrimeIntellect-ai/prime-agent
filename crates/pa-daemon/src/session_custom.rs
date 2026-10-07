@@ -988,4 +988,45 @@ mod tests {
         assert!(response.success, "failed: {response:?}");
         assert!(response.data.is_none());
     }
+
+    /// The reload parks the engine's blocking work off the async executor:
+    /// with a REAL agent engine behind the worker (the faux-script engine)
+    /// the reload reaches the MCP auth store's blocking lock, which panics
+    /// when taken on the runtime — this fails if the blocking work moves
+    /// back onto the executor.
+    #[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
+    #[tokio::test]
+    async fn reload_parks_the_engine_reload_off_the_runtime() {
+        let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir =
+            std::env::temp_dir().join(format!("pa-worker-sc-reload-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = crate::worker::WorkerConfig {
+            socket_path: dir.join("worker.sock"),
+            supervisor_socket_path: std::path::PathBuf::new(),
+            token: "token".to_string(),
+            worker_instance_id: String::new(),
+            active_session_id: "custom-session".to_string(),
+            agent_dir: dir.join("agent"),
+            recovery_journal_path: dir.join("recovery.jsonl"),
+            telemetry_disabled: None,
+            script: Some(json!({ "engine": "faux", "responses": ["ack"] })),
+        };
+        let worker = Arc::new(crate::worker::Worker::new(config, None));
+        let created = worker
+            .dispatch("create", &json!({ "noSession": true, "cwd": "/tmp" }))
+            .await;
+        assert!(created.success, "create failed: {created:?}");
+        assert!(
+            worker.agent_engine.is_some(),
+            "the faux script must build a real agent engine"
+        );
+        let response = worker
+            .dispatch("reload", &json!({ "activeSessionId": "custom-session" }))
+            .await;
+        assert!(response.success, "failed: {response:?}");
+        assert!(response.data.is_none());
+    }
 }
