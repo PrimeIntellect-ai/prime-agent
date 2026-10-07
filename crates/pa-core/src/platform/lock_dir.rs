@@ -1296,14 +1296,17 @@ impl LockDir {
 
     /// The acquisition probe re-run - the same ceil-plus-5 ms shape, so
     /// the staleness judgment keeps its meaning (see `create`'s platform
-    /// split). Returns the probe the write stamped, the value the tick
-    /// records and re-stats against (proper-lockfile's updater remembers
-    /// the exact `utimes` mtime the same way).
+    /// split). Returns the mtime the FILESYSTEM stored - the same
+    /// read-back as `create` (proper-lockfile's updater records the
+    /// stat'ed mtime), so a coarse-resolution filesystem's rounding never
+    /// fails the tick's own `assert_probe_landed` compare (the recorded
+    /// requested pair vs the stored rounded one was the cursor finding:
+    /// the first tick latched compromise on FAT and 1-second NFS).
     #[cfg(any(unix, windows))]
     fn reprobe_mtime(path: &Path) -> io::Result<Option<(i64, i64)>> {
         let (sec, nanos) = probe_mtime();
         set_mtime(path, sec, nanos)?;
-        Ok(Some((sec, nanos)))
+        Self::read_back_probe(path)
     }
 
     /// No mtime probe on this platform (see `create`): staleness rides the
