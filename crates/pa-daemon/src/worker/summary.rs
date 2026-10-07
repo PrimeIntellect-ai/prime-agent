@@ -34,15 +34,17 @@ impl Worker {
             let details = ModelDetails::read(self.engine.as_ref(), ModelDetailScope::Connection);
             let core = self.core.lock().unwrap();
             if self.engine.model_identity() == details.identity {
-                return (
-                    core,
-                    SummaryInputs::capture(
-                        self.engine.as_ref(),
-                        &self.user_bash,
-                        details.model.clone(),
-                    ),
-                    ConnectionStateInputs::capture(self.engine.as_ref(), &self.user_bash, details),
+                let identity = details.identity.clone();
+                let summary = SummaryInputs::capture(
+                    self.engine.as_ref(),
+                    &self.user_bash,
+                    details.model.clone(),
                 );
+                let connection =
+                    ConnectionStateInputs::capture(self.engine.as_ref(), &self.user_bash, details);
+                if self.engine.model_identity() == identity {
+                    return (core, summary, connection);
+                }
             }
         }
     }
@@ -424,7 +426,11 @@ impl SummaryInputs {
             let details = ModelDetails::read(engine, ModelDetailScope::Summary);
             let core = core.lock().unwrap();
             if engine.model_identity() == details.identity {
-                return (core, Self::capture(engine, user_bash, details.model));
+                let identity = details.identity;
+                let inputs = Self::capture(engine, user_bash, details.model);
+                if engine.model_identity() == identity {
+                    return (core, inputs);
+                }
             }
         }
     }
@@ -468,7 +474,11 @@ impl ConnectionStateInputs {
             let details = ModelDetails::read(engine, ModelDetailScope::Connection);
             let core = core.lock().unwrap();
             if engine.model_identity() == details.identity {
-                return (core, Self::capture(engine, user_bash, details));
+                let identity = details.identity.clone();
+                let inputs = Self::capture(engine, user_bash, details);
+                if engine.model_identity() == identity {
+                    return (core, inputs);
+                }
             }
         }
     }
