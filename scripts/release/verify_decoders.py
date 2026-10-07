@@ -39,6 +39,13 @@ def verify(incoming):
     for directory in directories:
         manifest = json.loads((directory / "manifest.json").read_text())
         binaries = manifest["binaries"]
+        # The source-artifact dir (artifacts-source: the homebrew-core
+        # candidate's src tarball) carries an EMPTY binaries list by
+        # contract — it is a per-release set, not a per-target build, so
+        # the decoder/binary shape checks below do not apply. Its tarball
+        # still rides hash continuity and the merged SHA256SUMS.
+        if not binaries:
+            continue
         check(len(binaries) == 1, f"{directory}: expected one binary per target")
         binary = binaries[0]
         target = binary["target"]

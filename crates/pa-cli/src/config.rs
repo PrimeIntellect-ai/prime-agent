@@ -1,6 +1,6 @@
 //! Product-wide constants and environment handling.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 pub const APP_NAME: &str = "prime-agent";
 
@@ -57,7 +57,8 @@ pub fn version() -> &'static str {
 }
 
 /// The packaged package-dir (`PI_PACKAGE_DIR` wins, else the directory of
-/// the executable).
+/// the executable, launcher symlinks resolved through pa-core's
+/// `exe_dir_of`).
 fn package_dir() -> PathBuf {
     if let Ok(env_dir) = std::env::var("PI_PACKAGE_DIR") {
         if !env_dir.is_empty() {
@@ -66,7 +67,7 @@ fn package_dir() -> PathBuf {
     }
     std::env::current_exe()
         .ok()
-        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+        .and_then(|exe| pa_core::packages::exe_dir_of(&exe))
         .unwrap_or_else(|| PathBuf::from("."))
 }
 

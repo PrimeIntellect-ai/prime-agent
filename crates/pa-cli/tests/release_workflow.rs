@@ -108,6 +108,8 @@ struct Step {
     run: Option<String>,
     #[serde(default)]
     with: Option<serde_yaml::Value>,
+    #[serde(default)]
+    env: Option<serde_yaml::Value>,
 }
 
 /// The promote job's steps from the committed `.github/workflows/release.yml`.
@@ -447,6 +449,73 @@ fn windows_build_job_contract() {
     assert!(
         publish.contains("render_installer_ps1") && publish.contains("install.ps1"),
         "the publish must render + serve the PowerShell installer pair"
+    );
+}
+
+/// The shipped Windows binary must link the STATIC VC runtime: the
+/// MSVC target links vcruntime dynamically by default, the windows-2022
+/// runner image carries vcruntime140.dll, and a stock Windows machine does
+/// not - the dynamically linked launcher dies at process start
+/// (0xC0000135, `STATUS_DLL_NOT_FOUND`, exit -1073741515) before main runs.
+/// The operator hit exactly that on a real box (2026-10-06), so the
+/// crt-static pin is the build step's own env: only the SHIPPED binary is
+/// static, and never through Cargo.toml, whose dev builds stay dynamic.
+#[test]
+fn the_windows_build_links_the_static_vc_runtime() {
+    let text = fs::read_to_string(repo_root().join(".github/workflows/release.yml"))
+        .expect("read release.yml");
+    let workflow: Workflow = serde_yaml::from_str(&text).expect("release.yml parses as YAML");
+    let windows = workflow
+        .jobs
+        .get("build-windows")
+        .expect("the build-windows job exists");
+    let build = windows
+        .steps
+        .iter()
+        .find(|step| {
+            step.name.as_deref() == Some("Build (release, locked)")
+                && step
+                    .run
+                    .as_deref()
+                    .is_some_and(|run| run.contains("cargo build --release --locked"))
+        })
+        .expect("the build-windows job's Build step exists");
+    let rustflags = build
+        .env
+        .as_ref()
+        .and_then(|env| env.get("RUSTFLAGS"))
+        .and_then(serde_yaml::Value::as_str)
+        .expect("the Windows build step must set RUSTFLAGS");
+    assert!(
+        rustflags.contains("target-feature=+crt-static"),
+        "the Windows build must link the static VC runtime (RUSTFLAGS carries target-feature=+crt-static), got: {rustflags}"
+    );
+    // The pin is the Windows build step's alone: the gnu and darwin release
+    // builds stay exactly as they are (crt-static would trade their libc
+    // contract for nothing a shipped binary needs).
+    for job in ["build-gnu", "build-darwin"] {
+        for step in &workflow.jobs.get(job).expect("job exists").steps {
+            if let Some(run) = step.run.as_deref() {
+                if run.contains("cargo build --release --locked") {
+                    assert!(
+                        !step
+                            .env
+                            .as_ref()
+                            .and_then(|env| env.get("RUSTFLAGS"))
+                            .and_then(serde_yaml::Value::as_str)
+                            .is_some_and(|flags| flags.contains("crt-static")),
+                        "crt-static is the Windows launcher's fix, never a gnu/darwin flag"
+                    );
+                }
+            }
+        }
+    }
+    // Dev builds stay dynamic: the pin lives in the release workflow alone,
+    // never in Cargo.toml (whose every target and profile would go static).
+    let cargo_toml = fs::read_to_string(repo_root().join("Cargo.toml")).expect("read Cargo.toml");
+    assert!(
+        !cargo_toml.contains("crt-static"),
+        "crt-static belongs to the release workflow's Windows build step, not Cargo.toml: dev builds link the runtime dynamically"
     );
 }
 

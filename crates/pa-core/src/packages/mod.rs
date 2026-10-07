@@ -43,7 +43,8 @@ pub(crate) fn is_offline_mode_enabled() -> bool {
 
 /// The package directory: `PI_PACKAGE_DIR` wins (matching the TS
 /// `getPackageDir` override), then the directory of the executable (the
-/// packaged bun-binary layout).
+/// packaged bun-binary layout), through [`exe_dir_of`] so a launcher
+/// symlink resolves.
 pub(crate) fn package_dir() -> PathBuf {
     if let Ok(env_dir) = std::env::var("PI_PACKAGE_DIR") {
         if !env_dir.is_empty() {
@@ -52,8 +53,25 @@ pub(crate) fn package_dir() -> PathBuf {
     }
     std::env::current_exe()
         .ok()
-        .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
+        .and_then(|exe| exe_dir_of(&exe))
         .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// The directory beside the binary's real file: a launcher symlink (the
+/// Homebrew formula's `bin` link) must resolve, or the payload shipped
+/// beside the real binary is invisible; a plain path stays untouched.
+/// The managed installer's launcher (`update::install::install_root_of`)
+/// resolves its launch the same way.
+#[must_use]
+pub fn exe_dir_of(exe: &std::path::Path) -> Option<PathBuf> {
+    let is_symlink =
+        std::fs::symlink_metadata(exe).is_ok_and(|metadata| metadata.file_type().is_symlink());
+    let resolved = if is_symlink {
+        exe.canonicalize().ok()?
+    } else {
+        exe.to_path_buf()
+    };
+    resolved.parent().map(std::path::Path::to_path_buf)
 }
 
 /// The bundled docs directory (TS `getDocsPath`): `<package dir>/docs`.
