@@ -12,9 +12,6 @@ pub fn install_stderr_log_sink() {
         let line = serde_json::to_string(entry).unwrap_or_default();
         // Fallible write, result discarded: `eprintln!` panics on a failed
         // write (a closed stderr), unwinding into the auth caller.
-        let _ = std::io::Write::write_fmt(
-            &mut std::io::stderr().lock(),
-            format_args!("{line}\n"),
-        );
+        let _ = std::io::Write::write_fmt(&mut std::io::stderr().lock(), format_args!("{line}\n"));
     })));
 }

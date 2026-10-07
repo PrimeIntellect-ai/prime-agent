@@ -1027,10 +1027,8 @@ fn the_forced_refresh_flight_guards_the_write() {
             Ok(((), Some(seed.clone())))
         })
         .ok();
-    let mut auth = AuthStorage::from_storage(
-        Arc::clone(&backend) as Arc<dyn AuthStorageBackend>,
-        oauth,
-    );
+    let mut auth =
+        AuthStorage::from_storage(Arc::clone(&backend) as Arc<dyn AuthStorageBackend>, oauth);
     let outcome = auth.force_refresh_oauth("x-flight-write");
     assert!(
         matches!(&outcome, Ok(AuthCredential::Oauth { access, .. }) if access == "fetched-access"),
