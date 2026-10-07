@@ -1,0 +1,152 @@
+//! `/reload`'s session half: the request auth rebinds from the credential
+//! store, the store a `/login` from another process writes.
+use super::*;
+use pa_core::session_engine::provider_adapter::ProviderTarget;
+
+/// A custom provider in `models.json` WITHOUT its own api key: the request
+/// auth must come from the stored credential.
+fn write_credential_backed_provider(agent_dir: &std::path::Path) {
+    std::fs::create_dir_all(agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("models.json"),
+        serde_json::json!({
+            "providers": {
+                "battery": {
+                    "api": "openai-completions",
+                    "baseUrl": "http://127.0.0.1:9",
+                    "models": [
+                        {
+                            "id": "mock-1",
+                            "name": "Mock 1",
+                            "api": "openai-completions",
+                            "contextWindow": 128_000,
+                            "maxTokens": 4096,
+                        }
+                    ]
+                }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+}
+
+/// One stored OAuth credential for the custom provider.
+fn write_oauth_credential(agent_dir: &std::path::Path, access: &str) {
+    std::fs::create_dir_all(agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("auth.json"),
+        serde_json::json!({
+            "battery": {
+                "type": "oauth",
+                "access": access,
+                "refresh": "r",
+                "expires": 4_102_444_800_000i64,
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+}
+
+fn credential_backed_engine(dir: &std::path::Path) -> AgentSessionEngine {
+    AgentSessionEngine::new(AgentEngineConfig {
+        cwd: dir.to_path_buf(),
+        agent_dir: dir.join("agent"),
+        provider: Some("battery".to_string()),
+        model: Some("mock-1".to_string()),
+        api_key: None,
+        thinking: None,
+        session_dir: None,
+        session_file: None,
+        faux_script: None,
+        supervisor_link: None,
+        telemetry_disabled: Some(true),
+        cron_store: None,
+        queued_steering_probe: None,
+    })
+    .expect("engine")
+}
+
+/// A credential another process wrote (the `/login` scenario) reaches the
+/// running session through the reload: the provider target rebinds.
+#[test]
+fn reload_rebinds_the_request_auth_from_the_credential_store() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_credential_backed_provider(&agent_dir);
+    write_oauth_credential(&agent_dir, "stale-access");
+    let engine = credential_backed_engine(dir.path());
+    let model = engine.resolve_model().expect("the custom model resolves");
+    // The session's build-time target: the credential the engine saw.
+    *engine
+        .provider_target
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ProviderTarget {
+        service_tier: None,
+        api_key: Some("stale-access".to_string()),
+        model: model.clone(),
+        headers: None,
+    });
+    // A re-login from another process replaces the stored credential.
+    write_oauth_credential(&agent_dir, "fresh-access");
+    engine.reload_live_inputs();
+    let target = engine
+        .provider_target
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+        .expect("the reload keeps the target set");
+    assert_eq!(
+        target.api_key.as_deref(),
+        Some("fresh-access"),
+        "the reload rebinds the request auth to the fresh stored credential"
+    );
+}
+
+/// Without a resolvable model the reload keeps the slot untouched — the
+/// MCP re-read alone still runs.
+#[test]
+fn reload_without_a_model_keeps_the_target() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let engine = credential_backed_engine(dir.path());
+    assert!(
+        engine.resolve_model().is_err(),
+        "no models.json: nothing resolves"
+    );
+    let model: pa_types::ai::Model = pa_core::session_engine::provider_adapter::json_round_trip(
+        &serde_json::json!({
+            "id": "mock-1",
+            "name": "Mock 1",
+            "api": "openai-completions",
+            "provider": "battery",
+            "reasoning": false,
+            "contextWindow": 128_000,
+            "maxTokens": 4096,
+        }),
+    )
+    .expect("the model converts");
+    *engine
+        .provider_target
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ProviderTarget {
+        service_tier: None,
+        api_key: Some("stale-access".to_string()),
+        model,
+        headers: None,
+    });
+    engine.reload_live_inputs();
+    let target = engine
+        .provider_target
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+        .expect("the target stays");
+    assert_eq!(
+        target.api_key.as_deref(),
+        Some("stale-access"),
+        "an unresolvable model leaves the target untouched"
+    );
+}

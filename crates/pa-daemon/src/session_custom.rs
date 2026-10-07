@@ -305,12 +305,17 @@ impl Worker {
         response_success(None, "refine", Some(result))
     }
 
-    /// `reload`: re-read the session's live inputs — settings, provider auth,
-    /// the MCP user-server config. This port resolves each per use, so the
-    /// command answers the TS success.
+    /// `reload`: re-read the session's live inputs — the request auth
+    /// rebinds from the credential store (a `/login` from another process
+    /// never reaches the running session's request path otherwise), and
+    /// the MCP manager re-reads its settings and auth state. Settings and
+    /// the model catalog resolve per use and need no re-read.
     pub(crate) fn handle_reload(&self) -> DaemonResponse {
         if let Err(response) = self.require_created("reload") {
             return response;
+        }
+        if let Some(engine) = &self.agent_engine {
+            engine.reload_live_inputs();
         }
         response_success(None, "reload", None)
     }
