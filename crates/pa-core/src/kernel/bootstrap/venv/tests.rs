@@ -45,7 +45,10 @@ use super::*;
 
 #[test]
 fn venv_dir_honors_override() {
-    // The default path lives under $HOME.
+    // The default path lives under $HOME. The read joins the env-test
+    // lock: concurrent override tests set `PRIME_AGENT_KERNEL_VENV`, and
+    // this read must not race them.
+    let _guard = PRIME_AGENT_ENV_LOCK.blocking_lock();
     let base = kernel_venv_dir();
     assert!(base.ends_with("kernel-venv"));
 }
@@ -543,8 +546,8 @@ fn disk_memo_late_write_after_invalidate_is_benign() {
 }
 
 /// Env-mutating tests serialize on this lock: the process env is global.
-/// Unix only: its takers are the unix env-override tests.
-#[cfg(unix)]
+/// (The env-override tests are Unix-only; env-reading tests on other
+/// platforms take it too so the serialization is one lock everywhere.)
 static PRIME_AGENT_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// A caller-owned `PRIME_AGENT_KERNEL_PYTHON` override resolves through
@@ -1100,18 +1103,10 @@ fn report_collector() -> (
     (lines, options)
 }
 
-/// THE DRAIN PIN (the operator's 2026-10-07 report: the first real
-/// Windows install hung FOREVER inside the kernel pre-warm, at the
-/// product's own "setting up python kernel" line): the bootstrap's uv
-/// children write through PIPED stdio that the parent drains and
-/// forwards line by line through the progress reporter - the kernel
-/// manager's own spawn discipline (`startup.rs` pipes the interpreter
-/// and drains it), never the inherited shared console the previous
-/// spawn leaned on (a console the `CREATE_NO_WINDOW` child does not own;
-/// TS never shipped on Windows, so that shape had never run for real).
-/// The bulk below is past the pipe capacity on both streams: a child
-/// nobody drains cannot exit, and an undrained spawn would hang the
-/// whole bootstrap.
+/// The drain pin: every bootstrap uv child writes through piped stdio
+/// that the parent drains and forwards through the progress reporter.
+/// The bulk is past the pipe capacity on both streams, so a spawn nobody
+/// drains would block the child before it can exit.
 #[cfg(unix)]
 #[tokio::test]
 async fn bootstrap_children_forward_piped_output_through_the_reporter() {
@@ -1144,30 +1139,26 @@ async fn bootstrap_children_forward_piped_output_through_the_reporter() {
     );
 }
 
-/// THE BOUND PIN: no uv child may hold the bootstrap - and, through the
-/// installer's synchronous pre-warm, the whole install - forever. A
-/// child that never exits is killed at the bound (the whole child tree
-/// on Windows) and the bootstrap reports the honest failure. The bound
-/// is env-overridable for slow links; the test rides the override to a
-/// short window and the hung child (an unresponsive `uv python
-/// install`) must die inside it.
+/// The bound pin: a child that never exits is tree-killed at the bound -
+/// the child AND its descendants (the fake uv leaves a sleeping one) -
+/// and the bootstrap reports the honest failure instead of waiting.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_hung_bootstrap_child_is_bounded_and_killed() {
     let _guard = PRIME_AGENT_ENV_LOCK.lock().await;
     let dir = tempfile::tempdir().unwrap();
     let pid_file = dir.path().join("hung-uv.pid");
+    let descendant_file = dir.path().join("hung-uv.descendant.pid");
     let _uv = fake_uv(
         dir.path(),
         &format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$$\" > {}\nsleep 600\n",
-            pid_file.display()
+            "#!/bin/sh\nprintf '%s\\n' \"$$\" > {}\nsleep 600 &\nprintf '%s\\n' \"$!\" > {}\nwait\n",
+            pid_file.display(),
+            descendant_file.display()
         ),
     );
-    // THE VENV RIDE SANDBOXED: `ensure_kernel_python` resolves the venv
-    // dir itself, so the override must pin it to this test's scratch - a
-    // HOME-defaulted resolution would touch a real machine venv (the
-    // machine's own live kernel venv on a dev box).
+    // `ensure_kernel_python` resolves the venv dir itself: the override
+    // must pin it to this test's scratch, never a real machine venv.
     let venv = dir.path().join("venv");
     let previous_venv = std::env::var("PRIME_AGENT_KERNEL_VENV").ok();
     let previous_timeout = std::env::var("PRIME_AGENT_BOOTSTRAP_CHILD_TIMEOUT_MS").ok();
@@ -1194,7 +1185,10 @@ async fn a_hung_bootstrap_child_is_bounded_and_killed() {
     let hung_pid = std::fs::read_to_string(&pid_file)
         .ok()
         .and_then(|text| text.trim().parse::<u32>().ok());
-    if let Some(pid) = hung_pid {
+    let descendant_pid = std::fs::read_to_string(&descendant_file)
+        .ok()
+        .and_then(|text| text.trim().parse::<u32>().ok());
+    for pid in [hung_pid, descendant_pid].into_iter().flatten() {
         let _ =
             crate::platform::process::kill_pid(pid as i32, crate::platform::process::Signal::Kill);
     }
@@ -1213,15 +1207,53 @@ async fn a_hung_bootstrap_child_is_bounded_and_killed() {
         !crate::platform::process::pid_exists(pid),
         "the hung uv child is killed, not left running"
     );
+    let descendant = descendant_pid.expect("the fake uv published its descendant");
+    assert!(
+        !crate::platform::process::pid_exists(descendant),
+        "the kill reaches the child tree, not just the child"
+    );
 }
 
-/// THE NON-INTERACTIVE PIN: the installer-driven bootstrap never depends
-/// on stdio state it does not control - stdin stays null (an inherited
-/// pipe or terminal stdin is a prompt/wait risk in an unattended
-/// install), and every uv call carries `--no-progress` (uv's global
-/// non-interactive flag; the animation frames a captured child must
-/// never emit are exactly what hung the first real Windows run's
-/// console dance).
+/// The exit-path grace: a child that exits while a descendant holds its
+/// pipes must not turn the drained join into a new unbounded wait - the
+/// bootstrap completes within the grace and the descendant is left to
+/// die on its own.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_descendant_holding_the_pipes_does_not_hang_a_completed_bootstrap() {
+    let _guard = PRIME_AGENT_ENV_LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let descendant_file = dir.path().join("holder.pid");
+    let _uv = fake_uv(
+        dir.path(),
+        &format!(
+            "#!/bin/sh\nsleep 60 &\nprintf '%s\\n' \"$!\" > {}\nexit 0\n",
+            descendant_file.display()
+        ),
+    );
+    let venv = dir.path().join("venv");
+    std::fs::create_dir_all(&venv).unwrap();
+    let restore_path = prepend_path(dir.path());
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        bootstrap_venv(&venv, &[], &EnsureKernelPythonOptions::default()),
+    )
+    .await;
+    restore_path();
+    let descendant = std::fs::read_to_string(&descendant_file)
+        .ok()
+        .and_then(|text| text.trim().parse::<u32>().ok());
+    if let Some(pid) = descendant {
+        let _ =
+            crate::platform::process::kill_pid(pid as i32, crate::platform::process::Signal::Kill);
+    }
+    let result = outcome.expect("a completed bootstrap must not wait on a pipe-holding descendant");
+    assert!(result.is_ok(), "the bootstrap completes: {result:?}");
+}
+
+/// The non-interactive pin: stdin stays null (never inherited - an
+/// unattended bootstrap must not wait on stdio it does not own), and
+/// every uv call carries `--no-progress`.
 #[cfg(unix)]
 #[tokio::test]
 async fn bootstrap_venv_runs_uv_quietly_with_no_stdin() {

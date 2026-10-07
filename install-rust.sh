@@ -3065,19 +3065,20 @@ if uv_on_path \
    || { [ -n "$uv_bin_dir" ] && [ -x "${uv_bin_dir}/${uv_name}" ]; } \
    || { [ "$uv_under_store" = "no" ] && [ -x "${HOME}/.local/bin/${uv_name}" ]; }; then
   step_start "Preparing the Python kernel"
-  # THE WATCHDOG (the operator's 2026-10-07 report: the first real
-  # Windows install hung FOREVER at this step - the product's own
-  # 'setting up python kernel' line behind a bare synchronous launcher
-  # call with no bound): the pre-warm must never hang an install. The
-  # portable-watchdog shape the --version probe already uses (a runner
-  # child that publishes the payload pid and a done marker; a poll loop
-  # bounded in ticks; SIGTERM then SIGKILL on expiry) - NOT the `timeout`
-  # command, which on Windows is timeout.exe (it waits for a keypress)
-  # and does not ship on macOS. On expiry the pre-warm degrades to the
-  # honest note the offline arm below prints - never fatal; the payload
-  # is already published and the first session bootstraps the kernel
-  # itself (the product's own wait is bounded now too).
+  # THE WATCHDOG (the --version probe's own shape - never the `timeout`
+  # command: on Windows it is timeout.exe, which waits for a keypress, and
+  # macOS ships none): a runner child publishes the launcher pid and a
+  # done marker; the poll loop bounds the wait; expiry TERMs then KILLs
+  # the launcher and its children, and the pre-warm degrades to the
+  # honest note the offline arm below prints. The pre-warm is best-effort
+  # - never fatal, the payload is already published.
   prewarm_bound_s="${prewarm_bound_s:-300}"
+  # The bound comes from the caller's environment: validate before the
+  # loop relies on it (a malformed override would disable the watchdog).
+  case "$prewarm_bound_s" in
+    ''|*[!0-9]*) prewarm_bound_s=300 ;;
+  esac
+  [ "$prewarm_bound_s" -gt 0 ] || prewarm_bound_s=300
   prewarm_scratch="$(mktemp -d "${TMPDIR:-/tmp}/prime-agent-prewarm.XXXXXX")"
   prewarm_out="$prewarm_scratch/out"
   prewarm_done="$prewarm_scratch/done"
@@ -3102,6 +3103,15 @@ if uv_on_path \
       prewarm_timed_out="yes"
       prewarm_pid="$(cat "$prewarm_pid_file" 2>/dev/null || true)"
       if [ -n "$prewarm_pid" ]; then
+        # The launcher's own children (the product's uv) are swept while
+        # their parent link still names them - after the launcher dies
+        # they reparent and no sweep can find them. Best-effort: pkill
+        # is not everywhere, and the product's own bounded wait is the
+        # backstop.
+        command -v pkill >/dev/null 2>&1 \
+          && pkill -TERM -P "$prewarm_pid" 2>/dev/null || true
+        command -v pkill >/dev/null 2>&1 \
+          && pkill -KILL -P "$prewarm_pid" 2>/dev/null || true
         kill "$prewarm_pid" 2>/dev/null || true
         sleep 1
         kill -9 "$prewarm_pid" 2>/dev/null || true

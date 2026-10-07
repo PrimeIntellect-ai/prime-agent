@@ -792,16 +792,11 @@ if (-not $uvOnPath -and $uvAtTarget -and -not (Test-PathEntry $env:PATH $uvInsta
 }
 if ($uvKnown) {
     Write-Host 'kernel pre-warm: provisioning the Python kernel runtime'
-    # THE WATCHDOG (the operator's 2026-10-07 report: the first real
-    # Windows install hung FOREVER at this step - the product's own
-    # 'setting up python kernel' line behind a bare synchronous launcher
-    # call with no bound): the pre-warm must never hang an install. The
-    # call runs as a WATCHED child of this shell - the payload exe
-    # directly (never the .cmd shim: watching a batch file means
-    # cmd.exe and its quoting), bounded by an explicit timeout,
-    # tree-killed on expiry (the exe, its uv, and any uv grandchild
-    # share one tree), and degraded to the same honest note the offline
-    # arm below prints - never fatal, the payload is already published.
+    # THE WATCHDOG: the pre-warm runs as a WATCHED child of this shell -
+    # the payload exe directly (watching the .cmd shim would mean cmd.exe
+    # and its quoting), bounded, tree-killed on expiry, and degraded to
+    # the honest note the offline arm below prints. Never fatal: the
+    # payload is already published.
     $prewarmBoundSec = 300
     $prewarmExe = Join-Path $share 'prime-agent.exe'
     $prewarm = $null
@@ -819,13 +814,21 @@ if ($uvKnown) {
             Step-Ok 'kernel ready'
         }
     } else {
-        # Expired: kill the whole launcher tree from the absolute System32
-        # path (a bare name must never resolve a planted exe - the
-        # product's own tree-kill discipline), reap, degrade honestly.
+        # The tree kill runs from the absolute System32 path (a bare name
+        # must never resolve a planted exe), and its result decides the
+        # honest wording: a tree that could not be stopped must not be
+        # reported as stopped.
         & (Join-Path $env:SystemRoot 'System32\taskkill.exe') /PID $prewarm.Id /T /F *> $null
+        $prewarmStopped = ($LASTEXITCODE -eq 0)
         $null = $prewarm.WaitForExit(15000)
-        Step-Fail 'preparing the Python kernel' "the watchdog stopped it at ${prewarmBoundSec}s"
+        if ($prewarm.HasExited) { $prewarmStopped = $true }
+        $prewarmDetail = "the watchdog stopped it at ${prewarmBoundSec}s"
+        if (-not $prewarmStopped) { $prewarmDetail = 'the watchdog could not stop it (it may still be running)' }
+        Step-Fail 'preparing the Python kernel' $prewarmDetail
         Write-Host "note: the kernel pre-warm did not finish within ${prewarmBoundSec}s; the first session bootstraps the kernel itself and needs the network once"
+        if (-not $prewarmStopped) {
+            Write-Host 'note: the launcher tree could not be stopped; it finishes on its own or ends with this console - the first session bootstraps the kernel itself and needs the network once'
+        }
     }
 } else {
     Write-Host 'note: uv was not found; the first session bootstraps the kernel itself and needs the network once'
