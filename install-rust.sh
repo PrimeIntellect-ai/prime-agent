@@ -3065,16 +3065,69 @@ if uv_on_path \
    || { [ -n "$uv_bin_dir" ] && [ -x "${uv_bin_dir}/${uv_name}" ]; } \
    || { [ "$uv_under_store" = "no" ] && [ -x "${HOME}/.local/bin/${uv_name}" ]; }; then
   step_start "Preparing the Python kernel"
-  if bootstrap_out="$("$launcher" --prime-agent-bootstrap 2>&1)"; then
+  # THE WATCHDOG (the operator's 2026-10-07 report: the first real
+  # Windows install hung FOREVER at this step - the product's own
+  # 'setting up python kernel' line behind a bare synchronous launcher
+  # call with no bound): the pre-warm must never hang an install. The
+  # portable-watchdog shape the --version probe already uses (a runner
+  # child that publishes the payload pid and a done marker; a poll loop
+  # bounded in ticks; SIGTERM then SIGKILL on expiry) - NOT the `timeout`
+  # command, which on Windows is timeout.exe (it waits for a keypress)
+  # and does not ship on macOS. On expiry the pre-warm degrades to the
+  # honest note the offline arm below prints - never fatal; the payload
+  # is already published and the first session bootstraps the kernel
+  # itself (the product's own wait is bounded now too).
+  prewarm_bound_s="${prewarm_bound_s:-300}"
+  prewarm_scratch="$(mktemp -d "${TMPDIR:-/tmp}/prime-agent-prewarm.XXXXXX")"
+  prewarm_out="$prewarm_scratch/out"
+  prewarm_done="$prewarm_scratch/done"
+  prewarm_pid_file="$prewarm_scratch/pid"
+  prewarm_status="$prewarm_scratch/status"
+  (
+    "$launcher" --prime-agent-bootstrap >"$prewarm_out" 2>&1 &
+    printf '%s\n' "$!" >"$prewarm_pid_file"
+    # The status rides a file (set -e would take a nonzero wait as an
+    # abort): the done marker, not the pid, is the loop's signal.
+    prewarm_status_val=0
+    wait "$!" || prewarm_status_val=$?
+    printf '%s\n' "$prewarm_status_val" >"$prewarm_status"
+    printf 'done\n' >"$prewarm_done"
+  ) &
+  prewarm_runner=$!
+  prewarm_waited=0
+  prewarm_timed_out=""
+  while [ ! -f "$prewarm_done" ]; do
+    prewarm_waited=$((prewarm_waited + 1))
+    if [ "$prewarm_waited" -gt "$prewarm_bound_s" ]; then
+      prewarm_timed_out="yes"
+      prewarm_pid="$(cat "$prewarm_pid_file" 2>/dev/null || true)"
+      if [ -n "$prewarm_pid" ]; then
+        kill "$prewarm_pid" 2>/dev/null || true
+        sleep 1
+        kill -9 "$prewarm_pid" 2>/dev/null || true
+      else
+        kill -9 "$prewarm_runner" 2>/dev/null || true
+      fi
+      break
+    fi
+    sleep 1
+  done
+  wait "$prewarm_runner" 2>/dev/null || true
+  if [ -n "$prewarm_timed_out" ]; then
+    step_fail "Preparing the Python kernel" "stopped at the ${prewarm_bound_s}s bound"
+    note "! The kernel pre-warm did not finish within ${prewarm_bound_s}s and was stopped;"
+    note "  the first session bootstraps the kernel itself and needs the network once."
+  elif [ "$(cat "$prewarm_status" 2>/dev/null || true)" = "0" ]; then
     step_ok "Kernel ready"
     say "kernel pre-warmed: the first session's Python kernel is ready"
-    say "$bootstrap_out"
+    say "$(cat "$prewarm_out" 2>/dev/null || true)"
   else
     step_fail "Preparing the Python kernel" "the first session retries it"
     note "! The kernel pre-warm failed; the install stands and the first session"
     note "  retries it online:"
-    note "$bootstrap_out"
+    note "$(cat "$prewarm_out" 2>/dev/null || true)"
   fi
+  rm -rf "$prewarm_scratch"
 else
   note "! The kernel pre-warm was skipped (no uv); the first session sets the"
   note "  kernel up itself and needs the network once."

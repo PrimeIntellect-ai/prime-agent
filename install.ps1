@@ -792,11 +792,40 @@ if (-not $uvOnPath -and $uvAtTarget -and -not (Test-PathEntry $env:PATH $uvInsta
 }
 if ($uvKnown) {
     Write-Host 'kernel pre-warm: provisioning the Python kernel runtime'
-    & $launcher --prime-agent-bootstrap
-    if ($LASTEXITCODE -ne 0) {
-        Step-Fail 'preparing the Python kernel' 'the first session retries it online'
+    # THE WATCHDOG (the operator's 2026-10-07 report: the first real
+    # Windows install hung FOREVER at this step - the product's own
+    # 'setting up python kernel' line behind a bare synchronous launcher
+    # call with no bound): the pre-warm must never hang an install. The
+    # call runs as a WATCHED child of this shell - the payload exe
+    # directly (never the .cmd shim: watching a batch file means
+    # cmd.exe and its quoting), bounded by an explicit timeout,
+    # tree-killed on expiry (the exe, its uv, and any uv grandchild
+    # share one tree), and degraded to the same honest note the offline
+    # arm below prints - never fatal, the payload is already published.
+    $prewarmBoundSec = 300
+    $prewarmExe = Join-Path $share 'prime-agent.exe'
+    $prewarm = $null
+    try {
+        $prewarm = Start-Process -FilePath $prewarmExe -ArgumentList '--prime-agent-bootstrap' -NoNewWindow -PassThru
+    } catch {
+        $prewarm = $null
+    }
+    if ($null -eq $prewarm) {
+        Step-Fail 'preparing the Python kernel' 'the launcher did not start; the first session retries it online'
+    } elseif ($prewarm.WaitForExit($prewarmBoundSec * 1000)) {
+        if ($prewarm.ExitCode -ne 0) {
+            Step-Fail 'preparing the Python kernel' 'the first session retries it online'
+        } else {
+            Step-Ok 'kernel ready'
+        }
     } else {
-        Step-Ok 'kernel ready'
+        # Expired: kill the whole launcher tree from the absolute System32
+        # path (a bare name must never resolve a planted exe - the
+        # product's own tree-kill discipline), reap, degrade honestly.
+        & (Join-Path $env:SystemRoot 'System32\taskkill.exe') /PID $prewarm.Id /T /F *> $null
+        $null = $prewarm.WaitForExit(15000)
+        Step-Fail 'preparing the Python kernel' "the watchdog stopped it at ${prewarmBoundSec}s"
+        Write-Host "note: the kernel pre-warm did not finish within ${prewarmBoundSec}s; the first session bootstraps the kernel itself and needs the network once"
     }
 } else {
     Write-Host 'note: uv was not found; the first session bootstraps the kernel itself and needs the network once'

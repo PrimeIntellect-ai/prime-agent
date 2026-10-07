@@ -11,8 +11,8 @@ use anyhow::{anyhow, Context};
 use sha2::Digest;
 
 use super::{
-    default_rlm_extra_uv_args, EnsureKernelPythonOptions, KernelPythonSkill,
-    DEFAULT_RLM_EXTRA_PACKAGES,
+    default_rlm_extra_uv_args, EnsureKernelPythonOptions, KernelBootstrapProgressHandler,
+    KernelPythonSkill, DEFAULT_RLM_EXTRA_PACKAGES,
 };
 
 // The concern children (the flows + the shared record stay in the
@@ -75,18 +75,114 @@ pub(crate) struct BootstrapVersion {
     python_skills: Option<Vec<BootstrapPythonSkill>>,
 }
 
-async fn run_async(command: &str, args: &[String]) -> anyhow::Result<()> {
+/// The default bound on one bootstrap child (`uv`): generous for slow
+/// links - the Python download alone is tens of MB - but short of the
+/// hang class the 2026-10-07 Windows report pinned (an unresponsive child
+/// held the pre-warm, and through it the whole install, forever).
+const DEFAULT_BOOTSTRAP_CHILD_TIMEOUT_MS: u64 = 600_000;
+
+/// The bound on one bootstrap child, overridable for slow links through
+/// `PRIME_AGENT_BOOTSTRAP_CHILD_TIMEOUT_MS` (the startup-budget knob's
+/// own resolution shape).
+fn resolve_bootstrap_child_timeout_ms() -> u64 {
+    match std::env::var("PRIME_AGENT_BOOTSTRAP_CHILD_TIMEOUT_MS") {
+        Ok(value) if !value.is_empty() => {
+            value.parse().unwrap_or(DEFAULT_BOOTSTRAP_CHILD_TIMEOUT_MS)
+        }
+        _ => DEFAULT_BOOTSTRAP_CHILD_TIMEOUT_MS,
+    }
+}
+
+/// Forward one piped child stream line by line through the progress
+/// reporter; the pipe is drained to EOF whatever the reporter does.
+fn drain_child_stream<R: std::io::Read + Send + 'static>(
+    pipe: Option<R>,
+    report: Option<KernelBootstrapProgressHandler>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let Some(mut pipe) = pipe.map(std::io::BufReader::new) else {
+            return;
+        };
+        for line in std::io::BufRead::lines(&mut pipe) {
+            let Ok(line) = line else { break };
+            match &report {
+                Some(handler) => handler(&line),
+                None => eprintln!("{line}"),
+            }
+        }
+    })
+}
+
+/// Spawn one bootstrap child: stdin is null (never inherited - an
+/// unattended install must not wait on stdio it does not own), stdout and
+/// stderr are PIPED and drained into the progress reporter line by line
+/// (the kernel manager's own spawn discipline; the previous inherit spawn
+/// leaned on the shared console, a shape the `CREATE_NO_WINDOW` child does
+/// not own and whose first real Windows run hung an install), and the
+/// wait is BOUNDED: a child that never exits is tree-killed at the bound
+/// and reported, never left to hang the bootstrap forever.
+async fn run_async(
+    command: &str,
+    args: &[String],
+    options: &EnsureKernelPythonOptions,
+) -> anyhow::Result<()> {
     // Run on a blocking thread: the bootstrap is an IO-bound child process.
     let command = command.to_string();
     let args = args.to_vec();
+    let report = options.on_progress.clone();
     tokio::task::spawn_blocking(move || {
-        let mut child = std::process::Command::new(&command);
-        child.args(&args).stdin(Stdio::null());
+        let mut spawn = std::process::Command::new(&command);
+        spawn
+            .args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         // Hidden window on Windows (TS `spawnHidden`).
-        crate::platform::process::set_no_window(&mut child);
-        let status = child
-            .status()
+        crate::platform::process::set_no_window(&mut spawn);
+        let mut child = spawn
+            .spawn()
             .with_context(|| format!("failed to spawn {command}"))?;
+        // THE DRAIN: forward every child line through the reporter. The
+        // pipes are never left full - a child blocked on its own output
+        // cannot exit, and the wait below would degrade into the bound.
+        let drains = [
+            drain_child_stream(child.stdout.take(), report.clone()),
+            drain_child_stream(child.stderr.take(), report),
+        ];
+        // THE BOUND: poll for exit, never an unbounded wait.
+        let bound = std::time::Duration::from_millis(resolve_bootstrap_child_timeout_ms());
+        let deadline = std::time::Instant::now() + bound;
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) if std::time::Instant::now() >= deadline => {
+                    // The whole child tree, not just the pid: `uv` may hold
+                    // its own children (build backends on the editable
+                    // installs), and a killed parent that leaves them
+                    // writing into the drained pipes is a leak. The verdict
+                    // never waits on the drains: a grandchild that
+                    // inherited the pipes can outlive the kill, and joining
+                    // it would hang the very wait this bound exists to end.
+                    let _ = crate::platform::process::kill_process_group_or_pid(child.id() as i32);
+                    let _ = child.wait();
+                    drop(drains);
+                    return Err(anyhow!(
+                        "{} {} did not finish within {}ms and was terminated",
+                        command,
+                        args.join(" "),
+                        bound.as_millis()
+                    ));
+                }
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+                Err(error) => {
+                    drop(drains);
+                    return Err(anyhow!(error).context(format!("waiting for {command}")));
+                }
+            }
+        };
+        for drain in drains {
+            let _ = drain.join();
+        }
         if status.success() {
             Ok(())
         } else {
@@ -131,27 +227,35 @@ pub(crate) async fn bootstrap_venv(
         install_args.push(uv_arg.to_string());
     }
 
+    // `--no-progress` rides every uv call: the animation frames are the
+    // output a captured non-interactive child must never emit (uv's own
+    // non-interactive flag; the fresh-venv bootstrap runs unattended).
     run_async(
         &uv,
         &[
+            "--no-progress".to_string(),
             "python".to_string(),
             "install".to_string(),
             PYTHON_VERSION.to_string(),
         ],
+        options,
     )
     .await?;
     run_async(
         &uv,
         &[
+            "--no-progress".to_string(),
             "venv".to_string(),
             venv_str,
             "--python".to_string(),
             PYTHON_VERSION.to_string(),
             "--seed".to_string(),
         ],
+        options,
     )
     .await?;
-    run_async(&uv, &install_args).await?;
+    install_args.insert(0, "--no-progress".to_string());
+    run_async(&uv, &install_args, options).await?;
     sync_python_skills(
         &uv,
         venv,
@@ -202,6 +306,7 @@ pub(crate) async fn sync_python_skills(
         // pays one process plus build-backend startup per install. A batch failure falls back to
         // the per-skill loop.
         let mut install_args = vec![
+            "--no-progress".to_string(),
             "pip".to_string(),
             "install".to_string(),
             "--python".to_string(),
@@ -211,7 +316,7 @@ pub(crate) async fn sync_python_skills(
             install_args.push("--editable".to_string());
             install_args.push(skill.package_path.clone());
         }
-        if run_async(uv, &install_args).await.is_ok() {
+        if run_async(uv, &install_args, options).await.is_ok() {
             // A changed pyproject (hash moved) replaces the stale record.
             for skill in &missing {
                 installed.insert(bootstrap_skill_key(skill), (*skill).clone());
@@ -221,6 +326,7 @@ pub(crate) async fn sync_python_skills(
                 let result = run_async(
                     uv,
                     &[
+                        "--no-progress".to_string(),
                         "pip".to_string(),
                         "install".to_string(),
                         "--python".to_string(),
@@ -228,6 +334,7 @@ pub(crate) async fn sync_python_skills(
                         "--editable".to_string(),
                         skill.package_path.clone(),
                     ],
+                    options,
                 )
                 .await;
                 match result {

@@ -10,6 +10,9 @@
 //! step code, fixture inputs), so the pin holds the shipped text, not a
 //! copy of it.
 
+// too_many_lines: style gate only (the extraction harnesses are
+// intentionally linear, one pinned block per test).
+#![allow(clippy::too_many_lines)]
 #![cfg(unix)]
 
 use std::path::{Path, PathBuf};
@@ -1179,4 +1182,242 @@ fn windows_e2e_harnesses_keep_the_kernel_prewarm_writes_in_scratch() {
             "{harness_name}'s cleanup must RESTORE the caller's override values, never delete the knobs (a caller with its own redirect loses it on an in-process run)"
         );
     }
+}
+
+/// install.ps1's kernel pre-warm WATCHDOG (the operator's 2026-10-07
+/// report: the fresh beta.52 install hung FOREVER at the pre-warm - the
+/// product's own "setting up python kernel" line, a bare synchronous
+/// launcher call with no bound): the pre-warm is best-effort by design
+/// (the no-uv arm already degrades to an honest note), so the call runs
+/// as a WATCHED child - the payload exe directly (never the .cmd shim:
+/// Start-Process on a batch file needs cmd.exe and its quoting), bounded
+/// by an explicit timeout, tree-killed on expiry (taskkill /T walks the
+/// exe, uv, and any uv grandchild), and degraded to the same honest note
+/// the offline path prints. The install always continues past the
+/// pre-warm; nothing in the section may throw.
+#[test]
+fn install_ps1_bounds_the_kernel_prewarm_with_a_watchdog() {
+    let text = std::fs::read_to_string(repo_root().join("install.ps1")).expect("read install.ps1");
+    let section_start = text
+        .find("# --- the kernel pre-warm")
+        .expect("the pre-warm section exists");
+    let section_end = text
+        .find("# --- the PATH add")
+        .expect("the PATH-add section follows");
+    let section = &text[section_start..section_end];
+    let markers: [(&str, &str); 8] = [
+        (
+            "the watchdog bound (the pre-warm may take minutes on a slow link, never forever)",
+            "$prewarmBoundSec = 300",
+        ),
+        (
+            "the watched child is the payload exe (never the .cmd shim: Start-Process on a batch file needs cmd.exe and its quoting)",
+            "$prewarmExe = Join-Path $share 'prime-agent.exe'",
+        ),
+        (
+            "the watched spawn (the bootstrap argument, the shared console, the process handle)",
+            "Start-Process -FilePath $prewarmExe -ArgumentList '--prime-agent-bootstrap' -NoNewWindow -PassThru",
+        ),
+        (
+            "the bounded wait (milliseconds, from the bound)",
+            "$prewarm.WaitForExit($prewarmBoundSec * 1000)",
+        ),
+        (
+            "the expiry arm tree-kills the launcher tree",
+            "& (Join-Path $env:SystemRoot 'System32\\taskkill.exe') /PID $prewarm.Id /T /F",
+        ),
+        (
+            "the expiry arm reaps the killed child",
+            "$prewarm.WaitForExit(15000)",
+        ),
+        (
+            "the honest expiry note names the wait",
+            "the kernel pre-warm did not finish within",
+        ),
+        (
+            "the honest expiry note degrades to the offline note's own phrase",
+            "the first session bootstraps the kernel itself and needs the network once",
+        ),
+    ];
+    let mut positions: Vec<usize> = Vec::new();
+    for (what, marker) in markers {
+        positions.push(section.find(marker).unwrap_or_else(|| {
+            panic!("the pre-warm watchdog must carry its {what} line: {marker}")
+        }));
+    }
+    for pair in positions.windows(2) {
+        assert!(
+            pair[0] < pair[1],
+            "the watchdog's discipline is spawn, bound, kill, degrade - in that order: {markers:?}"
+        );
+    }
+    // The expiry note must sit in the expiry arm (after the bounded wait),
+    // not in the no-uv arm alone.
+    let note_at = section
+        .find("the first session bootstraps the kernel itself and needs the network once")
+        .expect("the honest degradation phrase");
+    assert!(
+        note_at > positions[3],
+        "the honest note belongs to the expiry arm"
+    );
+    // Never fatal: every "Fail" in the expiry arm is a ledger Step-Fail -
+    // the thrown Fail helper would abort an install whose payload is
+    // already published.
+    let expiry_arm = &section[positions[4]..];
+    let mut at = 0;
+    while let Some(found) = expiry_arm[at..].find("Fail") {
+        let before = expiry_arm[..found + 4].trim_end();
+        assert!(
+            before.ends_with("Step-Fail"),
+            "the expiry arm must not call the throwing Fail helper: {}",
+            &expiry_arm[found.saturating_sub(40)..(found + 40).min(expiry_arm.len())]
+        );
+        at = found + 4;
+    }
+}
+
+/// install-rust.sh's kernel pre-warm WATCHDOG (the 2026-10-07 hang's sh
+/// arm): the pre-warm gate block runs the launcher BOUNDED - the block is
+/// extracted from the shipped script and driven under `sh` with a fake
+/// hanging launcher. The watchdog must TERM the launcher, print the
+/// honest degradation (the same phrase the offline note uses), record
+/// the failed step, and CONTINUE the install - the harness exits 0 and
+/// its flow marker lands after the block. At the red shape (a bare
+/// unbounded bootstrap call) the harness hangs and the test fails on the
+/// guard instead.
+#[test]
+fn install_rust_sh_prewarm_watchdog_bounds_a_hung_launcher() {
+    let script =
+        std::fs::read_to_string(repo_root().join("install-rust.sh")).expect("read install-rust.sh");
+    // The pinned bound default rides the shipped text.
+    assert!(
+        script.contains("prewarm_bound_s=\"${prewarm_bound_s:-300}\""),
+        "the pre-warm bound default (300s) rides the script"
+    );
+    let gate = script
+        .find("# THE PRE-WARM GATE")
+        .expect("the pre-warm gate exists");
+    let start = script[gate..]
+        .find("if uv_on_path")
+        .map(|at| gate + at)
+        .expect("the gate's guard if opens the block");
+    let end = script
+        .find("# --- verify: the launcher must answer --version")
+        .expect("the verify section follows the pre-warm");
+    let block = &script[start..end];
+
+    let (status, flow, terminated) = drive_sh_prewarm_block(block, "2");
+    let status = status.unwrap_or_else(|| {
+        panic!("the pre-warm block ran past its watchdog - a hung launcher held the whole install")
+    });
+    assert!(
+        status.success(),
+        "the install continues past a bounded pre-warm: {status:?}"
+    );
+    assert!(
+        flow.contains("fail Preparing the Python kernel"),
+        "the watchdog records the stopped step: {flow}"
+    );
+    assert!(
+        flow.contains("the first session bootstraps the kernel itself and needs the network once"),
+        "the honest degradation note (the offline note's own phrase): {flow}"
+    );
+    assert!(
+        flow.contains("flow-continued"),
+        "the install proceeds after the pre-warm: {flow}"
+    );
+    assert!(
+        terminated,
+        "the watchdog TERMed the hung launcher before degrading"
+    );
+}
+
+/// Drives the extracted pre-warm block under `sh` with a fake hanging
+/// launcher: stubs the ledger helpers, pins `prewarm_bound_s` to
+/// `bound`, appends a flow marker past the block, and runs the whole
+/// harness BOUNDED - a watchdog-less block hangs past the guard, which
+/// kills it and returns `None` so the caller fails instead of hanging
+/// the suite. Returns the harness exit status (None on the guard), the
+/// transcript the stubs wrote, and whether the launcher's TERM trap
+/// fired.
+fn drive_sh_prewarm_block(
+    block: &str,
+    bound: &str,
+) -> (Option<std::process::ExitStatus>, String, bool) {
+    let dir = tempfile::tempdir().expect("scratch dir");
+    let transcript = dir.path().join("transcript");
+    let sentinel = dir.path().join("terminated");
+    let launcher_pid = dir.path().join("launcher.pid");
+    let launcher = dir.path().join("launcher");
+    std::fs::write(
+        &launcher,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$$\" > {pid}\ntrap 'printf terminated > {sentinel}; exit 9' TERM INT\nwhile :; do sleep 1; done\n",
+            pid = launcher_pid.display(),
+            sentinel = sentinel.display(),
+        ),
+    )
+    .expect("write the fake launcher");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755))
+            .expect("launcher permissions");
+    }
+
+    let harness = format!(
+        "#!/bin/sh\n\
+         step_start() {{ printf 'start %s\\n' \"$1\" >> {transcript}; }}\n\
+         step_ok() {{ printf 'ok %s\\n' \"$1\" >> {transcript}; }}\n\
+         step_fail() {{ printf 'fail %s %s\\n' \"$1\" \"$2\" >> {transcript}; }}\n\
+         say() {{ printf 'say %s\\n' \"$*\" >> {transcript}; }}\n\
+         note() {{ printf 'note %s\\n' \"$*\" >> {transcript}; }}\n\
+         todo() {{ printf 'todo %s\\n' \"$*\" >> {transcript}; }}\n\
+         uv_on_path() {{ return 0; }}\n\
+         launcher='{launcher}'\n\
+         prewarm_bound_s={bound}\n\
+         {block}\
+         printf 'flow-continued\\n' >> {transcript}\n\
+         exit 0\n",
+        transcript = transcript.display(),
+        launcher = launcher.display(),
+        block = block,
+        bound = bound,
+    );
+    let harness_path = dir.path().join("harness.sh");
+    std::fs::write(&harness_path, harness).expect("write the harness");
+
+    // The harness runs BOUNDED: a watchdog-less block (the red shape)
+    // hangs past this guard, which kills it and hands `None` back so
+    // the caller fails instead of hanging the suite.
+    let mut child = Command::new("sh")
+        .arg(&harness_path)
+        .spawn()
+        .expect("spawn the harness");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let status = loop {
+        if let Ok(Some(done)) = child.try_wait() {
+            break Some(done);
+        }
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    // Best-effort cleanup of the fake launcher if the block never
+    // killed it (the red shape leaves it looping forever).
+    let hung_pid = std::fs::read_to_string(&launcher_pid)
+        .ok()
+        .and_then(|text| text.trim().parse::<u32>().ok());
+    if let Some(pid) = hung_pid {
+        let _ = Command::new("sh")
+            .arg("-c")
+            .arg(format!("kill -9 {pid} 2>/dev/null"))
+            .status();
+    }
+    let flow = std::fs::read_to_string(&transcript).unwrap_or_default();
+    let terminated =
+        std::fs::read_to_string(&sentinel).is_ok_and(|text| text.trim() == "terminated");
+    (status, flow, terminated)
 }
