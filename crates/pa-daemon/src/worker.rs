@@ -447,6 +447,8 @@ impl Worker {
                 // The in-run autonomous continuation seam: the hook holds
                 // itself weakly through the registered arc.
                 concrete.register_arc();
+                concrete
+                    .set_rlm_usage_store(std::sync::Arc::new(CoreUsageStore(Arc::clone(&core))));
                 let sink_core = Arc::clone(&core);
                 let sink_notify = Arc::clone(&work_notify);
                 let autonomous_sink: crate::agent_engine::AutonomousAdmission = {
@@ -917,6 +919,84 @@ fn emit_refinement_row(
         json!({ "type": "message_end", "message": message }),
     );
     true
+}
+
+struct CoreUsageStore(Arc<Mutex<SessionCore>>);
+
+fn missing_usage_target(target_id: &str) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!("Assistant message entry {target_id} not found"),
+    )
+}
+
+fn assistant_message(entry: &crate::session_store::SessionEntry) -> Option<&Value> {
+    if entry.type_ != "message" {
+        return None;
+    }
+    let message = entry.fields.get("message")?;
+    (crate::types::message_role(message) == Some("assistant")).then_some(message)
+}
+
+impl pa_core::session_engine::rlm_usage::RlmChildUsageStore for CoreUsageStore {
+    fn last_assistant(
+        &self,
+    ) -> pa_core::session_engine::rlm_usage::RlmChildUsageFuture<
+        '_,
+        Option<(String, pa_types::ai::Usage)>,
+    > {
+        let core = Arc::clone(&self.0);
+        Box::pin(async move {
+            let core = core.lock().unwrap();
+            let store = core.store.as_ref()?;
+            store.entries().iter().rev().find_map(|entry| {
+                let message = assistant_message(entry)?;
+                Some((
+                    entry.id.clone(),
+                    message
+                        .get("usage")
+                        .cloned()
+                        .and_then(|usage| serde_json::from_value(usage).ok())
+                        .unwrap_or_default(),
+                ))
+            })
+        })
+    }
+
+    fn append_attribution(
+        &self,
+        target_id: &str,
+        child_usage: pa_types::ai::Usage,
+        aggregate_usage: pa_types::ai::Usage,
+        origin: Option<pa_types::session::ChildUsageOrigin>,
+    ) -> pa_core::session_engine::rlm_usage::RlmChildUsageFuture<'_, std::io::Result<()>> {
+        let core = Arc::clone(&self.0);
+        let target_id = target_id.to_string();
+        Box::pin(async move {
+            let mut core = core.lock().unwrap();
+            let Some(store) = core.store.as_mut() else {
+                return Err(missing_usage_target(&target_id));
+            };
+            if store
+                .entry(&target_id)
+                .and_then(assistant_message)
+                .is_none()
+            {
+                return Err(missing_usage_target(&target_id));
+            }
+            let fields = serde_json::to_value(pa_types::session::ChildUsageAttributionEntry {
+                target_id: target_id.clone(),
+                child_usage,
+                aggregate_usage,
+                origin,
+            })
+            .map_err(std::io::Error::from)?;
+            store
+                .persist_entry("child_usage_attributed", fields)
+                .map(|_| ())
+                .map_err(|error| std::io::Error::other(format!("{error:#}")))
+        })
+    }
 }
 
 /// Whether one queued item is a minted goal-context turn (TS's

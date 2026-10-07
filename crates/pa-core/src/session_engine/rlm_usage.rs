@@ -37,6 +37,55 @@ pub(crate) fn attribute_child_usage(parent_usage: &mut Usage, child_usage: &Usag
     parent_usage.total_tokens = parent_context_tokens;
 }
 
+pub type RlmChildUsageFuture<'a, T> =
+    std::pin::Pin<std::boxed::Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+
+pub trait RlmChildUsageStore: Send + Sync {
+    fn last_assistant(&self) -> RlmChildUsageFuture<'_, Option<(String, Usage)>>;
+
+    fn append_attribution(
+        &self,
+        target_id: &str,
+        child_usage: Usage,
+        aggregate_usage: Usage,
+        origin: Option<ChildUsageOrigin>,
+    ) -> RlmChildUsageFuture<'_, std::io::Result<()>>;
+}
+
+pub(crate) struct SessionUsageStore(pub(crate) std::sync::Arc<tokio::sync::Mutex<SessionManager>>);
+
+impl RlmChildUsageStore for SessionUsageStore {
+    fn last_assistant(&self) -> RlmChildUsageFuture<'_, Option<(String, Usage)>> {
+        let session = std::sync::Arc::clone(&self.0);
+        Box::pin(async move {
+            let session = session.lock().await;
+            session
+                .retained_entries()
+                .iter()
+                .rev()
+                .find_map(last_assistant_row)
+        })
+    }
+
+    fn append_attribution(
+        &self,
+        target_id: &str,
+        child_usage: Usage,
+        aggregate_usage: Usage,
+        origin: Option<ChildUsageOrigin>,
+    ) -> RlmChildUsageFuture<'_, std::io::Result<()>> {
+        let session = std::sync::Arc::clone(&self.0);
+        let target_id = target_id.to_string();
+        Box::pin(async move {
+            session
+                .lock()
+                .await
+                .append_child_usage_attribution(&target_id, child_usage, aggregate_usage, origin)
+                .map(|_| ())
+        })
+    }
+}
+
 /// Per-origin batches in first-seen order.
 #[derive(Debug, Clone)]
 pub struct RlmChildUsageReport {
@@ -47,7 +96,7 @@ pub struct RlmChildUsageReport {
 /// The producer the daemon's child observation feeds: spawn registration
 /// plus the durable flush. One instance per session engine.
 pub struct RlmChildUsageAttributions {
-    session: std::sync::Arc<tokio::sync::Mutex<SessionManager>>,
+    store: std::sync::Arc<dyn RlmChildUsageStore>,
     /// The aggregate base per parent assistant row, shared by all its children;
     /// held across the durable append so batches serialize in observation order.
     bases: tokio::sync::Mutex<HashMap<String, Usage>>,
@@ -66,9 +115,9 @@ pub struct RlmChildUsageAttributions {
 }
 
 impl RlmChildUsageAttributions {
-    pub fn new(session: std::sync::Arc<tokio::sync::Mutex<SessionManager>>) -> Self {
+    pub fn new(store: std::sync::Arc<dyn RlmChildUsageStore>) -> Self {
         Self {
-            session,
+            store,
             bases: tokio::sync::Mutex::new(HashMap::new()),
             children: std::sync::Mutex::new(HashMap::new()),
             telemetry: std::sync::Mutex::new(None),
@@ -102,14 +151,7 @@ impl RlmChildUsageAttributions {
             Box::pin(async move { forward.register_spawn(rlm_child_id).await }).await;
             return;
         }
-        let target = {
-            let session = self.session.lock().await;
-            session
-                .retained_entries()
-                .iter()
-                .rev()
-                .find_map(last_assistant_row)
-        };
+        let target = self.store.last_assistant().await;
         if let Some((target_id, usage)) = target {
             // Seed the base BEFORE the registration publishes: a report finding the entry
             // must not compute from the default (or_insert preserves a broken first aggregate).
@@ -178,13 +220,12 @@ impl RlmChildUsageAttributions {
                 .unwrap_or_default();
             let mut aggregate = base;
             attribute_child_usage(&mut aggregate, &usage);
-            match self.session.lock().await.append_child_usage_attribution(
-                &target_id,
-                usage,
-                aggregate,
-                Some(origin),
-            ) {
-                Ok(_) => {
+            match self
+                .store
+                .append_attribution(&target_id, usage, aggregate, Some(origin))
+                .await
+            {
+                Ok(()) => {
                     bases.insert(target_id.clone(), aggregate);
                     if let Some(telemetry) = self
                         .telemetry
@@ -441,6 +482,12 @@ mod tests {
             .unwrap_or_else(|| row[key]["cost"]["total"].as_i64().expect("cost number") as f64)
     }
 
+    fn producer(
+        manager: std::sync::Arc<tokio::sync::Mutex<SessionManager>>,
+    ) -> RlmChildUsageAttributions {
+        RlmChildUsageAttributions::new(std::sync::Arc::new(SessionUsageStore(manager)))
+    }
+
     /// Captured TS fixture (assistant row 4f61089a, archive 01a0a7d4-cdd9):
     /// the folded aggregate carries input 52,898, parts summing to 77,321,
     /// and totalTokens FROZEN at the parent's 23,032; the raw parent's
@@ -450,7 +497,7 @@ mod tests {
         let raw_parent = usage_block(2_690, 1_577, 19_917, 0, 23_032, 0.0);
         let child = usage_block(50_208, 2_929, 0, 0, 53_137, 0.008_995_7);
         let (_tmp, manager) = manager_with_assistant(raw_parent);
-        let producer = RlmChildUsageAttributions::new(manager.clone());
+        let producer = producer(manager.clone());
         producer.register_spawn("sub-abc12345").await;
         producer
             .record_child_usage(RlmChildUsageReport {
@@ -500,8 +547,8 @@ mod tests {
     async fn rebuild_adoption_continues_the_aggregate_chain() {
         let raw_parent = usage_block(1_000, 0, 0, 0, 4_096, 0.0);
         let (_tmp, manager) = manager_with_assistant(raw_parent);
-        let retired = std::sync::Arc::new(RlmChildUsageAttributions::new(manager.clone()));
-        let fresh = std::sync::Arc::new(RlmChildUsageAttributions::new(manager.clone()));
+        let retired = std::sync::Arc::new(producer(manager.clone()));
+        let fresh = std::sync::Arc::new(producer(manager.clone()));
         retired.register_spawn("sub-rebuild1").await;
         retired
             .record_child_usage(RlmChildUsageReport {
@@ -649,7 +696,7 @@ mod tests {
     async fn multiple_children_and_origins_share_the_cumulative_base() {
         let raw_parent = usage_block(1_000, 100, 0, 0, 1_100, 0.01);
         let (_tmp, manager) = manager_with_assistant(raw_parent);
-        let producer = RlmChildUsageAttributions::new(manager.clone());
+        let producer = producer(manager.clone());
         producer.register_spawn("sub-one").await;
         producer.register_spawn("sub-two").await;
         producer
@@ -698,7 +745,7 @@ mod tests {
     #[tokio::test]
     async fn unregistered_child_report_attributes_nothing() {
         let (_tmp, manager) = manager_with_assistant(usage_block(1, 1, 0, 0, 2, 0.0));
-        let producer = RlmChildUsageAttributions::new(manager.clone());
+        let producer = producer(manager.clone());
         producer
             .record_child_usage(RlmChildUsageReport {
                 rlm_child_id: "sub-unknown".to_string(),
