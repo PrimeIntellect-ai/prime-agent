@@ -101,6 +101,16 @@ pub enum AuthCredential {
         /// RFC 8414/OIDC issuer selected by the protected-resource metadata.
         #[serde(rename = "issuer", default, skip_serializing_if = "Option::is_none")]
         issuer: Option<String>,
+        /// How `resource` associates with the configured endpoint: "exact"
+        /// (component-equal to the endpoint) or "origin" (the endpoint's bare
+        /// origin). `None` on legacy credentials that predate audience
+        /// modes (they were only ever issued under exact matching).
+        #[serde(
+            rename = "audienceMode",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        audience_mode: Option<String>,
     },
 }
 

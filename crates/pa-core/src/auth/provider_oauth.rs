@@ -103,6 +103,7 @@ impl ProviderOAuth {
                             client_id: None,
                             resource: None,
                             issuer: None,
+                            audience_mode: None,
                         }),
                     ANTHROPIC_PROVIDER_ID => runtime
                         .block_on(refresh_anthropic_token(
@@ -120,6 +121,7 @@ impl ProviderOAuth {
                             client_id: None,
                             resource: None,
                             issuer: None,
+                            audience_mode: None,
                         }),
                     GITHUB_COPILOT_PROVIDER_ID => {
                         // The stored GitHub token exchanges for a fresh Copilot token; the
@@ -141,6 +143,7 @@ impl ProviderOAuth {
                                 client_id: None,
                                 resource: None,
                                 issuer: None,
+                                audience_mode: None,
                             })
                     }
                     XAI_PROVIDER_ID => runtime
@@ -156,6 +159,7 @@ impl ProviderOAuth {
                             client_id: None,
                             resource: None,
                             issuer: None,
+                            audience_mode: None,
                         }),
                     // The match arms cover the four subscription ids;
                     // a refresh never dispatches another.
@@ -315,6 +319,7 @@ mod tests {
             client_id: None,
             resource: None,
             issuer: None,
+            audience_mode: None,
         }
     }
 
@@ -335,6 +340,7 @@ mod tests {
             client_id: None,
             resource: None,
             issuer: None,
+            audience_mode: None,
         }
     }
 
@@ -352,6 +358,7 @@ mod tests {
                 client_id: None,
                 resource: None,
                 issuer: None,
+                audience_mode: None,
             },
             _ => AuthCredential::Oauth {
                 access: "stale-access".to_string(),
@@ -364,6 +371,7 @@ mod tests {
                 client_id: None,
                 resource: None,
                 issuer: None,
+                audience_mode: None,
             },
         }
     }
@@ -618,6 +626,7 @@ mod tests {
             client_id: None,
             resource: None,
             issuer: None,
+            audience_mode: None,
         };
         let mut auth = storage_with_credential(OPENAI_CODEX_PROVIDER_ID, &without_refresh);
         let outcome = auth.force_refresh_oauth(OPENAI_CODEX_PROVIDER_ID);
@@ -647,6 +656,7 @@ mod tests {
             client_id: None,
             resource: None,
             issuer: None,
+            audience_mode: None,
         };
         let mut auth = storage_with_credential(OPENAI_CODEX_PROVIDER_ID, &unexpired);
         assert_eq!(
