@@ -36,7 +36,6 @@ class AppTestCase(unittest.IsolatedAsyncioTestCase):
 class LiveSecureFocusTests(AppTestCase):
     async def test_live_secure_focus_refuses_and_overrides_snapshot(self) -> None:
         env = self.make_env()
-        env.focused_index = 1  # the snapshot's Search field: not secure
         env.secure_focus = True  # the live focus moved onto a secure field
         app = await env.get_app()
         with self.assertRaises(errors.ComputerUseError) as caught:
@@ -46,7 +45,6 @@ class LiveSecureFocusTests(AppTestCase):
 
     async def test_snapshot_fallback_when_live_focus_unavailable(self) -> None:
         env = self.make_env()
-        env.focused_index = 4  # the Password secure field in the snapshot
         env.secure_focus = None  # the live read is unavailable
         app = await env.get_app()
         with self.assertRaises(errors.ComputerUseError) as caught:
@@ -55,7 +53,6 @@ class LiveSecureFocusTests(AppTestCase):
 
     async def test_live_non_secure_focus_overrides_snapshot(self) -> None:
         env = self.make_env()
-        env.focused_index = 4
         env.secure_focus = False  # focus moved off the secure field
         app = await env.get_app()
         await app.type_text("hello")
@@ -112,7 +109,6 @@ class DottedNameResolutionTests(AppTestCase):
 class SecureFocusFailClosedTests(AppTestCase):
     async def test_unavailable_live_focus_fails_closed(self) -> None:
         env = self.make_env()
-        env.focused_index = 4  # the Password secure field in the snapshot
         env.secure_focus = None  # the live read failed
         app = await env.get_app()
         with self.assertRaises(errors.ComputerUseError) as caught:
@@ -123,7 +119,6 @@ class SecureFocusFailClosedTests(AppTestCase):
 
     async def test_unavailable_live_focus_fails_closed_over_a_non_secure_snapshot(self) -> None:
         env = self.make_env()
-        env.focused_index = 1  # the Search field: not secure in the snapshot
         env.secure_focus = None  # the live read failed
         app = await env.get_app()
         with self.assertRaises(errors.ComputerUseError) as caught:
@@ -293,7 +288,6 @@ class BuiltinDenyInvariantTests(unittest.TestCase):
 class GateOrderingTests(AppTestCase):
     async def test_locked_screen_wins_over_the_secure_field_refusal(self) -> None:
         env = self.make_env()
-        env.focused_index = 4
         env.secure_focus = True
         app = await env.get_app()
         env.locked = True
@@ -304,7 +298,6 @@ class GateOrderingTests(AppTestCase):
 
     async def test_revoked_allowlist_wins_over_the_secure_field_refusal(self) -> None:
         env = self.make_env()
-        env.focused_index = 4
         env.secure_focus = True
         app = await env.get_app()
         fakes.write_settings(env.settings_tmp.name, allowed=())
@@ -900,7 +893,7 @@ class CappedTitleStaleTests(AppTestCase):
         app = await env.get_app()
         long_title = "T" * (ax._MAX_ATTRIBUTE_CHARS + 50)
         app._observation = fakes.observation(
-            [{"role": "AXButton", "title": ax._cap(long_title), "children": []}], focused_index=0
+            [{"role": "AXButton", "title": ax._cap(long_title), "children": []}]
         )
         live_services = types.SimpleNamespace(
             kAXErrorSuccess=0,
@@ -1036,6 +1029,17 @@ class DisplacedPayloadTests(AppTestCase):
         self.assertIn("clipboard changed during the paste", caught.exception.message)
         # an unverifiable pasteboard never restores over the concurrent copy
         self.assertNotIn(("restore", {"string": "saved"}), env.clipboard_calls)
+
+
+class SystemDenyRecoveryTests(unittest.TestCase):
+    def test_the_system_deny_refusal_does_not_suggest_an_allowlist_override(self) -> None:
+        from computer_use import policy
+
+        result = policy._gate("com.apple.loginwindow", policy.Settings())
+        self.assertFalse(result.allowed)
+        self.assertIn("always refused", result.reason)
+        self.assertIn("will NOT allow it", result.reason)
+        self.assertNotIn("To allow an app, add its bundle id", result.reason)
 
 
 if __name__ == "__main__":

@@ -109,6 +109,16 @@ async def get_app(app: str | dict[str, str]) -> App:
             )
     if len(allowed) > 1:
         bundle_ids = sorted(candidate.bundle_id for candidate in allowed)
+        if len(set(bundle_ids)) == 1:
+            # the caller already asked for this exact bundle id: the dead
+            # end is duplicated processes, not an unspecified spec
+            raise ComputerUseError(
+                "AMBIGUOUS_APP",
+                f"several instances of {bundle_ids[0]} are running; the skill binds "
+                "one app process at a time and cannot pick between them - ask the "
+                "user to close the extra instance or bring the wanted one forward",
+                {"bundle_ids": bundle_ids},
+            )
         raise ComputerUseError(
             "AMBIGUOUS_APP",
             "the app spec matched several allowed apps ("

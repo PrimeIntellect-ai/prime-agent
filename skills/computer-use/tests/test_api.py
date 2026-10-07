@@ -488,6 +488,21 @@ class GetAppTests(AppTestCase):
         self.assertEqual(caught.exception.code, "AMBIGUOUS_APP")
         self.assertIn("com.example.two", caught.exception.message)
 
+    async def test_get_app_same_bundle_instances_name_the_real_dead_end(self) -> None:
+        from computer_use import errors
+        from computer_use.apps import RunningApp
+
+        env = self.make_env(allowed=("com.example.app",))
+        env.running = [
+            RunningApp(bundle_id="com.example.app", name="Example", pid=4242, path=None),
+            RunningApp(bundle_id="com.example.app", name="Example", pid=4243, path=None),
+        ]
+        with self.assertRaises(errors.ComputerUseError) as caught:
+            await env.get_app("com.example.app")
+        self.assertEqual(caught.exception.code, "AMBIGUOUS_APP")
+        self.assertIn("several instances of com.example.app", caught.exception.message)
+        self.assertNotIn("call get_app with the bundle_id", caught.exception.message)
+
     async def test_get_app_launches_when_not_running(self) -> None:
         from computer_use.apps import RunningApp
 
@@ -642,7 +657,6 @@ class AppDispatchTests(AppTestCase):
         from computer_use import errors
 
         env = self.make_env()
-        env.focused_index = 4  # the Password secure field
         env.secure_focus = True  # the live focus agrees
         app = await env.get_app()
         with self.assertRaises(errors.ComputerUseError) as caught:
@@ -675,7 +689,6 @@ class AppDispatchTests(AppTestCase):
 
     async def test_type_text_allows_focused_non_secure_field(self) -> None:
         env = self.make_env()
-        env.focused_index = 1  # the Search text field
         app = await env.get_app()
         await app.type_text("hello")
         self.assertEqual(env.recorder.calls_named("type_text"), [{"pid": env.pid, "text": "hello"}])
@@ -684,7 +697,6 @@ class AppDispatchTests(AppTestCase):
         from computer_use import errors
 
         env = self.make_env()
-        env.focused_index = 4  # the Password secure field
         env.secure_focus = True  # the live focus agrees
         app = await env.get_app()
         with self.assertRaises(errors.ComputerUseError) as caught:
@@ -696,7 +708,6 @@ class AppDispatchTests(AppTestCase):
         from computer_use import errors
 
         env = self.make_env()
-        env.focused_index = 4
         env.secure_focus = True  # the live focus agrees
         app = await env.get_app()
         with self.assertRaises(errors.ComputerUseError) as caught:

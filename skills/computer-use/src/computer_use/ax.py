@@ -46,15 +46,13 @@ class Observation(NamedTuple):
     tree holds the window's children (the window itself is not indexed), refs
     holds the AX element reference for each tree element in walk order,
     window_rect is the window's global (x, y, width, height) when known,
-    focused_index is the focused element's tree index when known, and
-    window_id is the window's CGWindowID when readable.
+    and window_id is the window's CGWindowID when readable.
     """
 
     window_title: str | None
     tree: list[dict[str, Any]]
     refs: list[Any]
     window_rect: tuple[float, float, float, float] | None = None
-    focused_index: int | None = None
     window_id: int | None = None
     truncated: bool = False
 
@@ -145,21 +143,9 @@ def _observe(pid: int) -> Observation:
         tree=tree,
         refs=refs,
         window_rect=read(lambda: _window_rect(app_services, window, budget())),
-        focused_index=read(lambda: _focused_index(app_services, app_element, refs, budget())),
         window_id=read(lambda: _window_id(app_services, window, budget())),
         truncated=bool(stopped) or time.monotonic() > deadline,
     )
-
-
-def _focused_index(app_services: Any, app_element: Any, refs: list[Any], timeout_seconds: float | None = None) -> int | None:
-    """Resolve the app's focused element to its tree index, or None when unknown."""
-    focused = _copy_value(app_services, app_element, "AXFocusedUIElement", timeout_seconds)
-    if focused is None:
-        return None
-    for index, ref in enumerate(refs):
-        if ref is focused or ref == focused:
-            return index
-    return None
 
 
 def _live_fingerprint(ref: Any) -> tuple[str | None, str | None]:

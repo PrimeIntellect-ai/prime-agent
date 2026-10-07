@@ -410,7 +410,6 @@ def observation(
     tree: dict[str, Any] | list[dict[str, Any]],
     window_title: str | None = "Main",
     window_rect: tuple[float, float, float, float] | None = (100.0, 50.0, 400.0, 300.0),
-    focused_index: int | None = None,
     window_id: int | None = None,
 ) -> Any:
     """Build a canned ax._observe result; refs follow the same walk order as ax._flatten."""
@@ -422,7 +421,6 @@ def observation(
         tree=elements,
         refs=flatten_all(elements),
         window_rect=window_rect,
-        focused_index=focused_index,
         window_id=window_id,
     )
 
@@ -474,7 +472,6 @@ class AppEnvironment:
         self.window_rect: tuple[float, float, float, float] | None = (100.0, 50.0, 400.0, 300.0)
         self.locked = False
         self.settable = True
-        self.focused_index: int | None = None
         self.secure_focus: bool | None = False  # live focused_is_secure verdict; None = the live read failed (fails closed)
         self.live_secure_ref: bool = False  # live per-element secure verdict used by set_value/select_text
         self.fingerprint_values: list[Any] | None = None  # queued window_fingerprint reads; None = unreadable
@@ -566,7 +563,7 @@ class AppEnvironment:
         patch(policy, "SETTINGS_PATH", self.settings_file)
         patch(policy, "_screen_locked", lambda: self.locked)
         patch(permissions, "_status", lambda: dict(self.permissions))
-        patch(ax, "_observe", lambda pid: observation(self.current, self.window_title, self.window_rect, self.focused_index, self.window_id))
+        patch(ax, "_observe", lambda pid: observation(self.current, self.window_title, self.window_rect, self.window_id))
         patch(ax, "_live_fingerprint", self._live_fingerprint)
         patch(ax, "_focused_is_secure", lambda pid: self.secure_focus)
         patch(ax, "_live_is_secure", lambda ref: self.live_secure_ref)

@@ -606,5 +606,21 @@ class UnreadableRoleValueTests(unittest.TestCase):
         self.assertIsNone(described["value"])
 
 
+class ObserveFocusReadTests(unittest.TestCase):
+    def test_observe_does_not_spend_budget_on_the_unused_focus_lookup(self) -> None:
+        app = FakeAxValueServices()
+        read_attributes: list[str] = []
+        original = app.AXUIElementCopyAttributeValue
+
+        def recording_copy(element: Any, attribute: str, unused: Any) -> Any:
+            read_attributes.append(attribute)
+            return original(element, attribute, unused)
+
+        app.AXUIElementCopyAttributeValue = recording_copy
+        with mock.patch.object(ax, "_require_mac", lambda: types.SimpleNamespace(app_services=app)):
+            ax._observe(4242)
+        self.assertNotIn("AXFocusedUIElement", read_attributes)
+
+
 if __name__ == "__main__":
     unittest.main()
