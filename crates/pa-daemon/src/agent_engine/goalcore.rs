@@ -138,7 +138,7 @@ impl AgentSessionEngine {
                 continue;
             }
             if let Err(error) = wiring.store.cancel(&job.id, crate::util::now_ms()) {
-                tracing::warn!(%error, "failed to cancel goal wake job");
+                eprintln!("failed to cancel goal wake job: {error}");
             }
         }
     }

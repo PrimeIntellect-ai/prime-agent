@@ -470,7 +470,7 @@ impl Worker {
             },
             crate::util::now_ms(),
         ) {
-            tracing::warn!(%error, "failed to cancel deleted session jobs");
+            eprintln!("failed to cancel deleted session jobs: {error}");
         }
     }
 }
