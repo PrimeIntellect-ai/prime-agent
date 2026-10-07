@@ -6,6 +6,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[cfg(unix)]
+use crate::packages::exe_dir_of;
 use crate::packages::source::{GitSource, SourceScope, UserOrProject};
 use crate::packages::PackageManager;
 use crate::settings::SettingsManager;
@@ -326,4 +328,23 @@ fn git_ref_checkout_installs_the_pinned_revision() {
         .join("repo");
     assert!(installed.join("package.json").exists());
     assert!(!installed.join("skills.md").exists(), "pinned ref checkout");
+}
+
+/// A launcher symlink resolves to the real binary's directory (the
+/// Homebrew formula's `bin` link): the shipped payload sits beside the
+/// real file, and a plain path stays untouched.
+#[cfg(unix)]
+#[test]
+fn exe_dir_of_resolves_a_launcher_symlink() {
+    let root = tempfile::tempdir().unwrap();
+    let libexec = root.path().join("libexec");
+    let bin = root.path().join("bin");
+    std::fs::create_dir_all(&libexec).unwrap();
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(libexec.join("prime-agent"), b"binary").unwrap();
+    let launcher = bin.join("prime-agent");
+    std::os::unix::fs::symlink(libexec.join("prime-agent"), &launcher).unwrap();
+    let real = libexec.join("prime-agent");
+    assert_eq!(exe_dir_of(&launcher), Some(libexec.clone()));
+    assert_eq!(exe_dir_of(&real), Some(libexec));
 }

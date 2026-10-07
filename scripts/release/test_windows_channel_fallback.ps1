@@ -78,7 +78,27 @@ function Invoke-Installer {
 # test reads it back from the log.
 $serverLog = Join-Path $scratch 'channel-server.log'
 $server = Start-Process -FilePath $py -ArgumentList '-u','-m','http.server','0','--bind','127.0.0.1','--directory',$channel -PassThru -WindowStyle Hidden -RedirectStandardOutput $serverLog
+# install.ps1 writes the User PATH (the PATH-parity flow) and installs uv
+# when the machine has none (the astral route); the harness strips exactly
+# its own scratch-prefixed PATH entries in the cleanup below.
+# THE UV INSTALL IS ISOLATED (the reviewers' finding): ownership of a file
+# in the shared ~/.local/bin is unprovable, so the harness never lets the
+# installer touch the shared dir - install.ps1 honors
+# PRIME_AGENT_UV_BIN_DIR and the harness points it at its scratch.
+# The kernel pre-warm's writes (the venv, uv's cache, uv's pythons) would
+# land in the real user profile too; the harness steers all of them into
+# its own scratch dir through the product's override knobs and restores
+# the caller's values in the cleanup (the discipline install.ps1 itself
+# runs).
+$callerKernelVenv = $env:PRIME_AGENT_KERNEL_VENV
+$callerUvCacheDir = $env:UV_CACHE_DIR
+$callerUvPythonDir = $env:UV_PYTHON_INSTALL_DIR
+$callerUvBinDir = $env:PRIME_AGENT_UV_BIN_DIR
 try {
+    $env:PRIME_AGENT_KERNEL_VENV = Join-Path $scratch 'kernel-venv'
+    $env:UV_CACHE_DIR = Join-Path $scratch 'uv-cache'
+    $env:UV_PYTHON_INSTALL_DIR = Join-Path $scratch 'uv-python'
+    $env:PRIME_AGENT_UV_BIN_DIR = Join-Path $scratch 'uv-bin'
     # The port the server itself announced, then readiness is it answering
     # a request for this test's own channel (beta.json): bounded deadlines,
     # and a dead child fails fast instead of hanging the installer.
@@ -144,5 +164,48 @@ try {
     Write-Host "WIN_CHANNEL_FALLBACK default->beta=$betaVersion notice+marker verified; explicit-stable refused with the beta route"
 } finally {
     Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
+    # The User PATH: strip ONLY the entries this test added - the ones
+    # under its own scratch dir - from the CURRENT registry value, never
+    # a stale snapshot restore (a whole-value overwrite would clobber any
+    # external PATH change made while the test ran) and never through
+    # [Environment]::SetEnvironmentVariable (it flattens a REG_EXPAND_SZ
+    # Path to plain REG_SZ with this run's expansion frozen in). The raw
+    # value rides out with its registry kind intact; a Path this test
+    # created from nothing is deleted again; a Path it never touched is
+    # not rewritten at all. A cleanup failure is recorded and the
+    # remaining steps still run (the loud tail below reports it).
+    $pathCleanFailed = $false
+    $envKey = $null
+    try {
+        $envKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+        $rawUserPath = $envKey.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        $rawUserKind = [Microsoft.Win32.RegistryValueKind]::ExpandString
+        if ($envKey.GetValueNames() -contains 'Path') {
+            $rawUserKind = $envKey.GetValueKind('Path')
+        }
+        $allEntries = @($rawUserPath -split ';')
+        $keptEntries = @($allEntries | Where-Object { -not $_.Trim().StartsWith($scratch, [System.StringComparison]::OrdinalIgnoreCase) })
+        if ($keptEntries.Count -lt $allEntries.Count) {
+            if ($keptEntries.Count -gt 0) {
+                $envKey.SetValue('Path', ($keptEntries -join ';'), $rawUserKind)
+            } else {
+                $envKey.DeleteValue('Path', $false)
+            }
+        }
+    } catch {
+        $pathCleanFailed = $true
+    } finally {
+        if ($envKey) { $envKey.Close() }
+    }
+    # The uv install needs no cleanup: it never left the scratch dir (the
+    # PRIME_AGENT_UV_BIN_DIR knob above steered the installer), and the
+    # user's ~/.local/bin was never touched at all.
+    $env:PRIME_AGENT_KERNEL_VENV = $callerKernelVenv
+    $env:UV_CACHE_DIR = $callerUvCacheDir
+    $env:UV_PYTHON_INSTALL_DIR = $callerUvPythonDir
+    $env:PRIME_AGENT_UV_BIN_DIR = $callerUvBinDir
     Remove-Item -Recurse -Force $scratch -ErrorAction SilentlyContinue
+    if ($pathCleanFailed) {
+        throw 'could not clean the user PATH entries this test added'
+    }
 }

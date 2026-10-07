@@ -1193,6 +1193,14 @@ const UPDATE_EVENTS: &[EventRule] = &[
             ("sessions_failed", optional(count())),
         ],
     },
+    // The installer funnel refuses a Homebrew-owned executable before
+    // downloading or running the installer. `kind` is the package layout,
+    // never an executable path; invalid values normalize to `formula`.
+    EventRule {
+        name: "update_homebrew_refusal",
+        since: 2,
+        properties: &[("kind", required(enum_rule(&["formula", "cask"], "formula")))],
+    },
     EventRule {
         name: "update_aborted",
         since: 1,
