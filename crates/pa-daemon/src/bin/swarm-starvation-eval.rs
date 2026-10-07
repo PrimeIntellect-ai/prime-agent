@@ -712,10 +712,13 @@ fn drive_trial(
     // child prompt (secret included) rides in the orchestrator's own prompt,
     // so a correct ANSWER with zero arrivals was assembled without any child
     // REPORT — a crewless run is not a swarm measurement and must not pass.
-    // A schedule cut-off gets its own class first (children may still have
-    // been mid-REPORT at the deadline, so the arrivals count alone would
-    // misread a cut-off as crewless), and the rate-limit class stays first
-    // as before.
+    // A partial crew is the same defect one step along: a child that settles
+    // without ever sending its REPORT leaves the arrivals below the
+    // configured size, so the row would score a lighter load while still
+    // labeling it as the configured crew. A schedule cut-off gets its own
+    // class first (children may still have been mid-REPORT at the deadline,
+    // so the arrivals count alone would misread a cut-off as crewless), and
+    // the rate-limit class stays first as before.
     let instant_fail = rate_limit_failure(&messages)
         .or_else(|| {
             timed_out.then(|| "schedule timeout: no ANSWER line before the deadline".to_string())
@@ -723,6 +726,14 @@ fn drive_trial(
         .or_else(|| {
             (snapshot.arrivals.total == 0)
                 .then(|| "crewless trial: no child REPORT arrived".to_string())
+        })
+        .or_else(|| {
+            (snapshot.arrivals.total < size as u64).then(|| {
+                format!(
+                    "partial crew: {} of {size} child REPORTs arrived",
+                    snapshot.arrivals.total
+                )
+            })
         });
 
     Ok(trial_result_from_snapshot(
@@ -1035,6 +1046,72 @@ mod tests {
         assert!(report.contains("1/1 trials failed"), "{report}");
         assert!(
             report.contains("crewless trial: no child REPORT arrived"),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn a_partial_crew_cannot_pass() {
+        // One child of two settled without ever sending its REPORT. The
+        // orchestrator still embeds every child prompt, so it can emit the
+        // correct ANSWER from a partial crew — the scripted transcript even
+        // passes every defense line, so without the partial-crew class this
+        // row passes the sweep while scoring half the configured load.
+        let (seed, size, trial) = (1, 2, 1);
+        let secrets = seeded_secrets(seed + 31 * size + trial, 2);
+        let answer = secrets
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let daemon = fake_daemon(vec![
+            ("create", json!({ "activeSessionId": "s-eval" })),
+            ("prompt", json!({})),
+            (
+                "get_last_assistant_text",
+                json!({ "text": format!("ANSWER: {answer}") }),
+            ),
+            ("get_rlm_children", json!({ "children": [] })),
+            (
+                "get_messages",
+                json!({ "messages": [
+                    // Two plain orchestrator steps before the REPORT and one
+                    // small ingestion step after it: every defense line
+                    // passes, so only the partial-crew class fails the row.
+                    json!({ "role": "assistant", "usage": { "input": 1000, "output": 500 } }),
+                    json!({ "role": "assistant", "usage": { "input": 1000, "output": 500 } }),
+                    json!({ "role": "custom", "customType": "agent_message", "content": "[agent-message from child]\n\nREPORT" }),
+                    json!({ "role": "assistant", "usage": { "input": 10, "output": 5 } }),
+                ] }),
+            ),
+            (
+                "get_session_stats",
+                json!({ "contextUsage": { "tokens": 1_000 } }),
+            ),
+            ("kill", json!(null)),
+        ]);
+        let out_dir = tempfile::TempDir::new().expect("out dir");
+        let config = test_config(out_dir.path(), 2, 15.0);
+
+        run(&daemon.socket, &config).expect("the partial-crew trial is a row");
+
+        let raw = std::fs::read_to_string(out_dir.path().join("report.json")).expect("report.json");
+        let json: Value = serde_json::from_str(&raw).expect("report.json parses");
+        let rows = json["results"].as_array().expect("results array");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        // The ANSWER itself matched both secrets, so the task column stays
+        // honest; the verdict column carries why the row still cannot pass.
+        assert_eq!(rows[0]["task_success"], true, "{rows:?}");
+        assert_eq!(rows[0]["arrivals"], 1, "{rows:?}");
+        assert_eq!(
+            rows[0]["instant_fail"], "partial crew: 1 of 2 child REPORTs arrived",
+            "{rows:?}"
+        );
+        assert_eq!(rows[0]["verdict"], "fail", "{rows:?}");
+        let report = std::fs::read_to_string(out_dir.path().join("report.md")).expect("report.md");
+        assert!(report.contains("1/1 trials failed"), "{report}");
+        assert!(
+            report.contains("partial crew: 1 of 2 child REPORTs arrived"),
             "{report}"
         );
     }
