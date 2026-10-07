@@ -129,7 +129,7 @@ def _observe(pid: int) -> Observation:
 
     # Every post-walk read draws on the same deadline: each computes its own
     # slice of the remaining budget (one shared timeout would let the title,
-    # rect, focus, and window-id reads each spend it in full), and none
+    # rect, and window-id reads each spend it in full), and none
     # starts once the budget is spent.
     def budget() -> float:
         return min(_MESSAGING_TIMEOUT_SECONDS, _remaining_seconds(deadline))

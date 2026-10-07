@@ -1041,6 +1041,17 @@ class SystemDenyRecoveryTests(unittest.TestCase):
         self.assertIn("will NOT allow it", result.reason)
         self.assertNotIn("To allow an app, add its bundle id", result.reason)
 
+    def test_a_custom_deny_names_the_real_key_and_is_not_called_an_os_auth_surface(self) -> None:
+        from computer_use import policy
+
+        settings = policy.Settings(system_deny=("com.custom.deny",))
+        result = policy._gate("com.custom.deny", settings)
+        self.assertFalse(result.allowed)
+        self.assertIn("top-level `system_deny`", result.reason)
+        self.assertIn("will NOT allow it", result.reason)
+        self.assertNotIn("OS authentication", result.reason)
+        self.assertNotIn("apps.system_deny", result.reason)
+
 
 if __name__ == "__main__":
     unittest.main()

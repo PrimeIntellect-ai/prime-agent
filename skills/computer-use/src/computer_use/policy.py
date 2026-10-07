@@ -85,12 +85,17 @@ def _load_settings(path: Path | str | None = None) -> Settings:
 def _gate(bundle_id: str, settings: Settings) -> GateResult:
     """Decide one bundle id against settings; the deny-lists win over the allowlist."""
     risk = settings.risk.get(bundle_id, DEFAULT_RISK)
-    if bundle_id in SYSTEM_DENY or bundle_id in settings.system_deny:
+    if bundle_id in SYSTEM_DENY:
         reason = (
-            f"{bundle_id} is on the system deny-list; OS authentication surfaces are "
-            f"always refused - adding it to `apps.allowed` will NOT allow it. If the "
-            f"id sits in your own `apps.system_deny` in {SETTINGS_PATH}, remove it "
-            "there first."
+            f"{bundle_id} is on the built-in system deny-list; OS authentication "
+            f"surfaces are always refused and adding it to `apps.allowed` will "
+            "NOT allow it."
+        )
+    elif bundle_id in settings.system_deny:
+        reason = (
+            f"{bundle_id} is in the top-level `system_deny` list in "
+            f"{SETTINGS_PATH}; remove it there first - adding it to "
+            "`apps.allowed` will NOT allow it."
         )
     elif bundle_id in settings.blocked:
         reason = (

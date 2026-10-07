@@ -116,7 +116,7 @@ async def get_app(app: str | dict[str, str]) -> App:
                 "AMBIGUOUS_APP",
                 f"several instances of {bundle_ids[0]} are running; the skill binds "
                 "one app process at a time and cannot pick between them - ask the "
-                "user to close the extra instance or bring the wanted one forward",
+                "user to close the extra instance",
                 {"bundle_ids": bundle_ids},
             )
         raise ComputerUseError(
