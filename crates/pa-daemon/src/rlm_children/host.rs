@@ -62,8 +62,16 @@ async fn resolve_child_model_allowlisted(
 /// a run after its task's `finally`). Only the unclaimed verdict — the
 /// admission-to-run hand-off misread the grace exists to un-settle — is
 /// re-cleared for re-reading.
+///
+/// The delete's claim is its close marker, not its notice claim: the live
+/// delete commits `cancelled` together with `closed_by_parent` at one hold
+/// of the record lock, while its terminal-notice claim lands only after
+/// the registry removal — a multi-await window an in-flight collect
+/// holding the record can sit in, with the child reading busy mid-kill.
+/// The gate reads the marker so the delete's (and a close's) verdict
+/// keeps itself from its own commit.
 pub(super) fn collect_grace_may_reclear(record: &ChildRecord) -> bool {
-    !record.settled && !record.notice_delivered
+    !record.settled && !record.notice_delivered && !record.closed_by_parent
 }
 
 impl RlmSubagentHost for SupervisorChildSessions {

@@ -2047,3 +2047,88 @@ async fn the_display_completes_only_a_verdict_the_tail_claim_committed() {
         "rlm_child_terminal_notice"
     );
 }
+
+/// The "Grace reclears cancelled child verdicts" pin: the live delete
+/// commits its `cancelled` verdict together with its `closed_by_parent`
+/// claim marker at ONE hold of the record lock (`delete_subagent`), while
+/// its terminal-notice claim — the only delete claim the grace gate read
+/// before — lands only after the registry removal and the delete notifier:
+/// a multi-await window. A collect that resolved the record before the
+/// registry removal can sit in that window with the child reading busy
+/// mid-kill (the delete's teardown), and a grace that ran there wiped the
+/// committed verdict: the collect answered `running` for a child the
+/// parent already cancelled, and the reclear's post-wait refresh could
+/// remint `done` on the dead worker. The gate now reads the close marker
+/// as the claim the round-1 contract already names ("a cancel, a delete,
+/// and a parent close each claim the record and own their verdict"), so
+/// the delete's verdict keeps itself from its own commit.
+#[tokio::test]
+async fn collect_grace_keeps_a_verdict_the_delete_already_claimed() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let child_subagents = Arc::new(FakeChildSubagents::default());
+    let (sessions, _kill_rx) = sessions_with_fake_child_subagents(
+        follow_up_tx,
+        0,
+        FakeKill::Success,
+        FakeChild::ParksGraceCheck,
+        Arc::clone(&child_subagents),
+    )
+    .await;
+    sessions
+        .push_test_child(RlmChildIdentity {
+            rlm_child_id: "sub-delete-claimed".to_string(),
+            active_session_id: "child-live".to_string(),
+            session_id: Some("child-file".to_string()),
+            session_name: "delete-claimed".to_string(),
+        })
+        .await;
+    let record = Arc::clone(&sessions.inner.children.lock().await[0]);
+    // The record mid-delete: the kill landed and the delete committed its
+    // verdict and claim marker at one hold; the registry removal and the
+    // terminal-notice claim have not run yet.
+    {
+        let mut record = record.lock().await;
+        record.settled_status = Some("cancelled");
+        record.error = Some("Deleted by parent orchestrator".to_string());
+        record.closed_by_parent = true;
+    }
+    // The child reads busy mid-kill (the delete's teardown window): a
+    // grace that ran would find the busy child and re-clear the verdict.
+    child_subagents.running.store(true, Ordering::SeqCst);
+    // A grace that DID run parks its busy-check; release it whenever it
+    // parks, so a re-cleared verdict fails the asserts below instead of
+    // a timeout.
+    let release_subagents = Arc::clone(&child_subagents);
+    tokio::spawn(async move {
+        release_subagents.grace_parked.notified().await;
+        release_subagents.grace_release.notify_one();
+    });
+    let collect_sessions = sessions.clone();
+    let results = tokio::time::timeout(
+        Duration::from_secs(10),
+        collect_sessions.collect(vec!["sub-delete-claimed".to_string()], 0),
+    )
+    .await
+    .expect("the claimed verdict answers without the grace window")
+    .expect("collect the delete-claimed child");
+    assert_eq!(results.len(), 1);
+    assert_eq!(
+        results[0].status, "cancelled",
+        "the delete's committed verdict keeps itself inside the grace window"
+    );
+    assert!(
+        results[0].settled,
+        "the cancelled run answers settled, never a re-cleared running snapshot"
+    );
+    assert_eq!(
+        results[0].error.as_deref(),
+        Some("Deleted by parent orchestrator"),
+        "the delete's reason rides the kept verdict"
+    );
+    let verdict = record.lock().await.settled_status;
+    assert_eq!(
+        verdict,
+        Some("cancelled"),
+        "the record keeps the delete's verdict behind the collect read"
+    );
+}
