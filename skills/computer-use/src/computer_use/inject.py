@@ -63,10 +63,12 @@ def _click(pid: int, point: tuple[float, float], button: str = "left", count: in
             "right": (quartz.kCGEventRightMouseDown, quartz.kCGEventRightMouseUp, 1),
             "middle": (quartz.kCGEventOtherMouseDown, quartz.kCGEventOtherMouseUp, 2),
         }[button]
-        for _ in range(count):
+        for i in range(1, count + 1):
             down = quartz.CGEventCreateMouseEvent(None, down_type, (x, y), code)
+            quartz.CGEventSetIntegerValueField(down, quartz.kCGMouseEventClickState, i)
             quartz.CGEventPostToPid(pid, down)
             up = quartz.CGEventCreateMouseEvent(None, up_type, (x, y), code)
+            quartz.CGEventSetIntegerValueField(up, quartz.kCGMouseEventClickState, i)
             quartz.CGEventPostToPid(pid, up)
     except ComputerUseError:
         raise

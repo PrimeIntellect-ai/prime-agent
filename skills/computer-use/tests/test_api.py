@@ -263,6 +263,62 @@ class ScrollPointTests(unittest.TestCase):
         self.assertEqual(locations[0][1], (140, 160))
 
 
+class ClickStateTests(unittest.TestCase):
+    def click_with_fake_quartz(self, count: int) -> types.SimpleNamespace:
+        """Run _click against a recording fake quartz and return every call it made."""
+
+        click_states: list[tuple[object, object, int]] = []
+        created: list[tuple[object, object]] = []
+        posted: list[object] = []
+        order: list[str] = []
+
+        def create_mouse_event(source, event_type, location, button_code):
+            event = object()  # a fresh event per call, like the real CGEventCreateMouseEvent
+            created.append((event, event_type))
+            order.append("create")
+            return event
+
+        def set_integer_value_field(event, field, value):
+            click_states.append((event, field, value))
+            order.append("set")
+
+        def post_to_pid(pid, event):
+            posted.append(event)
+            order.append("post")
+
+        quartz = types.SimpleNamespace(
+            kCGEventLeftMouseDown="left-down",
+            kCGEventLeftMouseUp="left-up",
+            kCGEventRightMouseDown="right-down",
+            kCGEventRightMouseUp="right-up",
+            kCGEventOtherMouseDown="other-down",
+            kCGEventOtherMouseUp="other-up",
+            kCGMouseEventClickState="click-state",
+            CGEventCreateMouseEvent=create_mouse_event,
+            CGEventSetIntegerValueField=set_integer_value_field,
+            CGEventPostToPid=post_to_pid,
+        )
+        with mock.patch.object(inject, "_require_mac", return_value=types.SimpleNamespace(quartz=quartz)):
+            inject._click(123, (10, 20), "left", count)
+        return types.SimpleNamespace(click_states=click_states, created=created, posted=posted, order=order)
+
+    def test_double_click_sets_click_state_on_both_events_of_each_cycle(self) -> None:
+        run = self.click_with_fake_quartz(2)
+        self.assertEqual([value for _, _, value in run.click_states], [1, 1, 2, 2])
+        self.assertEqual([event for event, _, _ in run.click_states], [event for event, _ in run.created])
+        self.assertEqual([field for _, field, _ in run.click_states], ["click-state"] * 4)
+        self.assertEqual(run.order, ["create", "set", "post"] * 4)  # stamped between create and post
+
+    def test_single_click_sets_click_state_one_on_down_and_up(self) -> None:
+        run = self.click_with_fake_quartz(1)
+        self.assertEqual([value for _, _, value in run.click_states], [1, 1])
+
+    def test_click_posts_two_down_up_pairs_per_click_cycle(self) -> None:
+        run = self.click_with_fake_quartz(2)
+        self.assertEqual([event_type for _, event_type in run.created], ["left-down", "left-up"] * 2)
+        self.assertEqual(run.posted, [event for event, _ in run.created])
+
+
 class InjectionFailureTests(unittest.TestCase):
     def test_click_wraps_cg_error_as_injection_failed(self) -> None:
         with mock.patch.object(inject, "_require_mac", side_effect=RuntimeError("boom")):
