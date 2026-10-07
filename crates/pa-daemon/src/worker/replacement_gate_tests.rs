@@ -186,8 +186,12 @@ async fn a_switched_session_repairs_a_torn_tail_before_its_first_append() {
     let dir = tempfile::tempdir().unwrap();
     let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let worker = recording_worker(dir.path(), std::sync::Arc::clone(&events));
+    let live = written_session_file(dir.path(), "live.jsonl");
     let created = worker
-        .dispatch("create", &json!({ "noSession": true, "cwd": "/tmp" }))
+        .dispatch(
+            "create",
+            &json!({ "sessionPath": live.to_string_lossy(), "cwd": "/tmp" }),
+        )
         .await;
     assert!(created.success, "create failed: {created:?}");
 
@@ -243,8 +247,12 @@ async fn a_switched_non_session_file_is_never_rewritten() {
     let dir = tempfile::tempdir().unwrap();
     let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let worker = recording_worker(dir.path(), std::sync::Arc::clone(&events));
+    let live = written_session_file(dir.path(), "live.jsonl");
     let created = worker
-        .dispatch("create", &json!({ "noSession": true, "cwd": "/tmp" }))
+        .dispatch(
+            "create",
+            &json!({ "sessionPath": live.to_string_lossy(), "cwd": "/tmp" }),
+        )
         .await;
     assert!(created.success, "create failed: {created:?}");
 
@@ -315,4 +323,138 @@ async fn a_resumed_session_repairs_a_non_utf8_torn_tail_before_its_first_append(
     let killed = worker.dispatch("kill", &json!({})).await;
     assert!(killed.success, "kill failed: {killed:?}");
     drop(worker);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_symlinked_session_repairs_its_target_and_keeps_the_append_lease() {
+    let dir = tempfile::tempdir().unwrap();
+    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let worker = recording_worker(dir.path(), events);
+    let live = written_session_file(dir.path(), "live.jsonl");
+    let created = worker
+        .dispatch(
+            "create",
+            &json!({ "sessionPath": live.to_string_lossy(), "cwd": "/tmp" }),
+        )
+        .await;
+    assert!(created.success, "create failed: {created:?}");
+
+    let target = written_session_file(dir.path(), "target.jsonl");
+    let alias = dir.path().join("alias.jsonl");
+    std::os::unix::fs::symlink(&target, &alias).unwrap();
+    {
+        use std::io::Write as _;
+        let mut torn = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&target)
+            .unwrap();
+        torn.write_all(b"{\"type\":\"message\",\"id\":\"torn\",\"message\":\"con\xc3")
+            .unwrap();
+    }
+    let switched = worker
+        .dispatch(
+            "switch_session",
+            &json!({ "sessionPath": alias.to_string_lossy(), "cwdOverride": "/tmp" }),
+        )
+        .await;
+    assert!(switched.success, "switch failed: {switched:?}");
+    assert!(std::fs::symlink_metadata(&alias).unwrap().file_type().is_symlink());
+    let appended = {
+        let mut core = worker.core.lock().unwrap();
+        let store = core.store.as_mut().expect("the switched store is live");
+        assert!(store.lease.is_some(), "the target has a held lease");
+        store
+            .persist_entry(
+                "message",
+                json!({"message":{"role":"user","content":"after","timestamp":1}}),
+            )
+            .expect("append through the alias under its target lease")
+    };
+    assert!(std::fs::symlink_metadata(&alias).unwrap().file_type().is_symlink());
+    let reopened = crate::session_store::SessionFile::open(&target).unwrap();
+    assert!(reopened.entry(&appended).is_some(), "the target contains the append");
+
+    let killed = worker.dispatch("kill", &json!({})).await;
+    assert!(killed.success, "kill failed: {killed:?}");
+    drop(worker);
+}
+
+#[test]
+fn a_large_valid_last_row_stays_intact_during_tail_repair() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("large-last-row.jsonl");
+    let mut session = crate::session_store::SessionFile::create("/tmp", None, 0);
+    session.set_path(path.clone());
+    let id = session.append_message(&json!({
+        "role": "user",
+        "content": "x".repeat(1024 * 1024 + 1),
+        "timestamp": 0,
+    }));
+    session.rewrite().unwrap();
+    let original = std::fs::read(&path).unwrap();
+    assert!(original.len() > 1024 * 1024);
+    pa_core::session::manager::repair_jsonl_damage(&path);
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+
+    {
+        use std::io::Write as _;
+        let mut torn = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        torn.write_all(b"{\"type\":\"message\",\"id\":\"torn\"\xc3")
+            .unwrap();
+    }
+    pa_core::session::manager::repair_jsonl_damage(&path);
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    let reopened = crate::session_store::SessionFile::open(&path).unwrap();
+    assert!(reopened.entry(&id).is_some(), "the large row reloads");
+}
+
+#[tokio::test]
+async fn an_unleased_switch_never_rewrites_another_workers_damaged_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = written_session_file(dir.path(), "owned.jsonl");
+    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let owner = recording_worker(dir.path(), std::sync::Arc::clone(&events));
+    let created = owner
+        .dispatch(
+            "create",
+            &json!({ "sessionPath": target.to_string_lossy(), "cwd": "/tmp" }),
+        )
+        .await;
+    assert!(created.success, "owner create failed: {created:?}");
+    assert!(owner.core.lock().unwrap().store.as_ref().unwrap().lease.is_some());
+    {
+        use std::io::Write as _;
+        let mut torn = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&target)
+            .unwrap();
+        torn.write_all(b"{\"type\":\"message\",\"id\":\"torn\",\"message\":\"con\xc3")
+            .unwrap();
+    }
+    let before = std::fs::read(&target).unwrap();
+    let visitor = recording_worker(dir.path(), events);
+    let created = visitor
+        .dispatch("create", &json!({ "noSession": true, "cwd": "/tmp" }))
+        .await;
+    assert!(created.success, "visitor create failed: {created:?}");
+    let switched = visitor
+        .dispatch(
+            "switch_session",
+            &json!({ "sessionPath": target.to_string_lossy(), "cwdOverride": "/tmp" }),
+        )
+        .await;
+    assert!(!switched.success, "the damaged target must fail open: {switched:?}");
+    assert_eq!(std::fs::read(&target).unwrap(), before);
+    assert!(owner.core.lock().unwrap().store.as_ref().unwrap().lease.is_some());
+
+    let killed = visitor.dispatch("kill", &json!({})).await;
+    assert!(killed.success, "visitor kill failed: {killed:?}");
+    let killed = owner.dispatch("kill", &json!({})).await;
+    assert!(killed.success, "owner kill failed: {killed:?}");
+    drop(visitor);
+    drop(owner);
 }
