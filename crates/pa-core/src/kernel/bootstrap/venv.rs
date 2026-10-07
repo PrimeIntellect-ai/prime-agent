@@ -152,6 +152,11 @@ async fn run_async(
         // THE BOUND: poll for exit, never an unbounded wait.
         let bound = std::time::Duration::from_millis(resolve_bootstrap_child_timeout_ms());
         let deadline = std::time::Instant::now() + bound;
+        // The exit path joins the drains only for a grace: EOF normally
+        // lands the instant the child dies (its grandchildren are its
+        // waited-for build backends), and a daemonized grandchild that
+        // inherited the pipes must not trade the bound for a new hang.
+        let drain_grace = std::time::Duration::from_secs(5);
         let status = loop {
             match child.try_wait() {
                 Ok(Some(status)) => break status,
@@ -180,8 +185,14 @@ async fn run_async(
                 }
             }
         };
+        let drain_deadline = std::time::Instant::now() + drain_grace;
         for drain in drains {
-            let _ = drain.join();
+            while !drain.is_finished() && std::time::Instant::now() < drain_deadline {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            if drain.is_finished() {
+                let _ = drain.join();
+            }
         }
         if status.success() {
             Ok(())
