@@ -46,15 +46,17 @@ fn path_pins(path: &Path, dir: &fs::File) -> bool {
     }
 }
 
-/// Remove an unpublished lock candidate completely: the owner file
-/// first (a directory containing it cannot be removed), then the
+/// Remove an unpublished lock candidate completely: the auxiliary
+/// files first (a directory containing them cannot be removed), then the
 /// directory. A missing candidate is a non-error (a racing reclaimer).
 #[cfg(unix)]
 fn remove_candidate_dir(candidate: &Path) -> io::Result<()> {
-    match fs::remove_file(candidate.join("owner")) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
+    for note in ["owner", "claimed-at"] {
+        match fs::remove_file(candidate.join(note)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
     }
     fs::remove_dir(candidate)
 }
@@ -309,6 +311,18 @@ pub struct LockDir {
     #[cfg(unix)]
     dir: Option<fs::File>,
     owner: Option<String>,
+}
+
+/// The live owner record for this process's reclaim placeholder: the
+/// same "pid token" shape the owner-liveness check parses, so a
+/// placeholder sitting at a public lock path during a suspended
+/// exchange/restore interval is refused by every other judge exactly
+/// like a live owned lock.
+#[cfg(target_os = "linux")]
+fn process_owner_record() -> String {
+    static PROCESS_TOKEN: std::sync::OnceLock<uuid::Uuid> = std::sync::OnceLock::new();
+    let token = PROCESS_TOKEN.get_or_init(uuid::Uuid::new_v4);
+    format!("{} {token}\n", std::process::id())
 }
 
 /// The outcome of a Linux stale-incumbent reclaim attempt.
@@ -639,16 +653,25 @@ impl LockDir {
         }
     }
 
-    /// Reclaim the stale incumbent judged at `path`, atomically and
-    /// without ever vacating the public path: the incumbent is EXCHANGED
-    /// with a private empty placeholder (`renameat2(RENAME_EXCHANGE)`),
-    /// so the public path continuously holds either the incumbent or
-    /// the placeholder - a third process can never acquire the gap, and
-    /// a claimed successor (the incumbent replaced between the snapshot
+    /// Reclaim the stale incumbent judged at `path` without ever
+    /// vacating the public path and without stranding any holder. The
+    /// dance: (1) a private placeholder directory is created carrying a
+    /// live owner record for THIS process plus a `claimed-at` note
+    /// naming the placeholder itself - a suspension mid-dance leaves a
+    /// live-owned lock at the public path that no other judge may
+    /// reclaim, and any displaced holder whose release runs during the
+    /// interval can find and complete it at the claimed location;
+    /// (2) `renameat2(RENAME_EXCHANGE)` atomically swaps the incumbent
+    /// with the placeholder, so the public path is never empty; (3) the
+    /// exchanged content is removed from the private name ONLY after its
+    /// inode matches the snapshotted `incumbent`; (4) any other content
+    /// (a successor that replaced the incumbent between the snapshot
     /// and the exchange) is swapped back home with a second exchange,
-    /// which cannot fail while both paths exist. The removal happens only
-    /// at the private name and only after the exchanged inode matches
-    /// the snapshotted `incumbent`; a mismatch never removes anything.
+    /// whose ENOENT means the displaced holder already completed its own
+    /// release at the claimed location - the placeholder is then simply
+    /// removed and the acquisition retried. Overlapping holders are
+    /// unrepresentable: no path is ever vacated and no live holder's
+    /// directory is ever removed by another process.
     #[cfg(target_os = "linux")]
     fn claim_stale_incumbent(path: &Path, incumbent: Option<(u64, u64)>) -> io::Result<StaleClaim> {
         // The cheap pre-check: a successor that already replaced the
@@ -671,6 +694,28 @@ impl LockDir {
                 }
                 return Err(error);
             }
+            // The placeholder carries a live owner record for the whole
+            // exchange/restore interval: if this process is suspended
+            // mid-dance, the placeholder sitting at the public lock path
+            // is a stale-dated but LIVE-OWNED lock - another acquirer's
+            // judge refuses to reclaim it, exactly like the suspension
+            // scenario the owner record exists for. The `claimed-at`
+            // note lets a displaced holder's release find and complete
+            // itself at the private location.
+            if let Err(error) = fs::write(placeholder.join("owner"), process_owner_record()) {
+                let _ = remove_candidate_dir(&placeholder);
+                return Err(error);
+            }
+            if let Err(error) = fs::write(
+                placeholder.join("claimed-at"),
+                placeholder
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            ) {
+                let _ = remove_candidate_dir(&placeholder);
+                return Err(error);
+            }
             match rename_noreplace::exchange(path, &placeholder) {
                 Ok(()) => {
                     if identity_at(&placeholder) == incumbent {
@@ -678,35 +723,63 @@ impl LockDir {
                         // name: remove it there (owner file first). The
                         // placeholder itself still blocks the public
                         // path - remove it too so the caller's retry
-                        // sees an empty path (a failed removal here is a
-                        // real error: the retry would only contend with
-                        // our own artifact).
+                        // sees an empty path; a missing residue was
+                        // removed by a displaced holder's release.
                         if let Err(error) = remove_candidate_dir(&placeholder) {
                             if error.kind() != io::ErrorKind::NotFound {
                                 return Err(error);
                             }
                         }
-                        fs::remove_dir(path)?;
+                        if let Err(error) = remove_candidate_dir(path) {
+                            if error.kind() != io::ErrorKind::NotFound {
+                                return Err(error);
+                            }
+                        }
                         return Ok(StaleClaim::Removed);
                     }
                     // The exchanged directory is NOT the judged incumbent:
-                    // a live successor. Swap it home (both paths exist, so
-                    // the exchange cannot fail on occupancy) and remove the
-                    // placeholder, now back at its private name.
-                    rename_noreplace::exchange(path, &placeholder)?;
-                    let _ = fs::remove_dir(&placeholder);
-                    return Ok(StaleClaim::Successor);
+                    // a live successor. Swap it home atomically - both
+                    // paths exist throughout, so the exchange cannot fail
+                    // on occupancy.
+                    match rename_noreplace::exchange(path, &placeholder) {
+                        Ok(()) => {
+                            // The placeholder is back at its private name:
+                            // remove it (owner file and claim note first).
+                            if let Err(error) = remove_candidate_dir(&placeholder) {
+                                if error.kind() != io::ErrorKind::NotFound {
+                                    return Err(error);
+                                }
+                            }
+                            return Ok(StaleClaim::Successor);
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                            // The displaced holder's release already
+                            // consumed its directory at the claimed
+                            // location. The placeholder still blocks the
+                            // public path: clear it and retry.
+                            if let Err(error) = remove_candidate_dir(path) {
+                                if error.kind() != io::ErrorKind::NotFound {
+                                    return Err(error);
+                                }
+                            }
+                            return Ok(StaleClaim::Vanished);
+                        }
+                        Err(error) => {
+                            let _ = remove_candidate_dir(&placeholder);
+                            return Err(error);
+                        }
+                    }
                 }
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                    let _ = fs::remove_dir(&placeholder);
+                    let _ = remove_candidate_dir(&placeholder);
                     return Ok(StaleClaim::Vanished);
                 }
                 Err(error) if Self::rename_noreplace_unsupported(&error) => {
-                    let _ = fs::remove_dir(&placeholder);
+                    let _ = remove_candidate_dir(&placeholder);
                     return Ok(StaleClaim::Unsupported);
                 }
                 Err(error) => {
-                    let _ = fs::remove_dir(&placeholder);
+                    let _ = remove_candidate_dir(&placeholder);
                     return Err(error);
                 }
             }
@@ -809,6 +882,34 @@ impl LockDir {
     #[cfg(all(unix, not(target_os = "linux")))]
     fn create(path: &Path, owner: Option<&str>) -> io::Result<Created> {
         Self::create_by_mkdir(path, owner)
+    }
+
+    /// Complete a displaced owned release: the public path holds a
+    /// stale-reclaim placeholder whose `claimed-at` note names where
+    /// this guard's directory went. The owner file at that location is
+    /// verified against this guard before anything is removed, so a
+    /// stale or forged note removes nothing; the placeholder itself is
+    /// never touched (its process clears it). Failure is silent: the
+    /// displaced directory stays stale-reclaimable, never wedged
+    /// behind a live owner record.
+    #[cfg(target_os = "linux")]
+    fn release_displaced(path: &Path, owner: &str) {
+        let Some(claimed) = fs::read_to_string(path.join("claimed-at"))
+            .ok()
+            .map(|note| note.trim().to_string())
+        else {
+            return;
+        };
+        if claimed.is_empty() {
+            return;
+        }
+        let Some(parent) = path.parent() else {
+            return;
+        };
+        let displaced = parent.join(claimed);
+        if Self::owner_matches(&displaced, owner) {
+            let _ = remove_candidate_dir(&displaced);
+        }
     }
 
     fn owner_matches(path: &Path, owner: &str) -> bool {
@@ -1000,13 +1101,22 @@ impl LockDir {
     /// EBUSY and leak the lock behind a clean exit. An owned lock is
     /// removed only when the owner file still records this guard's
     /// owner, and the owner file goes first (a crash between the two
-    /// leaves a reclaimable stale directory, never a live one). A
-    /// missing directory means someone else already reclaimed it (the
-    /// TS release tolerates ENOENT); other failures go to the trace log
-    /// (`Drop` cannot propagate).
+    /// leaves a reclaimable stale directory, never a live one). When
+    /// the public path holds another process's stale-reclaim
+    /// placeholder instead - this guard's directory was displaced
+    /// mid-dance by an exchange judging some earlier incumbent - the
+    /// release completes at the displaced location named by the
+    /// placeholder's `claimed-at` note, after verifying the owner file
+    /// there still records this guard: never wedging a still-running
+    /// process's owner record behind a lost release. A missing directory
+    /// means someone else already reclaimed it (the TS release tolerates
+    /// ENOENT); other failures go to the trace log (`Drop` cannot
+    /// propagate).
     pub fn release(&mut self) {
         if let Some(owner) = &self.owner {
             if !Self::owner_matches(&self.path, owner) {
+                #[cfg(target_os = "linux")]
+                Self::release_displaced(&self.path, owner);
                 return;
             }
             if let Err(error) = fs::remove_file(self.path.join("owner")) {
@@ -1264,6 +1374,41 @@ mod tests {
         assert!(std::fs::metadata(lock_of(&file)).unwrap().is_dir());
         drop(guard);
         assert!(!lock_of(&file).exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn displaced_owned_release_completes_at_the_claimed_location() {
+        // The stale-reclaim dance displaces a live successor's directory
+        // to a private name while a placeholder holds the public path.
+        // The successor's guard drops during that interval: its release
+        // must complete at the location the placeholder names, or the
+        // still-running process's owner record wedges the lock forever.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("harness_state.json");
+        let path = LockDir::path_for(&file);
+        let guard =
+            LockDir::acquire_owned_retrying(&file, Duration::from_secs(10), 1, MIN_STALE).unwrap();
+        // Stand in for the dance: move the guard's directory to a private
+        // name and seat a placeholder with a live owner record and a
+        // claimed-at note at the public path.
+        let displaced_dir = dir.path().join(".j-displaced-probe");
+        fs::rename(&path, &displaced_dir).unwrap();
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("owner"), process_owner_record()).unwrap();
+        fs::write(path.join("claimed-at"), ".j-displaced-probe").unwrap();
+        // Drop the guard mid-dance: the release must consume the
+        // displaced directory and leave the placeholder untouched.
+        drop(guard);
+        assert!(
+            !displaced_dir.exists(),
+            "the displaced release consumed its own directory at the claimed location"
+        );
+        assert!(
+            path.join("claimed-at").exists(),
+            "the placeholder stays until its own process clears it"
+        );
+        let _ = remove_candidate_dir(&path);
     }
 
     #[cfg(target_os = "linux")]
