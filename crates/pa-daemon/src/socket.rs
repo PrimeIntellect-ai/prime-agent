@@ -308,16 +308,10 @@ impl Drop for SocketLease {
         // The pinned fd prevents inode reuse while this lease is alive.
         // A successor that reclaimed a stale lock must never be released
         // by us. Linux runs the claim-verify-release choreography;
-        // elsewhere the guarded release below (`release_fresh_lock_dir`)
-        // removes only a directory the path still pins to this lease
-        // AND whose mtime is fresh - a fresh lock cannot be legally
-        // stale-reclaimed, so no reclaim can interleave with the remove,
-        // and a stale-at-exit lock (a suspended exit) is left to expire
-        // through the stale window instead, where a reclaiming
-        // successor's directory is never touched. The residual
-        // check-then-act window on these platforms is confined to fresh
-        // locks with no legal reclaim in flight. macOS's renameatx_np is
-        // not used here.
+        // platforms and mounts without a no-replace rename never remove:
+        // the lock directory is left to expire through the stale window,
+        // proper-lockfile's own release behavior there, and a reclaiming
+        // successor's directory is never touched.
         if !self.compromised() {
             self.release_lock_dir();
         }
@@ -327,14 +321,18 @@ impl Drop for SocketLease {
 
 /// The lease release: Linux runs the airtight claim-verify-release
 /// choreography (`release_lock_dir_identity` below). Other unix
-/// platforms have no no-replace rename in use (macOS's
-/// `renameatx_np(RENAME_EXCL)` is not portable and not used here), so
-/// the release removes the lock directory only after the identity check
-/// confirms the path still pins this lease's own inode. That
-/// check-then-act remove carries proper-lockfile's own residual window:
-/// a stale reclaim landing between the check and the remove is deleted by
-/// this holder - the documented floor, matched to the Drop and release
-/// comments below.
+/// platforms, and Linux mounts whose filesystem rejects `renameat2`
+/// (NFS, FUSE - the same mounts where the acquisition falls back to the
+/// mkdir protocol), have no successor-safe removal: every
+/// check-then-act remove can delete a successor that stale-reclaimed
+/// this lock in the window between the check and the remove, and no
+/// user-space margin bounds the scheduler's part in that window. The
+/// release there is a deliberate no-op: the lock directory is left to
+/// expire through the stale window, exactly proper-lockfile's own
+/// release behavior on those platforms, and a reclaiming successor's
+/// directory is never touched. The cost is one stale window on the next
+/// startup - the documented floor where the no-replace primitive does
+/// not exist (macOS's `renameatx_np` is not used here).
 #[cfg(unix)]
 impl SocketLease {
     #[cfg(target_os = "linux")]
@@ -344,34 +342,7 @@ impl SocketLease {
 
     #[cfg(not(target_os = "linux"))]
     fn release_lock_dir(&self) {
-        release_fresh_lock_dir(&self.lock_path, &self.identity);
-    }
-}
-
-/// The guarded release for platforms and mounts without a no-replace
-/// rename: remove the lock directory only when the path still pins this
-/// lease's inode AND the directory's mtime is fresh - well inside the
-/// staleness threshold. A fresh lock cannot be legally stale-reclaimed,
-/// so no successor's reclaim can be in flight across this check-then-act
-/// remove; a lock already past the threshold (a suspended exit) is left
-/// to expire through the stale window instead, where a reclaiming
-/// successor's directory is never touched. The identity check is the
-/// same one the claim-verify choreography uses; the freshness margin
-/// keeps any reclaim decision strictly after this remove completes.
-#[cfg(unix)]
-fn release_fresh_lock_dir(lock_path: &Path, identity: &SocketIdentity) {
-    if !lock_identity_matches(lock_path, identity) {
-        return;
-    }
-    let fresh = std::fs::symlink_metadata(lock_path).is_ok_and(|metadata| {
-        metadata
-            .modified()
-            .ok()
-            .and_then(|mtime| mtime.elapsed().ok())
-            .is_some_and(|age| age < LOCK_STALE_AFTER / 2)
-    });
-    if fresh {
-        let _ = std::fs::remove_dir(lock_path);
+        // No no-replace rename exists here: never remove (see above).
     }
 }
 
@@ -389,10 +360,11 @@ fn release_lock_dir_identity(lock_path: &Path, identity: &SocketIdentity) {
         Err(error) if pa_core::platform::LockDir::rename_noreplace_unsupported(&error) => {
             // The filesystem has no no-replace rename (NFS, FUSE and
             // similar - the same mounts where the acquisition fell back
-            // to the mkdir protocol): fall back to the guarded release
-            // below instead of silently leaving the fresh lock behind a
-            // clean shutdown.
-            release_fresh_lock_dir(lock_path, identity);
+            // to the mkdir protocol): no successor-safe removal exists
+            // here, so the lock directory is left to expire through the
+            // stale window instead of risking a check-then-act remove
+            // (see the impl doc above).
+            let _ = (lock_path, identity);
             return;
         }
         Err(_) => return,
