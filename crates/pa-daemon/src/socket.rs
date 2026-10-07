@@ -309,9 +309,10 @@ impl Drop for SocketLease {
         // A successor that reclaimed a stale lock must never be released
         // by us. Linux runs the claim-verify-release choreography;
         // platforms and mounts without a no-replace rename never remove:
-        // the lock directory is left to expire through the stale window,
-        // proper-lockfile's own release behavior there, and a reclaiming
-        // successor's directory is never touched.
+        // the lock directory is left to expire through the stale window -
+        // a deliberate divergence from proper-lockfile's unconditional
+        // release remove - and a reclaiming successor's directory is
+        // never touched.
         if !self.compromised() {
             self.release_lock_dir();
         }
@@ -328,11 +329,13 @@ impl Drop for SocketLease {
 /// this lock in the window between the check and the remove, and no
 /// user-space margin bounds the scheduler's part in that window. The
 /// release there is a deliberate no-op: the lock directory is left to
-/// expire through the stale window, exactly proper-lockfile's own
-/// release behavior on those platforms, and a reclaiming successor's
-/// directory is never touched. The cost is one stale window on the next
-/// startup - the documented floor where the no-replace primitive does
-/// not exist (macOS's `renameatx_np` is not used here).
+/// expire through the stale window, and a reclaiming successor's
+/// directory is never touched. This is a deliberate DIVERGENCE from
+/// proper-lockfile, which removes its lock unconditionally on release
+/// (`removeLock`/`onExit` in lockfile.js) and accepts that window; the
+/// price of successor safety here is one stale window on the next
+/// startup where the no-replace primitive does not exist (macOS's
+/// `renameatx_np` is not used either).
 #[cfg(unix)]
 impl SocketLease {
     #[cfg(target_os = "linux")]
@@ -740,7 +743,16 @@ mod tests {
             "the conservative cleanup preserves the path"
         );
         drop(lease);
+        // The lock directory's release is platform-split: the Linux
+        // claim-verify choreography removes it, the no-noreplace floor
+        // leaves it to expire through the stale window.
+        #[cfg(target_os = "linux")]
         assert!(!pa_core::platform::LockDir::path_for(&socket).exists());
+        #[cfg(not(target_os = "linux"))]
+        assert!(
+            pa_core::platform::LockDir::path_for(&socket).exists(),
+            "the leave-expire floor keeps the lock directory for the stale window"
+        );
     }
 
     #[test]
@@ -850,7 +862,16 @@ mod tests {
             "the long-named dead socket is claimed and unlinked"
         );
         drop(lease);
+        // The lock directory's release is platform-split: the Linux
+        // claim-verify choreography removes it, the no-noreplace floor
+        // leaves it to expire through the stale window.
+        #[cfg(target_os = "linux")]
         assert!(!pa_core::platform::LockDir::path_for(&socket).exists());
+        #[cfg(not(target_os = "linux"))]
+        assert!(
+            pa_core::platform::LockDir::path_for(&socket).exists(),
+            "the leave-expire floor keeps the lock directory for the stale window"
+        );
     }
 
     #[tokio::test]
