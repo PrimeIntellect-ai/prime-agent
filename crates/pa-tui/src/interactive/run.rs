@@ -654,8 +654,8 @@ async fn run_interactive_surface(
     if headless {
         session.osc_sink = crate::clipboard::OscSink::Buffer(Vec::new());
     }
-    session.refresh_stats().await;
-    // The startup catalog fetch: failures stay silent and the snapshot keeps serving the picker.
+    // The tray's context usage came in with the attach snapshot, so the
+    // open path does not block on a stats fetch.
     session.spawn_model_catalog_refresh();
     session.rebuild_view(&mut view, &crate::session_ui::RebuildKind::Rebind);
     // The cross-view layout handoff's adopt (view::handoff): a re-entry whose attach cursor exactly
