@@ -316,7 +316,9 @@ impl Worker {
             Ok(()) => {
                 self.refresh_replaced_session_state().await;
                 self.reseed_service_tier_for_replacement();
-                self.bind_scheduled_jobs().await;
+                if let Err(error) = self.bind_scheduled_jobs().await {
+                    return response_failure(None, command, &error.to_string(), None);
+                }
                 self.prewarm_replacement_session();
                 // The replacement never pushed a roster delta, so the subscribed
                 // surfaces kept the PREVIOUS session's numbers.

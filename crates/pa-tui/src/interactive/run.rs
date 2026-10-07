@@ -19,6 +19,8 @@ const HEADLESS_SETTLE_TIMEOUT_MS: u64 = 60_000;
 const MIN_RENDER_INTERVAL: Duration = Duration::from_millis(16);
 /// The spinner's wall-clock cadence, not the render rate.
 const SPINNER_INTERVAL_MS: u128 = 80;
+/// The input-idle window the quiet tick waits out before materializing parked work.
+const QUIET_TICK_INTERVAL: Duration = Duration::from_millis(50);
 
 /// The animating loader's next phase boundary, the wake the select needs
 /// while a quiet turn waits out its stream: TS `Loader`'s `setInterval`
@@ -779,6 +781,7 @@ async fn run_interactive_surface(
     // is armed while a dirty frame waits out the interval.
     let mut last_render_at: Option<Instant> = None;
     let mut render_deadline: Option<Instant> = None;
+    let mut quiet_tick_deadline: Option<Instant> = None;
     let mut anim_started: Option<Instant> = None;
     // The spinner phase painted by the last frame (`usize::MAX` before the first): a quiet turn
     // only dirties when the 80ms phase advances.
@@ -1282,6 +1285,14 @@ async fn run_interactive_surface(
         // iteration. Terminal runs never arm it (`headless_done`
         // exists only on the headless harness).
         let settle_recheck_wanted = headless_done && headless_settle_pending;
+        // The window anchors at the first iteration that sees pending work: another arm's
+        // wake must not restart it, or a streaming reply starves the parked request.
+        quiet_tick_deadline = if autocomplete_pending || auto_scroll_armed || settle_recheck_wanted
+        {
+            quiet_tick_deadline.or_else(|| Some(Instant::now() + QUIET_TICK_INTERVAL))
+        } else {
+            None
+        };
         tokio::select! {
             maybe_event = async {
                 // A closed channel's recv() resolves None instantly and forever; while the
@@ -1492,6 +1503,11 @@ async fn run_interactive_surface(
                 }
             } => {
                 if let Some(input) = maybe_input {
+                    // A keystroke restarts the window: the rest of a typed burst (a
+                    // command plus its Enter) applies before a parked request materializes.
+                    if matches!(input, UiInput::Key(_) | UiInput::Paste(_)) {
+                        quiet_tick_deadline = None;
+                    }
                     pending.push_back(input);
                 }
             }
@@ -1835,11 +1851,14 @@ async fn run_interactive_surface(
                 // autocomplete request (suggestions resolve asynchronously after the keystroke
                 // batch, so the dropdown opens only once typing pauses) or an armed selection
                 // auto-scroll. An idle surface parks this arm.
-                if !(autocomplete_pending || auto_scroll_armed || settle_recheck_wanted) {
-                    std::future::pending::<()>().await;
+                match quiet_tick_deadline {
+                    Some(deadline) => {
+                        tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+                    }
+                    None => std::future::pending::<()>().await,
                 }
-                tokio::time::sleep(Duration::from_millis(50)).await;
             } => {
+                quiet_tick_deadline = None;
                 session.materialize_editor_autocomplete(&mut view);
                 session.selection_auto_scroll_tick(&mut view);
             }

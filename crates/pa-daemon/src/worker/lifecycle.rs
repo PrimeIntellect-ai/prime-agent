@@ -254,10 +254,7 @@ impl Worker {
     /// runtime call.
     pub(crate) async fn refresh_replaced_session_state(&self) {
         let (rlm_depth, summary, child_script) = {
-            let mut core = self
-                .core
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let (mut core, inputs) = self.summary_inputs();
             // The moved-to file's persisted depth wins (the replacement
             // carries no create-config depth).
             let rlm_depth = core
@@ -267,7 +264,7 @@ impl Worker {
                 .unwrap_or(0);
             core.rlm_depth = rlm_depth;
             let child_script = core.child_script.clone();
-            (rlm_depth, self.summary_locked(&core), child_script)
+            (rlm_depth, self.summary_locked(&core, inputs), child_script)
         };
         // No thinking flag rides the rebind (the create command's level is
         // already resolved on the engine), and the TS replacement runtime
@@ -301,7 +298,7 @@ impl Worker {
     /// Bind the live session's schedule catalog: register the artifact
     /// partition, rebind the stored jobs onto the live ids, and start (or
     /// wake) the scheduler. Runs at create and after every replacement swap.
-    pub(crate) async fn bind_scheduled_jobs(&self) {
+    pub(crate) async fn bind_scheduled_jobs(&self) -> anyhow::Result<()> {
         let binding = {
             let core = self
                 .core
@@ -310,8 +307,9 @@ impl Worker {
             crate::scheduled_jobs::live_binding(&core)
         };
         if let Some((binding, artifact_dir)) = binding {
-            self.scheduled.bind_session(binding, artifact_dir).await;
+            self.scheduled.bind_session(binding, artifact_dir).await?;
         }
+        Ok(())
     }
 
     /// Clear the queued-input suspension and wake the turn runner so parked

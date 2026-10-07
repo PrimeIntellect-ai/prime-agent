@@ -16,6 +16,7 @@ pub(super) enum WakeRoute {
 }
 
 pub(crate) const ROUTE_TIMEOUT_MS: u64 = 30_000;
+pub(crate) const SUMMARY_TIMEOUT_MS: u64 = 5_000;
 /// The route failure for a worker whose command channel is gone: the request did not
 /// leave the supervisor, so the route may retry it without risking a duplicate landing.
 pub(crate) const WORKER_NOT_CONNECTED: &str = "Session worker is not connected";
