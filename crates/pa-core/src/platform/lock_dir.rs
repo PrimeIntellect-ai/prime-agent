@@ -265,8 +265,12 @@ pub struct LockDir {
     /// Handle pinning the acquired lock directory's inode: the mtime
     /// probe acts through it and long-lived holders read their identity
     /// from it, never from the replaceable public pathname (unix only).
+    /// Optional so `release` can close it before the removal - on the
+    /// filesystems whose acquisitions took the mkdir fallback (NFS, FUSE,
+    /// CIFS) an open fd can make the remove return EBUSY and leak the
+    /// lock behind a clean exit.
     #[cfg(unix)]
-    dir: fs::File,
+    dir: Option<fs::File>,
 }
 
 impl LockDir {
@@ -280,7 +284,10 @@ impl LockDir {
 
     #[cfg(unix)]
     fn created(path: PathBuf, dir: Created) -> Self {
-        Self { path, dir }
+        Self {
+            path,
+            dir: Some(dir),
+        }
     }
 
     #[cfg(not(unix))]
@@ -291,15 +298,23 @@ impl LockDir {
     /// Transfer the lock path and the pinned handle to a caller that
     /// manages ownership and release itself (supervisor-lifetime leases
     /// with inode-guarded cleanup). Unix only.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the handle is no longer pinned - unreachable in practice,
+    /// because nothing takes it before this transfer (`release` only
+    /// runs from `Drop`).
     #[must_use]
     #[cfg(unix)]
     pub fn into_parts(self) -> (PathBuf, fs::File) {
         let mut this = std::mem::ManuallyDrop::new(self);
         let path = std::mem::take(&mut this.path);
         // SAFETY: `this` sits in a ManuallyDrop, so no Drop ever runs on
-        // it; the handle is read out exactly once and is not double-dropped.
+        // it; the handle is read out exactly once and is not
+        // double-dropped. The handle is always present here: nothing
+        // takes it before the transfer (`release` only runs from Drop).
         let dir = unsafe { std::ptr::read(&raw const this.dir) };
-        (path, dir)
+        (path, dir.expect("into_parts transfers the pinned handle"))
     }
 
     /// Acquire exclusively: create `{file}.lock` as an empty directory and
@@ -397,6 +412,11 @@ impl LockDir {
         let (sec, nanos) = probe_mtime();
         if let Err(error) = set_mtime_handle(&dir, sec, nanos) {
             // Never leave the private candidate behind a failed probe.
+            // The pinned handle closes first: on the filesystems that
+            // take this path (NFS, FUSE, CIFS) an open fd can make the
+            // remove return EBUSY, and this is an abandoned candidate -
+            // the fd has no further use.
+            drop(dir);
             let _ = fs::remove_dir(&candidate);
             return Err(error);
         }
@@ -407,11 +427,15 @@ impl LockDir {
                 // the compatible mkdir protocol instead of failing the
                 // acquisition (settings and daemon startup must keep
                 // working wherever the mkdir protocol worked before).
-                // The private candidate must be gone before the mkdir
-                // protocol runs: a failed removal here would leak a
-                // lock artifact beside every acquisition on this
-                // filesystem, so the acquisition fails instead of
-                // succeeding with the candidate still present.
+                // The pinned handle closes before the candidate's
+                // removal - on these filesystems (NFS, FUSE, CIFS) an
+                // open fd can make the remove return EBUSY and fail the
+                // acquisition instead of falling back. The candidate
+                // must be gone before the mkdir protocol runs: a failed
+                // removal leaks a lock artifact beside every acquisition
+                // on this filesystem, so the acquisition fails instead
+                // of succeeding with the candidate still present.
+                drop(dir);
                 if let Err(remove_error) = fs::remove_dir(&candidate) {
                     if remove_error.kind() != io::ErrorKind::NotFound {
                         return Err(remove_error);
@@ -588,10 +612,16 @@ impl LockDir {
             && io::Error::last_os_error().kind() == io::ErrorKind::WouldBlock)
     }
 
-    /// Release: remove the lock directory. A missing directory means someone
-    /// else already reclaimed it (the TS release tolerates ENOENT); other
-    /// failures go to the trace log (`Drop` cannot propagate).
-    pub fn release(&self) {
+    /// Release: remove the lock directory. The pinned handle closes
+    /// first: on the filesystems whose acquisitions took the mkdir
+    /// fallback (NFS, FUSE, CIFS) an open fd can make the remove return
+    /// EBUSY and leak the lock behind a clean exit. A missing directory
+    /// means someone else already reclaimed it (the TS release tolerates
+    /// ENOENT); other failures go to the trace log (`Drop` cannot
+    /// propagate).
+    pub fn release(&mut self) {
+        #[cfg(unix)]
+        drop(self.dir.take());
         if let Err(error) = fs::remove_dir(&self.path) {
             if error.kind() != io::ErrorKind::NotFound {
                 tracing::warn!("failed to release lock {}: {error}", self.path.display());
