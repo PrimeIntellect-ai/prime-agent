@@ -199,13 +199,28 @@ impl ActivityDock {
 }
 
 /// Context usage for the tray label (`N (P%)`).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContextUsage {
     pub tokens: u64,
     pub context_window: u64,
 }
 
 impl ContextUsage {
+    /// The wire shape (TS `SessionStats["contextUsage"]`, served by
+    /// `get_session_stats` and carried by the attach snapshot's state):
+    /// unknown tokens — a session right after a compaction — yield
+    /// `None`, which clears the tray display instead of keeping the
+    /// stale one (TS `patchConnectionState` replaces the snapshot).
+    #[must_use]
+    pub fn from_wire(usage: &Value) -> Option<Self> {
+        let tokens = usage.get("tokens").and_then(Value::as_u64)?;
+        let context_window = usage.get("contextWindow").and_then(Value::as_u64)?;
+        Some(Self {
+            tokens,
+            context_window,
+        })
+    }
+
     #[must_use]
     pub fn percent(&self) -> f64 {
         if self.context_window == 0 {

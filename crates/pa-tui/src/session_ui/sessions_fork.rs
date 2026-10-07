@@ -440,8 +440,8 @@ impl SessionUi {
         self.stash_draft_for_switch(view);
         match self.attach_session(&id, DockFold::FirstFrame).await {
             Ok(()) => {
-                // The rebuilt tray must show the switched-to session's context usage.
-                self.refresh_stats().await;
+                // The switched-to session's context usage rode the
+                // attach snapshot.
                 self.rebuild_view(view, &RebuildKind::Rebind);
                 self.note(&format!("switched to session {id}"), view);
                 // The switched-to session's own restore head lands after the switch note, so the
