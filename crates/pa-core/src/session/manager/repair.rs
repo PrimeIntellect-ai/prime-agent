@@ -74,6 +74,10 @@ fn first_line_is_session_header(file_path: &Path) -> bool {
 
 /// Repair crash damage (torn tail, zero-filled append) once at open.
 pub fn repair_jsonl_damage(file_path: &Path) {
+    let Ok(target_path) = std::fs::canonicalize(file_path) else {
+        return;
+    };
+    let file_path = target_path.as_path();
     if !tail_looks_damaged(file_path) {
         return;
     }
