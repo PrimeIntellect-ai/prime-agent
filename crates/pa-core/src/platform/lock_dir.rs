@@ -887,38 +887,56 @@ impl LockDir {
         #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         fs::create_dir(path)?;
+        // The GATE runs BEFORE every mutating step and before the probe
+        // is handed up (cursor's follow-up: a post-hoc error remap alone
+        // let a stalled creator's resume write the successor's owner record
+        // and probe FIRST, and a succeeded foreign write adopt). An
+        // UNOBSERVABLE identity (`None`) cannot gate or clean: the steps
+        // run unverified, a failure surfaces its own error - never remapped
+        // to a false collision - and nothing is removed (the artifact goes
+        // to the staleness sweep).
         let created = Self::ownership_id(path);
-        let still_ours = |occupied: io::Error| -> io::Error {
-            if created.is_some_and(|created| Self::ownership_id(path) == Some(created)) {
-                occupied
-            } else {
-                io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    format!("Lock file is already being held: {}", path.display()),
-                )
-            }
+        let our_path_now =
+            |created: Option<u64>| created.map(|created| Self::ownership_id(path) == Some(created));
+        let foreign_collision = || {
+            io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("Lock file is already being held: {}", path.display()),
+            )
         };
+        if our_path_now(created) == Some(false) {
+            return Err(foreign_collision());
+        }
         let result = (|| {
             if let Some(owner) = owner {
                 #[cfg(unix)]
                 {
-                    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-                        .map_err(still_ours)?;
+                    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
                 }
-                fs::write(path.join("owner"), format!("{owner}\n")).map_err(still_ours)?;
+                fs::write(path.join("owner"), format!("{owner}\n"))?;
                 #[cfg(unix)]
                 {
-                    fs::set_permissions(path.join("owner"), fs::Permissions::from_mode(0o600))
-                        .map_err(still_ours)?;
+                    fs::set_permissions(path.join("owner"), fs::Permissions::from_mode(0o600))?;
                 }
             }
+            if our_path_now(created) == Some(false) {
+                return Err(foreign_collision());
+            }
             let (sec, nanos) = probe_mtime();
-            set_mtime(path, sec, nanos).map_err(still_ours)?;
-            Self::read_back_probe(path).map_err(still_ours)
+            set_mtime(path, sec, nanos)?;
+            if our_path_now(created) == Some(false) {
+                return Err(foreign_collision());
+            }
+            let probe = Self::read_back_probe(path)?;
+            // The adoption gate: a probe read off a directory this create
+            // can no longer prove is its own is never handed up for
+            // `acquired` to adopt.
+            if our_path_now(created) == Some(false) {
+                return Err(foreign_collision());
+            }
+            Ok(probe)
         })();
-        if result.is_err()
-            && created.is_some_and(|created| Self::ownership_id(path) == Some(created))
-        {
+        if result.is_err() && our_path_now(created) == Some(true) {
             // Clean only the directory this create can still prove it
             // owns - a successor's replacement is left entirely alone, and
             // an unverified identity never touches the path.
