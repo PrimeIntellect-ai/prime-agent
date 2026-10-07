@@ -566,6 +566,54 @@ class HarnessStateTest(unittest.TestCase):
             entries = HarnessState(state_path).list("memory")
             self.assertEqual([entry.id for entry in entries], ["seed"])
 
+    def test_live_stale_lock_is_not_stolen(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "harness_state.json"
+            state = HarnessState(state_path)
+            state.create_memory("Seed", "Present")
+            lock_dir = Path(f"{os.path.realpath(state_path)}.lock")
+            owner = state._acquire_lock_dir(lock_dir)
+            os.utime(lock_dir, (1, 1))
+            try:
+                with self.assertRaises(RuntimeError):
+                    state.create_memory("Second", "Blocked")
+                self.assertTrue(state._owner_matches(lock_dir, owner))
+            finally:
+                (lock_dir / "owner").unlink()
+                lock_dir.rmdir()
+            self.assertEqual(len(HarnessState(state_path).list("memory")), 1)
+
+    def test_dead_lock_is_reclaimed_without_old_owner_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "harness_state.json"
+            state = HarnessState(state_path)
+            state.create_memory("Seed", "Present")
+            lock_dir = Path(f"{os.path.realpath(state_path)}.lock")
+            owner = state._acquire_lock_dir(lock_dir)
+            worker = subprocess.Popen([sys.executable, "-c", "pass"])
+            worker.wait()
+            (lock_dir / "owner").write_text(f"{worker.pid} dead-token\n", encoding="utf-8")
+            os.utime(lock_dir, (1, 1))
+            state.create_memory("Second", "Saved")
+            self.assertFalse(state._owner_matches(lock_dir, owner))
+            self.assertFalse(lock_dir.exists())
+            self.assertEqual(len(HarnessState(state_path).list("memory")), 2)
+
+    def test_save_refuses_lost_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "harness_state.json"
+            state = HarnessState(state_path)
+            state.create_memory("Seed", "Present")
+            with self.assertRaisesRegex(RuntimeError, "lock lost"):
+                with state._locked():
+                    lock_dir, _ = state._held_lock
+                    (lock_dir / "owner").write_text("999999 other-token\n", encoding="utf-8")
+                    state.save()
+            self.assertTrue(lock_dir.exists())
+            (lock_dir / "owner").unlink()
+            lock_dir.rmdir()
+            self.assertEqual(len(HarnessState(state_path).list("memory")), 1)
+
     def test_load_ignores_unknown_json_keys(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_path = Path(temp_dir) / "harness_state.json"

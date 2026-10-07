@@ -304,7 +304,7 @@ pub fn update_harness_state<R>(
 ) -> anyhow::Result<(R, PathBuf)> {
     std::fs::create_dir_all(harness_state_dir)?;
     let state_path = get_harness_state_path(harness_state_dir);
-    let _lock = crate::platform::lock_dir::LockDir::acquire_retrying(
+    let lock = crate::platform::lock_dir::LockDir::acquire_owned_retrying(
         &state_path,
         std::time::Duration::from_secs(10),
         50,
@@ -312,6 +312,7 @@ pub fn update_harness_state<R>(
     )?;
     let mut state = load_harness_state(harness_state_dir, scope);
     let result = update(&mut state);
+    lock.ensure_owned()?;
     let written = save_harness_state(harness_state_dir, &state)?;
     Ok((result, written))
 }

@@ -41,6 +41,7 @@ _state_cache: dict[tuple[Path, HarnessScope], "HarnessState"] = {}
 _LOCK_STALE_AFTER = 10.0
 _LOCK_ATTEMPTS = 50
 _LOCK_RETRY_INTERVAL = 0.02
+_PROCESS_TOKEN = uuid4().hex
 
 
 def _now() -> str:
@@ -416,6 +417,7 @@ class HarnessState:
         # mtime of the file as of the last load/save, used to detect out-of-process
         # writes (e.g. the host `/refine` command) and avoid clobbering them.
         self._loaded_mtime: int | None = None
+        self._held_lock: tuple[Path, str] | None = None
         self.load()
 
     def _ensure_local_writable(self) -> None:
@@ -442,38 +444,83 @@ class HarnessState:
         if self._disk_mtime() != self._loaded_mtime:
             self.load()
 
-    def _acquire_lock_dir(self, lock_path: Path) -> None:
+    @staticmethod
+    def _owner_dead(recorded: str) -> bool:
+        parts = recorded.strip().split(" ")
+        if len(parts) != 2 or not parts[1]:
+            return True
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            return True
+        if pid <= 0:
+            return True
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        except (PermissionError, OSError):
+            return False
+        return False
+
+    @staticmethod
+    def _owner_matches(lock_path: Path, owner: str) -> bool:
+        try:
+            return (lock_path / "owner").read_text(encoding="utf-8").strip() == owner
+        except OSError:
+            return False
+
+    def _acquire_lock_dir(self, lock_path: Path) -> str:
+        owner = f"{os.getpid()} {_PROCESS_TOKEN}.{uuid4().hex}"
+        owner_path = lock_path / "owner"
         for _ in range(_LOCK_ATTEMPTS):
             try:
                 os.mkdir(lock_path)
-                return
+                try:
+                    os.chmod(lock_path, 0o700)
+                    owner_path.write_text(f"{owner}\n", encoding="utf-8")
+                    os.chmod(owner_path, 0o600)
+                except OSError:
+                    lock_path.rmdir()
+                    raise
+                return owner
             except FileExistsError:
                 try:
                     stale = time.time() - lock_path.stat().st_mtime > _LOCK_STALE_AFTER
                 except FileNotFoundError:
                     continue
                 if stale:
-                    with contextlib.suppress(FileNotFoundError):
-                        os.rmdir(lock_path)
-                else:
-                    time.sleep(_LOCK_RETRY_INTERVAL)
+                    try:
+                        recorded = owner_path.read_text(encoding="utf-8")
+                    except OSError:
+                        recorded = None
+                    if recorded is None or self._owner_dead(recorded):
+                        if recorded is not None:
+                            with contextlib.suppress(FileNotFoundError):
+                                owner_path.unlink()
+                        with contextlib.suppress(FileNotFoundError):
+                            lock_path.rmdir()
+                        continue
+                time.sleep(_LOCK_RETRY_INTERVAL)
         raise RuntimeError(f"harness state lock not acquired: {lock_path}")
 
     @contextlib.contextmanager
     def _locked(self) -> Iterator[None]:
-        lock_path: Path | None = None
         if self.file_path is not None:
             target = Path(os.path.realpath(self.file_path))
             target.parent.mkdir(parents=True, exist_ok=True)
             lock_path = target.with_name(f"{target.name}.lock")
-            self._acquire_lock_dir(lock_path)
+            self._held_lock = (lock_path, self._acquire_lock_dir(lock_path))
         try:
             self._sync_from_disk()
             yield
         finally:
-            if lock_path is not None:
-                with contextlib.suppress(FileNotFoundError):
-                    os.rmdir(lock_path)
+            if self._held_lock is not None:
+                lock_path, owner = self._held_lock
+                if self._owner_matches(lock_path, owner):
+                    (lock_path / "owner").unlink()
+                    lock_path.rmdir()
+                self._held_lock = None
 
     def load(self) -> "HarnessState":
         if self.file_path is None or not self.file_path.exists():
@@ -565,6 +612,8 @@ class HarnessState:
         if self.file_path is None:
             # in_memory fallback: nothing to persist.
             return self
+        if self._held_lock is None:
+            raise RuntimeError("harness state lock not acquired")
         self.file_path.parent.mkdir(parents=True, exist_ok=True)
         data = {
             "schema": 1,
@@ -594,6 +643,9 @@ class HarnessState:
                     os.fsync(descriptor)
             if existing_mode is not None:
                 os.chmod(temp_path, existing_mode)
+            lock_path, owner = self._held_lock
+            if not self._owner_matches(lock_path, owner):
+                raise RuntimeError(f"harness state lock lost: {lock_path}")
             os.replace(temp_path, target_path)
             if os.name == "posix":
                 directory_fd = os.open(target_path.parent, os.O_RDONLY)
