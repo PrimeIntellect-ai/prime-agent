@@ -275,12 +275,11 @@ impl AgentSession {
                 summary_delta: options.summary_delta.clone(),
                 semantic_edges: options.semantic_edges.clone(),
             };
-            let prepared =
-                crate::session_engine::compact_session::summarize_attempt(
-                    &attempt,
-                    &attempt_options,
-                )
-                .await?;
+            let prepared = crate::session_engine::compact_session::summarize_attempt(
+                &attempt,
+                &attempt_options,
+            )
+            .await?;
             let committed = {
                 let mut session = self.session.lock().await;
                 crate::session_engine::compact_session::commit_attempt(
