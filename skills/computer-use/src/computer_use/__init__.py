@@ -785,8 +785,8 @@ class App:
         def dispatch() -> None:
             from . import inject
 
-            self._refuse_secure_focus()
             with _PASTE_LOCK:
+                self._refuse_secure_focus()
                 saved = _save_clipboard()
                 if saved is None:
                     raise ComputerUseError(
@@ -809,6 +809,11 @@ class App:
                                 {},
                             )
                         change_count = _clipboard_change_count()
+                        # a queued paste rechecks the gates the moment it
+                        # holds the lock: the focus and the app state may
+                        # have moved while another paste held the lock
+                        self._refuse_secure_focus()
+                        self._guard()
                         inject._press_key(self._pid, "cmd+v")
                         time.sleep(_PASTE_SETTLE_SECONDS)
                     except ComputerUseError:
@@ -961,14 +966,17 @@ class App:
                 f"element index must be an integer, got {type(element_index).__name__}",
                 {"element_index": type(element_index).__name__},
             )
-        refs = self._observation.refs if self._observation is not None else []
+        observation = self._observation
+        refs = observation.refs if observation is not None else []
         if element_index < 0 or element_index >= len(refs):
             raise ComputerUseError(
                 "ELEMENT_STALE",
                 f"element index {element_index} is stale; re-observe with get_ax_state() and use fresh indices",
                 {"element_index": element_index},
             )
-        element = ax._flatten(self._observation.tree)[element_index]
+        # refs and tree come from the one captured snapshot: a concurrent
+        # refresh publishing a new observation mid-read must not mix the two
+        element = ax._flatten(observation.tree)[element_index]
         live_role, live_title = ax._live_fingerprint(refs[element_index])
         if live_role != element.get("role") or live_title != element.get("title"):
             raise ComputerUseError(

@@ -794,5 +794,87 @@ class PackagedInstructionsTests(unittest.TestCase):
         self.assertNotIn("src/computer_use/references", str(ax._instructions_path(self.bundle)))
 
 
+class ElementSnapshotRaceTests(AppTestCase):
+    async def test_element_captures_one_observation_for_refs_and_tree(self) -> None:
+        env = self.make_env()
+        app = await env.get_app()
+        old_refs = [
+            {"role": "AXButton", "title": "A"},
+            {"role": "AXTextField", "title": "B"},
+        ]
+        old_tree = [
+            {"role": "AXButton", "title": "A", "children": []},
+            {"role": "AXTextField", "title": "B", "children": []},
+        ]
+        new_observation = types.SimpleNamespace(
+            refs=[{"role": "AXButton", "title": "A"}],
+            tree=[{"role": "AXButton", "title": "A", "children": []}],
+        )
+
+        class SwappingObservation:
+            """The current snapshot; a concurrent refresh publishes mid-read."""
+
+            @property
+            def refs(self):
+                # the refresh lands between the refs read and the tree read
+                app._observation = new_observation
+                return old_refs
+
+            @property
+            def tree(self):
+                return old_tree
+
+        app._observation = SwappingObservation()
+        element, ref = app._element(1)
+        self.assertEqual(element["role"], "AXTextField")
+        self.assertIs(ref, old_refs[1])
+
+
+class QueuedPasteGateTests(AppTestCase):
+    async def test_a_queued_paste_rechecks_the_gates_under_the_lock(self) -> None:
+        env = self.make_env()
+        app = await env.get_app()
+
+        class RecordingLock:
+            """A lock stand-in that records whether it is currently held."""
+
+            def __init__(self) -> None:
+                self.held = False
+
+            def __enter__(self) -> "RecordingLock":
+                self.held = True
+                return self
+
+            def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+                self.held = False
+
+        lock = RecordingLock()
+        held_at_focus: list[bool] = []
+        held_at_guard: list[bool] = []
+        real_focus = app._refuse_secure_focus
+        real_guard = app._guard
+
+        def recording_focus() -> None:
+            held_at_focus.append(lock.held)
+            real_focus()
+
+        def recording_guard() -> None:
+            held_at_guard.append(lock.held)
+            real_guard()
+
+        with mock.patch.object(computer_use, "_PASTE_LOCK", lock), mock.patch.object(
+            app, "_refuse_secure_focus", recording_focus
+        ), mock.patch.object(app, "_guard", recording_guard):
+            await app.paste("payload")
+
+        self.assertTrue(held_at_focus, "the paste checks the secure focus")
+        self.assertTrue(all(held_at_focus), "every secure-focus check runs under the paste lock")
+        self.assertIn(True, held_at_guard, "the guard recheck runs under the paste lock")
+        self.assertEqual(
+            env.clipboard_calls,
+            [("save", None), ("write", ("text", "payload")), ("restore", {"string": "saved"})],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
