@@ -429,8 +429,6 @@ class LiveIsSecureTests(unittest.TestCase):
             self.assertTrue(ax._live_is_secure("ref"))
 
 
-
-
 class UnsupportedSubroleTests(unittest.TestCase):
     """An element with no subrole attribute is ordinary, not unverifiable."""
 
@@ -533,8 +531,6 @@ class DescribeBudgetTests(unittest.TestCase):
         elapsed = app.clock - start
         self.assertIn("role", described)
         self.assertLessEqual(elapsed, 1.55, "one element's describe fits its budget, not budget x reads")
-if __name__ == "__main__":
-    unittest.main()
 
 
 class RoleUnsupportedRegressionTests(unittest.TestCase):
