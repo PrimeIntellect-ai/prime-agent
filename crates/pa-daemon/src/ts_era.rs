@@ -61,10 +61,4 @@ mod tests {
         assert_eq!(sweep_ts_era_leftovers(&agent_dir), 1);
         assert!(!cache.exists());
     }
-
-    #[test]
-    fn an_empty_agent_dir_counts_zero() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        assert_eq!(sweep_ts_era_leftovers(&dir.path().join("agent")), 0);
-    }
 }

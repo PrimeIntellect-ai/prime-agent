@@ -268,20 +268,17 @@ impl Supervisor {
         if let Some(runtime_metadata) = &runtime_metadata {
             durable_rest.insert("runtimeMetadata".to_string(), runtime_metadata.clone());
         }
+        let recovery_journal_path = self.descriptor_dir.join(format!(
+            "{worker_id}{}",
+            crate::journal::RECOVERY_JOURNAL_SUFFIX
+        ));
         let descriptor = DaemonWorkerDescriptor {
             version: 2,
             worker_id: worker_id.clone(),
             pid: 0,
             process_start_id: None,
             socket_path: worker_socket.to_string_lossy().to_string(),
-            recovery_journal_path: self
-                .descriptor_dir
-                .join(format!(
-                    "{worker_id}{}",
-                    crate::journal::RECOVERY_JOURNAL_SUFFIX
-                ))
-                .to_string_lossy()
-                .to_string(),
+            recovery_journal_path: recovery_journal_path.to_string_lossy().to_string(),
             orphan_process_journal_path: None,
             supervisor_socket_path: self.options.socket_path.to_string_lossy().to_string(),
             authentication_token: uuid::Uuid::new_v4().to_string(),
@@ -365,12 +362,6 @@ impl Supervisor {
                 // would keep the session file while a retry mints a second worker over it.
                 let _ = child.kill().await;
                 self.registry.remove(&worker_id).await;
-                let recovery_journal_path = resident
-                    .descriptor
-                    .lock()
-                    .await
-                    .recovery_journal_path
-                    .clone();
                 let _ = std::fs::remove_file(&recovery_journal_path);
                 let _ = std::fs::remove_file(&descriptor_path);
                 return Err(error);
@@ -756,9 +747,13 @@ impl Supervisor {
     /// `stopWorkerUntracked`'s contract): deleting the descriptor of a live worker orphans
     /// it behind its lease.
     pub(super) async fn retire_worker_after_stop(self: &Arc<Self>, resident: &Arc<ResidentWorker>) {
-        let (pid, start_id) = {
+        let (pid, start_id, recovery_journal_path) = {
             let descriptor = resident.descriptor.lock().await;
-            (descriptor.pid as u32, descriptor.process_start_id.clone())
+            (
+                descriptor.pid as u32,
+                descriptor.process_start_id.clone(),
+                descriptor.recovery_journal_path.clone(),
+            )
         };
         // An unobservable identity never receives the escalation's signals; a live process
         // behind such a pid keeps its tombstoned descriptor like a SIGKILL survivor (the
@@ -780,12 +775,6 @@ impl Supervisor {
                 ));
             }
             _ => {
-                let recovery_journal_path = resident
-                    .descriptor
-                    .lock()
-                    .await
-                    .recovery_journal_path
-                    .clone();
                 let _ = std::fs::remove_file(&recovery_journal_path);
                 let _ = std::fs::remove_file(&resident.descriptor_path);
                 // The identity-pending side record dies with the descriptor it shadows
@@ -953,9 +942,8 @@ mod tests {
 
     #[tokio::test]
     async fn the_provably_gone_retire_removes_the_recovery_journal() {
-        let dir = std::env::temp_dir().join(format!("pa-retire-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let supervisor = supervisor_in(&dir);
+        let dir = tempfile::tempdir().expect("temp dir");
+        let supervisor = supervisor_in(dir.path());
         let descriptor_dir = supervisor.descriptor_dir.clone();
         let pid = reaped_pid();
         let journal_path = descriptor_dir.join("w-gone.recovery.jsonl");
@@ -980,7 +968,6 @@ mod tests {
         persist_worker(&descriptor_path, &descriptor).expect("descriptor persisted");
         let resident =
             ResidentWorker::new("w-gone".to_string(), descriptor, descriptor_path.clone());
-        supervisor.registry.insert(Arc::clone(&resident)).await;
 
         supervisor.retire_worker_after_stop(&resident).await;
 
@@ -989,6 +976,5 @@ mod tests {
             "the journal dies with the descriptor"
         );
         assert!(!descriptor_path.exists());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

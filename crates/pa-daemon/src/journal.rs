@@ -6,10 +6,11 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const COMPACT_AFTER_RECORDS: usize = 4096;
 
@@ -659,7 +660,7 @@ pub(crate) fn sweep_orphaned_journals(
     let Ok(entries) = fs::read_dir(descriptor_dir) else {
         return 0;
     };
-    let candidates: Vec<std::path::PathBuf> = entries
+    let candidates: Vec<PathBuf> = entries
         .flatten()
         .map(|entry| entry.path())
         .filter(|path| {
@@ -668,20 +669,20 @@ pub(crate) fn sweep_orphaned_journals(
                 .is_some_and(|name| name.ends_with(RECOVERY_JOURNAL_SUFFIX))
         })
         .collect();
-    let referenced: std::collections::HashSet<std::ffi::OsString> =
+    let referenced: HashSet<OsString> =
         crate::descriptor::load_descriptors(descriptor_dir, supervisor_socket_path)
             .into_iter()
             .filter_map(|(_, descriptor)| {
                 Path::new(&descriptor.recovery_journal_path)
                     .file_name()
-                    .map(std::ffi::OsStr::to_os_string)
+                    .map(OsStr::to_os_string)
             })
             .collect();
     let mut removed = 0;
     for candidate in candidates {
         if candidate
             .file_name()
-            .is_some_and(|name| referenced.contains(&name.to_os_string()))
+            .is_some_and(|name| referenced.contains(name))
         {
             continue;
         }

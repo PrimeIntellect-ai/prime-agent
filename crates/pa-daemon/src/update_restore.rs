@@ -292,10 +292,10 @@ fn restore_target_mut<'a>(
 
 // Spec §6 step 1: the unconditional boot sweep
 
-/// Delete this socket's update scratch directory plus the legacy TS-era
-/// names and per-socket coordinator status records (spec §6 step 1): no
-/// liveness checks; the roster env is consumed first, so the sweep can
-/// delete the file it pointed at.
+/// Delete this socket's update scratch directory, the legacy TS-era
+/// names, and the TS-era flat status records (`<hash16>-<id>.json`)
+/// (spec §6 step 1): no liveness checks; the roster env is consumed
+/// first, so the sweep can delete the file it pointed at.
 pub(crate) fn boot_sweep(agent_dir: &Path, socket_path: &Path) {
     let socket_hash = crate::paths::hash_key(&socket_path.to_string_lossy(), 64);
     let _ = std::fs::remove_dir_all(socket_update_dir(agent_dir, &socket_hash));
