@@ -301,7 +301,7 @@ impl Worker {
     /// Bind the live session's schedule catalog: register the artifact
     /// partition, rebind the stored jobs onto the live ids, and start (or
     /// wake) the scheduler. Runs at create and after every replacement swap.
-    pub(crate) async fn bind_scheduled_jobs(&self) {
+    pub(crate) async fn bind_scheduled_jobs(&self) -> anyhow::Result<()> {
         let binding = {
             let core = self
                 .core
@@ -310,8 +310,9 @@ impl Worker {
             crate::scheduled_jobs::live_binding(&core)
         };
         if let Some((binding, artifact_dir)) = binding {
-            self.scheduled.bind_session(binding, artifact_dir).await;
+            self.scheduled.bind_session(binding, artifact_dir).await?;
         }
+        Ok(())
     }
 
     /// Clear the queued-input suspension and wake the turn runner so parked

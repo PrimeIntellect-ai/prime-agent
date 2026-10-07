@@ -777,16 +777,27 @@ impl Supervisor {
             .find(|passive| passive.job.id == *job_id);
         if let Some(passive) = passive {
             let store = Self::passive_job_store(&passive.info);
-            if let Some(job) = store.cancel(job_id, crate::util::now_ms()) {
-                self.broadcast_heartbeats_changed();
-                return (
-                    vec![response_line(&response_success(
-                        Some(command_id),
-                        type_name,
-                        Some(json!({ "job": serde_json::to_value(&job).unwrap_or(Value::Null) })),
-                    ))],
-                    false,
-                );
+            match store.cancel(job_id, crate::util::now_ms()) {
+                Ok(Some(job)) => {
+                    self.broadcast_heartbeats_changed();
+                    return (
+                        vec![response_line(&response_success(
+                            Some(command_id),
+                            type_name,
+                            Some(json!({ "job": serde_json::to_value(&job).unwrap_or(Value::Null) })),
+                        ))],
+                        false,
+                    );
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    return (
+                        vec![response_line(&response_failure(
+                            Some(command_id), type_name, &error.to_string(), None,
+                        ))],
+                        false,
+                    );
+                }
             }
         }
         (

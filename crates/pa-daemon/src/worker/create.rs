@@ -586,7 +586,9 @@ impl Worker {
         }
         // Bind the schedule catalog onto the session (artifact partition,
         // job rebind, scheduler start) — TS `rebindCronJobsToState`.
-        self.bind_scheduled_jobs().await;
+        if let Err(error) = self.bind_scheduled_jobs().await {
+            return response_failure(None, "create", &error.to_string(), None);
+        }
         // Recovery journal writes must not happen while holding the core
         // lock: record_recovery locks the core to read the store.
         let _ = self.record_recovery(true, "create");

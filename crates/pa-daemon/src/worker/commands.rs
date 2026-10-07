@@ -567,10 +567,13 @@ impl Worker {
         // cron jobs but cancels the subagent's RLM heartbeats; `shutdown` keeps them
         // all. The store cancel is durable, so the stopped session's own heartbeats
         // can never revive it.
-        match reason {
+        let cancel_result = match reason {
             KillCloseReason::Killed => self.cancel_session_scheduled_jobs().await,
             KillCloseReason::Replaced => self.cancel_session_rlm_heartbeats().await,
-            KillCloseReason::Shutdown => {}
+            KillCloseReason::Shutdown => Ok(()),
+        };
+        if let Err(error) = cancel_result {
+            return response_failure(None, "kill", &error.to_string(), None);
         }
         // The close cascades to the resident children with the SAME reason before
         // the session's own archive and dispose; a close failure is swallowed.

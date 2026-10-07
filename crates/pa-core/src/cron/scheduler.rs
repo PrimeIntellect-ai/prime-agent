@@ -89,7 +89,9 @@ impl<H: AgentCronSchedulerHooks + 'static> AgentCronScheduler<H> {
         self.core.stopped.store(false, Ordering::SeqCst);
         if !self.core.has_started.swap(true, Ordering::SeqCst) {
             let now = self.core.hooks.now();
-            self.core.store.recover_interrupted_dispatches(now);
+            if let Err(error) = self.core.store.recover_interrupted_dispatches(now) {
+                tracing::warn!(%error, "cron recovery failed at start");
+            }
         }
         self.schedule_next().await;
     }
@@ -113,7 +115,7 @@ impl<H: AgentCronSchedulerHooks + 'static> AgentCronScheduler<H> {
     ///
     /// # Errors
     ///
-    /// The underlying pass never fails in the current implementation.
+    /// Returns an error when a cron state lock or write fails.
     pub async fn run_due(&self) -> anyhow::Result<usize> {
         self.core.run_due_at(self.core.hooks.now()).await
     }
@@ -135,7 +137,7 @@ impl<H: AgentCronSchedulerHooks + 'static> SchedulerCore<H> {
     ///
     /// # Errors
     ///
-    /// The current implementation never returns `Err`.
+    /// Returns an error when a cron state lock or write fails.
     pub async fn run_due_at(&self, now: u64) -> anyhow::Result<usize> {
         // The pass claim is atomic: exactly one pass runs at a time.
         if (self.stopped.load(Ordering::SeqCst) && self.has_started.load(Ordering::SeqCst))
@@ -150,8 +152,8 @@ impl<H: AgentCronSchedulerHooks + 'static> SchedulerCore<H> {
         let _running = RunningGuard(&self.running);
         // Recover interrupted dispatches before claiming: a claim left
         // by an unwound pass is released here.
-        self.store.recover_interrupted_dispatches(now);
-        let claimed = self.store.claim_due(now, self.hooks.now());
+        self.store.recover_interrupted_dispatches(now)?;
+        let claimed = self.store.claim_due(now, self.hooks.now())?;
         let dispatches: Vec<PendingDispatch> = claimed
             .into_iter()
             .map(|dispatch| {
@@ -203,16 +205,16 @@ impl<H: AgentCronSchedulerHooks + 'static> SchedulerCore<H> {
     ) -> Option<&'static str> {
         let outcome = async {
             let Some(job) = self.store.get_claimed_job(&dispatch.job.id) else {
-                self.store
-                    .record_dispatch_result(
-                        &dispatch.id,
-                        &DispatchResultOptions {
-                            now: Some(self.hooks.now()),
-                            outcome: "skipped",
-                            error: None,
-                        },
-                    )
-                    .ok();
+                if let Err(error) = self.store.record_dispatch_result(
+                    &dispatch.id,
+                    &DispatchResultOptions {
+                        now: Some(self.hooks.now()),
+                        outcome: "skipped",
+                        error: None,
+                    },
+                ) {
+                    tracing::warn!(%error, "cron dispatch result not saved");
+                }
                 return Some("skipped");
             };
             let mut run_error: Option<String> = None;
@@ -231,22 +233,25 @@ impl<H: AgentCronSchedulerHooks + 'static> SchedulerCore<H> {
                 "ran"
             };
             let failed = run_error.is_some();
-            self.store
-                .record_dispatch_result(
-                    &dispatch.id,
-                    &DispatchResultOptions {
-                        now: Some(self.hooks.now()),
-                        outcome,
-                        error: run_error,
-                    },
-                )
-                .ok();
+            if let Err(error) = self.store.record_dispatch_result(
+                &dispatch.id,
+                &DispatchResultOptions {
+                    now: Some(self.hooks.now()),
+                    outcome,
+                    error: run_error,
+                },
+            ) {
+                tracing::warn!(%error, "cron dispatch result not saved");
+            }
             if failed {
                 let now = self.hooks.now();
                 let streak = self.note_run_failure(&dispatch.job.id);
-                let _ = self
+                if let Err(error) = self
                     .store
-                    .defer_next_run(&dispatch.job.id, now + failure_backoff_ms(streak));
+                    .defer_next_run(&dispatch.job.id, now + failure_backoff_ms(streak))
+                {
+                    tracing::warn!(%error, "cron failure backoff not saved");
+                }
             } else if outcome == "ran" {
                 self.clear_run_failure(&dispatch.job.id);
             }
@@ -541,7 +546,7 @@ mod tests {
         let job = store
             .create(&input("tick", "every 10m", now))
             .expect("first job");
-        store.cancel(&job.id, now).expect("cancel the only job");
+        store.cancel(&job.id, now).unwrap().expect("cancel the only job");
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
         while std::time::Instant::now() < deadline {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
