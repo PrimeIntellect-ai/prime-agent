@@ -47,6 +47,17 @@ pub struct CoordinatorOptions {
 }
 
 /// Why the driver left the success path. Before the stop the terminal is
+/// Where the prepare-time rollback-roster copy lives: beside the update's
+/// status record (the one artifact the successor's `boot_sweep` never
+/// deletes), so a rollback that must re-adopt a rejected child's workers
+/// still has the roster bytes.
+#[must_use]
+fn rollback_roster_path(status_path: &Path) -> PathBuf {
+    let mut name = status_path.file_name().unwrap_or_default().to_os_string();
+    name.push(".rollback-roster");
+    status_path.with_file_name(name)
+}
+
 /// `Aborted` (the daemon never stopped); after the stop it is a first-class
 /// `Rollback` attempt (spec §9) - the workers are gone and the previous
 /// binary must take over.
@@ -136,7 +147,15 @@ pub async fn run(options: &CoordinatorOptions) -> Result<UpdateStatus> {
             // spawn would strand those sessions).
             let prepared_dir = update_prepared_dir(&socket_dir, &update_id);
             let roster_path = update_roster_path(&prepared_dir);
-            let roster = (roster_path.is_file()).then_some(roster_path);
+            // The successor's boot sweep has usually deleted the
+            // original already (cursor's finding): the prepare-time copy
+            // beside the status record is the surviving artifact.
+            let backup = rollback_roster_path(&options.status_path);
+            let roster = if backup.is_file() {
+                Some(backup)
+            } else {
+                (roster_path.is_file()).then_some(roster_path)
+            };
             finish_failure(&writer, options, failure, roster.as_deref()).await?;
         }
     }
@@ -144,6 +163,9 @@ pub async fn run(options: &CoordinatorOptions) -> Result<UpdateStatus> {
     // The terminal state owns the lock cleanup; the boot sweep is the last
     // resort (spec §7).
     let _ = super::intent::release(&options.agent_dir, &socket_lossy);
+    // The prepare-time rollback-roster copy served its purpose (or was
+    // never needed); the original artifact is the successor's own.
+    let _ = std::fs::remove_file(rollback_roster_path(&options.status_path));
     let final_status = writer.lock().await.current().clone();
     Ok(final_status)
 }
@@ -211,6 +233,21 @@ async fn drive(
         // The roster artifact is the successor's input (consumed from the
         // env at its boot, spec §6 step 2); the coordinator never parses it.
         roster_path = Some(update_roster_path(&prepared_dir));
+        // The rollback's roster insurance (cursor's finding): the
+        // successor's `boot_sweep` deletes the socket's WHOLE update
+        // directory - the roster included - before it greets, so a
+        // rollback that must re-adopt a rejected child's workers would
+        // find nothing at the original path. The roster BYTES are copied
+        // beside the status record (sweep-safe); the copy is opaque - the
+        // coordinator still never parses the roster. Removed at the end
+        // of the run.
+        if let Some(roster_path) = &roster_path {
+            let backup = rollback_roster_path(&options.status_path);
+            if let (Ok(bytes), Some(parent)) = (std::fs::read(roster_path), backup.parent()) {
+                let _ = std::fs::create_dir_all(parent);
+                let _ = std::fs::write(&backup, bytes);
+            }
+        }
         writer
             .lock()
             .await
