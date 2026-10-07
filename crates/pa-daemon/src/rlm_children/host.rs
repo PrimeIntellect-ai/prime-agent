@@ -627,17 +627,38 @@ impl RlmSubagentHost for SupervisorChildSessions {
                         }
                         may
                     };
+                    // The re-clear's refresh needs a fresh observation
+                    // behind it. The wait inside the budget is what
+                    // carried the record past the admission-to-run
+                    // hand-off, so a refresh after it reads a
+                    // post-window state (a settled turn: the capture rides
+                    // this collect; a timed-out one: still busy, no
+                    // mint). A zero-remaining collect never waited, and a
+                    // refresh there would run on nothing: its own status
+                    // read can flap back to the idle-window misread the
+                    // grace just cleared (the queue snapshot and the
+                    // busy flag change under different locks), remint the
+                    // empty `done`, and pin it — the result block latches
+                    // `result_returned` on any settle it returns, and the
+                    // marker gates every later collect's grace, so the
+                    // empty answer would stand forever. That arm returns
+                    // the truthful running snapshot instead; a later
+                    // collect gives whatever settle lands the grace then.
+                    let mut refresh_backed = true;
                     if recleared {
                         let remaining = deadline.saturating_duration_since(Instant::now());
-                        if !remaining.is_zero() {
+                        refresh_backed = !remaining.is_zero();
+                        if refresh_backed {
                             this.wait_for_child(&active_session_id, remaining).await;
                         }
                     }
-                    // Refresh again after the grace whatever the busy
-                    // re-check said: an answer that landed inside the grace
-                    // must ride this collect's result (the refresh
+                    // With the settle that survived the grace the refresh
+                    // is always backed: an answer that landed inside the
+                    // grace must ride this collect's result (the refresh
                     // re-captures a `None` preview).
-                    this.refresh_record(record).await;
+                    if refresh_backed {
+                        this.refresh_record(record).await;
+                    }
                 }
                 let result = {
                     let mut record = record.lock().await;

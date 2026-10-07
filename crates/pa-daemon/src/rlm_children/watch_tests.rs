@@ -176,27 +176,60 @@ async fn spawn_fake_supervisor(
                                 child_subagents.grace_parked.notify_one();
                                 child_subagents.grace_release.notified().await;
                             }
-                            response_success(
-                                Some(&id),
-                                command_type,
-                                Some(json!({
-                                    "isStreaming": false,
-                                    "hasRunningSubagents": child_subagents.running.load(Ordering::SeqCst),
-                                    "sessionActions": { "queuedCount": 0 },
-                                })),
-                            )
+                            // The collect-remint pin's flap-back: the
+                            // fourth state read of the same flow is the
+                            // post-reclear refresh; armed, and the child
+                            // still running, it answers idle once — the
+                            // admission-window misread recurring on the
+                            // refresh's own status read.
+                            if child_subagents.remint_flap.load(Ordering::SeqCst)
+                                && child_subagents.running.load(Ordering::SeqCst)
+                                && state_reads.fetch_add(1, Ordering::SeqCst) + 1 == 4
+                            {
+                                child_subagents.remint_flap.store(false, Ordering::SeqCst);
+                                child_subagents.capture_empty.store(true, Ordering::SeqCst);
+                                response_success(
+                                    Some(&id),
+                                    command_type,
+                                    Some(json!({
+                                        "isStreaming": false,
+                                        "hasRunningSubagents": false,
+                                        "sessionActions": { "queuedCount": 0 },
+                                    })),
+                                )
+                            } else {
+                                response_success(
+                                    Some(&id),
+                                    command_type,
+                                    Some(json!({
+                                        "isStreaming": false,
+                                        "hasRunningSubagents": child_subagents.running.load(Ordering::SeqCst),
+                                        "sessionActions": { "queuedCount": 0 },
+                                    })),
+                                )
+                            }
                         }
                         "get_last_assistant_text" => {
-                            // The settle capture: with the knob set, the
-                            // worker leaves right after its final answer.
-                            if matches!(child, FakeChild::LeavesAfterSettle) {
-                                gone.store(true, Ordering::SeqCst);
+                            // The remint flap's capture reads no text: the
+                            // misread window holds no answer.
+                            if child_subagents.capture_empty.swap(false, Ordering::SeqCst) {
+                                response_success(
+                                    Some(&id),
+                                    command_type,
+                                    Some(json!({ "text": "" })),
+                                )
+                            } else {
+                                // The settle capture: with the knob set, the
+                                // worker leaves right after its final answer.
+                                if matches!(child, FakeChild::LeavesAfterSettle) {
+                                    gone.store(true, Ordering::SeqCst);
+                                }
+                                response_success(
+                                    Some(&id),
+                                    command_type,
+                                    Some(json!({ "text": "the child final answer" })),
+                                )
                             }
-                            response_success(
-                                Some(&id),
-                                command_type,
-                                Some(json!({ "text": "the child final answer" })),
-                            )
                         }
                         "kill" => {
                             let _ = kill_tx.send(command.clone());
@@ -257,15 +290,22 @@ async fn sessions_with_fake_supervisor(
 
 /// The fake child's own subagents: whether one still runs (the child
 /// reports `hasRunningSubagents`, and a `waitForRlmQuiescence` idle wait
-/// holds until it finishes), how many such waits started, and the
+/// holds until it finishes), how many such waits started, the
 /// `ParksGraceCheck` hand-off pair — per instance, never static, so
-/// parallel module tests cannot steal each other's park/release permits.
+/// parallel module tests cannot steal each other's park/release permits —
+/// and the collect-remint pin's one-shot flap: while armed, the state read
+/// the post-reclear refresh makes (the fourth of the zero-budget flow,
+/// while the child still runs) answers idle once — the far-side flag
+/// inconsistency the admission-window misread rides on — and the capture
+/// it unblocks reads no text (the turn never produced any).
 #[derive(Default)]
 struct FakeChildSubagents {
     running: AtomicBool,
     quiescent_waits: std::sync::atomic::AtomicUsize,
     grace_parked: tokio::sync::Notify,
     grace_release: tokio::sync::Notify,
+    remint_flap: AtomicBool,
+    capture_empty: AtomicBool,
 }
 
 /// [`sessions_with_fake_supervisor`] whose child reports its own running
@@ -1224,6 +1264,88 @@ async fn a_settle_before_any_collect_was_returned_still_gets_the_stability_grace
         results[0].answer_preview.as_deref(),
         Some("the child final answer"),
         "the first collect must not bind the empty admission-window misread"
+    );
+    let roster = sessions.list_subagents().await.expect("child roster");
+    assert_eq!(roster[0].status, "completed");
+}
+
+/// The "Collect remints settle after reclear" pin: the re-clear's
+/// refresh runs only on the wait's fresh observation. A zero-remaining
+/// collect (the kernel `rlm.collect` default) never waits, and a
+/// refresh there would run on nothing — its own status read can flap
+/// back to the idle-window misread the grace just cleared (the queue
+/// snapshot and the busy flag change under different locks), remint the
+/// empty `done`, and pin it: the result block latches `result_returned`
+/// on any settle it returns, and the marker gates every later
+/// collect's grace, so the empty answer would stand forever. The
+/// zero-remaining re-clear returns the truthful running snapshot
+/// instead, and the settle a later budgeted collect lands still gets
+/// the grace — the real answer rides that collect.
+#[tokio::test]
+async fn a_zero_remaining_reclear_returns_the_running_snapshot_not_a_reminted_settle() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let child_subagents = Arc::new(FakeChildSubagents::default());
+    let (sessions, _kill_rx) = sessions_with_fake_child_subagents(
+        follow_up_tx,
+        0,
+        FakeKill::Success,
+        FakeChild::Healthy,
+        Arc::clone(&child_subagents),
+    )
+    .await;
+    sessions
+        .push_test_child(RlmChildIdentity {
+            rlm_child_id: "sub-remint".to_string(),
+            active_session_id: "child-live".to_string(),
+            session_id: Some("child-file".to_string()),
+            session_name: "remint".to_string(),
+        })
+        .await;
+    {
+        let record = Arc::clone(&sessions.inner.children.lock().await[0]);
+        let mut record = record.lock().await;
+        // The watcher's refresh minted the admission-window misread
+        // before any collect ran: an unclaimed `done` verdict, no
+        // captured answer.
+        record.settled_status = Some("done");
+        // Keep the flow's state reads collect-driven: a live usage
+        // watcher's background polls would race the flap's read count.
+        record.usage_watch_live = true;
+    }
+    // The turn popped after the misread: the child is busy running the
+    // task the settle claimed was over, and the armed knob flaps the
+    // post-reclear refresh's status read back to idle once.
+    child_subagents.running.store(true, Ordering::SeqCst);
+    child_subagents.remint_flap.store(true, Ordering::SeqCst);
+    let zero = sessions
+        .collect(vec!["sub-remint".to_string()], 0)
+        .await
+        .expect("collect the recleared child with no budget");
+    assert_eq!(
+        zero[0].status, "running",
+        "a zero-remaining reclear returns the truthful running snapshot"
+    );
+    assert!(
+        !zero[0].settled,
+        "the misread the grace cleared stays cleared"
+    );
+    assert!(
+        zero[0].answer_preview.is_none(),
+        "no empty `done` is reminted for the caller to bind"
+    );
+    // The turn finishes; the budgeted collect gives the settle it lands
+    // the grace and returns the real answer — the misread cost nothing.
+    child_subagents.running.store(false, Ordering::SeqCst);
+    let recovered = sessions
+        .collect(vec!["sub-remint".to_string()], 10_000)
+        .await
+        .expect("collect the settled child with a budget");
+    assert_eq!(recovered[0].status, "done");
+    assert!(recovered[0].settled);
+    assert_eq!(
+        recovered[0].answer_preview.as_deref(),
+        Some("the child final answer"),
+        "the real answer rides the budgeted collect, not an empty remint"
     );
     let roster = sessions.list_subagents().await.expect("child roster");
     assert_eq!(roster[0].status, "completed");
