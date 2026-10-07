@@ -191,7 +191,7 @@ def _focused_is_secure(pid: int) -> bool | None:
     if focused is None:
         return False
     role_ok, role = _read_attribute(app_services, focused, "AXRole")
-    subrole_ok, subrole = _read_attribute(app_services, focused, "AXSubrole")
+    subrole_ok, subrole = _read_subrole(app_services, focused)
     if not role_ok or not subrole_ok:
         return None  # an unreadable focused element is unverifiable: fail closed
     return _is_secure_field({"role": role, "subrole": subrole})
@@ -208,21 +208,18 @@ def _live_is_secure(ref: Any) -> bool | None:
     """
     app_services = _require_mac().app_services
     role_ok, role = _read_attribute(app_services, ref, "AXRole")
-    subrole_ok, subrole = _read_attribute(app_services, ref, "AXSubrole")
+    subrole_ok, subrole = _read_subrole(app_services, ref)
     if not role_ok or not subrole_ok:
         return None
     return _is_secure_field({"role": role, "subrole": subrole})
 
 
 def _read_attribute(app_services: Any, element: Any, attribute: str, timeout_seconds: float | None = None) -> tuple[bool, str | None]:
-    """Copy one attribute as text, telling a failed read from an absent value.
+    """Copy one attribute as text, telling a failed read from a None value.
 
     Both surface as None through _copy_value; a failed read must be
     distinguishable so security-relevant attributes can fail closed.
-    Returns (ok, value). ok=False means the read could not complete, and
-    callers fail closed on it. An element without the attribute answers
-    authoritatively: ok=True with a None value - a control with no
-    AXSubrole is an ordinary control, not an unverifiable one.
+    Returns (ok, value); ok=False means the read itself failed.
     """
     _set_messaging_timeout(app_services, element, timeout_seconds)
     try:
@@ -231,10 +228,31 @@ def _read_attribute(app_services: Any, element: Any, attribute: str, timeout_sec
         return False, None
     error, value = _split_result(app_services, result)
     if error != app_services.kAXErrorSuccess:
-        if error == _AX_ERROR_ATTRIBUTE_UNSUPPORTED:
-            return True, None
         return False, None
     return True, _text(value)
+
+
+def _read_subrole(app_services: Any, element: Any, timeout_seconds: float | None = None) -> tuple[bool, str | None]:
+    """Read AXSubrole, telling an unsupported attribute from a failed read.
+
+    Most controls have no subrole attribute at all: kAXErrorAttributeUnsupported
+    answers that authoritatively (ok=True, None), so an ordinary field is
+    never unverifiable and never fails the secure gate. Every other error stays
+    (ok=False, None) and callers fail closed on it. Only the subrole read is
+    allowed this: a role read that comes back unsupported is anomalous, not
+    evidence of an ordinary control.
+    """
+    _set_messaging_timeout(app_services, element, timeout_seconds)
+    try:
+        result = app_services.AXUIElementCopyAttributeValue(element, "AXSubrole", None)
+    except Exception:
+        return False, None
+    error, value = _split_result(app_services, result)
+    if error == app_services.kAXErrorSuccess:
+        return True, _text(value)
+    if error == _AX_ERROR_ATTRIBUTE_UNSUPPORTED:
+        return True, None
+    return False, None
 
 
 def _remaining_seconds(deadline: float) -> float:
@@ -283,6 +301,12 @@ def _window_fingerprint(pid: int, timeout_seconds: float | None = None) -> tuple
             return False, None
         return _read_attribute(app_services, element, attribute, _remaining_seconds(deadline))
 
+    def read_subrole(element: Any) -> tuple[bool, str | None]:
+        """One bounded subrole read, failing closed once the budget is spent."""
+        if _budget_spent(deadline):
+            return False, None
+        return _read_subrole(app_services, element, _remaining_seconds(deadline))
+
     window = read(app_element, "AXFocusedWindow")
     if window is None:
         return None
@@ -296,7 +320,7 @@ def _window_fingerprint(pid: int, timeout_seconds: float | None = None) -> tuple
     if focused is None:
         return (title, count, None, None, None)
     role_ok, role = read_attribute(focused, "AXRole")
-    subrole_ok, subrole = read_attribute(focused, "AXSubrole")
+    subrole_ok, subrole = read_subrole(focused)
     if not role_ok or not subrole_ok or (role == _SECURE_ROLE and subrole == _SECURE_SUBROLE):
         value_head = ""  # an unverifiable or secure field's value is never read
     else:
@@ -432,8 +456,14 @@ def _describe(app_services: Any, element: Any, deadline: float | None = None) ->
             return False, None
         return _read_attribute(app_services, element, attribute, _remaining_seconds(deadline))
 
+    def read_subrole() -> tuple[bool, str | None]:
+        """One guarded subrole read, failing closed once the budget is spent."""
+        if _budget_spent(deadline):
+            return False, None
+        return _read_subrole(app_services, element, _remaining_seconds(deadline))
+
     role = _cap(_text(read("AXRole")))
-    subrole_ok, subrole = read_attribute("AXSubrole")
+    subrole_ok, subrole = read_subrole()
     subrole = _cap(subrole)
     if not subrole_ok and role == _SECURE_ROLE:
         subrole = _SECURE_SUBROLE

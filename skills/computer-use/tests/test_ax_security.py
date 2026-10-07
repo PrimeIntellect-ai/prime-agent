@@ -535,3 +535,38 @@ class DescribeBudgetTests(unittest.TestCase):
         self.assertLessEqual(elapsed, 1.55, "one element's describe fits its budget, not budget x reads")
 if __name__ == "__main__":
     unittest.main()
+
+
+class RoleUnsupportedRegressionTests(unittest.TestCase):
+    """A role read that cannot happen is unverifiable, never benign."""
+
+    def test_a_role_unsupported_secure_subrole_still_fails_closed(self) -> None:
+        class Services:
+            kAXErrorSuccess = 0
+
+            def AXUIElementSetMessagingTimeout(self, element: Any, seconds: Any) -> None:
+                pass
+
+            def AXUIElementCreateApplication(self, pid: int) -> "Services":
+                return self
+
+            def AXUIElementCopyAttributeValue(self, element: Any, attribute: str, unused: Any) -> Any:
+                if attribute == "AXRole":
+                    return (-25205, None)  # the role read is unsupported: anomalous
+                if attribute == "AXSubrole":
+                    return (0, "AXSecureTextField")  # the field says it is secure
+                if attribute == "AXFocusedUIElement":
+                    return (0, element)
+                return (0, None)
+
+        services = Services()
+        with mock.patch.object(ax, "_require_mac", lambda: types.SimpleNamespace(app_services=services)):
+            # the secure gate must not pass a field that reports a secure
+            # subrole merely because its role read came back unsupported
+            self.assertIsNone(ax._live_is_secure("ref"))
+        with mock.patch.object(ax, "_require_mac", lambda: types.SimpleNamespace(app_services=services)):
+            self.assertIsNone(ax._focused_is_secure(4242))
+
+
+if __name__ == "__main__":
+    unittest.main()
