@@ -17,7 +17,7 @@ const SHUTDOWN_CONVERGENCE_TIMEOUT_MS: u128 = 10_000;
 /// process is confirmed gone (zombies count as dead — [`is_process_alive`]).
 /// Deliberate TS divergence (TS fires SIGKILL and returns without verifying):
 /// a stop path must not claim a stop a D-state process never performed.
-pub(super) fn force_kill_daemon(pid: u32) -> bool {
+pub(crate) fn force_kill_daemon(pid: u32) -> bool {
     kill_daemon(pid);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
     while std::time::Instant::now() < deadline {

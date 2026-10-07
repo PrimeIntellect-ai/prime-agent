@@ -128,7 +128,16 @@ pub async fn run(options: &CoordinatorOptions) -> Result<UpdateStatus> {
             writer.set_message(Some(failure.message))?;
         }
         Err(failure) => {
-            finish_failure(&writer, options, failure).await?;
+            // The rollback child gets the update's roster artifact (the
+            // same one the failed spawn booted with): the rejected
+            // successor's crash-oracle kill leaves its adopted workers'
+            // recovery journals on disk, and the rollback boot re-adopts
+            // them from the roster (macroscope's finding - a bare rollback
+            // spawn would strand those sessions).
+            let prepared_dir = update_prepared_dir(&socket_dir, &update_id);
+            let roster_path = update_roster_path(&prepared_dir);
+            let roster = (roster_path.is_file()).then_some(roster_path);
+            finish_failure(&writer, options, failure, roster.as_deref()).await?;
         }
     }
     heartbeat.stop();
@@ -406,6 +415,7 @@ async fn finish_failure(
     writer: &Arc<Mutex<StatusWriter>>,
     options: &CoordinatorOptions,
     failure: PhaseFailure,
+    roster_path: Option<&Path>,
 ) -> Result<()> {
     let reason = failure.message.trim_end_matches('.');
     writer.lock().await.set_state(UpdateState::Rollback)?;
@@ -502,35 +512,30 @@ async fn finish_failure(
     // rollback always fails against a squatter we ourselves created). A
     // surviving squatter after the bounded attempt surfaces as the same
     // honest Failed as before.
+    // The rejected successor, still running from the failed spawn, is
+    // stopped HERE by a CRASH-ORACLE KILL of the pid this coordinator
+    // spawned - never an RPC to the socket: the graceful Shutdown
+    // command tombstones the child's roster-adopted workers (durable stop
+    // intent; macroscope's finding), while a forced kill is the crash
+    // path the protocol already trusts - the adopted workers die with the
+    // supervisor, their recovery journals persist, and the roster'd
+    // rollback boot below re-adopts them (cursor's squatter finding: the
+    // socket frees for the rollback). No RPC also means a competing
+    // daemon that answered the socket is never touched (macroscope's
+    // second finding); a live competitor keeps the rollback's honest
+    // Failed.
     if let Some(rejected) = &failure.rejected {
-        let identity = pa_types::daemon::update_flow::UpdateProcessIdentity {
-            pid: rejected.pid,
-            process_start_id: rejected.process_start_id.clone(),
-            supervisor_generation: None,
-            supervisor_owner_token: None,
-            rest: serde_json::Map::default(),
-        };
-        // Nothing answering the socket means the rejected child either
-        // never bound or already died - nothing to stop.
-        if let Ok((client, _events)) =
-            pa_tui::daemon_client::DaemonClient::connect(&options.socket_path).await
-        {
-            // The graceful shutdown command (`prime-agent shutdown`'s own;
-            // invariant I3 - never a kill): the refused child is asked to
-            // stop workers and exit, then bounded-waited.
-            let _ = client
-                .request_with_timeout(
-                    pa_types::daemon::DaemonCommand::Shutdown {
-                        id: None,
-                        force: Some(false),
-                        rest: serde_json::Map::default(),
-                    },
-                    options.budget.prepare_rpc_ms
-                        + options.budget.worker_stop_ms
-                        + options.budget.worker_stop_extension_ms,
-                )
-                .await;
-            client.close();
+        let killed = crate::daemon_discovery::kill::force_kill_daemon(
+            u32::try_from(rejected.pid).unwrap_or(0),
+        );
+        if killed {
+            let identity = pa_types::daemon::update_flow::UpdateProcessIdentity {
+                pid: rejected.pid,
+                process_start_id: rejected.process_start_id.clone(),
+                supervisor_generation: None,
+                supervisor_owner_token: None,
+                rest: serde_json::Map::default(),
+            };
             let _ = super::successor::wait_for_exit(&identity, options.budget.predecessor_exit_ms)
                 .await;
         }
@@ -556,7 +561,7 @@ async fn finish_failure(
     let spawned = match spawn_supervisor(
         previous.executable(),
         &options.socket_path,
-        None,
+        roster_path,
         &spawn_cwd,
     ) {
         Ok(pid) => capture_spawned_successor(pid),

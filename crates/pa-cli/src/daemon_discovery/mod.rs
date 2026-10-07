@@ -14,7 +14,7 @@ use crate::config;
 use crate::daemon_client::DaemonClient;
 
 mod format;
-mod kill;
+pub(crate) mod kill;
 pub(crate) mod plan;
 pub(crate) mod scan;
 pub(crate) mod stop;
