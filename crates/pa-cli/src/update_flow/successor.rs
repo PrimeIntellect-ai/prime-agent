@@ -134,8 +134,10 @@ pub fn validate_replacement_daemon(
         .get("supervisorSocketPath")
         .and_then(Value::as_str)
         .filter(|hello_socket_path| {
-            pa_daemon::supervisor_ownership::normalize_socket_path(Path::new(hello_socket_path))
-                == pa_daemon::supervisor_ownership::normalize_socket_path(socket_path)
+            pa_daemon::supervisor_ownership::hello_socket_path_matches(
+                hello_socket_path,
+                socket_path,
+            )
         });
     if hello_socket_path.is_none() {
         bail!(

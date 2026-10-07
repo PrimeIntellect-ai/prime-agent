@@ -161,6 +161,20 @@ pub fn normalize_socket_path(socket_path: &Path) -> String {
     hex
 }
 
+/// Whether a daemon hello's `supervisorSocketPath` names THIS socket: the
+/// hello is JSON (UTF-8), so the daemon emits the LOSSY spelling of its
+/// socket path (`to_string_lossy` in `supervision.rs`) and the compare
+/// runs lossy-to-lossy - never against the raw-bytes identity, whose
+/// `raw:` hex could never equal its own hello's spelling and every
+/// legitimate gate would fail closed (cursor's finding on the non-UTF-8
+/// fix). The raw identity stays what the fence FILE keys on.
+#[must_use]
+pub fn hello_socket_path_matches(hello_socket_path: &str, socket_path: &Path) -> bool {
+    let our_hello_spelling = socket_path.to_string_lossy();
+    normalize_socket_path(Path::new(hello_socket_path))
+        == normalize_socket_path(Path::new(our_hello_spelling.as_ref()))
+}
+
 /// The fence record's path: full sha256 hex of the normalized socket path
 /// under `<registry>/startup-fences` (TS `startupFencePath`).
 #[must_use]
@@ -586,8 +600,7 @@ impl FenceIdentity {
         let owner_token = identity.supervisor_owner_token.as_deref()?;
         let supervisor_generation = identity.supervisor_generation.as_deref()?;
         let hello_socket_path = hello_socket_path?;
-        if normalize_socket_path(Path::new(hello_socket_path)) != normalize_socket_path(socket_path)
-        {
+        if !hello_socket_path_matches(hello_socket_path, socket_path) {
             return None;
         }
         Some(FenceIdentity {
@@ -1345,6 +1358,42 @@ mod tests {
         assert!(
             guard.is_dir(),
             "the successor's guard directory is never removed"
+        );
+    }
+
+    /// The hello gate accepts a non-UTF-8 socket's OWN lossy spelling
+    /// (cursor's finding on the raw-identity fix: the daemon's hello is
+    /// JSON, so it emits `to_string_lossy` - comparing that against the
+    /// `raw:` identity failed closed on every legitimate hello).
+    #[test]
+    #[cfg(unix)]
+    fn the_hello_gate_accepts_the_lossy_spelling_of_a_non_utf8_socket() {
+        use std::os::unix::ffi::OsStrExt;
+        let socket = std::ffi::OsStr::from_bytes(b"/tmp/a\xff.sock");
+        let path = std::path::Path::new(socket);
+        let lossy = path.to_string_lossy().to_string();
+        assert!(
+            hello_socket_path_matches(&lossy, path),
+            "the daemon's own lossy emission names this socket"
+        );
+        let other = std::ffi::OsStr::from_bytes(b"/tmp/b\xff.sock");
+        let other_lossy = std::path::Path::new(other).to_string_lossy().to_string();
+        assert!(
+            !hello_socket_path_matches(&other_lossy, path),
+            "another socket's lossy emission is refused"
+        );
+        // End to end: a fixed hello pins the fence on a non-UTF-8 socket.
+        let (pid, start_id) = own_identity();
+        let identity = pa_types::daemon::update_flow::UpdateProcessIdentity {
+            pid: u64::from(pid),
+            process_start_id: Some(start_id),
+            supervisor_generation: Some(format!("sup:{pid}")),
+            supervisor_owner_token: Some("tok".to_string()),
+            rest: serde_json::Map::default(),
+        };
+        assert!(
+            FenceIdentity::from_verified_hello(&identity, path, Some(&lossy)).is_some(),
+            "the lossy-hello fence pins on a raw-identity socket"
         );
     }
 
