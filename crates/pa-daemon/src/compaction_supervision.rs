@@ -194,19 +194,27 @@ impl TerminalCompactionJournal {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        let latest = Self::load(path);
+        if crate::journal::tail_is_torn(path) {
+            let records = latest
+                .values()
+                .map(serde_json::to_value)
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            crate::journal::rewrite_records(path, &records, crate::journal::Finalize::Synced)?;
+        }
         Ok(TerminalCompactionJournal {
-            latest: Self::load(path),
+            latest,
             retryable: HashMap::new(),
             path: path.to_path_buf(),
         })
     }
 
     fn load(path: &Path) -> HashMap<String, TerminalCompactionRecord> {
-        let Ok(content) = std::fs::read_to_string(path) else {
+        let Ok(bytes) = std::fs::read(path) else {
             return HashMap::new();
         };
         let mut latest = HashMap::new();
-        for line in content.lines() {
+        for line in String::from_utf8_lossy(&bytes).lines() {
             if line.trim().is_empty() {
                 continue;
             }
@@ -810,6 +818,41 @@ mod tests {
             journal.pending("session-a").unwrap().is_none(),
             "the cleared record never reappears"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn terminal_journal_open_heals_torn_utf8_tail() {
+        let dir = std::env::temp_dir().join(format!("pa-comp-sup-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("compaction-supervision.jsonl");
+        let mut torn: Vec<u8> = br#"{"version":1,"type":"terminal_compaction","activeSessionId":"session-a","sessionFile":"/sessions/a.jsonl","reason":"threshold","declaredAt":"2026-09-23T00:00:00Z"}"#.to_vec();
+        torn.push(b'\n');
+        let whole = r#"{"activeSessionId":"session-b","reason":"shütdown"}"#;
+        torn.extend_from_slice(&whole.as_bytes()[..=whole.find('ü').unwrap()]);
+        assert!(std::str::from_utf8(&torn).is_err());
+        std::fs::write(&path, torn).unwrap();
+
+        {
+            let mut journal = TerminalCompactionJournal::open(&path).unwrap();
+            assert!(journal.pending("session-a").unwrap().is_some());
+            journal
+                .declare(TerminalCompactionRecord {
+                    version: 1,
+                    r#type: TERMINAL_COMPACTION_RECORD_TYPE.to_string(),
+                    active_session_id: "session-b".to_string(),
+                    session_file: None,
+                    reason: "threshold".to_string(),
+                    declared_at: "2026-09-23T00:00:01Z".to_string(),
+                })
+                .unwrap();
+        }
+        let mut reopened = TerminalCompactionJournal::open(&path).unwrap();
+        assert!(
+            reopened.pending("session-b").unwrap().is_some(),
+            "the record appended after the reopened journal must survive a reload"
+        );
+        assert!(reopened.pending("session-a").unwrap().is_some());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

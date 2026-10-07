@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 const COMPACT_AFTER_RECORDS: usize = 4096;
@@ -93,6 +93,20 @@ pub(crate) fn rewrite_records(path: &Path, records: &[Value], finalize: Finalize
     Ok(())
 }
 
+pub(crate) fn tail_is_torn(path: &Path) -> bool {
+    let Ok(mut file) = File::open(path) else {
+        return false;
+    };
+    if !file.metadata().is_ok_and(|metadata| metadata.len() > 0) {
+        return false;
+    }
+    if file.seek(SeekFrom::End(-1)).is_err() {
+        return false;
+    }
+    let mut tail = [0u8];
+    file.read_exact(&mut tail).is_ok() && tail[0] != b'\n'
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandJournalEntry {
     pub status: String,
@@ -111,8 +125,9 @@ impl CommandRecoveryJournal {
     ///
     /// # Errors
     ///
-    /// Returns an error when the parent directory cannot be created; a
-    /// missing journal loads as empty, and the record load never errors.
+    /// Returns an error when the parent directory cannot be created, or
+    /// the torn-tail heal cannot rewrite it; a missing journal loads as
+    /// empty, and the record load never errors.
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -123,6 +138,9 @@ impl CommandRecoveryJournal {
             record_count: 0,
         };
         journal.load()?;
+        if tail_is_torn(path) {
+            journal.compact()?;
+        }
         Ok(journal)
     }
 
@@ -257,10 +275,10 @@ impl CommandRecoveryJournal {
     }
 
     fn load(&mut self) -> Result<()> {
-        let Ok(content) = fs::read_to_string(&self.path) else {
+        let Ok(bytes) = fs::read(&self.path) else {
             return Ok(());
         };
-        for line in content.lines() {
+        for line in String::from_utf8_lossy(&bytes).lines() {
             if line.is_empty() {
                 continue;
             }
@@ -317,10 +335,10 @@ pub struct WorkerRecoveryRecord {
 
 fn parse_worker_records(path: &Path) -> Result<HashMap<String, WorkerRecoveryRecord>> {
     let mut latest = HashMap::new();
-    let Ok(content) = fs::read_to_string(path) else {
+    let Ok(bytes) = fs::read(path) else {
         return Ok(latest);
     };
-    for line in content.lines() {
+    for line in String::from_utf8_lossy(&bytes).lines() {
         if line.is_empty() {
             continue;
         }
@@ -401,18 +419,23 @@ impl WorkerRecoveryJournal {
     ///
     /// # Errors
     ///
-    /// Returns an error when the parent directory cannot be created, or
-    /// the queue-snapshot pass cannot read an existing journal.
+    /// Returns an error when the parent directory cannot be created, the
+    /// queue-snapshot pass cannot read an existing journal, or the
+    /// torn-tail heal cannot rewrite it.
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
         let queue_snapshots = parse_queue_snapshot_records(path)?;
-        Ok(WorkerRecoveryJournal {
+        let journal = WorkerRecoveryJournal {
             path: path.to_path_buf(),
             latest: parse_worker_records(path)?,
             queue_snapshots,
-        })
+        };
+        if tail_is_torn(path) {
+            journal.compact()?;
+        }
+        Ok(journal)
     }
 
     /// Read the latest worker record per active session straight from a
@@ -657,14 +680,17 @@ const QUEUE_SNAPSHOT_VERSION: u32 = 2;
 
 fn parse_queue_snapshot_records(path: &Path) -> Result<HashMap<String, WorkerQueueSnapshotRecord>> {
     let mut latest: HashMap<String, WorkerQueueSnapshotRecord> = HashMap::new();
-    let contents = match fs::read_to_string(path) {
-        Ok(contents) => contents,
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(latest),
         Err(error) => {
             return Err(error).with_context(|| format!("read journal {}", path.display()))
         }
     };
-    for line in contents.split('\n').filter(|line| !line.is_empty()) {
+    for line in String::from_utf8_lossy(&bytes)
+        .split('\n')
+        .filter(|line| !line.is_empty())
+    {
         let Ok(record) = serde_json::from_str::<Value>(line) else {
             continue;
         };
@@ -1020,6 +1046,85 @@ mod tests {
         assert!(!WorkerRecoveryJournal::read_interrupted(&path));
         std::fs::write(&path, "not json").unwrap();
         assert!(!WorkerRecoveryJournal::read_interrupted(&path));
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn worker_journal_open_skips_torn_utf8_tail() {
+        let path = temp_path("torn-utf8-tail.recovery.jsonl");
+        let item = WorkerQueueItemRecord {
+            message: "steer ünïcode".to_string(),
+            priority: Some(crate::worker::QueuePriority::Human),
+            preview: Some("preview".to_string()),
+            custom_message: None,
+            queue_key: None,
+            queue_visible: true,
+            policy: queue_policy_default(),
+        };
+        let mut journal = WorkerRecoveryJournal::open(&path).unwrap();
+        journal
+            .record_queue_checkpoint(
+                "s1",
+                "sess1",
+                Some("/a.jsonl"),
+                true,
+                "prompt_accepted",
+                std::slice::from_ref(&item),
+                &[],
+            )
+            .unwrap();
+        let whole = serde_json::to_string(&WorkerRecoveryRecord {
+            active_session_id: "s2".to_string(),
+            session_id: "sess2".to_string(),
+            session_file: None,
+            busy: false,
+            operation: "shütdown".to_string(),
+            recorded_at: "2026-10-07T00:00:00Z".to_string(),
+        })
+        .unwrap();
+        let torn = &whole.as_bytes()[..=whole.find('ü').unwrap()];
+        assert!(std::str::from_utf8(torn).is_err());
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(torn).unwrap();
+        drop(file);
+
+        let reopened = WorkerRecoveryJournal::open(&path).unwrap();
+        assert!(WorkerRecoveryJournal::read_interrupted(&path));
+        let latest = reopened.get_latest();
+        assert_eq!(latest.len(), 1);
+        assert_eq!(latest[0].active_session_id, "s1");
+        assert!(latest[0].busy);
+        let restored = reopened.latest_queue_snapshot("s1").unwrap();
+        assert_eq!(restored.0, vec![item]);
+        assert!(restored.1.is_empty());
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn worker_journal_open_heals_torn_ascii_tail() {
+        let path = temp_path("torn-ascii-tail.recovery.jsonl");
+        let mut journal = WorkerRecoveryJournal::open(&path).unwrap();
+        journal
+            .record("s1", "sess1", Some("/a.jsonl"), true, "prompt_accepted")
+            .unwrap();
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(br#"{"activeSessionId":"s3","sessionId":"ses"#)
+            .unwrap();
+        drop(file);
+
+        let mut journal = WorkerRecoveryJournal::open(&path).unwrap();
+        journal.record("s2", "sess2", None, false, "ready").unwrap();
+        let reopened = WorkerRecoveryJournal::open(&path).unwrap();
+        assert!(WorkerRecoveryJournal::read_interrupted(&path));
+        assert_eq!(
+            reopened
+                .get_latest()
+                .iter()
+                .filter(|record| record.active_session_id == "s2")
+                .count(),
+            1,
+            "the record appended after the reopened journal must survive a reload"
+        );
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 }
