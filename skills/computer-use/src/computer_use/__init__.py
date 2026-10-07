@@ -844,6 +844,10 @@ class App:
         full = self._render_full(observation, lines)
         if diff_on and self._lines is not None:
             text = diff._diff(self._lines, lines) or "(no changes since the previous observation)"
+            if observation.truncated:
+                # a truncated snapshot may look like removals in the diff:
+                # the hidden-controls warning must survive the diff path
+                text += "\nTRUNCATED: the observation stopped at its element/depth/time bounds, some controls are hidden"
         else:
             text = full
         self._observation = observation

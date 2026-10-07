@@ -876,5 +876,17 @@ class QueuedPasteGateTests(AppTestCase):
         )
 
 
+class TruncatedDiffWarningTests(AppTestCase):
+    async def test_a_truncated_diff_keeps_the_truncated_warning(self) -> None:
+        env = self.make_env()
+        app = await env.get_app()
+        await app.get_ax_state()
+        truncated = ax._observe(4242)._replace(truncated=True)
+        with mock.patch.object(ax, "_observe", lambda pid: truncated):
+            text = await app.get_ax_state()
+        self.assertIn("(no changes since the previous observation)", text)
+        self.assertIn("TRUNCATED: the observation stopped at its element/depth/time bounds, some controls are hidden", text)
+
+
 if __name__ == "__main__":
     unittest.main()
