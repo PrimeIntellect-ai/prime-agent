@@ -1101,3 +1101,57 @@ async fn unsupported_tool_failures_surface_with_the_disclosure() {
         }]
     );
 }
+
+/// An auth rejection after unrelated retries still consults the recovery
+/// seam: the auth classification counts auth retries, not the episode's
+/// total, so an earlier rate-limit retry never suppresses the refresh.
+#[tokio::test]
+async fn an_auth_failure_after_unrelated_retries_still_recovers() {
+    let recovery_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let recovery_calls_for_seam = Arc::clone(&recovery_calls);
+    let mut seam = move |_message: &AssistantMessage| {
+        let recovery_calls = Arc::clone(&recovery_calls_for_seam);
+        Box::pin(async move {
+            recovery_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            crate::session_engine::provider_auth::AuthRecoveryOutcome::Continue
+        }) as crate::session_engine::provider_auth::AuthRecoveryFuture
+    };
+    let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let attempts_for_closure = Arc::clone(&attempts);
+    let message = run_turn_with_auto_retry(
+        &fast_policy(),
+        0,
+        None,
+        move || {
+            let attempts = Arc::clone(&attempts_for_closure);
+            async move {
+                let index = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(match index {
+                    0 => error_message(Some("rate_limit"), Some(429), None),
+                    1 => error_message(Some("auth"), Some(401), None),
+                    _ => ok_message(),
+                })
+            }
+        },
+        move |event| {
+            let _ = event;
+            async { Ok(()) }
+        },
+        |_| async { true },
+        None,
+        Some(&mut seam),
+    )
+    .await
+    .unwrap();
+    assert_eq!(message.stop_reason, StopReason::Stop);
+    assert_eq!(
+        recovery_calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the recovery seam runs despite the earlier rate-limit retry"
+    );
+    assert_eq!(
+        attempts.load(std::sync::atomic::Ordering::SeqCst),
+        3,
+        "the rate-limit retry, the auth failure, and the recovered retry"
+    );
+}

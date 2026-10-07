@@ -272,6 +272,9 @@ impl AuthStorage {
                     if !refresh_token.is_empty()
             )
         });
+        // The loaded credential itself, for the write guard's
+        // same-credential check (the destructure below consumes it).
+        let loaded = credential.clone();
         let Some(AuthCredential::Oauth {
             access: loaded_access,
             ..
@@ -282,28 +285,29 @@ impl AuthStorage {
                 "the stored credential for {provider_id} carries no refresh token"
             ));
         };
-        // FETCH: outside every lock, one flight per provider. A peer may have
-        // refreshed against the same rejection while this load ran; its fresh
-        // credential stands without spending this refresh token.
-        let fetched = {
-            let _flight = refresh_flight(provider_id);
-            let peer = self
-                .storage
-                .read()
-                .ok()
-                .and_then(|content| parse_storage_data(content.as_deref()).ok())
-                .and_then(|data| data.credential(provider_id));
-            if let Some(peer) = peer.filter(|credential| {
-                matches!(
-                    credential,
-                    AuthCredential::Oauth { access, .. } if *access != loaded_access
-                )
-            }) {
-                self.reload();
-                return Ok(peer);
-            }
-            self.oauth.refresh_forced(provider_id, &data)
-        };
+        // FETCH + WRITE behind the per-provider flight: the guard stays
+        // alive through persistence and reload, so a concurrent caller
+        // never re-spends the same single-use refresh token before this
+        // attempt's write lands. A peer that refreshed against the same
+        // rejection through the expiry-gated path still stands — the peer
+        // check below serves its fresh credential without a fetch.
+        let _flight = refresh_flight(provider_id);
+        let peer = self
+            .storage
+            .read()
+            .ok()
+            .and_then(|content| parse_storage_data(content.as_deref()).ok())
+            .and_then(|data| data.credential(provider_id));
+        if let Some(peer) = peer.filter(|credential| {
+            matches!(
+                credential,
+                AuthCredential::Oauth { access, .. } if *access != loaded_access
+            )
+        }) {
+            self.reload();
+            return Ok(peer);
+        }
+        let fetched = self.oauth.refresh_forced(provider_id, &data);
         let new_credential = match fetched {
             None => {
                 self.reload();
@@ -327,19 +331,25 @@ impl AuthStorage {
             }
             Some(Ok(new_credential)) => new_credential,
         };
-        // WRITE: the locked read-modify-write. A peer that wrote a different
-        // credential while this fetch ran keeps its fresher credential.
+        // WRITE: the locked read-modify-write. The entry only replaces
+        // the credential this attempt loaded; any change that landed under
+        // the fetch — a peer's fresher grant, an API-key replacement, a
+        // logout — stands untouched.
         let mut outcome = Err("the refreshed credential could not be stored".to_string());
         let result = self.storage.with_lock(&mut |current| {
             let mut data = parse_storage_data(current.as_deref())?;
-            if let Some(credential) = data.credential(provider_id).filter(|credential| {
-                matches!(
-                    credential,
-                    AuthCredential::Oauth { access, .. } if *access != loaded_access
-                )
-            }) {
-                outcome = Ok(credential);
-                return Ok(((), None));
+            match data.credential(provider_id) {
+                Some(changed) if Some(&changed) != loaded.as_ref() => {
+                    outcome = Ok(changed);
+                    return Ok(((), None));
+                }
+                None => {
+                    outcome = Err(format!(
+                        "the stored credential for {provider_id} was removed while refreshing"
+                    ));
+                    return Ok(((), None));
+                }
+                Some(_) => {}
             }
             data.insert(provider_id, &new_credential);
             outcome = Ok(new_credential.clone());

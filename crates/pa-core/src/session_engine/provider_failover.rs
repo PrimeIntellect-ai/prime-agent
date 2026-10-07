@@ -132,6 +132,10 @@ where
     }
     let mut total_retries = 0u32;
     let mut retries_on_provider = 0u32;
+    // Auth-classified retries on the CURRENT provider: an unrelated
+    // earlier retry never suppresses the auth recovery, and a switch
+    // resets the budget with the new provider's credential.
+    let mut auth_retries = 0u32;
     let mut candidate_index = 0usize;
     let mut switched = false;
     loop {
@@ -173,7 +177,7 @@ where
             || is_unsupported_tool_failure(&message)
             || is_permanent_provider_failure_kind(
                 provider_stream_failure_kind(&message).as_deref(),
-                total_retries,
+                auth_retries,
                 provider_stream_failure_status(&message),
             );
         if non_retryable {
@@ -224,6 +228,9 @@ where
                 .await?;
                 return Ok(message);
             }
+            // This auth failure is being retried: the classification
+            // counts it, so the next rejection settles the turn.
+            auth_retries += 1;
         }
         total_retries += 1;
         retries_on_provider += 1;
@@ -258,6 +265,7 @@ where
             };
             candidate_index += 1;
             retries_on_provider = 0;
+            auth_retries = 0;
             let backup_model = format!("{}/{}", next.provider, next.id);
             switch(next).await?;
             switched = true;
@@ -959,6 +967,79 @@ mod tests {
         assert!(
             restores.lock().unwrap().is_empty(),
             "no restore runs: the primary never switched"
+        );
+    }
+
+    /// An auth rejection after unrelated retries on the same provider still
+    /// consults the recovery seam: the auth classification tracks auth
+    /// retries per provider, so an earlier rate-limit retry never
+    /// suppresses the forced refresh.
+    #[tokio::test]
+    async fn an_auth_failure_after_unrelated_retries_still_recovers() {
+        let candidates = vec![model("backup-a")];
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recovery_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recovery_calls_for_seam = Arc::clone(&recovery_calls);
+        let mut seam = move |_message: &AssistantMessage| {
+            let recovery_calls = Arc::clone(&recovery_calls_for_seam);
+            Box::pin(async move {
+                recovery_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                crate::session_engine::provider_auth::AuthRecoveryOutcome::Continue
+            }) as crate::session_engine::provider_auth::AuthRecoveryFuture
+        };
+        let attempts_for_attempt = Arc::clone(&attempts);
+        let message = run_turn_with_provider_failover(
+            &quick_policy(),
+            &fast_failover(),
+            &candidates,
+            0,
+            None,
+            {
+                let attempts = Arc::clone(&attempts_for_attempt);
+                move || {
+                    let attempts = Arc::clone(&attempts);
+                    async move {
+                        let index = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Ok(match index {
+                            0 => error_message(Some("rate_limit"), Some(429), "slow down"),
+                            1 => error_message(Some("auth"), Some(401), "token rejected"),
+                            _ => ok_message("recovered"),
+                        })
+                    }
+                }
+            },
+            |_| async { Ok(()) },
+            |_| async { true },
+            {
+                let switches: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+                move |next: &Model| {
+                    let switches = Arc::clone(&switches);
+                    let next = next.clone();
+                    async move {
+                        switches
+                            .lock()
+                            .unwrap()
+                            .push(format!("{}/{}", next.provider, next.id));
+                        Ok(())
+                    }
+                }
+            },
+            move || async { Ok(Some("primary/glm-5.3".to_string())) },
+            None,
+            Some(&mut seam),
+        )
+        .await
+        .unwrap();
+        assert_eq!(message.stop_reason, StopReason::Stop);
+        assert_eq!(
+            recovery_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the recovery seam runs despite the earlier rate-limit retry"
+        );
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "the rate-limit retry, the auth failure, and the recovered retry"
         );
     }
 }

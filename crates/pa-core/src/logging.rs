@@ -10,6 +10,11 @@
 pub fn install_stderr_log_sink() {
     pa_ai::utils::log::set_log_sink(Some(std::sync::Arc::new(|entry| {
         let line = serde_json::to_string(entry).unwrap_or_default();
-        eprintln!("{line}");
+        // Fallible write, result discarded: `eprintln!` panics on a failed
+        // write (a closed stderr), unwinding into the auth caller.
+        let _ = std::io::Write::write_fmt(
+            &mut std::io::stderr().lock(),
+            format_args!("{line}\n"),
+        );
     })));
 }

@@ -81,6 +81,7 @@ where
     WF: Future<Output = bool>,
 {
     let mut retries_performed = 0u32;
+    let mut auth_retries = 0u32;
     loop {
         let message = attempt().await?;
         if message.stop_reason != StopReason::Error {
@@ -108,7 +109,7 @@ where
             || is_unsupported_tool_failure(&message)
             || is_permanent_provider_failure_kind(
                 provider_stream_failure_kind(&message).as_deref(),
-                retries_performed,
+                auth_retries,
                 provider_stream_failure_status(&message),
             );
         if !policy.enabled || non_retryable {
@@ -153,6 +154,9 @@ where
                 .await?;
                 return Ok(message);
             }
+            // This auth failure is being retried: the classification
+            // counts it, so the next rejection settles the turn.
+            auth_retries += 1;
         }
         // The attempt counter bumps before deciding, so the exhaustion
         // check compares past `max_retries`.
